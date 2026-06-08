@@ -5139,6 +5139,16 @@ export default function App({ authEmail = "", onSignOut }) {
     return () => document.removeEventListener("visibilitychange", onVis);
   }, []);
 
+  const [dbError, setDbError] = React.useState(null);
+  useEffect(() => {
+    const onStatus = (e) => {
+      if (e.detail.type === "error") setDbError(e.detail.msg);
+      else setDbError(null);
+    };
+    document.addEventListener("sps-db-status", onStatus);
+    return () => document.removeEventListener("sps-db-status", onStatus);
+  }, []);
+
   const handleSignOut = () => { setPage("dashboard"); setSelectedClient(null); setAdding(false); if (onSignOut) onSignOut(); };
   // first real sign-in (no emails assigned yet) claims the owner account automatically
   useEffect(() => {
@@ -5332,7 +5342,12 @@ export default function App({ authEmail = "", onSignOut }) {
           <div style={{ display: "flex", gap: 12, flexShrink: 0, alignItems: "center" }}><button onClick={() => window.location.reload()} title="Sync" style={{ background: "none", border: "none", color: T.textMuted, fontSize: 16, cursor: "pointer", lineHeight: 1, padding: 0 }}>↻</button><button onClick={handleSignOut} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button></div>
         </div>
 
-        {/* Main */}
+        {dbError && (
+          <div style={{ background: "#FEF3C7", borderBottom: "1px solid #F59E0B", padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: "#92400E" }}>
+            <span>⚠️ {dbError}</span>
+            <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 8, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>↻ Retry</button>
+          </div>
+        )}
         <main style={{ flex: 1, padding: "22px 16px", maxWidth: 740, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
           {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
