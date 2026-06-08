@@ -1026,7 +1026,7 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
 
       {/* Bulk action bar */}
       {selectMode && selCount > 0 && (
-        <div style={{ position: "fixed", bottom: 64, left: 0, right: 0, zIndex: 95, padding: "10px 16px", maxWidth: 740, margin: "0 auto" }}>
+        <div style={{ position: "fixed", bottom: "calc(74px + env(safe-area-inset-bottom))", left: 0, right: 0, zIndex: 95, padding: "10px 16px", maxWidth: 740, margin: "0 auto" }}>
           <div style={{ background: T.headerBg, borderRadius: 14, padding: "10px 12px", display: "flex", gap: 8, boxShadow: "0 6px 24px rgba(0,0,0,0.25)", overflowX: "auto" }}>
             {[
               { label: "📅 Schedule", fn: doSchedule },
@@ -3007,7 +3007,7 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
             </div>
 
             {nextStop && (
-              <a href={goDirections(nextStop.address)} target="_blank" rel="noreferrer" style={{ position: "fixed", bottom: 64, left: 0, right: 0, zIndex: 95, maxWidth: 740, margin: "0 auto", textDecoration: "none" }}>
+              <a href={goDirections(nextStop.address)} target="_blank" rel="noreferrer" style={{ position: "fixed", bottom: "calc(74px + env(safe-area-inset-bottom))", left: 0, right: 0, zIndex: 95, maxWidth: 740, margin: "0 auto", textDecoration: "none" }}>
                 <div style={{ margin: "0 16px", background: T.primary, color: "#fff", borderRadius: 14, padding: "13px 16px", textAlign: "center", boxShadow: "0 6px 24px rgba(0,0,0,0.25)" }}>
                   <div style={{ fontSize: 14, fontWeight: 800 }}>Directions to {nextStop.client} ›</div>
                   <div style={{ fontSize: 11.5, opacity: 0.9, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nextStop.address}</div>
@@ -3020,7 +3020,7 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
 
       {/* Bulk action bar */}
       {selectMode && selCount > 0 && (
-        <div style={{ position: "fixed", bottom: 64, left: 0, right: 0, zIndex: 95, padding: "10px 16px", maxWidth: 740, margin: "0 auto" }}>
+        <div style={{ position: "fixed", bottom: "calc(74px + env(safe-area-inset-bottom))", left: 0, right: 0, zIndex: 95, padding: "10px 16px", maxWidth: 740, margin: "0 auto" }}>
           <div style={{ background: T.headerBg, borderRadius: 14, padding: "10px 12px", display: "flex", gap: 8, boxShadow: "0 6px 24px rgba(0,0,0,0.25)" }}>
             <button onClick={deleteSelected}
               style={{ flex: 1, background: "rgba(255,80,80,0.15)", color: "#ff8080", border: "none", borderRadius: 10, padding: "12px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
@@ -5048,6 +5048,17 @@ export default function App({ authEmail = "", onSignOut }) {
     });
   }, [ltm]);
 
+  // cache the current logo so the sign-in screen can show it (matches the in-app logo)
+  useEffect(() => {
+    try {
+      if (typeof localStorage !== "undefined") {
+        localStorage.setItem("sps_brand_logo", JSON.stringify({
+          type: branding.logoType, emoji: branding.logoEmoji, image: branding.logoImage, name: branding.companyName,
+        }));
+      }
+    } catch (e) {}
+  }, [branding]);
+
   const systemDark = useSystemDark();
   const mode = branding.appearance === "system" ? (systemDark ? "dark" : "light") : (branding.appearance || "light");
   const themeDef = THEMES[branding.themeKey];
@@ -5258,7 +5269,7 @@ export default function App({ authEmail = "", onSignOut }) {
         </div>
 
         {/* Main */}
-        <main style={{ flex: 1, padding: "22px 16px", maxWidth: 740, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: 96 }}>
+        <main style={{ flex: 1, padding: "22px 16px", maxWidth: 740, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
           {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
           {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
@@ -5270,7 +5281,7 @@ export default function App({ authEmail = "", onSignOut }) {
         </main>
 
         {/* Bottom Nav — frosted with active pill */}
-        <nav style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: hexA(T.surface, 0.82), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", borderTop: `1px solid ${T.border}`, display: "flex", zIndex: 90, height: 66, paddingBottom: "env(safe-area-inset-bottom)" }}>
+        <nav style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: hexA(T.surface, 0.82), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", borderTop: `1px solid ${T.border}`, display: "flex", zIndex: 90, minHeight: 60, paddingTop: 4, paddingBottom: "calc(8px + env(safe-area-inset-bottom))" }}>
           {NAV.flatMap(n => (n.id === "settings" && perms.canInvoice) ? [{ id: "invoices", icon: "invoice", label: "Invoices" }, n] : [n]).map(n => {
             const active = page === n.id;
             return (

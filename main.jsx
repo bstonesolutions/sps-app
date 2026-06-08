@@ -13,17 +13,26 @@ function Login() {
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [brand, setBrand] = useState(null);
+  useEffect(() => {
+    try { const raw = localStorage.getItem("sps_brand_logo"); if (raw) setBrand(JSON.parse(raw)); } catch (e) {}
+  }, []);
   const submit = async () => {
     setBusy(true); setErr("");
     const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: pw });
     if (error) setErr(error.message);
     setBusy(false);
   };
+  const hasImg = brand && brand.type === "image" && brand.image;
   return (
     <div style={wrap}>
       <div style={card}>
-        <div style={{ fontSize: 42, textAlign: "center", marginBottom: 6 }}>💧</div>
-        <h1 style={{ fontSize: 20, fontWeight: 800, textAlign: "center", margin: "0 0 4px", color: "#111" }}>Stone Property Solutions</h1>
+        <div style={{ display: "flex", justifyContent: "center", marginBottom: 8 }}>
+          {hasImg
+            ? <img src={brand.image} alt="" style={{ width: 72, height: 72, borderRadius: 18, objectFit: "cover" }} />
+            : <div style={{ width: 72, height: 72, borderRadius: 18, background: "#f1f5f9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 40 }}>{(brand && brand.emoji) || "💧"}</div>}
+        </div>
+        <h1 style={{ fontSize: 20, fontWeight: 800, textAlign: "center", margin: "0 0 4px", color: "#111" }}>{(brand && brand.name) || "Stone Property Solutions"}</h1>
         <p style={{ textAlign: "center", color: "#6b7280", fontSize: 13, margin: "0 0 20px" }}>Sign in to your account</p>
         <input style={inp} placeholder="Email" type="email" autoCapitalize="none" value={email} onChange={e => setEmail(e.target.value)} />
         <input style={inp} placeholder="Password" type="password" value={pw} onChange={e => setPw(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} />
