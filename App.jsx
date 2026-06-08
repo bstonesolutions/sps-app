@@ -45,6 +45,14 @@ const _rgb = (hex) => { const h = (hex || "#000000").replace("#", ""); const f =
 const _toHex = (arr) => "#" + arr.map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0")).join("");
 const mix = (a, b, t) => { const A = _rgb(a), B = _rgb(b); return _toHex([A[0] + (B[0] - A[0]) * t, A[1] + (B[1] - A[1]) * t, A[2] + (B[2] - A[2]) * t]); };
 const lum = (hex) => { const c = _rgb(hex).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }); return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };
+const buildMapUrl = (address, app) => {
+  const enc = encodeURIComponent(address || "");
+  if (app === "apple") return `maps://maps.apple.com/?daddr=${enc}`;
+  if (app === "google") return `https://maps.google.com/maps?daddr=${enc}`;
+  if (app === "waze") return `waze://?q=${enc}&navigate=yes`;
+  return `https://www.google.com/maps/dir/?api=1&destination=${enc}`;
+};
+
 
 // Selectable fonts (use system-available faces, no external load)
 const FONTS = {
@@ -737,9 +745,7 @@ function Select({ value, onChange, options }) {
 // DASHBOARD (configurable home)
 // ─────────────────────────────────────────────
 function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onNav }) {
-  const { T, perms, currentUser } = useApp();
-  const _hr = new Date().getHours();
-  const _greet = _hr < 12 ? "Good morning" : _hr < 17 ? "Good afternoon" : "Good evening";
+  const { T, perms } = useApp();
   const [editing, setEditing] = useState(false);
 
   const today = (schedule && schedule[0]) || { stops: [] };
@@ -851,7 +857,7 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22 }}>
         <div>
           <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 4, letterSpacing: "-0.01em" }}>{new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" })}</div>
-          <h2 style={{ margin: 0, fontSize: 28, fontWeight: 700, color: T.text, letterSpacing: "-0.03em" }}>{_greet}, {currentUser?.name || "there"}.</h2>
+          <h2 style={{ margin: 0, fontSize: 28, fontWeight: 700, color: T.text, letterSpacing: "-0.03em" }}>Good morning, Brandon.</h2>
         </div>
         <Btn variant="ghost" sm onClick={() => setEditing(e => !e)}>{editing ? "Done" : "Edit"}</Btn>
       </div>
@@ -2633,11 +2639,56 @@ function RouteRing({ done, total, size = 58, label = "stops" }) {
   );
 }
 
+function HeadHereModal({ stop, client, email, branding, onClose }) {
+  const { T } = useApp();
+  const [pref, setPref] = React.useState(() => { try { return localStorage.getItem("sps_map_app") || null; } catch { return null; } });
+  const firstName = client && client.name ? client.name.split(" ")[0] : (stop.client || "there");
+  const phone = ((client && (client.phone || client.contactPhone || "")) || "").replace(/[^\d+]/g, "");
+  const addr = stop.address || "";
+  const msg = (() => {
+    const tpl = (email && email.smsOnMyWay) || DEFAULT_EMAIL.smsOnMyWay;
+    const track = email && email.trackLink ? `Track: ${email.trackLink} ` : "";
+    return (tpl || "")
+      .replace(/{first}/g, firstName).replace(/{sender}/g, (email && email.senderName) || branding.companyName)
+      .replace(/{company}/g, branding.companyName).replace(/{eta}/g, "a few minutes")
+      .replace(/{arrival}/g, "soon").replace(/{track}/g, track);
+  })();
+  const smsHref = phone ? `sms:${phone}${/iPhone|iPad|iPod/.test(navigator.userAgent) ? "&" : "?"}body=${encodeURIComponent(msg)}` : null;
+  const openMap = (app) => { try { localStorage.setItem("sps_map_app", app); } catch {} setPref(app); };
+  const mapApps = [{ key: "apple", label: "Apple Maps", icon: "🍎" }, { key: "google", label: "Google Maps", icon: "🔵" }, { key: "waze", label: "Waze", icon: "💜" }];
+  const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10, display: "block" };
+  return (
+    <Modal title={`Head to ${stop.client || "Stop"}`} onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        {addr && <div style={{ fontSize: 13, color: T.textMuted, marginTop: -8, lineHeight: 1.4 }}>📍 {addr}</div>}
+        <div>
+          <span style={lbl}>On My Way Text</span>
+          {smsHref ? <Btn href={smsHref} variant="outline" block>📱 Send On My Way to {firstName}</Btn>
+            : <div style={{ fontSize: 13, color: T.textMuted, background: T.surfaceAlt, borderRadius: 10, padding: "11px 14px" }}>Add a phone number to this client to send texts.</div>}
+        </div>
+        <div>
+          <span style={lbl}>Open in Maps</span>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {mapApps.map(a => (
+              <Btn key={a.key} href={buildMapUrl(addr, a.key)} variant={pref === a.key ? "primary" : "ghost"} block onClick={() => openMap(a.key)}>
+                {a.icon} {a.label}{pref === a.key ? " ✓" : ""}
+              </Btn>
+            ))}
+          </div>
+          {pref && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 8 }}>Preferred map app saved on this device.</div>}
+        </div>
+        <Btn variant="ghost" block onClick={onClose}>Done</Btn>
+      </div>
+    </Modal>
+  );
+}
+
 function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg, team, onClientSelect, seedClientIds, clearSeed, email, onComplete, completedSids, onOfficeAlert }) {
   const { T, perms } = useApp();
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
   const compact = cfg.density === "compact";
   const [omwModal, setOmwModal] = useState(null);
+  const [headHereModal, setHeadHereModal] = useState(null);
   const [completeModal, setCompleteModal] = useState(null);
   const [sentStops, setSentStops] = useState({});
   const [showAdd, setShowAdd] = useState(false);
@@ -2840,6 +2891,10 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
                 <div style={{ fontSize: 12, color: T.textMuted }}>Not yet started</div>
               )}
               <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: s, client: c }); }}
+                  style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 8, padding: "6px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                  🗺 Head Here
+                </button>
                 {!isComplete && perms.sendTexts && (
                   <button onClick={e => { e.stopPropagation(); setOmwModal({ stop: s, client: c, key: s.sid }); }}
                     style={{ background: "transparent", color: T.primary, border: `1.5px solid ${T.primary}`, borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
@@ -3045,6 +3100,7 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
       {omwModal && (
         <OnMyWayModal stop={omwModal.stop} client={omwModal.client} email={email} onClose={() => setOmwModal(null)} onSent={() => handleOmwSent(omwModal.key)} />
       )}
+      {headHereModal && <HeadHereModal stop={headHereModal.stop} client={headHereModal.client} email={email} branding={branding} onClose={() => setHeadHereModal(null)} />}
 
       {completeModal && (
         <CompleteStopModal
@@ -5076,6 +5132,13 @@ export default function App({ authEmail = "", onSignOut }) {
   const teamHasOwner = (team || []).some(m => m.role === "owner");
   const effRole = (m) => m ? (m.role || ((!teamHasOwner && team[0] && team[0].id === m.id) ? "owner" : "field")) : null;
   const perms = memberPerms(currentUser ? { ...currentUser, role: effRole(currentUser) } : null);
+  useEffect(() => {
+    let hiddenAt = null;
+    const onVis = () => { if (document.hidden) { hiddenAt = Date.now(); } else if (hiddenAt && Date.now() - hiddenAt > 30000) { window.location.reload(); } };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+
   const handleSignOut = () => { setPage("dashboard"); setSelectedClient(null); setAdding(false); if (onSignOut) onSignOut(); };
   // first real sign-in (no emails assigned yet) claims the owner account automatically
   useEffect(() => {
@@ -5242,7 +5305,7 @@ export default function App({ authEmail = "", onSignOut }) {
         `}</style>
 
         {/* Header — light frosted, matches theme surface */}
-        <header style={{ background: hexA(T.surface, 0.8), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, paddingTop: "env(safe-area-inset-top)", paddingRight: 18, paddingBottom: 0, paddingLeft: 18, minHeight: 56, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 100, borderBottom: `1px solid ${T.border}` }}>
+        <header style={{ background: hexA(T.surface, 0.8), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, padding: "0 18px", height: 56, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 100, borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
             <div style={{ width: 36, height: 36, borderRadius: 11, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
               {branding.logoType === "image" && branding.logoImage
@@ -5266,7 +5329,7 @@ export default function App({ authEmail = "", onSignOut }) {
             <span style={{ width: 22, height: 22, borderRadius: "50%", background: currentUser.role === "owner" ? T.primary : hexA(T.primary, 0.16), color: currentUser.role === "owner" ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 9.5, flexShrink: 0 }}>{initials(currentUser.name)}</span>
             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Signed in as <span style={{ color: T.text, fontWeight: 700 }}>{currentUser.name}</span> · {roleLabel(currentUser.role)}</span>
           </span>
-          <button onClick={handleSignOut} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Sign out</button>
+          <div style={{ display: "flex", gap: 12, flexShrink: 0, alignItems: "center" }}><button onClick={() => window.location.reload()} title="Sync" style={{ background: "none", border: "none", color: T.textMuted, fontSize: 16, cursor: "pointer", lineHeight: 1, padding: 0 }}>↻</button><button onClick={handleSignOut} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button></div>
         </div>
 
         {/* Main */}
