@@ -737,7 +737,9 @@ function Select({ value, onChange, options }) {
 // DASHBOARD (configurable home)
 // ─────────────────────────────────────────────
 function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onNav }) {
-  const { T, perms } = useApp();
+  const { T, perms, currentUser } = useApp();
+  const _hr = new Date().getHours();
+  const _greet = _hr < 12 ? "Good morning" : _hr < 17 ? "Good afternoon" : "Good evening";
   const [editing, setEditing] = useState(false);
 
   const today = (schedule && schedule[0]) || { stops: [] };
@@ -849,7 +851,7 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22 }}>
         <div>
           <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 4, letterSpacing: "-0.01em" }}>{new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" })}</div>
-          <h2 style={{ margin: 0, fontSize: 28, fontWeight: 700, color: T.text, letterSpacing: "-0.03em" }}>Good morning, Brandon.</h2>
+          <h2 style={{ margin: 0, fontSize: 28, fontWeight: 700, color: T.text, letterSpacing: "-0.03em" }}>{_greet}, {currentUser?.name || "there"}.</h2>
         </div>
         <Btn variant="ghost" sm onClick={() => setEditing(e => !e)}>{editing ? "Done" : "Edit"}</Btn>
       </div>
@@ -5240,7 +5242,7 @@ export default function App({ authEmail = "", onSignOut }) {
         `}</style>
 
         {/* Header — light frosted, matches theme surface */}
-        <header style={{ background: hexA(T.surface, 0.8), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, padding: "0 18px", height: 56, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 100, borderBottom: `1px solid ${T.border}` }}>
+        <header style={{ background: hexA(T.surface, 0.8), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, paddingTop: "env(safe-area-inset-top)", paddingRight: 18, paddingBottom: 0, paddingLeft: 18, minHeight: 56, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 100, borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
             <div style={{ width: 36, height: 36, borderRadius: 11, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
               {branding.logoType === "image" && branding.logoImage
