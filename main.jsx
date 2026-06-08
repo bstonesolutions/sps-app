@@ -13,7 +13,7 @@ function Login() {
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
-  const [brand, setBrand] = useState(null);
+  const [brand, setBrand] = useState({ type: "image", image: "/icon-192.png", name: "Stone Property Solutions" });
   useEffect(() => {
     try { const raw = localStorage.getItem("sps_brand_logo"); if (raw) setBrand(JSON.parse(raw)); } catch (e) {}
   }, []);

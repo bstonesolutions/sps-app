@@ -128,13 +128,12 @@ const THEMES = {
 const DEFAULT_BRANDING = {
   companyName: "Stone Property Solutions",
   division: "All Divisions",
-  logoType: "emoji", // "emoji" | "image"
+  logoType: "image",
   logoEmoji: "💧",
-  logoImage: null,
+  logoImage: "/icon-192.png",
   themeKey: "sps",
-  appearance: "system", // "light" | "dark" | "system"
+  appearance: "system",
   custom: DEFAULT_CUSTOM,
-  // contact info — shown on invoices and the client portal, used for tap-to-call / email
   companyPhone: "",
   companyEmail: "",
   companyWebsite: "",
