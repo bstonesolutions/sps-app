@@ -4898,10 +4898,10 @@ const NAV = [
 // ─────────────────────────────────────────────
 
 const CLIENT_NAV = [
-  { id: "cp_home",    label: "Home",     emoji: "🏠" },
-  { id: "cp_history", label: "History",  emoji: "📋" },
-  { id: "cp_invoices",label: "Invoices", emoji: "💳" },
-  { id: "cp_request", label: "Request",  emoji: "➕" },
+  { id: "cp_home",     label: "Home",     icon: "home" },
+  { id: "cp_history",  label: "History",  icon: "history" },
+  { id: "cp_invoices", label: "Invoices", icon: "invoice" },
+  { id: "cp_request",  label: "Request",  icon: "plus" },
 ];
 
 function clientNextVisit(schedule, clientId) {
@@ -4925,9 +4925,26 @@ function fmtDate(dateStr) {
   return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
 }
 
+// ── CLIENT NAV ICON ──
+function CIcon({ name, size = 22 }) {
+  const paths = {
+    home:    "M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z",
+    history: "M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z",
+    invoice: "M20 4H4c-1.11 0-2 .89-2 2v12c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V6c0-1.11-.89-2-2-2zm0 14H4v-6h16v6zm0-10H4V6h16v2z",
+    plus:    "M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z",
+  };
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="currentColor">
+      <path d={paths[name] || paths.home} />
+    </svg>
+  );
+}
+
+// ── CP HOME ──
 function CPHome({ client, schedule, invoices, branding, onNav, T }) {
   const next = clientNextVisit(schedule, client.id);
-  const outstanding = (invoices || []).filter(iv => iv.clientId === client.id && iv.status !== "paid");
+  const myInvoices = (invoices || []).filter(iv => iv.clientId === client.id);
+  const outstanding = myInvoices.filter(iv => iv.status !== "paid");
   const totalOwed = outstanding.reduce((s, iv) => s + (parseFloat((iv.total || "0").replace(/[^0-9.-]/g,"")) || 0), 0);
   const recentHistory = (client.history || []).slice(0, 3);
   const hour = new Date().getHours();
@@ -4935,113 +4952,134 @@ function CPHome({ client, schedule, invoices, branding, onNav, T }) {
   const firstName = (client.name || "").split(" ")[0] || "there";
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       {/* Greeting */}
-      <div style={{ paddingTop: 4 }}>
-        <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{greeting}, {firstName} 👋</div>
-        <div style={{ fontSize: 13, color: T.textMuted, marginTop: 3 }}>Here's what's happening with your {branding.division || "service"}.</div>
+      <div style={{ paddingTop: 6 }}>
+        <div style={{ fontSize: 28, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", lineHeight: 1.1 }}>{greeting},<br />{firstName}.</div>
+        <div style={{ fontSize: 14, color: T.textMuted, marginTop: 6 }}>{branding.companyName} client portal</div>
       </div>
 
-      {/* Next Visit Card */}
-      <div style={{ background: T.primary, borderRadius: 18, padding: "20px 20px", color: "#fff", boxShadow: "0 4px 20px rgba(0,0,0,0.15)" }}>
-        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", opacity: 0.75, marginBottom: 6 }}>Next Visit</div>
+      {/* Next Visit — premium card */}
+      <div style={{ background: `linear-gradient(135deg, ${T.primary} 0%, ${mix(T.primary, "#000", 0.25)} 100%)`, borderRadius: 22, padding: "22px 22px 20px", color: "#fff", boxShadow: `0 8px 32px ${hexA(T.primary, 0.35)}`, position: "relative", overflow: "hidden" }}>
+        <div style={{ position: "absolute", right: -20, top: -20, width: 120, height: 120, borderRadius: "50%", background: "rgba(255,255,255,0.06)" }} />
+        <div style={{ position: "absolute", right: 20, bottom: -30, width: 80, height: 80, borderRadius: "50%", background: "rgba(255,255,255,0.04)" }} />
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", opacity: 0.7, marginBottom: 10 }}>Next Visit</div>
         {next ? (
           <>
-            <div style={{ fontSize: 24, fontWeight: 800, letterSpacing: "-0.02em" }}>{fmtDate(next.label)}</div>
-            <div style={{ fontSize: 13, opacity: 0.85, marginTop: 4 }}>{next.stop.type || "Service Visit"}</div>
+            <div style={{ fontSize: 26, fontWeight: 800, letterSpacing: "-0.02em", lineHeight: 1.1 }}>{fmtDate(next.label)}</div>
+            <div style={{ fontSize: 14, opacity: 0.8, marginTop: 6 }}>{next.stop.type || "Service Visit"}</div>
           </>
         ) : (
-          <div style={{ fontSize: 16, fontWeight: 600, opacity: 0.85 }}>No upcoming visits scheduled</div>
+          <div style={{ fontSize: 17, fontWeight: 600, opacity: 0.8 }}>No upcoming visits yet</div>
         )}
       </div>
 
-      {/* Balance Card */}
+      {/* Balance row */}
       {totalOwed > 0 && (
-        <div style={{ background: T.surface, borderRadius: 16, padding: "18px 20px", border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div>
-            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 4 }}>Balance Due</div>
-            <div style={{ fontSize: 22, fontWeight: 800, color: T.warning }}>${totalOwed.toFixed(2)}</div>
+        <button onClick={() => onNav("cp_invoices")} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, padding: "18px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", fontFamily: "inherit", width: "100%", boxSizing: "border-box", boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}>
+          <div style={{ textAlign: "left" }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: T.textMuted, marginBottom: 4, letterSpacing: "0.02em" }}>BALANCE DUE</div>
+            <div style={{ fontSize: 24, fontWeight: 800, color: T.warning, letterSpacing: "-0.02em" }}>${totalOwed.toFixed(2)}</div>
           </div>
-          <button onClick={() => onNav("cp_invoices")} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "10px 18px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>View Invoices</button>
-        </div>
+          <div style={{ background: T.warning, color: "#fff", borderRadius: 12, padding: "10px 18px", fontSize: 13, fontWeight: 700 }}>View →</div>
+        </button>
       )}
 
       {/* Recent Activity */}
       {recentHistory.length > 0 && (
-        <div style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, overflow: "hidden" }}>
-          <div style={{ padding: "14px 18px 10px", fontSize: 13, fontWeight: 700, color: T.text, borderBottom: `1px solid ${T.border}` }}>Recent Activity</div>
-          {recentHistory.map((h, i) => (
-            <div key={i} style={{ padding: "13px 18px", borderBottom: i < recentHistory.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", gap: 12, alignItems: "flex-start" }}>
-              <div style={{ width: 34, height: 34, borderRadius: 10, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 }}>✅</div>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{h.type || "Service Visit"}</div>
-                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{fmtDate(h.date)}</div>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: T.textMuted, marginBottom: 10, letterSpacing: "0.02em", textTransform: "uppercase" }}>Recent Activity</div>
+          <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden", boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}>
+            {recentHistory.map((h, i) => (
+              <div key={i} style={{ padding: "15px 18px", borderBottom: i < recentHistory.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", gap: 14, alignItems: "center" }}>
+                <div style={{ width: 36, height: 36, borderRadius: 11, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <svg viewBox="0 0 24 24" width={18} height={18} fill={T.primary}><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: T.text, letterSpacing: "-0.01em" }}>{h.type || "Service Visit"}</div>
+                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{fmtDate(h.date)}</div>
+                </div>
               </div>
-            </div>
-          ))}
-          {(client.history || []).length > 3 && (
-            <button onClick={() => onNav("cp_history")} style={{ width: "100%", padding: "12px", background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", borderTop: `1px solid ${T.border}` }}>View Full History</button>
-          )}
+            ))}
+            {(client.history || []).length > 3 && (
+              <button onClick={() => onNav("cp_history")} style={{ width: "100%", padding: "13px", background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>View all history →</button>
+            )}
+          </div>
         </div>
       )}
 
-      {/* Request Service */}
-      <button onClick={() => onNav("cp_request")} style={{ background: T.surface, border: `1.5px dashed ${T.border}`, borderRadius: 16, padding: "18px 20px", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%", boxSizing: "border-box" }}>
-        <div style={{ width: 40, height: 40, borderRadius: 12, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>➕</div>
-        <div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Request Service</div>
-          <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>Schedule a visit or ask a question</div>
+      {/* Quick Actions */}
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 700, color: T.textMuted, marginBottom: 10, letterSpacing: "0.02em", textTransform: "uppercase" }}>Quick Actions</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          {[
+            { label: "Service History", sub: `${(client.history||[]).length} visits`, icon: "history", page: "cp_history" },
+            { label: "Request Service", sub: "Schedule a visit", icon: "plus", page: "cp_request" },
+          ].map(q => (
+            <button key={q.page} onClick={() => onNav(q.page)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, padding: "18px 16px", cursor: "pointer", fontFamily: "inherit", textAlign: "left", boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}>
+              <div style={{ width: 38, height: 38, borderRadius: 11, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 12, color: T.primary }}>
+                <CIcon name={q.icon} size={20} />
+              </div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{q.label}</div>
+              <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>{q.sub}</div>
+            </button>
+          ))}
         </div>
-      </button>
+      </div>
     </div>
   );
 }
 
+// ── CP HISTORY ──
 function CPHistory({ client, T }) {
-  const history = (client.history || []).slice().reverse().reverse(); // newest first (already stored newest-first)
+  const history = client.history || [];
   if (!history.length) {
     return (
-      <div style={{ textAlign: "center", padding: "60px 20px", color: T.textMuted }}>
-        <div style={{ fontSize: 40, marginBottom: 12 }}>📋</div>
-        <div style={{ fontSize: 16, fontWeight: 700, color: T.text, marginBottom: 6 }}>No service history yet</div>
-        <div style={{ fontSize: 13 }}>Your visit records will appear here after each service.</div>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "80px 20px", gap: 12, textAlign: "center" }}>
+        <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.08), display: "flex", alignItems: "center", justifyContent: "center", color: T.primary }}><CIcon name="history" size={30} /></div>
+        <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>No history yet</div>
+        <div style={{ fontSize: 14, color: T.textMuted, lineHeight: 1.5, maxWidth: 240 }}>Your service records will appear here after each visit.</div>
       </div>
     );
   }
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", paddingTop: 4 }}>Service History</div>
-      {history.map((h, i) => (
-        <div key={i} style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, overflow: "hidden" }}>
-          <div style={{ padding: "14px 18px", display: "flex", gap: 12, alignItems: "center", borderBottom: (h.notes || h.services?.length || h.products?.length) ? `1px solid ${T.border}` : "none" }}>
-            <div style={{ width: 38, height: 38, borderRadius: 11, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flexShrink: 0 }}>✅</div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{h.type || "Service Visit"}</div>
-              <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{fmtDate(h.date)}{h.tech ? ` · ${h.tech}` : ""}</div>
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", paddingTop: 4 }}>Service History</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {history.map((h, i) => (
+          <div key={i} style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden", boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}>
+            <div style={{ padding: "16px 18px", display: "flex", gap: 14, alignItems: "center" }}>
+              <div style={{ width: 42, height: 42, borderRadius: 13, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: T.primary }}>
+                <svg viewBox="0 0 24 24" width={20} height={20} fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 15, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{h.type || "Service Visit"}</div>
+                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>{fmtDate(h.date)}{h.tech ? ` · ${h.tech}` : ""}</div>
+              </div>
+              {h.invoice && h.invoice !== "$0" && <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{h.invoice}</div>}
             </div>
-            {h.invoice && h.invoice !== "$0" && <div style={{ fontSize: 13, fontWeight: 700, color: T.text, flexShrink: 0 }}>{h.invoice}</div>}
+            {h.notes && <div style={{ padding: "0 18px 14px", fontSize: 13, color: T.textMuted, lineHeight: 1.6, borderTop: `1px solid ${T.border}`, paddingTop: 12 }}>{h.notes}</div>}
+            {(h.services?.length > 0 || h.products?.length > 0) && (
+              <div style={{ padding: "10px 18px 14px", display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {(h.services || []).map((s, j) => (
+                  <span key={j} style={{ fontSize: 11, fontWeight: 600, background: hexA(T.primary, 0.1), color: T.primary, borderRadius: 100, padding: "4px 11px" }}>{s}</span>
+                ))}
+                {(h.products || []).map((p, j) => (
+                  <span key={j} style={{ fontSize: 11, fontWeight: 600, background: T.surfaceAlt, color: T.textMuted, borderRadius: 100, padding: "4px 11px" }}>{p}</span>
+                ))}
+              </div>
+            )}
+            {h.photos?.length > 0 && (
+              <div style={{ padding: "0 18px 14px" }}><PhotoStrip photos={h.photos} size={56} /></div>
+            )}
           </div>
-          {h.notes && (
-            <div style={{ padding: "12px 18px", fontSize: 13, color: T.textMuted, lineHeight: 1.5, borderBottom: (h.services?.length || h.products?.length) ? `1px solid ${T.border}` : "none" }}>
-              {h.notes}
-            </div>
-          )}
-          {(h.services?.length > 0 || h.products?.length > 0) && (
-            <div style={{ padding: "12px 18px", display: "flex", flexWrap: "wrap", gap: 6 }}>
-              {(h.services || []).map((s, j) => (
-                <span key={j} style={{ fontSize: 11, fontWeight: 600, background: hexA(T.primary, 0.1), color: T.primary, borderRadius: 100, padding: "4px 10px" }}>{s}</span>
-              ))}
-              {(h.products || []).map((p, j) => (
-                <span key={j} style={{ fontSize: 11, fontWeight: 600, background: T.surfaceAlt, color: T.textMuted, borderRadius: 100, padding: "4px 10px" }}>{p}</span>
-              ))}
-            </div>
-          )}
-        </div>
-      ))}
+        ))}
+      </div>
     </div>
   );
 }
 
+// ── CP INVOICES ──
 function CPInvoices({ client, invoices, branding, T }) {
   const myInvoices = (invoices || []).filter(iv => iv.clientId === client.id).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const [selected, setSelected] = useState(null);
@@ -5051,41 +5089,45 @@ function CPInvoices({ client, invoices, branding, T }) {
     const isPaid = iv.status === "paid";
     const qbLink = iv.qbLink || null;
     return (
-      <div>
-        <button onClick={() => setSelected(null)} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", padding: "0 0 16px", display: "flex", alignItems: "center", gap: 4 }}>← Back</button>
-        <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
-          <div style={{ padding: "20px 20px 16px", borderBottom: `1px solid ${T.border}` }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <button onClick={() => setSelected(null)} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 14, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 6, alignSelf: "flex-start" }}>
+          <svg viewBox="0 0 24 24" width={16} height={16} fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+          Back
+        </button>
+        <div style={{ background: T.surface, borderRadius: 22, border: `1px solid ${T.border}`, overflow: "hidden", boxShadow: "0 4px 24px rgba(0,0,0,0.06)" }}>
+          <div style={{ padding: "24px 22px 20px", borderBottom: `1px solid ${T.border}` }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
               <div>
-                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 4 }}>Invoice</div>
-                <div style={{ fontSize: 20, fontWeight: 800, color: T.text }}>#{iv.number || iv.id}</div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, letterSpacing: "0.06em", marginBottom: 6 }}>INVOICE</div>
+                <div style={{ fontSize: 26, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>#{iv.number || iv.id}</div>
               </div>
-              <span style={{ fontSize: 11, fontWeight: 700, padding: "5px 12px", borderRadius: 100, background: isPaid ? hexA("#16a34a", 0.12) : hexA(T.warning, 0.12), color: isPaid ? "#16a34a" : T.warning }}>{isPaid ? "Paid" : "Outstanding"}</span>
+              <span style={{ fontSize: 11, fontWeight: 700, padding: "6px 14px", borderRadius: 100, background: isPaid ? hexA("#16a34a", 0.1) : hexA(T.warning, 0.1), color: isPaid ? "#16a34a" : T.warning, letterSpacing: "0.04em" }}>{isPaid ? "PAID" : "DUE"}</span>
             </div>
             <div style={{ fontSize: 13, color: T.textMuted, marginTop: 8 }}>{fmtDate(iv.date || iv.createdAt)}</div>
           </div>
           {(iv.items || []).length > 0 && (
-            <div style={{ padding: "16px 20px", borderBottom: `1px solid ${T.border}` }}>
+            <div style={{ padding: "16px 22px", borderBottom: `1px solid ${T.border}` }}>
               {(iv.items || []).map((item, i) => (
-                <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: i < iv.items.length - 1 ? `1px solid ${T.border}` : "none", fontSize: 13 }}>
-                  <div style={{ color: T.text }}>{item.desc || item.name || "Service"}{item.qty > 1 ? ` ×${item.qty}` : ""}</div>
-                  <div style={{ fontWeight: 600, color: T.text }}>${(parseFloat(item.price || item.total || 0) * (item.qty || 1)).toFixed(2)}</div>
+                <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: i < iv.items.length - 1 ? `1px solid ${T.border}` : "none" }}>
+                  <div>
+                    <div style={{ fontSize: 14, color: T.text, fontWeight: 500 }}>{item.desc || item.name || "Service"}</div>
+                    {item.qty > 1 && <div style={{ fontSize: 12, color: T.textMuted }}>×{item.qty}</div>}
+                  </div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>${(parseFloat(item.price || item.total || 0) * (item.qty || 1)).toFixed(2)}</div>
                 </div>
               ))}
             </div>
           )}
-          <div style={{ padding: "16px 20px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Total</div>
-            <div style={{ fontSize: 20, fontWeight: 800, color: T.text }}>{iv.total || "$0.00"}</div>
+          <div style={{ padding: "18px 22px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: T.text }}>Total</div>
+            <div style={{ fontSize: 26, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{iv.total || "$0.00"}</div>
           </div>
-          {!isPaid && qbLink && (
-            <div style={{ padding: "0 20px 20px" }}>
-              <a href={qbLink} target="_blank" rel="noreferrer" style={{ display: "block", background: T.primary, color: "#fff", border: "none", borderRadius: 14, padding: "14px", fontWeight: 700, fontSize: 15, textAlign: "center", textDecoration: "none", fontFamily: "inherit" }}>Pay Now via QuickBooks</a>
-            </div>
-          )}
-          {!isPaid && !qbLink && (
-            <div style={{ padding: "0 20px 20px" }}>
-              <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: "14px", fontSize: 13, color: T.textMuted, textAlign: "center", lineHeight: 1.5 }}>To pay this invoice, contact Stone Property Solutions at {branding.companyPhone || branding.companyEmail || "the number on file"}.</div>
+          {!isPaid && (
+            <div style={{ padding: "0 22px 22px" }}>
+              {qbLink
+                ? <a href={qbLink} target="_blank" rel="noreferrer" style={{ display: "block", background: T.primary, color: "#fff", borderRadius: 16, padding: "15px", fontWeight: 800, fontSize: 15, textAlign: "center", textDecoration: "none", letterSpacing: "-0.01em", boxShadow: `0 4px 16px ${hexA(T.primary, 0.3)}` }}>Pay Now</a>
+                : <div style={{ background: T.surfaceAlt, borderRadius: 16, padding: "16px", fontSize: 13, color: T.textMuted, textAlign: "center", lineHeight: 1.6 }}>Contact {branding.companyName} at {branding.companyPhone || branding.companyEmail || "the number on file"} to pay.</div>
+              }
             </div>
           )}
         </div>
@@ -5095,10 +5137,10 @@ function CPInvoices({ client, invoices, branding, T }) {
 
   if (!myInvoices.length) {
     return (
-      <div style={{ textAlign: "center", padding: "60px 20px", color: T.textMuted }}>
-        <div style={{ fontSize: 40, marginBottom: 12 }}>💳</div>
-        <div style={{ fontSize: 16, fontWeight: 700, color: T.text, marginBottom: 6 }}>No invoices yet</div>
-        <div style={{ fontSize: 13 }}>Your invoices will appear here as services are completed.</div>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "80px 20px", gap: 12, textAlign: "center" }}>
+        <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.08), display: "flex", alignItems: "center", justifyContent: "center", color: T.primary }}><CIcon name="invoice" size={30} /></div>
+        <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>No invoices yet</div>
+        <div style={{ fontSize: 14, color: T.textMuted, lineHeight: 1.5 }}>Your invoices will appear here.</div>
       </div>
     );
   }
@@ -5106,47 +5148,47 @@ function CPInvoices({ client, invoices, branding, T }) {
   const open = myInvoices.filter(iv => iv.status !== "paid");
   const paid = myInvoices.filter(iv => iv.status === "paid");
 
+  const InvoiceRow = ({ iv }) => {
+    const isPaid = iv.status === "paid";
+    return (
+      <button onClick={() => setSelected(iv)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, padding: "16px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", fontFamily: "inherit", width: "100%", boxSizing: "border-box", opacity: isPaid ? 0.65 : 1, boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{ width: 40, height: 40, borderRadius: 12, background: isPaid ? hexA("#16a34a", 0.1) : hexA(T.warning, 0.1), display: "flex", alignItems: "center", justifyContent: "center", color: isPaid ? "#16a34a" : T.warning, flexShrink: 0 }}>
+            <CIcon name="invoice" size={18} />
+          </div>
+          <div style={{ textAlign: "left" }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>Invoice #{iv.number || iv.id}</div>
+            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{fmtDate(iv.date || iv.createdAt)}</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ fontSize: 16, fontWeight: 800, color: isPaid ? "#16a34a" : T.warning, letterSpacing: "-0.01em" }}>{iv.total || "$0.00"}</div>
+          <svg viewBox="0 0 24 24" width={16} height={16} fill={T.textMuted}><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+        </div>
+      </button>
+    );
+  };
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", paddingTop: 4 }}>Invoices</div>
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", paddingTop: 4 }}>Invoices</div>
       {open.length > 0 && (
-        <>
-          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted }}>Outstanding</div>
-          {open.map(iv => (
-            <button key={iv.id} onClick={() => setSelected(iv)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "16px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", fontFamily: "inherit", width: "100%", boxSizing: "border-box" }}>
-              <div style={{ textAlign: "left" }}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Invoice #{iv.number || iv.id}</div>
-                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>{fmtDate(iv.date || iv.createdAt)}</div>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <div style={{ fontSize: 16, fontWeight: 800, color: T.warning }}>{iv.total || "$0.00"}</div>
-                <span style={{ fontSize: 18, color: T.textMuted }}>›</span>
-              </div>
-            </button>
-          ))}
-        </>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, letterSpacing: "0.06em", textTransform: "uppercase" }}>Outstanding</div>
+          {open.map(iv => <InvoiceRow key={iv.id} iv={iv} />)}
+        </div>
       )}
       {paid.length > 0 && (
-        <>
-          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginTop: 4 }}>Paid</div>
-          {paid.map(iv => (
-            <button key={iv.id} onClick={() => setSelected(iv)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "16px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", fontFamily: "inherit", width: "100%", boxSizing: "border-box", opacity: 0.7 }}>
-              <div style={{ textAlign: "left" }}>
-                <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>Invoice #{iv.number || iv.id}</div>
-                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>{fmtDate(iv.date || iv.createdAt)}</div>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <div style={{ fontSize: 15, fontWeight: 700, color: "#16a34a" }}>{iv.total || "$0.00"}</div>
-                <span style={{ fontSize: 18, color: T.textMuted }}>›</span>
-              </div>
-            </button>
-          ))}
-        </>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, letterSpacing: "0.06em", textTransform: "uppercase" }}>Paid</div>
+          {paid.map(iv => <InvoiceRow key={iv.id} iv={iv} />)}
+        </div>
       )}
     </div>
   );
 }
 
+// ── CP REQUEST ──
 function CPRequest({ client, branding, onSubmit, T }) {
   const [form, setForm] = useState({ type: "", dates: "", notes: "" });
   const [sent, setSent] = useState(false);
@@ -5161,81 +5203,118 @@ function CPRequest({ client, branding, onSubmit, T }) {
 
   if (sent) {
     return (
-      <div style={{ textAlign: "center", padding: "60px 20px" }}>
-        <div style={{ fontSize: 52, marginBottom: 16 }}>✅</div>
-        <div style={{ fontSize: 20, fontWeight: 800, color: T.text, marginBottom: 8 }}>Request Sent!</div>
-        <div style={{ fontSize: 14, color: T.textMuted, lineHeight: 1.6, maxWidth: 280, margin: "0 auto" }}>We received your request and will be in touch shortly to confirm your appointment.</div>
-        <button onClick={() => setSent(false)} style={{ marginTop: 24, background: T.surfaceAlt, border: "none", borderRadius: 12, padding: "12px 24px", fontWeight: 700, fontSize: 14, color: T.text, cursor: "pointer", fontFamily: "inherit" }}>Send Another</button>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "80px 20px", gap: 16, textAlign: "center" }}>
+        <div style={{ width: 72, height: 72, borderRadius: 22, background: hexA("#16a34a", 0.1), display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <svg viewBox="0 0 24 24" width={36} height={36} fill="#16a34a"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+        </div>
+        <div>
+          <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginBottom: 8 }}>Request Sent</div>
+          <div style={{ fontSize: 14, color: T.textMuted, lineHeight: 1.6, maxWidth: 260 }}>We'll be in touch shortly to confirm your appointment.</div>
+        </div>
+        <button onClick={() => setSent(false)} style={{ marginTop: 8, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 14, padding: "12px 28px", fontWeight: 700, fontSize: 14, color: T.text, cursor: "pointer", fontFamily: "inherit" }}>Send Another</button>
       </div>
     );
   }
 
-  const field = { width: "100%", padding: "12px 14px", border: `1px solid ${T.border}`, borderRadius: 12, fontSize: 15, fontFamily: "inherit", boxSizing: "border-box", outline: "none", color: T.text, background: T.surface };
+  const field = { width: "100%", padding: "13px 15px", border: `1.5px solid ${T.border}`, borderRadius: 13, fontSize: 15, fontFamily: "inherit", boxSizing: "border-box", outline: "none", color: T.text, background: T.surface, transition: "border-color 0.15s" };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", paddingTop: 4 }}>Request Service</div>
-      <div style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, padding: "18px 18px", display: "flex", flexDirection: "column", gap: 14 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ paddingTop: 4 }}>
+        <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Request Service</div>
+        <div style={{ fontSize: 14, color: T.textMuted, marginTop: 4 }}>Tell us what you need and we'll be in touch.</div>
+      </div>
+      <div style={{ background: T.surface, borderRadius: 22, border: `1px solid ${T.border}`, padding: "22px 20px", display: "flex", flexDirection: "column", gap: 18, boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}>
         <div>
-          <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 6 }}>Service Type</label>
+          <label style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 8 }}>Service Type</label>
           <select value={form.type} onChange={e => set("type", e.target.value)} style={field}>
-            <option value="">Select a service type...</option>
+            <option value="">Select a type...</option>
             {serviceTypes.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
         </div>
         <div>
-          <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 6 }}>Preferred Dates</label>
-          <input style={field} value={form.dates} onChange={e => set("dates", e.target.value)} placeholder="e.g. Anytime next week, or Mon/Wed mornings" />
+          <label style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 8 }}>Preferred Dates</label>
+          <input style={field} value={form.dates} onChange={e => set("dates", e.target.value)} placeholder="e.g. Anytime next week, Mon/Wed mornings" />
         </div>
         <div>
-          <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 6 }}>Additional Notes</label>
-          <textarea style={{ ...field, minHeight: 90, resize: "vertical", lineHeight: 1.5 }} value={form.notes} onChange={e => set("notes", e.target.value)} placeholder="Describe what you're seeing or any specific concerns..." />
+          <label style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 8 }}>Notes</label>
+          <textarea style={{ ...field, minHeight: 100, resize: "vertical", lineHeight: 1.6 }} value={form.notes} onChange={e => set("notes", e.target.value)} placeholder="Describe what you're seeing or any specific concerns..." />
         </div>
-        <button onClick={handleSend} disabled={!form.type} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 14, padding: "14px", fontWeight: 700, fontSize: 15, cursor: form.type ? "pointer" : "not-allowed", opacity: form.type ? 1 : 0.5, fontFamily: "inherit" }}>Send Request</button>
+        <button onClick={handleSend} disabled={!form.type} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 14, padding: "15px", fontWeight: 800, fontSize: 15, cursor: form.type ? "pointer" : "not-allowed", opacity: form.type ? 1 : 0.45, fontFamily: "inherit", letterSpacing: "-0.01em", boxShadow: form.type ? `0 4px 16px ${hexA(T.primary, 0.3)}` : "none", transition: "all 0.2s" }}>Send Request</button>
       </div>
-      <div style={{ fontSize: 12, color: T.textMuted, textAlign: "center", lineHeight: 1.5 }}>
-        Need immediate help? Call us at <a href={`tel:${branding.companyPhone}`} style={{ color: T.primary, fontWeight: 600, textDecoration: "none" }}>{branding.companyPhone || "the number on file"}</a>
-      </div>
+      {(branding.companyPhone || branding.companyEmail) && (
+        <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, marginBottom: 2 }}>Need immediate help?</div>
+            <div style={{ fontSize: 13, color: T.text, fontWeight: 600 }}>{branding.companyPhone || branding.companyEmail}</div>
+          </div>
+          <a href={branding.companyPhone ? `tel:${branding.companyPhone}` : `mailto:${branding.companyEmail}`} style={{ background: hexA(T.primary, 0.1), color: T.primary, borderRadius: 12, padding: "9px 16px", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>Call</a>
+        </div>
+      )}
     </div>
   );
 }
 
+// ── SPS CLIENT PORTAL SHELL ──
 function SPSClientPortal({ client, schedule, invoices, branding, T, fontStack, onSignOut, onServiceRequest, isStaffPreview = false }) {
   const [page, setPage] = useState("cp_home");
 
+  const safeTop = isStaffPreview ? 0 : "env(safe-area-inset-top)";
+  const headerH = isStaffPreview ? 52 : "calc(52px + env(safe-area-inset-top))";
+
   return (
-    <div style={{ fontFamily: fontStack, background: T.bg, minHeight: "100vh", display: "flex", flexDirection: "column", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale" }}>
-      <style>{`* { -webkit-tap-highlight-color: transparent; } button:active { transform: scale(0.97); } @keyframes spin { to { transform: rotate(360deg); } }`}</style>
+    <div style={{ fontFamily: fontStack, background: T.bg, minHeight: "100vh", display: "flex", flexDirection: "column", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em" }}>
+      <style>{`
+        * { -webkit-tap-highlight-color: transparent; }
+        button { transition: transform 0.08s ease, opacity 0.15s ease; }
+        button:active { transform: scale(0.97); }
+        input:focus, select:focus, textarea:focus { border-color: ${T.primary} !important; outline: none; box-shadow: 0 0 0 3px ${hexA(T.primary, 0.15)}; }
+      `}</style>
 
       {/* Header */}
-      <header style={{ background: hexA(T.surface, 0.9), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", borderBottom: `1px solid ${T.border}`, padding: "0 18px", height: 56, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 100, paddingTop: "env(safe-area-inset-top)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 34, height: 34, borderRadius: 10, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+      <header style={{
+        background: hexA(T.surface, 0.92),
+        backdropFilter: "saturate(180%) blur(24px)",
+        WebkitBackdropFilter: "saturate(180%) blur(24px)",
+        borderBottom: `1px solid ${T.border}`,
+        paddingLeft: 20, paddingRight: 20,
+        paddingTop: safeTop,
+        minHeight: headerH,
+        display: "flex", alignItems: "flex-end", paddingBottom: 12,
+        justifyContent: "space-between",
+        position: "sticky", top: 0, zIndex: 100,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
+          <div style={{ width: 32, height: 32, borderRadius: 9, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
             {branding.logoType === "image" && branding.logoImage
               ? <img src={branding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-              : <span style={{ fontSize: 17 }}>{branding.logoEmoji}</span>}
+              : <span style={{ fontSize: 16 }}>{branding.logoEmoji}</span>}
           </div>
           <div style={{ fontSize: 15, fontWeight: 700, color: T.text, letterSpacing: "-0.02em" }}>{branding.companyName}</div>
         </div>
-        {!isStaffPreview && <button onClick={onSignOut} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button>}
+        {!isStaffPreview && (
+          <button onClick={onSignOut} style={{ background: "none", border: "none", color: T.textMuted, fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button>
+        )}
       </header>
 
       {/* Main content */}
-      <main style={{ flex: 1, padding: "20px 16px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(90px + env(safe-area-inset-bottom))" }}>
+      <main style={{ flex: 1, padding: "24px 18px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(100px + env(safe-area-inset-bottom))" }}>
         {page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} onNav={setPage} T={T} />}
         {page === "cp_history"  && <CPHistory client={client} T={T} />}
         {page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} />}
         {page === "cp_request"  && <CPRequest client={client} branding={branding} onSubmit={onServiceRequest} T={T} />}
       </main>
 
-      {/* Bottom nav */}
-      <nav style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: hexA(T.surface, 0.88), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", borderTop: `1px solid ${T.border}`, display: "flex", zIndex: 90, paddingTop: 6, paddingBottom: "calc(10px + env(safe-area-inset-bottom))" }}>
+      {/* Bottom nav — matches staff app style exactly */}
+      <nav style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: hexA(T.surface, 0.88), backdropFilter: "saturate(180%) blur(24px)", WebkitBackdropFilter: "saturate(180%) blur(24px)", borderTop: `1px solid ${T.border}`, display: "flex", zIndex: 90, paddingTop: 6, paddingBottom: "calc(10px + env(safe-area-inset-bottom))" }}>
         {CLIENT_NAV.map(n => {
           const active = page === n.id;
           return (
-            <button key={n.id} onClick={() => setPage(n.id)} style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, color: active ? T.primary : T.textMuted, fontFamily: "inherit" }}>
-              <span style={{ width: 44, height: 28, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", fontSize: 18 }}>{n.emoji}</span>
-              <span style={{ fontSize: 10.5, fontWeight: active ? 700 : 500 }}>{n.label}</span>
+            <button key={n.id} onClick={() => setPage(n.id)} style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, color: active ? T.primary : T.textMuted, fontFamily: "inherit", padding: "4px 0" }}>
+              <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", transition: "background 0.15s" }}>
+                <CIcon name={n.icon} size={22} />
+              </span>
+              <span style={{ fontSize: 10.5, fontWeight: active ? 700 : 500, letterSpacing: "-0.01em" }}>{n.label}</span>
             </button>
           );
         })}
@@ -5612,7 +5691,7 @@ export default function App({ authEmail = "", onSignOut }) {
         `}</style>
 
         {/* Header — light frosted, matches theme surface */}
-        <header style={{ background: hexA(T.surface, 0.8), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, padding: "0 18px", height: 56, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 100, borderBottom: `1px solid ${T.border}` }}>
+        <header style={{ background: hexA(T.surface, 0.9), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, paddingLeft: 18, paddingRight: 18, paddingTop: "env(safe-area-inset-top)", minHeight: "calc(56px + env(safe-area-inset-top))", display: "flex", alignItems: "flex-end", paddingBottom: 10, justifyContent: "space-between", position: "sticky", top: 0, zIndex: 100, borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
             <div style={{ width: 36, height: 36, borderRadius: 11, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
               {branding.logoType === "image" && branding.logoImage
@@ -5631,7 +5710,7 @@ export default function App({ authEmail = "", onSignOut }) {
         </header>
 
         {/* Signed-in identity + sign out / switch user */}
-        <div style={{ position: "sticky", top: 56, zIndex: 99, background: T.surfaceAlt, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "7px 16px" }}>
+        <div style={{ position: "sticky", top: "calc(56px + env(safe-area-inset-top))", zIndex: 99, background: T.surfaceAlt, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "7px 16px" }}>
           <span style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: T.textMuted, minWidth: 0 }}>
             <span style={{ width: 22, height: 22, borderRadius: "50%", background: currentUser.role === "owner" ? T.primary : hexA(T.primary, 0.16), color: currentUser.role === "owner" ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 9.5, flexShrink: 0 }}>{initials(currentUser.name)}</span>
             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Signed in as <span style={{ color: T.text, fontWeight: 700 }}>{currentUser.name}</span> · {roleLabel(currentUser.role)}</span>
