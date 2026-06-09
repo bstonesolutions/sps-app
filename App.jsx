@@ -1578,7 +1578,7 @@ function Modal({ title, children, onClose }) {
 }
 
 function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatchDelete, onBatchSchedule }) {
-  const { T, perms } = useApp();
+  const { T, perms, tiers } = useApp();
   const [search, setSearch] = useState("");
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState({}); // { [id]: true }
@@ -2105,7 +2105,7 @@ function ClientDocuments({ client, onChange }) {
 }
 
 function ClientDetail({ client: init, invoices, invoicing, branding, schedule, onBack, onUpdate, onSaveInvoice, onDeleteInvoice }) {
-  const { T, perms } = useApp();
+  const { T, perms, tiers } = useApp();
   const [client, setClient] = useState(init);
   const [tab, setTab] = useState("overview");
   const [editing, setEditing] = useState(false);
@@ -10076,6 +10076,7 @@ const CLIENT_NAV = [
   { id: "cp_service",   label: "My Service", icon: "service" },
   { id: "cp_pond",      label: "My Pond",    icon: "pond" },   // label overridden dynamically in portal
   { id: "cp_invoices",  label: "Invoices",   icon: "invoice" },
+  { id: "cp_messages",  label: "Messages",   icon: "message" },
   { id: "cp_request",   label: "Request",    icon: "plus" },
 ];
 
@@ -10195,6 +10196,11 @@ function CIcon({ name, size = 22 }) {
       <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round">
         <circle cx="12" cy="12" r="9"/>
         <polyline points="12 7 12 12 15 15"/>
+      </svg>
+    ),
+    message: (
+      <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
       </svg>
     ),
   };
@@ -10324,7 +10330,7 @@ function CPHome({ client, schedule, invoices, branding, onNav, T }) {
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           {[
             { label: "My Service Plan", sub: `${client.plan || "Signature"} — tap to manage`, icon: "clients", page: "cp_service", accent: true },
-            { label: "Request a Visit", sub: "Schedule service", icon: "plus", page: "cp_request", accent: false },
+            { label: "Messages", sub: "Chat with our team", icon: "message", page: "cp_messages", accent: false },
             { label: pondLabel(client), sub: `${(client.history||[]).length} visits · ${(client.equipment||[]).length} equipment`, icon: "history", page: "cp_pond", accent: false },
             { label: "My Invoices", sub: outstanding.length ? `${outstanding.length} outstanding` : "All paid up", icon: "invoice", page: "cp_invoices", accent: false },
           ].map(q => (
@@ -11300,7 +11306,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
         {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} />}
 
         {!settingsOpen && page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
-        {!settingsOpen && page === "cp_messages" && <CPMessages client={client} T={T} />}
+        {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} T={T} />}
         {!settingsOpen && page === "cp_request"  && <CPRequest client={client} branding={branding} onSubmit={onServiceRequest} T={T} />}
       </main>
 
@@ -11792,72 +11798,74 @@ export default function App({ authEmail = "", onSignOut }) {
   const splashGreeting = splashHour < 12 ? "Good morning" : splashHour < 17 ? "Good afternoon" : "Good evening";
 
   if (!hydrated || showSplash) {
-    // Resolve splash background
     const splashBg1    = (branding.splashBgColor && branding.splashBgColor.trim()) ? branding.splashBgColor : T.primary;
-    const splashBg2    = (branding.splashBgColor2 && branding.splashBgColor2.trim()) ? branding.splashBgColor2 : mix(splashBg1, "#000", 0.3);
+    const splashBg2    = (branding.splashBgColor2 && branding.splashBgColor2.trim()) ? branding.splashBgColor2 : mix(splashBg1, "#000", 0.32);
     const splashStyle  = branding.splashBgStyle || "gradient";
     const splashBgCss  = splashStyle === "solid" ? splashBg1
       : splashStyle === "image" && branding.splashBgImage ? `url(${branding.splashBgImage}) center/cover no-repeat`
-      : `linear-gradient(160deg, ${splashBg1} 0%, ${splashBg2} 100%)`;
+      : `linear-gradient(150deg, ${splashBg1} 0%, ${splashBg2} 100%)`;
     const splashFgColor = branding.splashTextColor === "dark" ? "rgba(0,0,0,0.85)" : "#fff";
-    const splashRingColor = branding.splashTextColor === "dark" ? "rgba(0,0,0,0.2)" : "rgba(255,255,255,0.3)";
-    const splashRingTop   = branding.splashTextColor === "dark" ? "rgba(0,0,0,0.7)" : "#fff";
-    const splashLogoSrc   = branding.splashLogoOverride || (branding.logoType === "image" ? branding.logoImage : null);
-    const showGreeting    = branding.splashShowGreeting !== "false";
+    const splashLogoSrc = branding.splashLogoOverride || (branding.logoType === "image" ? branding.logoImage : null);
+    const showGreeting  = branding.splashShowGreeting !== "false";
+    const greetPrefix   = (branding.splashGreetingPrefix || "").trim();
 
     return (
-      <div style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif',
+      <div style={{
+        fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif',
         background: splashBgCss,
-        minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-        color: splashFgColor, WebkitFontSmoothing: "antialiased", position: "relative", overflow: "hidden" }}>
-        {/* Dim overlay for image backgrounds */}
-        {splashStyle === "image" && branding.splashBgImage && (
-          <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.4)", pointerEvents: "none" }} />
-        )}
+        position: "fixed", inset: 0,
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+        color: splashFgColor, WebkitFontSmoothing: "antialiased", overflow: "hidden",
+        zIndex: 9999,
+      }}>
         <style>{`
-          @keyframes spin { to { transform: rotate(360deg); } }
-          @keyframes syncPulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
-          @keyframes splashFadeUp { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
-          @keyframes splashFadeOut { from { opacity: 1; } to { opacity: 0; } }
-          .splash-logo  { animation: splashFadeUp 0.55s cubic-bezier(.34,1.56,.64,1) both; }
-          .splash-name  { animation: splashFadeUp 0.55s cubic-bezier(.34,1.56,.64,1) 0.12s both; }
-          .splash-tag   { animation: splashFadeUp 0.55s cubic-bezier(.34,1.56,.64,1) 0.22s both; }
-          .splash-greet { animation: splashFadeUp 0.4s cubic-bezier(.34,1.56,.64,1) 0.28s both; }
-          .splash-dot   { animation: splashFadeUp 0.55s cubic-bezier(.34,1.56,.64,1) 0.55s both; }
-          .splash-fade-out { animation: splashFadeOut 0.5s ease 2.4s both; }
+          @keyframes sIn  { from { opacity:0; transform:translateY(20px) scale(0.96); } to { opacity:1; transform:translateY(0) scale(1); } }
+          @keyframes sOut { from { opacity:1; } to { opacity:0; } }
+          @keyframes spin { to { transform:rotate(360deg); } }
+          .si0 { animation: sIn 0.5s cubic-bezier(.22,1,.36,1) 0.05s both; }
+          .si1 { animation: sIn 0.5s cubic-bezier(.22,1,.36,1) 0.18s both; }
+          .si2 { animation: sIn 0.5s cubic-bezier(.22,1,.36,1) 0.28s both; }
+          .si3 { animation: sIn 0.5s cubic-bezier(.22,1,.36,1) 0.42s both; }
+          .s-out { animation: sOut 0.6s ease 2.3s both; }
         `}</style>
 
-        {/* Decorative circles — only on solid/gradient */}
-        {splashStyle !== "image" && <>
-          <div style={{ position: "absolute", right: -80, top: -80, width: 300, height: 300, borderRadius: "50%", background: "rgba(255,255,255,0.05)", pointerEvents: "none" }} />
-          <div style={{ position: "absolute", left: -60, bottom: -60, width: 200, height: 200, borderRadius: "50%", background: "rgba(255,255,255,0.04)", pointerEvents: "none" }} />
-        </>}
+        {splashStyle === "image" && branding.splashBgImage && (
+          <div style={{ position:"absolute", inset:0, background:"rgba(0,0,0,0.38)", pointerEvents:"none" }} />
+        )}
+        {splashStyle !== "image" && (
+          <>
+            <div style={{ position:"absolute", right:-100, top:-100, width:340, height:340, borderRadius:"50%", background:"rgba(255,255,255,0.06)", pointerEvents:"none" }} />
+            <div style={{ position:"absolute", left:-70, bottom:-70, width:220, height:220, borderRadius:"50%", background:"rgba(255,255,255,0.04)", pointerEvents:"none" }} />
+          </>
+        )}
 
-        <div className="splash-fade-out" style={{ position: "relative", display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", padding: "0 32px" }}>
+        <div className="s-out" style={{ position:"relative", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", padding:"0 36px", gap: 0 }}>
           {/* Logo */}
-          {splashLogoSrc ? (
-            <img className="splash-logo" src={splashLogoSrc} alt="" style={{ width: 88, height: 88, borderRadius: 24, objectFit: "cover", marginBottom: 22, boxShadow: "0 12px 40px rgba(0,0,0,0.3)" }} />
-          ) : (
-            <div className="splash-logo" style={{ width: 88, height: 88, borderRadius: 24, background: "rgba(255,255,255,0.18)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 40, marginBottom: 22 }}>
-              {branding.logoEmoji || "💧"}
-            </div>
-          )}
+          <div className="si0" style={{ marginBottom: 24 }}>
+            {splashLogoSrc ? (
+              <img src={splashLogoSrc} alt="" style={{ width:92, height:92, borderRadius:26, objectFit:"cover", boxShadow:"0 16px 48px rgba(0,0,0,0.35), 0 2px 8px rgba(0,0,0,0.2)" }} />
+            ) : (
+              <div style={{ width:92, height:92, borderRadius:26, background:"rgba(255,255,255,0.18)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:44, boxShadow:"0 16px 48px rgba(0,0,0,0.25)" }}>
+                {branding.logoEmoji || "💧"}
+              </div>
+            )}
+          </div>
 
           {/* Company name */}
-          <div className="splash-name" style={{ fontSize: 24, fontWeight: 900, letterSpacing: "-0.03em", marginBottom: 6, color: splashFgColor }}>
+          <div className="si1" style={{ fontSize:26, fontWeight:900, letterSpacing:"-0.04em", color:splashFgColor, lineHeight:1, marginBottom:8 }}>
             {branding.companyName}
           </div>
 
           {/* Tagline */}
-          <div className="splash-tag" style={{ fontSize: 14, opacity: 0.72, fontWeight: 500, marginBottom: (splashFirstName && showGreeting) ? 24 : 0, letterSpacing: "0.01em", color: splashFgColor }}>
+          <div className="si2" style={{ fontSize:14, fontWeight:500, letterSpacing:"0.04em", textTransform:"uppercase", opacity:0.6, color:splashFgColor, marginBottom: splashFirstName && showGreeting ? 28 : 0 }}>
             {splashTagline}
           </div>
 
-          {/* Personalised greeting */}
+          {/* Greeting pill */}
           {splashFirstName && showGreeting && (
-            <div className="splash-greet" style={{ marginTop: 8, background: "rgba(128,128,128,0.2)", borderRadius: 100, padding: "10px 24px", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)" }}>
-              <span style={{ fontSize: 22, fontWeight: 800, color: splashFgColor, letterSpacing: "-0.02em" }}>
-                {(branding.splashGreetingPrefix && branding.splashGreetingPrefix.trim()) ? branding.splashGreetingPrefix.trim() : splashGreeting}, {splashFirstName}.
+            <div className="si3" style={{ background:"rgba(255,255,255,0.14)", borderRadius:100, padding:"11px 28px", backdropFilter:"blur(20px)", WebkitBackdropFilter:"blur(20px)", border:"1px solid rgba(255,255,255,0.18)" }}>
+              <span style={{ fontSize:20, fontWeight:800, color:splashFgColor, letterSpacing:"-0.02em" }}>
+                {greetPrefix || splashGreeting}, {splashFirstName}.
               </span>
             </div>
           )}
