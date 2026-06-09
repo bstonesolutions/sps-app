@@ -1675,20 +1675,23 @@ function StaffClientPreview({ client, invoices, schedule, branding, onClose }) {
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 500, display: "flex", flexDirection: "column" }}>
       {/* Staff-only banner — always on top, not part of the real client view */}
-      <div style={{
-        background: "#1D1D1F", color: "#fff", padding: "10px 16px",
-        display: "flex", justifyContent: "space-between", alignItems: "center",
-        fontSize: 13, flexShrink: 0, zIndex: 501,
-      }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ background: T.primary, color: "#fff", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 100, letterSpacing: "0.05em" }}>STAFF PREVIEW</span>
-          <span style={{ color: "rgba(255,255,255,0.6)" }}>Viewing as {client.name}</span>
+      <div style={{ background: "#1D1D1F", color: "#fff", flexShrink: 0, zIndex: 501 }}>
+        {/* Safe area spacer so banner clears the iPhone status bar */}
+        <div style={{ height: "env(safe-area-inset-top)" }} />
+        <div style={{
+          padding: "10px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13,
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ background: T.primary, color: "#fff", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 100, letterSpacing: "0.05em" }}>STAFF PREVIEW</span>
+            <span style={{ color: "rgba(255,255,255,0.6)", fontSize: 12 }}>Viewing as {client.name}</span>
+          </div>
+          <button onClick={onClose} style={{
+            background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.2)", color: "#fff",
+            borderRadius: 10, padding: "8px 16px", fontSize: 12, fontWeight: 700,
+            cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5,
+            WebkitTapHighlightColor: "transparent",
+          }}>← Back to my view</button>
         </div>
-        <button onClick={onClose} style={{
-          background: "rgba(255,255,255,0.12)", border: "none", color: "#fff",
-          borderRadius: 8, padding: "7px 14px", fontSize: 12, fontWeight: 700,
-          cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 6,
-        }}>← Back to my view</button>
       </div>
 
       {/* Real client portal scrollable below the banner */}
@@ -5259,9 +5262,6 @@ function CPRequest({ client, branding, onSubmit, T }) {
 function SPSClientPortal({ client, schedule, invoices, branding, T, fontStack, onSignOut, onServiceRequest, isStaffPreview = false }) {
   const [page, setPage] = useState("cp_home");
 
-  const safeTop = isStaffPreview ? 0 : "env(safe-area-inset-top)";
-  const headerH = isStaffPreview ? 52 : "calc(52px + env(safe-area-inset-top))";
-
   return (
     <div style={{ fontFamily: fontStack, background: T.bg, minHeight: "100vh", display: "flex", flexDirection: "column", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em" }}>
       <style>{`
@@ -5277,24 +5277,23 @@ function SPSClientPortal({ client, schedule, invoices, branding, T, fontStack, o
         backdropFilter: "saturate(180%) blur(24px)",
         WebkitBackdropFilter: "saturate(180%) blur(24px)",
         borderBottom: `1px solid ${T.border}`,
-        paddingLeft: 20, paddingRight: 20,
-        paddingTop: safeTop,
-        minHeight: headerH,
-        display: "flex", alignItems: "flex-end", paddingBottom: 12,
-        justifyContent: "space-between",
         position: "sticky", top: 0, zIndex: 100,
       }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
-          <div style={{ width: 32, height: 32, borderRadius: 9, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
-            {branding.logoType === "image" && branding.logoImage
-              ? <img src={branding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-              : <span style={{ fontSize: 16 }}>{branding.logoEmoji}</span>}
+        {/* Safe area spacer — auto-adjusts to any phone's status bar */}
+        {!isStaffPreview && <div style={{ height: "env(safe-area-inset-top)" }} />}
+        <div style={{ height: 52, display: "flex", alignItems: "center", justifyContent: "space-between", paddingLeft: 20, paddingRight: 20 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
+            <div style={{ width: 32, height: 32, borderRadius: 9, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+              {branding.logoType === "image" && branding.logoImage
+                ? <img src={branding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                : <span style={{ fontSize: 16 }}>{branding.logoEmoji}</span>}
+            </div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: T.text, letterSpacing: "-0.02em" }}>{branding.companyName}</div>
           </div>
-          <div style={{ fontSize: 15, fontWeight: 700, color: T.text, letterSpacing: "-0.02em" }}>{branding.companyName}</div>
+          {!isStaffPreview && (
+            <button onClick={onSignOut} style={{ background: "none", border: "none", color: T.textMuted, fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button>
+          )}
         </div>
-        {!isStaffPreview && (
-          <button onClick={onSignOut} style={{ background: "none", border: "none", color: T.textMuted, fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button>
-        )}
       </header>
 
       {/* Main content */}
@@ -5691,7 +5690,10 @@ export default function App({ authEmail = "", onSignOut }) {
         `}</style>
 
         {/* Header — light frosted, matches theme surface */}
-        <header style={{ background: hexA(T.surface, 0.9), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, paddingLeft: 18, paddingRight: 18, paddingTop: "env(safe-area-inset-top)", minHeight: "calc(56px + env(safe-area-inset-top))", display: "flex", alignItems: "flex-end", paddingBottom: 10, justifyContent: "space-between", position: "sticky", top: 0, zIndex: 100, borderBottom: `1px solid ${T.border}` }}>
+        <header style={{ background: hexA(T.surface, 0.9), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, position: "sticky", top: 0, zIndex: 100, borderBottom: `1px solid ${T.border}` }}>
+          {/* Safe area spacer — grows to exactly the status bar height on any iPhone, zero on Android */}
+          <div style={{ height: "env(safe-area-inset-top)", background: "transparent" }} />
+          <div style={{ height: 56, display: "flex", alignItems: "center", justifyContent: "space-between", paddingLeft: 18, paddingRight: 18 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
             <div style={{ width: 36, height: 36, borderRadius: 11, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
               {branding.logoType === "image" && branding.logoImage
@@ -5707,6 +5709,7 @@ export default function App({ authEmail = "", onSignOut }) {
             style={{ background: page === "settings" ? hexA(T.primary, 0.12) : T.surfaceAlt, border: "none", color: page === "settings" ? T.primary : T.textMuted, fontSize: 17, cursor: "pointer", width: 36, height: 36, borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1 }}>
             ⚙
           </button>
+          </div>
         </header>
 
         {/* Signed-in identity + sign out / switch user */}
