@@ -1,6 +1,180 @@
 import { useState, useRef, useEffect, useContext, createContext } from "react";
 import { store, supabase } from "./supabaseClient";
 
+// ── PDF generation (jsPDF) ──
+// Loaded lazily so it doesn't block initial render
+const loadJsPDF = () => import("jspdf").then(m => m.jsPDF || m.default);
+
+function generateEstimatePDF(estimate, branding, invoicing) {
+  return loadJsPDF().then(JsPDF => {
+    const doc = new JsPDF({ unit: "pt", format: "letter" });
+    const primary = branding?.accentColor || "#B81D24";
+    const W = doc.internal.pageSize.getWidth();
+    let y = 40;
+
+    // Header bar
+    doc.setFillColor(primary);
+    doc.rect(0, 0, W, 70, "F");
+    doc.setTextColor("#ffffff");
+    doc.setFontSize(22);
+    doc.setFont("helvetica", "bold");
+    doc.text(branding?.companyName || "Stone Property Solutions", 40, 38);
+    doc.setFontSize(10);
+    doc.setFont("helvetica", "normal");
+    const contact = [branding?.companyPhone, branding?.companyEmail].filter(Boolean).join("  ·  ");
+    if (contact) doc.text(contact, 40, 56);
+    y = 100;
+
+    // Estimate title + info
+    doc.setTextColor("#1D1D1F");
+    doc.setFontSize(18);
+    doc.setFont("helvetica", "bold");
+    doc.text(estimate.title || "Service Estimate", 40, y);
+    y += 24;
+    doc.setFontSize(10);
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor("#6B7280");
+    doc.text(`Date: ${estimate.date || ""}   ·   Valid: ${estimate.validDays || 30} days`, 40, y);
+    y += 10;
+    doc.text(`Prepared for: ${estimate.clientName || ""}`, 40, y);
+    y += 30;
+
+    // Line items header
+    doc.setFillColor("#F5F5F7");
+    doc.rect(40, y, W - 80, 24, "F");
+    doc.setTextColor("#1D1D1F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.text("Description", 52, y + 16);
+    doc.text("Qty", W - 160, y + 16, { align: "right" });
+    doc.text("Unit Price", W - 100, y + 16, { align: "right" });
+    doc.text("Amount", W - 40, y + 16, { align: "right" });
+    y += 28;
+
+    // Line items
+    doc.setFont("helvetica", "normal");
+    (estimate.items || []).filter(it => it.desc).forEach(item => {
+      const qty = parseInt(item.qty) || 1;
+      const price = parseFloat(item.price || 0);
+      const amt = (qty * price).toFixed(2);
+      doc.setTextColor("#1D1D1F");
+      doc.text(String(item.desc), 52, y);
+      doc.text(String(qty), W - 160, y, { align: "right" });
+      doc.text(`$${price.toFixed(2)}`, W - 100, y, { align: "right" });
+      doc.text(`$${amt}`, W - 40, y, { align: "right" });
+      y += 20;
+      doc.setDrawColor("#E5E7EB");
+      doc.line(40, y - 4, W - 40, y - 4);
+    });
+
+    // Total
+    y += 10;
+    doc.setFontSize(13);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(primary);
+    doc.text(`Total: ${estimate.total || "$0.00"}`, W - 40, y, { align: "right" });
+    y += 30;
+
+    // Notes
+    if (estimate.notes) {
+      doc.setFontSize(10);
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor("#6B7280");
+      const lines = doc.splitTextToSize(estimate.notes, W - 80);
+      doc.text(lines, 40, y);
+      y += lines.length * 14 + 10;
+    }
+
+    // Footer
+    y = doc.internal.pageSize.getHeight() - 40;
+    doc.setFontSize(9);
+    doc.setTextColor("#9CA3AF");
+    doc.text(`${branding?.companyName || "Stone Property Solutions"}  ·  ${branding?.companyAddress || "Honey Brook, PA"}`, 40, y);
+
+    const filename = `estimate-${(estimate.clientName || "client").replace(/\s+/g, "-").toLowerCase()}.pdf`;
+    doc.save(filename);
+  });
+}
+
+function generateStatementPDF(client, invoices, branding) {
+  return loadJsPDF().then(JsPDF => {
+    const doc = new JsPDF({ unit: "pt", format: "letter" });
+    const primary = branding?.accentColor || "#B81D24";
+    const W = doc.internal.pageSize.getWidth();
+    let y = 40;
+
+    // Header
+    doc.setFillColor(primary);
+    doc.rect(0, 0, W, 70, "F");
+    doc.setTextColor("#ffffff");
+    doc.setFontSize(20);
+    doc.setFont("helvetica", "bold");
+    doc.text(branding?.companyName || "Stone Property Solutions", 40, 38);
+    doc.setFontSize(10);
+    doc.setFont("helvetica", "normal");
+    doc.text("Account Statement", 40, 56);
+    y = 100;
+
+    // Client info
+    doc.setTextColor("#1D1D1F");
+    doc.setFontSize(14);
+    doc.setFont("helvetica", "bold");
+    doc.text(client.name || "Client", 40, y);
+    y += 16;
+    doc.setFontSize(10);
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor("#6B7280");
+    if (client.address) { doc.text(client.address, 40, y); y += 14; }
+    doc.text(`Statement Date: ${new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}`, 40, y);
+    y += 30;
+
+    // Invoice table header
+    doc.setFillColor("#F5F5F7");
+    doc.rect(40, y, W - 80, 24, "F");
+    doc.setTextColor("#1D1D1F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.text("Invoice #", 52, y + 16);
+    doc.text("Date", 180, y + 16);
+    doc.text("Due", 280, y + 16);
+    doc.text("Status", 370, y + 16);
+    doc.text("Amount", W - 40, y + 16, { align: "right" });
+    y += 28;
+
+    // Invoices
+    let totalPaid = 0, totalOpen = 0;
+    doc.setFont("helvetica", "normal");
+    (invoices || []).forEach(iv => {
+      const amt = parseFloat((iv.total || "0").replace(/[^0-9.-]/g, "")) || 0;
+      const isPaid = iv.status === "paid";
+      if (isPaid) totalPaid += amt; else totalOpen += amt;
+      doc.setTextColor(isPaid ? "#6B7280" : "#1D1D1F");
+      doc.text(String(iv.number || iv.id), 52, y);
+      doc.text(String(iv.date || ""), 180, y);
+      doc.text(String(iv.dueDate || ""), 280, y);
+      doc.text(isPaid ? "Paid" : "Outstanding", 370, y);
+      doc.text(`$${amt.toFixed(2)}`, W - 40, y, { align: "right" });
+      y += 18;
+      doc.setDrawColor("#E5E7EB");
+      doc.line(40, y - 2, W - 40, y - 2);
+    });
+
+    // Summary
+    y += 16;
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(11);
+    doc.setTextColor("#6B7280");
+    doc.text(`Total Paid: $${totalPaid.toFixed(2)}`, W - 200, y);
+    y += 18;
+    doc.setTextColor(primary);
+    doc.setFontSize(13);
+    doc.text(`Balance Due: $${totalOpen.toFixed(2)}`, W - 200, y);
+
+    const filename = `statement-${(client.name || "client").replace(/\s+/g, "-").toLowerCase()}.pdf`;
+    doc.save(filename);
+  });
+}
+
 // ─────────────────────────────────────────────
 // PERSISTENT STORAGE
 // Keeps app data across reloads and updates so nothing resets.
@@ -72,6 +246,18 @@ const DEFAULT_CUSTOM = {
   surface: "#FFFFFF",
   text: "#1D1D1F",
 };
+
+// Saved brand palette — pre-loaded with SPS colors, user can edit
+const DEFAULT_PALETTE = [
+  { name: "SPS Crimson",  hex: "#AF011A" },
+  { name: "SPS Red",      hex: "#B81D24" },
+  { name: "White",        hex: "#FFFFFF" },
+  { name: "Slate Grey",   hex: "#6B7280" },
+  { name: "Dark",         hex: "#1D1D1F" },
+  { name: "Light Grey",   hex: "#F5F5F7" },
+  { name: "Green",        hex: "#2FA862" },
+  { name: "Gold",         hex: "#D97706" },
+];
 
 // Build a full theme object from the user's custom picks (light or dark mode)
 function buildCustomTheme(c0, mode = "light") {
@@ -146,6 +332,9 @@ const DEFAULT_BRANDING = {
   companyEmail: "",
   companyWebsite: "",
   companyAddress: "",
+  portalAppName: "",
+  portalTagline: "",
+  accentColor: "",
 };
 
 // Schedule layout preferences
@@ -519,7 +708,7 @@ function monthActuals(clients, when = new Date()) {
 }
 
 // derive outstanding balances + equipment flags into alert items
-function deriveAlerts(clients, invoices) {
+function deriveAlerts(clients, invoices, catalog) {
   const alerts = [];
   (clients || []).forEach(c => {
     (c.equipment || []).forEach(e => {
@@ -528,7 +717,12 @@ function deriveAlerts(clients, invoices) {
     const owed = clientOutstanding(c, invoices);
     if (owed > 0) alerts.push({ icon: "dollar", title: `${c.name} — $${owed.toFixed(2)} outstanding`, sub: "Open balance" });
   });
-  return alerts.slice(0, 6);
+  // Low inventory alerts
+  ((catalog && catalog.treatments) || []).forEach(t => {
+    const oz = parseFloat(t.inventoryOz) || 0;
+    if (oz < 32) alerts.unshift({ icon: "warning", title: `Low stock: ${t.name}`, sub: `${oz}oz remaining — consider restocking`, type: "inventory" });
+  });
+  return alerts.slice(0, 8);
 }
 
 // ── Invoicing ──
@@ -743,13 +937,13 @@ function Select({ value, onChange, options }) {
 // ─────────────────────────────────────────────
 // DASHBOARD (configurable home)
 // ─────────────────────────────────────────────
-function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onNav }) {
+function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onNav, catalog }) {
   const { T, perms } = useApp();
   const [editing, setEditing] = useState(false);
 
   const today = (schedule && schedule[0]) || { stops: [] };
   const ma = monthActuals(clients);
-  const derived = deriveAlerts(clients, invoices).filter(a => perms.seeBalances || !/outstanding/i.test(a.title || ""));
+  const derived = deriveAlerts(clients, invoices, catalog).filter(a => perms.seeBalances || !/outstanding/i.test(a.title || ""));
   const flags = (officeAlerts || []).filter(a => !a.resolved);
   const outstandingClients = (clients || []).map(c => ({ c, owed: clientOutstanding(c, invoices) })).filter(x => x.owed > 0);
   const outstandingTotal = outstandingClients.reduce((s, x) => s + x.owed, 0);
@@ -1167,6 +1361,27 @@ function ClientEditForm({ client, onSave, onCancel, title = "Edit Client" }) {
                 <FieldRow label="Plan"><Select value={form.plan} onChange={e => set("plan", e.target.value)} options={["Essential","Signature","Premium"]} /></FieldRow>
                 <FieldRow label="Frequency"><Select value={form.planFreq} onChange={e => set("planFreq", e.target.value)} options={["Monthly","Bi-Weekly","Weekly"]} /></FieldRow>
                 <FieldRow label="Next Service"><Input value={form.nextService} onChange={e => set("nextService", e.target.value)} placeholder="MM/DD/YYYY" /></FieldRow>
+                <FieldRow label="Monthly Rate">
+                  <div style={{ position: "relative" }}>
+                    <span style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: "#9ca3af" }}>$</span>
+                    <Input value={form.monthlyRate || ""} onChange={e => set("monthlyRate", e.target.value.replace(/[^0-9.]/g, ""))} placeholder="e.g. 150" />
+                  </div>
+                </FieldRow>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "#6b7280", display: "block", marginBottom: 5 }}>Auto-Invoice</label>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    {["Off", "Monthly", "Bi-Weekly", "Weekly"].map(opt => {
+                      const on = (form.autoInvoice || "Off") === opt;
+                      return (
+                        <button key={opt} type="button" onClick={() => set("autoInvoice", opt)}
+                          style={{ flex: 1, padding: "8px 4px", borderRadius: 10, border: `1.5px solid ${on ? "var(--ringBorder)" : "#e5e7eb"}`, background: on ? "rgba(184,29,36,0.08)" : "transparent", color: on ? "var(--ringBorder)" : "#9ca3af", fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>
+                          {opt}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 6 }}>When enabled, invoices generate automatically on that schedule using the monthly rate above.</div>
+                </div>
               </>}
             </div>
           </Card>
@@ -1213,6 +1428,11 @@ function ClientDetail({ client: init, invoices, invoicing, branding, schedule, o
             </div>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <Badge label={client.plan} bg={pm.bg} color={pm.color || pm.text} />
+              {perms.canInvoice && (invoices||[]).filter(iv => iv.clientId === client.id).length > 0 && (
+                <Btn variant="ghost" sm onClick={() => generateStatementPDF(client, (invoices||[]).filter(iv => iv.clientId === client.id), branding)} style={{ display:"flex", alignItems:"center", gap:5 }}>
+                  <Icon name="download" size={13} /> Statement
+                </Btn>
+              )}
               {perms.editClients && <Btn variant="ghost" sm onClick={() => setEditing(true)} style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="edit" size={13} /> Edit</Btn>}
             </div>
           </div>
@@ -1239,7 +1459,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, schedule, o
       </div>
 
       {tab === "overview" && <ClientOverview client={client} invoices={invoices} onUpdate={onUpdate} />}
-      {tab === "equipment" && <ClientEquipment client={client} onChange={eq => update({ equipment: eq })} />}
+      {tab === "equipment" && <ClientEquipment client={client} invoices={invoices} onChange={eq => update({ equipment: eq })} />}
       {tab === "history" && <ClientHistory client={client} onChange={hist => update({ history: hist })} />}
       {tab === "invoices" && perms.canInvoice && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} onSave={onSaveInvoice} onDelete={onDeleteInvoice} />}
       {tab === "portal" && <ClientPortal client={client} invoices={invoices} schedule={schedule} branding={branding} />}
@@ -1251,50 +1471,84 @@ function ClientDetail({ client: init, invoices, invoicing, branding, schedule, o
 // CLIENT PHOTO PICKER
 // Shared inline photo capture/upload used on overview + equipment
 // ─────────────────────────────────────────────
-function PhotoPicker({ photos = [], onChange, label = "Photos", maxPhotos = 10 }) {
+// photos can be strings (legacy) or objects { src, caption }
+// PhotoPicker normalises both so old data still works
+function PhotoPicker({ photos = [], onChange, label = "Photos", maxPhotos = 10, allowCaptions = false }) {
   const { T } = useApp();
   const inputRef = useRef(null);
   const [viewer, setViewer] = useState(null);
+  const [editingCaption, setEditingCaption] = useState(null); // index
+
+  // Normalise: ensure every item is { src, caption }
+  const normalised = photos.map(p => typeof p === "string" ? { src: p, caption: "" } : p);
 
   const addPhotos = (files) => {
-    const readers = Array.from(files).slice(0, maxPhotos - photos.length).map(file =>
+    const readers = Array.from(files).slice(0, maxPhotos - normalised.length).map(file =>
       new Promise(res => {
         const r = new FileReader();
-        r.onload = e => res(e.target.result);
+        r.onload = e => res({ src: e.target.result, caption: "" });
         r.readAsDataURL(file);
       })
     );
-    Promise.all(readers).then(results => onChange([...photos, ...results]));
+    Promise.all(readers).then(results => onChange([...normalised, ...results]));
   };
 
-  const remove = (idx) => onChange(photos.filter((_, i) => i !== idx));
+  const remove = (idx) => onChange(normalised.filter((_, i) => i !== idx));
+
+  const setCaption = (idx, caption) => {
+    onChange(normalised.map((p, i) => i === idx ? { ...p, caption } : p));
+  };
+
+  // Return src string for PhotoViewer (which expects strings)
+  const srcs = normalised.map(p => p.src);
 
   return (
     <div>
-      <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>{label}</div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-start" }}>
-        {photos.map((p, i) => (
-          <div key={i} style={{ position: "relative" }}>
-            <img src={p} alt="" onClick={() => setViewer(i)}
-              style={{ width: 80, height: 80, borderRadius: 12, objectFit: "cover", cursor: "pointer", border: `1px solid ${T.border}` }} />
-            <button onClick={() => remove(i)}
-              style={{ position: "absolute", top: -6, right: -6, width: 22, height: 22, borderRadius: "50%", background: "#E5484D", border: "2px solid #fff", color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}>
-              <Icon name="close" size={10} />
-            </button>
+      {label && <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>{label}</div>}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-start" }}>
+        {normalised.map((p, i) => (
+          <div key={i} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+            <div style={{ position: "relative" }}>
+              <img src={p.src} alt={p.caption || ""} onClick={() => setViewer(i)}
+                style={{ width: 90, height: 90, borderRadius: 12, objectFit: "cover", cursor: "pointer", border: `1px solid ${T.border}`, display: "block" }} />
+              <button onClick={() => remove(i)}
+                style={{ position: "absolute", top: -6, right: -6, width: 22, height: 22, borderRadius: "50%", background: "#E5484D", border: `2px solid ${T.surface}`, color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}>
+                <Icon name="close" size={10} />
+              </button>
+            </div>
+            {allowCaptions && (
+              editingCaption === i ? (
+                <input
+                  type="text"
+                  autoFocus
+                  value={p.caption}
+                  onChange={e => setCaption(i, e.target.value)}
+                  onBlur={() => setEditingCaption(null)}
+                  onKeyDown={e => e.key === "Enter" && setEditingCaption(null)}
+                  placeholder="Add label..."
+                  style={{ width: 90, padding: "4px 7px", border: `1.5px solid ${T.primary}`, borderRadius: 8, fontSize: 11, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }}
+                />
+              ) : (
+                <button onClick={() => setEditingCaption(i)}
+                  style={{ width: 90, padding: "4px 7px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 11, fontWeight: p.caption ? 600 : 400, color: p.caption ? T.text : T.textMuted, background: T.surfaceAlt, cursor: "pointer", fontFamily: "inherit", textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {p.caption || "Add label"}
+                </button>
+              )
+            )}
           </div>
         ))}
-        {photos.length < maxPhotos && (
+        {normalised.length < maxPhotos && (
           <button onClick={() => inputRef.current?.click()}
-            style={{ width: 80, height: 80, borderRadius: 12, border: `2px dashed ${T.border}`, background: T.surfaceAlt, color: T.textMuted, cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4 }}>
-            <Icon name="plus" size={20} />
-            <span style={{ fontSize: 10, fontWeight: 700 }}>Add</span>
+            style={{ width: 90, height: 90, borderRadius: 12, border: `2px dashed ${T.border}`, background: T.surfaceAlt, color: T.textMuted, cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 5 }}>
+            <Icon name="plus" size={22} />
+            <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.02em", textAlign: "center" }}>Camera / Library</span>
           </button>
         )}
       </div>
-      <input ref={inputRef} type="file" accept="image/*" multiple capture="environment"
+      <input ref={inputRef} type="file" accept="image/*,application/pdf,image/heic,image/heif" multiple
         style={{ display: "none" }}
         onChange={e => { addPhotos(e.target.files); e.target.value = ""; }} />
-      {viewer !== null && <PhotoViewer photos={photos} index={viewer} onClose={() => setViewer(null)} />}
+      {viewer !== null && <PhotoViewer photos={srcs} index={viewer} onClose={() => setViewer(null)} />}
     </div>
   );
 }
@@ -1304,9 +1558,67 @@ function ClientOverview({ client, onUpdate }) {
   const h = client.history[0];
   const m = dMeta(client.division);
   const sitePhotos = client.sitePhotos || [];
+  const siteVideos = client.siteVideos || [];
+  const [videoViewer, setVideoViewer] = useState(null);
+  const videoInputRef = useRef(null);
+  const [editingVideoCaption, setEditingVideoCaption] = useState(null);
 
   const updateSitePhotos = (photos) => {
     if (onUpdate) onUpdate({ ...client, sitePhotos: photos });
+  };
+
+  const MAX_VIDEO_DURATION = 20; // seconds
+  const [videoError, setVideoError] = useState("");
+
+  const addVideos = (files) => {
+    setVideoError("");
+    const incoming = Array.from(files).slice(0, 6 - siteVideos.length);
+    const results = [];
+    let checked = 0;
+
+    incoming.forEach(file => {
+      const url = URL.createObjectURL(file);
+      const vid = document.createElement("video");
+      vid.preload = "metadata";
+      vid.onloadedmetadata = () => {
+        URL.revokeObjectURL(url);
+        if (vid.duration > MAX_VIDEO_DURATION) {
+          setVideoError(`"${file.name}" is ${Math.round(vid.duration)}s — clips must be 20 seconds or under. Trim it in the Photos app first.`);
+        } else {
+          const r = new FileReader();
+          r.onload = e => {
+            results.push({ src: e.target.result, caption: "", type: file.type, name: file.name, size: file.size });
+            checked++;
+            if (checked === incoming.length) {
+              if (results.length) onUpdate({ ...client, siteVideos: [...siteVideos, ...results] });
+            }
+          };
+          r.readAsDataURL(file);
+          return;
+        }
+        checked++;
+        if (checked === incoming.length && results.length) {
+          onUpdate({ ...client, siteVideos: [...siteVideos, ...results] });
+        }
+      };
+      vid.src = url;
+    });
+  };
+
+  const removeVideo = (idx) => {
+    if (onUpdate) onUpdate({ ...client, siteVideos: siteVideos.filter((_, i) => i !== idx) });
+  };
+
+  const setVideoCaption = (idx, caption) => {
+    const next = siteVideos.map((v, i) => i === idx ? { ...v, caption } : v);
+    if (onUpdate) onUpdate({ ...client, siteVideos: next });
+  };
+
+  const fmtFileSize = (bytes) => {
+    if (!bytes) return "";
+    if (bytes > 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+    if (bytes > 1e6) return `${(bytes / 1e6).toFixed(0)} MB`;
+    return `${(bytes / 1e3).toFixed(0)} KB`;
   };
 
   return (
@@ -1320,9 +1632,18 @@ function ClientOverview({ client, onUpdate }) {
             <div style={{ fontSize: 13, color: T.textMuted, textAlign: "center", padding: "16px 0" }}>No photos added yet.</div>
           ) : (
             <>
-              {sitePhotos.length > 0 && (
-                <div style={{ marginBottom: perms.editClients ? 16 : 0 }}>
-                  <PhotoStrip photos={sitePhotos} size={100} />
+              {sitePhotos.length > 0 && !perms.editClients && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+                  {sitePhotos.map((p, i) => {
+                    const src = typeof p === "string" ? p : p.src;
+                    const cap = typeof p === "object" ? p.caption : "";
+                    return (
+                      <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <img src={src} alt={cap || ""} style={{ width: 90, height: 90, borderRadius: 12, objectFit: "cover", border: `1px solid ${T.border}` }} />
+                        {cap && <div style={{ fontSize: 11, color: T.textMuted, textAlign: "center", maxWidth: 90, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{cap}</div>}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
               {perms.editClients && (
@@ -1331,9 +1652,119 @@ function ClientOverview({ client, onUpdate }) {
                   onChange={updateSitePhotos}
                   label={sitePhotos.length === 0 ? `Add photos of the ${m.siteLabel.toLowerCase()} to document its current state` : "Add more photos"}
                   maxPhotos={20}
+                  allowCaptions={true}
                 />
               )}
             </>
+          )}
+        </div>
+      </Card>
+
+      {/* Site Videos */}
+      <Card>
+        <CardHeader
+          title={`${m.siteLabel} Videos`}
+          action={perms.editClients && siteVideos.length < 6 ? (
+            <button onClick={() => videoInputRef.current?.click()}
+              style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontFamily: "inherit" }}>
+              <Icon name="plus" size={14} /> Add
+            </button>
+          ) : null}
+        />
+        <div style={{ padding: "16px 18px" }}>
+          {siteVideos.length === 0 ? (
+            perms.editClients ? (
+              <button onClick={() => videoInputRef.current?.click()}
+                style={{ width: "100%", padding: "24px 16px", border: `2px dashed ${T.border}`, borderRadius: 14, background: T.surfaceAlt, cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 10, color: T.textMuted, fontFamily: "inherit" }}>
+                <div style={{ width: 44, height: 44, borderRadius: 13, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M15 10l4.553-2.069A1 1 0 0 1 21 8.87v6.26a1 1 0 0 1-1.447.899L15 14M3 8a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8z" />
+                  </svg>
+                </div>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text, marginBottom: 3 }}>Add a video</div>
+                  <div style={{ fontSize: 12, lineHeight: 1.5 }}>Take a video, pick from your library, or upload a file. Up to 6 clips, 20 sec each.</div>
+                </div>
+              </button>
+            ) : (
+              <div style={{ fontSize: 13, color: T.textMuted, textAlign: "center", padding: "16px 0" }}>No videos added yet.</div>
+            )
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {siteVideos.map((v, i) => (
+                <div key={i} style={{ background: T.surfaceAlt, borderRadius: 14, overflow: "hidden", border: `1px solid ${T.border}` }}>
+                  {/* Video player */}
+                  <div style={{ position: "relative", background: "#000", borderRadius: "14px 14px 0 0" }}>
+                    <video
+                      src={v.src}
+                      controls
+                      playsInline
+                      preload="metadata"
+                      style={{ width: "100%", maxHeight: 260, borderRadius: "14px 14px 0 0", display: "block", objectFit: "contain" }}
+                    />
+                    {perms.editClients && (
+                      <button onClick={() => removeVideo(i)}
+                        style={{ position: "absolute", top: 8, right: 8, width: 28, height: 28, borderRadius: "50%", background: "rgba(0,0,0,0.55)", border: "none", color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <Icon name="close" size={13} />
+                      </button>
+                    )}
+                  </div>
+                  {/* Caption + metadata */}
+                  <div style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      {perms.editClients ? (
+                        editingVideoCaption === i ? (
+                          <input
+                            type="text"
+                            autoFocus
+                            value={v.caption || ""}
+                            onChange={e => setVideoCaption(i, e.target.value)}
+                            onBlur={() => setEditingVideoCaption(null)}
+                            onKeyDown={e => e.key === "Enter" && setEditingVideoCaption(null)}
+                            placeholder="Add a label for this clip..."
+                            style={{ width: "100%", padding: "6px 10px", border: `1.5px solid ${T.primary}`, borderRadius: 9, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }}
+                          />
+                        ) : (
+                          <button onClick={() => setEditingVideoCaption(i)}
+                            style={{ background: "none", border: "none", color: v.caption ? T.text : T.textMuted, fontWeight: v.caption ? 600 : 400, fontSize: 13, cursor: "pointer", fontFamily: "inherit", padding: 0, textAlign: "left" }}>
+                            {v.caption || "Tap to add label"}
+                          </button>
+                        )
+                      ) : (
+                        v.caption && <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{v.caption}</div>
+                      )}
+                      {v.size && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{fmtFileSize(v.size)}</div>}
+                    </div>
+                  </div>
+                </div>
+              ))}
+              {perms.editClients && siteVideos.length < 6 && (
+                <button onClick={() => videoInputRef.current?.click()}
+                  style={{ padding: "12px", border: `2px dashed ${T.border}`, borderRadius: 12, background: "none", color: T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, fontFamily: "inherit", fontSize: 13, fontWeight: 600 }}>
+                  <Icon name="plus" size={16} /> Record or select clip
+                </button>
+              )}
+            </div>
+          )}
+          {/* Hidden file input — no capture attribute so it shows the full picker including existing videos */}
+          <input
+            ref={videoInputRef}
+            type="file"
+            accept="video/mp4,video/quicktime,video/mov,video/*"
+            multiple
+            style={{ display: "none" }}
+            onChange={e => { addVideos(e.target.files); e.target.value = ""; }}
+          />
+          {videoError && (
+            <div style={{ background: hexA(T.warning, 0.08), border: `1px solid ${hexA(T.warning, 0.25)}`, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.warning, marginTop: 8, display: "flex", alignItems: "flex-start", gap: 8, lineHeight: 1.5 }}>
+              <Icon name="warning" size={15} style={{ flexShrink: 0, marginTop: 1 }} />
+              <span>{videoError}</span>
+            </div>
+          )}
+          {perms.editClients && (
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 10, lineHeight: 1.5 }}>
+              Max 20 seconds per clip. For best quality, record at 1080p: iPhone Settings → Camera → Record Video → 1080p HD at 60 fps.
+            </div>
           )}
         </div>
       </Card>
@@ -1379,16 +1810,22 @@ function ClientOverview({ client, onUpdate }) {
   );
 }
 
-function ClientEquipment({ client, onChange }) {
+function ClientEquipment({ client, invoices, onChange }) {
   const { T, perms } = useApp();
   const [modal, setModal] = useState(null);
   const [expanded, setExpanded] = useState({});
   const equipment = client.equipment || [];
+  const clientInvoices = (invoices || []).filter(iv => iv.clientId === client.id);
   const STATUSES = ["Good", "Monitor", "Replace Soon"];
+  const ORIGINS  = ["Installed by SPS", "Pre-existing (before SPS)", "Client-supplied"];
 
-  const blankEq = () => ({ name: "", installed: "", status: "Good", notes: "", photos: [] });
+  const blankEq = () => ({
+    name: "", installed: "", purchaseDate: "", purchasePrice: "",
+    serialNumber: "", origin: "Installed by SPS", linkedInvoiceId: "",
+    status: "Good", notes: "", photos: [],
+  });
   const openAdd  = () => setModal({ mode: "add",  data: blankEq() });
-  const openEdit = (eq, i) => { if (perms.editClients) setModal({ mode: "edit", index: i, data: { photos: [], notes: "", ...eq } }); };
+  const openEdit = (eq, i) => { if (perms.editClients) setModal({ mode: "edit", index: i, data: { ...blankEq(), ...eq } }); };
 
   const save = () => {
     const d = modal.data;
@@ -1407,9 +1844,10 @@ function ClientEquipment({ client, onChange }) {
 
   const setD = (k, v) => setModal(m => ({ ...m, data: { ...m.data, [k]: v } }));
   const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
-  const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
-
+  const lbl   = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
   const toggleExpand = (i) => setExpanded(e => ({ ...e, [i]: !e[i] }));
+
+  const getLinkedInvoice = (id) => clientInvoices.find(iv => String(iv.id) === String(id));
 
   return (
     <Card>
@@ -1425,22 +1863,25 @@ function ClientEquipment({ client, onChange }) {
       {equipment.map((eq, i) => {
         const isOpen = expanded[i];
         const photos = eq.photos || [];
+        const linkedInv = getLinkedInvoice(eq.linkedInvoiceId);
         return (
           <div key={i} style={{ borderBottom: i < equipment.length - 1 ? `1px solid ${T.border}` : "none" }}>
-            {/* Header row — tap to expand */}
+            {/* Header row */}
             <div onClick={() => toggleExpand(i)}
               style={{ padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 700, fontSize: 14, color: T.text }}>{eq.name}</div>
-                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>
-                  Installed {eq.installed || "—"}
-                  {photos.length > 0 && <span style={{ marginLeft: 8, color: T.primary }}>· {photos.length} photo{photos.length > 1 ? "s" : ""}</span>}
+                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  {eq.installed && <span>Installed {eq.installed}</span>}
+                  {eq.serialNumber && <span>S/N: {eq.serialNumber}</span>}
+                  {photos.length > 0 && <span style={{ color: T.primary }}>{photos.length} photo{photos.length > 1 ? "s" : ""}</span>}
+                  {eq.origin === "Pre-existing (before SPS)" && <span style={{ color: T.textMuted, fontSize: 10, fontWeight: 700, background: T.surfaceAlt, padding: "2px 7px", borderRadius: 100 }}>Pre-SPS</span>}
                 </div>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <div style={{ width: 8, height: 8, borderRadius: "50%", background: statusColor(eq.status, T), flexShrink: 0 }} />
-                  <span style={{ fontSize: 12, color: T.text, fontWeight: 600 }}>{eq.status}</span>
+                  <span style={{ fontSize: 12, color: T.text, fontWeight: 600 }}>{eq.status || "Good"}</span>
                 </div>
                 <div style={{ color: T.textMuted, transform: isOpen ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>
                   <Icon name="chevronD" size={16} />
@@ -1450,51 +1891,52 @@ function ClientEquipment({ client, onChange }) {
 
             {/* Expanded detail */}
             {isOpen && (
-              <div style={{ padding: "0 18px 16px", display: "flex", flexDirection: "column", gap: 14 }}>
-                {/* Photos */}
-                {perms.editClients ? (
-                  <PhotoPicker
-                    photos={photos}
-                    onChange={newPhotos => {
-                      const next = equipment.map((e2, j) => j === i ? { ...e2, photos: newPhotos } : e2);
-                      onChange(next);
-                    }}
-                    label="Equipment Photos"
-                    maxPhotos={10}
-                  />
-                ) : (
-                  photos.length > 0 && (
-                    <div>
-                      <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 8 }}>Photos</div>
-                      <PhotoStrip photos={photos} size={80} />
-                    </div>
-                  )
-                )}
+              <div style={{ padding: "0 18px 18px", display: "flex", flexDirection: "column", gap: 16 }}>
+
+                {/* Photos with captions */}
+                <PhotoPicker
+                  photos={photos}
+                  onChange={newPhotos => onChange(equipment.map((e2, j) => j === i ? { ...e2, photos: newPhotos } : e2))}
+                  label="Photos"
+                  maxPhotos={12}
+                  allowCaptions={true}
+                />
 
                 {/* Condition notes */}
-                {perms.editClients ? (
-                  <div>
-                    <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 8 }}>Condition Notes</div>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 8 }}>Condition Notes</div>
+                  {perms.editClients ? (
                     <textarea
                       value={eq.notes || ""}
-                      onChange={e => {
-                        const next = equipment.map((e2, j) => j === i ? { ...e2, notes: e.target.value } : e2);
-                        onChange(next);
-                      }}
-                      placeholder="Describe visible condition, wear, leaks, noise, etc..."
+                      onChange={e => onChange(equipment.map((e2, j) => j === i ? { ...e2, notes: e.target.value } : e2))}
+                      placeholder="Visible condition, wear, leaks, unusual noise, etc..."
                       style={{ width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical", minHeight: 72, lineHeight: 1.5 }}
                     />
+                  ) : (
+                    eq.notes ? <div style={{ fontSize: 13, color: T.text, lineHeight: 1.6 }}>{eq.notes}</div>
+                             : <div style={{ fontSize: 13, color: T.textMuted }}>No condition notes.</div>
+                  )}
+                </div>
+
+                {/* Detail fields — read view */}
+                {!perms.editClients && (eq.purchaseDate || eq.purchasePrice || eq.serialNumber || eq.origin || linkedInv) && (
+                  <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
+                    {[
+                      eq.origin && ["Origin", eq.origin],
+                      eq.purchaseDate && ["Purchase Date", eq.purchaseDate],
+                      eq.purchasePrice && ["Purchase Price", `$${eq.purchasePrice}`],
+                      eq.serialNumber && ["Serial Number", eq.serialNumber],
+                      linkedInv && ["Linked Invoice", `${linkedInv.number || linkedInv.id} — ${linkedInv.total || ""}`],
+                    ].filter(Boolean).map(([k, v]) => (
+                      <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                        <div style={{ fontSize: 12, color: T.textMuted }}>{k}</div>
+                        <div style={{ fontSize: 12, fontWeight: 600, color: T.text, textAlign: "right" }}>{v}</div>
+                      </div>
+                    ))}
                   </div>
-                ) : (
-                  eq.notes && (
-                    <div>
-                      <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 6 }}>Condition Notes</div>
-                      <div style={{ fontSize: 13, color: T.text, lineHeight: 1.6 }}>{eq.notes}</div>
-                    </div>
-                  )
                 )}
 
-                {/* Edit button */}
+                {/* Edit Details button */}
                 {perms.editClients && (
                   <button onClick={() => openEdit(eq, i)}
                     style={{ background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 11, padding: "9px 16px", fontSize: 13, fontWeight: 700, color: T.text, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 6, alignSelf: "flex-start" }}>
@@ -1507,19 +1949,33 @@ function ClientEquipment({ client, onChange }) {
         );
       })}
 
+      {/* Add / Edit modal */}
       {modal && (
         <Modal title={modal.mode === "add" ? "Add Equipment" : "Edit Equipment"} onClose={() => setModal(null)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+            {/* Name */}
             <div>
-              <label style={labelStyle}>Name</label>
+              <label style={lbl}>Equipment Name</label>
               <input type="text" style={field} value={modal.data.name} onChange={e => setD("name", e.target.value)} placeholder="e.g. Aquascape 3000 Pump" autoFocus />
             </div>
+
+            {/* Origin */}
             <div>
-              <label style={labelStyle}>Date Installed</label>
-              <input type="text" inputMode="numeric" style={field} value={modal.data.installed} onChange={e => setD("installed", e.target.value)} placeholder="MM/YYYY" />
+              <label style={lbl}>Origin</label>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {ORIGINS.map(o => (
+                  <button key={o} onClick={() => setD("origin", o)}
+                    style={{ padding: "8px 12px", borderRadius: 10, border: `1.5px solid ${modal.data.origin === o ? T.primary : T.border}`, background: modal.data.origin === o ? hexA(T.primary, 0.1) : T.surface, color: modal.data.origin === o ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                    {o}
+                  </button>
+                ))}
+              </div>
             </div>
+
+            {/* Status */}
             <div>
-              <label style={labelStyle}>Status</label>
+              <label style={lbl}>Status</label>
               <div style={{ display: "flex", gap: 8 }}>
                 {STATUSES.map(s => (
                   <button key={s} onClick={() => setD("status", s)}
@@ -1529,6 +1985,52 @@ function ClientEquipment({ client, onChange }) {
                 ))}
               </div>
             </div>
+
+            {/* Dates */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div>
+                <label style={lbl}>Install Date</label>
+                <input type="text" inputMode="numeric" style={field} value={modal.data.installed} onChange={e => setD("installed", e.target.value)} placeholder="MM/YYYY" />
+              </div>
+              <div>
+                <label style={lbl}>Purchase Date</label>
+                <input type="text" inputMode="numeric" style={field} value={modal.data.purchaseDate || ""} onChange={e => setD("purchaseDate", e.target.value)} placeholder="MM/YYYY" />
+              </div>
+            </div>
+
+            {/* Price + Serial */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div>
+                <label style={lbl}>Purchase Price</label>
+                <div style={{ position: "relative" }}>
+                  <span style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: T.textMuted }}>$</span>
+                  <input type="text" inputMode="decimal" style={{ ...field, paddingLeft: 26 }} value={modal.data.purchasePrice || ""} onChange={e => setD("purchasePrice", e.target.value.replace(/[^0-9.]/g, ""))} placeholder="0.00" />
+                </div>
+              </div>
+              <div>
+                <label style={lbl}>Serial Number</label>
+                <input type="text" style={field} value={modal.data.serialNumber || ""} onChange={e => setD("serialNumber", e.target.value)} placeholder="SN-XXXXXX" />
+              </div>
+            </div>
+
+            {/* Notes */}
+            <div>
+              <label style={lbl}>Notes</label>
+              <textarea style={{ ...field, minHeight: 72, resize: "vertical", lineHeight: 1.5 }} value={modal.data.notes || ""} onChange={e => setD("notes", e.target.value)} placeholder="Any notes about this equipment, history, or pre-existing condition..." />
+            </div>
+
+            {/* Linked Invoice */}
+            <div>
+              <label style={lbl}>Linked Invoice <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
+              <select style={{ ...field, appearance: "none", WebkitAppearance: "none" }} value={modal.data.linkedInvoiceId || ""} onChange={e => setD("linkedInvoiceId", e.target.value)}>
+                <option value="">None</option>
+                {clientInvoices.map(iv => (
+                  <option key={iv.id} value={iv.id}>{iv.number || `Invoice ${iv.id}`} — {iv.date} — {iv.total || "$0.00"}</option>
+                ))}
+              </select>
+              {clientInvoices.length === 0 && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>No invoices on file for this client yet.</div>}
+            </div>
+
             <Btn onClick={save} block lg>{modal.mode === "add" ? "Add Equipment" : "Save Changes"}</Btn>
             {modal.mode === "edit" && (
               <button onClick={remove} style={{ background: "none", border: "none", color: "#C0392B", fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 6, fontFamily: "inherit", textAlign: "center" }}>
@@ -1632,9 +2134,10 @@ function HistoryEditModal({ entry, onSave, onClose }) {
                 <button onClick={() => setPhotos(ps => ps.filter((_, idx) => idx !== i))} style={{ position: "absolute", top: -6, right: -6, background: "#C0392B", color: "#fff", border: "none", borderRadius: "50%", width: 20, height: 20, fontSize: 12, cursor: "pointer", lineHeight: 1 }}>×</button>
               </div>
             ))}
-            <label style={{ width: 60, height: 60, borderRadius: 10, border: `2px dashed ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, color: T.textMuted, cursor: "pointer" }}>
-              {busy ? "…" : "+"}
-              <input type="file" accept="image/*" multiple onChange={addPhotos} style={{ display: "none" }} />
+            <label style={{ width: 60, height: 60, borderRadius: 10, border: `2px dashed ${T.border}`, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, color: T.textMuted, cursor: "pointer" }}>
+              {busy ? <span style={{ fontSize: 18 }}>…</span> : <Icon name="plus" size={18} />}
+              <span style={{ fontSize: 7, fontWeight: 700, letterSpacing: "0.02em" }}>ADD</span>
+              <input type="file" accept="image/*,image/heic,image/heif" multiple onChange={addPhotos} style={{ display: "none" }} />
             </label>
           </div>
         </div>
@@ -1984,10 +2487,12 @@ function StaffClientPreview({ client, invoices, schedule, branding, onClose }) {
           invoices={invoices}
           schedule={schedule}
           branding={branding}
+          estimates={[]}
           T={T}
           fontStack={fontStack}
           onSignOut={onClose}
           onServiceRequest={() => {}}
+          onApproveEstimate={() => {}}
           isStaffPreview={true}
         />
       </div>
@@ -2475,7 +2980,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
           ))}
           <label style={{ width: 64, height: 64, borderRadius: 10, border: `2px dashed ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, color: T.textMuted, cursor: "pointer" }}>
             {busy ? "…" : "+"}
-            <input type="file" accept="image/*" multiple capture="environment" onChange={addPhotos} style={{ display: "none" }} />
+            <input type="file" accept="image/*,image/heic,image/heif" multiple onChange={addPhotos} style={{ display: "none" }} />
           </label>
         </div>
       </div>
@@ -2843,7 +3348,622 @@ function HeadHereModal({ stop, client, email, onClose }) {
   );
 }
 
-function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg, team, onClientSelect, seedClientIds, clearSeed, email, onComplete, completedSids, onOfficeAlert }) {
+// ─────────────────────────────────────────────
+// ROUTE ASSIGNMENTS
+// Set a client up once — frequency, day, tech, tier —
+// and the schedule auto-populates stops each week.
+// ─────────────────────────────────────────────
+
+const DAYS_OF_WEEK = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+const FREQ_OPTIONS = [
+  { id: "weekly",    label: "Weekly",       weeks: 1 },
+  { id: "biweekly",  label: "Bi-Weekly",    weeks: 2 },
+  { id: "monthly",   label: "Monthly",      weeks: 4 },
+  { id: "6week",     label: "Every 6 Weeks", weeks: 6 },
+];
+
+// Given assignments + existing schedule, produce the stops that SHOULD exist
+// in a rolling window (today → today + 8 weeks).
+// Returns array of { date, stop } for any that are missing.
+function computeMissingStops(assignments, schedule, clients, catalog, windowWeeks = 8) {
+  const today = new Date();
+  today.setHours(0,0,0,0);
+  const windowEnd = new Date(today);
+  windowEnd.setDate(windowEnd.getDate() + windowWeeks * 7);
+
+  // Build a set of existing (clientId, date) so we don't double-add
+  const existing = new Set();
+  (schedule||[]).forEach(d => {
+    (d.stops||[]).forEach(s => {
+      if (s.id) existing.add(`${s.id}::${d.date}`);
+    });
+  });
+
+  const missing = [];
+
+  (assignments||[]).forEach(a => {
+    if (!a.clientId || !a.dayOfWeek || !a.frequency || !a.startDate) return;
+    if (a.paused) return;
+
+    const client = (clients||[]).find(c => String(c.id) === String(a.clientId));
+    if (!client) return;
+
+    const freqObj = FREQ_OPTIONS.find(f => f.id === a.frequency) || FREQ_OPTIONS[0];
+    const intervalDays = freqObj.weeks * 7;
+
+    // Parse start date
+    const [sy, sm, sd] = a.startDate.split("-").map(Number);
+    let cursor = new Date(sy, sm - 1, sd);
+    cursor.setHours(0,0,0,0);
+
+    // Advance cursor to the right day of week
+    const targetDay = DAYS_OF_WEEK.indexOf(a.dayOfWeek);
+    if (targetDay === -1) return;
+    while (cursor.getDay() !== targetDay) cursor.setDate(cursor.getDate() + 1);
+
+    // weekOffset: which occurrence within the cycle to target
+    // e.g. for monthly (every 4 weeks), weekOffset=1 means the 2nd occurrence each month
+    // For bi-weekly, weekOffset=0 is week A, weekOffset=1 is week B
+    const weekOffset = a.weekOffset ?? 0;
+    const freqWeeks  = freqObj.weeks;
+
+    // Walk through occurrences within the window
+    let occurrenceCount = 0;
+    const maxOccurrences = a.stopAfter ? parseInt(a.stopAfter) : 9999;
+    const skipWeeks = (a.skipWeeks || "").split(",").map(s => s.trim()).filter(Boolean);
+
+    // For offset-based scheduling: advance cursor to the correct starting occurrence
+    // occurrence 0 = first hit at/after startDate, then every intervalDays
+    // weekOffset shifts which occurrence within a "cycle" to use
+    // We compute a global occurrence index and only emit when (index % freqWeeks) === weekOffset
+    // For weekly (freqWeeks=1), weekOffset is always 0 so every occurrence fires
+    let globalOccurrence = 0;
+
+    while (cursor <= windowEnd) {
+      const isTargetOccurrence = freqWeeks === 1 || (globalOccurrence % freqWeeks === weekOffset % freqWeeks);
+
+      if (cursor >= today && isTargetOccurrence) {
+        occurrenceCount++;
+        if (occurrenceCount > maxOccurrences) break;
+
+        // Format date as MM/DD/YYYY
+        const mm = String(cursor.getMonth()+1).padStart(2,"0");
+        const dd = String(cursor.getDate()).padStart(2,"0");
+        const yy = cursor.getFullYear();
+        const dateStr = `${mm}/${dd}/${yy}`;
+        const isoDate = `${yy}-${mm}-${dd}`;
+
+        // Check skip weeks
+        const shouldSkip = skipWeeks.some(sw => dateStr.includes(sw) || isoDate.includes(sw));
+
+        if (!shouldSkip && !existing.has(`${client.id}::${dateStr}`)) {
+          const stopType = a.stopType || (catalog?.stopTypes?.[0]) || "Service";
+          const services = (a.serviceIds || []).map(sid => {
+            const svc = (catalog?.services||[]).find(s => s.id === sid);
+            return svc ? (typeof svc === "string" ? svc : svc.name) : sid;
+          }).filter(Boolean);
+
+          missing.push({
+            date: dateStr,
+            isoDate,
+            stop: {
+              sid: `route-${a.id}-${isoDate}`,
+              id: client.id,
+              client: client.name,
+              address: client.address || "",
+              type: stopType,
+              duration: a.duration || "60",
+              time: a.time || "8:00 AM",
+              assigneeId: a.techId || "",
+              services: services,
+              fromRoute: true,
+              routeAssignmentId: a.id,
+            }
+          });
+        }
+      }
+      globalOccurrence++;
+      cursor.setDate(cursor.getDate() + 7); // always step 1 week at a time
+    }
+  });
+
+  return missing;
+}
+
+function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, onClose }) {
+  const blank = {
+    id: `ra-${Date.now()}`,
+    clientId: "", techId: "", dayOfWeek: "Monday", frequency: "biweekly",
+    startDate: new Date().toISOString().split("T")[0],
+    stopAfter: "", skipWeeks: "", time: "08:00",
+    stopType: "", serviceIds: [], duration: "60", paused: false,
+  };
+  const [form, setForm] = useState({ ...blank, ...(assignment || {}) });
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", appearance: "none", WebkitAppearance: "none" };
+  const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
+
+  const clientObj = (clients||[]).find(c => String(c.id) === String(form.clientId));
+  const techObj   = (team||[]).find(t => t.id === form.techId);
+
+  const toggleService = (id) => set("serviceIds",
+    form.serviceIds.includes(id) ? form.serviceIds.filter(x => x !== id) : [...form.serviceIds, id]
+  );
+
+  const canSave = form.clientId && form.dayOfWeek && form.frequency && form.startDate;
+
+  return (
+    <Modal title={assignment ? "Edit Assignment" : "Add Assignment"} onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+        {/* Client */}
+        <div>
+          <label style={lbl}>Client</label>
+          <select style={field} value={form.clientId} onChange={e => set("clientId", e.target.value)}>
+            <option value="">Select a client...</option>
+            {(clients||[]).sort((a,b) => (a.name||"").localeCompare(b.name||"")).map(c => (
+              <option key={c.id} value={c.id}>{c.name} — {c.plan || c.division}</option>
+            ))}
+          </select>
+          {clientObj && (
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>
+              {clientObj.division} · {clientObj.plan} · {clientObj.planFreq} · {clientObj.address}
+            </div>
+          )}
+        </div>
+
+        {/* Tech */}
+        <div>
+          <label style={lbl}>Technician</label>
+          <select style={field} value={form.techId} onChange={e => set("techId", e.target.value)}>
+            <option value="">Unassigned</option>
+            {(team||[]).map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        </div>
+
+        {/* Day of week */}
+        <div>
+          <label style={lbl}>Day of Week</label>
+          <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+            {DAYS_OF_WEEK.map(d => (
+              <button key={d} onClick={() => set("dayOfWeek", d)}
+                style={{ padding: "8px 10px", borderRadius: 10, border: `1.5px solid ${form.dayOfWeek === d ? T.primary : T.border}`, background: form.dayOfWeek === d ? hexA(T.primary, 0.1) : T.surface, color: form.dayOfWeek === d ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                {d.slice(0,3)}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Frequency */}
+        <div>
+          <label style={lbl}>Frequency</label>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {FREQ_OPTIONS.map(f => (
+              <button key={f.id} onClick={() => set("frequency", f.id)}
+                style={{ padding: "9px 12px", borderRadius: 10, border: `1.5px solid ${form.frequency === f.id ? T.primary : T.border}`, background: form.frequency === f.id ? hexA(T.primary, 0.1) : T.surface, color: form.frequency === f.id ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                {f.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Time + Duration */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div>
+            <label style={lbl}>Default Time</label>
+            <input type="time" style={field} value={form.time} onChange={e => set("time", e.target.value)} />
+          </div>
+          <div>
+            <label style={lbl}>Duration (min)</label>
+            <input type="text" inputMode="numeric" style={field} value={form.duration} onChange={e => set("duration", e.target.value.replace(/\D/g,""))} placeholder="60" />
+          </div>
+        </div>
+
+        {/* Start on */}
+        <div>
+          <label style={lbl}>Start On</label>
+          <input type="date" style={field} value={form.startDate} onChange={e => set("startDate", e.target.value)} />
+        </div>
+
+        {/* Stop type */}
+        <div>
+          <label style={lbl}>Stop Type <span style={{ textTransform:"none", fontWeight:400 }}>(optional)</span></label>
+          <select style={field} value={form.stopType} onChange={e => set("stopType", e.target.value)}>
+            <option value="">Use client service tier</option>
+            {(catalog?.stopTypes||[]).map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </div>
+
+        {/* Services */}
+        {(catalog?.services||[]).length > 0 && (
+          <div>
+            <label style={lbl}>Default Services <span style={{ textTransform:"none", fontWeight:400 }}>(optional)</span></label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+              {(catalog.services||[]).map(s => {
+                const on = form.serviceIds.includes(s.id);
+                return (
+                  <button key={s.id} onClick={() => toggleService(s.id)}
+                    style={{ padding: "7px 12px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.1) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                    {s.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Stop after + Skip weeks */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div>
+            <label style={lbl}>Stop After <span style={{ textTransform:"none", fontWeight:400 }}>(# visits)</span></label>
+            <input type="text" inputMode="numeric" style={field} value={form.stopAfter} onChange={e => set("stopAfter", e.target.value.replace(/\D/g,""))} placeholder="No limit" />
+          </div>
+          <div>
+            <label style={lbl}>Pause</label>
+            <button onClick={() => set("paused", !form.paused)}
+              style={{ width: "100%", padding: "11px 13px", border: `1.5px solid ${form.paused ? T.warning : T.border}`, borderRadius: 12, background: form.paused ? hexA(T.warning, 0.08) : T.surface, color: form.paused ? T.warning : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+              {form.paused ? "Paused — tap to resume" : "Active"}
+            </button>
+          </div>
+        </div>
+
+        <Btn onClick={() => canSave && onSave(form)} block lg disabled={!canSave}
+          style={{ opacity: canSave ? 1 : 0.4 }}>
+          {assignment ? "Save Changes" : "Add Assignment"}
+        </Btn>
+        {assignment && (
+          <button onClick={() => onSave(null)} style={{ background: "none", border: "none", color: "#C0392B", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", textAlign: "center", padding: 6 }}>
+            Delete Assignment
+          </button>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+function RouteAssignmentsTab({ clients, catalog, team, schedule, setSchedule, assignments, setAssignments, T }) {
+  const [view, setView]   = useState("matrix"); // "matrix" | "list"
+  const [modal, setModal] = useState(null);
+  const [populating, setPopulating] = useState(false);
+  const [lastPopulated, setLastPopulated]   = useState(null);
+  const [dragSrc, setDragSrc]   = useState(null);   // { assignmentId, fromWeek }
+  const [dropTarget, setDropTarget] = useState(null); // { freq, week }
+  const [filterFreq, setFilterFreq] = useState("all");
+
+  // ── shared helpers ──
+  const clientOf  = (id) => (clients||[]).find(c => String(c.id) === String(id));
+  const techName  = (id) => { if (!id) return ""; const t = (team||[]).find(t => t.id === id); return t?.name || ""; };
+  const freqLabel = (id) => FREQ_OPTIONS.find(f => f.id === id)?.label || id;
+
+  const saveAssignment = (a) => {
+    if (a === null) setAssignments(prev => prev.filter(x => x.id !== modal.id));
+    else if (modal === "add") setAssignments(prev => [...(prev||[]), a]);
+    else setAssignments(prev => prev.map(x => x.id === a.id ? a : x));
+    setModal(null);
+  };
+
+  const populateSchedule = () => {
+    setPopulating(true);
+    const missing = computeMissingStops(assignments, schedule, clients, catalog, 8);
+    if (missing.length === 0) { setLastPopulated("Already up to date."); setPopulating(false); return; }
+    setSchedule(prev => {
+      const copy = prev.map(d => ({ ...d, stops: [...d.stops] }));
+      missing.forEach(({ date, isoDate, stop }) => {
+        const dayName = new Date(isoDate + "T12:00:00").toLocaleDateString("en-US", { weekday: "long" });
+        const existing = copy.find(d => d.date === date);
+        if (existing) { if (!existing.stops.find(s => s.sid === stop.sid)) existing.stops.push(stop); }
+        else copy.push({ date, day: dayName, stops: [stop] });
+      });
+      copy.sort((a,b) => { const p = s => { const [m,d,y]=s.split("/").map(Number); return new Date(y,m-1,d).getTime(); }; return p(a.date)-p(b.date); });
+      return copy;
+    });
+    setLastPopulated(`Added ${missing.length} stop${missing.length!==1?"s":""} across 8 weeks.`);
+    setPopulating(false);
+  };
+
+  // ── MATRIX logic ──
+  // weekOffset on an assignment = which occurrence of their day the client lands on
+  // 0 = first occurrence, 1 = second, etc.
+  // For weekly: all weeks (just one column "Every Week")
+  // For bi-weekly: week A (0) or week B (1)
+  // For monthly: 1st/2nd/3rd/4th/5th of month
+  // For 6-week: 6 slots
+
+  const FREQ_COLS = {
+    weekly:   ["Every Week"],
+    biweekly: ["Week A", "Week B"],
+    monthly:  ["1st", "2nd", "3rd", "4th", "5th"],
+    "6week":  ["Wk 1","Wk 2","Wk 3","Wk 4","Wk 5","Wk 6"],
+  };
+
+  const moveToWeek = (assignmentId, newWeek) => {
+    setAssignments(prev => prev.map(a =>
+      a.id === assignmentId ? { ...a, weekOffset: newWeek } : a
+    ));
+  };
+
+  // Touch drag state for mobile
+  const touchDragRef = useRef(null);
+  const cellRefs = useRef({});
+
+  const onTouchStartMatrix = (e, assignmentId, fromWeek) => {
+    touchDragRef.current = { assignmentId, fromWeek };
+    setDragSrc({ assignmentId, fromWeek });
+  };
+
+  const onTouchMoveMatrix = (e) => {
+    if (!touchDragRef.current) return;
+    e.preventDefault();
+    const touch = e.touches[0];
+    let hit = null;
+    Object.entries(cellRefs.current).forEach(([key, el]) => {
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      if (touch.clientX >= r.left && touch.clientX <= r.right && touch.clientY >= r.top && touch.clientY <= r.bottom) {
+        hit = key; // "freq::week"
+      }
+    });
+    setDropTarget(hit ? { key: hit } : null);
+  };
+
+  const onTouchEndMatrix = () => {
+    if (touchDragRef.current && dropTarget) {
+      const [, weekStr] = dropTarget.key.split("::");
+      moveToWeek(touchDragRef.current.assignmentId, parseInt(weekStr));
+    }
+    touchDragRef.current = null;
+    setDragSrc(null);
+    setDropTarget(null);
+  };
+
+  // ── MATRIX render ──
+  const MatrixView = () => {
+    const freqGroups = ["weekly","biweekly","monthly","6week"];
+    const visibleFreqs = filterFreq === "all" ? freqGroups : [filterFreq];
+
+    const freqAssignments = (freq) =>
+      (assignments||[])
+        .filter(a => a.frequency === freq && !a.paused)
+        .sort((a,b) => (clientOf(a.clientId)?.name||"").localeCompare(clientOf(b.clientId)?.name||""));
+
+    // Get all unique days used in this frequency group for column sub-label
+    const dayLabel = (freq) => {
+      const days = [...new Set((assignments||[]).filter(a=>a.frequency===freq).map(a=>a.dayOfWeek))];
+      return days.length === 1 ? days[0] : days.length > 1 ? "Multiple days" : "";
+    };
+
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 20 }} onTouchMove={onTouchMoveMatrix} onTouchEnd={onTouchEndMatrix}>
+        {visibleFreqs.map(freq => {
+          const rows = freqAssignments(freq);
+          if (rows.length === 0) return null;
+          const cols = FREQ_COLS[freq] || ["Week 1"];
+          const dl   = dayLabel(freq);
+
+          return (
+            <div key={freq}>
+              {/* Section header */}
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                <div style={{ flex: 1, height: 1, background: T.border }} />
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 12, fontWeight: 800, color: T.primary, textTransform: "uppercase", letterSpacing: "0.07em" }}>{freqLabel(freq)}</span>
+                  {dl && <span style={{ fontSize: 11, color: T.textMuted }}>· {dl}</span>}
+                  <span style={{ fontSize: 11, color: T.textMuted }}>· {rows.length} client{rows.length!==1?"s":""}</span>
+                </div>
+                <div style={{ flex: 1, height: 1, background: T.border }} />
+              </div>
+
+              {/* Matrix table */}
+              <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+                {/* Column headers */}
+                <div style={{ display: "grid", gridTemplateColumns: `1fr ${cols.map(()=>"1fr").join(" ")}`, background: T.surfaceAlt, borderBottom: `1px solid ${T.border}` }}>
+                  <div style={{ padding: "10px 14px", fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Client</div>
+                  {cols.map((col, ci) => (
+                    <div key={ci} style={{ padding: "10px 6px", textAlign: "center", fontSize: 10, fontWeight: 700, color: T.primary, textTransform: "uppercase", letterSpacing: "0.05em", borderLeft: `1px solid ${T.border}` }}>
+                      {col}
+                    </div>
+                  ))}
+                </div>
+
+                {/* Rows */}
+                {rows.map((a, ri) => {
+                  const c = clientOf(a.clientId);
+                  const currentWeek = a.weekOffset ?? 0;
+                  const isDragging = dragSrc?.assignmentId === a.id;
+                  return (
+                    <div key={a.id}
+                      style={{ display: "grid", gridTemplateColumns: `1fr ${cols.map(()=>"1fr").join(" ")}`, borderBottom: ri < rows.length-1 ? `1px solid ${T.border}` : "none", opacity: isDragging ? 0.5 : 1 }}>
+                      {/* Client name cell */}
+                      <div style={{ padding: "11px 14px", display: "flex", flexDirection: "column", justifyContent: "center" }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: T.text, lineHeight: 1.3 }}>{c?.name || "?"}</div>
+                        {a.techId && <div style={{ fontSize: 10, color: T.textMuted, marginTop: 1 }}>{techName(a.techId)}</div>}
+                      </div>
+
+                      {/* Week cells */}
+                      {cols.map((col, ci) => {
+                        const isHere  = currentWeek === ci;
+                        const cellKey = `${freq}::${ci}`;
+                        const isOver  = dropTarget?.key === cellKey;
+                        return (
+                          <div
+                            key={ci}
+                            ref={el => { cellRefs.current[cellKey] = el; }}
+                            onTouchStart={isHere ? (e => onTouchStartMatrix(e, a.id, ci)) : undefined}
+                            onClick={() => !isHere && moveToWeek(a.id, ci)}
+                            style={{
+                              borderLeft: `1px solid ${T.border}`,
+                              display: "flex", alignItems: "center", justifyContent: "center",
+                              padding: "8px 4px", minHeight: 44,
+                              background: isOver ? hexA(T.primary, 0.15)
+                                        : isHere  ? hexA(T.primary, 0.08)
+                                        : "transparent",
+                              cursor: isHere ? "grab" : "pointer",
+                              transition: "background 0.1s",
+                            }}>
+                            {isHere && (
+                              <div style={{
+                                background: T.primary, color: "#fff",
+                                borderRadius: 10, padding: "5px 10px",
+                                fontSize: 11, fontWeight: 800,
+                                maxWidth: "100%", textAlign: "center",
+                                lineHeight: 1.2,
+                                boxShadow: `0 2px 8px ${hexA(T.primary, 0.35)}`,
+                              }}>
+                                {c?.name?.split(" ").slice(-1)[0] || "·"}
+                              </div>
+                            )}
+                            {!isHere && isOver && (
+                              <div style={{ width: 28, height: 4, borderRadius: 2, background: T.primary, opacity: 0.6 }} />
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Paused clients note */}
+              {(assignments||[]).filter(a => a.frequency===freq && a.paused).length > 0 && (
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6, fontStyle: "italic" }}>
+                  {(assignments||[]).filter(a=>a.frequency===freq&&a.paused).length} client{(assignments||[]).filter(a=>a.frequency===freq&&a.paused).length!==1?"s":""} paused — hidden from matrix
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  // ── LIST render ──
+  const ListView = () => {
+    const all = (assignments||[]);
+    if (!all.length) return (
+      <div style={{ textAlign: "center", padding: "48px 20px" }}>
+        <div style={{ width: 56, height: 56, borderRadius: 18, background: hexA(T.primary, 0.08), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px" }}><Icon name="calendar" size={28} /></div>
+        <div style={{ fontSize: 16, fontWeight: 700, color: T.text, marginBottom: 6 }}>No assignments yet</div>
+        <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5, maxWidth: 260, margin: "0 auto" }}>
+          Tap Add to set up a client's recurring schedule. Then use Populate to auto-fill your stops.
+        </div>
+      </div>
+    );
+    const grouped = {};
+    all.forEach(a => {
+      const c = clientOf(a.clientId);
+      const key = c?.division || "Other";
+      if (!grouped[key]) grouped[key] = [];
+      grouped[key].push(a);
+    });
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {Object.entries(grouped).sort().map(([div, items]) => (
+          <div key={div}>
+            <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: T.textMuted, marginBottom: 8 }}>{div}</div>
+            <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+              {items.sort((a,b) => (clientOf(a.clientId)?.name||"").localeCompare(clientOf(b.clientId)?.name||"")).map((a, i) => {
+                const c = clientOf(a.clientId);
+                const cols = FREQ_COLS[a.frequency] || ["Week 1"];
+                const week = cols[a.weekOffset ?? 0] || cols[0];
+                return (
+                  <div key={a.id} onClick={() => setModal(a)}
+                    style={{ padding: "13px 18px", borderBottom: i < items.length-1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 13, cursor: "pointer" }}>
+                    <div style={{ width: 9, height: 9, borderRadius: "50%", background: a.paused ? T.textMuted : T.primary, flexShrink: 0 }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: a.paused ? T.textMuted : T.text, letterSpacing: "-0.01em" }}>{c?.name || "Unknown"}</div>
+                      <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>
+                        {freqLabel(a.frequency)} · {a.dayOfWeek}s · {week}
+                        {a.techId ? ` · ${techName(a.techId)}` : ""}
+                        {a.paused ? " · PAUSED" : ""}
+                      </div>
+                    </div>
+                    <Icon name="chevronD" size={13} style={{ transform: "rotate(-90deg)", color: T.textMuted, flexShrink: 0 }} />
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+      {/* Header row */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <div style={{ fontSize: 20, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Route Assignments</div>
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>
+            {(assignments||[]).filter(a=>!a.paused).length} active · {(assignments||[]).filter(a=>a.paused).length} paused
+          </div>
+        </div>
+        <Btn onClick={() => setModal("add")} style={{ gap: 5 }}><Icon name="plus" size={14} /> Add</Btn>
+      </div>
+
+      {/* View toggle + freq filter */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        {/* List / Matrix toggle */}
+        <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 10, padding: 3, gap: 2, flexShrink: 0 }}>
+          {[["matrix","Grid"],["list","List"]].map(([v,l]) => (
+            <button key={v} onClick={() => setView(v)}
+              style={{ padding: "6px 12px", border: "none", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer", background: view===v ? T.surface : "transparent", color: view===v ? T.primary : T.textMuted, fontFamily: "inherit", boxShadow: view===v ? "0 1px 3px rgba(0,0,0,0.1)" : "none" }}>
+              {l}
+            </button>
+          ))}
+        </div>
+        {/* Frequency filter (matrix only) */}
+        {view === "matrix" && (
+          <div style={{ flex: 1, display: "flex", gap: 5, overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+            {[["all","All"],...FREQ_OPTIONS.map(f=>[f.id,f.label.split(" ")[0]])].map(([id,label]) => (
+              <button key={id} onClick={() => setFilterFreq(id)}
+                style={{ flexShrink: 0, padding: "6px 11px", borderRadius: 100, border: "none", background: filterFreq===id ? T.primary : T.surfaceAlt, color: filterFreq===id ? "#fff" : T.textMuted, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Auto-populate card */}
+      <div style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, padding: "14px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Auto-populate Schedule</div>
+          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2, lineHeight: 1.4 }}>Adds missing stops for the next 8 weeks. Won't duplicate.</div>
+          {lastPopulated && <div style={{ fontSize: 11, color: T.primary, marginTop: 4, fontWeight: 600 }}>{lastPopulated}</div>}
+        </div>
+        <button onClick={populateSchedule} disabled={populating}
+          style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "10px 16px", fontWeight: 800, fontSize: 13, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 6, opacity: populating ? 0.6 : 1, flexShrink: 0, whiteSpace: "nowrap" }}>
+          {populating ? <><div style={{ width: 12, height: 12, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.7s linear infinite" }} /></> : <Icon name="refresh" size={14} />}
+          {populating ? "Working..." : "Populate"}
+        </button>
+      </div>
+
+      {/* Instruction hint for matrix */}
+      {view === "matrix" && (assignments||[]).filter(a=>!a.paused).length > 0 && (
+        <div style={{ fontSize: 11, color: T.textMuted, textAlign: "center", lineHeight: 1.5 }}>
+          Tap an empty cell to move a client to that week. Touch and hold the name chip to drag on mobile.
+        </div>
+      )}
+
+      {/* Main view */}
+      {view === "matrix" ? <MatrixView /> : <ListView />}
+
+      {modal && (
+        <RouteAssignmentModal
+          assignment={modal === "add" ? null : modal}
+          clients={clients} catalog={catalog} team={team} T={T}
+          onSave={saveAssignment}
+          onClose={() => setModal(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg, team, onClientSelect, seedClientIds, clearSeed, email, onComplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments }) {
   const { T, perms } = useApp();
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
   const compact = cfg.density === "compact";
@@ -3126,20 +4246,45 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
   };
 
   const stripDate = (ds) => { const d = parseMDY(ds); return d ? d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }) : ds; };
+  const [schedTab, setSchedTab] = useState("schedule"); // "schedule" | "routes"
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
         <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Schedule</h2>
-        {selectMode ? (
+        {schedTab === "schedule" && (selectMode ? (
           <button onClick={exitSelect} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Done</button>
         ) : perms.editSchedule ? (
           <div style={{ display: "flex", gap: 8 }}>
             {allStops.length > 0 && <Btn variant="ghost" sm onClick={() => setSelectMode(true)}>Select</Btn>}
             <Btn sm onClick={() => setShowAdd(true)}>+ Add Stop</Btn>
           </div>
-        ) : null}
+        ) : null)}
       </div>
+
+      {/* Tab switcher */}
+      <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 11, padding: 3, gap: 3, marginBottom: 18 }}>
+        {[["schedule", "Schedule"], ["routes", "Route Assignments"]].map(([id, label]) => (
+          <button key={id} onClick={() => setSchedTab(id)} style={{ flex: 1, padding: "8px", border: "none", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer", background: schedTab === id ? T.surface : "transparent", color: schedTab === id ? T.primary : T.textMuted, fontFamily: "inherit", boxShadow: schedTab === id ? "0 1px 4px rgba(0,0,0,0.1)" : "none", transition: "all 0.15s" }}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {schedTab === "routes" && (
+        <RouteAssignmentsTab
+          clients={clients}
+          catalog={catalog}
+          team={team}
+          schedule={schedule}
+          setSchedule={setSchedule}
+          assignments={routeAssignments}
+          setAssignments={setRouteAssignments}
+          T={T}
+        />
+      )}
+
+      {schedTab === "schedule" && <>
 
       {selectMode && (
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, padding: "8px 14px", background: T.surfaceAlt, borderRadius: 10 }}>
@@ -3336,6 +4481,7 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
           onOfficeAlert={onOfficeAlert}
         />
       )}
+      </>}
     </div>
   );
 }
@@ -4947,8 +6093,10 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
 // ESTIMATE BUILDER
 // ─────────────────────────────────────────────
 
-function EstimatesScreen({ clients, catalog, branding, email, invoicing, T }) {
-  const [estimates, setEstimates] = useStoredState("sps_estimates", []);
+function EstimatesScreen({ clients, catalog, branding, email, invoicing, T, estimates: estimatesProp, setEstimates: setEstimatesProp }) {
+  const [estimatesLocal, setEstimatesLocal] = useStoredState("sps_estimates", []);
+  const estimates = estimatesProp !== undefined ? estimatesProp : estimatesLocal;
+  const setEstimates = setEstimatesProp || setEstimatesLocal;
   const [view, setView] = useState("list"); // list | new | detail
   const [selected, setSelected] = useState(null);
 
@@ -5231,6 +6379,9 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
         <Btn onClick={sendViaEmail} variant="ghost" block style={{ gap: 7 }}>
           <Icon name="mail" size={15} /> Send via Email
         </Btn>
+        <Btn onClick={() => { onSave(form); generateEstimatePDF(form, branding, invoicing); }} variant="ghost" block style={{ gap: 7 }}>
+          <Icon name="download" size={15} /> Download PDF
+        </Btn>
         {sentMsg && <div style={{ fontSize: 12, color: T.textMuted, textAlign: "center", lineHeight: 1.5 }}>{sentMsg}</div>}
       </div>
 
@@ -5335,6 +6486,8 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
   const [tab, setTab] = useState("branding");
   const [localBranding, setLocalBranding] = useState({ ...branding });
   const [confirmReset, setConfirmReset] = useState(false);
+  const [palette, setPalette, lpal] = useStoredState("sps_palette", DEFAULT_PALETTE);
+  const [editingPalette, setEditingPalette] = useState(false);
   const set = (k, v) => setLocalBranding(b => ({ ...b, [k]: v }));
 
   const sysDark = useSystemDark();
@@ -5399,218 +6552,417 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
       {activeTab === "budget" && perms.seeCostsBudget && <BudgetManager budget={budget} setBudget={setBudget} clients={clients} costs={costs} />}
       {activeTab === "schedule" && <ScheduleSettings cfg={scheduleCfg} setCfg={setScheduleCfg} />}
       {activeTab === "team" && perms.isAdmin && <TeamManager team={team} setTeam={setTeam} currentUserId={currentUserId} />}
-      </>)}
-
       {activeTab === "branding" && <>
-      {/* Logo */}
+
+      {/* ── LOGO & IDENTITY ── */}
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Logo & Identity" />
-        <div style={{ padding: 18 }}>
-          <div style={{ display: "flex", gap: 16, alignItems: "center", marginBottom: 16 }}>
-            <div style={{ width: 56, height: 56, borderRadius: 14, background: T.headerBg, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
+
+          {/* Live preview */}
+          <div style={{ display: "flex", gap: 14, alignItems: "center", background: T.surfaceAlt, borderRadius: 14, padding: "14px 16px" }}>
+            <div style={{ width: 52, height: 52, borderRadius: 14, background: T.surface, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
               {localBranding.logoType === "image" && localBranding.logoImage
                 ? <img src={localBranding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                 : <span style={{ fontSize: 26 }}>{localBranding.logoEmoji}</span>}
             </div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 700, fontSize: 14, color: T.text }}>{localBranding.companyName}</div>
-              <div style={{ fontSize: 12, color: T.textMuted }}>{localBranding.division}</div>
+            <div>
+              <div style={{ fontWeight: 800, fontSize: 16, color: T.text, letterSpacing: "-0.01em" }}>{localBranding.companyName || "Company Name"}</div>
+              <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{localBranding.division || "Division"}</div>
             </div>
           </div>
 
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <FieldRow label="Company Name"><Input value={localBranding.companyName} onChange={e => set("companyName", e.target.value)} /></FieldRow>
-            <FieldRow label="Division Label"><Input value={localBranding.division} onChange={e => set("division", e.target.value)} /></FieldRow>
+          <FieldRow label="Company Name">
+            <Input value={localBranding.companyName} onChange={e => set("companyName", e.target.value)} placeholder="Stone Property Solutions" />
+          </FieldRow>
+          <FieldRow label="Division / Tagline">
+            <Input value={localBranding.division} onChange={e => set("division", e.target.value)} placeholder="Pond · Pool · Seasonal" />
+          </FieldRow>
 
-            <FieldRow label="Logo Type">
-              <div style={{ display: "flex", gap: 8 }}>
-                {["emoji","image"].map(opt => (
-                  <button key={opt} onClick={() => set("logoType", opt)}
-                    style={{ flex: 1, padding: "9px 12px", border: `1px solid ${localBranding.logoType === opt ? T.primary : T.border}`, borderRadius: 8, background: localBranding.logoType === opt ? T.navActiveBg : T.surface, color: localBranding.logoType === opt ? T.primary : T.text, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", textTransform: "capitalize" }}>
-                    {opt === "emoji" ? "🎯 Emoji" : "🖼️ Image"}
+          {/* Logo type */}
+          <FieldRow label="Logo">
+            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+              {["image", "emoji"].map(opt => (
+                <button key={opt} onClick={() => set("logoType", opt)}
+                  style={{ flex: 1, padding: "9px 12px", border: `1.5px solid ${localBranding.logoType === opt ? T.primary : T.border}`, borderRadius: 10, background: localBranding.logoType === opt ? hexA(T.primary, 0.08) : T.surface, color: localBranding.logoType === opt ? T.primary : T.text, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+                  {opt === "image" ? "Upload Image" : "Use Emoji"}
+                </button>
+              ))}
+            </div>
+
+            {localBranding.logoType === "image" && (
+              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                <label style={{ background: T.primary, color: "#fff", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+                  <Icon name="download" size={14} /> Upload Logo
+                  <input type="file" accept="image/*" ref={fileRef} onChange={handleLogoUpload} style={{ display: "none" }} />
+                </label>
+                {localBranding.logoImage && localBranding.logoImage !== "/icon-192.png" && (
+                  <button onClick={() => { set("logoImage", "/icon-192.png"); }} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                    Reset to default
+                  </button>
+                )}
+              </div>
+            )}
+
+            {localBranding.logoType === "emoji" && (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {["💧","🌿","🏡","🐟","🌊","⚙️","🔧","🍃","🪴","🌱","🌻","🦆"].map(e => (
+                  <button key={e} onClick={() => set("logoEmoji", e)}
+                    style={{ width: 44, height: 44, borderRadius: 10, border: `2px solid ${localBranding.logoEmoji === e ? T.primary : T.border}`, background: localBranding.logoEmoji === e ? hexA(T.primary, 0.08) : T.surface, fontSize: 22, cursor: "pointer" }}>
+                    {e}
                   </button>
                 ))}
               </div>
-            </FieldRow>
-
-            {localBranding.logoType === "emoji" && (
-              <FieldRow label="Logo Emoji">
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  {["💧","🌿","🏡","🐟","🌊","⚙️","🔧","🍃"].map(e => (
-                    <button key={e} onClick={() => set("logoEmoji", e)}
-                      style={{ width: 40, height: 40, borderRadius: 8, border: `2px solid ${localBranding.logoEmoji === e ? T.primary : T.border}`, background: T.surface, fontSize: 20, cursor: "pointer" }}>
-                      {e}
-                    </button>
-                  ))}
-                </div>
-              </FieldRow>
             )}
+          </FieldRow>
 
-            {localBranding.logoType === "image" && (
-              <FieldRow label="Upload Logo">
-                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                  <label style={{ background: T.primary, color: "#fff", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
-                    Upload Image
-                    <input type="file" accept="image/*" ref={fileRef} onChange={handleLogoUpload} style={{ display: "none" }} />
-                  </label>
-                  {localBranding.logoImage && <button onClick={() => { set("logoImage", null); set("logoType", "emoji"); }} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12, cursor: "pointer" }}>Remove</button>}
-                </div>
-              </FieldRow>
-            )}
+          {/* App icon hint */}
+          <div style={{ background: hexA(T.primary, 0.06), border: `1px solid ${hexA(T.primary, 0.15)}`, borderRadius: 12, padding: "12px 14px", fontSize: 12, color: T.textMuted, lineHeight: 1.6 }}>
+            <span style={{ fontWeight: 700, color: T.text }}>App icon: </span>
+            The logo above appears in the header. For the home screen icon (after installing to your iPhone), replace <code style={{ background: T.surfaceAlt, padding: "1px 5px", borderRadius: 4 }}>icon-180.png</code> and <code style={{ background: T.surfaceAlt, padding: "1px 5px", borderRadius: 4 }}>icon-512.png</code> in your GitHub repo with your logo at those sizes.
           </div>
         </div>
       </Card>
 
-      {/* Appearance */}
+      {/* ── CONTACT INFO ── */}
+      <Card style={{ marginBottom: 14 }}>
+        <CardHeader title="Contact Info" />
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: -4 }}>These appear on invoices, estimates, and the client portal.</div>
+          <FieldRow label="Phone">
+            <Input value={localBranding.companyPhone || ""} onChange={e => set("companyPhone", e.target.value)} placeholder="(610) 555-1234" />
+          </FieldRow>
+          <FieldRow label="Email">
+            <Input value={localBranding.companyEmail || ""} onChange={e => set("companyEmail", e.target.value)} placeholder="hello@stonepropertysolutions.com" />
+          </FieldRow>
+          <FieldRow label="Website">
+            <Input value={localBranding.companyWebsite || ""} onChange={e => set("companyWebsite", e.target.value)} placeholder="stonepropertysolutions.com" />
+          </FieldRow>
+          <FieldRow label="Address">
+            <Input value={localBranding.companyAddress || ""} onChange={e => set("companyAddress", e.target.value)} placeholder="123 Main St, Honey Brook, PA 19344" />
+          </FieldRow>
+        </div>
+      </Card>
+
+      {/* ── APPEARANCE ── */}
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Appearance" />
-        <div style={{ padding: 18 }}>
-          <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 12, padding: 4, gap: 4 }}>
-            {[["light", "Light"], ["dark", "Dark"], ["system", "Auto"]].map(([m, label]) => (
-              <button key={m} onClick={() => set("appearance", m)} style={{
-                flex: 1, padding: "10px 6px", border: "none", borderRadius: 9, cursor: "pointer", fontFamily: "inherit",
-                fontSize: 13, fontWeight: 600,
-                background: (localBranding.appearance || "system") === m ? T.surface : "transparent",
-                color: (localBranding.appearance || "system") === m ? T.primary : T.textMuted,
-                boxShadow: (localBranding.appearance || "system") === m ? T.shadow : "none",
-              }}>{label}</button>
-            ))}
-          </div>
-          <div style={{ fontSize: 12, color: T.textMuted, marginTop: 10 }}>
-            {(localBranding.appearance || "system") === "system"
-              ? "Follows your device's light or dark setting automatically."
-              : `Always ${localBranding.appearance} for whoever uses this device.`} Each person can set their own on their own device.
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Mode</div>
+            <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 12, padding: 4, gap: 4 }}>
+              {[["light", "Light"], ["dark", "Dark"], ["system", "Auto"]].map(([m, label]) => (
+                <button key={m} onClick={() => set("appearance", m)} style={{
+                  flex: 1, padding: "10px 6px", border: "none", borderRadius: 9, cursor: "pointer", fontFamily: "inherit",
+                  fontSize: 13, fontWeight: 600,
+                  background: (localBranding.appearance || "system") === m ? T.surface : "transparent",
+                  color: (localBranding.appearance || "system") === m ? T.primary : T.textMuted,
+                  boxShadow: (localBranding.appearance || "system") === m ? T.shadow : "none",
+                }}>{label}</button>
+              ))}
+            </div>
+            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 8 }}>
+              {(localBranding.appearance || "system") === "system" ? "Follows your device's light or dark setting." : `Always ${localBranding.appearance} mode.`}
+            </div>
           </div>
         </div>
       </Card>
 
-      {/* Themes */}
+      {/* ── THEME ── */}
       <Card style={{ marginBottom: 14 }}>
-        <CardHeader title="Theme" />
-        <div style={{ padding: 18, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          {Object.entries(THEMES).map(([key, theme]) => {
-            const pal = palOf(theme);
-            return (
-            <button key={key} onClick={() => set("themeKey", key)}
-              style={{ padding: "14px 14px", border: `2px solid ${localBranding.themeKey === key ? pal.primary : T.border}`, borderRadius: 14, background: pal.surface, cursor: "pointer", textAlign: "left", fontFamily: "inherit", position: "relative", overflow: "hidden" }}>
-              <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                <div style={{ width: 18, height: 18, borderRadius: 5, background: pal.primary }} />
-                <div style={{ width: 18, height: 18, borderRadius: 5, background: pal.bg, border: `1px solid ${pal.border}` }} />
-                <div style={{ width: 18, height: 18, borderRadius: 5, background: pal.accent }} />
-              </div>
-              <div style={{ fontWeight: 700, fontSize: 13, color: pal.text }}>{theme.name}</div>
-              {localBranding.themeKey === key && (
-                <div style={{ position: "absolute", top: 8, right: 8, width: 18, height: 18, borderRadius: "50%", background: pal.primary, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: "#fff", fontWeight: 700 }}>✓</div>
-              )}
-            </button>
-          ); })}
-          {/* Custom */}
-          {(() => { const cu = buildCustomTheme(localBranding.custom, localMode); const key = "custom"; return (
-            <button onClick={() => set("themeKey", key)}
-              style={{ padding: "14px 14px", border: `2px solid ${localBranding.themeKey === key ? cu.primary : T.border}`, borderRadius: 14, background: cu.surface, cursor: "pointer", textAlign: "left", fontFamily: "inherit", position: "relative", overflow: "hidden" }}>
-              <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                <div style={{ width: 18, height: 18, borderRadius: 5, background: cu.primary }} />
-                <div style={{ width: 18, height: 18, borderRadius: 5, background: cu.bg, border: `1px solid ${cu.border}` }} />
-                <div style={{ width: 18, height: 18, borderRadius: 5, background: cu.accent }} />
-              </div>
-              <div style={{ fontWeight: 700, fontSize: 13, color: cu.text }}>Custom</div>
-              {localBranding.themeKey === key && (
-                <div style={{ position: "absolute", top: 8, right: 8, width: 18, height: 18, borderRadius: "50%", background: cu.primary, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: "#fff", fontWeight: 700 }}>✓</div>
-              )}
-            </button>
-          ); })()}
+        <CardHeader title="Color Theme" />
+        <div style={{ padding: 18 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
+            {Object.entries(THEMES).map(([key, theme]) => {
+              const pal = palOf(theme);
+              const active = localBranding.themeKey === key;
+              return (
+                <button key={key} onClick={() => set("themeKey", key)}
+                  style={{ padding: "14px 14px", border: `2px solid ${active ? pal.primary : T.border}`, borderRadius: 14, background: pal.surface, cursor: "pointer", textAlign: "left", fontFamily: "inherit", position: "relative", overflow: "hidden" }}>
+                  <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+                    <div style={{ width: 20, height: 20, borderRadius: 6, background: pal.primary }} />
+                    <div style={{ width: 20, height: 20, borderRadius: 6, background: pal.bg, border: `1px solid ${pal.border}` }} />
+                    <div style={{ width: 20, height: 20, borderRadius: 6, background: pal.accent }} />
+                  </div>
+                  <div style={{ fontWeight: 700, fontSize: 13, color: pal.text }}>{theme.name}</div>
+                  {active && (
+                    <div style={{ position: "absolute", top: 8, right: 8, width: 20, height: 20, borderRadius: "50%", background: pal.primary, display: "flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>
+                      <Icon name="check" size={12} />
+                    </div>
+                  )}
+                </button>
+              );
+            })}
+            {/* Custom */}
+            {(() => {
+              const cu = buildCustomTheme(localBranding.custom, localMode);
+              const active = localBranding.themeKey === "custom";
+              return (
+                <button onClick={() => set("themeKey", "custom")}
+                  style={{ padding: "14px 14px", border: `2px solid ${active ? cu.primary : T.border}`, borderRadius: 14, background: cu.surface, cursor: "pointer", textAlign: "left", fontFamily: "inherit", position: "relative", overflow: "hidden" }}>
+                  <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+                    <div style={{ width: 20, height: 20, borderRadius: 6, background: cu.primary }} />
+                    <div style={{ width: 20, height: 20, borderRadius: 6, background: cu.bg, border: `1px solid ${cu.border}` }} />
+                    <div style={{ width: 20, height: 20, borderRadius: 6, background: cu.accent }} />
+                  </div>
+                  <div style={{ fontWeight: 700, fontSize: 13, color: cu.text }}>Custom</div>
+                  {active && (
+                    <div style={{ position: "absolute", top: 8, right: 8, width: 20, height: 20, borderRadius: "50%", background: cu.primary, display: "flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>
+                      <Icon name="check" size={12} />
+                    </div>
+                  )}
+                </button>
+              );
+            })()}
+          </div>
         </div>
       </Card>
 
-      {/* Custom theme editor */}
+      {/* ── SAVED COLOR PALETTE ── */}
+      <Card style={{ marginBottom: 14 }}>
+        <CardHeader
+          title="Brand Palette"
+          action={
+            <button onClick={() => setEditingPalette(e => !e)}
+              style={{ background: editingPalette ? T.primary : T.surfaceAlt, color: editingPalette ? "#fff" : T.textMuted, border: "none", borderRadius: 8, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+              {editingPalette ? "Done" : "Edit"}
+            </button>
+          }
+        />
+        <div style={{ padding: "14px 18px" }}>
+          <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 14, lineHeight: 1.5 }}>
+            Your saved colors. Tap any chip in the color editor below to apply instantly. These are pre-loaded with SPS brand colors.
+          </div>
+
+          {/* Palette grid */}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: editingPalette ? 16 : 0 }}>
+            {(palette || DEFAULT_PALETTE).map((p, i) => (
+              <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 5 }}>
+                <div style={{ position: "relative" }}>
+                  <div style={{ width: 44, height: 44, borderRadius: 12, background: p.hex, border: `1px solid ${T.border}`, boxShadow: "0 1px 4px rgba(0,0,0,0.12)" }} />
+                  {editingPalette && (
+                    <button onClick={() => setPalette(prev => (prev||DEFAULT_PALETTE).filter((_, j) => j !== i))}
+                      style={{ position: "absolute", top: -6, right: -6, width: 18, height: 18, borderRadius: "50%", background: "#E5484D", border: `2px solid ${T.surface}`, color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", padding: 0, fontSize: 10 }}>
+                      ×
+                    </button>
+                  )}
+                </div>
+                <div style={{ fontSize: 9, color: T.textMuted, textAlign: "center", maxWidth: 44, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>{p.name}</div>
+              </div>
+            ))}
+
+            {/* Add new color */}
+            {editingPalette && (palette || DEFAULT_PALETTE).length < 16 && (() => {
+              const [newHex, setNewHex] = useState("#000000");
+              const [newName, setNewName] = useState("");
+              return (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, background: T.surfaceAlt, borderRadius: 12, padding: "10px 12px" }}>
+                    <div style={{ position: "relative", width: 36, height: 36, borderRadius: 9, overflow: "hidden", border: `1px solid ${T.border}`, background: newHex, flexShrink: 0 }}>
+                      <input type="color" value={newHex} onChange={e => setNewHex(e.target.value)}
+                        style={{ position: "absolute", inset: -4, width: 48, height: 48, border: "none", padding: 0, cursor: "pointer" }} />
+                    </div>
+                    <input
+                      type="text"
+                      value={newName}
+                      onChange={e => setNewName(e.target.value)}
+                      placeholder="Color name"
+                      style={{ flex: 1, padding: "6px 10px", border: `1.5px solid ${T.border}`, borderRadius: 9, fontSize: 12, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none" }}
+                    />
+                    <button
+                      onClick={() => {
+                        if (!newName.trim()) return;
+                        setPalette(prev => [...(prev || DEFAULT_PALETTE), { name: newName.trim(), hex: newHex }]);
+                        setNewName("");
+                        setNewHex("#000000");
+                      }}
+                      style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 9, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
+                      Add
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+
+          {editingPalette && (
+            <button
+              onClick={() => setPalette(DEFAULT_PALETTE)}
+              style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12, cursor: "pointer", fontFamily: "inherit", padding: 0 }}>
+              Reset to SPS defaults
+            </button>
+          )}
+        </div>
+      </Card>
+
+      {/* ── CUSTOM THEME EDITOR ── */}
       {localBranding.themeKey === "custom" && (() => {
         const cust = { ...DEFAULT_CUSTOM, ...(localBranding.custom || {}) };
         const setCustom = (k, v) => setLocalBranding(b => ({ ...b, custom: { ...DEFAULT_CUSTOM, ...(b.custom || {}), [k]: v } }));
         const preview = buildCustomTheme(cust, localMode);
-        const swatch = (key, label) => (
-          <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "11px 14px", background: T.surfaceAlt, borderRadius: 12, cursor: "pointer" }}>
-            <span style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{label}</span>
-            <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span style={{ fontSize: 12, color: T.textMuted, fontFamily: "monospace" }}>{cust[key].toUpperCase()}</span>
-              <span style={{ position: "relative", width: 30, height: 30, borderRadius: 8, overflow: "hidden", border: `1px solid ${T.border}`, background: cust[key] }}>
-                <input type="color" value={cust[key]} onChange={e => setCustom(key, e.target.value)} style={{ position: "absolute", inset: -4, width: 40, height: 40, border: "none", padding: 0, cursor: "pointer", background: "none" }} />
-              </span>
-            </span>
-          </label>
-        );
+        const savedPalette = palette || DEFAULT_PALETTE;
+
+        // Color row: shows palette chips + a native color picker fallback
+        const ColorRow = ({ colorKey, label, hint }) => {
+          const [showHex, setShowHex] = useState(false);
+          const currentVal = cust[colorKey] || "#000000";
+          return (
+            <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: "13px 14px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{label}</div>
+                  {hint && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{hint}</div>}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 12, color: T.textMuted, fontFamily: "monospace" }}>{currentVal.toUpperCase()}</span>
+                  <div style={{ position: "relative", width: 32, height: 32, borderRadius: 8, overflow: "hidden", border: `2px solid ${T.border}`, background: currentVal, flexShrink: 0 }}>
+                    <input type="color" value={currentVal} onChange={e => setCustom(colorKey, e.target.value)}
+                      style={{ position: "absolute", inset: -4, width: 44, height: 44, border: "none", padding: 0, cursor: "pointer", background: "none" }} />
+                  </div>
+                </div>
+              </div>
+              {/* Saved palette chips */}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+                {savedPalette.map((p, pi) => (
+                  <button key={pi} onClick={() => setCustom(colorKey, p.hex)}
+                    title={`${p.name} ${p.hex}`}
+                    style={{
+                      width: 30, height: 30, borderRadius: 8, background: p.hex, border: `2.5px solid ${currentVal === p.hex ? T.text : "transparent"}`,
+                      cursor: "pointer", flexShrink: 0, boxShadow: currentVal === p.hex ? `0 0 0 1px ${T.border}` : "0 1px 3px rgba(0,0,0,0.15)",
+                      transition: "transform 0.1s",
+                    }}
+                  />
+                ))}
+                {/* Custom hex input */}
+                <button onClick={() => setShowHex(v => !v)}
+                  style={{ width: 30, height: 30, borderRadius: 8, background: T.surface, border: `1.5px dashed ${T.border}`, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: T.textMuted, fontSize: 16, fontWeight: 300 }}>
+                  +
+                </button>
+              </div>
+              {showHex && (
+                <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
+                  <input
+                    type="text"
+                    placeholder="#AF011A"
+                    defaultValue={currentVal}
+                    onBlur={e => {
+                      const v = e.target.value.trim();
+                      if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(v)) setCustom(colorKey, v);
+                    }}
+                    onKeyDown={e => {
+                      if (e.key === "Enter") {
+                        const v = e.target.value.trim();
+                        if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(v)) { setCustom(colorKey, v); setShowHex(false); }
+                      }
+                    }}
+                    style={{ flex: 1, padding: "8px 12px", border: `1.5px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "monospace", color: T.text, background: T.surface, outline: "none" }}
+                  />
+                  <div style={{ width: 30, height: 30, borderRadius: 8, background: currentVal, border: `1px solid ${T.border}`, flexShrink: 0 }} />
+                </div>
+              )}
+            </div>
+          );
+        };
+
         return (
           <Card style={{ marginBottom: 14 }}>
-            <CardHeader title="Customize Theme" />
+            <CardHeader title="Custom Theme Editor" />
             <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 16 }}>
-              {/* font */}
+              {/* Font */}
               <div>
-                <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 }}>Font</label>
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Font</div>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
                   {Object.entries(FONTS).map(([key, f]) => (
                     <button key={key} onClick={() => setCustom("fontFamily", key)}
-                      style={{ padding: "8px 14px", borderRadius: 100, border: `1.5px solid ${cust.fontFamily === key ? T.primary : T.border}`, background: cust.fontFamily === key ? T.navActiveBg : T.surface, color: cust.fontFamily === key ? T.primary : T.text, fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: f.stack }}>
+                      style={{ padding: "8px 14px", borderRadius: 100, border: `1.5px solid ${cust.fontFamily === key ? T.primary : T.border}`, background: cust.fontFamily === key ? hexA(T.primary, 0.08) : T.surface, color: cust.fontFamily === key ? T.primary : T.text, fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: f.stack }}>
                       {f.label}
                     </button>
                   ))}
                 </div>
               </div>
-              {/* colors */}
+
+              {/* Colors */}
               <div>
-                <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 }}>Colors</label>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {swatch("primary", "Primary / Accent Brand")}
-                  {swatch("accent", "Success / Money")}
-                  {swatch("bg", "Background")}
-                  {swatch("surface", "Cards & Surfaces")}
-                  {swatch("text", "Text")}
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Colors</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <ColorRow colorKey="primary" label="Brand Color"   hint="Buttons, active states, highlights" />
+                  <ColorRow colorKey="accent"  label="Accent Color"  hint="Success, money, positive states" />
+                  <ColorRow colorKey="bg"      label="Background"    hint="Page background" />
+                  <ColorRow colorKey="surface" label="Surface"       hint="Cards, modals, input fields" />
+                  <ColorRow colorKey="text"    label="Text"          hint="Primary text color" />
                 </div>
               </div>
-              {/* live preview */}
+
+              {/* Live preview */}
               <div>
-                <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 }}>Preview</label>
-                <div style={{ background: preview.bg, borderRadius: 16, padding: 16, fontFamily: FONTS[cust.fontFamily]?.stack }}>
-                  <div style={{ background: preview.surface, borderRadius: 14, padding: 16, boxShadow: preview.shadow, marginBottom: 10 }}>
-                    <div style={{ fontSize: 17, fontWeight: 700, color: preview.text, letterSpacing: "-0.02em", marginBottom: 3 }}>Sample Card</div>
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Live Preview</div>
+                <div style={{ background: preview.bg, borderRadius: 16, padding: 16, border: `1px solid ${preview.border}`, fontFamily: FONTS[cust.fontFamily]?.stack }}>
+                  <div style={{ background: preview.surface, borderRadius: 14, padding: 16, boxShadow: "0 2px 12px rgba(0,0,0,0.06)", marginBottom: 10, border: `1px solid ${preview.border}` }}>
+                    <div style={{ fontSize: 16, fontWeight: 800, color: preview.text, letterSpacing: "-0.02em", marginBottom: 4 }}>Sample Client Card</div>
                     <div style={{ fontSize: 13, color: preview.textMuted, marginBottom: 12 }}>This is how your app will look.</div>
                     <div style={{ display: "flex", gap: 8 }}>
-                      <span style={{ background: preview.primary, color: "#fff", borderRadius: 10, padding: "8px 14px", fontSize: 13, fontWeight: 600 }}>Primary</span>
-                      <span style={{ background: preview.surfaceAlt, color: preview.text, borderRadius: 10, padding: "8px 14px", fontSize: 13, fontWeight: 600 }}>Secondary</span>
-                      <span style={{ color: preview.accent, fontWeight: 700, fontSize: 14, alignSelf: "center" }}>+$420</span>
+                      <span style={{ background: preview.primary, color: "#fff", borderRadius: 10, padding: "8px 14px", fontSize: 13, fontWeight: 700 }}>Primary Button</span>
+                      <span style={{ background: preview.surfaceAlt, color: preview.text, borderRadius: 10, padding: "8px 14px", fontSize: 13, fontWeight: 600, border: `1px solid ${preview.border}` }}>Secondary</span>
                     </div>
+                    <div style={{ marginTop: 10, fontSize: 14, fontWeight: 700, color: preview.accent }}>$245.00 collected</div>
                   </div>
                 </div>
               </div>
-              <div style={{ fontSize: 11, color: T.textMuted }}>Tap "Apply" at the top to use your custom look across the whole app.</div>
+
+              <div style={{ fontSize: 11, color: T.textMuted, lineHeight: 1.5 }}>Tap <strong>Apply</strong> at the top right to use this theme across the whole app.</div>
             </div>
           </Card>
         );
       })()}
 
-      <div style={{ background: T.surfaceAlt, borderRadius: 10, padding: "12px 16px", fontSize: 12, color: T.textMuted, display: "flex", gap: 8 }}>
-        <Icon name="check" size={14} />
-        <span>Your clients, schedule, catalog, and settings are saved automatically and stay put across updates.</span>
-      </div>
+      {/* ── CLIENT PORTAL BRANDING ── */}
+      <Card style={{ marginBottom: 14 }}>
+        <CardHeader title="Client Portal Branding" />
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: -4 }}>Controls how your brand appears to clients in their portal.</div>
+          <FieldRow label="Portal App Name">
+            <Input value={localBranding.portalAppName || ""} onChange={e => set("portalAppName", e.target.value)} placeholder={localBranding.companyName || "Stone Property Solutions"} />
+          </FieldRow>
+          <FieldRow label="Portal Tagline">
+            <Input value={localBranding.portalTagline || ""} onChange={e => set("portalTagline", e.target.value)} placeholder="Your trusted property care partner" />
+          </FieldRow>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Portal Accent Color <span style={{ textTransform: "none", fontWeight: 400 }}>(optional — defaults to brand color)</span></div>
+            <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "13px 14px", background: T.surfaceAlt, borderRadius: 12, cursor: "pointer" }}>
+              <div style={{ fontSize: 14, color: T.text }}>Portal primary color</div>
+              <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 12, color: T.textMuted, fontFamily: "monospace" }}>{(localBranding.accentColor || T.primary).toUpperCase()}</span>
+                <span style={{ position: "relative", width: 32, height: 32, borderRadius: 8, overflow: "hidden", border: `1px solid ${T.border}`, background: localBranding.accentColor || T.primary, flexShrink: 0 }}>
+                  <input type="color" value={localBranding.accentColor || T.primary} onChange={e => set("accentColor", e.target.value)} style={{ position: "absolute", inset: -4, width: 44, height: 44, border: "none", padding: 0, cursor: "pointer", background: "none" }} />
+                </span>
+              </span>
+            </label>
+          </div>
+        </div>
+      </Card>
 
+      {/* ── RESET ── */}
       <Card style={{ marginTop: 14 }}>
-        <CardHeader title="Reset" />
+        <CardHeader title="Reset All Data" />
         <div style={{ padding: 18 }}>
           {!confirmReset ? (
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-              <div style={{ fontSize: 13, color: T.textMuted }}>Clear all saved data and restore the demo defaults.</div>
-              <button onClick={() => setConfirmReset(true)} style={{ flexShrink: 0, background: "transparent", color: "#C0392B", border: `1.5px solid #C0392B`, borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Reset All Data</button>
+              <div style={{ fontSize: 13, color: T.textMuted }}>Clear all saved data and restore demo defaults. This cannot be undone.</div>
+              <button onClick={() => setConfirmReset(true)} style={{ flexShrink: 0, background: "transparent", color: "#C0392B", border: `1.5px solid #C0392B`, borderRadius: 10, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Reset</button>
             </div>
           ) : (
             <div>
-              <div style={{ fontSize: 13, color: T.text, marginBottom: 12 }}>This erases all saved clients, stops, and settings. Are you sure?</div>
+              <div style={{ fontSize: 13, color: T.text, marginBottom: 12, fontWeight: 600 }}>This erases everything. Are you sure?</div>
               <div style={{ display: "flex", gap: 10 }}>
-                <button onClick={() => { onResetData(); setConfirmReset(false); }} style={{ background: "#C0392B", color: "#fff", border: "none", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Yes, Reset Everything</button>
-                <button onClick={() => setConfirmReset(false)} style={{ background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+                <button onClick={() => { onResetData(); setConfirmReset(false); }} style={{ background: "#C0392B", color: "#fff", border: "none", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Yes, Reset Everything</button>
+                <button onClick={() => setConfirmReset(false)} style={{ background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
               </div>
             </div>
           )}
         </div>
       </Card>
       </>}
+      </>)}
     </div>
   );
 }
@@ -5949,6 +7301,334 @@ function CPMessages({ client, T, currentUser }) {
 // REPORTS DASHBOARD
 // ─────────────────────────────────────────────
 
+// ─────────────────────────────────────────────
+// SERVICE STOPS REPORT
+// Per-client breakdown of completed stops for any period.
+// Printable — generates a clean PDF for billing review.
+// ─────────────────────────────────────────────
+function ServiceStopsReport({ clients, invoices, T }) {
+  const now = new Date();
+
+  // Period options
+  const [mode, setMode] = useState("month");      // month | custom
+  const [month, setMonth] = useState(now.getMonth());
+  const [year,  setYear]  = useState(now.getFullYear());
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd,   setCustomEnd]   = useState("");
+  const [generating, setGenerating]   = useState(false);
+  const [filterClient, setFilterClient] = useState("all");
+
+  const MONTHS = ["January","February","March","April","May","June",
+                  "July","August","September","October","November","December"];
+
+  // Build date range
+  const range = (() => {
+    if (mode === "custom" && customStart && customEnd) {
+      return { start: new Date(customStart + "T00:00:00"), end: new Date(customEnd + "T23:59:59"), label: `${customStart} – ${customEnd}` };
+    }
+    const s = new Date(year, month, 1);
+    const e = new Date(year, month + 1, 0, 23, 59, 59);
+    return { start: s, end: e, label: `${MONTHS[month]} ${year}` };
+  })();
+
+  const inRange = (dateStr) => {
+    if (!dateStr) return false;
+    const [mm, dd, yy] = dateStr.split("/").map(Number);
+    if (!mm || !dd || !yy) return false;
+    const d = new Date(yy, mm - 1, dd);
+    return d >= range.start && d <= range.end;
+  };
+
+  // Collect all completed stops (from client history) in range
+  const allStops = [];
+  (clients || []).forEach(c => {
+    (c.history || []).forEach(h => {
+      if (!inRange(h.date)) return;
+      if (filterClient !== "all" && String(c.id) !== filterClient) return;
+      allStops.push({ client: c, visit: h });
+    });
+  });
+
+  // Group by client
+  const byClient = {};
+  allStops.forEach(({ client: c, visit: h }) => {
+    if (!byClient[c.id]) byClient[c.id] = { client: c, visits: [] };
+    byClient[c.id].visits.push(h);
+  });
+
+  // Sort each client's visits by date ascending
+  Object.values(byClient).forEach(row => {
+    row.visits.sort((a, b) => {
+      const parse = (s) => { const [m,d,y] = (s||"").split("/").map(Number); return new Date(y,m-1,d); };
+      return parse(a.date) - parse(b.date);
+    });
+  });
+
+  const clientRows = Object.values(byClient).sort((a, b) =>
+    (a.client.name || "").localeCompare(b.client.name || "")
+  );
+
+  const totalStops = allStops.length;
+  const uniqueClients = clientRows.length;
+
+  // PDF generation
+  const generatePDF = async () => {
+    setGenerating(true);
+    try {
+      const { jsPDF } = await import("jspdf");
+      const doc = new jsPDF({ unit: "pt", format: "letter" });
+      const W = doc.internal.pageSize.getWidth();
+      const MARGIN = 40;
+      let y = 40;
+      const LINE_H = 16;
+      const newPage = () => { doc.addPage(); y = 40; };
+      const checkPage = (needed = 20) => { if (y + needed > 750) newPage(); };
+
+      // Header
+      doc.setFillColor("#AF011A");
+      doc.rect(0, 0, W, 60, "F");
+      doc.setTextColor("#ffffff");
+      doc.setFontSize(18);
+      doc.setFont("helvetica", "bold");
+      doc.text("Stone Property Solutions", MARGIN, 30);
+      doc.setFontSize(10);
+      doc.setFont("helvetica", "normal");
+      doc.text("Service Stops Report", MARGIN, 46);
+      doc.text(`${range.label}  ·  ${totalStops} stop${totalStops !== 1 ? "s" : ""}  ·  ${uniqueClients} client${uniqueClients !== 1 ? "s" : ""}`, W - MARGIN, 46, { align: "right" });
+      y = 80;
+
+      if (clientRows.length === 0) {
+        doc.setTextColor("#6B7280");
+        doc.setFontSize(12);
+        doc.text("No service stops found for this period.", MARGIN, y);
+      }
+
+      clientRows.forEach(({ client: c, visits }) => {
+        checkPage(40 + visits.length * 18);
+
+        // Client header bar
+        doc.setFillColor("#F5F5F7");
+        doc.rect(MARGIN, y, W - MARGIN * 2, 22, "F");
+        doc.setTextColor("#1D1D1F");
+        doc.setFontSize(11);
+        doc.setFont("helvetica", "bold");
+        doc.text(c.name || "Unknown", MARGIN + 8, y + 15);
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(9);
+        doc.setTextColor("#6B7280");
+        const meta = [c.division, c.plan, c.address].filter(Boolean).join("  ·  ");
+        doc.text(meta, W - MARGIN - 8, y + 15, { align: "right" });
+        y += 26;
+
+        // Column headers
+        doc.setFontSize(8);
+        doc.setFont("helvetica", "bold");
+        doc.setTextColor("#9CA3AF");
+        doc.text("DATE",       MARGIN + 8,         y);
+        doc.text("TYPE",       MARGIN + 80,         y);
+        doc.text("TECHNICIAN", MARGIN + 240,        y);
+        doc.text("SERVICES",   MARGIN + 340,        y);
+        doc.text("INVOICE",    W - MARGIN - 8,      y, { align: "right" });
+        y += 4;
+        doc.setDrawColor("#E5E7EB");
+        doc.line(MARGIN, y, W - MARGIN, y);
+        y += 10;
+
+        // Visit rows
+        visits.forEach((h, vi) => {
+          checkPage(18);
+          doc.setFontSize(9);
+          doc.setFont("helvetica", "normal");
+          doc.setTextColor("#1D1D1F");
+
+          const services = (h.services || []).map(s => typeof s === "string" ? s : s.name).join(", ") || "—";
+          const servicesShort = services.length > 40 ? services.slice(0, 38) + "…" : services;
+
+          doc.text(h.date || "—",                   MARGIN + 8,  y);
+          doc.text((h.type || "Service Visit").slice(0, 22), MARGIN + 80,  y);
+          doc.text((h.tech || "—").slice(0, 18),    MARGIN + 240, y);
+          doc.text(servicesShort,                    MARGIN + 340, y);
+          doc.setTextColor(h.invoice && h.invoice !== "$0" ? "#AF011A" : "#9CA3AF");
+          doc.text(h.invoice || "—",                W - MARGIN - 8, y, { align: "right" });
+
+          if (vi < visits.length - 1) {
+            doc.setDrawColor("#F3F4F6");
+            doc.line(MARGIN + 8, y + 4, W - MARGIN - 8, y + 4);
+          }
+          y += LINE_H;
+          doc.setTextColor("#1D1D1F");
+        });
+
+        // Client total
+        y += 4;
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(9);
+        doc.setTextColor("#6B7280");
+        doc.text(`${visits.length} stop${visits.length !== 1 ? "s" : ""}`, MARGIN + 8, y);
+        const clientInvs = (invoices || []).filter(iv => iv.clientId === c.id && inRange(iv.date || iv.createdAt));
+        if (clientInvs.length) {
+          const total = clientInvs.reduce((s, iv) => s + (parseFloat((iv.total||"0").replace(/[^0-9.-]/g,""))||0), 0);
+          doc.setTextColor("#AF011A");
+          doc.text(`$${total.toFixed(2)} invoiced`, W - MARGIN - 8, y, { align: "right" });
+        }
+        y += 20;
+      });
+
+      // Footer on last page
+      const pageCount = doc.getNumberOfPages();
+      for (let i = 1; i <= pageCount; i++) {
+        doc.setPage(i);
+        doc.setFontSize(8);
+        doc.setTextColor("#9CA3AF");
+        doc.text(`Stone Property Solutions  ·  ${range.label}  ·  Page ${i} of ${pageCount}`, W / 2, 760, { align: "center" });
+      }
+
+      doc.save(`sps-service-report-${range.label.replace(/\s+/g, "-").toLowerCase()}.pdf`);
+    } catch (e) {
+      console.error("PDF error:", e);
+    }
+    setGenerating(false);
+  };
+
+  const YEARS = Array.from({ length: 5 }, (_, i) => now.getFullYear() - i);
+  const field = { padding: "9px 12px", border: `1.5px solid ${T.border}`, borderRadius: 11, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none" };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <div style={{ paddingTop: 4 }}>
+        <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Service Stops Report</div>
+        <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>Every completed stop per client — use this to audit billing at end of month.</div>
+      </div>
+
+      {/* Controls */}
+      <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, padding: "18px 18px", display: "flex", flexDirection: "column", gap: 14 }}>
+
+        {/* Period mode */}
+        <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 11, padding: 3, gap: 3 }}>
+          {[["month", "By Month"], ["custom", "Custom Range"]].map(([v, l]) => (
+            <button key={v} onClick={() => setMode(v)} style={{ flex: 1, padding: "8px", border: "none", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer", background: mode === v ? T.surface : "transparent", color: mode === v ? T.primary : T.textMuted, fontFamily: "inherit", boxShadow: mode === v ? "0 1px 4px rgba(0,0,0,0.1)" : "none", transition: "all 0.15s" }}>
+              {l}
+            </button>
+          ))}
+        </div>
+
+        {/* Month/year picker */}
+        {mode === "month" && (
+          <div style={{ display: "flex", gap: 10 }}>
+            <select value={month} onChange={e => setMonth(Number(e.target.value))} style={{ ...field, flex: 2 }}>
+              {MONTHS.map((m, i) => <option key={i} value={i}>{m}</option>)}
+            </select>
+            <select value={year} onChange={e => setYear(Number(e.target.value))} style={{ ...field, flex: 1 }}>
+              {YEARS.map(y => <option key={y} value={y}>{y}</option>)}
+            </select>
+          </div>
+        )}
+
+        {/* Custom range */}
+        {mode === "custom" && (
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <input type="date" value={customStart} onChange={e => setCustomStart(e.target.value)} style={{ ...field, flex: 1 }} />
+            <span style={{ color: T.textMuted, fontSize: 13 }}>to</span>
+            <input type="date" value={customEnd} onChange={e => setCustomEnd(e.target.value)} style={{ ...field, flex: 1 }} />
+          </div>
+        )}
+
+        {/* Client filter */}
+        <select value={filterClient} onChange={e => setFilterClient(e.target.value)} style={field}>
+          <option value="all">All Clients ({uniqueClients} with stops)</option>
+          {(clients || []).sort((a,b) => (a.name||"").localeCompare(b.name||"")).map(c => (
+            <option key={c.id} value={String(c.id)}>{c.name}</option>
+          ))}
+        </select>
+
+        {/* Generate PDF */}
+        <button onClick={generatePDF} disabled={generating || (mode === "custom" && (!customStart || !customEnd))}
+          style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 13, padding: "14px", fontWeight: 800, fontSize: 15, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, opacity: (generating || (mode === "custom" && (!customStart || !customEnd))) ? 0.5 : 1, boxShadow: `0 4px 16px ${hexA(T.primary, 0.3)}` }}>
+          {generating
+            ? <><div style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.7s linear infinite" }} /> Generating PDF...</>
+            : <><Icon name="download" size={16} /> Download PDF Report</>
+          }
+        </button>
+      </div>
+
+      {/* Summary strip */}
+      <div style={{ display: "flex", gap: 10 }}>
+        {[
+          { label: "Period", value: range.label },
+          { label: "Total Stops", value: totalStops },
+          { label: "Clients", value: uniqueClients },
+        ].map(s => (
+          <div key={s.label} style={{ flex: 1, background: T.surface, borderRadius: 14, border: `1px solid ${T.border}`, padding: "14px 14px" }}>
+            <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 6 }}>{s.label}</div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{s.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Per-client breakdown */}
+      {clientRows.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "48px 20px", color: T.textMuted }}>
+          <div style={{ width: 56, height: 56, borderRadius: 18, background: hexA(T.primary, 0.08), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px" }}><Icon name="calendar" size={28} /></div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: T.text, marginBottom: 6 }}>No stops found</div>
+          <div style={{ fontSize: 13, lineHeight: 1.5 }}>No completed service stops for {range.label}. Stops are logged when you mark them complete in the Schedule tab.</div>
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {clientRows.map(({ client: c, visits }) => {
+            const clientInvs = (invoices || []).filter(iv => iv.clientId === c.id && inRange(iv.date || iv.createdAt));
+            const invoiced = clientInvs.reduce((s, iv) => s + (parseFloat((iv.total||"0").replace(/[^0-9.-]/g,""))||0), 0);
+            return (
+              <div key={c.id} style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+                {/* Client header */}
+                <div style={{ padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: `1px solid ${T.border}`, background: T.surfaceAlt }}>
+                  <div>
+                    <div style={{ fontSize: 15, fontWeight: 800, color: T.text, letterSpacing: "-0.01em" }}>{c.name}</div>
+                    <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{c.division} · {c.plan} · {visits.length} stop{visits.length !== 1 ? "s" : ""}</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    {invoiced > 0 ? (
+                      <div style={{ fontSize: 15, fontWeight: 800, color: T.primary }}>${invoiced.toFixed(2)}</div>
+                    ) : (
+                      <div style={{ fontSize: 12, color: T.textMuted, fontStyle: "italic" }}>Not yet invoiced</div>
+                    )}
+                    <div style={{ fontSize: 10, color: T.textMuted, marginTop: 2 }}>{invoiced > 0 ? "invoiced this period" : ""}</div>
+                  </div>
+                </div>
+
+                {/* Visit rows */}
+                {visits.map((h, i) => {
+                  const services = (h.services || []).map(s => typeof s === "string" ? s : s.name).join(", ");
+                  return (
+                    <div key={i} style={{ padding: "12px 18px", borderBottom: i < visits.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "flex-start", gap: 14 }}>
+                      {/* Date pill */}
+                      <div style={{ background: hexA(T.primary, 0.08), borderRadius: 9, padding: "5px 10px", flexShrink: 0, textAlign: "center" }}>
+                        <div style={{ fontSize: 11, fontWeight: 800, color: T.primary, letterSpacing: "-0.01em" }}>
+                          {(() => { const [m,d] = (h.date||"").split("/"); return `${m}/${d}`; })()}
+                        </div>
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{h.type || "Service Visit"}</div>
+                        {h.tech && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{h.tech}</div>}
+                        {services && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3, lineHeight: 1.4 }}>{services}</div>}
+                      </div>
+                      <div style={{ textAlign: "right", flexShrink: 0 }}>
+                        {h.invoice && h.invoice !== "$0"
+                          ? <div style={{ fontSize: 13, fontWeight: 700, color: T.primary }}>{h.invoice}</div>
+                          : <div style={{ fontSize: 11, color: T.textMuted, fontStyle: "italic" }}>—</div>
+                        }
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ReportsScreen({ clients, invoices, schedule, costs, T }) {
   const [period, setPeriod] = useState("month"); // month | quarter | year | all
 
@@ -6022,11 +7702,29 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
     </div>
   );
 
+  const [reportTab, setReportTab] = useState("overview");
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <div style={{ paddingTop: 4, marginBottom: 16 }}>
+      <div style={{ paddingTop: 4, marginBottom: 14 }}>
         <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Reports</div>
       </div>
+
+      {/* Tab switcher */}
+      <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 12, padding: 4, marginBottom: 16, gap: 3 }}>
+        {[["overview", "Overview"], ["stops", "Service Stops"]].map(([id, label]) => (
+          <button key={id} onClick={() => setReportTab(id)} style={{ flex: 1, padding: "9px 4px", border: "none", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer", background: reportTab === id ? T.surface : "transparent", color: reportTab === id ? T.primary : T.textMuted, boxShadow: reportTab === id ? "0 1px 4px rgba(0,0,0,0.1)" : "none", fontFamily: "inherit", transition: "all 0.15s" }}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── SERVICE STOPS REPORT ── */}
+      {reportTab === "stops" && (
+        <ServiceStopsReport clients={clients} invoices={invoices} T={T} />
+      )}
+
+      {reportTab === "overview" && <>
 
       {/* Period selector */}
       <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 12, padding: 4, marginBottom: 20, gap: 3 }}>
@@ -6151,6 +7849,7 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
           )}
         </div>
       </Section>
+      </>}
     </div>
   );
 }
@@ -6395,11 +8094,11 @@ function OverflowMenu({ page, perms, navUnread, dockIds, setDockIds, onNav, onSi
 // ─────────────────────────────────────────────
 
 const CLIENT_NAV = [
-  { id: "cp_home",     label: "Home",     icon: "home" },
-  { id: "cp_history",  label: "History",  icon: "history" },
-  { id: "cp_invoices", label: "Invoices", icon: "invoice" },
-  { id: "cp_messages", label: "Messages", icon: "message" },
-  { id: "cp_request",  label: "Request",  icon: "plus" },
+  { id: "cp_home",      label: "Home",      icon: "home" },
+  { id: "cp_history",   label: "History",   icon: "history" },
+  { id: "cp_invoices",  label: "Invoices",  icon: "invoice" },
+  { id: "cp_estimates", label: "Estimates", icon: "clipboard" },
+  { id: "cp_request",   label: "Request",   icon: "plus" },
 ];
 
 function clientNextVisit(schedule, clientId) {
@@ -6531,6 +8230,8 @@ function CPHome({ client, schedule, invoices, branding, onNav, T }) {
 // ── CP HISTORY ──
 function CPHistory({ client, T }) {
   const history = client.history || [];
+  const [expanded, setExpanded] = useState({});
+
   if (!history.length) {
     return (
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "80px 20px", gap: 12, textAlign: "center" }}>
@@ -6540,44 +8241,250 @@ function CPHistory({ client, T }) {
       </div>
     );
   }
+
+  const getReadings = (h) => {
+    if (h.readings && Object.keys(h.readings).length) return h.readings;
+    const legacy = {};
+    if (h.ph) legacy["pH"] = h.ph;
+    if (h.ammonia) legacy["NH₃"] = h.ammonia;
+    if (h.nitrite) legacy["NO₂"] = h.nitrite;
+    if (h.temp) legacy["Temp"] = h.temp;
+    return legacy;
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", paddingTop: 4 }}>Service History</div>
+      <div style={{ paddingTop: 4 }}>
+        <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Service History</div>
+        <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>{history.length} visit{history.length !== 1 ? "s" : ""} on record</div>
+      </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {history.map((h, i) => (
-          <div key={i} style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden", boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}>
-            <div style={{ padding: "16px 18px", display: "flex", gap: 14, alignItems: "center" }}>
-              <div style={{ width: 42, height: 42, borderRadius: 13, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: T.primary }}>
-                <svg viewBox="0 0 24 24" width={20} height={20} fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+        {history.map((h, i) => {
+          const readings = getReadings(h);
+          const hasReadings = Object.keys(readings).length > 0;
+          const isOpen = expanded[i];
+          const hasDetails = h.notes || hasReadings || h.services?.length || h.products?.length || h.photos?.length;
+          return (
+            <div key={i} style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden", boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}>
+              {/* Header row */}
+              <div onClick={() => hasDetails && setExpanded(e => ({ ...e, [i]: !e[i] }))}
+                style={{ padding: "16px 18px", display: "flex", gap: 14, alignItems: "center", cursor: hasDetails ? "pointer" : "default" }}>
+                <div style={{ width: 42, height: 42, borderRadius: 13, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: T.primary }}>
+                  <svg viewBox="0 0 24 24" width={20} height={20} fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{h.type || "Service Visit"}</div>
+                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>{fmtDate(h.date)}{h.tech ? ` · ${h.tech}` : ""}</div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  {h.invoice && h.invoice !== "$0" && <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{h.invoice}</div>}
+                  {hasDetails && <div style={{ color: T.textMuted, transform: isOpen ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}><CIcon name="history" size={14} /></div>}
+                </div>
               </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 15, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{h.type || "Service Visit"}</div>
-                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>{fmtDate(h.date)}{h.tech ? ` · ${h.tech}` : ""}</div>
-              </div>
-              {h.invoice && h.invoice !== "$0" && <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{h.invoice}</div>}
+
+              {/* Expanded detail */}
+              {isOpen && (
+                <div style={{ borderTop: `1px solid ${T.border}` }}>
+                  {/* Notes */}
+                  {h.notes && (
+                    <div style={{ padding: "14px 18px", fontSize: 13, color: T.textMuted, lineHeight: 1.6, borderBottom: (hasReadings || h.services?.length || h.photos?.length) ? `1px solid ${T.border}` : "none" }}>
+                      {h.notes}
+                    </div>
+                  )}
+
+                  {/* Water quality readings */}
+                  {hasReadings && (
+                    <div style={{ padding: "14px 18px", borderBottom: (h.services?.length || h.photos?.length) ? `1px solid ${T.border}` : "none" }}>
+                      <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>Water Quality</div>
+                      <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(Object.keys(readings).length, 4)}, 1fr)`, gap: 8 }}>
+                        {Object.entries(readings).map(([k, v]) => (
+                          <div key={k} style={{ background: T.surfaceAlt, borderRadius: 12, padding: "10px 8px", textAlign: "center" }}>
+                            <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>{k}</div>
+                            <div style={{ fontSize: 18, fontWeight: 800, color: T.text, marginTop: 3 }}>{v}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Services/products */}
+                  {(h.services?.length > 0 || h.products?.length > 0) && (
+                    <div style={{ padding: "12px 18px", display: "flex", flexWrap: "wrap", gap: 6, borderBottom: h.photos?.length ? `1px solid ${T.border}` : "none" }}>
+                      {(h.services || []).map((s, j) => (
+                        <span key={j} style={{ fontSize: 11, fontWeight: 600, background: hexA(T.primary, 0.1), color: T.primary, borderRadius: 100, padding: "4px 11px" }}>{typeof s === "string" ? s : s.name}</span>
+                      ))}
+                      {(h.products || []).map((p, j) => (
+                        <span key={j} style={{ fontSize: 11, fontWeight: 600, background: T.surfaceAlt, color: T.textMuted, borderRadius: 100, padding: "4px 11px" }}>{typeof p === "string" ? p : p.name}</span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Photos */}
+                  {h.photos?.length > 0 && (
+                    <div style={{ padding: "12px 18px 14px" }}>
+                      <PhotoStrip photos={h.photos} size={72} />
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-            {h.notes && <div style={{ padding: "0 18px 14px", fontSize: 13, color: T.textMuted, lineHeight: 1.6, borderTop: `1px solid ${T.border}`, paddingTop: 12 }}>{h.notes}</div>}
-            {(h.services?.length > 0 || h.products?.length > 0) && (
-              <div style={{ padding: "10px 18px 14px", display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {(h.services || []).map((s, j) => (
-                  <span key={j} style={{ fontSize: 11, fontWeight: 600, background: hexA(T.primary, 0.1), color: T.primary, borderRadius: 100, padding: "4px 11px" }}>{s}</span>
-                ))}
-                {(h.products || []).map((p, j) => (
-                  <span key={j} style={{ fontSize: 11, fontWeight: 600, background: T.surfaceAlt, color: T.textMuted, borderRadius: 100, padding: "4px 11px" }}>{p}</span>
-                ))}
-              </div>
-            )}
-            {h.photos?.length > 0 && (
-              <div style={{ padding: "0 18px 14px" }}><PhotoStrip photos={h.photos} size={56} /></div>
-            )}
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
 }
 
 // ── CP INVOICES ──
+// ── CP ESTIMATES ──
+function CPEstimates({ client, estimates, branding, onApprove, T }) {
+  const myEstimates = (estimates || []).filter(e => e.clientId === String(client.id) || e.clientId === client.id);
+  const [selected, setSelected] = useState(null);
+  const [actioning, setActioning] = useState(false);
+
+  if (!myEstimates.length) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "80px 20px", gap: 12, textAlign: "center" }}>
+        <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.08), display: "flex", alignItems: "center", justifyContent: "center", color: T.primary }}><CIcon name="invoice" size={30} /></div>
+        <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>No estimates yet</div>
+        <div style={{ fontSize: 14, color: T.textMuted, lineHeight: 1.5, maxWidth: 240 }}>Estimates from Stone Property Solutions will appear here for your review.</div>
+      </div>
+    );
+  }
+
+  if (selected) {
+    const est = selected;
+    const isPending  = est.status === "sent" || est.status === "draft";
+    const isApproved = est.status === "approved";
+    const isDeclined = est.status === "declined";
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <button onClick={() => setSelected(null)} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 14, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 6, alignSelf: "flex-start", fontFamily: "inherit" }}>
+          <CIcon name="back" size={16} /> Back
+        </button>
+        <div style={{ background: T.surface, borderRadius: 22, border: `1px solid ${T.border}`, overflow: "hidden", boxShadow: "0 4px 24px rgba(0,0,0,0.06)" }}>
+          <div style={{ padding: "22px 20px 16px", borderBottom: `1px solid ${T.border}` }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, letterSpacing: "0.06em", marginBottom: 4 }}>ESTIMATE</div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{est.title || "Service Estimate"}</div>
+              </div>
+              <span style={{ fontSize: 11, fontWeight: 700, padding: "5px 12px", borderRadius: 100, background: isApproved ? hexA("#16a34a", 0.1) : isDeclined ? hexA("#dc2626", 0.1) : hexA(T.primary, 0.1), color: isApproved ? "#16a34a" : isDeclined ? "#dc2626" : T.primary }}>
+                {isApproved ? "APPROVED" : isDeclined ? "DECLINED" : "PENDING"}
+              </span>
+            </div>
+            <div style={{ fontSize: 13, color: T.textMuted, marginTop: 8 }}>
+              {fmtDate(est.date)} · Valid {est.validDays || 30} days
+            </div>
+          </div>
+
+          {/* Line items */}
+          {(est.items || []).filter(it => it.desc).length > 0 && (
+            <div style={{ padding: "16px 20px", borderBottom: `1px solid ${T.border}` }}>
+              {(est.items || []).filter(it => it.desc).map((item, i, arr) => (
+                <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: i < arr.length - 1 ? `1px solid ${T.border}` : "none" }}>
+                  <div>
+                    <div style={{ fontSize: 14, color: T.text, fontWeight: 500 }}>{item.desc}</div>
+                    {item.qty > 1 && <div style={{ fontSize: 12, color: T.textMuted }}>×{item.qty}</div>}
+                  </div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>${(parseFloat(item.price || 0) * (parseInt(item.qty) || 1)).toFixed(2)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ padding: "16px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: est.notes ? `1px solid ${T.border}` : "none" }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: T.text }}>Total</div>
+            <div style={{ fontSize: 26, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{est.total || "$0.00"}</div>
+          </div>
+
+          {est.notes && (
+            <div style={{ padding: "14px 20px", fontSize: 13, color: T.textMuted, lineHeight: 1.6, borderBottom: isPending ? `1px solid ${T.border}` : "none" }}>
+              {est.notes}
+            </div>
+          )}
+
+          {/* Approve/Decline actions */}
+          {isPending && (
+            <div style={{ padding: "18px 20px", display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 4, lineHeight: 1.5 }}>Ready to move forward? Tap Approve and we'll be in touch to schedule your service.</div>
+              <button onClick={() => { onApprove(est.id, "approved"); setActioning(true); setSelected(null); }}
+                style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 14, padding: "15px", fontWeight: 800, fontSize: 15, cursor: "pointer", fontFamily: "inherit", letterSpacing: "-0.01em", boxShadow: `0 4px 16px ${hexA(T.primary, 0.3)}`, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+                <CIcon name="check" size={18} /> Approve This Estimate
+              </button>
+              <button onClick={() => { onApprove(est.id, "declined"); setSelected(null); }}
+                style={{ background: "none", border: `1.5px solid ${T.border}`, borderRadius: 14, padding: "13px", fontWeight: 700, fontSize: 14, cursor: "pointer", color: T.textMuted, fontFamily: "inherit" }}>
+                Decline
+              </button>
+            </div>
+          )}
+
+          {isApproved && (
+            <div style={{ padding: "18px 20px", background: hexA("#16a34a", 0.06), display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ color: "#16a34a" }}><CIcon name="check" size={20} /></div>
+              <div style={{ fontSize: 13, color: "#16a34a", fontWeight: 600 }}>You approved this estimate. We'll reach out to schedule your service.</div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  const pending  = myEstimates.filter(e => e.status === "sent" || e.status === "draft");
+  const closed   = myEstimates.filter(e => e.status === "approved" || e.status === "declined");
+
+  const statusColor = (s) => ({ approved: "#16a34a", declined: "#dc2626", sent: T.primary, draft: T.textMuted }[s] || T.textMuted);
+  const statusLabel = (s) => ({ approved: "Approved", declined: "Declined", sent: "Awaiting Review", draft: "Pending" }[s] || s);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ paddingTop: 4 }}>
+        <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Estimates</div>
+      </div>
+      {pending.length > 0 && (
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>Awaiting Your Review</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {pending.map(e => (
+              <button key={e.id} onClick={() => setSelected(e)}
+                style={{ background: T.surface, border: `2px solid ${T.primary}`, borderRadius: 18, padding: "16px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", fontFamily: "inherit", width: "100%", boxSizing: "border-box", boxShadow: `0 4px 16px ${hexA(T.primary, 0.15)}` }}>
+                <div style={{ textAlign: "left" }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{e.title || "Service Estimate"}</div>
+                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>{fmtDate(e.date)} · Valid {e.validDays || 30} days</div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ fontSize: 17, fontWeight: 800, color: T.text }}>{e.total || "$0.00"}</div>
+                  <div style={{ background: T.primary, color: "#fff", borderRadius: 10, padding: "5px 12px", fontSize: 11, fontWeight: 700 }}>Review</div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {closed.length > 0 && (
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>Past Estimates</div>
+          <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+            {closed.map((e, i) => (
+              <button key={e.id} onClick={() => setSelected(e)}
+                style={{ width: "100%", padding: "15px 18px", background: "none", border: "none", borderBottom: i < closed.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", fontFamily: "inherit", opacity: 0.7 }}>
+                <div style={{ textAlign: "left" }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{e.title || "Service Estimate"}</div>
+                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{fmtDate(e.date)}</div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: statusColor(e.status) }}>{statusLabel(e.status)}</span>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{e.total || "$0.00"}</div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CPInvoices({ client, invoices, branding, T }) {
   const myInvoices = (invoices || []).filter(iv => iv.clientId === client.id).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const [selected, setSelected] = useState(null);
@@ -6686,6 +8593,89 @@ function CPInvoices({ client, invoices, branding, T }) {
   );
 }
 
+// ── CP EQUIPMENT ──
+function CPEquipment({ client, T }) {
+  const equipment = client.equipment || [];
+  const [expanded, setExpanded] = useState({});
+
+  if (!equipment.length) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "80px 20px", gap: 12, textAlign: "center" }}>
+        <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.08), display: "flex", alignItems: "center", justifyContent: "center", color: T.primary }}><CIcon name="history" size={30} /></div>
+        <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>No equipment logged</div>
+        <div style={{ fontSize: 14, color: T.textMuted, lineHeight: 1.5, maxWidth: 260 }}>Your technician will document your equipment during service visits.</div>
+      </div>
+    );
+  }
+
+  const statusColor = (s) => s === "Good" ? "#16a34a" : s === "Monitor" ? "#d97706" : "#dc2626";
+  const statusBg    = (s) => s === "Good" ? hexA("#16a34a", 0.1) : s === "Monitor" ? hexA("#d97706", 0.1) : hexA("#dc2626", 0.1);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ paddingTop: 4 }}>
+        <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Equipment</div>
+        <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>{equipment.length} item{equipment.length !== 1 ? "s" : ""} on record</div>
+      </div>
+
+      {/* Status summary */}
+      {equipment.some(e => e.status !== "Good") && (
+        <div style={{ background: hexA("#d97706", 0.08), border: `1px solid ${hexA("#d97706", 0.2)}`, borderRadius: 16, padding: "14px 16px", display: "flex", alignItems: "flex-start", gap: 10 }}>
+          <div style={{ color: "#d97706", flexShrink: 0, marginTop: 1 }}><CIcon name="history" size={16} /></div>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#d97706", marginBottom: 2 }}>Attention needed</div>
+            <div style={{ fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>
+              {equipment.filter(e => e.status !== "Good").map(e => e.name).join(", ")} {equipment.filter(e => e.status !== "Good").length === 1 ? "needs" : "need"} attention.
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {equipment.map((eq, i) => {
+          const isOpen = expanded[i];
+          const hasDetail = eq.notes || (eq.photos || []).length > 0;
+          return (
+            <div key={i} style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden", boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}>
+              <div onClick={() => hasDetail && setExpanded(e => ({ ...e, [i]: !e[i] }))}
+                style={{ padding: "15px 18px", display: "flex", alignItems: "center", gap: 14, cursor: hasDetail ? "pointer" : "default" }}>
+                <div style={{ width: 42, height: 42, borderRadius: 13, background: statusBg(eq.status), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <svg viewBox="0 0 24 24" width={20} height={20} fill={statusColor(eq.status)}><circle cx="12" cy="12" r="9" stroke="none" fill={statusBg(eq.status)} /><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill={statusColor(eq.status)} /></svg>
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{eq.name}</div>
+                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>
+                    {eq.installed ? `Installed ${eq.installed}` : "Install date unknown"}
+                    {(eq.photos || []).length > 0 && <span style={{ marginLeft: 8, color: T.primary }}>· {eq.photos.length} photo{eq.photos.length > 1 ? "s" : ""}</span>}
+                  </div>
+                </div>
+                <span style={{ fontSize: 11, fontWeight: 700, padding: "4px 12px", borderRadius: 100, background: statusBg(eq.status), color: statusColor(eq.status) }}>
+                  {eq.status || "Good"}
+                </span>
+              </div>
+
+              {isOpen && (
+                <div style={{ borderTop: `1px solid ${T.border}` }}>
+                  {eq.notes && (
+                    <div style={{ padding: "14px 18px", fontSize: 13, color: T.textMuted, lineHeight: 1.6, borderBottom: (eq.photos || []).length ? `1px solid ${T.border}` : "none" }}>
+                      {eq.notes}
+                    </div>
+                  )}
+                  {(eq.photos || []).length > 0 && (
+                    <div style={{ padding: "12px 18px 14px" }}>
+                      <PhotoStrip photos={eq.photos} size={72} />
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ── CP REQUEST ──
 function CPRequest({ client, branding, onSubmit, T }) {
   const [form, setForm] = useState({ type: "", dates: "", notes: "" });
@@ -6754,7 +8744,7 @@ function CPRequest({ client, branding, onSubmit, T }) {
 }
 
 // ── SPS CLIENT PORTAL SHELL ──
-function SPSClientPortal({ client, schedule, invoices, branding, T, fontStack, onSignOut, onServiceRequest, isStaffPreview = false }) {
+function SPSClientPortal({ client, schedule, invoices, estimates, branding, T, fontStack, onSignOut, onServiceRequest, onApproveEstimate, isStaffPreview = false }) {
   const [page, setPage] = useState("cp_home");
 
   return (
@@ -6797,6 +8787,8 @@ function SPSClientPortal({ client, schedule, invoices, branding, T, fontStack, o
         {page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} onNav={setPage} T={T} />}
         {page === "cp_history"  && <CPHistory client={client} T={T} />}
         {page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} />}
+        {page === "cp_equipment" && <CPEquipment client={client} T={T} />}
+        {page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
         {page === "cp_messages" && <CPMessages client={client} T={T} />}
         {page === "cp_request"  && <CPRequest client={client} branding={branding} onSubmit={onServiceRequest} T={T} />}
       </main>
@@ -7008,6 +9000,8 @@ export default function App({ authEmail = "", onSignOut }) {
 
   // Customizable dock — which pages appear in the bottom bar (max 5)
   const [navDock, setNavDock, lndock] = useStoredState("sps_nav_dock", DEFAULT_DOCK);
+  const [estimatesRaw, setEstimatesRaw, lest] = useStoredState("sps_estimates", []);
+  const [routeAssignments, setRouteAssignments, lra] = useStoredState("sps_route_assignments", []);
   const [menuOpen, setMenuOpen] = useState(false);
 
   // Ensure dock only contains pages the user has permission to see
@@ -7148,12 +9142,23 @@ export default function App({ authEmail = "", onSignOut }) {
   // Loading gate so the saved theme/data are ready before first paint
   if (!hydrated) {
     return (
-      <div style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif', background: T.bg, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: T.textMuted, WebkitFontSmoothing: "antialiased" }}>
-        <div style={{ textAlign: "center" }}>
-          <div style={{ width: 28, height: 28, border: `3px solid ${T.border}`, borderTopColor: T.primary, borderRadius: "50%", margin: "0 auto 12px", animation: "spin 0.7s linear infinite" }} />
-          <div style={{ fontSize: 13 }}>Loading your data...</div>
-          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-        </div>
+      <div style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif', background: T.primary, minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#fff", WebkitFontSmoothing: "antialiased" }}>
+        <style>{`
+          @keyframes spin { to { transform: rotate(360deg); } }
+          @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+          .splash-logo { animation: fadeUp 0.5s ease both; }
+          .splash-name { animation: fadeUp 0.5s ease 0.15s both; }
+          .splash-div  { animation: fadeUp 0.5s ease 0.25s both; }
+          .splash-spin { animation: spin 0.9s linear infinite; }
+        `}</style>
+        {branding.logoType === "image" && branding.logoImage ? (
+          <img className="splash-logo" src={branding.logoImage} alt="" style={{ width: 80, height: 80, borderRadius: 22, objectFit: "cover", marginBottom: 18, boxShadow: "0 8px 32px rgba(0,0,0,0.25)" }} />
+        ) : (
+          <div className="splash-logo" style={{ width: 80, height: 80, borderRadius: 22, background: "rgba(255,255,255,0.15)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 36, marginBottom: 18 }}>{branding.logoEmoji || "💧"}</div>
+        )}
+        <div className="splash-name" style={{ fontSize: 22, fontWeight: 800, letterSpacing: "-0.02em", marginBottom: 4 }}>{branding.companyName}</div>
+        <div className="splash-div" style={{ fontSize: 13, opacity: 0.7, marginBottom: 48 }}>{branding.division || "Field Operations"}</div>
+        <div className="splash-spin" style={{ width: 22, height: 22, border: "2.5px solid rgba(255,255,255,0.3)", borderTopColor: "#fff", borderRadius: "50%" }} />
       </div>
     );
   }
@@ -7163,6 +9168,8 @@ export default function App({ authEmail = "", onSignOut }) {
     return (
       <SPSClientPortal
         client={clientUser}
+        estimates={estimatesRaw}
+        onApproveEstimate={(id, status) => setEstimatesRaw(prev => (prev||[]).map(e => String(e.id) === String(id) ? { ...e, status } : e))}
         schedule={schedule}
         invoices={invoices}
         branding={branding}
@@ -7257,14 +9264,14 @@ export default function App({ authEmail = "", onSignOut }) {
           </div>
         )}
         <main style={{ flex: 1, padding: "22px 16px", maxWidth: 740, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
-          {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} />}
+          {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
           {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
           {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} />}
-          {page === "schedule" && <Schedule clients={clients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} />}
+          {page === "schedule" && <Schedule clients={clients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
           {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
           {page === "reports"   && perms.isAdmin && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
-          {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} />}
+          {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
           {page === "invoices"  && perms.canInvoice && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} />}
           {page === "import"   && perms.canImport && <SkimmerImport onImport={handleImportClients} onGoToClients={() => handleNav("clients")} />}
           {page === "settings" && <AppSettings branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} />}
