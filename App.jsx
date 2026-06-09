@@ -11872,7 +11872,7 @@ export default function App({ authEmail = "", onSignOut }) {
 
           {/* Loading spinner */}
           {!hydrated && (
-            <div className="splash-dot" style={{ marginTop: 48, width: 22, height: 22, border: `2.5px solid ${splashRingColor}`, borderTopColor: splashRingTop, borderRadius: "50%", animation: "spin 0.9s linear infinite" }} />
+            <div className="splash-dot" style={{ marginTop: 48, width: 22, height: 22, border: `2.5px solid rgba(255,255,255,0.3)`, borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.9s linear infinite" }} />
           )}
         </div>
       </div>
