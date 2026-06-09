@@ -7276,41 +7276,74 @@ function ClientInvoices({ client, invoices, invoicing, branding, onSave, onDelet
 function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
   const TIER_KEYS = ["Essential", "Signature", "Premium"];
   const [selected, setSelected] = useState("Signature");
-  const [editingInclude, setEditingInclude] = useState(null); // index
+  const [editingInclude, setEditingInclude] = useState(null);
   const [newInclude, setNewInclude] = useState("");
-  const [bulkPrices, setBulkPrices] = useState({}); // clientId -> price override for this session
+  const [bulkPrices, setBulkPrices] = useState({});
+  const [bulkPlans, setBulkPlans] = useState({});
   const [bulkSaved, setBulkSaved] = useState(false);
   const [confirmBulk, setConfirmBulk] = useState(false);
+  const [tierSaved, setTierSaved] = useState(false);
+  const [unsaved, setUnsaved] = useState(false);
 
-  const tier = (tiers || DEFAULT_TIERS)[selected] || DEFAULT_TIERS["Signature"];
-  const setTier = (k, v) => setTiers(prev => ({ ...(prev || DEFAULT_TIERS), [selected]: { ...(prev || DEFAULT_TIERS)[selected], [k]: v } }));
-  const setInclude = (i, v) => setTier("includes", tier.includes.map((item, j) => j === i ? v : item));
-  const removeInclude = (i) => setTier("includes", tier.includes.filter((_, j) => j !== i));
+  // Local draft — edits stay here until you hit Save
+  const liveTier = (tiers || DEFAULT_TIERS)[selected] || DEFAULT_TIERS["Signature"];
+  const [draft, setDraft] = useState(() => ({ ...liveTier }));
+
+  // Switch tiers: load fresh draft
+  const switchTier = (key) => {
+    setSelected(key);
+    setDraft({ ...((tiers || DEFAULT_TIERS)[key] || DEFAULT_TIERS[key]) });
+    setBulkPrices({}); setBulkPlans({}); setBulkSaved(false); setConfirmBulk(false);
+    setUnsaved(false); setTierSaved(false); setEditingInclude(null); setNewInclude("");
+  };
+
+  // Keep draft in sync when tiers first load from Supabase
+  useEffect(() => {
+    setDraft({ ...((tiers || DEFAULT_TIERS)[selected] || DEFAULT_TIERS[selected]) });
+  }, [selected]);
+
+  const tier = draft;
+  const setDraftField = (k, v) => { setDraft(d => ({ ...d, [k]: v })); setUnsaved(true); };
+  const setInclude = (i, v) => setDraftField("includes", draft.includes.map((item, j) => j === i ? v : item));
+  const removeInclude = (i) => setDraftField("includes", draft.includes.filter((_, j) => j !== i));
   const addInclude = () => {
     if (!newInclude.trim()) return;
-    setTier("includes", [...(tier.includes || []), newInclude.trim()]);
+    setDraftField("includes", [...(draft.includes || []), newInclude.trim()]);
     setNewInclude("");
   };
   const moveInclude = (i, dir) => {
-    const arr = [...tier.includes];
+    const arr = [...draft.includes];
     const j = i + dir;
     if (j < 0 || j >= arr.length) return;
     [arr[i], arr[j]] = [arr[j], arr[i]];
-    setTier("includes", arr);
+    setDraftField("includes", arr);
+  };
+
+  const saveTierDraft = () => {
+    setTiers(prev => ({ ...(prev || DEFAULT_TIERS), [selected]: { ...draft } }));
+    setUnsaved(false);
+    setTierSaved(true);
+    setTimeout(() => setTierSaved(false), 2500);
   };
 
   // Clients on this tier
   const tierClients = (clients || []).filter(c => c.plan === selected);
 
-  // Bulk apply prices
+  // Bulk apply prices + plan changes
   const applyBulkPrices = () => {
-    if (Object.keys(bulkPrices).length === 0) return;
+    if (Object.keys(bulkPrices).length === 0 && Object.keys(bulkPlans).length === 0) return;
     setClients(prev => prev.map(c => {
       const newRate = bulkPrices[String(c.id)];
-      if (newRate === undefined) return c;
-      return { ...c, monthlyRate: newRate };
+      const newPlan = bulkPlans[String(c.id)];
+      if (newRate === undefined && !newPlan) return c;
+      return {
+        ...c,
+        ...(newRate !== undefined ? { monthlyRate: newRate } : {}),
+        ...(newPlan ? { plan: newPlan, planFreq: TIER_FREQ[newPlan] || c.planFreq } : {}),
+      };
     }));
     setBulkPrices({});
+    setBulkPlans({});
     setBulkSaved(true);
     setConfirmBulk(false);
     setTimeout(() => setBulkSaved(false), 3000);
@@ -7332,7 +7365,7 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
           const count = (clients || []).filter(c => c.plan === key).length;
           const active = selected === key;
           return (
-            <button key={key} onClick={() => { setSelected(key); setBulkPrices({}); setBulkPlans({}); setBulkSaved(false); setConfirmBulk(false); }}
+            <button key={key} onClick={() => switchTier(key)}
               style={{ flex: 1, padding: "12px 8px", border: `2px solid ${active ? (t.color || T.primary) : T.border}`, borderRadius: 16, background: active ? hexA(t.color || T.primary, 0.08) : T.surface, cursor: "pointer", fontFamily: "inherit", textAlign: "center", transition: "all 0.15s" }}>
               <div style={{ width: 10, height: 10, borderRadius: "50%", background: t.color || T.primary, margin: "0 auto 6px" }} />
               <div style={{ fontSize: 13, fontWeight: 800, color: active ? (t.color || T.primary) : T.text }}>{key}</div>
@@ -7344,17 +7377,33 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
 
       {/* Tier details editor */}
       <Card>
-        <CardHeader title={`${selected} Tier Settings`} />
+        <CardHeader title={`${selected} Tier Settings`}
+          action={
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              {unsaved && <span style={{ fontSize: 12, color: T.textMuted }}>Unsaved changes</span>}
+              {tierSaved && !unsaved && (
+                <span style={{ fontSize: 12, fontWeight: 700, color: "#16a34a", display: "flex", alignItems: "center", gap: 5 }}>
+                  <svg viewBox="0 0 24 24" width={13} height={13} fill="none" stroke="#16a34a" strokeWidth={2.5} strokeLinecap="round"><path d="M20 6L9 17l-5-5"/></svg>
+                  Saved
+                </span>
+              )}
+              <button onClick={saveTierDraft}
+                style={{ background: unsaved ? T.primary : T.surfaceAlt, color: unsaved ? "#fff" : T.textMuted, border: "none", borderRadius: 10, padding: "7px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", transition: "all 0.2s", boxShadow: unsaved ? `0 2px 8px ${hexA(T.primary, 0.3)}` : "none" }}>
+                Save {selected}
+              </button>
+            </div>
+          }
+        />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 16 }}>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <div>
               <label style={lbl}>Tagline</label>
-              <input type="text" style={field} value={tier.tagline || ""} onChange={e => setTier("tagline", e.target.value)} placeholder="e.g. Our most popular plan" />
+              <input type="text" style={field} value={tier.tagline || ""} onChange={e => setDraftField("tagline", e.target.value)} placeholder="e.g. Our most popular plan" />
             </div>
             <div>
               <label style={lbl}>Display Price</label>
-              <input type="text" style={field} value={tier.price || ""} onChange={e => setTier("price", e.target.value)} placeholder="e.g. $150/mo or Contact us" />
+              <input type="text" style={field} value={tier.price || ""} onChange={e => setDraftField("price", e.target.value)} placeholder="e.g. $150/mo or Contact us" />
               <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4 }}>Shown to clients in their portal.</div>
             </div>
           </div>
@@ -7363,7 +7412,7 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
             <label style={lbl}>Tier Color</label>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <div style={{ position: "relative", width: 44, height: 44, borderRadius: 12, overflow: "hidden", border: `1.5px solid ${T.border}`, background: tier.color || "#6B7280", flexShrink: 0 }}>
-                <input type="color" value={tier.color || "#6B7280"} onChange={e => setTier("color", e.target.value)} style={{ position: "absolute", inset: -4, width: 56, height: 56, border: "none", cursor: "pointer" }} />
+                <input type="color" value={tier.color || "#6B7280"} onChange={e => setDraftField("color", e.target.value)} style={{ position: "absolute", inset: -4, width: 56, height: 56, border: "none", cursor: "pointer" }} />
               </div>
               <div style={{ fontSize: 13, color: T.textMuted }}>Used on the hero card and tier badge in the client portal.</div>
             </div>
@@ -7373,7 +7422,7 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
             <label style={lbl}>Upgrades To</label>
             <div style={{ display: "flex", gap: 8 }}>
               {["Signature", "Premium", "none"].map(opt => (
-                <button key={opt} onClick={() => setTier("upgradeTo", opt === "none" ? null : opt)}
+                <button key={opt} onClick={() => setDraftField("upgradeTo", opt === "none" ? null : opt)}
                   style={{ flex: 1, padding: "9px", border: `1.5px solid ${(tier.upgradeTo === opt || (opt === "none" && !tier.upgradeTo)) ? T.primary : T.border}`, borderRadius: 10, background: (tier.upgradeTo === opt || (opt === "none" && !tier.upgradeTo)) ? hexA(T.primary, 0.08) : T.surface, color: (tier.upgradeTo === opt || (opt === "none" && !tier.upgradeTo)) ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
                   {opt === "none" ? "None (top tier)" : opt}
                 </button>
@@ -7506,10 +7555,10 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
               </div>
 
               {/* Apply button */}
-              {Object.keys(bulkPrices).length > 0 && !confirmBulk && (
+              {(Object.keys(bulkPrices).length > 0 || Object.keys(bulkPlans).length > 0) && !confirmBulk && (
                 <button onClick={() => setConfirmBulk(true)}
                   style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 14, padding: "14px", fontWeight: 800, fontSize: 15, cursor: "pointer", fontFamily: "inherit", boxShadow: `0 4px 16px ${hexA(T.primary, 0.3)}` }}>
-                  Apply {Object.keys(bulkPrices).length} Price Change{Object.keys(bulkPrices).length !== 1 ? "s" : ""}
+                  Apply {Object.keys(bulkPrices).length + Object.keys(bulkPlans).length} Change{(Object.keys(bulkPrices).length + Object.keys(bulkPlans).length) !== 1 ? "s" : ""}
                 </button>
               )}
               {confirmBulk && (
