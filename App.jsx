@@ -1608,23 +1608,25 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
         <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Clients</h2>
         {selectMode ? (
           <button onClick={exitSelect} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Done</button>
         ) : perms.editClients ? (
           <div style={{ display: "flex", gap: 8 }}>
             <Btn variant="ghost" sm onClick={() => setSelectMode(true)}>Select</Btn>
-            <Btn sm onClick={onAdd}>+ Add</Btn>
+            <Btn sm onClick={onAdd}>+ Add Client</Btn>
           </div>
         ) : null}
       </div>
 
       <div style={{ position: "relative", marginBottom: 14 }}>
-        <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: T.textMuted, display:"flex" }}><Icon name="clients" size={16} /></span>
-        <input type="search" placeholder="Search clients or address..."
+        <span style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", color: T.textMuted, display:"flex", pointerEvents:"none" }}>
+          <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        </span>
+        <input type="search" placeholder="Search by name or address…"
           value={search} onChange={e => setSearch(e.target.value)}
-          style={{ width: "100%", padding: "10px 14px 10px 36px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, boxSizing: "border-box", outline: "none", fontFamily: "inherit", color: T.text, background: T.surface }} />
+          style={{ width: "100%", padding: "11px 14px 11px 38px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, boxSizing: "border-box", outline: "none", fontFamily: "inherit", color: T.text, background: T.surface }} />
       </div>
 
       {!selectMode && perms.canImport && onImport && (
@@ -1657,20 +1659,28 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
           return (
             <div key={c.id}
               onClick={() => selectMode ? toggle(c.id) : onSelect(c)}
-              style={{ background: T.surface, border: `1px solid ${isSel ? T.primary : T.border}`, borderRadius: 14, padding: "16px 18px", cursor: "pointer", display: "flex", gap: 14, alignItems: "center", transition: "box-shadow 0.15s, border-color 0.15s" }}
-              onMouseEnter={e => e.currentTarget.style.boxShadow = "0 4px 16px rgba(0,0,0,0.08)"}
-              onMouseLeave={e => e.currentTarget.style.boxShadow = "none"}
+              style={{ background: T.surface, border: `1px solid ${isSel ? T.primary : T.border}`, borderRadius: 16, padding: "15px 16px", cursor: "pointer", display: "flex", gap: 14, alignItems: "center", transition: "box-shadow 0.15s, border-color 0.15s", boxShadow: "0 1px 4px rgba(0,0,0,0.04)" }}
+              onMouseEnter={e => e.currentTarget.style.boxShadow = "0 4px 16px rgba(0,0,0,0.09)"}
+              onMouseLeave={e => e.currentTarget.style.boxShadow = "0 1px 4px rgba(0,0,0,0.04)"}
             >
               {selectMode && <Checkbox checked={isSel} onChange={() => toggle(c.id)} />}
-              <div style={{ width: 46, height: 46, borderRadius: 12, background: T.surfaceAlt, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0 }}>{dMeta(c.division).icon}</div>
+              {/* Division color bar instead of emoji */}
+              <div style={{ width: 4, alignSelf: "stretch", borderRadius: 4, background: pm.bg, flexShrink: 0, minHeight: 44 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 700, fontSize: 15, color: T.text }}>{c.name}</div>
-                <div style={{ fontSize: 12, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.address}</div>
-                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{c.division || "Pond"} · {c.pondType} · {c.pondSize}</div>
+                <div style={{ fontWeight: 700, fontSize: 15, color: T.text, letterSpacing: "-0.01em" }}>{c.name}</div>
+                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.address || "No address"}</div>
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3, display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ fontWeight: 600, color: T.text }}>{c.division || "Pond"}</span>
+                  {c.pondType && <><span style={{ opacity: 0.35 }}>·</span><span>{c.pondType}</span></>}
+                  {c.pondSize && <><span style={{ opacity: 0.35 }}>·</span><span>{c.pondSize}</span></>}
+                </div>
               </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end", flexShrink: 0 }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 5, alignItems: "flex-end", flexShrink: 0 }}>
                 <Badge label={c.plan} bg={pm.bg} color={pm.color || pm.text} sm />
-                <div style={{ fontSize: 11, color: T.textMuted }}>Next: {c.nextService || "—"}</div>
+                {c.nextService && <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 600 }}>{c.nextService}</div>}
+              </div>
+              <div style={{ color: T.textMuted, flexShrink: 0 }}>
+                <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="m9 18 6-6-6-6"/></svg>
               </div>
             </div>
           );
@@ -2129,28 +2139,32 @@ function ClientDetail({ client: init, invoices, invoicing, branding, schedule, o
     <div>
       <button onClick={onBack} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", padding: "0 0 16px", display: "flex", alignItems: "center", gap: 4 }}>← Back to Clients</button>
 
-      <Card style={{ marginBottom: 14 }}>
-        <div style={{ padding: "18px 18px 14px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
-            <div>
-              <h2 style={{ margin: "0 0 3px", fontSize: 20, fontWeight: 800, color: T.text, letterSpacing: "-0.01em" }}>{client.name}</h2>
-              <div style={{ fontSize: 12, color: T.textMuted }}>{client.address}</div>
+      <Card style={{ marginBottom: 14, overflow: "hidden" }}>
+        {/* Color accent bar at top */}
+        <div style={{ height: 4, background: pm.bg }} />
+        <div style={{ padding: "16px 18px 14px" }}>
+          {/* Name row */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10, gap: 10 }}>
+            <div style={{ minWidth: 0 }}>
+              <h2 style={{ margin: "0 0 2px", fontSize: 21, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{client.name}</h2>
+              <div style={{ fontSize: 12, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{client.address}</div>
             </div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <div style={{ display: "flex", gap: 7, alignItems: "center", flexShrink: 0 }}>
               <Badge label={client.plan} bg={pm.bg} color={pm.color || pm.text} />
               {perms.canInvoice && (invoices||[]).filter(iv => iv.clientId === client.id).length > 0 && (
                 <Btn variant="ghost" sm onClick={() => generateStatementPDF(client, (invoices||[]).filter(iv => iv.clientId === client.id), branding)} style={{ display:"flex", alignItems:"center", gap:5 }}>
-                  <Icon name="download" size={13} /> Statement
+                  <Icon name="download" size={13} /> PDF
                 </Btn>
               )}
               {perms.editClients && <Btn variant="ghost" sm onClick={() => setEditing(true)} style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="edit" size={13} /> Edit</Btn>}
             </div>
           </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 20px", fontSize: 12, color: T.textMuted }}>
-            <span style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="phone" size={13} />{client.phone}</span>
-            <span style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="mail" size={13} />{client.email}</span>
-            <span style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="calendar" size={13} />{client.nextService}</span>
-            {perms.seeBalances && <span style={{ color: owed <= 0 ? T.accent : T.warning, fontWeight: 600, display:"flex", alignItems:"center", gap:4 }}><Icon name="dollar" size={13} />${owed.toFixed(2)}</span>}
+          {/* Contact info row */}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px" }}>
+            {client.phone && <span style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color:T.textMuted }}><Icon name="phone" size={12} />{client.phone}</span>}
+            {client.email && <span style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color:T.textMuted }}><Icon name="mail" size={12} />{client.email}</span>}
+            {client.nextService && <span style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color:T.textMuted }}><Icon name="calendar" size={12} />Next: {client.nextService}</span>}
+            {perms.seeBalances && <span style={{ display:"flex", alignItems:"center", gap:4, fontSize:12, fontWeight:700, color: owed <= 0 ? T.accent : T.warning }}><Icon name="dollar" size={12} />${owed.toFixed(2)}{owed > 0 ? " due" : " balance"}</span>}
           </div>
         </div>
       </Card>
