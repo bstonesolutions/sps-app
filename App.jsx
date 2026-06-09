@@ -633,13 +633,12 @@ function pondLabel(client, withCare = false) {
 const PLANS = ["Essential", "Signature", "Premium"];
 
 // Returns all active service divisions for a client (primary + any extras toggled on)
-function clientServices(client) {
+function clientServices(client, tierData) {
   const all = [];
   const div = client.division || "Pond";
-  // Always include primary
   all.push({ div, type: client[div.toLowerCase() + "Type"] || "", size: client[div.toLowerCase() + "Size"] || "" });
-  // Add any extras
-  ["Pond","Pool","Seasonal"].forEach(d => {
+  const allDivs = getDivisions(tierData);
+  allDivs.forEach(d => {
     if (d !== div && client["service" + d]) {
       all.push({ div: d, type: client[d.toLowerCase() + "Type"] || "", size: client[d.toLowerCase() + "Size"] || "" });
     }
@@ -1728,7 +1727,7 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
                 <div style={{ fontWeight: 700, fontSize: 15, color: T.text, letterSpacing: "-0.01em" }}>{c.name}</div>
                 <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.address || "No address"}</div>
                 <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
-                  {clientServices(c).map((s, si) => (
+                  {clientServices(c, tiers).map((s, si) => (
                     <span key={si} style={{ display: "flex", alignItems: "center", gap: 4 }}>
                       {si > 0 && <span style={{ opacity: 0.3 }}>·</span>}
                       <span style={{ fontWeight: 600, color: T.text }}>{s.div}</span>
@@ -1772,7 +1771,7 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
       {modal === "division" && (
         <Modal title={`Change Division (${selCount})`} onClose={() => setModal(null)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {DIVISIONS.map(d => (
+            {(tiers ? getDivisions(tiers) : DIVISIONS).map(d => (
               <button key={d} onClick={() => applyDivision(d)}
                 style={{ padding: "14px 16px", border: `1px solid ${T.border}`, borderRadius: 12, background: T.surface, color: T.text, fontWeight: 700, fontSize: 15, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
                 {d} Solutions
@@ -1820,7 +1819,7 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
 // CLIENT EDIT FORM
 // ─────────────────────────────────────────────
 function ClientEditForm({ client, onSave, onCancel, title = "Edit Client" }) {
-  const { T } = useApp();
+  const { T, tiers } = useApp();
   const [form, setForm] = useState(() => {
     const base = { ...client };
     // backfill address parts: use stored components if present, else parse the address string
@@ -1880,8 +1879,8 @@ function ClientEditForm({ client, onSave, onCancel, title = "Edit Client" }) {
               {si === 1 && <>
                 {/* Primary division — drives portal labels */}
                 <FieldRow label="Primary Division">
-                  <div style={{ display: "flex", gap: 8 }}>
-                    {DIVISIONS.map(d => {
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {getDivisions(tiers).map(d => {
                       const active = (form.division || "Pond") === d;
                       return (
                         <button key={d} type="button" onClick={() => set("division", d)}
@@ -1898,7 +1897,7 @@ function ClientEditForm({ client, onSave, onCancel, title = "Edit Client" }) {
                 <div>
                   <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 }}>Services</label>
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                    {DIVISIONS.map(div => {
+                    {getDivisions(tiers).map(div => {
                       const m = dMeta(div);
                       const serviceKey = `service${div}`; // e.g. servicePond, servicePool, serviceSeasonal
                       const detailKey  = `${div.toLowerCase()}Type`;
@@ -1956,7 +1955,7 @@ function ClientEditForm({ client, onSave, onCancel, title = "Edit Client" }) {
                 <div>
                   <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 }}>Service Plans</label>
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                    {[form.division, ...["Pond","Pool","Seasonal"].filter(d => d !== form.division && form["service" + d])].map(div => {
+                    {[form.division, ...getDivisions(tiers).filter(d => d !== form.division && form["service" + d])].map(div => {
                       const currentPlan = (form.plans && form.plans[div]) || (div === (form.division || "Pond") ? (form.plan || "Essential") : "Essential");
                       return (
                         <div key={div} style={{ background: T.surfaceAlt, borderRadius: 14, padding: "12px 14px" }}>
@@ -2309,7 +2308,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, schedule, o
               <h2 style={{ margin: "0 0 2px", fontSize: 21, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{client.name}</h2>
               <div style={{ fontSize: 12, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{client.address}</div>
               <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2, display: "flex", gap: 4, flexWrap: "wrap" }}>
-                {clientServices(client).map((s, i) => (
+                {clientServices(client, tiers).map((s, i) => (
                   <span key={i} style={{ display:"inline-flex", alignItems:"center", gap:3 }}>
                     {i > 0 && <span style={{ opacity:0.3 }}>·</span>}
                     <span style={{ fontWeight:600 }}>{s.div}{s.type ? ` — ${s.type}` : ""}</span>
@@ -7459,10 +7458,20 @@ function ClientInvoices({ client, invoices, invoicing, branding, onSave, onDelet
 // Bulk-update client pricing by tier.
 // ─────────────────────────────────────────────
 function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
-  const TIER_KEYS = ["Essential", "Signature", "Premium"];
-  const DIVISIONS_LIST = ["Pond", "Pool", "Seasonal"];
-  const [activeDivision, setActiveDivision] = useState("Pond");
-  const [selected, setSelected] = useState("Signature");
+  // Read from stored tiers so names/divisions are always in sync
+  const DIVISIONS_LIST  = getDivisions(tiers);
+  const TIER_KEYS       = getTierNames(tiers, DIVISIONS_LIST[0]);
+  const [activeDivision, setActiveDivision] = useState(DIVISIONS_LIST[0] || "Pond");
+  const [selected, setSelected] = useState(TIER_KEYS[1] || TIER_KEYS[0] || "Signature");
+  // Renaming state
+  const [renamingDiv,  setRenamingDiv]  = useState(false); // editing division name
+  const [renamingTier, setRenamingTier] = useState(false); // editing tier names
+  const [divNameDraft, setDivNameDraft] = useState("");
+  const [tierNameDrafts, setTierNameDrafts] = useState([]);
+  // Add division state
+  const [addingDiv, setAddingDiv] = useState(false);
+  const [newDivName, setNewDivName] = useState("");
+  const [newDivLabel, setNewDivLabel] = useState("");
   const [editingInclude, setEditingInclude] = useState(null);
   const [newInclude, setNewInclude] = useState("");
   const [bulkPrices, setBulkPrices] = useState({});
@@ -7517,6 +7526,94 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
     setDraftField("includes", arr);
   };
 
+  // Save a renamed division
+  const saveDivisionRename = (oldName, newName, newLabel) => {
+    if (!newName.trim() || newName === oldName) return;
+    setTiers(prev => {
+      const base = { ...(prev || DEFAULT_TIERS) };
+      // Copy division data under new name
+      base[newName] = base[oldName] || makeDivisionTiers(newName);
+      delete base[oldName];
+      // Update meta
+      const meta = { ...(base._meta || DEFAULT_TIERS._meta) };
+      meta.divisions = meta.divisions.map(d => d === oldName ? newName : d);
+      if (newLabel) {
+        meta.divisionLabels = { ...(meta.divisionLabels || {}), [newName]: { singular: newLabel, plural: newLabel + "s", portalLabel: "My " + newLabel } };
+        delete (meta.divisionLabels || {})[oldName];
+      }
+      base._meta = meta;
+      return base;
+    });
+    // Update any clients using old division name
+    setClients(cs => cs.map(c => c.division === oldName ? { ...c, division: newName } : c));
+    setActiveDivision(newName);
+    setRenamingDiv(false);
+  };
+
+  // Save renamed tier names for active division
+  const saveTierRenames = (newNames) => {
+    if (!newNames || newNames.length === 0) return;
+    setTiers(prev => {
+      const base = { ...(prev || DEFAULT_TIERS) };
+      const oldNames = getTierNames(base, activeDivision);
+      const divData  = { ...(base[activeDivision] || {}) };
+      // Rename each tier key
+      const newDivData = { _tierNames: newNames };
+      newNames.forEach((name, i) => {
+        const old = oldNames[i];
+        if (old && divData[old]) newDivData[name] = { ...divData[old] };
+        else newDivData[name] = makeDivisionTiers(activeDivision)[old] || {};
+      });
+      base[activeDivision] = newDivData;
+      return base;
+    });
+    // Update any clients using old tier names for this division
+    const oldNames = getTierNames(tiers, activeDivision);
+    setClients(cs => cs.map(c => {
+      if (c.division !== activeDivision) return c;
+      const oldPlan = c.plan;
+      const idx = oldNames.indexOf(oldPlan);
+      if (idx >= 0 && newNames[idx] && newNames[idx] !== oldPlan) {
+        return { ...c, plan: newNames[idx], plans: { ...(c.plans || {}), [activeDivision]: newNames[idx] } };
+      }
+      return c;
+    }));
+    setRenamingTier(false);
+    setSelected(newNames[1] || newNames[0]);
+  };
+
+  // Add a brand new division
+  const addDivision = (name, label) => {
+    if (!name.trim()) return;
+    setTiers(prev => {
+      const base = { ...(prev || DEFAULT_TIERS) };
+      base[name] = makeDivisionTiers(name);
+      const meta = { ...(base._meta || DEFAULT_TIERS._meta) };
+      meta.divisions = [...(meta.divisions || []), name];
+      meta.divisionLabels = { ...(meta.divisionLabels || {}), [name]: { singular: label || name, plural: (label || name) + "s", portalLabel: "My " + (label || name) } };
+      base._meta = meta;
+      return base;
+    });
+    setActiveDivision(name);
+    setAddingDiv(false);
+    setNewDivName(""); setNewDivLabel("");
+  };
+
+  // Remove a division (with guard — can't remove last one)
+  const removeDivision = (name) => {
+    const divs = getDivisions(tiers);
+    if (divs.length <= 1) return;
+    setTiers(prev => {
+      const base = { ...(prev || DEFAULT_TIERS) };
+      delete base[name];
+      const meta = { ...(base._meta || DEFAULT_TIERS._meta) };
+      meta.divisions = meta.divisions.filter(d => d !== name);
+      base._meta = meta;
+      return base;
+    });
+    setActiveDivision(getDivisions(tiers).filter(d => d !== name)[0]);
+  };
+
   const saveTierDraft = () => {
     setTiers(prev => {
       const base = prev || DEFAULT_TIERS;
@@ -7567,14 +7664,97 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
         <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>Customize plans for each division. Each division has its own Essential, Signature, and Premium tiers.</div>
       </div>
 
-      {/* Division switcher */}
-      <div style={{ display: "flex", gap: 6, background: T.surfaceAlt, borderRadius: 14, padding: 4 }}>
-        {DIVISIONS_LIST.map(div => (
-          <button key={div} onClick={() => switchDivision(div)}
-            style={{ flex: 1, padding: "9px 6px", border: "none", borderRadius: 11, background: activeDivision === div ? T.surface : "transparent", color: activeDivision === div ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", boxShadow: activeDivision === div ? "0 1px 4px rgba(0,0,0,0.1)" : "none", transition: "all 0.15s" }}>
-            {div}
+      {/* Division switcher + manage */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <div style={{ display: "flex", gap: 6, background: T.surfaceAlt, borderRadius: 14, padding: 4 }}>
+          {DIVISIONS_LIST.map(div => (
+            <button key={div} onClick={() => switchDivision(div)}
+              style={{ flex: 1, padding: "9px 6px", border: "none", borderRadius: 11, background: activeDivision === div ? T.surface : "transparent", color: activeDivision === div ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", boxShadow: activeDivision === div ? "0 1px 4px rgba(0,0,0,0.1)" : "none", transition: "all 0.15s" }}>
+              {div}
+            </button>
+          ))}
+          {/* Add division button */}
+          <button onClick={() => { setAddingDiv(true); setRenamingDiv(false); setRenamingTier(false); }}
+            style={{ width: 34, height: 34, border: "none", borderRadius: 11, background: "transparent", color: T.primary, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontFamily: "inherit" }}>
+            <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round"><path d="M12 5v14M5 12h14"/></svg>
           </button>
-        ))}
+        </div>
+
+        {/* Division management row */}
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button onClick={() => { setRenamingDiv(true); setDivNameDraft(activeDivision); setRenamingTier(false); setAddingDiv(false); }}
+            style={{ fontSize: 11, fontWeight: 700, color: T.primary, background: "none", border: `1px solid ${T.border}`, borderRadius: 8, padding: "5px 10px", cursor: "pointer", fontFamily: "inherit" }}>
+            Rename Division
+          </button>
+          <button onClick={() => { setRenamingTier(true); setTierNameDrafts([...getTierNames(tiers, activeDivision)]); setRenamingDiv(false); setAddingDiv(false); }}
+            style={{ fontSize: 11, fontWeight: 700, color: T.primary, background: "none", border: `1px solid ${T.border}`, borderRadius: 8, padding: "5px 10px", cursor: "pointer", fontFamily: "inherit" }}>
+            Rename Tiers
+          </button>
+          {DIVISIONS_LIST.length > 1 && (
+            <button onClick={() => { if (window.confirm(`Remove ${activeDivision} division? This cannot be undone.`)) removeDivision(activeDivision); }}
+              style={{ fontSize: 11, fontWeight: 700, color: "#E5484D", background: "none", border: `1px solid ${hexA("#E5484D", 0.3)}`, borderRadius: 8, padding: "5px 10px", cursor: "pointer", fontFamily: "inherit", marginLeft: "auto" }}>
+              Remove
+            </button>
+          )}
+        </div>
+
+        {/* Rename division panel */}
+        {renamingDiv && (
+          <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Rename "{activeDivision}" Division</div>
+            <input value={divNameDraft} onChange={e => setDivNameDraft(e.target.value)}
+              placeholder="Division name (e.g. Irrigation)"
+              style={{ padding: "10px 13px", border: `1.5px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none" }} />
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => saveDivisionRename(activeDivision, divNameDraft.trim(), divNameDraft.trim())}
+                style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "10px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Save</button>
+              <button onClick={() => setRenamingDiv(false)}
+                style={{ background: T.surface, color: T.textMuted, border: `1px solid ${T.border}`, borderRadius: 10, padding: "10px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+            </div>
+          </div>
+        )}
+
+        {/* Rename tiers panel */}
+        {renamingTier && (
+          <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Rename Tiers — {activeDivision}</div>
+            <div style={{ fontSize: 12, color: T.textMuted }}>Changes update all client records and the portal automatically.</div>
+            {tierNameDrafts.map((name, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 12, color: T.textMuted, width: 16, fontWeight: 700 }}>{i + 1}</span>
+                <input value={name} onChange={e => { const n = [...tierNameDrafts]; n[i] = e.target.value; setTierNameDrafts(n); }}
+                  style={{ flex: 1, padding: "9px 13px", border: `1.5px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none" }} />
+              </div>
+            ))}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => saveTierRenames(tierNameDrafts.map(n => n.trim()).filter(Boolean))}
+                style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "10px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Save Names</button>
+              <button onClick={() => setRenamingTier(false)}
+                style={{ background: T.surface, color: T.textMuted, border: `1px solid ${T.border}`, borderRadius: 10, padding: "10px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+            </div>
+          </div>
+        )}
+
+        {/* Add division panel */}
+        {addingDiv && (
+          <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Add New Division</div>
+            <input value={newDivName} onChange={e => setNewDivName(e.target.value)}
+              placeholder="Division name (e.g. Irrigation)"
+              style={{ padding: "10px 13px", border: `1.5px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none" }} />
+            <input value={newDivLabel} onChange={e => setNewDivLabel(e.target.value)}
+              placeholder="Portal label (e.g. Irrigation System)"
+              style={{ padding: "10px 13px", border: `1.5px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none" }} />
+            <div style={{ fontSize: 11, color: T.textMuted }}>The new division will get default Essential / Signature / Premium tiers that you can customize.</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => addDivision(newDivName.trim(), newDivLabel.trim())}
+                disabled={!newDivName.trim()}
+                style={{ flex: 1, background: newDivName.trim() ? T.primary : T.surfaceAlt, color: newDivName.trim() ? "#fff" : T.textMuted, border: "none", borderRadius: 10, padding: "10px", fontWeight: 700, fontSize: 13, cursor: newDivName.trim() ? "pointer" : "default", fontFamily: "inherit" }}>Add Division</button>
+              <button onClick={() => { setAddingDiv(false); setNewDivName(""); setNewDivLabel(""); }}
+                style={{ background: T.surface, color: T.textMuted, border: `1px solid ${T.border}`, borderRadius: 10, padding: "10px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Tier selector */}
@@ -10344,6 +10524,18 @@ const makeDivisionTiers = (div) => ({
 });
 
 const DEFAULT_TIERS = {
+  _meta: {
+    // Ordered list of active divisions — edit to add/remove/rename
+    divisions: ["Pond", "Pool", "Seasonal"],
+    // Global tier names (apply across all divisions unless overridden)
+    tierNames: ["Essential", "Signature", "Premium"],
+    // Per-division display labels (for portal + app UI)
+    divisionLabels: {
+      Pond:     { singular: "Pond",     plural: "Ponds",      portalLabel: "My Pond" },
+      Pool:     { singular: "Pool",     plural: "Pools",      portalLabel: "My Pool" },
+      Seasonal: { singular: "Property", plural: "Properties", portalLabel: "My Property" },
+    },
+  },
   Pond:     makeDivisionTiers("Pond"),
   Pool:     makeDivisionTiers("Pool"),
   Seasonal: makeDivisionTiers("Seasonal"),
@@ -10354,6 +10546,18 @@ const DEFAULT_TIERS = {
 let CP_TIERS = DEFAULT_TIERS;
 // Helper: get tiers for a specific division
 const divTiers = (tiers, div) => (tiers || DEFAULT_TIERS)[div] || (tiers || DEFAULT_TIERS)["Pond"] || DEFAULT_TIERS["Pond"];
+
+// Helper: get active divisions list from stored tiers
+const getDivisions = (tiers) => ((tiers || DEFAULT_TIERS)._meta?.divisions) || DEFAULT_TIERS._meta.divisions;
+
+// Helper: get tier names for a division
+const getTierNames = (tiers, div) => {
+  const t = (tiers || DEFAULT_TIERS);
+  // Per-division tier names take precedence, fall back to global tier names
+  const divData = t[div] || {};
+  const globalNames = t._meta?.tierNames || DEFAULT_TIERS._meta.tierNames;
+  return divData._tierNames || globalNames;
+};
 
 function clientNextVisit(schedule, clientId) {
   const today = new Date(); today.setHours(0,0,0,0);
@@ -10826,7 +11030,7 @@ function CPProperty({ client, branding, onNav, onUpgradeRequest, T }) {
       </div>
 
       {/* All active service sections */}
-      {clientServices(client).map((svc, si) => {
+      {clientServices(client, tiers).map((svc, si) => {
         const sm = dMeta(svc.div);
         return (
           <div key={si} style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, padding:"16px 18px" }}>
