@@ -8750,12 +8750,33 @@ function StaffChat({ client, currentUser, T, onBack }) {
 }
 
 // ── Client messages tab ──
-function CPMessages({ client, T, currentUser }) {
+function CPMessages({ client, branding, onSubmit, T }) {
+  const [view, setView] = useState("messages"); // "messages" | "request"
+
+  if (view === "request") {
+    return (
+      <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+        <button onClick={() => setView("messages")}
+          style={{ background:"none", border:"none", color:T.primary, fontWeight:700, fontSize:13, cursor:"pointer", padding:"0 0 4px", display:"flex", alignItems:"center", gap:4, fontFamily:"inherit", alignSelf:"flex-start" }}>
+          ← Messages
+        </button>
+        <CPRequest client={client} branding={branding} onSubmit={(data) => { if (onSubmit) onSubmit(data); setView("messages"); }} T={T} />
+      </div>
+    );
+  }
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14, height: "calc(100vh - 200px)" }}>
-      <div style={{ paddingTop: 4 }}>
-        <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Messages</div>
-        <div style={{ fontSize: 14, color: T.textMuted, marginTop: 3 }}>Chat with Stone Property Solutions</div>
+    <div style={{ display:"flex", flexDirection:"column", gap:14, height:"calc(100vh - 200px)" }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", paddingTop:4 }}>
+        <div>
+          <div style={{ fontSize:22, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>Messages</div>
+          <div style={{ fontSize:14, color:T.textMuted, marginTop:3 }}>Chat with {branding?.companyName || "us"}</div>
+        </div>
+        <button onClick={() => setView("request")}
+          style={{ display:"flex", alignItems:"center", gap:7, background:T.primary, color:"#fff", border:"none", borderRadius:12, padding:"9px 16px", fontWeight:700, fontSize:13, cursor:"pointer", fontFamily:"inherit", flexShrink:0, boxShadow:`0 3px 12px ${hexA(T.primary,0.3)}` }}>
+          <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          Request Service
+        </button>
       </div>
       <ChatThread
         clientId={client.id}
@@ -10078,10 +10099,9 @@ function OverflowMenu({ page, perms, navUnread, dockIds, setDockIds, onNav, onSi
 
 const CLIENT_NAV = [
   { id: "cp_home",      label: "Home",       icon: "home" },
-  { id: "cp_service",   label: "My Service", icon: "service" },
-  { id: "cp_pond",      label: "My Pond",    icon: "pond" },   // label overridden dynamically in portal
+  { id: "cp_property",  label: "My Property",icon: "pond" },   // combined pond + service
+  { id: "cp_messages",  label: "Messages",   icon: "message" },
   { id: "cp_invoices",  label: "Invoices",   icon: "invoice" },
-  { id: "cp_settings",  label: "Settings",   icon: "settings" },
 ];
 
 // Tier → frequency mapping (single source of truth)
@@ -10519,6 +10539,155 @@ function CPUpgradeRequest({ client, currentPlan, currentTier, upgradePlan, upgra
               Back
             </button>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── CP PROPERTY — combines pond/property details + service plan ──
+function CPProperty({ client, branding, onNav, onUpgradeRequest, T }) {
+  const { tiers } = useApp();
+  const [section, setSection] = useState("property"); // "property" | "plan"
+  const plan = client.plan || "Signature";
+  const allTiers = tiers || CP_TIERS;
+  const tier = allTiers[plan] || CP_TIERS["Signature"];
+  const tierColor = tier?.color || T.primary;
+  const TIER_ORDER = ["Essential", "Signature", "Premium"];
+  const currentIdx = TIER_ORDER.indexOf(plan);
+  const upgradeOptions = TIER_ORDER.slice(currentIdx + 1).filter(p => allTiers[p]);
+  const upgradePlan = upgradeOptions[0] || null;
+  const upgradeTier = upgradePlan ? allTiers[upgradePlan] : null;
+  const pondLbl = pondLabel(client);
+  const m = dMeta(client.division);
+
+  // Service plan card — tappable to switch to plan section
+  const PlanCard = () => (
+    <div onClick={() => setSection("plan")}
+      style={{ background: `linear-gradient(145deg, ${tierColor} 0%, ${mix(tierColor,"#000",0.28)} 100%)`, borderRadius: 20, padding: "18px 20px", color: "#fff", cursor: "pointer", boxShadow: `0 8px 28px ${hexA(tierColor,0.35)}`, position: "relative", overflow: "hidden" }}>
+      <div style={{ position:"absolute", right:-30, top:-30, width:140, height:140, borderRadius:"50%", background:"rgba(255,255,255,0.06)" }} />
+      <div style={{ position:"relative" }}>
+        <div style={{ fontSize:10, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.1em", opacity:0.7, marginBottom:4 }}>Service Plan</div>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-end" }}>
+          <div>
+            <div style={{ fontSize:22, fontWeight:900, letterSpacing:"-0.02em" }}>{plan}</div>
+            <div style={{ fontSize:12, opacity:0.8, marginTop:3 }}>{TIER_FREQ[plan] || client.planFreq || "—"} service</div>
+          </div>
+          <div style={{ textAlign:"right" }}>
+            {client.monthlyRate && <div style={{ fontSize:20, fontWeight:900 }}>${parseFloat(client.monthlyRate).toLocaleString()}<span style={{ fontSize:11, opacity:0.7 }}>/mo</span></div>}
+            <div style={{ fontSize:11, opacity:0.7, marginTop:2, display:"flex", alignItems:"center", gap:4 }}>
+              {upgradeOptions.length > 0 ? "Tap to view & upgrade →" : "Top tier ✓"}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  if (section === "plan") {
+    return (
+      <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+        <button onClick={() => setSection("property")}
+          style={{ background:"none", border:"none", color:T.primary, fontWeight:700, fontSize:13, cursor:"pointer", padding:"0 0 4px", display:"flex", alignItems:"center", gap:4, fontFamily:"inherit", alignSelf:"flex-start" }}>
+          ← {pondLbl}
+        </button>
+        {/* Reuse CPService content inline */}
+        <CPService client={client} branding={branding} onNav={onNav} onUpgradeRequest={onUpgradeRequest} T={T} />
+      </div>
+    );
+  }
+
+  // Property section — pond/pool/property details + plan card
+  const history   = client.history   || [];
+  const equipment = client.equipment || [];
+  const sitePhotos = client.sitePhotos || [];
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      {/* Page title */}
+      <div>
+        <div style={{ fontSize:26, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>{pondLbl}</div>
+        <div style={{ fontSize:14, color:T.textMuted, marginTop:3 }}>{client.division} · {client.pondType || m.typeOptions[0]}</div>
+      </div>
+
+      {/* Service plan card — tappable */}
+      <PlanCard />
+
+      {/* Stats row */}
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:10 }}>
+        {[
+          { label:"Visits",    value: history.length },
+          { label:"Equipment", value: equipment.length },
+          { label:"Photos",    value: sitePhotos.length },
+        ].map(s => (
+          <div key={s.label} style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:16, padding:"14px 10px", textAlign:"center" }}>
+            <div style={{ fontSize:24, fontWeight:800, color:T.text, letterSpacing:"-0.02em" }}>{s.value}</div>
+            <div style={{ fontSize:10, color:T.textMuted, marginTop:4, fontWeight:600 }}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Site details */}
+      {(client.pondGallons || client.pondType || client.pondSize) && (
+        <div style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, padding:"16px 18px" }}>
+          <div style={{ fontSize:13, fontWeight:800, color:T.text, marginBottom:12 }}>{m.siteLabel} Details</div>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+            {[[m.typeLabel, client.pondType],[m.sizeLabel, client.pondSize || client.pondGallons]].filter(([,v])=>v).map(([k,v]) => (
+              <div key={k}>
+                <div style={{ fontSize:10, color:T.textMuted, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:3 }}>{k}</div>
+                <div style={{ fontSize:14, fontWeight:600, color:T.text }}>{v}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Site photos */}
+      {sitePhotos.length > 0 && (
+        <div style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, padding:"16px 18px" }}>
+          <div style={{ fontSize:13, fontWeight:800, color:T.text, marginBottom:12 }}>Photos</div>
+          <div style={{ display:"flex", gap:8, overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+            {sitePhotos.map((p,i) => {
+              const src = typeof p === "string" ? p : p.src;
+              return <img key={i} src={src} alt="" style={{ width:90, height:90, borderRadius:12, objectFit:"cover", flexShrink:0 }} />;
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Recent service */}
+      {history.length > 0 && (
+        <div style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, overflow:"hidden" }}>
+          <div style={{ padding:"14px 18px", borderBottom:`1px solid ${T.border}`, fontSize:13, fontWeight:800, color:T.text }}>Recent Visits</div>
+          {history.slice(0,3).map((h,i) => (
+            <div key={i} style={{ padding:"12px 18px", borderBottom: i<2 && i<history.length-1 ? `1px solid ${T.border}` : "none", display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:10 }}>
+              <div>
+                <div style={{ fontSize:13, fontWeight:700, color:T.text }}>{h.type || "Service Visit"}</div>
+                <div style={{ fontSize:11, color:T.textMuted, marginTop:2 }}>{h.date}{h.tech ? ` · ${h.tech}` : ""}</div>
+                {h.notes && <div style={{ fontSize:12, color:T.textMuted, marginTop:4, lineHeight:1.4 }}>{h.notes}</div>}
+              </div>
+              {h.invoice && <div style={{ fontSize:12, fontWeight:700, color:T.textMuted, flexShrink:0 }}>{h.invoice}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Equipment */}
+      {equipment.length > 0 && (
+        <div style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, overflow:"hidden" }}>
+          <div style={{ padding:"14px 18px", borderBottom:`1px solid ${T.border}`, fontSize:13, fontWeight:800, color:T.text }}>Equipment</div>
+          {equipment.map((eq,i) => (
+            <div key={i} style={{ padding:"12px 18px", borderBottom: i<equipment.length-1 ? `1px solid ${T.border}` : "none", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <div>
+                <div style={{ fontSize:13, fontWeight:700, color:T.text }}>{eq.name}</div>
+                {eq.installed && <div style={{ fontSize:11, color:T.textMuted, marginTop:1 }}>Installed {eq.installed}</div>}
+              </div>
+              <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                <div style={{ width:7, height:7, borderRadius:"50%", background: eq.status==="Good" ? "#16a34a" : eq.status==="Monitor" ? "#F59E0B" : T.primary }} />
+                <span style={{ fontSize:11, color:T.textMuted, fontWeight:600 }}>{eq.status || "Good"}</span>
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -11273,13 +11442,22 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
               <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 600, letterSpacing: "0.02em" }}>Client Portal</div>
             </div>
           </div>
-          {/* Refresh button only — settings is in nav */}
-          <button onClick={() => window.location.reload()}
-            style={{ width: 34, height: 34, borderRadius: 10, background: T.surfaceAlt, border: "none", color: T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-            </svg>
-          </button>
+          <div style={{ display: "flex", gap: 8 }}>
+            {/* Refresh */}
+            <button onClick={() => window.location.reload()}
+              style={{ width: 34, height: 34, borderRadius: 10, background: T.surfaceAlt, border: "none", color: T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+              </svg>
+            </button>
+            {/* Settings gear */}
+            {!isStaffPreview && (
+              <button onClick={() => setSettingsOpen(s => !s)}
+                style={{ width: 34, height: 34, borderRadius: 10, background: settingsOpen ? hexA(T.primary, 0.12) : T.surfaceAlt, border: "none", color: settingsOpen ? T.primary : T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <Icon name="settings" size={16} />
+              </button>
+            )}
+          </div>
         </div>
       </header>
 
@@ -11289,17 +11467,14 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
           <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
         )}
         {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} onNav={setPage} T={T} />}
-        {!settingsOpen && page === "cp_service"  && <CPService client={client} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
-        {!settingsOpen && page === "cp_pond"     && <CPPond client={client} T={T} />}
-        {!settingsOpen && page === "cp_history"  && <CPPond client={client} T={T} />}
+        {!settingsOpen && page === "cp_property" && <CPProperty client={client} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
+        {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
         {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} />}
-
+        {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} onSubmit={onServiceRequest} T={T} />}
         {!settingsOpen && page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
-        {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} T={T} />}
-        {!settingsOpen && page === "cp_request"  && <CPRequest client={client} branding={branding} onSubmit={onServiceRequest} T={T} />}
       </main>
 
-      {/* Bottom nav — matches staff UI exactly, 5 tabs */}
+      {/* Bottom nav — 4 clean tabs */}
       <nav style={{
         position: "fixed", bottom: 0, left: 0, right: 0,
         background: hexA(T.surface, 0.88),
@@ -11311,19 +11486,13 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
         paddingBottom: "calc(8px + env(safe-area-inset-bottom))",
       }}>
         {CLIENT_NAV.map(n => {
-          const isSettings = n.id === "cp_settings";
-          const active = isSettings ? settingsOpen : (page === n.id && !settingsOpen);
-          const label  = n.id === "cp_pond" ? pondLabel(client) : n.label;
-          const handleClick = isSettings
-            ? () => setSettingsOpen(s => !s)
-            : () => { setPage(n.id); setSettingsOpen(false); };
-          // Hide settings tab in staff preview
-          if (isSettings && isStaffPreview) return null;
+          const active = (page === n.id || (n.id === "cp_property" && (page === "cp_pond" || page === "cp_service"))) && !settingsOpen;
+          const label  = n.id === "cp_property" ? pondLabel(client) : n.label;
           return (
-            <button key={n.id} onClick={handleClick}
+            <button key={n.id} onClick={() => { setPage(n.id); setSettingsOpen(false); }}
               style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, color: active ? T.primary : T.textMuted, fontFamily: "inherit", position: "relative", WebkitTapHighlightColor: "transparent" }}>
               <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s" }}>
-                {isSettings ? <Icon name="settings" size={22} /> : <CIcon name={n.icon} size={22} />}
+                <CIcon name={n.icon} size={22} />
               </span>
               <span style={{ fontSize: 10.5, fontWeight: active ? 600 : 500, letterSpacing: "-0.01em" }}>{label}</span>
             </button>
