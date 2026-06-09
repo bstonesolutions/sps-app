@@ -7402,11 +7402,9 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
 
   const tabs = [];
   if (perms.editSettings) tabs.push(["branding", "Branding"]);
-  if (perms.editCatalog) tabs.push(["catalog", "Catalog"]);
-  if (perms.seeCostsBudget) { tabs.push(["costs", "Costs"], ["budget", "Budget"]); }
-  if (perms.editSettings) tabs.push(["email", "Messaging"], ["schedule", "Schedule"]);
-  if (perms.editSettings || perms.canInvoice) tabs.push(["invoicing", "Invoices"]);
-  if (perms.isAdmin) tabs.push(["tiers", "Service Tiers"], ["team", "Team & Logins"]);
+  if (perms.editCatalog || perms.editSettings || perms.isAdmin) tabs.push(["services", "Services"]);
+  if (perms.seeCostsBudget || perms.editSettings || perms.canInvoice) tabs.push(["business", "Business"]);
+  if (perms.isAdmin) tabs.push(["team", "Team"]);
   // if the current tab isn't available (e.g. switched to employee view), fall back to the first one
   const activeTab = tabs.some(([id]) => id === tab) ? tab : (tabs[0] ? tabs[0][0] : null);
 
@@ -7502,7 +7500,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             </div>
             <div>
               <div style={{ fontWeight: 800, fontSize: 16, color: T.text, letterSpacing: "-0.01em" }}>{localBranding.companyName || "Company Name"}</div>
-              <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{localBranding.division || "Division"}</div>
+              <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{localBranding.splashTagline || localBranding.division || "Division"}</div>
             </div>
           </div>
 
@@ -7511,6 +7509,16 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
           </FieldRow>
           <FieldRow label="Division / Tagline">
             <Input value={localBranding.division} onChange={e => set("division", e.target.value)} placeholder="Pond · Pool · Seasonal" />
+          </FieldRow>
+          <FieldRow label="Loading Screen Tagline">
+            <Input
+              value={localBranding.splashTagline || ""}
+              onChange={e => set("splashTagline", e.target.value)}
+              placeholder={localBranding.division || "Pond · Pool · Seasonal"}
+            />
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5, lineHeight: 1.5 }}>
+              Shows under your logo when the app loads. If blank, uses the Division / Tagline above.
+            </div>
           </FieldRow>
 
           {/* Logo type */}
@@ -9599,11 +9607,11 @@ function OverflowMenu({ page, perms, navUnread, dockIds, setDockIds, onNav, onSi
 // ─────────────────────────────────────────────
 
 const CLIENT_NAV = [
-  { id: "cp_home",      label: "Home",      icon: "home" },
-  { id: "cp_service",   label: "My Service", icon: "clients" },
-  { id: "cp_pond",      label: "My Pond",   icon: "history" },  // label overridden dynamically in portal
-  { id: "cp_invoices",  label: "Invoices",  icon: "invoice" },
-  { id: "cp_request",   label: "Request",   icon: "plus" },
+  { id: "cp_home",      label: "Home",       icon: "home" },
+  { id: "cp_service",   label: "My Service", icon: "service" },
+  { id: "cp_pond",      label: "My Pond",    icon: "pond" },   // label overridden dynamically in portal
+  { id: "cp_invoices",  label: "Invoices",   icon: "invoice" },
+  { id: "cp_request",   label: "Request",    icon: "plus" },
 ];
 
 const DEFAULT_TIERS = {
@@ -9677,17 +9685,48 @@ function fmtDate(dateStr) {
 
 // ── CLIENT NAV ICON ──
 function CIcon({ name, size = 22 }) {
-  const paths = {
-    home:    "M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z",
-    history: "M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z",
-    invoice: "M20 4H4c-1.11 0-2 .89-2 2v12c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V6c0-1.11-.89-2-2-2zm0 14H4v-6h16v6zm0-10H4V6h16v2z",
-    plus:    "M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z",
+  // Stroke-based icons (cleaner on dark nav)
+  const icons = {
+    home: (
+      <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 9.5L12 3l9 6.5V20a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V9.5z"/>
+        <path d="M9 21V12h6v9"/>
+      </svg>
+    ),
+    service: (
+      // Shield check — representing a service plan/agreement
+      <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 2L4 6v6c0 5.5 3.8 10.7 8 12 4.2-1.3 8-6.5 8-12V6l-8-4z"/>
+        <polyline points="9 12 11 14 15 10"/>
+      </svg>
+    ),
+    pond: (
+      // Water drop / waves — representing a pond or pool
+      <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 2C6.5 2 2 8 2 12c0 5.5 4.5 10 10 10s10-4.5 10-10c0-4-4.5-10-10-10z"/>
+        <path d="M7 15c1-1 2-1.5 3-1.5s2 .5 4 .5 3-.5 3-1.5"/>
+      </svg>
+    ),
+    invoice: (
+      <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round">
+        <rect x="4" y="2" width="16" height="20" rx="2"/>
+        <path d="M9 7h6M9 11h6M9 15h4"/>
+      </svg>
+    ),
+    plus: (
+      <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round">
+        <line x1="12" y1="5" x2="12" y2="19"/>
+        <line x1="5" y1="12" x2="19" y2="12"/>
+      </svg>
+    ),
+    history: (
+      <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="9"/>
+        <polyline points="12 7 12 12 15 15"/>
+      </svg>
+    ),
   };
-  return (
-    <svg viewBox="0 0 24 24" width={size} height={size} fill="currentColor">
-      <path d={paths[name] || paths.home} />
-    </svg>
-  );
+  return icons[name] || icons.home;
 }
 
 // ── CP HOME ──
@@ -10543,7 +10582,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T, f
         {page === "cp_request"  && <CPRequest client={client} branding={branding} onSubmit={onServiceRequest} T={T} />}
       </main>
 
-      {/* Bottom nav — floating dark pill with center action button */}
+      {/* Bottom nav — stable floating pill, no layout shifts */}
       {(() => {
         const centerId = branding.portalCenterBtn || "cp_request";
         const centerItem = CLIENT_NAV.find(n => n.id === centerId) || CLIENT_NAV[CLIENT_NAV.length - 1];
@@ -10552,40 +10591,63 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T, f
         const right = sideItems.slice(2);
         const accentColor = branding.accentColor || T.primary;
 
-        return (
-          <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 90, display: "flex", justifyContent: "center", alignItems: "flex-end", paddingBottom: "calc(16px + env(safe-area-inset-bottom))", pointerEvents: "none" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 0, background: T.mode === "dark" ? "rgba(30,30,32,0.96)" : "rgba(22,22,24,0.94)", borderRadius: 100, padding: "6px 6px", boxShadow: "0 8px 32px rgba(0,0,0,0.28), 0 2px 8px rgba(0,0,0,0.18)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)", pointerEvents: "all", maxWidth: "min(380px, 90vw)" }}>
-              {/* Left items */}
-              {left.map(n => {
-                const active = page === n.id;
-                return (
-                  <button key={n.id} onClick={() => setPage(n.id)}
-                    style={{ display: "flex", alignItems: "center", gap: active ? 7 : 0, padding: active ? "10px 18px" : "10px 16px", borderRadius: 100, border: "none", cursor: "pointer", fontFamily: "inherit", background: active ? "rgba(255,255,255,0.15)" : "transparent", color: active ? "#fff" : "rgba(255,255,255,0.45)", transition: "all 0.2s cubic-bezier(.34,1.56,.64,1)", whiteSpace: "nowrap", overflow: "hidden", maxWidth: active ? 160 : 52 }}>
-                    <CIcon name={n.icon} size={20} />
-                    <span style={{ fontSize: 13, fontWeight: 700, letterSpacing: "-0.01em", opacity: active ? 1 : 0, maxWidth: active ? 120 : 0, transition: "all 0.2s cubic-bezier(.34,1.56,.64,1)", overflow: "hidden" }}>{n.id === "cp_pond" ? pondLabel(client) : n.label}</span>
-                  </button>
-                );
-              })}
+        // Fixed-width side button — label fades in with opacity, no layout shift
+        const SideBtn = ({ n }) => {
+          const active = page === n.id;
+          const label = n.id === "cp_pond" ? pondLabel(client) : n.label;
+          return (
+            <button onClick={() => setPage(n.id)}
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column",
+                gap: 3, width: 56, height: 52, borderRadius: 14, border: "none", cursor: "pointer",
+                fontFamily: "inherit", flexShrink: 0,
+                background: active ? "rgba(255,255,255,0.14)" : "transparent",
+                color: active ? "#fff" : "rgba(255,255,255,0.4)",
+                transition: "background 0.2s ease, color 0.2s ease",
+                WebkitTapHighlightColor: "transparent",
+              }}>
+              <CIcon name={n.icon} size={21} />
+              <span style={{
+                fontSize: 9, fontWeight: active ? 700 : 500,
+                letterSpacing: "0.01em", lineHeight: 1,
+                opacity: active ? 1 : 0.7,
+                maxWidth: 52, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                transition: "opacity 0.15s ease",
+              }}>{label}</span>
+            </button>
+          );
+        };
 
-              {/* Center action button */}
+        return (
+          <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 90, display: "flex", justifyContent: "center", alignItems: "flex-end", paddingBottom: "calc(18px + env(safe-area-inset-bottom))", pointerEvents: "none" }}>
+            <div style={{
+              display: "flex", alignItems: "center", gap: 2,
+              background: "rgba(18,18,20,0.95)",
+              borderRadius: 26, padding: "5px 5px",
+              boxShadow: "0 8px 32px rgba(0,0,0,0.35), 0 2px 8px rgba(0,0,0,0.2)",
+              backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
+              pointerEvents: "all",
+            }}>
+              {left.map(n => <SideBtn key={n.id} n={n} />)}
+
+              {/* Center action button — glass sphere */}
               <button onClick={() => setPage(centerItem.id)}
-                style={{ width: 52, height: 52, borderRadius: "50%", background: `linear-gradient(135deg, ${accentColor}, ${mix(accentColor, "#000", 0.2)})`, border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, boxShadow: `0 4px 16px ${hexA(accentColor, 0.5)}`, margin: "0 4px", color: "#fff", transition: "transform 0.15s cubic-bezier(.34,1.56,.64,1)", WebkitTapHighlightColor: "transparent" }}
-                onTouchStart={e => e.currentTarget.style.transform = "scale(0.92)"}
-                onTouchEnd={e => e.currentTarget.style.transform = "scale(1)"}>
-                <CIcon name={centerItem.icon} size={24} />
+                style={{
+                  width: 52, height: 52, borderRadius: "50%",
+                  background: `linear-gradient(150deg, ${accentColor} 0%, ${mix(accentColor, "#000", 0.15)} 100%)`,
+                  border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                  flexShrink: 0,
+                  boxShadow: `0 4px 20px ${hexA(accentColor, 0.55)}, inset 0 1px 0 ${hexA("#fff", 0.3)}`,
+                  margin: "0 2px", color: "#fff",
+                  WebkitTapHighlightColor: "transparent",
+                  transition: "transform 0.12s cubic-bezier(.34,1.56,.64,1)",
+                }}
+                onTouchStart={e => e.currentTarget.style.transform = "scale(0.88)"}
+                onTouchEnd={e => { e.currentTarget.style.transform = "scale(1)"; }}>
+                <CIcon name={centerItem.icon} size={22} />
               </button>
 
-              {/* Right items */}
-              {right.map(n => {
-                const active = page === n.id;
-                return (
-                  <button key={n.id} onClick={() => setPage(n.id)}
-                    style={{ display: "flex", alignItems: "center", gap: active ? 7 : 0, padding: active ? "10px 18px" : "10px 16px", borderRadius: 100, border: "none", cursor: "pointer", fontFamily: "inherit", background: active ? "rgba(255,255,255,0.15)" : "transparent", color: active ? "#fff" : "rgba(255,255,255,0.45)", transition: "all 0.2s cubic-bezier(.34,1.56,.64,1)", whiteSpace: "nowrap", overflow: "hidden", maxWidth: active ? 160 : 52 }}>
-                    <CIcon name={n.icon} size={20} />
-                    <span style={{ fontSize: 13, fontWeight: 700, letterSpacing: "-0.01em", opacity: active ? 1 : 0, maxWidth: active ? 120 : 0, transition: "all 0.2s cubic-bezier(.34,1.56,.64,1)", overflow: "hidden" }}>{n.id === "cp_pond" ? pondLabel(client) : n.label}</span>
-                  </button>
-                );
-              })}
+              {right.map(n => <SideBtn key={n.id} n={n} />)}
             </div>
           </div>
         );
@@ -11002,7 +11064,7 @@ export default function App({ authEmail = "", onSignOut }) {
           <div className="splash-logo" style={{ width: 80, height: 80, borderRadius: 22, background: "rgba(255,255,255,0.15)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 36, marginBottom: 18 }}>{branding.logoEmoji || "💧"}</div>
         )}
         <div className="splash-name" style={{ fontSize: 22, fontWeight: 800, letterSpacing: "-0.02em", marginBottom: 4 }}>{branding.companyName}</div>
-        <div className="splash-div" style={{ fontSize: 13, opacity: 0.7, marginBottom: 48 }}>{branding.splashTagline || branding.division || "Field Operations"}</div>
+        <div className="splash-div" style={{ fontSize: 13, opacity: 0.7, marginBottom: 48 }}>{(branding.splashTagline && branding.splashTagline.trim()) ? branding.splashTagline.trim() : (branding.division && branding.division.trim()) ? branding.division.trim() : "Field Operations"}</div>
         <div className="splash-spin" style={{ width: 22, height: 22, border: "2.5px solid rgba(255,255,255,0.3)", borderTopColor: "#fff", borderRadius: "50%" }} />
       </div>
     );
