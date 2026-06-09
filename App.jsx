@@ -615,6 +615,9 @@ const BLANK_CLIENT = {
   phone: "", email: "", division: "Pond",
   plan: "Essential", planFreq: "Monthly", status: "Active",
   pondType: "Koi Pond", pondSize: "",
+  poolType: "", poolSize: "",
+  seasonalType: "", seasonalSize: "",
+  servicePond: false, servicePool: false, serviceSeasonal: false,
   equipment: [], history: [],
   nextService: "", balance: "$0.00",
 };
@@ -628,6 +631,21 @@ function pondLabel(client, withCare = false) {
   return withCare ? base + " Care" : base;
 }
 const PLANS = ["Essential", "Signature", "Premium"];
+
+// Returns all active service divisions for a client (primary + any extras toggled on)
+function clientServices(client) {
+  const all = [];
+  const div = client.division || "Pond";
+  // Always include primary
+  all.push({ div, type: client[div.toLowerCase() + "Type"] || "", size: client[div.toLowerCase() + "Size"] || "" });
+  // Add any extras
+  ["Pond","Pool","Seasonal"].forEach(d => {
+    if (d !== div && client["service" + d]) {
+      all.push({ div: d, type: client[d.toLowerCase() + "Type"] || "", size: client[d.toLowerCase() + "Size"] || "" });
+    }
+  });
+  return all;
+}
 
 // Per-division labels, icon, and type options so the app fits all three divisions.
 const DIVISION_META = {
@@ -1667,10 +1685,14 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 700, fontSize: 15, color: T.text, letterSpacing: "-0.01em" }}>{c.name}</div>
                 <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.address || "No address"}</div>
-                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3, display: "flex", alignItems: "center", gap: 6 }}>
-                  <span style={{ fontWeight: 600, color: T.text }}>{c.division || "Pond"}</span>
-                  {c.pondType && <><span style={{ opacity: 0.35 }}>·</span><span>{c.pondType}</span></>}
-                  {c.pondSize && <><span style={{ opacity: 0.35 }}>·</span><span>{c.pondSize}</span></>}
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+                  {clientServices(c).map((s, si) => (
+                    <span key={si} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      {si > 0 && <span style={{ opacity: 0.3 }}>·</span>}
+                      <span style={{ fontWeight: 600, color: T.text }}>{s.div}</span>
+                      {s.type && <><span style={{ opacity: 0.3 }}>·</span><span>{s.type}</span></>}
+                    </span>
+                  ))}
                 </div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 5, alignItems: "flex-end", flexShrink: 0 }}>
@@ -1814,9 +1836,78 @@ function ClientEditForm({ client, onSave, onCancel, title = "Edit Client" }) {
                 <FieldRow label="Email"><Input value={form.email} onChange={e => set("email", e.target.value)} /></FieldRow>
               </>}
               {si === 1 && <>
-                <FieldRow label="Division"><Select value={form.division || "Pond"} onChange={e => set("division", e.target.value)} options={DIVISIONS} /></FieldRow>
-                <FieldRow label={dMeta(form.division).typeLabel}><Select value={form.pondType} onChange={e => set("pondType", e.target.value)} options={dMeta(form.division).typeOptions} /></FieldRow>
-                <FieldRow label={dMeta(form.division).sizeLabel}><Input value={form.pondSize} onChange={e => set("pondSize", e.target.value)} placeholder="e.g. 3,200 gal" /></FieldRow>
+                {/* Primary division — drives portal labels */}
+                <FieldRow label="Primary Division">
+                  <div style={{ display: "flex", gap: 8 }}>
+                    {DIVISIONS.map(d => {
+                      const active = (form.division || "Pond") === d;
+                      return (
+                        <button key={d} type="button" onClick={() => set("division", d)}
+                          style={{ flex: 1, padding: "10px 6px", borderRadius: 12, border: `1.5px solid ${active ? T.primary : T.border}`, background: active ? hexA(T.primary, 0.08) : T.surface, color: active ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+                          {d}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>Sets the label in their client portal (My Pond / My Pool / My Property).</div>
+                </FieldRow>
+
+                {/* Active services — can have multiple */}
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 }}>Services</label>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    {DIVISIONS.map(div => {
+                      const m = dMeta(div);
+                      const serviceKey = `service${div}`; // e.g. servicePond, servicePool, serviceSeasonal
+                      const detailKey  = `${div.toLowerCase()}Type`;
+                      const sizeKey    = `${div.toLowerCase()}Size`;
+                      const isOn = !!(form[serviceKey] || form.division === div);
+                      return (
+                        <div key={div} style={{ background: isOn ? hexA(T.primary, 0.04) : T.surfaceAlt, border: `1.5px solid ${isOn ? hexA(T.primary, 0.25) : T.border}`, borderRadius: 14, overflow: "hidden", transition: "all 0.15s" }}>
+                          {/* Toggle row */}
+                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px" }}>
+                            <div>
+                              <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{div} Services</div>
+                              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{div === "Pond" ? "Ponds, water features, waterfalls" : div === "Pool" ? "In-ground, above-ground, spas" : "Leaf removal, gutters, snow"}</div>
+                            </div>
+                            <button type="button" onClick={() => {
+                              if (isOn && form.division !== div) {
+                                // turning off a secondary service
+                                set(serviceKey, false);
+                              } else if (!isOn) {
+                                set(serviceKey, true);
+                              }
+                              // Can't turn off primary division service directly — change primary division instead
+                            }}
+                              style={{ width: 44, height: 26, borderRadius: 100, background: isOn ? T.primary : T.surfaceAlt, border: "none", cursor: form.division === div ? "default" : "pointer", position: "relative", flexShrink: 0, transition: "background 0.2s", opacity: form.division === div ? 0.6 : 1 }}>
+                              <div style={{ width: 20, height: 20, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: isOn ? 21 : 3, transition: "left 0.2s", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />
+                            </button>
+                          </div>
+                          {/* Detail fields when on */}
+                          {isOn && (
+                            <div style={{ padding: "0 14px 14px", display: "flex", flexDirection: "column", gap: 10, borderTop: `1px solid ${hexA(T.primary, 0.1)}`, paddingTop: 12 }}>
+                              <div>
+                                <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.04em" }}>{m.typeLabel}</label>
+                                <select value={form[detailKey] || ""} onChange={e => set(detailKey, e.target.value)}
+                                  style={{ width: "100%", padding: "10px 13px", border: `1.5px solid ${T.border}`, borderRadius: 11, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", appearance: "none", WebkitAppearance: "none" }}>
+                                  <option value="">Select…</option>
+                                  {m.typeOptions.map(o => <option key={o} value={o}>{o}</option>)}
+                                </select>
+                              </div>
+                              <div>
+                                <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.04em" }}>{m.sizeLabel}</label>
+                                <input type="text" value={form[sizeKey] || ""} onChange={e => set(sizeKey, e.target.value)}
+                                  placeholder={div === "Pond" ? "e.g. 3,200 gal" : div === "Pool" ? "e.g. 15,000 gal" : "e.g. 2 acres"}
+                                  style={{ width: "100%", padding: "10px 13px", border: `1.5px solid ${T.border}`, borderRadius: 11, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div style={{ fontSize: 11, color: T.textMuted, marginTop: 8 }}>Enable all services this client receives. Primary division sets their portal label.</div>
+                </div>
               </>}
               {si === 2 && <>
                 <FieldRow label="Plan"><Select value={form.plan} onChange={e => set("plan", e.target.value)} options={["Essential","Signature","Premium"]} /></FieldRow>
@@ -2146,6 +2237,14 @@ function ClientDetail({ client: init, invoices, invoicing, branding, schedule, o
             <div style={{ minWidth: 0 }}>
               <h2 style={{ margin: "0 0 2px", fontSize: 21, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{client.name}</h2>
               <div style={{ fontSize: 12, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{client.address}</div>
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2, display: "flex", gap: 4, flexWrap: "wrap" }}>
+                {clientServices(client).map((s, i) => (
+                  <span key={i} style={{ display:"inline-flex", alignItems:"center", gap:3 }}>
+                    {i > 0 && <span style={{ opacity:0.3 }}>·</span>}
+                    <span style={{ fontWeight:600 }}>{s.div}{s.type ? ` — ${s.type}` : ""}</span>
+                  </span>
+                ))}
+              </div>
             </div>
             <div style={{ display: "flex", gap: 7, alignItems: "center", flexShrink: 0 }}>
               <Badge label={client.plan} bg={pm.bg} color={pm.color || pm.text} />
@@ -10623,20 +10722,23 @@ function CPProperty({ client, branding, onNav, onUpgradeRequest, T }) {
         ))}
       </div>
 
-      {/* Site details */}
-      {(client.pondGallons || client.pondType || client.pondSize) && (
-        <div style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, padding:"16px 18px" }}>
-          <div style={{ fontSize:13, fontWeight:800, color:T.text, marginBottom:12 }}>{client.division === "Pond" ? "Pond" : client.division === "Pool" ? "Pool" : "Property"} Details</div>
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
-            {[[m.typeLabel, client.pondType],[m.sizeLabel, client.pondSize || client.pondGallons]].filter(([,v])=>v).map(([k,v]) => (
-              <div key={k}>
-                <div style={{ fontSize:10, color:T.textMuted, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:3 }}>{k}</div>
-                <div style={{ fontSize:14, fontWeight:600, color:T.text }}>{v}</div>
-              </div>
-            ))}
+      {/* All active service sections */}
+      {clientServices(client).map((svc, si) => {
+        const sm = dMeta(svc.div);
+        return (
+          <div key={si} style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, padding:"16px 18px" }}>
+            <div style={{ fontSize:13, fontWeight:800, color:T.text, marginBottom:12 }}>{svc.div} Details</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+              {[[sm.typeLabel, svc.type],[sm.sizeLabel, svc.size]].filter(([,v])=>v).map(([k,v]) => (
+                <div key={k}>
+                  <div style={{ fontSize:10, color:T.textMuted, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:3 }}>{k}</div>
+                  <div style={{ fontSize:14, fontWeight:600, color:T.text }}>{v}</div>
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })}
 
       {/* Site photos */}
       {sitePhotos.length > 0 && (
