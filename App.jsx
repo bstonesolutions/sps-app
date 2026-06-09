@@ -1180,7 +1180,7 @@ function ClientEditForm({ client, onSave, onCancel, title = "Edit Client" }) {
 // ─────────────────────────────────────────────
 // CLIENT DETAIL
 // ─────────────────────────────────────────────
-function ClientDetail({ client: init, invoices, invoicing, branding, onBack, onUpdate, onSaveInvoice, onDeleteInvoice }) {
+function ClientDetail({ client: init, invoices, invoicing, branding, schedule, onBack, onUpdate, onSaveInvoice, onDeleteInvoice }) {
   const { T, perms } = useApp();
   const [client, setClient] = useState(init);
   const [tab, setTab] = useState("overview");
@@ -1243,7 +1243,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, onBack, onU
       {tab === "equipment" && <ClientEquipment client={client} onChange={eq => update({ equipment: eq })} />}
       {tab === "history" && <ClientHistory client={client} onChange={hist => update({ history: hist })} />}
       {tab === "invoices" && perms.canInvoice && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} onSave={onSaveInvoice} onDelete={onDeleteInvoice} />}
-      {tab === "portal" && <ClientPortal client={client} />}
+      {tab === "portal" && <ClientPortal client={client} invoices={invoices} schedule={schedule} branding={branding} />}
     </div>
   );
 }
@@ -1605,14 +1605,15 @@ function ClientHistory({ client, onChange }) {
   );
 }
 
-function ClientPortal({ client }) {
+function ClientPortal({ client, invoices, schedule, branding }) {
   const { T } = useApp();
   const [preview, setPreview] = useState(false);
   const [copied, setCopied] = useState(false);
-  const portalUrl = `portal.stonepropertysolutions.com/${client.name.split(" ").pop().toLowerCase()}`;
+  const hasEmail = !!(client.email || "").trim();
+  const appUrl = window.location.origin;
 
   const copyLink = () => {
-    try { navigator.clipboard?.writeText("https://" + portalUrl); } catch (e) {}
+    try { navigator.clipboard?.writeText(appUrl); } catch (e) {}
     setCopied(true);
     setTimeout(() => setCopied(false), 1800);
   };
@@ -1622,168 +1623,91 @@ function ClientPortal({ client }) {
       <Card>
         <div style={{ padding: 24 }}>
           <div style={{ display: "flex", gap: 14, alignItems: "center", marginBottom: 18 }}>
-            <div style={{ width: 52, height: 52, borderRadius: 14, background: T.surfaceAlt, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, flexShrink: 0 }}>🔗</div>
+            <div style={{ width: 52, height: 52, borderRadius: 14, background: T.surfaceAlt, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, flexShrink: 0 }}>📱</div>
             <div>
               <div style={{ fontWeight: 800, fontSize: 16, color: T.text }}>Client Portal</div>
-              <div style={{ fontSize: 12, color: T.textMuted }}>What {client.name.split(" ")[0]} sees when they log in</div>
+              <div style={{ fontSize: 12, color: T.textMuted }}>Preview exactly what {client.name.split(" ")[0]} sees</div>
             </div>
           </div>
 
-          <div style={{ background: T.surfaceAlt, borderRadius: 8, padding: "10px 14px", fontSize: 12, color: T.textMuted, marginBottom: 16, fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis" }}>
-            {portalUrl}
-          </div>
+          {!hasEmail && (
+            <div style={{ background: hexA(T.warning, 0.1), border: `1px solid ${hexA(T.warning, 0.3)}`, borderRadius: 10, padding: "10px 14px", fontSize: 12, color: T.warning, marginBottom: 16, display: "flex", gap: 8 }}>
+              <span>⚠️</span>
+              <span>No email on file. Add this client's email in Edit so they can log in.</span>
+            </div>
+          )}
 
-          <Btn onClick={() => setPreview(true)} style={{ width: "100%", padding: "12px", borderRadius: 10, marginBottom: 10 }}>
-            👁️ Preview as Client
+          {hasEmail && (
+            <div style={{ background: T.surfaceAlt, borderRadius: 8, padding: "10px 14px", fontSize: 12, color: T.textMuted, marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>✉️ {client.email}</span>
+              <button onClick={copyLink} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>{copied ? "✓ Copied link" : "Copy app link"}</button>
+            </div>
+          )}
+
+          <Btn onClick={() => setPreview(true)} style={{ width: "100%", padding: "13px", borderRadius: 12, marginBottom: 0 }}>
+            👁️ Preview as {client.name.split(" ")[0]}
           </Btn>
-          <div style={{ display: "flex", gap: 10 }}>
-            <Btn variant="ghost" style={{ flex: 1 }}>Send Invite</Btn>
-            <Btn variant="ghost" style={{ flex: 1 }} onClick={copyLink}>{copied ? "✓ Copied" : "Copy Link"}</Btn>
-          </div>
-
-          <div style={{ marginTop: 16, fontSize: 11, color: T.textMuted, display: "flex", gap: 6 }}>
-            <span>🔒</span>
-            <span>Login goes live with the backend in the next phase. This preview shows the real layout and the client's actual data.</span>
-          </div>
         </div>
       </Card>
 
-      {preview && <PortalPreview client={client} onClose={() => setPreview(false)} />}
+      {preview && (
+        <StaffClientPreview
+          client={client}
+          invoices={invoices}
+          schedule={schedule}
+          branding={branding}
+          onClose={() => setPreview(false)}
+        />
+      )}
     </>
   );
 }
 
 // ─────────────────────────────────────────────
-// CLIENT-FACING PORTAL VIEW
-// What the customer sees. Reused behind client login in Phase 2.
+// STAFF CLIENT PREVIEW
+// Renders the real client portal inside a fixed overlay
+// with a staff-only banner so you can exit back instantly.
 // ─────────────────────────────────────────────
-function PortalPreview({ client, onClose }) {
-  const { T, branding, perms } = useApp();
-  const firstName = client.name.split(" ")[0];
-  const balanceDue = client.balance && client.balance !== "$0.00";
-  const equipNeedsAttention = (client.equipment || []).filter(e => e.status !== "Good");
+function StaffClientPreview({ client, invoices, schedule, branding, onClose }) {
+  const { T } = useApp();
+  const fontStack = '-apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif';
 
   return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 300, background: T.bg, overflowY: "auto" }}>
-      {/* Preview banner (operator only — not part of the real client view) */}
-      <div style={{ background: T.headerBg, color: "#fff", padding: "8px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12 }}>
-        <span style={{ opacity: 0.7 }}>👁️ Client Preview</span>
-        <button onClick={onClose} style={{ background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: 6, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Exit Preview</button>
+    <div style={{ position: "fixed", inset: 0, zIndex: 500, display: "flex", flexDirection: "column" }}>
+      {/* Staff-only banner — always on top, not part of the real client view */}
+      <div style={{
+        background: "#1D1D1F", color: "#fff", padding: "10px 16px",
+        display: "flex", justifyContent: "space-between", alignItems: "center",
+        fontSize: 13, flexShrink: 0, zIndex: 501,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ background: T.primary, color: "#fff", fontSize: 10, fontWeight: 800, padding: "3px 8px", borderRadius: 100, letterSpacing: "0.05em" }}>STAFF PREVIEW</span>
+          <span style={{ color: "rgba(255,255,255,0.6)" }}>Viewing as {client.name}</span>
+        </div>
+        <button onClick={onClose} style={{
+          background: "rgba(255,255,255,0.12)", border: "none", color: "#fff",
+          borderRadius: 8, padding: "7px 14px", fontSize: 12, fontWeight: 700,
+          cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 6,
+        }}>← Back to my view</button>
       </div>
 
-      {/* Branded client header */}
-      <div style={{ background: T.primary, color: "#fff", padding: "24px 20px 28px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18, opacity: 0.95 }}>
-          <div style={{ width: 30, height: 30, borderRadius: 8, background: "rgba(255,255,255,0.15)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, overflow: "hidden" }}>
-            {branding.logoType === "image" && branding.logoImage
-              ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-              : <span>{branding.logoEmoji}</span>}
-          </div>
-          <span style={{ fontSize: 13, fontWeight: 700 }}>{branding.companyName}</span>
-        </div>
-        <div style={{ fontSize: 14, opacity: 0.85 }}>Welcome back,</div>
-        <div style={{ fontSize: 26, fontWeight: 800, letterSpacing: "-0.02em" }}>{firstName}</div>
-      </div>
-
-      <div style={{ maxWidth: 560, margin: "0 auto", padding: "18px 16px 60px" }}>
-        {/* Next service */}
-        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: 18, marginBottom: 14, marginTop: -20, boxShadow: "0 4px 20px rgba(0,0,0,0.08)" }}>
-          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 8 }}>Your Next Service</div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div>
-              <div style={{ fontSize: 22, fontWeight: 800, color: T.text }}>{client.nextService || "To be scheduled"}</div>
-              <div style={{ fontSize: 13, color: T.textMuted, marginTop: 2 }}>{client.plan} Plan · {client.planFreq}</div>
-            </div>
-            <div style={{ fontSize: 30 }}>🗓️</div>
-          </div>
-        </div>
-
-        {/* Balance */}
-        {perms.seeBalances && (
-        <div style={{ background: balanceDue ? `${T.warning}14` : `${T.accent}14`, border: `1px solid ${balanceDue ? T.warning : T.accent}40`, borderRadius: 16, padding: 18, marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div>
-            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 4 }}>Account Balance</div>
-            <div style={{ fontSize: 22, fontWeight: 800, color: balanceDue ? T.warning : T.accent }}>{client.balance}</div>
-          </div>
-          {balanceDue
-            ? <Btn style={{ borderRadius: 10 }}>Pay Now</Btn>
-            : <span style={{ fontSize: 13, color: T.accent, fontWeight: 700 }}>✓ Paid in full</span>}
-        </div>
-        )}
-
-        {/* Equipment status */}
-        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: 18, marginBottom: 14 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 12 }}>Your {dMeta(client.division).siteLabel}</div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: T.text, marginBottom: 2 }}>{client.pondType}</div>
-          <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 14 }}>{client.pondSize}</div>
-          {equipNeedsAttention.length === 0 ? (
-            <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: T.accent, fontWeight: 600 }}>
-              <span>✓</span> All equipment in good condition
-            </div>
-          ) : (
-            equipNeedsAttention.map((e, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: T.text, marginBottom: 4 }}>
-                <span style={{ color: T.warning }}>⚠️</span> {e.name} — {e.status}
-              </div>
-            ))
-          )}
-        </div>
-
-        {/* Service history */}
-        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10, paddingLeft: 4 }}>Service History</div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 20 }}>
-          {(client.history || []).length === 0 && (
-            <div style={{ fontSize: 13, color: T.textMuted, padding: "12px 4px" }}>No service visits yet.</div>
-          )}
-          {(client.history || []).map((h, i) => (
-            <div key={i} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: 16 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-                <div style={{ fontWeight: 700, fontSize: 14, color: T.text }}>{h.type}</div>
-                <div style={{ fontSize: 12, color: T.textMuted }}>{h.date}</div>
-              </div>
-              <div style={{ fontSize: 13, color: T.text, lineHeight: 1.5, marginBottom: 12 }}>{h.notes}</div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-                {[["pH", h.ph],["NH₃", h.ammonia],["NO₂", h.nitrite],["Temp", h.temp]].map(([k, v]) => (
-                  <div key={k} style={{ background: T.surfaceAlt, borderRadius: 10, padding: "7px 4px", textAlign: "center" }}>
-                    <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 700, textTransform: "uppercase" }}>{k}</div>
-                    <div style={{ fontSize: 14, fontWeight: 800, color: T.text, marginTop: 2 }}>{v}</div>
-                  </div>
-                ))}
-              </div>
-              {h.photos && h.photos.length > 0 && (
-                <div style={{ marginTop: 12 }}>
-                  <PhotoStrip photos={h.photos} size={60} />
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-
-        {/* Contact / request */}
-        {(() => {
-          const cPhone = (branding.companyPhone || "").replace(/[^\d+]/g, "");
-          const cEmail = branding.companyEmail || "";
-          const reqHref = cEmail
-            ? `mailto:${cEmail}?subject=${encodeURIComponent("Service Request — " + client.name)}&body=${encodeURIComponent("Hi " + (branding.companyName || "") + ",\n\nI'd like to request service for my account (" + client.name + ").\n\nThank you!")}`
-            : (cPhone ? `sms:${cPhone}` : null);
-          const contactHref = cPhone ? `tel:${cPhone}` : (cEmail ? `mailto:${cEmail}` : null);
-          const haveContact = reqHref || contactHref;
-          return (
-            <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: 18, textAlign: "center" }}>
-              <div style={{ fontWeight: 700, fontSize: 14, color: T.text, marginBottom: 4 }}>Need something?</div>
-              <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 14 }}>{haveContact ? "Request a service or reach out to our team." : "Add your phone or email in Customize → Messaging to enable these."}</div>
-              <div style={{ display: "flex", gap: 10 }}>
-                <Btn href={reqHref || undefined} disabled={!reqHref} block style={{ flex: 1, borderRadius: 12 }}>Request Service</Btn>
-                <Btn href={contactHref || undefined} disabled={!contactHref} variant="outline" block style={{ flex: 1, borderRadius: 12 }}>Contact Us</Btn>
-              </div>
-            </div>
-          );
-        })()}
+      {/* Real client portal scrollable below the banner */}
+      <div style={{ flex: 1, overflowY: "auto", position: "relative" }}>
+        <SPSClientPortal
+          client={client}
+          invoices={invoices}
+          schedule={schedule}
+          branding={branding}
+          T={T}
+          fontStack={fontStack}
+          onSignOut={onClose}
+          onServiceRequest={() => {}}
+          isStaffPreview={true}
+        />
       </div>
     </div>
   );
 }
-
 // ─────────────────────────────────────────────
 // ON MY WAY MODAL
 // ─────────────────────────────────────────────
@@ -5276,7 +5200,7 @@ function CPRequest({ client, branding, onSubmit, T }) {
   );
 }
 
-function SPSClientPortal({ client, schedule, invoices, branding, T, fontStack, onSignOut, onServiceRequest }) {
+function SPSClientPortal({ client, schedule, invoices, branding, T, fontStack, onSignOut, onServiceRequest, isStaffPreview = false }) {
   const [page, setPage] = useState("cp_home");
 
   return (
@@ -5293,7 +5217,7 @@ function SPSClientPortal({ client, schedule, invoices, branding, T, fontStack, o
           </div>
           <div style={{ fontSize: 15, fontWeight: 700, color: T.text, letterSpacing: "-0.02em" }}>{branding.companyName}</div>
         </div>
-        <button onClick={onSignOut} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button>
+        {!isStaffPreview && <button onClick={onSignOut} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button>}
       </header>
 
       {/* Main content */}
@@ -5725,7 +5649,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
           {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
-          {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} />}
+          {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} />}
           {page === "schedule" && <Schedule clients={clients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} />}
           {page === "invoices" && perms.canInvoice && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} />}
           {page === "import"   && perms.canImport && <SkimmerImport onImport={handleImportClients} onGoToClients={() => handleNav("clients")} />}
