@@ -801,8 +801,11 @@ function compressImage(file, maxDim = 900, quality = 0.6) {
 }
 
 // ─────────────────────────────────────────────
-const planMeta = (plan, T, tiers) => {
-  const tierColor = (tiers || {})[plan]?.color;
+const planMeta = (plan, T, tiers, div) => {
+  // tiers is now { Pond: {...}, Pool: {...}, Seasonal: {...} }
+  const divKey = div || "Pond";
+  const divTierSet = (tiers || {})[divKey] || (tiers || {});
+  const tierColor = divTierSet[plan]?.color;
   return ({
     Premium:   { bg: tierColor || T.primary,  text: "#fff" },
     Signature: { bg: tierColor || "#6366F1",   text: "#fff" },
@@ -1910,8 +1913,37 @@ function ClientEditForm({ client, onSave, onCancel, title = "Edit Client" }) {
                 </div>
               </>}
               {si === 2 && <>
-                <FieldRow label="Plan"><Select value={form.plan} onChange={e => set("plan", e.target.value)} options={["Essential","Signature","Premium"]} /></FieldRow>
-                <FieldRow label="Frequency"><Select value={form.planFreq} onChange={e => set("planFreq", e.target.value)} options={["Monthly","Bi-Weekly","Weekly"]} /></FieldRow>
+                {/* Per-division plan assignments */}
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 }}>Service Plans</label>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    {[form.division, ...["Pond","Pool","Seasonal"].filter(d => d !== form.division && form["service" + d])].map(div => {
+                      const currentPlan = (form.plans && form.plans[div]) || (div === (form.division || "Pond") ? (form.plan || "Essential") : "Essential");
+                      return (
+                        <div key={div} style={{ background: T.surfaceAlt, borderRadius: 14, padding: "12px 14px" }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>{div}</div>
+                          <div style={{ display: "flex", gap: 6 }}>
+                            {["Essential","Signature","Premium"].map(p => {
+                              const active = currentPlan === p;
+                              return (
+                                <button key={p} type="button"
+                                  onClick={() => {
+                                    const newPlans = { ...(form.plans || {}), [div]: p };
+                                    set("plans", newPlans);
+                                    if (div === form.division) { set("plan", p); set("planFreq", TIER_FREQ[p] || form.planFreq); }
+                                  }}
+                                  style={{ flex: 1, padding: "9px 4px", borderRadius: 10, border: `1.5px solid ${active ? T.primary : T.border}`, background: active ? hexA(T.primary, 0.08) : T.surface, color: active ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                                  {p}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>{TIER_FREQ[currentPlan] || "—"} service</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
                 <FieldRow label="Next Service"><Input value={form.nextService} onChange={e => set("nextService", e.target.value)} placeholder="MM/DD/YYYY" /></FieldRow>
                 <FieldRow label="Monthly Rate">
                   <div style={{ position: "relative" }}>
@@ -7389,6 +7421,8 @@ function ClientInvoices({ client, invoices, invoicing, branding, onSave, onDelet
 // ─────────────────────────────────────────────
 function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
   const TIER_KEYS = ["Essential", "Signature", "Premium"];
+  const DIVISIONS_LIST = ["Pond", "Pool", "Seasonal"];
+  const [activeDivision, setActiveDivision] = useState("Pond");
   const [selected, setSelected] = useState("Signature");
   const [editingInclude, setEditingInclude] = useState(null);
   const [newInclude, setNewInclude] = useState("");
@@ -7400,21 +7434,32 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
   const [unsaved, setUnsaved] = useState(false);
 
   // Local draft — edits stay here until you hit Save
-  const liveTier = (tiers || DEFAULT_TIERS)[selected] || DEFAULT_TIERS["Signature"];
+  const divTierData = (tiers || DEFAULT_TIERS)[activeDivision] || DEFAULT_TIERS[activeDivision] || DEFAULT_TIERS["Pond"];
+  const liveTier = divTierData[selected] || DEFAULT_TIERS["Pond"]["Signature"];
   const [draft, setDraft] = useState(() => ({ ...liveTier }));
 
   // Switch tiers: load fresh draft
   const switchTier = (key) => {
     setSelected(key);
-    setDraft({ ...((tiers || DEFAULT_TIERS)[key] || DEFAULT_TIERS[key]) });
+    const dt = (tiers || DEFAULT_TIERS)[activeDivision] || DEFAULT_TIERS[activeDivision] || DEFAULT_TIERS["Pond"];
+    setDraft({ ...(dt[key] || DEFAULT_TIERS["Pond"][key] || {}) });
+    setBulkPrices({}); setBulkPlans({}); setBulkSaved(false); setConfirmBulk(false);
+    setUnsaved(false); setTierSaved(false); setEditingInclude(null); setNewInclude("");
+  };
+
+  const switchDivision = (div) => {
+    setActiveDivision(div);
+    const dt = (tiers || DEFAULT_TIERS)[div] || DEFAULT_TIERS[div] || DEFAULT_TIERS["Pond"];
+    setDraft({ ...(dt[selected] || DEFAULT_TIERS["Pond"][selected] || {}) });
     setBulkPrices({}); setBulkPlans({}); setBulkSaved(false); setConfirmBulk(false);
     setUnsaved(false); setTierSaved(false); setEditingInclude(null); setNewInclude("");
   };
 
   // Keep draft in sync when tiers first load from Supabase
   useEffect(() => {
-    setDraft({ ...((tiers || DEFAULT_TIERS)[selected] || DEFAULT_TIERS[selected]) });
-  }, [selected]);
+    const dt = (tiers || DEFAULT_TIERS)[activeDivision] || DEFAULT_TIERS[activeDivision] || DEFAULT_TIERS["Pond"];
+    setDraft({ ...(dt[selected] || DEFAULT_TIERS["Pond"][selected] || {}) });
+  }, [selected, activeDivision]);
 
   const tier = draft;
   const setDraftField = (k, v) => { setDraft(d => ({ ...d, [k]: v })); setUnsaved(true); };
@@ -7434,14 +7479,22 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
   };
 
   const saveTierDraft = () => {
-    setTiers(prev => ({ ...(prev || DEFAULT_TIERS), [selected]: { ...draft } }));
+    setTiers(prev => {
+      const base = prev || DEFAULT_TIERS;
+      const divData = base[activeDivision] || DEFAULT_TIERS[activeDivision] || {};
+      return { ...base, [activeDivision]: { ...divData, [selected]: { ...draft } } };
+    });
     setUnsaved(false);
     setTierSaved(true);
     setTimeout(() => setTierSaved(false), 2500);
   };
 
   // Clients on this tier
-  const tierClients = (clients || []).filter(c => c.plan === selected);
+  // Clients on this tier for this division
+  const tierClients = (clients || []).filter(c => {
+    const clientPlan = (c.plans && c.plans[activeDivision]) || (c.division === activeDivision ? c.plan : null);
+    return clientPlan === selected;
+  });
 
   // Bulk apply prices + plan changes
   const applyBulkPrices = () => {
@@ -7450,10 +7503,13 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
       const newRate = bulkPrices[String(c.id)];
       const newPlan = bulkPlans[String(c.id)];
       if (newRate === undefined && !newPlan) return c;
+      const updatedPlans = newPlan ? { ...(c.plans || {}), [activeDivision]: newPlan } : c.plans;
+      const isPrimary = c.division === activeDivision;
       return {
         ...c,
         ...(newRate !== undefined ? { monthlyRate: newRate } : {}),
-        ...(newPlan ? { plan: newPlan, planFreq: TIER_FREQ[newPlan] || c.planFreq } : {}),
+        ...(newPlan && isPrimary ? { plan: newPlan, planFreq: TIER_FREQ[newPlan] || c.planFreq } : {}),
+        ...(newPlan ? { plans: updatedPlans } : {}),
       };
     }));
     setBulkPrices({});
@@ -7469,13 +7525,24 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <div>
-        <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>Edit what each service tier offers. Changes sync instantly to the client portal — all clients on that tier see the update immediately.</div>
+        <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>Customize plans for each division. Each division has its own Essential, Signature, and Premium tiers.</div>
+      </div>
+
+      {/* Division switcher */}
+      <div style={{ display: "flex", gap: 6, background: T.surfaceAlt, borderRadius: 14, padding: 4 }}>
+        {DIVISIONS_LIST.map(div => (
+          <button key={div} onClick={() => switchDivision(div)}
+            style={{ flex: 1, padding: "9px 6px", border: "none", borderRadius: 11, background: activeDivision === div ? T.surface : "transparent", color: activeDivision === div ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", boxShadow: activeDivision === div ? "0 1px 4px rgba(0,0,0,0.1)" : "none", transition: "all 0.15s" }}>
+            {div}
+          </button>
+        ))}
       </div>
 
       {/* Tier selector */}
       <div style={{ display: "flex", gap: 8 }}>
         {TIER_KEYS.map(key => {
-          const t = (tiers || DEFAULT_TIERS)[key] || {};
+          const dt2 = (tiers || DEFAULT_TIERS)[activeDivision] || DEFAULT_TIERS[activeDivision] || DEFAULT_TIERS["Pond"];
+          const t = dt2[key] || {};
           const count = (clients || []).filter(c => c.plan === key).length;
           const active = selected === key;
           return (
@@ -10206,53 +10273,48 @@ const TIER_FREQ = {
   "Premium":    "Weekly",
 };
 
-const DEFAULT_TIERS = {
+// Per-division tier defaults — each division has its own plan set
+const makeDivisionTiers = (div) => ({
   "Essential": {
-    color: "#6B7280",
-    price: "",
-    tagline: "Reliable seasonal care",
-    includes: [
-      "Monthly service visits",
-      "Basic water quality checks",
-      "Filter maintenance",
-      "Seasonal adjustments",
-    ],
-    upgradeTo: "Signature",
+    color: "#6B7280", price: "", upgradeTo: "Signature",
+    tagline: div === "Pond" ? "Reliable pond care" : div === "Pool" ? "Basic pool service" : "Core seasonal service",
+    includes: div === "Pond"
+      ? ["Monthly service visits","Basic water quality checks","Filter maintenance","Seasonal adjustments"]
+      : div === "Pool"
+      ? ["Monthly pool service","Chemical balancing","Filter check","Skimmer cleaning"]
+      : ["One seasonal service","Debris removal","Basic cleanup"],
   },
   "Signature": {
-    color: "#B81D24",
-    price: "",
-    tagline: "Our most popular plan",
-    includes: [
-      "Bi-weekly service visits",
-      "Full water chemistry testing",
-      "Filter + skimmer cleaning",
-      "Algae & debris treatment",
-      "Priority scheduling",
-      "Photo documentation each visit",
-    ],
-    upgradeTo: "Premium",
+    color: "#B81D24", price: "", upgradeTo: "Premium",
+    tagline: div === "Pond" ? "Our most popular plan" : div === "Pool" ? "Complete pool care" : "Full seasonal package",
+    includes: div === "Pond"
+      ? ["Bi-weekly service visits","Full water chemistry testing","Filter + skimmer cleaning","Algae & debris treatment","Priority scheduling","Photo documentation each visit"]
+      : div === "Pool"
+      ? ["Bi-weekly service","Full chemical testing","Equipment inspection","Algae prevention","Priority scheduling"]
+      : ["Multiple seasonal visits","Full property cleanup","Gutter cleaning","Priority scheduling"],
   },
   "Premium": {
-    color: "#AF011A",
-    price: "",
-    tagline: "White-glove pond care",
-    includes: [
-      "Weekly service visits",
-      "Comprehensive water testing",
-      "Equipment health monitoring",
-      "Same-day emergency response",
-      "Seasonal startup & closing",
-      "Annual equipment inspection",
-      "Dedicated technician",
-    ],
-    upgradeTo: null,
+    color: "#AF011A", price: "", upgradeTo: null,
+    tagline: div === "Pond" ? "White-glove pond care" : div === "Pool" ? "Premium pool service" : "White-glove property care",
+    includes: div === "Pond"
+      ? ["Weekly service visits","Comprehensive water testing","Equipment health monitoring","Same-day emergency response","Seasonal startup & closing","Annual equipment inspection","Dedicated technician"]
+      : div === "Pool"
+      ? ["Weekly service","Comprehensive water testing","Equipment monitoring","Same-day emergency response","Opening & closing service","Dedicated technician"]
+      : ["Unlimited seasonal visits","Full property maintenance","Snow removal included","Same-day emergency response","Dedicated crew"],
   },
+});
+
+const DEFAULT_TIERS = {
+  Pond:     makeDivisionTiers("Pond"),
+  Pool:     makeDivisionTiers("Pool"),
+  Seasonal: makeDivisionTiers("Seasonal"),
 };
 
 // CP_TIERS is loaded from stored state in App — this is just the reference
 // Individual components read from the `tiers` context via useApp()
 let CP_TIERS = DEFAULT_TIERS;
+// Helper: get tiers for a specific division
+const divTiers = (tiers, div) => (tiers || DEFAULT_TIERS)[div] || (tiers || DEFAULT_TIERS)["Pond"] || DEFAULT_TIERS["Pond"];
 
 function clientNextVisit(schedule, clientId) {
   const today = new Date(); today.setHours(0,0,0,0);
@@ -10645,14 +10707,16 @@ function CPProperty({ client, branding, onNav, onUpgradeRequest, T }) {
   const { tiers } = useApp();
   const [section, setSection] = useState("property"); // "property" | "plan"
   const plan = client.plan || "Signature";
+  const clientDiv = client.division || "Pond";
   const allTiers = tiers || CP_TIERS;
-  const tier = allTiers[plan] || CP_TIERS["Signature"];
+  const divTierSet = (allTiers[clientDiv] || allTiers["Pond"] || DEFAULT_TIERS["Pond"]);
+  const tier = divTierSet[plan] || divTierSet["Essential"] || {};
   const tierColor = tier?.color || T.primary;
   const TIER_ORDER = ["Essential", "Signature", "Premium"];
   const currentIdx = TIER_ORDER.indexOf(plan);
-  const upgradeOptions = TIER_ORDER.slice(currentIdx + 1).filter(p => allTiers[p]);
+  const upgradeOptions = TIER_ORDER.slice(currentIdx + 1).filter(p => divTierSet[p]);
   const upgradePlan = upgradeOptions[0] || null;
-  const upgradeTier = upgradePlan ? allTiers[upgradePlan] : null;
+  const upgradeTier = upgradePlan ? divTierSet[upgradePlan] : null;
   const pondLbl = pondLabel(client);
   const m = dMeta(client.division);
 
@@ -10796,15 +10860,17 @@ function CPProperty({ client, branding, onNav, onUpgradeRequest, T }) {
 function CPService({ client, branding, onNav, onUpgradeRequest, T }) {
   const { tiers } = useApp();
   const plan = client.plan || "Signature";
+  const clientDiv = client.division || "Pond";
   const allTiers = tiers || CP_TIERS;
-  const tier = allTiers[plan] || CP_TIERS["Signature"];
+  const divTierSet = (allTiers[clientDiv] || allTiers["Pond"] || DEFAULT_TIERS["Pond"]);
+  const tier = divTierSet[plan] || divTierSet["Essential"] || {};
   const tierColor = tier?.color || T.primary;
   // All tiers strictly above current — no downgrades
   const TIER_ORDER = ["Essential", "Signature", "Premium"];
   const currentIdx = TIER_ORDER.indexOf(plan);
-  const upgradeOptions = TIER_ORDER.slice(currentIdx + 1).filter(p => allTiers[p]);
+  const upgradeOptions = TIER_ORDER.slice(currentIdx + 1).filter(p => divTierSet[p]);
   const upgradePlan = upgradeOptions[0] || null;
-  const upgradeTier = upgradePlan ? allTiers[upgradePlan] : null;
+  const upgradeTier = upgradePlan ? divTierSet[upgradePlan] : null;
 
   const CheckRow = ({ text, highlighted }) => (
     <div style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
@@ -10903,7 +10969,7 @@ function CPService({ client, branding, onNav, onUpgradeRequest, T }) {
           upgradePlan={upgradePlan}
           upgradeTier={upgradeTier}
           upgradeOptions={upgradeOptions}
-          tiers={allTiers}
+          tiers={divTierSet}
           branding={branding}
           onSubmit={onUpgradeRequest}
           T={T}
@@ -11791,7 +11857,7 @@ export default function App({ authEmail = "", onSignOut }) {
   const [estimatesRaw, setEstimatesRaw, lest] = useStoredState("sps_estimates", []);
   const [serviceTiers, setServiceTiers] = useStoredState("sps_service_tiers", DEFAULT_TIERS);
   // Keep the module-level reference in sync so client portal uses live tiers
-  CP_TIERS = serviceTiers || DEFAULT_TIERS;
+  CP_TIERS = serviceTiers || DEFAULT_TIERS;  // now a { Pond, Pool, Seasonal } object
   const [routeAssignments, setRouteAssignments, lra] = useStoredState("sps_route_assignments", []);
   const [menuOpen, setMenuOpen] = useState(false);
   const [syncState, setSyncState] = useState("idle");
