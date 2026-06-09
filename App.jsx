@@ -10557,10 +10557,15 @@ function CPUpgradeRequest({ client, currentPlan, currentTier, upgradePlan, upgra
 function CPService({ client, branding, onNav, onUpgradeRequest, T }) {
   const { tiers } = useApp();
   const plan = client.plan || "Signature";
-  const tier = (tiers || CP_TIERS)[plan] || CP_TIERS["Signature"];
+  const allTiers = tiers || CP_TIERS;
+  const tier = allTiers[plan] || CP_TIERS["Signature"];
   const tierColor = tier?.color || T.primary;
-  const upgradePlan = tier?.upgradeTo;
-  const upgradeTier = upgradePlan ? (tiers || CP_TIERS)[upgradePlan] : null;
+  // All tiers strictly above current — no downgrades
+  const TIER_ORDER = ["Essential", "Signature", "Premium"];
+  const currentIdx = TIER_ORDER.indexOf(plan);
+  const upgradeOptions = TIER_ORDER.slice(currentIdx + 1).filter(p => allTiers[p]);
+  const upgradePlan = upgradeOptions[0] || null;
+  const upgradeTier = upgradePlan ? allTiers[upgradePlan] : null;
 
   const CheckRow = ({ text, highlighted }) => (
     <div style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
