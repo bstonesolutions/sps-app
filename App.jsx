@@ -428,6 +428,7 @@ const DEFAULT_BRANDING = {
   splashShowGreeting: "true", // "true" | "false"
   splashGreetingPrefix: "",   // e.g. "Welcome back" or "Hey" — defaults to time-based
   portalCenterBtn: "cp_request",
+  portalNavLabels: "true",   // "true" | "false" — show labels under nav icons
   portalHeroImage: "",
   staffDefaultPage: "dashboard",
   portalDefaultPage: "cp_home",
@@ -8385,6 +8386,23 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             </div>
           </div>
 
+          {/* Nav label toggle */}
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Nav Bar Labels</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              {[["true","Icons + Labels"],["false","Icons Only"]].map(([v,l]) => {
+                const active = (localBranding.portalNavLabels ?? "true") === v;
+                return (
+                  <button key={v} onClick={() => set("portalNavLabels", v)}
+                    style={{ flex:1, padding:"10px 8px", border:`1.5px solid ${active ? T.primary : T.border}`, borderRadius:12, background: active ? hexA(T.primary,0.07) : T.surface, color: active ? T.primary : T.textMuted, fontWeight:700, fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>
+                    {l}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ fontSize:11, color:T.textMuted, marginTop:5 }}>Icons Only is cleaner on small screens.</div>
+          </div>
+
           {/* Center button picker */}
           <div>
             <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Center Nav Button</div>
@@ -11309,7 +11327,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
       </header>
 
       {/* Main content */}
-      <main style={{ flex: 1, padding: "24px 18px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(110px + env(safe-area-inset-bottom))", fontSize: `${textScale}em` }}>
+      <main style={{ flex: 1, padding: "24px 18px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))", fontSize: `${textScale}em` }}>
         {settingsOpen && !isStaffPreview && (
           <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
         )}
@@ -11324,74 +11342,96 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
         {!settingsOpen && page === "cp_request"  && <CPRequest client={client} branding={branding} onSubmit={onServiceRequest} T={T} />}
       </main>
 
-      {/* Bottom nav — stable floating pill, no layout shifts */}
+      {/* Bottom nav — transparent glass bar like reference UI */}
       {(() => {
-        const centerId = branding.portalCenterBtn || "cp_request";
+        const centerId   = branding.portalCenterBtn || "cp_request";
         const centerItem = CLIENT_NAV.find(n => n.id === centerId) || CLIENT_NAV[CLIENT_NAV.length - 1];
-        const sideItems = CLIENT_NAV.filter(n => n.id !== centerId);
-        const left  = sideItems.slice(0, 2);
-        const right = sideItems.slice(2);
+        const sideItems  = CLIENT_NAV.filter(n => n.id !== centerId);
+        const left       = sideItems.slice(0, 2);
+        const right      = sideItems.slice(2);
         const accentColor = branding.accentColor || T.primary;
+        const showLabels  = branding.portalNavLabels !== "false";
 
-        // Fixed-width side button — label fades in with opacity, no layout shift
-        const SideBtn = ({ n }) => {
-          const active = page === n.id;
-          const label = n.id === "cp_pond" ? pondLabel(client) : n.label;
+        const NavBtn = ({ n }) => {
+          const active = page === n.id || (settingsOpen && n.id === "__settings");
+          const label  = n.id === "cp_pond" ? pondLabel(client) : n.label;
           return (
-            <button onClick={() => setPage(n.id)}
+            <button onClick={() => { setPage(n.id); setSettingsOpen(false); }}
               style={{
-                display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column",
-                gap: 3, width: 64, height: 52, borderRadius: 14, border: "none", cursor: "pointer",
-                fontFamily: "inherit", flexShrink: 0,
-                background: active ? "rgba(255,255,255,0.14)" : "transparent",
-                color: active ? "#fff" : "rgba(255,255,255,0.4)",
-                transition: "background 0.2s ease, color 0.2s ease",
+                flex: 1, display: "flex", alignItems: "center", justifyContent: "center",
+                flexDirection: "column", gap: showLabels ? 4 : 0,
+                height: "100%", border: "none", cursor: "pointer",
+                background: "transparent", fontFamily: "inherit",
+                color: active ? "#fff" : "rgba(255,255,255,0.45)",
                 WebkitTapHighlightColor: "transparent",
+                position: "relative", transition: "color 0.18s ease",
               }}>
-              <CIcon name={n.icon} size={21} />
-              <span style={{
-                fontSize: 9, fontWeight: active ? 700 : 500,
-                letterSpacing: "0.01em", lineHeight: 1,
-                opacity: active ? 1 : 0.7,
-                maxWidth: 60, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                transition: "opacity 0.15s ease",
-              }}>{label}</span>
+              {/* Active indicator dot above icon */}
+              {active && (
+                <div style={{ position:"absolute", top: 6, left:"50%", transform:"translateX(-50%)", width:4, height:4, borderRadius:"50%", background:"#fff", opacity:0.9 }} />
+              )}
+              <CIcon name={n.icon} size={showLabels ? 22 : 24} />
+              {showLabels && (
+                <span style={{ fontSize: 10, fontWeight: active ? 700 : 500, letterSpacing:"0.01em", lineHeight:1, maxWidth:62, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                  {label}
+                </span>
+              )}
             </button>
           );
         };
 
         return (
-          <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 90, display: "flex", justifyContent: "center", alignItems: "flex-end", paddingBottom: "calc(18px + env(safe-area-inset-bottom))", pointerEvents: "none" }}>
-            <div style={{
-              display: "flex", alignItems: "center", gap: 2,
-              background: "rgba(18,18,20,0.95)",
-              borderRadius: 26, padding: "5px 5px",
-              boxShadow: "0 8px 32px rgba(0,0,0,0.35), 0 2px 8px rgba(0,0,0,0.2)",
-              backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
-              pointerEvents: "all",
-            }}>
-              {left.map(n => <SideBtn key={n.id} n={n} />)}
+          <nav style={{
+            position:"fixed", bottom:0, left:0, right:0, zIndex:90,
+            background:"rgba(12,12,14,0.72)",
+            backdropFilter:"saturate(180%) blur(28px)",
+            WebkitBackdropFilter:"saturate(180%) blur(28px)",
+            borderTop:"1px solid rgba(255,255,255,0.08)",
+            paddingBottom:"env(safe-area-inset-bottom)",
+          }}>
+            <div style={{ maxWidth:600, margin:"0 auto", height: showLabels ? 62 : 54, display:"flex", alignItems:"stretch", position:"relative" }}>
+              {/* Left items */}
+              {left.map(n => <NavBtn key={n.id} n={n} />)}
 
-              {/* Center action button — glass sphere */}
-              <button onClick={() => setPage(centerItem.id)}
-                style={{
-                  width: 52, height: 52, borderRadius: "50%",
-                  background: `linear-gradient(150deg, ${accentColor} 0%, ${mix(accentColor, "#000", 0.15)} 100%)`,
-                  border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
-                  flexShrink: 0,
-                  boxShadow: `0 4px 20px ${hexA(accentColor, 0.55)}, inset 0 1px 0 ${hexA("#fff", 0.3)}`,
-                  margin: "0 2px", color: "#fff",
-                  WebkitTapHighlightColor: "transparent",
-                  transition: "transform 0.12s cubic-bezier(.34,1.56,.64,1)",
-                }}
-                onTouchStart={e => e.currentTarget.style.transform = "scale(0.88)"}
-                onTouchEnd={e => { e.currentTarget.style.transform = "scale(1)"; }}>
-                <CIcon name={centerItem.icon} size={22} />
-              </button>
+              {/* Center button — raised accent circle */}
+              <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center", position:"relative" }}>
+                {/* Raised platform */}
+                <div style={{
+                  position:"absolute", bottom: showLabels ? -2 : -2, left:"50%", transform:"translateX(-50%)",
+                  width:58, height:58, borderRadius:"50%",
+                  background:"rgba(12,12,14,0.72)",
+                  backdropFilter:"blur(28px)", WebkitBackdropFilter:"blur(28px)",
+                  border:"1px solid rgba(255,255,255,0.08)",
+                }} />
+                <button onClick={() => { setPage(centerItem.id); setSettingsOpen(false); }}
+                  style={{
+                    position:"relative", zIndex:1,
+                    width:52, height:52, borderRadius:"50%",
+                    background:`linear-gradient(145deg, ${accentColor} 0%, ${mix(accentColor,"#000",0.2)} 100%)`,
+                    border:"none", cursor:"pointer",
+                    display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center",
+                    gap: showLabels ? 3 : 0,
+                    color:"#fff",
+                    boxShadow:`0 4px 24px ${hexA(accentColor,0.5)}, 0 2px 8px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.25)`,
+                    WebkitTapHighlightColor:"transparent",
+                    transition:"transform 0.12s cubic-bezier(.34,1.56,.64,1), box-shadow 0.12s ease",
+                    marginBottom: showLabels ? 10 : 6,
+                  }}
+                  onTouchStart={e => { e.currentTarget.style.transform="scale(0.9)"; e.currentTarget.style.boxShadow=`0 2px 12px ${hexA(accentColor,0.4)}`; }}
+                  onTouchEnd={e => { e.currentTarget.style.transform="scale(1)"; e.currentTarget.style.boxShadow=`0 4px 24px ${hexA(accentColor,0.5)}, 0 2px 8px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.25)`; }}>
+                  <CIcon name={centerItem.icon} size={22} />
+                  {showLabels && (
+                    <span style={{ fontSize:9, fontWeight:800, letterSpacing:"0.03em", lineHeight:1, color:"rgba(255,255,255,0.9)", textTransform:"uppercase" }}>
+                      {(centerItem.id === "cp_pond" ? pondLabel(client) : centerItem.label).split(" ")[0]}
+                    </span>
+                  )}
+                </button>
+              </div>
 
-              {right.map(n => <SideBtn key={n.id} n={n} />)}
+              {/* Right items */}
+              {right.map(n => <NavBtn key={n.id} n={n} />)}
             </div>
-          </div>
+          </nav>
         );
       })()}
     </div>
