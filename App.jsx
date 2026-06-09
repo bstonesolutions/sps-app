@@ -8403,34 +8403,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             <div style={{ fontSize:11, color:T.textMuted, marginTop:5 }}>Icons Only is cleaner on small screens.</div>
           </div>
 
-          {/* Center button picker */}
-          <div>
-            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Center Nav Button</div>
-            <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 10, lineHeight: 1.5 }}>The prominent circle button in the middle of the client nav bar. Pick whichever action you want front and center.</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {[
-                { id: "cp_request",  label: "Request Service",  sub: "Client requests a visit" },
-                { id: "cp_service",  label: "My Service Plan",  sub: "View plan & upgrade" },
-                { id: "cp_invoices", label: "My Invoices",      sub: "Pay & view invoices" },
-                { id: "cp_pond",     label: "My Pond / Pool / Property", sub: "Auto-labels by division — equipment, history & photos" },
-              ].map(opt => {
-                const active = (localBranding.portalCenterBtn || "cp_request") === opt.id;
-                return (
-                  <button key={opt.id} onClick={() => set("portalCenterBtn", opt.id)}
-                    style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", border: `1.5px solid ${active ? T.primary : T.border}`, borderRadius: 14, background: active ? hexA(T.primary, 0.06) : T.surface, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%", boxSizing: "border-box" }}>
-                    <div style={{ width: 36, height: 36, borderRadius: "50%", background: active ? T.primary : T.surfaceAlt, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                      <div style={{ width: 10, height: 10, borderRadius: "50%", background: active ? "#fff" : T.border }} />
-                    </div>
-                    <div>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: active ? T.primary : T.text }}>{opt.label}</div>
-                      <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{opt.sub}</div>
-                    </div>
-                    {active && <div style={{ marginLeft: "auto", color: T.primary }}><Icon name="check" size={16} /></div>}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+
 
           <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: "12px 14px", fontSize: 12, color: T.textMuted, lineHeight: 1.6 }}>
             <strong style={{ color: T.text }}>Plan tier details</strong> — what's listed under each plan (Essential, Signature, Premium) and upgrade copy — edit in the <strong style={{ color: T.text }}>Service Tiers</strong> tab above.
@@ -10108,8 +10081,7 @@ const CLIENT_NAV = [
   { id: "cp_service",   label: "My Service", icon: "service" },
   { id: "cp_pond",      label: "My Pond",    icon: "pond" },   // label overridden dynamically in portal
   { id: "cp_invoices",  label: "Invoices",   icon: "invoice" },
-  { id: "cp_messages",  label: "Messages",   icon: "message" },
-  { id: "cp_request",   label: "Request",    icon: "plus" },
+  { id: "cp_settings",  label: "Settings",   icon: "settings" },
 ];
 
 // Tier → frequency mapping (single source of truth)
@@ -11327,7 +11299,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
         {!settingsOpen && page === "cp_request"  && <CPRequest client={client} branding={branding} onSubmit={onServiceRequest} T={T} />}
       </main>
 
-      {/* Bottom nav — matches staff UI style */}
+      {/* Bottom nav — matches staff UI exactly, 5 tabs */}
       <nav style={{
         position: "fixed", bottom: 0, left: 0, right: 0,
         background: hexA(T.surface, 0.88),
@@ -11339,30 +11311,24 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
         paddingBottom: "calc(8px + env(safe-area-inset-bottom))",
       }}>
         {CLIENT_NAV.map(n => {
-          const active = page === n.id || (settingsOpen && n.id === "__settings");
+          const isSettings = n.id === "cp_settings";
+          const active = isSettings ? settingsOpen : (page === n.id && !settingsOpen);
           const label  = n.id === "cp_pond" ? pondLabel(client) : n.label;
+          const handleClick = isSettings
+            ? () => setSettingsOpen(s => !s)
+            : () => { setPage(n.id); setSettingsOpen(false); };
+          // Hide settings tab in staff preview
+          if (isSettings && isStaffPreview) return null;
           return (
-            <button key={n.id}
-              onClick={() => { setPage(n.id); setSettingsOpen(false); }}
+            <button key={n.id} onClick={handleClick}
               style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, color: active ? T.primary : T.textMuted, fontFamily: "inherit", position: "relative", WebkitTapHighlightColor: "transparent" }}>
               <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s" }}>
-                <CIcon name={n.icon} size={22} />
+                {isSettings ? <Icon name="settings" size={22} /> : <CIcon name={n.icon} size={22} />}
               </span>
               <span style={{ fontSize: 10.5, fontWeight: active ? 600 : 500, letterSpacing: "-0.01em" }}>{label}</span>
             </button>
           );
         })}
-        {/* Settings tab */}
-        {!isStaffPreview && (
-          <button
-            onClick={() => setSettingsOpen(s => !s)}
-            style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, color: settingsOpen ? T.primary : T.textMuted, fontFamily: "inherit", WebkitTapHighlightColor: "transparent" }}>
-            <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: settingsOpen ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s" }}>
-              <Icon name="settings" size={22} />
-            </span>
-            <span style={{ fontSize: 10.5, fontWeight: settingsOpen ? 600 : 500, letterSpacing: "-0.01em" }}>Settings</span>
-          </button>
-        )}
       </nav>
     </div>
   );
