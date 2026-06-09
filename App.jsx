@@ -523,10 +523,10 @@ function deriveAlerts(clients, invoices) {
   const alerts = [];
   (clients || []).forEach(c => {
     (c.equipment || []).forEach(e => {
-      if (e.status && e.status !== "Good") alerts.push({ icon: "⚠️", title: `${c.name} — ${e.name}`, sub: `Marked "${e.status}"` });
+      if (e.status && e.status !== "Good") alerts.push({ icon: "warning", title: `${c.name} — ${e.name}`, sub: `Marked "${e.status}"` });
     });
     const owed = clientOutstanding(c, invoices);
-    if (owed > 0) alerts.push({ icon: "💰", title: `${c.name} — $${owed.toFixed(2)} outstanding`, sub: "Open balance" });
+    if (owed > 0) alerts.push({ icon: "dollar", title: `${c.name} — $${owed.toFixed(2)} outstanding`, sub: "Open balance" });
   });
   return alerts.slice(0, 6);
 }
@@ -828,7 +828,7 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
         {/* office flags from the field (resolvable) */}
         {flags.map((a) => (
           <div key={a.id} style={{ padding: "14px 18px", borderBottom: `1px solid ${T.border}`, display: "flex", gap: 12, alignItems: "flex-start", background: `${T.warning}08` }}>
-            <span style={{ fontSize: 18, lineHeight: 1.2 }}>🚩</span>
+            <Icon name="warning" size={18} />
             <div style={{ flex: 1 }}>
               <div style={{ fontWeight: 700, fontSize: 13, color: T.text }}>{a.client} — needs office attention</div>
               <div style={{ fontSize: 12, color: T.textMuted }}>{a.message}</div>
@@ -839,7 +839,7 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
         ))}
         {derived.map((a, i) => (
           <div key={"d" + i} style={{ padding: "14px 18px", borderBottom: i < derived.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", gap: 12, alignItems: "flex-start" }}>
-            <span style={{ fontSize: 18, lineHeight: 1.2 }}>{a.icon}</span>
+            <div style={{ width: 34, height: 34, borderRadius: 10, background: hexA(T.warning, 0.1), color: T.warning, display:"flex", alignItems:"center", justifyContent:"center", flexShrink: 0 }}><Icon name={a.icon || "warning"} size={17} /></div>
             <div>
               <div style={{ fontWeight: 700, fontSize: 13, color: T.text }}>{a.title}</div>
               <div style={{ fontSize: 12, color: T.textMuted }}>{a.sub}</div>
@@ -908,7 +908,7 @@ function Checkbox({ checked, onChange, accent }) {
   return (
     <div onClick={e => { e.stopPropagation(); onChange(); }}
       style={{ width: 22, height: 22, borderRadius: "50%", border: `2px solid ${checked ? (accent || T.primary) : T.border}`, background: checked ? (accent || T.primary) : T.surface, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, cursor: "pointer", transition: "all 0.15s" }}>
-      {checked && <span style={{ color: "#fff", fontSize: 12, fontWeight: 800, lineHeight: 1 }}>✓</span>}
+      {checked && <Icon name="check" size={12} />}
     </div>
   );
 }
@@ -922,7 +922,7 @@ function Modal({ title, children, onClose }) {
         <div style={{ width: 38, height: 5, background: T.border, borderRadius: 100, margin: "0 auto 18px" }} />
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
           <div style={{ fontWeight: 700, fontSize: 20, color: T.text, letterSpacing: "-0.02em" }}>{title}</div>
-          <button onClick={onClose} style={{ background: T.surfaceAlt, border: "none", borderRadius: "50%", width: 30, height: 30, fontSize: 14, cursor: "pointer", color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
+          <button onClick={onClose} style={{ background: T.surfaceAlt, border: "none", borderRadius: "50%", width: 30, height: 30, cursor: "pointer", color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="close" size={14} /></button>
         </div>
         {children}
       </div>
@@ -974,8 +974,8 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
       </div>
 
       <div style={{ position: "relative", marginBottom: 14 }}>
-        <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: T.textMuted }}>🔍</span>
-        <input placeholder="Search clients or address..."
+        <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: T.textMuted, display:"flex" }}><Icon name="clients" size={16} /></span>
+        <input type="search" placeholder="Search clients or address..."
           value={search} onChange={e => setSearch(e.target.value)}
           style={{ width: "100%", padding: "10px 14px 10px 36px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, boxSizing: "border-box", outline: "none", fontFamily: "inherit", color: T.text, background: T.surface }} />
       </div>
@@ -999,7 +999,7 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
       <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: selectMode && selCount > 0 ? 90 : 0 }}>
         {filtered.length === 0 && (
           <div style={{ textAlign: "center", padding: "40px 20px", color: T.textMuted }}>
-            <div style={{ fontSize: 32, marginBottom: 10 }}>🔍</div>
+            <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="clients" size={26} /></div>
             <div style={{ fontWeight: 700, fontSize: 14, color: T.text, marginBottom: 4 }}>No clients found</div>
             <div style={{ fontSize: 13 }}>{search ? `Nothing matches "${search}"` : "Add your first client to get started"}</div>
           </div>
@@ -1142,18 +1142,18 @@ function ClientEditForm({ client, onSave, onCancel, title = "Edit Client" }) {
                 <div style={{ display: "flex", gap: 10 }}>
                   <div style={{ flex: 2 }}>
                     <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 5 }}>City</label>
-                    <input style={halfInput} value={form.city} onChange={e => setAddr("city", e.target.value)} placeholder="Elverson" />
+                    <input type="text" style={halfInput} value={form.city} onChange={e => setAddr("city", e.target.value)} placeholder="Elverson" />
                   </div>
                   <div style={{ flex: 1 }}>
                     <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 5 }}>State</label>
-                    <input style={halfInput} value={form.state} onChange={e => setAddr("state", e.target.value)} placeholder="PA" />
+                    <input type="text" autoCapitalize="characters" style={halfInput} value={form.state} onChange={e => setAddr("state", e.target.value)} placeholder="PA" />
                   </div>
                   <div style={{ flex: 1 }}>
                     <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 5 }}>ZIP</label>
-                    <input style={halfInput} value={form.zip} onChange={e => setAddr("zip", e.target.value)} placeholder="19520" />
+                    <input type="text" inputMode="numeric" style={halfInput} value={form.zip} onChange={e => setAddr("zip", e.target.value)} placeholder="19520" />
                   </div>
                 </div>
-                {combined && <div style={{ fontSize: 12, color: T.textMuted, background: T.surfaceAlt, borderRadius: 9, padding: "9px 12px" }} style={{ display:"flex", alignItems:"center", gap:6 }}><Icon name="location" size={13} />{combined}</div>}
+                {combined && <div style={{ fontSize: 12, color: T.textMuted, background: T.surfaceAlt, borderRadius: 9, padding: "9px 12px", display:"flex", alignItems:"center", gap:6 }}><Icon name="location" size={13} />{combined}</div>}
 
                 <FieldRow label="Phone"><Input value={form.phone} onChange={e => set("phone", e.target.value)} /></FieldRow>
                 <FieldRow label="Email"><Input value={form.email} onChange={e => set("email", e.target.value)} /></FieldRow>
@@ -1220,7 +1220,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, schedule, o
             <span style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="phone" size={13} />{client.phone}</span>
             <span style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="mail" size={13} />{client.email}</span>
             <span style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="calendar" size={13} />{client.nextService}</span>
-            {perms.seeBalances && <span style={{ color: owed <= 0 ? T.accent : T.warning, fontWeight: 600 }} style={{ display:"flex", alignItems:"center", gap:4 }}><Icon name="dollar" size={13} />${owed.toFixed(2)}</span>}
+            {perms.seeBalances && <span style={{ color: owed <= 0 ? T.accent : T.warning, fontWeight: 600, display:"flex", alignItems:"center", gap:4 }}><Icon name="dollar" size={13} />${owed.toFixed(2)}</span>}
           </div>
         </div>
       </Card>
@@ -1238,7 +1238,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, schedule, o
         ))}
       </div>
 
-      {tab === "overview" && <ClientOverview client={client} invoices={invoices} />}
+      {tab === "overview" && <ClientOverview client={client} invoices={invoices} onUpdate={onUpdate} />}
       {tab === "equipment" && <ClientEquipment client={client} onChange={eq => update({ equipment: eq })} />}
       {tab === "history" && <ClientHistory client={client} onChange={hist => update({ history: hist })} />}
       {tab === "invoices" && perms.canInvoice && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} onSave={onSaveInvoice} onDelete={onDeleteInvoice} />}
@@ -1247,23 +1247,111 @@ function ClientDetail({ client: init, invoices, invoicing, branding, schedule, o
   );
 }
 
-function ClientOverview({ client }) {
+// ─────────────────────────────────────────────
+// CLIENT PHOTO PICKER
+// Shared inline photo capture/upload used on overview + equipment
+// ─────────────────────────────────────────────
+function PhotoPicker({ photos = [], onChange, label = "Photos", maxPhotos = 10 }) {
   const { T } = useApp();
+  const inputRef = useRef(null);
+  const [viewer, setViewer] = useState(null);
+
+  const addPhotos = (files) => {
+    const readers = Array.from(files).slice(0, maxPhotos - photos.length).map(file =>
+      new Promise(res => {
+        const r = new FileReader();
+        r.onload = e => res(e.target.result);
+        r.readAsDataURL(file);
+      })
+    );
+    Promise.all(readers).then(results => onChange([...photos, ...results]));
+  };
+
+  const remove = (idx) => onChange(photos.filter((_, i) => i !== idx));
+
+  return (
+    <div>
+      <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>{label}</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-start" }}>
+        {photos.map((p, i) => (
+          <div key={i} style={{ position: "relative" }}>
+            <img src={p} alt="" onClick={() => setViewer(i)}
+              style={{ width: 80, height: 80, borderRadius: 12, objectFit: "cover", cursor: "pointer", border: `1px solid ${T.border}` }} />
+            <button onClick={() => remove(i)}
+              style={{ position: "absolute", top: -6, right: -6, width: 22, height: 22, borderRadius: "50%", background: "#E5484D", border: "2px solid #fff", color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}>
+              <Icon name="close" size={10} />
+            </button>
+          </div>
+        ))}
+        {photos.length < maxPhotos && (
+          <button onClick={() => inputRef.current?.click()}
+            style={{ width: 80, height: 80, borderRadius: 12, border: `2px dashed ${T.border}`, background: T.surfaceAlt, color: T.textMuted, cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4 }}>
+            <Icon name="plus" size={20} />
+            <span style={{ fontSize: 10, fontWeight: 700 }}>Add</span>
+          </button>
+        )}
+      </div>
+      <input ref={inputRef} type="file" accept="image/*" multiple capture="environment"
+        style={{ display: "none" }}
+        onChange={e => { addPhotos(e.target.files); e.target.value = ""; }} />
+      {viewer !== null && <PhotoViewer photos={photos} index={viewer} onClose={() => setViewer(null)} />}
+    </div>
+  );
+}
+
+function ClientOverview({ client, onUpdate }) {
+  const { T, perms } = useApp();
   const h = client.history[0];
   const m = dMeta(client.division);
+  const sitePhotos = client.sitePhotos || [];
+
+  const updateSitePhotos = (photos) => {
+    if (onUpdate) onUpdate({ ...client, sitePhotos: photos });
+  };
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+
+      {/* Site Photos */}
+      <Card>
+        <CardHeader title={`${m.siteLabel} Photos`} />
+        <div style={{ padding: "16px 18px" }}>
+          {sitePhotos.length === 0 && !perms.editClients ? (
+            <div style={{ fontSize: 13, color: T.textMuted, textAlign: "center", padding: "16px 0" }}>No photos added yet.</div>
+          ) : (
+            <>
+              {sitePhotos.length > 0 && (
+                <div style={{ marginBottom: perms.editClients ? 16 : 0 }}>
+                  <PhotoStrip photos={sitePhotos} size={100} />
+                </div>
+              )}
+              {perms.editClients && (
+                <PhotoPicker
+                  photos={sitePhotos}
+                  onChange={updateSitePhotos}
+                  label={sitePhotos.length === 0 ? `Add photos of the ${m.siteLabel.toLowerCase()} to document its current state` : "Add more photos"}
+                  maxPhotos={20}
+                />
+              )}
+            </>
+          )}
+        </div>
+      </Card>
+
+      {/* Service Details */}
       <Card>
         <CardHeader title="Service Details" />
         <div style={{ padding: 18, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
           {[["Division", client.division || "Pond"],[m.typeLabel, client.pondType],[m.sizeLabel, client.pondSize],["Plan", `${client.plan} (${client.planFreq})`]].map(([k,v]) => (
             <div key={k}>
               <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 3 }}>{k}</div>
-              <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{v}</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{v || "—"}</div>
             </div>
           ))}
         </div>
       </Card>
+
+      {/* Last Service */}
       {h && (
         <Card>
           <CardHeader title="Last Service" />
@@ -1280,7 +1368,7 @@ function ClientOverview({ client }) {
             </div>
             {h.photos && h.photos.length > 0 && (
               <div style={{ marginTop: 14 }}>
-                <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>Photos</div>
+                <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>Visit Photos</div>
                 <PhotoStrip photos={h.photos} />
               </div>
             )}
@@ -1293,12 +1381,14 @@ function ClientOverview({ client }) {
 
 function ClientEquipment({ client, onChange }) {
   const { T, perms } = useApp();
-  const [modal, setModal] = useState(null); // { mode:"add"|"edit", index, data }
+  const [modal, setModal] = useState(null);
+  const [expanded, setExpanded] = useState({});
   const equipment = client.equipment || [];
   const STATUSES = ["Good", "Monitor", "Replace Soon"];
 
-  const openAdd = () => setModal({ mode: "add", data: { name: "", installed: "", status: "Good" } });
-  const openEdit = (eq, i) => { if (perms.editClients) setModal({ mode: "edit", index: i, data: { ...eq } }); };
+  const blankEq = () => ({ name: "", installed: "", status: "Good", notes: "", photos: [] });
+  const openAdd  = () => setModal({ mode: "add",  data: blankEq() });
+  const openEdit = (eq, i) => { if (perms.editClients) setModal({ mode: "edit", index: i, data: { photos: [], notes: "", ...eq } }); };
 
   const save = () => {
     const d = modal.data;
@@ -1309,62 +1399,141 @@ function ClientEquipment({ client, onChange }) {
     onChange(next);
     setModal(null);
   };
+
   const remove = () => {
     onChange(equipment.filter((_, i) => i !== modal.index));
     setModal(null);
   };
 
   const setD = (k, v) => setModal(m => ({ ...m, data: { ...m.data, [k]: v } }));
-  const field = { width: "100%", padding: "10px 13px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
-  const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 };
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
+
+  const toggleExpand = (i) => setExpanded(e => ({ ...e, [i]: !e[i] }));
 
   return (
     <Card>
-      <CardHeader title={`Equipment (${equipment.length})`} action={perms.editClients ? <Btn sm onClick={openAdd}>+ Add</Btn> : null} />
+      <CardHeader title={`Equipment (${equipment.length})`} action={perms.editClients ? <Btn sm onClick={openAdd} style={{ gap: 5 }}><Icon name="plus" size={13} /> Add</Btn> : null} />
+
       {equipment.length === 0 && (
-        <div style={{ padding: "28px 18px", textAlign: "center", color: T.textMuted }}>
+        <div style={{ padding: "32px 18px", textAlign: "center", color: T.textMuted }}>
           <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="settings" size={26} /></div>
-          <div style={{ fontSize: 13 }}>No equipment yet. Tap "+ Add" to log a pump, filter, or other gear.</div>
+          <div style={{ fontSize: 13 }}>No equipment logged yet. Tap Add to document a pump, filter, or other gear.</div>
         </div>
       )}
-      {equipment.map((eq, i) => (
-        <div key={i} onClick={() => openEdit(eq, i)}
-          style={{ padding: "14px 18px", borderBottom: i < equipment.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: perms.editClients ? "pointer" : "default" }}>
-          <div>
-            <div style={{ fontWeight: 600, fontSize: 14, color: T.text }}>{eq.name}</div>
-            <div style={{ fontSize: 11, color: T.textMuted }}>Installed {eq.installed || "—"}</div>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-              <div style={{ width: 8, height: 8, borderRadius: "50%", background: statusColor(eq.status, T) }} />
-              <span style={{ fontSize: 12, color: T.text, fontWeight: 600 }}>{eq.status}</span>
+
+      {equipment.map((eq, i) => {
+        const isOpen = expanded[i];
+        const photos = eq.photos || [];
+        return (
+          <div key={i} style={{ borderBottom: i < equipment.length - 1 ? `1px solid ${T.border}` : "none" }}>
+            {/* Header row — tap to expand */}
+            <div onClick={() => toggleExpand(i)}
+              style={{ padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: 14, color: T.text }}>{eq.name}</div>
+                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>
+                  Installed {eq.installed || "—"}
+                  {photos.length > 0 && <span style={{ marginLeft: 8, color: T.primary }}>· {photos.length} photo{photos.length > 1 ? "s" : ""}</span>}
+                </div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: statusColor(eq.status, T), flexShrink: 0 }} />
+                  <span style={{ fontSize: 12, color: T.text, fontWeight: 600 }}>{eq.status}</span>
+                </div>
+                <div style={{ color: T.textMuted, transform: isOpen ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>
+                  <Icon name="chevronD" size={16} />
+                </div>
+              </div>
             </div>
-            <span style={{ color: T.textMuted, fontSize: 14 }}>✏️</span>
+
+            {/* Expanded detail */}
+            {isOpen && (
+              <div style={{ padding: "0 18px 16px", display: "flex", flexDirection: "column", gap: 14 }}>
+                {/* Photos */}
+                {perms.editClients ? (
+                  <PhotoPicker
+                    photos={photos}
+                    onChange={newPhotos => {
+                      const next = equipment.map((e2, j) => j === i ? { ...e2, photos: newPhotos } : e2);
+                      onChange(next);
+                    }}
+                    label="Equipment Photos"
+                    maxPhotos={10}
+                  />
+                ) : (
+                  photos.length > 0 && (
+                    <div>
+                      <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 8 }}>Photos</div>
+                      <PhotoStrip photos={photos} size={80} />
+                    </div>
+                  )
+                )}
+
+                {/* Condition notes */}
+                {perms.editClients ? (
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 8 }}>Condition Notes</div>
+                    <textarea
+                      value={eq.notes || ""}
+                      onChange={e => {
+                        const next = equipment.map((e2, j) => j === i ? { ...e2, notes: e.target.value } : e2);
+                        onChange(next);
+                      }}
+                      placeholder="Describe visible condition, wear, leaks, noise, etc..."
+                      style={{ width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical", minHeight: 72, lineHeight: 1.5 }}
+                    />
+                  </div>
+                ) : (
+                  eq.notes && (
+                    <div>
+                      <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 6 }}>Condition Notes</div>
+                      <div style={{ fontSize: 13, color: T.text, lineHeight: 1.6 }}>{eq.notes}</div>
+                    </div>
+                  )
+                )}
+
+                {/* Edit button */}
+                {perms.editClients && (
+                  <button onClick={() => openEdit(eq, i)}
+                    style={{ background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 11, padding: "9px 16px", fontSize: 13, fontWeight: 700, color: T.text, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 6, alignSelf: "flex-start" }}>
+                    <Icon name="edit" size={13} /> Edit Details
+                  </button>
+                )}
+              </div>
+            )}
           </div>
-        </div>
-      ))}
+        );
+      })}
 
       {modal && (
         <Modal title={modal.mode === "add" ? "Add Equipment" : "Edit Equipment"} onClose={() => setModal(null)}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <div><label style={labelStyle}>Name</label><input style={field} value={modal.data.name} onChange={e => setD("name", e.target.value)} placeholder="e.g. Aquascape 3000 Pump" autoFocus /></div>
-            <div><label style={labelStyle}>Installed</label><input style={field} value={modal.data.installed} onChange={e => setD("installed", e.target.value)} placeholder="MM/YYYY" /></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div>
+              <label style={labelStyle}>Name</label>
+              <input type="text" style={field} value={modal.data.name} onChange={e => setD("name", e.target.value)} placeholder="e.g. Aquascape 3000 Pump" autoFocus />
+            </div>
+            <div>
+              <label style={labelStyle}>Date Installed</label>
+              <input type="text" inputMode="numeric" style={field} value={modal.data.installed} onChange={e => setD("installed", e.target.value)} placeholder="MM/YYYY" />
+            </div>
             <div>
               <label style={labelStyle}>Status</label>
               <div style={{ display: "flex", gap: 8 }}>
                 {STATUSES.map(s => (
                   <button key={s} onClick={() => setD("status", s)}
-                    style={{ flex: 1, padding: "9px 6px", borderRadius: 8, border: `1.5px solid ${modal.data.status === s ? statusColor(s, T) : T.border}`, background: modal.data.status === s ? `${statusColor(s, T)}14` : T.surface, color: modal.data.status === s ? statusColor(s, T) : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                    style={{ flex: 1, padding: "10px 6px", borderRadius: 11, border: `1.5px solid ${modal.data.status === s ? statusColor(s, T) : T.border}`, background: modal.data.status === s ? `${statusColor(s, T)}14` : T.surface, color: modal.data.status === s ? statusColor(s, T) : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
                     {s}
                   </button>
                 ))}
               </div>
             </div>
-            <Btn onClick={save} style={{ width: "100%", padding: "12px", borderRadius: 12, marginTop: 4 }}>
-              {modal.mode === "add" ? "Add Equipment" : "Save Changes"}
-            </Btn>
+            <Btn onClick={save} block lg>{modal.mode === "add" ? "Add Equipment" : "Save Changes"}</Btn>
             {modal.mode === "edit" && (
-              <button onClick={remove} style={{ background: "none", border: "none", color: "#C0392B", fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 6, fontFamily: "inherit" }}>Delete this equipment</button>
+              <button onClick={remove} style={{ background: "none", border: "none", color: "#C0392B", fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 6, fontFamily: "inherit", textAlign: "center" }}>
+                Delete this equipment
+              </button>
             )}
           </div>
         </Modal>
@@ -1429,7 +1598,7 @@ function HistoryEditModal({ entry, onSave, onClose }) {
       <span style={{ fontSize: 13, color: T.text }}>{label}</span>
       <div style={{ position: "relative", width: 100 }}>
         <span style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
-        <input value={val} onChange={e => setter(e.target.value.replace(/[^\d.]/g, ""))} style={{ width: "100%", padding: "7px 8px 7px 20px", border: `1px solid ${T.border}`, borderRadius: 7, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
+        <input type="text" inputMode="decimal" value={val} onChange={e => setter(e.target.value.replace(/[^\d.]/g, ""))} style={{ width: "100%", padding: "7px 8px 7px 20px", border: `1px solid ${T.border}`, borderRadius: 7, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
       </div>
     </div>
   );
@@ -1566,7 +1735,7 @@ function ClientHistory({ client, onChange }) {
               )}
 
               {h.treatmentsUsed && h.treatmentsUsed.length > 0 && (
-                <div style={{ marginTop: 12, fontSize: 12, color: T.textMuted }}>🧪 {h.treatmentsUsed.map(t => `${t.name} (${t.oz}oz)`).join(", ")}</div>
+                <div style={{ marginTop: 12, fontSize: 12, color: T.textMuted, display:"flex", alignItems:"center", gap:5 }}><Icon name="info" size={12} /> {h.treatmentsUsed.map(t => `${t.name} (${t.oz}oz)`).join(", ")}</div>
               )}
 
               {h.photos && h.photos.length > 0 && (
@@ -1576,7 +1745,7 @@ function ClientHistory({ client, onChange }) {
               {b && perms.seeProfit && (
                 <details style={{ marginTop: 14, background: T.surfaceAlt, borderRadius: 10, padding: "10px 12px" }}>
                   <summary style={{ cursor: "pointer", fontSize: 12, fontWeight: 700, color: T.text, listStyle: "none" }}>
-                    💵 Profitability — {b.profit >= 0 ? "Profit" : "Loss"} {money(Math.abs(b.profit))} ({(b.margin || 0).toFixed(0)}%)
+                    Profitability — {b.profit >= 0 ? "Profit" : "Loss"} {money(Math.abs(b.profit))} ({(b.margin || 0).toFixed(0)}%)
                   </summary>
                   <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 5 }}>
                     {[["Revenue", b.revenue, false],["Labor", b.labor, true],["Treatments", b.treatment, true],["Products", b.product, true],["Gas", b.gas, true],["Insurance", b.insurance, true],["Equipment", b.equipment, true],["Overhead", b.overhead, true]].map(([k, v, neg]) => (
@@ -1607,47 +1776,162 @@ function ClientHistory({ client, onChange }) {
 function ClientPortal({ client, invoices, schedule, branding }) {
   const { T } = useApp();
   const [preview, setPreview] = useState(false);
+  const [inviteState, setInviteState] = useState("idle"); // idle | sending | sent | error
+  const [inviteMsg, setInviteMsg] = useState("");
   const [copied, setCopied] = useState(false);
   const hasEmail = !!(client.email || "").trim();
   const appUrl = window.location.origin;
+  const firstName = client.name.split(" ")[0];
 
   const copyLink = () => {
     try { navigator.clipboard?.writeText(appUrl); } catch (e) {}
     setCopied(true);
-    setTimeout(() => setCopied(false), 1800);
+    setTimeout(() => setCopied(false), 2000);
   };
+
+  const sendInvite = async () => {
+    if (!hasEmail || inviteState === "sending") return;
+    setInviteState("sending");
+    setInviteMsg("");
+    try {
+      // signInWithOtp with shouldCreateUser:true creates the account if it
+      // doesn't exist yet AND sends the magic link — one call does both.
+      const { error } = await supabase.auth.signInWithOtp({
+        email: client.email.trim(),
+        options: {
+          shouldCreateUser: true,
+          emailRedirectTo: appUrl,
+          data: { name: client.name },
+        },
+      });
+      if (error) {
+        setInviteState("error");
+        setInviteMsg(error.message);
+      } else {
+        setInviteState("sent");
+      }
+    } catch (e) {
+      setInviteState("error");
+      setInviteMsg("Something went wrong. Check your connection and try again.");
+    }
+  };
+
+  const resetInvite = () => { setInviteState("idle"); setInviteMsg(""); };
 
   return (
     <>
-      <Card>
-        <div style={{ padding: 24 }}>
-          <div style={{ display: "flex", gap: 14, alignItems: "center", marginBottom: 18 }}>
-            <div style={{ width: 52, height: 52, borderRadius: 14, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="mobile" size={26} /></div>
-            <div>
-              <div style={{ fontWeight: 800, fontSize: 16, color: T.text }}>Client Portal</div>
-              <div style={{ fontSize: 12, color: T.textMuted }}>Preview exactly what {client.name.split(" ")[0]} sees</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+
+        {/* Invite card */}
+        <Card>
+          <div style={{ padding: "20px 20px" }}>
+            <div style={{ display: "flex", gap: 14, alignItems: "center", marginBottom: 18 }}>
+              <div style={{ width: 46, height: 46, borderRadius: 13, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                <Icon name="mail" size={22} />
+              </div>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 15, color: T.text, letterSpacing: "-0.01em" }}>Client Portal Access</div>
+                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>Send {firstName} a login link to their portal</div>
+              </div>
             </div>
+
+            {/* No email warning */}
+            {!hasEmail && (
+              <div style={{ background: hexA(T.warning, 0.08), border: `1px solid ${hexA(T.warning, 0.25)}`, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.warning, display: "flex", alignItems: "flex-start", gap: 9, marginBottom: 0 }}>
+                <Icon name="warning" size={15} />
+                <span>No email on file. Add {firstName}'s email in Edit before sending an invite.</span>
+              </div>
+            )}
+
+            {/* Email on file + invite controls */}
+            {hasEmail && (
+              <>
+                {/* Email display */}
+                <div style={{ background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 11, padding: "10px 14px", fontSize: 13, color: T.textMuted, display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+                  <Icon name="mail" size={14} />
+                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{client.email}</span>
+                  <button onClick={copyLink} style={{ background: "none", border: "none", color: T.primary, fontWeight: 600, fontSize: 11, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, display:"flex", alignItems:"center", gap:4 }}>
+                    <Icon name="link" size={11} />{copied ? "Copied!" : "Copy link"}
+                  </button>
+                </div>
+
+                {/* Idle state — send button */}
+                {inviteState === "idle" && (
+                  <Btn onClick={sendInvite} block style={{ gap: 8 }}>
+                    <Icon name="mail" size={15} /> Send Login Invite to {firstName}
+                  </Btn>
+                )}
+
+                {/* Sending */}
+                {inviteState === "sending" && (
+                  <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: "13px", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, fontSize: 14, color: T.textMuted }}>
+                    <div style={{ width: 16, height: 16, border: `2px solid ${T.border}`, borderTopColor: T.primary, borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />
+                    Sending invite...
+                  </div>
+                )}
+
+                {/* Sent success */}
+                {inviteState === "sent" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                    <div style={{ background: hexA("#16a34a", 0.08), border: `1px solid ${hexA("#16a34a", 0.2)}`, borderRadius: 12, padding: "14px 16px", display: "flex", alignItems: "flex-start", gap: 10 }}>
+                      <div style={{ color: "#16a34a", flexShrink: 0, marginTop: 1 }}><Icon name="check" size={16} /></div>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: "#16a34a", marginBottom: 3 }}>Invite sent to {firstName}</div>
+                        <div style={{ fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>They'll receive a login link at <b>{client.email}</b>. The link is valid for 1 hour. You can resend anytime.</div>
+                      </div>
+                    </div>
+                    <Btn variant="ghost" onClick={resetInvite} block style={{ gap: 6 }}>
+                      <Icon name="refresh" size={13} /> Resend Invite
+                    </Btn>
+                  </div>
+                )}
+
+                {/* Error */}
+                {inviteState === "error" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                    <div style={{ background: hexA(T.warning, 0.08), border: `1px solid ${hexA(T.warning, 0.25)}`, borderRadius: 12, padding: "14px 16px", display: "flex", alignItems: "flex-start", gap: 10 }}>
+                      <div style={{ color: T.warning, flexShrink: 0, marginTop: 1 }}><Icon name="warning" size={16} /></div>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: T.warning, marginBottom: 3 }}>Invite failed</div>
+                        <div style={{ fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>{inviteMsg || "Something went wrong. Try again."}</div>
+                      </div>
+                    </div>
+                    <Btn onClick={sendInvite} block style={{ gap: 8 }}>
+                      <Icon name="mail" size={15} /> Try Again
+                    </Btn>
+                  </div>
+                )}
+              </>
+            )}
           </div>
+        </Card>
 
-          {!hasEmail && (
-            <div style={{ background: hexA(T.warning, 0.1), border: `1px solid ${hexA(T.warning, 0.3)}`, borderRadius: 10, padding: "10px 14px", fontSize: 12, color: T.warning, marginBottom: 16, display: "flex", gap: 8 }}>
-              <Icon name="warning" size={14} />
-              <span>No email on file. Add this client's email in Edit so they can log in.</span>
-            </div>
-          )}
+        {/* How it works */}
+        <Card>
+          <CardHeader title="How it works" />
+          <div style={{ padding: "16px 18px", display: "flex", flexDirection: "column", gap: 14 }}>
+            {[
+              { icon: "mail",    text: "Tap Send Invite — we email them a secure login link" },
+              { icon: "mobile",  text: `${firstName} taps the link and lands directly in their portal` },
+              { icon: "history", text: "They see their service history, invoices, and can request service" },
+              { icon: "check",   text: "They stay logged in — no password, no friction" },
+            ].map((step, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+                <div style={{ width: 32, height: 32, borderRadius: 9, background: hexA(T.primary, 0.08), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <Icon name={step.icon} size={16} />
+                </div>
+                <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5, paddingTop: 6 }}>{step.text}</div>
+              </div>
+            ))}
+          </div>
+        </Card>
 
-          {hasEmail && (
-            <div style={{ background: T.surfaceAlt, borderRadius: 8, padding: "10px 14px", fontSize: 12, color: T.textMuted, marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="mail" size={13} />{client.email}</span>
-              <button onClick={copyLink} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>{copied ? "✓ Copied link" : "Copy app link"}</button>
-            </div>
-          )}
+        {/* Preview button */}
+        <Btn variant="ghost" onClick={() => setPreview(true)} block style={{ gap: 8 }}>
+          <Icon name="eye" size={15} /> Preview as {firstName}
+        </Btn>
 
-          <Btn onClick={() => setPreview(true)} style={{ width: "100%", padding: "13px", borderRadius: 12, marginBottom: 0, display:"flex", alignItems:"center", justifyContent:"center", gap:7 }}>
-            <Icon name="eye" size={15} /> Preview as {client.name.split(" ")[0]}
-          </Btn>
-        </div>
-      </Card>
+      </div>
 
       {preview && (
         <StaffClientPreview
@@ -1715,147 +1999,97 @@ function StaffClientPreview({ client, invoices, schedule, branding, onClose }) {
 // ─────────────────────────────────────────────
 function OnMyWayModal({ stop, client, email, onClose, onSent }) {
   const { T, branding } = useApp();
-  const trackLink = (email && email.trackLink) || "";
 
-  // GPS state: locating | ready
-  const [gpsState, setGpsState] = useState("locating");
-  const [baseEta, setBaseEta] = useState(0);   // auto-calculated drive time (min)
-  const [buffer, setBuffer] = useState(0);      // extra minutes the driver adds
-
-  // Simulate a GPS lookup that returns a drive-time ETA.
-  // In production this is replaced by a real distance/traffic API call.
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      // mock: derive a believable ETA from GPS distance + traffic
-      const mockMinutes = 8 + Math.floor(Math.random() * 18); // 8–25 min
-      setBaseEta(mockMinutes);
-      setGpsState("ready");
-    }, 1400);
-    return () => clearTimeout(timer);
-  }, []);
-
-  const totalEta = baseEta + buffer;
+  // ETA is set manually by the tech — auto-calc via Google Maps wired in later
+  const [eta, setEta] = useState(15); // default 15 min
   const firstName = client?.name?.split(" ")[0] || "there";
   const phone = client?.phone?.replace(/\D/g, "") || "";
 
-  // arrival clock time
-  const arrival = new Date(Date.now() + totalEta * 60000);
+  const arrival = new Date(Date.now() + eta * 60000);
   const arrivalStr = arrival.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 
   const message = (() => {
     const tpl = (email && email.smsOnMyWay) || DEFAULT_EMAIL.smsOnMyWay;
-    const trackText = trackLink ? `Track my live location here: ${trackLink} — ` : "";
     return tpl
       .replace(/\{first\}/g, firstName)
       .replace(/\{sender\}/g, (email && email.senderName) || (email && email.fromName) || branding.companyName)
       .replace(/\{company\}/g, branding.companyName)
-      .replace(/\{eta\}/g, String(totalEta))
+      .replace(/\{eta\}/g, String(eta))
       .replace(/\{arrival\}/g, arrivalStr)
-      .replace(/\{track\}/g, trackText);
+      .replace(/\{track\}/g, "");
   })();
 
   const handleSend = () => {
+    if (!phone) return;
     const smsUrl = `sms:${phone}${/iPhone|iPad|iPod/i.test(navigator.userAgent) ? "&" : "?"}body=${encodeURIComponent(message)}`;
     window.open(smsUrl, "_blank");
     onSent();
     onClose();
   };
 
-  const QUICK_ADD = [5, 10, 15, 30];
+  const QUICK_MINS = [10, 15, 20, 30, 45, 60];
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={onClose}>
       <div onClick={e => e.stopPropagation()}
-        style={{ background: T.surface, borderRadius: "20px 20px 0 0", width: "100%", maxWidth: 600, padding: "24px 20px 36px", boxShadow: "0 -8px 40px rgba(0,0,0,0.2)" }}>
+        style={{ background: T.surface, borderRadius: "22px 22px 0 0", width: "100%", maxWidth: 600, padding: "20px 20px calc(28px + env(safe-area-inset-bottom))", boxShadow: "0 -8px 40px rgba(0,0,0,0.2)" }}>
 
-        <div style={{ width: 40, height: 4, background: T.border, borderRadius: 2, margin: "0 auto 20px" }} />
+        <div style={{ width: 36, height: 4, background: T.border, borderRadius: 2, margin: "0 auto 20px" }} />
 
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
           <div>
-            <div style={{ fontWeight: 800, fontSize: 17, color: T.text }}>On My Way</div>
+            <div style={{ fontWeight: 800, fontSize: 17, color: T.text, letterSpacing: "-0.02em" }}>On My Way</div>
             <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{client?.name} · {client?.phone}</div>
           </div>
-          <button onClick={onClose} style={{ background: T.surfaceAlt, border: "none", borderRadius: "50%", width: 32, height: 32, fontSize: 16, cursor: "pointer", color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
+          <button onClick={onClose} style={{ background: T.surfaceAlt, border: "none", borderRadius: "50%", width: 32, height: 32, cursor: "pointer", color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Icon name="close" size={16} />
+          </button>
         </div>
 
-        {/* GPS ETA display */}
-        {gpsState === "locating" ? (
-          <div style={{ background: T.surfaceAlt, borderRadius: 16, padding: "28px 20px", textAlign: "center", marginBottom: 16 }}>
-            <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-              <span style={{ display: "inline-block", width: 14, height: 14, border: `2px solid ${T.border}`, borderTopColor: T.primary, borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />
-              Calculating ETA from GPS...
+        {/* ETA display + stepper */}
+        <div style={{ background: T.surfaceAlt, borderRadius: 18, padding: "20px", marginBottom: 16 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: T.textMuted, marginBottom: 14, textAlign: "center" }}>Estimated Arrival</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+            <button onClick={() => setEta(e => Math.max(5, e - 5))}
+              style={{ width: 48, height: 48, borderRadius: 14, border: `1.5px solid ${T.border}`, background: T.surface, fontSize: 24, fontWeight: 300, color: T.text, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>−</button>
+            <div style={{ flex: 1, textAlign: "center" }}>
+              <div style={{ fontSize: 44, fontWeight: 800, color: T.text, lineHeight: 1, letterSpacing: "-0.03em" }}>{eta}<span style={{ fontSize: 18, fontWeight: 600, color: T.textMuted }}> min</span></div>
+              <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>Arriving around <strong style={{ color: T.text }}>{arrivalStr}</strong></div>
             </div>
-            <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+            <button onClick={() => setEta(e => e + 5)}
+              style={{ width: 48, height: 48, borderRadius: 14, border: `1.5px solid ${T.border}`, background: T.surface, fontSize: 24, fontWeight: 300, color: T.text, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>+</button>
           </div>
-        ) : (
-          <div style={{ background: T.surfaceAlt, borderRadius: 16, padding: "20px", marginBottom: 16, textAlign: "center" }}>
-            <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: T.textMuted, marginBottom: 6, display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
-              <span style={{ color: T.accent }}>📍</span> GPS Estimated Arrival
-            </div>
-            <div style={{ fontSize: 42, fontWeight: 800, color: T.text, lineHeight: 1 }}>{totalEta} <span style={{ fontSize: 18, fontWeight: 700, color: T.textMuted }}>min</span></div>
-            <div style={{ fontSize: 13, color: T.textMuted, marginTop: 6 }}>
-              Arriving around <strong style={{ color: T.text }}>{arrivalStr}</strong>
-            </div>
-            {buffer > 0 && (
-              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>
-                {baseEta} min drive + {buffer} min buffer
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Buffer controls */}
-        {gpsState === "ready" && (
-          <div style={{ marginBottom: 18 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>Add Buffer Time</div>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-              <button onClick={() => setBuffer(b => Math.max(0, b - 5))}
-                style={{ width: 44, height: 44, borderRadius: 12, border: `1.5px solid ${T.border}`, background: T.surface, fontSize: 22, fontWeight: 700, color: T.text, cursor: "pointer", flexShrink: 0 }}>−</button>
-              <div style={{ flex: 1, textAlign: "center", background: T.surface, border: `1.5px solid ${T.border}`, borderRadius: 12, padding: "10px", fontSize: 15, fontWeight: 700, color: buffer > 0 ? T.primary : T.textMuted }}>
-                +{buffer} min
-              </div>
-              <button onClick={() => setBuffer(b => b + 5)}
-                style={{ width: 44, height: 44, borderRadius: 12, border: `1.5px solid ${T.border}`, background: T.surface, fontSize: 22, fontWeight: 700, color: T.text, cursor: "pointer", flexShrink: 0 }}>+</button>
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              {QUICK_ADD.map(m => (
-                <button key={m} onClick={() => setBuffer(m)}
-                  style={{ flex: 1, padding: "8px", borderRadius: 20, border: `1.5px solid ${buffer === m ? T.primary : T.border}`, background: buffer === m ? T.navActiveBg : T.surface, color: buffer === m ? T.primary : T.text, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-                  +{m}
-                </button>
+          <div style={{ display: "flex", gap: 7 }}>
+            {QUICK_MINS.map(m => (
+              <button key={m} onClick={() => setEta(m)}
+                style={{ flex: 1, padding: "7px 2px", borderRadius: 10, border: `1.5px solid ${eta === m ? T.primary : T.border}`, background: eta === m ? hexA(T.primary, 0.1) : T.surface, color: eta === m ? T.primary : T.textMuted, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>
+                {m}
+              </button>
               ))}
-              {buffer > 0 && (
-                <button onClick={() => setBuffer(0)}
-                  style={{ padding: "8px 14px", borderRadius: 20, border: `1.5px solid ${T.border}`, background: T.surface, color: T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-                  Reset
-                </button>
-              )}
-            </div>
-            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 8 }}>Grabbing lunch or gas? Pad the ETA so the client isn't left waiting.</div>
           </div>
-        )}
+        </div>
 
         {/* Message preview */}
-        {gpsState === "ready" && (
-          <div style={{ marginBottom: 18 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 8 }}>Message Preview</div>
-            <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: "14px 16px", fontSize: 13, color: T.text, lineHeight: 1.6, position: "relative" }}>
-              <div style={{ position: "absolute", top: -6, left: 16, width: 12, height: 12, background: T.surfaceAlt, transform: "rotate(45deg)", borderRadius: 2 }} />
-              {message}
-            </div>
-            {trackLink && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 8, display: "flex", alignItems: "center", gap: 5 }}>
-              <Icon name="link" size={14} /> Includes live tracking link
-            </div>}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 8 }}>Message Preview</div>
+          <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: "14px 16px", fontSize: 13, color: T.text, lineHeight: 1.6 }}>
+            {message}
           </div>
-        )}
+          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>Stopping for gas or lunch? Adjust the time above so the client isn't left waiting.</div>
+        </div>
 
         {/* Actions */}
+        {!phone && (
+          <div style={{ background: hexA(T.warning, 0.08), border: `1px solid ${hexA(T.warning, 0.25)}`, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.warning, marginBottom: 14, display: "flex", gap: 8 }}>
+            <Icon name="warning" size={14} /> No phone number on file for this client.
+          </div>
+        )}
         <div style={{ display: "flex", gap: 10 }}>
-          <Btn onClick={handleSend} style={{ flex: 1, padding: "13px", fontSize: 14, borderRadius: 12, opacity: gpsState === "ready" ? 1 : 0.5, pointerEvents: gpsState === "ready" ? "auto" : "none" }}>
-            <span style={{ display:"flex", alignItems:"center", gap:6 }}><Icon name="message" size={15} /> Open in Messages</span>
+          <Btn onClick={handleSend} disabled={!phone} block style={{ flex: 1, gap: 7 }}>
+            <Icon name="message" size={15} /> Send via Messages
           </Btn>
           <button onClick={onClose}
-            style={{ background: T.surfaceAlt, border: "none", borderRadius: 12, padding: "13px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer", color: T.text, fontFamily: "inherit" }}>
+            style={{ background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "13px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer", color: T.text, fontFamily: "inherit" }}>
             Cancel
           </button>
         </div>
@@ -1873,8 +2107,8 @@ function PhotoViewer({ photos, index, onClose }) {
   const next = (e) => { e.stopPropagation(); setI(x => (x + 1) % photos.length); };
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)", zIndex: 400, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <button onClick={onClose} style={{ position: "absolute", top: 16, right: 16, background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 38, height: 38, fontSize: 18, cursor: "pointer" }}>✕</button>
-      {photos.length > 1 && <button onClick={prev} style={{ position: "absolute", left: 12, background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 42, height: 42, fontSize: 22, cursor: "pointer" }}>‹</button>}
+      <button onClick={onClose} style={{ position: "absolute", top: 16, right: 16, background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 38, height: 38, cursor: "pointer", display:"flex", alignItems:"center", justifyContent:"center" }}><Icon name="close" size={18} /></button>
+      {photos.length > 1 && <button onClick={prev} style={{ position: "absolute", left: 12, background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 42, height: 42, cursor: "pointer", display:"flex", alignItems:"center", justifyContent:"center" }}><Icon name="back" size={20} /></button>}
       <img src={photos[i]} alt="" style={{ maxWidth: "92%", maxHeight: "82%", borderRadius: 10, objectFit: "contain" }} onClick={e => e.stopPropagation()} />
       {photos.length > 1 && <button onClick={next} style={{ position: "absolute", right: 12, background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 42, height: 42, fontSize: 22, cursor: "pointer" }}>›</button>}
       <div style={{ position: "absolute", bottom: 20, color: "rgba(255,255,255,0.7)", fontSize: 13 }}>{i + 1} / {photos.length}</div>
@@ -2062,8 +2296,8 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
           </div>
           <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 18, lineHeight: 1.5 }}>Send the client their report:</div>
           <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
-            <Btn onClick={sendEmail} style={{ flex: 1, padding: "13px", borderRadius: 12 }} style={{ display:"flex", alignItems:"center", gap:6 }}><Icon name="mail" size={14} /> Email Report</Btn>
-            <Btn onClick={sendText} variant="ghost" style={{ flex: 1, padding: "13px", borderRadius: 12 }}>💬 Text Report</Btn>
+            <Btn onClick={sendEmail} style={{ flex: 1, padding: "13px", borderRadius: 12, display:"flex", alignItems:"center", gap:6 }}><Icon name="mail" size={14} /> Email Report</Btn>
+            <Btn onClick={sendText} variant="ghost" style={{ flex: 1, padding: "13px", borderRadius: 12, display:"flex", alignItems:"center", gap:6 }}><Icon name="message" size={14} /> Text Report</Btn>
           </div>
           <button onClick={onClose} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 8, fontFamily: "inherit" }}>Done</button>
         </div>
@@ -2142,7 +2376,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
                 border: `1px solid ${t.done ? hexA(T.accent, 0.35) : "transparent"}`, transition: "all .15s" }}>
               <span style={{ width: 22, height: 22, borderRadius: "50%", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
                 background: t.done ? T.accent : "transparent", border: `2px solid ${t.done ? T.accent : T.border}`, transition: "all .15s" }}>
-                {t.done && <span style={{ color: "#fff", fontSize: 12, fontWeight: 800, lineHeight: 1 }}>✓</span>}
+                {t.done && <Icon name="check" size={12} />}
               </span>
               <span style={{ flex: 1, fontSize: 14, fontWeight: t.done ? 500 : 600, color: t.done ? T.textMuted : T.text, textDecoration: t.done ? "line-through" : "none", transition: "all .15s" }}>{t.text}</span>
               {t.done
@@ -2153,7 +2387,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
           {checklist.length === 0 && <div style={{ fontSize: 12, color: T.textMuted }}>No tasks yet — add what needs to get done below.</div>}
         </div>
         <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-          <input value={newTask} onChange={e => setNewTask(e.target.value)} onKeyDown={e => e.key === "Enter" && addTask()} placeholder="Add a task..."
+          <input type="text" value={newTask} onChange={e => setNewTask(e.target.value)} onKeyDown={e => e.key === "Enter" && addTask()} placeholder="Add a task..."
             style={{ flex: 1, padding: "10px 13px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
           <Btn sm onClick={addTask} style={{ padding: "10px 16px" }}>Add</Btn>
         </div>
@@ -2264,7 +2498,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
       <div style={sectionGap}>
         <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", marginBottom: officeFlag ? 10 : 0 }}>
           <Checkbox checked={officeFlag} onChange={() => setOfficeFlag(f => !f)} accent={T.warning} />
-          <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>🚩 Flag for office attention</span>
+          <span style={{ display:"flex", alignItems:"center", gap:6, fontSize: 13, fontWeight: 700, color: T.text }}><Icon name="warning" size={14} /> Flag for office attention</span>
         </label>
         {officeFlag && (
           <>
@@ -2307,7 +2541,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
             <span style={{ fontSize: 13, color: T.text }}>{k}</span>
             <div style={{ position: "relative", width: 90 }}>
               <span style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
-              <input value={val} onChange={e => setter(e.target.value.replace(/[^\d.]/g, ""))} style={{ width: "100%", padding: "6px 8px 6px 20px", border: `1px solid ${T.border}`, borderRadius: 7, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
+              <input type="text" inputMode="decimal" value={val} onChange={e => setter(e.target.value.replace(/[^\d.]/g, ""))} style={{ width: "100%", padding: "6px 8px 6px 20px", border: `1px solid ${T.border}`, borderRadius: 7, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
             </div>
           </div>
         ))}
@@ -2424,7 +2658,7 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
         <label style={labelStyle}>Client(s) — {selClientIds.length} selected</label>
         <div style={{ position: "relative", marginBottom: 8 }}>
           <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>🔍</span>
-          <input placeholder="Search clients..." value={clientSearch} onChange={e => setClientSearch(e.target.value)}
+          <input type="search" placeholder="Search clients..." value={clientSearch} onChange={e => setClientSearch(e.target.value)}
             style={{ width: "100%", padding: "9px 12px 9px 34px", border: `1px solid ${T.border}`, borderRadius: 9, fontSize: 13, boxSizing: "border-box", outline: "none", fontFamily: "inherit", color: T.text, background: T.surface }} />
         </div>
         <div style={{ maxHeight: 160, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, border: `1px solid ${T.border}`, borderRadius: 10, padding: 6 }}>
@@ -2581,7 +2815,7 @@ function HeadHereModal({ stop, client, email, onClose }) {
   })();
   const smsHref = phone ? `sms:${phone}${/iPhone|iPad|iPod/.test(navigator.userAgent) ? "&" : "?"}body=${encodeURIComponent(msg)}` : null;
   const openMap = (app) => { try { localStorage.setItem("sps_map_app", app); } catch {} setPref(app); };
-  const mapApps = [{ key: "apple", label: "Apple Maps", icon: "🍎" }, { key: "google", label: "Google Maps", icon: "🔵" }, { key: "waze", label: "Waze", icon: "💜" }];
+  const mapApps = [{ key: "apple", label: "Apple Maps", icon: "A" }, { key: "google", label: "Google Maps", icon: "G" }, { key: "waze", label: "Waze", icon: "💜" }];
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10, display: "block" };
   return (
     <Modal title={`Head to ${stop.client || "Stop"}`} onClose={onClose}>
@@ -2597,7 +2831,7 @@ function HeadHereModal({ stop, client, email, onClose }) {
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {mapApps.map(a => (
               <Btn key={a.key} href={buildMapUrl(addr, a.key)} variant={pref === a.key ? "primary" : "ghost"} block onClick={() => openMap(a.key)}>
-                {a.icon} {a.label}{pref === a.key ? " ✓" : ""}
+                {a.label}{pref === a.key ? " ✓" : ""}
               </Btn>
             ))}
           </div>
@@ -2684,11 +2918,61 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
 
   const closeAdd = () => { setShowAdd(false); if (clearSeed) clearSeed(); };
 
+  // ── Route optimization (nearest-neighbor using ZIP codes as proxy) ──
+  // When Google Maps API is connected, swap the distance function for real geodistance
+  const [optimizing, setOptimizing] = useState(false);
+  const [optimizeMsg, setOptimizeMsg] = useState("");
+
+  const extractZip = (address) => {
+    const m = (address || "").match(/\b(\d{5})\b/);
+    return m ? parseInt(m[1]) : 0;
+  };
+
+  const zipDistance = (a, b) => {
+    // proxy: difference in ZIP codes as rough geographic distance
+    // good enough for same-region routes; replaced by real lat/lng when Maps API is ready
+    return Math.abs(extractZip(a) - extractZip(b));
+  };
+
+  const nearestNeighbor = (stops, clients) => {
+    if (stops.length <= 1) return stops;
+    const getAddr = (s) => {
+      const c = clients.find(c => c.id === s.clientId);
+      return s.address || c?.address || "";
+    };
+    const remaining = [...stops];
+    const ordered = [remaining.shift()]; // start with first stop (approximate start location)
+    while (remaining.length) {
+      const last = ordered[ordered.length - 1];
+      let bestIdx = 0;
+      let bestDist = Infinity;
+      remaining.forEach((s, i) => {
+        const d = zipDistance(getAddr(last), getAddr(s));
+        if (d < bestDist) { bestDist = d; bestIdx = i; }
+      });
+      ordered.push(remaining.splice(bestIdx, 1)[0]);
+    }
+    return ordered;
+  };
+
+  const optimizeRoute = (date, techKey, currentStops) => {
+    setOptimizing(true);
+    const optimized = nearestNeighbor(currentStops, clients);
+    setSchedule(prev => prev.map(d => {
+      if (d.date !== date) return d;
+      const otherStops = d.stops.filter(s => {
+        if (techKey === "__all") return false;
+        if (techKey === "__un") return (s.assignee || "__un") !== "__un";
+        return s.assignee !== techKey;
+      });
+      return { ...d, stops: [...otherStops, ...optimized] };
+    }));
+    setOptimizeMsg("Route optimized");
+    setTimeout(() => { setOptimizing(false); setOptimizeMsg(""); }, 2000);
+  };
+
   // ── Route-dashboard state + helpers ──
-  const [selectedDate, setSelectedDate] = useState(() => {
-    const t = todayMDY();
-    return schedule.some(d => d.date === t) ? t : (schedule[0] ? schedule[0].date : t);
-  });
+  const [selectedDate, setSelectedDate] = useState(() => todayMDY());
   const [viewTech, setViewTech] = useState(null); // null = dashboard; else assignee key / "__un" / "__all"
   const LEG_MIN = 15; // assumed drive time between stops (estimate until GPS/maps is connected)
   const AVG_MPH = 28;
@@ -2789,12 +3073,12 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontWeight: 700, fontSize: 14, color: T.text, display: "flex", alignItems: "center", gap: 6 }}>
-                {isComplete && <span style={{ color: T.accent }}>✓</span>}{s.client}
+                {isComplete && <span style={{ color: T.accent, marginRight: 4, display:"inline-flex", verticalAlign:"middle" }}><Icon name="check" size={13} /></span>}{s.client}
               </div>
               {cfg.showAddress && <div style={{ fontSize: 12, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.address}</div>}
               {cfg.showServices && s.services && s.services.length > 0 ? (
                 <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  🧰 {s.services.map(sv => typeof sv === "string" ? sv : `${sv.name}${sv.price ? ` $${sv.price}` : ""}`).join(" · ")}
+                  {s.services.map(sv => typeof sv === "string" ? sv : `${sv.name}${sv.price ? ` $${sv.price}` : ""}`).join(" · ")}
                 </div>
               ) : null}
             </div>
@@ -2812,7 +3096,7 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
               {isComplete ? (
                 <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: T.accent, fontWeight: 700 }}><Icon name="check" size={13} /> Completed · Report saved</div>
               ) : sent ? (
-                <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: T.accent, fontWeight: 700 }}><span>📍</span> Client notified</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: T.accent, fontWeight: 700 }}><Icon name="check" size={13} /> Client notified</div>
               ) : (
                 <div style={{ fontSize: 12, color: T.textMuted }}>Not yet started</div>
               )}
@@ -2830,7 +3114,7 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
                 {perms.completeStops && (
                   <button onClick={e => { e.stopPropagation(); setCompleteModal({ stop: s, client: c }); }}
                     style={{ background: isComplete ? "transparent" : T.accent, color: isComplete ? T.accent : "#fff", border: isComplete ? `1.5px solid ${T.accent}` : "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-                    ✓ {isComplete ? "Re-send" : "Complete"}
+                    <span style={{ display:"flex", alignItems:"center", gap:4 }}><Icon name="check" size={13} /> {isComplete ? "Re-send" : "Complete"}</span>
                   </button>
                 )}
               </div>
@@ -2967,8 +3251,18 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
         return (
           <div style={{ paddingBottom: nextStop ? 80 : 0 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 0 12px" }}>
-              <button onClick={() => setViewTech(null)} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", padding: 0, display: "flex", alignItems: "center", gap: 4 }}>‹ All routes</button>
-              <span style={{ fontSize: 12, color: T.textMuted, fontWeight: 600 }}>{stripDate(selectedDate)}{isToday ? " · Today" : ""}</span>
+              <button onClick={() => setViewTech(null)} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
+                <Icon name="back" size={14} /> All routes
+              </button>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 12, color: T.textMuted, fontWeight: 600 }}>{stripDate(selectedDate)}{isToday ? " · Today" : ""}</span>
+                {perms.editSchedule && stops.length > 1 && (
+                  <button onClick={() => optimizeRoute(selectedDate, viewTech, stops)}
+                    style={{ background: hexA(T.primary, 0.1), border: `1px solid ${hexA(T.primary, 0.2)}`, color: T.primary, borderRadius: 10, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5 }}>
+                    <Icon name="refresh" size={13} /> Optimize Route
+                  </button>
+                )}
+              </div>
             </div>
 
             <div style={{ background: T.surface, borderRadius: 18, boxShadow: T.shadow, padding: "16px 18px", marginBottom: 16, display: "flex", alignItems: "center", gap: 16 }}>
@@ -3383,8 +3677,7 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
           <div style={{ display: "flex", gap: 10 }}>
             <div style={{ flex: 1 }}><label style={labelStyle}>Sender Name</label><input style={field} value={email.senderName || ""} onChange={e => set("senderName", e.target.value)} placeholder="Brandon" /></div>
           </div>
-          <div><label style={labelStyle}>Live Tracking Link <span style={{ textTransform: "none", color: T.textMuted, fontWeight: 400 }}>(optional)</span></label><input style={field} value={email.trackLink || ""} onChange={e => set("trackLink", e.target.value)} placeholder="Leave blank to omit tracking" /></div>
-          <div><label style={labelStyle}>"On My Way" Text</label><textarea style={{ ...field, resize: "vertical" }} rows={3} value={email.smsOnMyWay || ""} onChange={e => set("smsOnMyWay", e.target.value)} /></div>
+          <div><label style={labelStyle}>Live Tracking Link <span style={{ textTransform: "none", color: T.textMuted, fontWeight: 400 }}>(optional)</span></label><input type="url" style={field} value={email.trackLink || ""} onChange={e => set("trackLink", e.target.value)} placeholder="Leave blank until Maps API is connected" /></div>
           <div><label style={labelStyle}>Reminder Text</label><textarea style={{ ...field, resize: "vertical" }} rows={2} value={email.smsReminder || ""} onChange={e => set("smsReminder", e.target.value)} /></div>
           <div>
             <label style={labelStyle}>Text Preview</label>
@@ -3412,6 +3705,59 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
             {email.footer && <div style={{ padding: "0 16px 16px", fontSize: 11, color: T.textMuted, borderTop: `1px solid ${T.border}`, paddingTop: 12 }}>{email.footer}</div>}
           </div>
           <div style={hint}>Preview uses sample data. Real reports fill in the actual client, notes, and readings from each completed stop.</div>
+        </div>
+      </Card>
+
+      {/* Client Portal Settings */}
+      <Card style={{ marginBottom: 14 }}>
+        <CardHeader title="Client Portal" />
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: -2 }}>Controls what clients see and how they interact with your portal.</div>
+          <div>
+            <label style={labelStyle}>Welcome Message</label>
+            <textarea style={{ ...field, resize: "vertical" }} rows={2}
+              value={email.portalWelcome || ""}
+              onChange={e => set("portalWelcome", e.target.value)}
+              placeholder="e.g. Thanks for being a Stone Property Solutions client!" />
+            <div style={hint}>Shown on the client's Home tab. Leave blank to use the default greeting.</div>
+          </div>
+          <div>
+            <label style={labelStyle}>Service Request Confirmation</label>
+            <input type="text" style={field}
+              value={email.requestConfirmMsg || ""}
+              onChange={e => set("requestConfirmMsg", e.target.value)}
+              placeholder="e.g. We'll be in touch within 24 hours to confirm." />
+            <div style={hint}>Shown after a client submits a service request.</div>
+          </div>
+        </div>
+      </Card>
+
+      {/* Notifications */}
+      <Card style={{ marginBottom: 14 }}>
+        <CardHeader title="Notification Templates" />
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: -2 }}>Edit the SMS messages sent to clients. Use tags: {"{first}"} = client first name, {"{company}"} = your company, {"{eta}"} = minutes, {"{arrival}"} = clock time, {"{sender}"} = your name.</div>
+          <div>
+            <label style={labelStyle}>"On My Way" Text</label>
+            <textarea style={{ ...field, resize: "vertical" }} rows={3} value={email.smsOnMyWay || ""} onChange={e => set("smsOnMyWay", e.target.value)} />
+            {smsPreview ? (
+              <div style={{ marginTop: 8, background: T.surfaceAlt, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.text, lineHeight: 1.5, borderTopLeftRadius: 4 }}>{smsPreview}</div>
+            ) : null}
+          </div>
+          <div>
+            <label style={labelStyle}>Invoice Sent Text <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
+            <textarea style={{ ...field, resize: "vertical" }} rows={2}
+              value={email.smsInvoice || ""}
+              onChange={e => set("smsInvoice", e.target.value)}
+              placeholder={`Hi {first}, you have a new invoice from {company}. Log in to your portal to view and pay it.`} />
+          </div>
+          <div>
+            <label style={labelStyle}>Job Complete Text <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
+            <textarea style={{ ...field, resize: "vertical" }} rows={2}
+              value={email.smsComplete || ""}
+              onChange={e => set("smsComplete", e.target.value)}
+              placeholder={`Hi {first}, your {company} service is complete. Check your portal for notes and photos.`} />
+          </div>
         </div>
       </Card>
     </>
@@ -3552,8 +3898,8 @@ function CatalogManager({ catalog, setCatalog }) {
                 </div>
               </div>
               {s.description && <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6, lineHeight: 1.4 }}>{s.description}</div>}
-              {(s.products?.length > 0) && <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 3 }}>🧴 {s.products.map(productName).filter(Boolean).join(", ")}</div>}
-              {(s.tests?.length > 0) && <div style={{ fontSize: 11, color: T.textMuted }}>🧪 {s.tests.join(", ")}</div>}
+              {(s.products?.length > 0) && <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 3 }}>{s.products.map(productName).filter(Boolean).join(", ")}</div>}
+              {(s.tests?.length > 0) && <div style={{ fontSize: 11, color: T.textMuted }}>{s.tests.join(", ")}</div>}
             </div>
           ))}
         </div>
@@ -4030,7 +4376,7 @@ function ScheduleSettings({ cfg, setCfg }) {
       </Card>
 
       <div style={{ background: T.surfaceAlt, borderRadius: 10, padding: "12px 16px", fontSize: 12, color: T.textMuted, display: "flex", gap: 8 }}>
-        <span>🚚</span>
+        <Icon name="map" size={14} />
         <span>These settings apply to everyone using the schedule on this device.</span>
       </div>
     </>
@@ -4087,56 +4433,156 @@ function PermissionGroups({ value, onChange }) {
 function TeamManager({ team, setTeam, currentUserId }) {
   const { T } = useApp();
   const [modal, setModal] = useState(null); // { mode, data }
+  const [inviteState, setInviteState] = useState({}); // { [memberId]: "idle"|"sending"|"sent"|"error" }
+  const [inviteMsg, setInviteMsg] = useState({});
   const list = team || [];
-  const openAdd = () => setModal({ mode: "add", data: { id: `e${Date.now()}`, name: "", rate: "", role: "field", pin: "", email: "", perms: { ...ROLE_PRESETS.field } } });
+
+  const blankMember = () => ({ id: `e${Date.now()}`, name: "", rate: "", role: "field", pin: "", email: "", perms: { ...ROLE_PRESETS.field } });
+  const openAdd  = () => setModal({ mode: "add",  data: blankMember() });
   const openEdit = (e) => setModal({ mode: "edit", data: { perms: { ...(ROLE_PRESETS[e.role] || ROLE_PRESETS.field) }, ...e } });
   const setD = (patch) => setModal(m => ({ ...m, data: { ...m.data, ...patch } }));
+
   const save = () => {
-    const d = modal.data; if (!d.name.trim()) return;
+    const d = modal.data;
+    if (!d.name.trim()) return;
     setTeam(t => {
       const exists = (t || []).some(x => x.id === d.id);
       return exists ? t.map(x => x.id === d.id ? d : x) : [...(t || []), d];
     });
     setModal(null);
   };
-  const del = () => { setTeam(t => (t || []).filter(x => x.id !== modal.data.id)); setModal(null); };
-  const field = { width: "100%", padding: "11px 14px", border: `1px solid ${T.border}`, borderRadius: 11, fontSize: 15, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
-  const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
 
+  const del = () => {
+    setTeam(t => (t || []).filter(x => x.id !== modal.data.id));
+    setModal(null);
+  };
+
+  // Send a magic link invite to a staff member — creates their Supabase account automatically
+  const sendStaffInvite = async (member) => {
+    if (!(member.email || "").trim()) return;
+    const id = member.id;
+    setInviteState(s => ({ ...s, [id]: "sending" }));
+    setInviteMsg(s => ({ ...s, [id]: "" }));
+    try {
+      const { error } = await supabase.auth.signInWithOtp({
+        email: member.email.trim(),
+        options: {
+          shouldCreateUser: true,
+          emailRedirectTo: window.location.origin,
+          data: { name: member.name },
+        },
+      });
+      if (error) {
+        setInviteState(s => ({ ...s, [id]: "error" }));
+        setInviteMsg(s => ({ ...s, [id]: error.message }));
+      } else {
+        setInviteState(s => ({ ...s, [id]: "sent" }));
+        setInviteMsg(s => ({ ...s, [id]: `Invite sent to ${member.email}` }));
+        setTimeout(() => setInviteState(s => ({ ...s, [id]: "idle" })), 6000);
+      }
+    } catch (e) {
+      setInviteState(s => ({ ...s, [id]: "error" }));
+      setInviteMsg(s => ({ ...s, [id]: "Something went wrong. Check your connection." }));
+    }
+  };
+
+  const field = { width: "100%", padding: "11px 14px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 15, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
   const ownerCount = list.filter(m => m.role === "owner").length;
   const isLastOwner = modal && modal.data.role === "owner" && ownerCount <= 1 && list.some(m => m.id === modal.data.id && m.role === "owner");
 
   return (
     <>
       <Card style={{ marginBottom: 14 }}>
-        <CardHeader title="Team & Logins" action={<Btn sm onClick={openAdd}>+ Add</Btn>} />
-        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 8 }}>
-          <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 4 }}>Each person signs in with their own account and sees only what their role allows. Tap a member to set their role, PIN, and pay rate.</div>
-          {list.length === 0 && <div style={{ fontSize: 13, color: T.textMuted }}>No team members yet. Tap "+ Add" to create one.</div>}
-          {list.map(e => (
-            <div key={e.id} onClick={() => openEdit(e)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", background: T.surfaceAlt, borderRadius: 12, cursor: "pointer" }}>
-              <span style={{ width: 38, height: 38, borderRadius: "50%", background: e.role === "owner" ? T.primary : hexA(T.primary, 0.14), color: e.role === "owner" ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 13, flexShrink: 0 }}>{initials(e.name)}</span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{e.name} {e.id === currentUserId && <span style={{ fontSize: 11, color: T.textMuted, fontWeight: 600 }}>· you</span>}</div>
-                <div style={{ fontSize: 12, color: T.textMuted }}>{roleLabel(e.role)}{e.pin ? " · PIN set" : ""}{e.rate !== "" && e.rate != null ? ` · $${e.rate}/hr` : ""}</div>
+        <CardHeader title="Team & Logins" action={<Btn sm onClick={openAdd} style={{ gap: 5 }}><Icon name="plus" size={13} /> Add Member</Btn>} />
+        <div style={{ padding: "14px 18px", display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>
+            Add a staff member, set their role and permissions, then tap Send Invite — their Supabase account is created automatically and they get a login link by email. No backend required.
+          </div>
+
+          {list.length === 0 && (
+            <div style={{ textAlign: "center", padding: "20px", color: T.textMuted, fontSize: 13 }}>No team members yet. Tap Add Member to get started.</div>
+          )}
+
+          {list.map(e => {
+            const state = inviteState[e.id] || "idle";
+            const msg   = inviteMsg[e.id] || "";
+            const hasEmail = !!(e.email || "").trim();
+            return (
+              <div key={e.id} style={{ background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 14, overflow: "hidden" }}>
+                {/* Member row */}
+                <div onClick={() => openEdit(e)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 16px", cursor: "pointer" }}>
+                  <span style={{ width: 40, height: 40, borderRadius: "50%", background: e.role === "owner" ? T.primary : hexA(T.primary, 0.14), color: e.role === "owner" ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 13, flexShrink: 0 }}>
+                    {initials(e.name)}
+                  </span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>
+                      {e.name} {e.id === currentUserId && <span style={{ fontSize: 11, color: T.textMuted, fontWeight: 500 }}>· you</span>}
+                    </div>
+                    <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>
+                      {roleLabel(e.role)}
+                      {hasEmail ? ` · ${e.email}` : " · No email set"}
+                      {e.rate ? ` · $${e.rate}/hr` : ""}
+                    </div>
+                  </div>
+                  <Icon name="edit" size={14} />
+                </div>
+
+                {/* Invite row */}
+                <div style={{ borderTop: `1px solid ${T.border}`, padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, background: T.surface }}>
+                  {!hasEmail ? (
+                    <div style={{ fontSize: 12, color: T.textMuted, display: "flex", alignItems: "center", gap: 6 }}>
+                      <Icon name="warning" size={13} /> Add an email above to send a login invite
+                    </div>
+                  ) : state === "sent" ? (
+                    <div style={{ fontSize: 12, color: T.accent, display: "flex", alignItems: "center", gap: 6, flex: 1 }}>
+                      <Icon name="check" size={13} /> {msg}
+                    </div>
+                  ) : state === "error" ? (
+                    <div style={{ fontSize: 12, color: T.warning, flex: 1, lineHeight: 1.4 }}>{msg}</div>
+                  ) : (
+                    <div style={{ fontSize: 12, color: T.textMuted, display: "flex", alignItems: "center", gap: 6 }}>
+                      <Icon name="mail" size={13} /> {e.email}
+                    </div>
+                  )}
+                  <button
+                    onClick={() => sendStaffInvite(e)}
+                    disabled={!hasEmail || state === "sending"}
+                    style={{ background: hasEmail ? T.primary : T.surfaceAlt, color: hasEmail ? "#fff" : T.textMuted, border: "none", borderRadius: 10, padding: "7px 14px", fontSize: 12, fontWeight: 700, cursor: hasEmail ? "pointer" : "default", fontFamily: "inherit", flexShrink: 0, display: "flex", alignItems: "center", gap: 5, opacity: state === "sending" ? 0.6 : 1 }}>
+                    {state === "sending"
+                      ? <><div style={{ width: 12, height: 12, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.7s linear infinite" }} /> Sending...</>
+                      : state === "sent"
+                        ? <><Icon name="refresh" size={12} /> Resend</>
+                        : <><Icon name="mail" size={12} /> Send Invite</>
+                    }
+                  </button>
+                </div>
               </div>
-              <Icon name="edit" size={14} />
-            </div>
-          ))}
+            );
+          })}
         </div>
       </Card>
 
-      <div style={{ background: T.surfaceAlt, borderRadius: 10, padding: "12px 16px", fontSize: 12, color: T.textMuted, display: "flex", gap: 8, lineHeight: 1.5 }}>
-        <span>🔒</span>
-        <span>This is a working prototype of logins on this device. Real accounts with secure passwords that sync across phones arrive with the cloud backend at deployment.</span>
-      </div>
-
       {modal && (
         <Modal title={modal.mode === "add" ? "Add Team Member" : "Edit Team Member"} onClose={() => setModal(null)}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <div><label style={labelStyle}>Name</label><input style={field} value={modal.data.name} onChange={e => setD({ name: e.target.value })} placeholder="e.g. David" autoFocus /></div>
-            <div><label style={labelStyle}>Login Email</label><input style={field} value={modal.data.email || ""} onChange={e => setD({ email: e.target.value })} placeholder="the email they sign in with" inputMode="email" autoCapitalize="none" /></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
 
+            {/* Name */}
+            <div>
+              <label style={labelStyle}>Full Name</label>
+              <input style={field} value={modal.data.name} onChange={e => setD({ name: e.target.value })} placeholder="e.g. David Smith" autoFocus />
+            </div>
+
+            {/* Email */}
+            <div>
+              <label style={labelStyle}>Login Email</label>
+              <input style={field} value={modal.data.email || ""} onChange={e => setD({ email: e.target.value })} placeholder="their work email address" inputMode="email" autoCapitalize="none" />
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6, lineHeight: 1.5 }}>
+                This is the email they use to sign in. Once saved, tap Send Invite on their card and their Supabase account is created automatically.
+              </div>
+            </div>
+
+            {/* Role */}
             <div>
               <label style={labelStyle}>Role</label>
               <select value={modal.data.role || "field"} onChange={e => { const role = e.target.value; setD({ role, ...(role === "custom" && !modal.data.perms ? { perms: { ...ROLE_PRESETS.field } } : {}) }); }}
@@ -4144,31 +4590,29 @@ function TeamManager({ team, setTeam, currentUserId }) {
                 {MEMBER_ROLES.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
               </select>
               <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>
-                {modal.data.role === "owner" ? "Full control, including managing team and logins."
-                  : "Pick a starting role, then fine-tune the exact permissions below."}
+                {modal.data.role === "owner" ? "Full control — including team and login management."
+                  : "Pick a role, then fine-tune permissions below if needed."}
               </div>
             </div>
 
+            {/* Hourly rate */}
             <div>
-              <label style={labelStyle}>Login PIN <span style={{ textTransform: "none", color: T.textMuted, fontWeight: 400 }}>(optional)</span></label>
-              <input style={field} value={modal.data.pin || ""} onChange={e => setD({ pin: e.target.value.replace(/\D/g, "").slice(0, 6) })} placeholder="4–6 digits, or leave blank for tap-to-sign-in" inputMode="numeric" />
-            </div>
-
-            <div>
-              <label style={labelStyle}>Hourly Labor Rate <span style={{ textTransform: "none", color: T.textMuted, fontWeight: 400 }}>(optional)</span></label>
+              <label style={labelStyle}>Hourly Labor Rate <span style={{ textTransform: "none", fontWeight: 400 }}>(optional)</span></label>
               <div style={{ position: "relative" }}>
-                <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: T.textMuted }}>$</span>
-                <input style={{ ...field, paddingLeft: 24 }} value={modal.data.rate} onChange={e => setD({ rate: e.target.value.replace(/[^\d.]/g, "") })} placeholder="Leave blank for default" />
+                <span style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", fontSize: 15, color: T.textMuted }}>$</span>
+                <input style={{ ...field, paddingLeft: 28 }} value={modal.data.rate} onChange={e => setD({ rate: e.target.value.replace(/[^\d.]/g, "") })} placeholder="0.00" />
               </div>
-              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>Used to value the labor on jobs they're assigned to.</div>
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>Used to calculate job profitability on assigned stops.</div>
             </div>
 
+            {/* Permissions */}
             {modal.data.role === "owner" ? (
-              <div style={{ background: T.surfaceAlt, borderRadius: 10, padding: "11px 14px", fontSize: 12.5, color: T.textMuted, lineHeight: 1.5 }}>👑 Owners have full access to everything, including team and login management.</div>
+              <div style={{ background: hexA(T.primary, 0.08), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.text, lineHeight: 1.5 }}>
+                Owners have full access to everything including team management, all reports, and settings.
+              </div>
             ) : (
               <div>
-                <label style={{ ...labelStyle, marginBottom: 6 }}>Permissions for this login</label>
-                <div style={{ fontSize: 11.5, color: T.textMuted, marginBottom: 12, lineHeight: 1.5 }}>Toggle anything to control exactly what this person sees and can do. A new hire stays locked down; a manager can be opened up. Changes save to this login only.</div>
+                <label style={{ ...labelStyle, marginBottom: 10 }}>Permissions</label>
                 <PermissionGroups
                   value={modal.data.role === "custom" ? (modal.data.perms || {}) : (ROLE_PRESETS[modal.data.role] || ROLE_PRESETS.field)}
                   onChange={p => setD({ role: "custom", perms: p })}
@@ -4176,9 +4620,15 @@ function TeamManager({ team, setTeam, currentUserId }) {
               </div>
             )}
 
-            <Btn onClick={save} block lg style={{ borderRadius: 12 }}>{modal.mode === "add" ? "Add Member" : "Save Changes"}</Btn>
-            {modal.mode === "edit" && !isLastOwner && <button onClick={del} style={{ background: "none", border: "none", color: "#C0392B", fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 6, fontFamily: "inherit" }}>Remove this member</button>}
-            {isLastOwner && <div style={{ fontSize: 11, color: T.textMuted, textAlign: "center" }}>This is your only Owner account, so it can't be removed.</div>}
+            <Btn onClick={save} block lg>{modal.mode === "add" ? "Save Member" : "Save Changes"}</Btn>
+            {modal.mode === "edit" && !isLastOwner && (
+              <button onClick={del} style={{ background: "none", border: "none", color: "#C0392B", fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 6, fontFamily: "inherit", textAlign: "center" }}>
+                Remove {modal.data.name || "this member"}
+              </button>
+            )}
+            {isLastOwner && (
+              <div style={{ fontSize: 11, color: T.textMuted, textAlign: "center" }}>Can't remove the only Owner account.</div>
+            )}
           </div>
         </Modal>
       )}
@@ -4493,6 +4943,302 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
   );
 }
 
+// ─────────────────────────────────────────────
+// ESTIMATE BUILDER
+// ─────────────────────────────────────────────
+
+function EstimatesScreen({ clients, catalog, branding, email, invoicing, T }) {
+  const [estimates, setEstimates] = useStoredState("sps_estimates", []);
+  const [view, setView] = useState("list"); // list | new | detail
+  const [selected, setSelected] = useState(null);
+
+  const saveEstimate = (est) => {
+    setEstimates(prev => {
+      const exists = (prev||[]).some(e => e.id === est.id);
+      return exists ? prev.map(e => e.id === est.id ? est : e) : [est, ...(prev||[])];
+    });
+    setView("list");
+  };
+
+  const deleteEstimate = (id) => {
+    setEstimates(prev => (prev||[]).filter(e => e.id !== id));
+    setView("list");
+  };
+
+  if (view === "new" || (view === "detail" && selected)) {
+    return (
+      <EstimateForm
+        estimate={view === "detail" ? selected : null}
+        clients={clients}
+        catalog={catalog}
+        branding={branding}
+        email={email}
+        invoicing={invoicing}
+        T={T}
+        onSave={saveEstimate}
+        onDelete={deleteEstimate}
+        onBack={() => { setView("list"); setSelected(null); }}
+      />
+    );
+  }
+
+  const est = estimates || [];
+  const open   = est.filter(e => e.status === "draft" || e.status === "sent");
+  const closed = est.filter(e => e.status === "approved" || e.status === "declined");
+
+  const statusColor = (s) => ({
+    draft: T.textMuted, sent: T.primary, approved: T.accent, declined: T.warning
+  }[s] || T.textMuted);
+
+  const statusLabel = (s) => ({ draft: "Draft", sent: "Sent", approved: "Approved", declined: "Declined" }[s] || s);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 4 }}>
+        <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Estimates</div>
+        <Btn onClick={() => setView("new")} sm style={{ gap: 5 }}><Icon name="plus" size={13} /> New</Btn>
+      </div>
+
+      {est.length === 0 && (
+        <div style={{ textAlign: "center", padding: "60px 20px" }}>
+          <div style={{ width: 60, height: 60, borderRadius: 18, background: hexA(T.primary, 0.08), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px" }}><Icon name="invoice" size={28} /></div>
+          <div style={{ fontSize: 17, fontWeight: 800, color: T.text, marginBottom: 6 }}>No estimates yet</div>
+          <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 20 }}>Build and send professional estimates to clients.</div>
+          <Btn onClick={() => setView("new")} style={{ gap: 6 }}><Icon name="plus" size={14} /> Create First Estimate</Btn>
+        </div>
+      )}
+
+      {open.length > 0 && (
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>Active</div>
+          <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+            {open.map((e, i) => (
+              <button key={e.id} onClick={() => { setSelected(e); setView("detail"); }}
+                style={{ width: "100%", padding: "15px 18px", background: "none", border: "none", borderBottom: i < open.length-1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{e.clientName || "No client"}</div>
+                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{e.title || "Estimate"} · {fmtDate(e.date)}</div>
+                </div>
+                <div style={{ textAlign: "right", flexShrink: 0 }}>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>{e.total || "$0.00"}</div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: statusColor(e.status), textTransform: "uppercase", marginTop: 2 }}>{statusLabel(e.status)}</div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {closed.length > 0 && (
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>Closed</div>
+          <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden", opacity: 0.7 }}>
+            {closed.map((e, i) => (
+              <button key={e.id} onClick={() => { setSelected(e); setView("detail"); }}
+                style={{ width: "100%", padding: "15px 18px", background: "none", border: "none", borderBottom: i < closed.length-1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{e.clientName || "No client"}</div>
+                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{e.title || "Estimate"} · {fmtDate(e.date)}</div>
+                </div>
+                <div style={{ textAlign: "right", flexShrink: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{e.total || "$0.00"}</div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: statusColor(e.status), textTransform: "uppercase", marginTop: 2 }}>{statusLabel(e.status)}</div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, T, onSave, onDelete, onBack }) {
+  const isNew = !estimate;
+  const [form, setForm] = useState(() => estimate || {
+    id: Date.now(),
+    clientId: "",
+    clientName: "",
+    title: "",
+    date: new Date().toISOString().split("T")[0],
+    validDays: 30,
+    status: "draft",
+    items: [{ id: Date.now(), desc: "", qty: 1, price: "" }],
+    notes: "",
+    total: "$0.00",
+  });
+  const [sending, setSending] = useState(false);
+  const [sentMsg, setSentMsg] = useState("");
+
+  const set = (k, v) => setForm(f => {
+    const next = { ...f, [k]: v };
+    // recalculate total when items change
+    if (k === "items") {
+      const t = v.reduce((s, item) => s + (parseFloat(item.price||0) * (parseInt(item.qty)||1)), 0);
+      next.total = `$${t.toFixed(2)}`;
+    }
+    return next;
+  });
+
+  const setItem = (idx, key, val) => {
+    const items = form.items.map((it, i) => i === idx ? { ...it, [key]: val } : it);
+    set("items", items);
+  };
+  const addItem = () => set("items", [...form.items, { id: Date.now(), desc: "", qty: 1, price: "" }]);
+  const removeItem = (idx) => set("items", form.items.filter((_, i) => i !== idx));
+
+  const selectClient = (id) => {
+    const c = (clients||[]).find(c => String(c.id) === String(id));
+    setForm(f => ({ ...f, clientId: id, clientName: c?.name || "" }));
+  };
+
+  // Build the estimate text for SMS
+  const buildSmsText = () => {
+    const lines = [
+      `Estimate from ${branding.companyName}`,
+      form.title ? `Service: ${form.title}` : "",
+      "",
+      ...form.items.filter(it => it.desc).map(it => `• ${it.desc}: $${(parseFloat(it.price||0)*(parseInt(it.qty)||1)).toFixed(2)}`),
+      "",
+      `Total: ${form.total}`,
+      form.notes ? `Notes: ${form.notes}` : "",
+      `Valid for ${form.validDays} days.`,
+      "",
+      `To approve, reply YES. Questions? Call ${branding.companyPhone || "us"}.`,
+    ].filter(l => l !== null);
+    return lines.join("\n");
+  };
+
+  const sendViaSms = () => {
+    const client = (clients||[]).find(c => String(c.id) === String(form.clientId));
+    const phone = (client?.phone||"").replace(/\D/g,"");
+    if (!phone) { setSentMsg("No phone number on file for this client."); return; }
+    const smsUrl = `sms:${phone}${/iPhone|iPad|iPod/i.test(navigator.userAgent) ? "&" : "?"}body=${encodeURIComponent(buildSmsText())}`;
+    window.open(smsUrl, "_blank");
+    set("status", "sent");
+    setSentMsg("Opened in Messages. Mark as sent when you've sent it.");
+  };
+
+  const sendViaEmail = () => {
+    const client = (clients||[]).find(c => String(c.id) === String(form.clientId));
+    const em = client?.email || "";
+    if (!em) { setSentMsg("No email on file for this client."); return; }
+    const subject = encodeURIComponent(`Estimate from ${branding.companyName}`);
+    const body = encodeURIComponent(buildSmsText());
+    window.open(`mailto:${em}?subject=${subject}&body=${body}`, "_blank");
+    set("status", "sent");
+    setSentMsg("Opened in Mail. Save after sending.");
+  };
+
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", outline: "none", color: T.text, background: T.surface };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 4 }}>
+        <button onClick={onBack} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4, fontFamily: "inherit" }}>
+          <Icon name="back" size={14} /> Back
+        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          {!isNew && <Btn variant="danger" sm onClick={() => onDelete(form.id)}>Delete</Btn>}
+          <Btn sm onClick={() => onSave(form)}>Save</Btn>
+        </div>
+      </div>
+
+      {/* Client + title */}
+      <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, padding: "18px 18px", display: "flex", flexDirection: "column", gap: 14 }}>
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 6 }}>Client</label>
+          <select value={form.clientId} onChange={e => selectClient(e.target.value)} style={field}>
+            <option value="">Select a client...</option>
+            {(clients||[]).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </div>
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 6 }}>Estimate Title</label>
+          <input style={field} value={form.title} onChange={e => set("title", e.target.value)} placeholder="e.g. Spring Pond Opening, New Installation..." />
+        </div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <div style={{ flex: 1 }}>
+            <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 6 }}>Date</label>
+            <input type="date" style={field} value={form.date} onChange={e => set("date", e.target.value)} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 6 }}>Valid (days)</label>
+            <input type="number" style={field} value={form.validDays} onChange={e => set("validDays", e.target.value)} min={1} />
+          </div>
+        </div>
+      </div>
+
+      {/* Line items */}
+      <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+        <div style={{ padding: "14px 18px", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Line Items</div>
+          <button onClick={addItem} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontFamily: "inherit" }}>
+            <Icon name="plus" size={14} /> Add
+          </button>
+        </div>
+        {form.items.map((item, idx) => (
+          <div key={item.id} style={{ padding: "14px 18px", borderBottom: idx < form.items.length-1 ? `1px solid ${T.border}` : "none", display: "flex", flexDirection: "column", gap: 8 }}>
+            <input style={field} value={item.desc} onChange={e => setItem(idx, "desc", e.target.value)} placeholder="Description of service or item..." />
+            <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ flex: 1 }}>
+                <input type="number" style={field} value={item.qty} onChange={e => setItem(idx, "qty", e.target.value)} placeholder="Qty" min={1} />
+              </div>
+              <div style={{ flex: 2 }}>
+                <input type="number" style={{ ...field, paddingLeft: 28, backgroundImage: "none" }} value={item.price} onChange={e => setItem(idx, "price", e.target.value)} placeholder="0.00" step="0.01" />
+              </div>
+              {form.items.length > 1 && (
+                <button onClick={() => removeItem(idx)} style={{ background: "none", border: "none", color: T.warning, cursor: "pointer", padding: "0 4px", display: "flex", alignItems: "center" }}>
+                  <Icon name="close" size={16} />
+                </button>
+              )}
+            </div>
+            <div style={{ fontSize: 12, color: T.textMuted, textAlign: "right" }}>
+              Subtotal: <strong>${(parseFloat(item.price||0) * (parseInt(item.qty)||1)).toFixed(2)}</strong>
+            </div>
+          </div>
+        ))}
+        <div style={{ padding: "14px 18px", display: "flex", justifyContent: "space-between", background: T.surfaceAlt }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Total</div>
+          <div style={{ fontSize: 20, fontWeight: 800, color: T.text }}>{form.total}</div>
+        </div>
+      </div>
+
+      {/* Notes */}
+      <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, padding: "18px 18px" }}>
+        <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 8 }}>Notes (optional)</label>
+        <textarea style={{ ...field, minHeight: 80, resize: "vertical", lineHeight: 1.5 }} value={form.notes} onChange={e => set("notes", e.target.value)} placeholder="Scope of work, terms, or any extra detail..." />
+      </div>
+
+      {/* Status */}
+      <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, padding: "18px 18px" }}>
+        <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 10 }}>Status</label>
+        <div style={{ display: "flex", gap: 8 }}>
+          {["draft","sent","approved","declined"].map(s => (
+            <button key={s} onClick={() => set("status", s)} style={{ flex: 1, padding: "9px 4px", border: `1.5px solid ${form.status === s ? T.primary : T.border}`, borderRadius: 11, background: form.status === s ? hexA(T.primary, 0.1) : T.surface, color: form.status === s ? T.primary : T.textMuted, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit", textTransform: "capitalize" }}>
+              {s}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Send options */}
+      <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, padding: "18px 18px", display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: T.text, marginBottom: 2 }}>Send to Client</div>
+        <Btn onClick={sendViaSms} variant="outline" block style={{ gap: 7 }}>
+          <Icon name="message" size={15} /> Send via Text Message
+        </Btn>
+        <Btn onClick={sendViaEmail} variant="ghost" block style={{ gap: 7 }}>
+          <Icon name="mail" size={15} /> Send via Email
+        </Btn>
+        {sentMsg && <div style={{ fontSize: 12, color: T.textMuted, textAlign: "center", lineHeight: 1.5 }}>{sentMsg}</div>}
+      </div>
+
+      <Btn onClick={() => onSave(form)} block>Save Estimate</Btn>
+    </div>
+  );
+}
+
 function InvoicesScreen({ invoices, clients, invoicing, branding, onSave, onDelete }) {
   const { T, perms } = useApp();
   const money = (n) => `$${Math.round(n).toLocaleString()}`;
@@ -4531,7 +5277,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, onSave, onDele
       </div>
 
       <div style={{ position: "relative", marginBottom: 12 }}>
-        <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: T.textMuted }}>🔍</span>
+        <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: T.textMuted, display:"flex" }}><Icon name="clients" size={16} /></span>
         <input placeholder="Search by number or client..." value={search} onChange={e => setSearch(e.target.value)} style={{ width: "100%", padding: "10px 14px 10px 36px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, boxSizing: "border-box", outline: "none", fontFamily: "inherit", color: T.text, background: T.surface }} />
       </div>
       <div style={{ display: "flex", gap: 7, marginBottom: 16, overflowX: "auto", paddingBottom: 4 }}>
@@ -4720,7 +5466,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
         <CardHeader title="Appearance" />
         <div style={{ padding: 18 }}>
           <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 12, padding: 4, gap: 4 }}>
-            {[["light", "☀︎ Light"], ["dark", "☾ Dark"], ["system", "⚙ System"]].map(([m, label]) => (
+            {[["light", "Light"], ["dark", "Dark"], ["system", "Auto"]].map(([m, label]) => (
               <button key={m} onClick={() => set("appearance", m)} style={{
                 flex: 1, padding: "10px 6px", border: "none", borderRadius: 9, cursor: "pointer", fontFamily: "inherit",
                 fontSize: 13, fontWeight: 600,
@@ -4767,7 +5513,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
                 <div style={{ width: 18, height: 18, borderRadius: 5, background: cu.bg, border: `1px solid ${cu.border}` }} />
                 <div style={{ width: 18, height: 18, borderRadius: 5, background: cu.accent }} />
               </div>
-              <div style={{ fontWeight: 700, fontSize: 13, color: cu.text }}>✨ Custom</div>
+              <div style={{ fontWeight: 700, fontSize: 13, color: cu.text }}>Custom</div>
               {localBranding.themeKey === key && (
                 <div style={{ position: "absolute", top: 8, right: 8, width: 18, height: 18, borderRadius: "50%", background: cu.primary, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: "#fff", fontWeight: 700 }}>✓</div>
               )}
@@ -4841,7 +5587,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
       })()}
 
       <div style={{ background: T.surfaceAlt, borderRadius: 10, padding: "12px 16px", fontSize: 12, color: T.textMuted, display: "flex", gap: 8 }}>
-        <span>💾</span>
+        <Icon name="check" size={14} />
         <span>Your clients, schedule, catalog, and settings are saved automatically and stay put across updates.</span>
       </div>
 
@@ -4917,10 +5663,504 @@ function Icon({ name, size = 22, filled = false }) {
   return <svg {...common}>{paths[name] || null}</svg>;
 }
 
+// ─────────────────────────────────────────────
+// MESSAGING SYSTEM
+// Two-way chat between staff and clients.
+// Backed by the sps_messages table in Supabase.
+// ─────────────────────────────────────────────
+
+// Shared hook — loads messages for a given clientId, with real-time polling
+function useMessages(clientId) {
+  const [messages, setMessages] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = async () => {
+    if (!clientId) return;
+    const { data, error } = await supabase
+      .from("sps_messages")
+      .select("*")
+      .eq("client_id", String(clientId))
+      .order("created_at", { ascending: true });
+    if (!error && data) setMessages(data);
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    setLoading(true);
+    load();
+    const interval = setInterval(load, 8000); // poll every 8s
+    return () => clearInterval(interval);
+  }, [clientId]);
+
+  const send = async (body, sender, senderName) => {
+    if (!body.trim() || !clientId) return;
+    const { data, error } = await supabase.from("sps_messages").insert({
+      client_id: String(clientId),
+      sender,
+      sender_name: senderName || "",
+      body: body.trim(),
+    }).select().single();
+    if (!error && data) setMessages(prev => [...prev, data]);
+    return !error;
+  };
+
+  const markRead = async (msgIds) => {
+    if (!msgIds.length) return;
+    await supabase.from("sps_messages").update({ read_at: new Date().toISOString() }).in("id", msgIds);
+  };
+
+  return { messages, loading, send, markRead, reload: load };
+}
+
+function fmtMsgTime(ts) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  const now = new Date();
+  const isToday = d.toDateString() === now.toDateString();
+  if (isToday) return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " · " + d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+// ── STAFF: Full messages inbox ──
+function MessagesScreen({ clients, currentUser, T }) {
+  const [selectedClientId, setSelectedClientId] = useState(null);
+  const selectedClient = (clients || []).find(c => String(c.id) === String(selectedClientId)) || null;
+
+  // Get unread counts per client — loaded once then refreshed
+  const [unreadMap, setUnreadMap] = useState({});
+  useEffect(() => {
+    const load = async () => {
+      const { data } = await supabase
+        .from("sps_messages")
+        .select("client_id, read_at, sender")
+        .eq("sender", "client")
+        .is("read_at", null);
+      if (data) {
+        const map = {};
+        data.forEach(m => { map[m.client_id] = (map[m.client_id] || 0) + 1; });
+        setUnreadMap(map);
+      }
+    };
+    load();
+    const interval = setInterval(load, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  if (selectedClient) {
+    return (
+      <StaffChat
+        client={selectedClient}
+        currentUser={currentUser}
+        T={T}
+        onBack={() => setSelectedClientId(null)}
+      />
+    );
+  }
+
+  const clientsWithMessages = (clients || []).filter(c => unreadMap[String(c.id)] > 0);
+  const otherClients = (clients || []).filter(c => !unreadMap[String(c.id)]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ paddingTop: 4 }}>
+        <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Messages</div>
+        <div style={{ fontSize: 14, color: T.textMuted, marginTop: 3 }}>Client conversations</div>
+      </div>
+
+      {clientsWithMessages.length > 0 && (
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>Unread</div>
+          <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+            {clientsWithMessages.map((c, i) => (
+              <button key={c.id} onClick={() => setSelectedClientId(c.id)}
+                style={{ width: "100%", padding: "14px 18px", background: "none", border: "none", borderBottom: i < clientsWithMessages.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+                <div style={{ width: 42, height: 42, borderRadius: 13, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 800, flexShrink: 0 }}>
+                  {(c.name || "?")[0].toUpperCase()}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{c.name}</div>
+                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>Tap to view conversation</div>
+                </div>
+                <div style={{ background: T.primary, color: "#fff", borderRadius: 100, width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, flexShrink: 0 }}>
+                  {unreadMap[String(c.id)]}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div>
+        {clientsWithMessages.length > 0 && <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>All Clients</div>}
+        <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+          {otherClients.length === 0 && clientsWithMessages.length === 0 && (
+            <div style={{ padding: "40px 20px", textAlign: "center", color: T.textMuted, fontSize: 14 }}>No clients yet. Add clients to start messaging.</div>
+          )}
+          {otherClients.map((c, i) => (
+            <button key={c.id} onClick={() => setSelectedClientId(c.id)}
+              style={{ width: "100%", padding: "14px 18px", background: "none", border: "none", borderBottom: i < otherClients.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+              <div style={{ width: 42, height: 42, borderRadius: 13, background: T.surfaceAlt, color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 800, flexShrink: 0 }}>
+                {(c.name || "?")[0].toUpperCase()}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{c.name}</div>
+                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{c.division || "Pond"} · {c.status || "Active"}</div>
+              </div>
+              <Icon name="chevronR" size={16} />
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Shared chat thread UI (used by both staff and client) ──
+function ChatThread({ clientId, sender, senderName, T, accentSide = "right" }) {
+  const { messages, loading, send, markRead } = useMessages(clientId);
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const bottomRef = useRef(null);
+
+  // Scroll to bottom on new messages
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length]);
+
+  // Mark incoming messages as read
+  useEffect(() => {
+    const unread = messages.filter(m => m.sender !== sender && !m.read_at).map(m => m.id);
+    if (unread.length) markRead(unread);
+  }, [messages]);
+
+  const handleSend = async () => {
+    if (!draft.trim() || sending) return;
+    setSending(true);
+    await send(draft, sender, senderName);
+    setDraft("");
+    setSending(false);
+  };
+
+  if (loading) {
+    return (
+      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: T.textMuted, fontSize: 14 }}>
+        <div style={{ width: 18, height: 18, border: `2px solid ${T.border}`, borderTopColor: T.primary, borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      {/* Messages */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "12px 0", display: "flex", flexDirection: "column", gap: 8 }}>
+        {messages.length === 0 && (
+          <div style={{ textAlign: "center", padding: "40px 20px", color: T.textMuted, fontSize: 13 }}>No messages yet. Start the conversation below.</div>
+        )}
+        {messages.map((m, i) => {
+          const isMine = m.sender === sender;
+          const showTime = i === 0 || (new Date(m.created_at) - new Date(messages[i-1].created_at)) > 300000;
+          return (
+            <div key={m.id}>
+              {showTime && (
+                <div style={{ textAlign: "center", fontSize: 11, color: T.textMuted, padding: "6px 0", marginBottom: 2 }}>{fmtMsgTime(m.created_at)}</div>
+              )}
+              <div style={{ display: "flex", justifyContent: isMine ? "flex-end" : "flex-start", paddingLeft: isMine ? 48 : 0, paddingRight: isMine ? 0 : 48 }}>
+                <div style={{
+                  background: isMine ? T.primary : T.surfaceAlt,
+                  color: isMine ? "#fff" : T.text,
+                  borderRadius: isMine ? "18px 18px 4px 18px" : "18px 18px 18px 4px",
+                  padding: "10px 14px",
+                  fontSize: 14,
+                  lineHeight: 1.5,
+                  maxWidth: "100%",
+                  wordBreak: "break-word",
+                  boxShadow: isMine ? `0 2px 8px ${hexA(T.primary, 0.25)}` : "none",
+                }}>
+                  {m.body}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Input */}
+      <div style={{ borderTop: `1px solid ${T.border}`, padding: "12px 0 0", display: "flex", gap: 10, alignItems: "flex-end" }}>
+        <textarea
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
+          placeholder="Type a message..."
+          rows={1}
+          style={{ flex: 1, padding: "11px 14px", border: `1.5px solid ${T.border}`, borderRadius: 14, fontSize: 14, fontFamily: "inherit", resize: "none", outline: "none", color: T.text, background: T.surface, lineHeight: 1.5, maxHeight: 120, overflowY: "auto" }}
+        />
+        <button onClick={handleSend} disabled={!draft.trim() || sending}
+          style={{ width: 42, height: 42, borderRadius: 13, background: draft.trim() ? T.primary : T.surfaceAlt, border: "none", color: draft.trim() ? "#fff" : T.textMuted, cursor: draft.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "background 0.15s" }}>
+          <svg viewBox="0 0 24 24" width={18} height={18} fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Staff chat view (single client thread) ──
+function StaffChat({ client, currentUser, T, onBack }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 180px)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, paddingBottom: 16, borderBottom: `1px solid ${T.border}` }}>
+        <button onClick={onBack} style={{ background: "none", border: "none", color: T.primary, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4, fontWeight: 700, fontSize: 13, fontFamily: "inherit" }}>
+          <Icon name="back" size={16} /> Back
+        </button>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{client.name}</div>
+          <div style={{ fontSize: 12, color: T.textMuted }}>{client.division || "Pond"} client</div>
+        </div>
+      </div>
+      <ChatThread
+        clientId={client.id}
+        sender="staff"
+        senderName={currentUser?.name || "SPS"}
+        T={T}
+      />
+    </div>
+  );
+}
+
+// ── Client messages tab ──
+function CPMessages({ client, T, currentUser }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14, height: "calc(100vh - 200px)" }}>
+      <div style={{ paddingTop: 4 }}>
+        <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Messages</div>
+        <div style={{ fontSize: 14, color: T.textMuted, marginTop: 3 }}>Chat with Stone Property Solutions</div>
+      </div>
+      <ChatThread
+        clientId={client.id}
+        sender="client"
+        senderName={client.name}
+        T={T}
+      />
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// REPORTS DASHBOARD
+// ─────────────────────────────────────────────
+
+function ReportsScreen({ clients, invoices, schedule, costs, T }) {
+  const [period, setPeriod] = useState("month"); // month | quarter | year | all
+
+  const now = new Date();
+  const periodStart = (() => {
+    const d = new Date(now);
+    if (period === "month")   { d.setDate(1); d.setHours(0,0,0,0); return d; }
+    if (period === "quarter") { d.setMonth(Math.floor(d.getMonth()/3)*3,1); d.setHours(0,0,0,0); return d; }
+    if (period === "year")    { d.setMonth(0,1); d.setHours(0,0,0,0); return d; }
+    return new Date(0);
+  })();
+
+  const inPeriod = (ts) => ts && new Date(ts) >= periodStart;
+
+  // ── Revenue ──
+  const allInvoices = invoices || [];
+  const periodInvoices = allInvoices.filter(iv => inPeriod(iv.createdAt || iv.date));
+  const paidInvoices  = periodInvoices.filter(iv => iv.status === "paid");
+  const openInvoices  = allInvoices.filter(iv => iv.status !== "paid");
+
+  const sumTotal = (arr) => arr.reduce((s, iv) => s + (parseFloat((iv.total||"0").replace(/[^0-9.-]/g,""))||0), 0);
+  const revenue   = sumTotal(paidInvoices);
+  const pipeline  = sumTotal(openInvoices);
+  const allRevenue = sumTotal(allInvoices.filter(iv => iv.status === "paid"));
+
+  // ── Jobs ──
+  const allHistory = (clients||[]).flatMap(c => (c.history||[]).map(h => ({ ...h, clientId: c.id, division: c.division })));
+  const periodJobs = allHistory.filter(h => inPeriod(h.date));
+  const jobsByDivision = { Pond: 0, Pool: 0, Seasonal: 0 };
+  periodJobs.forEach(h => { jobsByDivision[h.division] = (jobsByDivision[h.division]||0) + 1; });
+
+  // ── Clients ──
+  const activeClients = (clients||[]).filter(c => c.status === "Active");
+  const byDivision = { Pond: 0, Pool: 0, Seasonal: 0 };
+  activeClients.forEach(c => { byDivision[c.division] = (byDivision[c.division]||0) + 1; });
+
+  // ── Schedule ──
+  const periodStops = (schedule||[])
+    .filter(d => inPeriod(d.date))
+    .flatMap(d => d.stops||[]);
+
+  // ── Monthly revenue trend (last 6 months) ──
+  const monthlyRevenue = Array.from({ length: 6 }, (_, i) => {
+    const d = new Date(now);
+    d.setMonth(d.getMonth() - (5 - i));
+    const label = d.toLocaleDateString("en-US", { month: "short" });
+    const start = new Date(d.getFullYear(), d.getMonth(), 1);
+    const end   = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59);
+    const total = sumTotal(allInvoices.filter(iv => {
+      const dt = new Date(iv.createdAt || iv.date || 0);
+      return iv.status === "paid" && dt >= start && dt <= end;
+    }));
+    return { label, total };
+  });
+  const maxBar = Math.max(...monthlyRevenue.map(m => m.total), 1);
+
+  const money = (n) => n >= 1000 ? `$${(n/1000).toFixed(1)}k` : `$${n.toFixed(0)}`;
+  const pct = (n, total) => total ? Math.round((n/total)*100) : 0;
+
+  const PERIODS = [
+    { id: "month",   label: "This Month" },
+    { id: "quarter", label: "Quarter" },
+    { id: "year",    label: "This Year" },
+    { id: "all",     label: "All Time" },
+  ];
+
+  const Section = ({ title, children }) => (
+    <div style={{ marginBottom: 24 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>{title}</div>
+      {children}
+    </div>
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <div style={{ paddingTop: 4, marginBottom: 16 }}>
+        <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Reports</div>
+      </div>
+
+      {/* Period selector */}
+      <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 12, padding: 4, marginBottom: 20, gap: 3 }}>
+        {PERIODS.map(p => (
+          <button key={p.id} onClick={() => setPeriod(p.id)} style={{ flex: 1, padding: "8px 4px", border: "none", borderRadius: 9, fontSize: 12, fontWeight: 700, cursor: "pointer", background: period === p.id ? T.surface : "transparent", color: period === p.id ? T.primary : T.textMuted, boxShadow: period === p.id ? "0 1px 4px rgba(0,0,0,0.1)" : "none", fontFamily: "inherit", transition: "all 0.15s" }}>
+            {p.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Revenue */}
+      <Section title="Revenue">
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+          {[
+            { label: "Collected", value: money(revenue), sub: `${paidInvoices.length} invoices`, color: T.accent },
+            { label: "Outstanding", value: money(pipeline), sub: `${openInvoices.length} open`, color: T.warning },
+          ].map(s => (
+            <div key={s.label} style={{ background: T.surface, borderRadius: 16, padding: "16px 16px", border: `1px solid ${T.border}` }}>
+              <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>{s.label}</div>
+              <div style={{ fontSize: 26, fontWeight: 800, color: s.color, letterSpacing: "-0.03em" }}>{s.value}</div>
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4 }}>{s.sub}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Monthly bar chart */}
+        <div style={{ background: T.surface, borderRadius: 16, padding: "18px 16px", border: `1px solid ${T.border}` }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, marginBottom: 14 }}>6-Month Revenue Trend</div>
+          <div style={{ display: "flex", gap: 6, alignItems: "flex-end", height: 80 }}>
+            {monthlyRevenue.map((m, i) => (
+              <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 600 }}>{m.total > 0 ? money(m.total) : ""}</div>
+                <div style={{ width: "100%", background: i === monthlyRevenue.length-1 ? T.primary : hexA(T.primary, 0.3), borderRadius: "4px 4px 0 0", height: `${Math.max(4, (m.total/maxBar)*60)}px`, transition: "height 0.3s" }} />
+                <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 600 }}>{m.label}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </Section>
+
+      {/* Jobs & Activity */}
+      <Section title="Jobs & Activity">
+        <div style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+          {[
+            { label: "Service Visits", value: periodJobs.length, sub: `${periodStops.length} scheduled stops` },
+            { label: "Avg Visits / Client", value: activeClients.length ? (periodJobs.length / activeClients.length).toFixed(1) : "0", sub: "active clients" },
+            { label: "Pond Jobs", value: jobsByDivision.Pond, sub: `${pct(jobsByDivision.Pond, periodJobs.length)}% of total` },
+            { label: "Pool Jobs", value: jobsByDivision.Pool, sub: `${pct(jobsByDivision.Pool, periodJobs.length)}% of total` },
+            { label: "Seasonal Jobs", value: jobsByDivision.Seasonal, sub: `${pct(jobsByDivision.Seasonal, periodJobs.length)}% of total` },
+          ].map((row, i, arr) => (
+            <div key={row.label} style={{ padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: i < arr.length-1 ? `1px solid ${T.border}` : "none" }}>
+              <div style={{ fontSize: 13, color: T.textMuted }}>{row.label}</div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>{row.value}</div>
+                <div style={{ fontSize: 11, color: T.textMuted }}>{row.sub}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      {/* Client base */}
+      <Section title="Client Base">
+        <div style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+          {[
+            { label: "Total Active Clients", value: activeClients.length },
+            { label: "Pond Clients", value: byDivision.Pond, sub: `${pct(byDivision.Pond, activeClients.length)}%` },
+            { label: "Pool Clients", value: byDivision.Pool, sub: `${pct(byDivision.Pool, activeClients.length)}%` },
+            { label: "Seasonal Clients", value: byDivision.Seasonal, sub: `${pct(byDivision.Seasonal, activeClients.length)}%` },
+            { label: "All-Time Revenue / Client", value: activeClients.length ? money(allRevenue / activeClients.length) : "$0", sub: "average" },
+          ].map((row, i, arr) => (
+            <div key={row.label} style={{ padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: i < arr.length-1 ? `1px solid ${T.border}` : "none" }}>
+              <div style={{ fontSize: 13, color: T.textMuted }}>{row.label}</div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>{row.value}</div>
+                {row.sub && <div style={{ fontSize: 11, color: T.textMuted }}>{row.sub}</div>}
+              </div>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      {/* Invoice health */}
+      <Section title="Invoice Health">
+        <div style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+          {[
+            { label: "Invoices Sent", value: allInvoices.length },
+            { label: "Paid", value: allInvoices.filter(iv => iv.status === "paid").length, color: T.accent },
+            { label: "Outstanding", value: openInvoices.length, color: T.warning },
+            { label: "Collection Rate", value: `${pct(allInvoices.filter(iv=>iv.status==="paid").length, allInvoices.length)}%`, color: T.accent },
+            { label: "Total Outstanding", value: money(pipeline), color: pipeline > 0 ? T.warning : T.accent },
+          ].map((row, i, arr) => (
+            <div key={row.label} style={{ padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: i < arr.length-1 ? `1px solid ${T.border}` : "none" }}>
+              <div style={{ fontSize: 13, color: T.textMuted }}>{row.label}</div>
+              <div style={{ fontSize: 15, fontWeight: 800, color: row.color || T.text }}>{row.value}</div>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      {/* Top clients by visits */}
+      <Section title="Most Active Clients">
+        <div style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+          {(clients||[])
+            .map(c => ({ c, visits: (c.history||[]).length }))
+            .sort((a,b) => b.visits - a.visits)
+            .slice(0, 5)
+            .map(({ c, visits }, i, arr) => (
+              <div key={c.id} style={{ padding: "14px 18px", display: "flex", alignItems: "center", gap: 14, borderBottom: i < arr.length-1 ? `1px solid ${T.border}` : "none" }}>
+                <div style={{ width: 36, height: 36, borderRadius: 11, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 800, flexShrink: 0 }}>
+                  {(c.name||"?")[0]}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</div>
+                  <div style={{ fontSize: 11, color: T.textMuted }}>{c.division} · {c.plan}</div>
+                </div>
+                <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>{visits} <span style={{ fontSize: 11, color: T.textMuted, fontWeight: 500 }}>visits</span></div>
+              </div>
+            ))}
+          {(clients||[]).length === 0 && (
+            <div style={{ padding: "24px", textAlign: "center", color: T.textMuted, fontSize: 13 }}>No client data yet.</div>
+          )}
+        </div>
+      </Section>
+    </div>
+  );
+}
+
 const NAV = [
   { id: "dashboard", label: "Home",      icon: "home" },
   { id: "clients",   label: "Clients",   icon: "clients" },
   { id: "schedule",  label: "Schedule",  icon: "calendar" },
+  { id: "messages",  label: "Messages",  icon: "message" },
+  { id: "reports",   label: "Reports",   icon: "dollar",  ownerOnly: true },
   { id: "settings",  label: "Customize", icon: "sliders" },
 ];
 
@@ -4934,6 +6174,7 @@ const CLIENT_NAV = [
   { id: "cp_home",     label: "Home",     icon: "home" },
   { id: "cp_history",  label: "History",  icon: "history" },
   { id: "cp_invoices", label: "Invoices", icon: "invoice" },
+  { id: "cp_messages", label: "Messages", icon: "message" },
   { id: "cp_request",  label: "Request",  icon: "plus" },
 ];
 
@@ -5295,10 +6536,11 @@ function SPSClientPortal({ client, schedule, invoices, branding, T, fontStack, o
   return (
     <div style={{ fontFamily: fontStack, background: T.bg, minHeight: "100vh", display: "flex", flexDirection: "column", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em" }}>
       <style>{`
-        * { -webkit-tap-highlight-color: transparent; }
+        * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+        input, select, textarea { -webkit-appearance: none; appearance: none; font-size: 16px !important; }
+        input:focus, select:focus, textarea:focus { border-color: ${T.primary} !important; outline: none; box-shadow: 0 0 0 3px ${hexA(T.primary, 0.15)}; }
         button { transition: transform 0.08s ease, opacity 0.15s ease; }
         button:active { transform: scale(0.97); }
-        input:focus, select:focus, textarea:focus { border-color: ${T.primary} !important; outline: none; box-shadow: 0 0 0 3px ${hexA(T.primary, 0.15)}; }
       `}</style>
 
       {/* Header */}
@@ -5331,6 +6573,7 @@ function SPSClientPortal({ client, schedule, invoices, branding, T, fontStack, o
         {page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} onNav={setPage} T={T} />}
         {page === "cp_history"  && <CPHistory client={client} T={T} />}
         {page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} />}
+        {page === "cp_messages" && <CPMessages client={client} T={T} />}
         {page === "cp_request"  && <CPRequest client={client} branding={branding} onSubmit={onServiceRequest} T={T} />}
       </main>
 
@@ -5536,6 +6779,18 @@ export default function App({ authEmail = "", onSignOut }) {
     return () => document.removeEventListener("sps-db-status", onStatus);
   }, []);
 
+  // Track unread message count for nav badge
+  const [navUnread, setNavUnread] = useState(0);
+  useEffect(() => {
+    const load = async () => {
+      const { data } = await supabase.from("sps_messages").select("id").eq("sender", "client").is("read_at", null);
+      setNavUnread(data ? data.length : 0);
+    };
+    load();
+    const interval = setInterval(load, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
   const handleSignOut = () => { setPage("dashboard"); setSelectedClient(null); setAdding(false); if (onSignOut) onSignOut(); };
   // first real sign-in (no emails assigned yet) claims the owner account automatically
   useEffect(() => {
@@ -5707,16 +6962,27 @@ export default function App({ authEmail = "", onSignOut }) {
         ["--ring"]: hexA(T.primary, 0.22), ["--ringBorder"]: T.primary,
       }}>
         <style>{`
-          * { -webkit-tap-highlight-color: transparent; }
-          input, select, textarea { transition: box-shadow .15s ease, border-color .15s ease; }
-          input:focus, select:focus, textarea:focus { border-color: var(--ringBorder) !important; box-shadow: 0 0 0 3.5px var(--ring); }
-          button, a { transition: transform .08s ease, opacity .15s ease, filter .15s ease, background .15s ease, box-shadow .15s ease; }
+          * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+          input, select, textarea {
+            transition: box-shadow .15s ease, border-color .15s ease;
+            -webkit-appearance: none;
+            appearance: none;
+            border-radius: 12px;
+            font-size: 16px !important;
+          }
+          input:focus, select:focus, textarea:focus {
+            border-color: var(--ringBorder) !important;
+            box-shadow: 0 0 0 3px var(--ring);
+            outline: none;
+          }
+          button, a { transition: transform .08s ease, opacity .15s ease, background .15s ease, box-shadow .15s ease; }
           button:active, a:active { transform: scale(0.97); }
           @media (hover: hover) { button:hover:not(:disabled) { filter: brightness(1.04); } }
           ::selection { background: var(--ring); }
-          ::-webkit-scrollbar { width: 9px; height: 9px; }
-          ::-webkit-scrollbar-thumb { background: ${hexA(T.textMuted, 0.35)}; border-radius: 100px; }
+          ::-webkit-scrollbar { width: 6px; height: 6px; }
+          ::-webkit-scrollbar-thumb { background: ${hexA(T.textMuted, 0.25)}; border-radius: 100px; }
           ::-webkit-scrollbar-track { background: transparent; }
+          select { background-image: none; }
         `}</style>
 
         {/* Header — light frosted, matches theme surface */}
@@ -5754,7 +7020,7 @@ export default function App({ authEmail = "", onSignOut }) {
         {dbError && (
           <div style={{ background: "#FEF3C7", borderBottom: "1px solid #F59E0B", padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: "#92400E" }}>
             <span style={{ display:"flex", alignItems:"center", gap:6 }}><Icon name="warning" size={15} />{dbError}</span>
-            <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 8, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }} style={{ display:"flex", alignItems:"center", gap:5 }}>Retry</button>
+            <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 8, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, display:"flex", alignItems:"center", gap:5 }}>Retry</button>
           </div>
         )}
         <main style={{ flex: 1, padding: "22px 16px", maxWidth: 740, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
@@ -5763,22 +7029,33 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
           {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} />}
           {page === "schedule" && <Schedule clients={clients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} />}
-          {page === "invoices" && perms.canInvoice && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} />}
+          {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
+          {page === "reports"   && perms.isAdmin && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
+          {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} />}
+          {page === "invoices"  && perms.canInvoice && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} />}
           {page === "import"   && perms.canImport && <SkimmerImport onImport={handleImportClients} onGoToClients={() => handleNav("clients")} />}
           {page === "settings" && <AppSettings branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} />}
         </main>
 
         {/* Bottom Nav — frosted with active pill */}
         <nav style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: hexA(T.surface, 0.82), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", borderTop: `1px solid ${T.border}`, display: "flex", zIndex: 90, minHeight: 60, paddingTop: 4, paddingBottom: "calc(8px + env(safe-area-inset-bottom))" }}>
-          {NAV.flatMap(n => (n.id === "settings" && perms.canInvoice) ? [{ id: "invoices", icon: "invoice", label: "Invoices" }, n] : [n]).map(n => {
-            const active = page === n.id;
-            return (
-              <button key={n.id} onClick={() => handleNav(n.id)}
-                style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, color: active ? T.primary : T.textMuted, fontFamily: "inherit" }}>
-                <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s" }}><Icon name={n.icon} size={22} /></span>
-                <span style={{ fontSize: 10.5, fontWeight: active ? 600 : 500, letterSpacing: "-0.01em" }}>{n.label}</span>
-              </button>
-            );
+          {NAV
+            .filter(n => !n.ownerOnly || perms.isAdmin)
+            .flatMap(n => (n.id === "settings" && perms.canInvoice) ? [{ id: "invoices", icon: "invoice", label: "Invoices" }, { id: "estimates", icon: "clipboard", label: "Estimates" }, n] : [n])
+            .map(n => {
+              const active = page === n.id;
+              return (
+                <button key={n.id} onClick={() => handleNav(n.id)}
+                  style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, color: active ? T.primary : T.textMuted, fontFamily: "inherit", position: "relative" }}>
+                  <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s", position: "relative" }}>
+                    <Icon name={n.icon} size={22} />
+                    {n.id === "messages" && navUnread > 0 && (
+                      <span style={{ position: "absolute", top: 2, right: 4, width: 8, height: 8, borderRadius: "50%", background: T.primary, border: `2px solid ${T.bg}` }} />
+                    )}
+                  </span>
+                  <span style={{ fontSize: 10.5, fontWeight: active ? 600 : 500, letterSpacing: "-0.01em" }}>{n.label}</span>
+                </button>
+              );
           })}
         </nav>
       </div>
