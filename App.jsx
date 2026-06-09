@@ -426,7 +426,6 @@ const DEFAULT_BRANDING = {
   splashLogoOverride: "",  // separate logo just for splash — defaults to main logo
   splashTextColor: "light", // "light" | "dark"
   splashShowGreeting: "true", // "true" | "false"
-  splashGreetingPrefix: "",   // e.g. "Welcome back" or "Hey" — defaults to time-based
   portalCenterBtn: "cp_request",
   portalHeroImage: "",
   staffDefaultPage: "dashboard",
@@ -7734,9 +7733,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
                     <div style={{ fontSize: 10, color: textColor, opacity: 0.7 }}>{tagline}</div>
                     {(localBranding.splashShowGreeting !== "false") && (
                       <div style={{ marginTop: 8, background: "rgba(255,255,255,0.15)", borderRadius: 100, padding: "5px 14px", backdropFilter: "blur(8px)" }}>
-                        <span style={{ fontSize: 11, fontWeight: 800, color: textColor }}>
-                          {(localBranding.splashGreetingPrefix && localBranding.splashGreetingPrefix.trim()) ? localBranding.splashGreetingPrefix.trim() : "Good morning"}, Brandon.
-                        </span>
+                        <span style={{ fontSize: 10, fontWeight: 700, color: textColor }}>Good morning, Brandon.</span>
                       </div>
                     )}
                   </div>
@@ -7831,17 +7828,6 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
               </div>
 
               {/* Text color + greeting toggle */}
-              {/* Greeting prefix */}
-              <div>
-                <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 }}>Greeting Text</label>
-                <Input
-                  value={localBranding.splashGreetingPrefix || ""}
-                  onChange={e => set("splashGreetingPrefix", e.target.value)}
-                  placeholder="Good morning / Good afternoon / Good evening"
-                />
-                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4 }}>Replaces the time-based greeting. Leave blank to keep "Good morning/afternoon/evening".</div>
-              </div>
-
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                 <div>
                   <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 }}>Text Color</label>
@@ -11513,7 +11499,7 @@ export default function App({ authEmail = "", onSignOut }) {
     if (splashShown.current) return;
     splashShown.current = true;
     setShowSplash(true);
-    const t = setTimeout(() => setShowSplash(false), 4000);
+    const t = setTimeout(() => setShowSplash(false), 2200);
     return () => clearTimeout(t);
   }, [hydrated]);
 
@@ -11732,9 +11718,9 @@ export default function App({ authEmail = "", onSignOut }) {
           .splash-logo  { animation: splashFadeUp 0.55s cubic-bezier(.34,1.56,.64,1) both; }
           .splash-name  { animation: splashFadeUp 0.55s cubic-bezier(.34,1.56,.64,1) 0.12s both; }
           .splash-tag   { animation: splashFadeUp 0.55s cubic-bezier(.34,1.56,.64,1) 0.22s both; }
-          .splash-greet { animation: splashFadeUp 0.4s cubic-bezier(.34,1.56,.64,1) 0.28s both; }
+          .splash-greet { animation: splashFadeUp 0.55s cubic-bezier(.34,1.56,.64,1) 0.38s both; }
           .splash-dot   { animation: splashFadeUp 0.55s cubic-bezier(.34,1.56,.64,1) 0.55s both; }
-          .splash-fade-out { animation: splashFadeOut 0.5s ease 3.4s both; }
+          .splash-fade-out { animation: splashFadeOut 0.4s ease 1.8s both; }
         `}</style>
 
         {/* Decorative circles — only on solid/gradient */}
@@ -11766,9 +11752,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {/* Personalised greeting */}
           {splashFirstName && showGreeting && (
             <div className="splash-greet" style={{ marginTop: 8, background: "rgba(128,128,128,0.2)", borderRadius: 100, padding: "10px 24px", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)" }}>
-              <span style={{ fontSize: 22, fontWeight: 800, color: splashFgColor, letterSpacing: "-0.02em" }}>
-                {(branding.splashGreetingPrefix && branding.splashGreetingPrefix.trim()) ? branding.splashGreetingPrefix.trim() : splashGreeting}, {splashFirstName}.
-              </span>
+              <span style={{ fontSize: 15, fontWeight: 700, color: splashFgColor }}>{splashGreeting}, {splashFirstName}.</span>
             </div>
           )}
 
