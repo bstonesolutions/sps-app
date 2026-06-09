@@ -1000,7 +1000,7 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
         {today.stops.map((s, i) => (
           <div key={i} style={{ padding: "14px 18px", borderBottom: i < today.stops.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", gap: 14, alignItems: "center" }}>
             <div style={{ background: T.surfaceAlt, borderRadius: 10, padding: "7px 10px", textAlign: "center", minWidth: 58, flexShrink: 0 }}>
-              <div style={{ fontSize: 9, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{s.time.split(" ")[1]}</div>
+              <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{s.time.split(" ")[1]}</div>
               <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>{s.time.split(" ")[0]}</div>
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
@@ -1526,11 +1526,11 @@ function PhotoPicker({ photos = [], onChange, label = "Photos", maxPhotos = 10, 
                   onBlur={() => setEditingCaption(null)}
                   onKeyDown={e => e.key === "Enter" && setEditingCaption(null)}
                   placeholder="Add label..."
-                  style={{ width: 90, padding: "4px 7px", border: `1.5px solid ${T.primary}`, borderRadius: 8, fontSize: 11, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }}
+                  style={{ width: 90, padding: "4px 7px", border: `1.5px solid ${T.primary}`, borderRadius: 10, fontSize: 11, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }}
                 />
               ) : (
                 <button onClick={() => setEditingCaption(i)}
-                  style={{ width: 90, padding: "4px 7px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 11, fontWeight: p.caption ? 600 : 400, color: p.caption ? T.text : T.textMuted, background: T.surfaceAlt, cursor: "pointer", fontFamily: "inherit", textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  style={{ width: 90, padding: "4px 7px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 11, fontWeight: p.caption ? 600 : 400, color: p.caption ? T.text : T.textMuted, background: T.surfaceAlt, cursor: "pointer", fontFamily: "inherit", textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {p.caption || "Add label"}
                 </button>
               )
@@ -1541,7 +1541,7 @@ function PhotoPicker({ photos = [], onChange, label = "Photos", maxPhotos = 10, 
           <button onClick={() => inputRef.current?.click()}
             style={{ width: 90, height: 90, borderRadius: 12, border: `2px dashed ${T.border}`, background: T.surfaceAlt, color: T.textMuted, cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 5 }}>
             <Icon name="plus" size={22} />
-            <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.02em", textAlign: "center" }}>Camera / Library</span>
+            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.02em", textAlign: "center" }}>Camera / Library</span>
           </button>
         )}
       </div>
@@ -1792,7 +1792,7 @@ function ClientOverview({ client, onUpdate }) {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
               {[["NH₃", h.ammonia],["NO₂", h.nitrite],["pH", h.ph],["Temp", h.temp]].map(([k,v]) => (
                 <div key={k} style={{ background: T.surfaceAlt, borderRadius: 10, padding: "10px 8px", textAlign: "center" }}>
-                  <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>{k}</div>
+                  <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>{k}</div>
                   <div style={{ fontSize: 17, fontWeight: 800, color: T.text, marginTop: 2 }}>{v}</div>
                 </div>
               ))}
@@ -2094,7 +2094,7 @@ function HistoryEditModal({ entry, onSave, onClose }) {
   };
 
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 };
-  const ta = { width: "100%", padding: "10px 13px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical" };
+  const ta = { width: "100%", padding: "10px 13px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical" };
   const costLine = (label, val, setter) => (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
       <span style={{ fontSize: 13, color: T.text }}>{label}</span>
@@ -2118,7 +2118,7 @@ function HistoryEditModal({ entry, onSave, onClose }) {
               {Object.entries(readings).map(([k, v]) => (
                 <div key={k}>
                   <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textAlign: "center", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{k}</div>
-                  <input value={v} onChange={e => setReadings(r => ({ ...r, [k]: e.target.value }))} style={{ width: "100%", padding: "9px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "center" }} />
+                  <input type="text" inputMode="decimal" value={v} onChange={e => setReadings(r => ({ ...r, [k]: e.target.value }))} style={{ width: "100%", padding: "9px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "center" }} />
                 </div>
               ))}
             </div>
@@ -2148,7 +2148,7 @@ function HistoryEditModal({ entry, onSave, onClose }) {
             <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Revenue</span>
             <div style={{ position: "relative", width: 110 }}>
               <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>$</span>
-              <input value={revenue} onChange={e => setRevenue(e.target.value.replace(/[^\d.]/g, ""))} style={{ width: "100%", padding: "8px 8px 8px 22px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 14, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
+              <input type="text" inputMode="decimal" value={revenue} onChange={e => setRevenue(e.target.value.replace(/[^\d.]/g, ""))} style={{ width: "100%", padding: "8px 8px 8px 22px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
             </div>
           </div>
           <div style={{ borderTop: `1px solid ${T.border}`, margin: "6px 0 10px" }} />
@@ -2215,7 +2215,7 @@ function ClientHistory({ client, onChange }) {
               <div style={{ fontSize: 13, color: T.text, marginBottom: 12, borderLeft: `3px solid ${T.border}`, paddingLeft: 10, lineHeight: 1.5 }}>{h.notes}</div>
 
               {h.officeNotes && (
-                <div style={{ fontSize: 12, color: T.warning, marginBottom: 12, background: `${T.warning}10`, borderRadius: 8, padding: "8px 10px" }}>
+                <div style={{ fontSize: 12, color: T.warning, marginBottom: 12, background: `${T.warning}10`, borderRadius: 10, padding: "8px 10px" }}>
                   <strong>Office note:</strong> {h.officeNotes}
                 </div>
               )}
@@ -2224,7 +2224,7 @@ function ClientHistory({ client, onChange }) {
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
                   {readingPairs.map(([k, v]) => (
                     <div key={k} style={{ background: T.surfaceAlt, borderRadius: 10, padding: "8px 6px", textAlign: "center" }}>
-                      <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{k}</div>
+                      <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{k}</div>
                       <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginTop: 2 }}>{v}</div>
                     </div>
                   ))}
@@ -2629,7 +2629,7 @@ function PhotoStrip({ photos, size = 56 }) {
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         {photos.map((p, i) => (
           <img key={i} src={p} alt="" onClick={() => setViewer(i)}
-            style={{ width: size, height: size, borderRadius: 8, objectFit: "cover", cursor: "pointer" }} />
+            style={{ width: size, height: size, borderRadius: 10, objectFit: "cover", cursor: "pointer" }} />
         ))}
       </div>
       {viewer !== null && <PhotoViewer photos={photos} index={viewer} onClose={() => setViewer(null)} />}
@@ -2786,7 +2786,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
   };
 
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
-  const smallInput = { width: "100%", padding: "9px 10px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "center" };
+  const smallInput = { width: "100%", padding: "9px 10px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "center" };
   const sectionGap = { marginBottom: 20 };
 
   if (done) {
@@ -2853,7 +2853,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
                 <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: T.text }}>{s.name}</span>
                 <div style={{ position: "relative", width: 92 }}>
                   <span style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
-                  <input value={s.price} onChange={e => setSvcPrice(i, e.target.value)} placeholder="0"
+                  <input type="text" inputMode="decimal" value={s.price} onChange={e => setSvcPrice(i, e.target.value)} placeholder="0"
                     style={{ width: "100%", padding: "7px 8px 7px 20px", border: `1px solid ${T.border}`, borderRadius: 7, fontSize: 13, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
                 </div>
               </div>
@@ -2903,13 +2903,13 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
         <label style={labelStyle}>Time on Site</label>
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           <div style={{ position: "relative", flex: 1 }}>
-            <input value={minutes} onChange={e => setMinutes(e.target.value.replace(/\D/g, ""))} style={{ ...smallInput, textAlign: "left", paddingRight: 40 }} />
+            <input type="text" inputMode="numeric" value={minutes} onChange={e => setMinutes(e.target.value.replace(/\D/g, ""))} style={{ ...smallInput, textAlign: "left", paddingRight: 40 }} />
             <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>min</span>
           </div>
           {!timerOn ? (
-            <button onClick={() => { setElapsed(0); setTimerOn(true); }} style={{ background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 8, padding: "9px 14px", fontSize: 13, fontWeight: 700, color: T.text, cursor: "pointer", fontFamily: "inherit" }}>▶ Start timer</button>
+            <button onClick={() => { setElapsed(0); setTimerOn(true); }} style={{ background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 14px", fontSize: 13, fontWeight: 700, color: T.text, cursor: "pointer", fontFamily: "inherit" }}>▶ Start timer</button>
           ) : (
-            <button onClick={stopTimer} style={{ background: T.primary, border: "none", borderRadius: 8, padding: "9px 14px", fontSize: 13, fontWeight: 700, color: "#fff", cursor: "pointer", fontFamily: "inherit" }}>
+            <button onClick={stopTimer} style={{ background: T.primary, border: "none", borderRadius: 10, padding: "9px 14px", fontSize: 13, fontWeight: 700, color: "#fff", cursor: "pointer", fontFamily: "inherit" }}>
               ⏸ {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, "0")}
             </button>
           )}
@@ -2924,7 +2924,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
             {tests.map(t => (
               <div key={t}>
                 <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textAlign: "center", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t}</div>
-                <input value={readings[t] || ""} onChange={e => setReadings(r => ({ ...r, [t]: e.target.value }))} style={smallInput} placeholder="—" />
+                <input type="text" inputMode="decimal" value={readings[t] || ""} onChange={e => setReadings(r => ({ ...r, [t]: e.target.value }))} style={smallInput} placeholder="—" />
               </div>
             ))}
           </div>
@@ -2944,7 +2944,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
                     ${num(t.costPerOz).toFixed(2)}/oz · {num(t.inventoryOz)} oz on hand{num(tx[t.id]) > num(t.inventoryOz) ? " · over!" : ""}
                   </div>
                 </div>
-                <input value={tx[t.id] || ""} onChange={e => setTx(x => ({ ...x, [t.id]: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0" style={{ width: 60, padding: "8px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
+                <input type="text" inputMode="decimal" value={tx[t.id] || ""} onChange={e => setTx(x => ({ ...x, [t.id]: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0" style={{ width: 60, padding: "8px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
                 <span style={{ fontSize: 12, color: T.textMuted, width: 14 }}>oz</span>
                 <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: num(tx[t.id]) > 0 ? T.text : T.textMuted }}>{money(num(tx[t.id]) * num(t.costPerOz))}</div>
               </div>
@@ -2989,14 +2989,14 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
       <div style={sectionGap}>
         <label style={labelStyle}>Notes to Client <span style={{ textTransform: "none", color: T.textMuted, fontWeight: 400 }}>(in their report & portal)</span></label>
         <textarea value={notesClient} onChange={e => setNotesClient(e.target.value)} placeholder="What you'd like the client to know..." rows={2}
-          style={{ width: "100%", padding: "10px 13px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical" }} />
+          style={{ width: "100%", padding: "10px 13px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical" }} />
       </div>
 
       {/* Notes to office */}
       <div style={sectionGap}>
         <label style={labelStyle}>Notes to Office <span style={{ textTransform: "none", color: T.textMuted, fontWeight: 400 }}>(internal — all staff see this)</span></label>
         <textarea value={notesOffice} onChange={e => setNotesOffice(e.target.value)} placeholder="Internal notes — never shown to the client..." rows={2}
-          style={{ width: "100%", padding: "10px 13px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical" }} />
+          style={{ width: "100%", padding: "10px 13px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical" }} />
       </div>
 
       {/* Flag for office attention */}
@@ -3008,7 +3008,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
         {officeFlag && (
           <>
             <textarea value={officeFlagMsg} onChange={e => setOfficeFlagMsg(e.target.value)} placeholder="e.g. Client wants a new pump quote; needs algaecide reorder..." rows={2}
-              style={{ width: "100%", padding: "10px 13px", border: `1.5px solid ${T.warning}`, borderRadius: 8, fontSize: 14, fontFamily: "inherit", color: T.text, background: `${T.warning}08`, outline: "none", boxSizing: "border-box", resize: "vertical" }} />
+              style={{ width: "100%", padding: "10px 13px", border: `1.5px solid ${T.warning}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: `${T.warning}08`, outline: "none", boxSizing: "border-box", resize: "vertical" }} />
             <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>This sends an alert to the office (shown on the admin dashboard). Email/SMS notification turns on with the backend.</div>
           </>
         )}
@@ -3024,7 +3024,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
           <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Amount Charged</span>
           <div style={{ position: "relative", width: 110 }}>
             <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>$</span>
-            <input value={revenue} onChange={e => setRevenue(e.target.value.replace(/[^\d.]/g, ""))} placeholder="0.00" style={{ width: "100%", padding: "8px 8px 8px 22px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 14, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
+            <input type="text" inputMode="decimal" value={revenue} onChange={e => setRevenue(e.target.value.replace(/[^\d.]/g, ""))} placeholder="0.00" style={{ width: "100%", padding: "8px 8px 8px 22px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
           </div>
         </div>
 
@@ -3154,7 +3154,7 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
   };
 
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
-  const nativeInput = { width: "100%", padding: "10px 12px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const nativeInput = { width: "100%", padding: "10px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
 
   return (
     <Modal title="New Service Stop" onClose={onClose}>
@@ -3169,7 +3169,7 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
         <div style={{ maxHeight: 160, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, border: `1px solid ${T.border}`, borderRadius: 10, padding: 6 }}>
           {filteredClients.map(c => (
             <div key={c.id} onClick={() => toggleClient(c.id)}
-              style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 8, cursor: "pointer", background: selClients[c.id] ? T.navActiveBg : "transparent" }}>
+              style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 10, cursor: "pointer", background: selClients[c.id] ? T.navActiveBg : "transparent" }}>
               <Checkbox checked={!!selClients[c.id]} onChange={() => toggleClient(c.id)} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{c.name}</div>
@@ -3201,8 +3201,8 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
         <div style={{ flex: 1 }}>
           <label style={labelStyle}>Duration</label>
           <div style={{ position: "relative" }}>
-            <input value={duration} onChange={e => setDuration(e.target.value.replace(/\D/g, ""))} placeholder="60"
-              style={{ width: "100%", padding: "10px 38px 10px 12px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
+            <input type="text" inputMode="numeric" value={duration} onChange={e => setDuration(e.target.value.replace(/\D/g, ""))} placeholder="60"
+              style={{ width: "100%", padding: "10px 38px 10px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
             <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>min</span>
           </div>
         </div>
@@ -3251,7 +3251,7 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
                 <span style={{ fontSize: 11, color: T.textMuted }}>price</span>
                 <div style={{ position: "relative", width: 90 }}>
                   <span style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
-                  <input value={svcPrices[s.id] ?? s.price ?? ""} onChange={e => setSvcPrices(p => ({ ...p, [s.id]: e.target.value.replace(/[^\d.]/g, "") }))}
+                  <input type="text" inputMode="decimal" value={svcPrices[s.id] ?? s.price ?? ""} onChange={e => setSvcPrices(p => ({ ...p, [s.id]: e.target.value.replace(/[^\d.]/g, "") }))}
                     style={{ width: "100%", padding: "6px 8px 6px 20px", border: `1px solid ${T.border}`, borderRadius: 7, fontSize: 13, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
                 </div>
               </div>
@@ -3909,7 +3909,7 @@ function RouteAssignmentsTab({ clients, catalog, team, schedule, setSchedule, as
         <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 10, padding: 3, gap: 2, flexShrink: 0 }}>
           {[["matrix","Grid"],["list","List"]].map(([v,l]) => (
             <button key={v} onClick={() => setView(v)}
-              style={{ padding: "6px 12px", border: "none", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer", background: view===v ? T.surface : "transparent", color: view===v ? T.primary : T.textMuted, fontFamily: "inherit", boxShadow: view===v ? "0 1px 3px rgba(0,0,0,0.1)" : "none" }}>
+              style={{ padding: "6px 12px", border: "none", borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer", background: view===v ? T.surface : "transparent", color: view===v ? T.primary : T.textMuted, fontFamily: "inherit", boxShadow: view===v ? "0 1px 3px rgba(0,0,0,0.1)" : "none" }}>
               {l}
             </button>
           ))}
@@ -4189,7 +4189,7 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
             {selectMode && <Checkbox checked={isSel} onChange={() => toggle(s.sid)} />}
             <div style={{ textAlign: "center", minWidth: 50, flexShrink: 0 }}>
               <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>{s.time.split(" ")[0]}</div>
-              <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 700 }}>{s.time.split(" ")[1]}</div>
+              <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700 }}>{s.time.split(" ")[1]}</div>
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontWeight: 700, fontSize: 14, color: T.text, display: "flex", alignItems: "center", gap: 6 }}>
@@ -4222,18 +4222,18 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
               )}
               <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
                 <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: s, client: c }); }}
-                  style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 8, padding: "6px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                  style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "6px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
                   <span style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="map" size={13} /> Head Here</span>
                 </button>
                 {!isComplete && perms.sendTexts && (
                   <button onClick={e => { e.stopPropagation(); setOmwModal({ stop: s, client: c, key: s.sid }); }}
-                    style={{ background: "transparent", color: T.primary, border: `1.5px solid ${T.primary}`, borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                    style={{ background: "transparent", color: T.primary, border: `1.5px solid ${T.primary}`, borderRadius: 10, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
                     <span style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="message" size={13} /> {sent ? "Resend" : "On My Way"}</span>
                   </button>
                 )}
                 {perms.completeStops && (
                   <button onClick={e => { e.stopPropagation(); setCompleteModal({ stop: s, client: c }); }}
-                    style={{ background: isComplete ? "transparent" : T.accent, color: isComplete ? T.accent : "#fff", border: isComplete ? `1.5px solid ${T.accent}` : "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                    style={{ background: isComplete ? "transparent" : T.accent, color: isComplete ? T.accent : "#fff", border: isComplete ? `1.5px solid ${T.accent}` : "none", borderRadius: 10, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
                     <span style={{ display:"flex", alignItems:"center", gap:4 }}><Icon name="check" size={13} /> {isComplete ? "Re-send" : "Complete"}</span>
                   </button>
                 )}
@@ -4635,7 +4635,7 @@ function SkimmerImport({ onImport, onGoToClients }) {
   const preview = records.length ? buildClients([records[0]], mapping)[0] : null;
   const detected = IMPORT_FIELDS.filter(f => mapping[f.key]).length;
 
-  const selectStyle = { width: "100%", padding: "8px 10px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none" };
+  const selectStyle = { width: "100%", padding: "8px 10px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none" };
 
   return (
     <div>
@@ -4653,7 +4653,7 @@ function SkimmerImport({ onImport, onGoToClients }) {
             <div style={{ width: 56, height: 56, borderRadius: 18, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 14px" }}><Icon name="download" size={28} /></div>
             <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 6 }}>Upload CSV Export</div>
             <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 18 }}>Client name, address, phone, email, plan, and more</div>
-            <label style={{ background: T.primary, color: "#fff", borderRadius: 8, padding: "10px 22px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+            <label style={{ background: T.primary, color: "#fff", borderRadius: 10, padding: "10px 22px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
               Choose File
               <input type="file" accept=".csv,text/csv" onChange={handleFile} style={{ display: "none" }} />
             </label>
@@ -4770,10 +4770,10 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
         <CardHeader title="Company Contact" />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
           <div style={{ fontSize: 12, color: T.textMuted, marginTop: -2 }}>Your public contact details. These power the portal's Request Service and Contact Us buttons and show on invoices.</div>
-          <div><label style={labelStyle}>Phone</label><input style={field} value={branding.companyPhone || ""} onChange={e => setB("companyPhone", e.target.value)} placeholder="(610) 555-1234" inputMode="tel" /></div>
-          <div><label style={labelStyle}>Contact Email</label><input style={field} value={branding.companyEmail || ""} onChange={e => setB("companyEmail", e.target.value)} placeholder="hello@yourcompany.com" /></div>
-          <div><label style={labelStyle}>Website</label><input style={field} value={branding.companyWebsite || ""} onChange={e => setB("companyWebsite", e.target.value)} placeholder="yourcompany.com" /></div>
-          <div><label style={labelStyle}>Business Address</label><input style={field} value={branding.companyAddress || ""} onChange={e => setB("companyAddress", e.target.value)} placeholder="123 Main St, Honey Brook, PA 19344" /></div>
+          <div><label style={labelStyle}>Phone</label><input type="tel" style={field} value={branding.companyPhone || ""} onChange={e => setB("companyPhone", e.target.value)} placeholder="(610) 555-1234" inputMode="tel" /></div>
+          <div><label style={labelStyle}>Contact Email</label><input type="email" style={field} value={branding.companyEmail || ""} onChange={e => setB("companyEmail", e.target.value)} placeholder="hello@yourcompany.com" /></div>
+          <div><label style={labelStyle}>Website</label><input type="url" style={field} value={branding.companyWebsite || ""} onChange={e => setB("companyWebsite", e.target.value)} placeholder="yourcompany.com" /></div>
+          <div><label style={labelStyle}>Business Address</label><input type="text" style={field} value={branding.companyAddress || ""} onChange={e => setB("companyAddress", e.target.value)} placeholder="123 Main St, Honey Brook, PA 19344" /></div>
         </div>
       </Card>
 
@@ -4781,10 +4781,10 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Email Sender" />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
-          <div><label style={labelStyle}>From Name</label><input style={field} value={email.fromName} onChange={e => set("fromName", e.target.value)} /></div>
+          <div><label style={labelStyle}>From Name</label><input type="text" style={field} value={email.fromName} onChange={e => set("fromName", e.target.value)} /></div>
           <div>
             <label style={labelStyle}>From Address</label>
-            <input style={field} value={email.fromAddress} onChange={e => set("fromAddress", e.target.value)} placeholder="service@yourcompany.com" />
+            <input type="email" style={field} value={email.fromAddress} onChange={e => set("fromAddress", e.target.value)} placeholder="service@yourcompany.com" />
             <div style={hint}>The address clients reply to. Auto-sending is set up with the backend; for now reports open in your own mail app.</div>
           </div>
         </div>
@@ -4796,7 +4796,7 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
           <div>
             <label style={labelStyle}>Subject Line</label>
-            <input style={field} value={email.subject} onChange={e => set("subject", e.target.value)} />
+            <input type="text" style={field} value={email.subject} onChange={e => set("subject", e.target.value)} />
             <div style={hint}>Use {"{date}"} to insert the service date.</div>
           </div>
           <div><label style={labelStyle}>Intro Line</label><textarea style={{ ...field, resize: "vertical" }} rows={2} value={email.intro} onChange={e => set("intro", e.target.value)} /></div>
@@ -4821,7 +4821,7 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
             Tags you can use: <b style={{ color: T.text }}>{"{first}"}</b> name, <b style={{ color: T.text }}>{"{sender}"}</b> your name, <b style={{ color: T.text }}>{"{company}"}</b>, <b style={{ color: T.text }}>{"{eta}"}</b> minutes, <b style={{ color: T.text }}>{"{arrival}"}</b> time, <b style={{ color: T.text }}>{"{track}"}</b> tracking link.
           </div>
           <div style={{ display: "flex", gap: 10 }}>
-            <div style={{ flex: 1 }}><label style={labelStyle}>Sender Name</label><input style={field} value={email.senderName || ""} onChange={e => set("senderName", e.target.value)} placeholder="Brandon" /></div>
+            <div style={{ flex: 1 }}><label style={labelStyle}>Sender Name</label><input type="text" style={field} value={email.senderName || ""} onChange={e => set("senderName", e.target.value)} placeholder="Brandon" /></div>
           </div>
           <div><label style={labelStyle}>Live Tracking Link <span style={{ textTransform: "none", color: T.textMuted, fontWeight: 400 }}>(optional)</span></label><input type="url" style={field} value={email.trackLink || ""} onChange={e => set("trackLink", e.target.value)} placeholder="Leave blank until Maps API is connected" /></div>
           <div><label style={labelStyle}>Reminder Text</label><textarea style={{ ...field, resize: "vertical" }} rows={2} value={email.smsReminder || ""} onChange={e => set("smsReminder", e.target.value)} /></div>
@@ -5004,8 +5004,8 @@ function CatalogManager({ catalog, setCatalog }) {
     return { ...m, data: { ...m.data, tests: has ? m.data.tests.filter(x => x !== t) : [...m.data.tests, t] } };
   });
 
-  const chipInput = { flex: 1, padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
-  const field = { width: "100%", padding: "10px 13px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const chipInput = { flex: 1, padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const field = { width: "100%", padding: "10px 13px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
   const productName = (pid) => (products.find(p => p.id === pid) || {}).name || "";
 
@@ -5120,7 +5120,7 @@ function CatalogManager({ catalog, setCatalog }) {
       {prodModal && (
         <Modal title={prodModal.mode === "add" ? "Add Product" : "Edit Product"} onClose={() => setProdModal(null)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <div><label style={labelStyle}>Name</label><input style={field} value={prodModal.data.name} onChange={e => setProdModal(m => ({ ...m, data: { ...m.data, name: e.target.value } }))} placeholder="Product name" autoFocus /></div>
+            <div><label style={labelStyle}>Name</label><input type="text" style={field} value={prodModal.data.name} onChange={e => setProdModal(m => ({ ...m, data: { ...m.data, name: e.target.value } }))} placeholder="Product name" autoFocus /></div>
             <div><label style={labelStyle}>Price</label>
               <div style={{ position: "relative" }}>
                 <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: T.textMuted }}>$</span>
@@ -5137,7 +5137,7 @@ function CatalogManager({ catalog, setCatalog }) {
       {txModal && (
         <Modal title={txModal.mode === "add" ? "Add Treatment" : "Edit Treatment"} onClose={() => setTxModal(null)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <div><label style={labelStyle}>Name</label><input style={field} value={txModal.data.name} onChange={e => setTxModal(m => ({ ...m, data: { ...m.data, name: e.target.value } }))} placeholder="e.g. Algaecide" autoFocus /></div>
+            <div><label style={labelStyle}>Name</label><input type="text" style={field} value={txModal.data.name} onChange={e => setTxModal(m => ({ ...m, data: { ...m.data, name: e.target.value } }))} placeholder="e.g. Algaecide" autoFocus /></div>
             <div><label style={labelStyle}>Cost per Ounce</label>
               <div style={{ position: "relative" }}>
                 <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: T.textMuted }}>$</span>
@@ -5149,13 +5149,13 @@ function CatalogManager({ catalog, setCatalog }) {
             <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: 14 }}>
               <label style={labelStyle}>Inventory on Hand</label>
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-                <button onClick={() => adjustInv(-1)} style={{ width: 34, height: 34, borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 18, cursor: "pointer", fontFamily: "inherit" }}>−</button>
+                <button onClick={() => adjustInv(-1)} style={{ width: 34, height: 34, borderRadius: 10, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 18, cursor: "pointer", fontFamily: "inherit" }}>−</button>
                 <div style={{ position: "relative", flex: 1 }}>
-                  <input value={txModal.data.inventoryOz} onChange={e => setTxModal(m => ({ ...m, data: { ...m.data, inventoryOz: e.target.value.replace(/[^\d.]/g, "") } }))}
-                    style={{ width: "100%", padding: "10px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 16, fontWeight: 800, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "center" }} />
+                  <input type="text" inputMode="decimal" value={txModal.data.inventoryOz} onChange={e => setTxModal(m => ({ ...m, data: { ...m.data, inventoryOz: e.target.value.replace(/[^\d.]/g, "") } }))}
+                    style={{ width: "100%", padding: "10px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 16, fontWeight: 800, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "center" }} />
                   <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>oz</span>
                 </div>
-                <button onClick={() => adjustInv(1)} style={{ width: 34, height: 34, borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 18, cursor: "pointer", fontFamily: "inherit" }}>+</button>
+                <button onClick={() => adjustInv(1)} style={{ width: 34, height: 34, borderRadius: 10, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 18, cursor: "pointer", fontFamily: "inherit" }}>+</button>
               </div>
               {/* quick add bottle sizes */}
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
@@ -5165,7 +5165,7 @@ function CatalogManager({ catalog, setCatalog }) {
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <div style={{ position: "relative", flex: 1 }}>
-                  <input value={txModal.addOz} onChange={e => setTxModal(m => ({ ...m, addOz: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="Custom amount" style={{ width: "100%", padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
+                  <input type="text" inputMode="decimal" value={txModal.addOz} onChange={e => setTxModal(m => ({ ...m, addOz: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="Custom amount" style={{ width: "100%", padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
                 </div>
                 <Btn sm onClick={addInvAmount} style={{ padding: "9px 16px" }}>Add</Btn>
               </div>
@@ -5184,7 +5184,7 @@ function CatalogManager({ catalog, setCatalog }) {
             <div style={{ display: "flex", gap: 10 }}>
               <div style={{ flex: 2 }}>
                 <label style={labelStyle}>Service Name</label>
-                <input style={chipInput} value={svcModal.data.name} onChange={e => setSvc("name", e.target.value)} placeholder="e.g. Algae Treatment" autoFocus />
+                <input type="text" style={chipInput} value={svcModal.data.name} onChange={e => setSvc("name", e.target.value)} placeholder="e.g. Algae Treatment" autoFocus />
               </div>
               <div style={{ flex: 1 }}>
                 <label style={labelStyle}>Price</label>
@@ -5286,8 +5286,8 @@ function BudgetManager({ budget, setBudget, clients, costs }) {
   const removeRow = (kind, id) =>
     setBudget(b => ({ ...b, [kind]: b[kind].filter(r => r.id !== id) }));
 
-  const lineInput = { flex: 1, padding: "9px 11px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
-  const amtInput = { width: 96, padding: "9px 8px 9px 20px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 13, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" };
+  const lineInput = { flex: 1, padding: "9px 11px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const amtInput = { width: 96, padding: "9px 8px 9px 20px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" };
 
   const section = (kind, title, accent) => (
     <Card style={{ marginBottom: 14 }}>
@@ -5295,16 +5295,16 @@ function BudgetManager({ budget, setBudget, clients, costs }) {
       <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 8 }}>
         {(budget[kind] || []).map(r => (
           <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input value={r.label} onChange={e => editRow(kind, r.id, "label", e.target.value)} placeholder="Label..." style={lineInput} />
+            <input type="text" value={r.label} onChange={e => editRow(kind, r.id, "label", e.target.value)} placeholder="Label..." style={lineInput} />
             <div style={{ position: "relative" }}>
               <span style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
-              <input value={r.amount} onChange={e => editRow(kind, r.id, "amount", e.target.value)} placeholder="0" style={amtInput} />
+              <input type="text" inputMode="decimal" value={r.amount} onChange={e => editRow(kind, r.id, "amount", e.target.value)} placeholder="0" style={amtInput} />
             </div>
             <button onClick={() => removeRow(kind, r.id)} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", fontSize: 16 }}>×</button>
           </div>
         ))}
         {kind === "expenses" && fixedFromCosts > 0 && (
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: T.surfaceAlt, borderRadius: 8, padding: "9px 11px" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: T.surfaceAlt, borderRadius: 10, padding: "9px 11px" }}>
             <span style={{ fontSize: 13, color: T.text }}>Fixed overhead <span style={{ fontSize: 11, color: T.textMuted }}>(from Costs tab)</span></span>
             <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{money(fixedFromCosts)}</span>
           </div>
@@ -5395,7 +5395,7 @@ function CostSettings({ costs, setCosts }) {
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <div style={{ position: "relative", width: 100 }}>
               <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>$</span>
-              <input value={costs.hourlyRate} onChange={e => setRate(e.target.value)} style={{ width: "100%", padding: "9px 8px 9px 22px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 14, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
+              <input type="text" inputMode="decimal" value={costs.hourlyRate} onChange={e => setRate(e.target.value)} style={{ width: "100%", padding: "9px 8px 9px 22px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
             </div>
             <span style={{ fontSize: 11, color: T.textMuted, width: 30 }}>/hr</span>
           </div>
@@ -5416,9 +5416,9 @@ function CostSettings({ costs, setCosts }) {
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <div style={{ position: "relative", width: 96 }}>
                         <span style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>$</span>
-                        <input value={l.amount} onChange={e => setLine(key, { amount: e.target.value.replace(/[^\d.]/g, "") })} style={{ width: "100%", padding: "9px 8px 9px 20px", border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 14, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
+                        <input type="text" inputMode="decimal" value={l.amount} onChange={e => setLine(key, { amount: e.target.value.replace(/[^\d.]/g, "") })} style={{ width: "100%", padding: "9px 8px 9px 20px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
                       </div>
-                      <div style={{ display: "flex", border: `1px solid ${T.border}`, borderRadius: 8, overflow: "hidden" }}>
+                      <div style={{ display: "flex", border: `1px solid ${T.border}`, borderRadius: 10, overflow: "hidden" }}>
                         {[["stop", "/stop"], ["month", "/mo"]].map(([m, lbl]) => (
                           <button key={m} onClick={() => setLine(key, { mode: m })}
                             style={{ padding: "8px 10px", border: "none", background: l.mode === m ? T.primary : T.surface, color: l.mode === m ? "#fff" : T.textMuted, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>{lbl}</button>
@@ -5716,13 +5716,13 @@ function TeamManager({ team, setTeam, currentUserId }) {
             {/* Name */}
             <div>
               <label style={labelStyle}>Full Name</label>
-              <input style={field} value={modal.data.name} onChange={e => setD({ name: e.target.value })} placeholder="e.g. David Smith" autoFocus />
+              <input type="text" style={field} value={modal.data.name} onChange={e => setD({ name: e.target.value })} placeholder="e.g. David Smith" autoFocus />
             </div>
 
             {/* Email */}
             <div>
               <label style={labelStyle}>Login Email</label>
-              <input style={field} value={modal.data.email || ""} onChange={e => setD({ email: e.target.value })} placeholder="their work email address" inputMode="email" autoCapitalize="none" />
+              <input type="email" style={field} value={modal.data.email || ""} onChange={e => setD({ email: e.target.value })} placeholder="their work email address" inputMode="email" autoCapitalize="none" />
               <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6, lineHeight: 1.5 }}>
                 This is the email they use to sign in. Once saved, tap Send Invite on their card and their Supabase account is created automatically.
               </div>
@@ -5855,7 +5855,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, presetClientId, 
           </div>
           <div style={{ flex: 1 }}>
             <label style={label}>Invoice #</label>
-            <input style={field} value={inv.number} onChange={e => set("number", e.target.value)} />
+            <input type="text" style={field} value={inv.number} onChange={e => set("number", e.target.value)} />
           </div>
         </div>
 
@@ -5907,7 +5907,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, presetClientId, 
                   </div>
                   <div style={{ textAlign: "center" }}>
                     <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 3 }}>Tax</div>
-                    <div onClick={() => setLine(l.id, "taxable", !l.taxable)} title="Taxable" style={{ width: 32, height: 32, borderRadius: 8, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", background: l.taxable ? T.primary : T.surface, border: `1.5px solid ${l.taxable ? T.primary : T.border}`, color: "#fff", fontWeight: 800, fontSize: 13 }}>{l.taxable ? "✓" : ""}</div>
+                    <div onClick={() => setLine(l.id, "taxable", !l.taxable)} title="Taxable" style={{ width: 32, height: 32, borderRadius: 10, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", background: l.taxable ? T.primary : T.surface, border: `1.5px solid ${l.taxable ? T.primary : T.border}`, color: "#fff", fontWeight: 800, fontSize: 13 }}>{l.taxable ? "✓" : ""}</div>
                   </div>
                   <button onClick={() => removeLine(l.id)} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 18, cursor: "pointer", padding: "4px 2px", height: 32 }}>×</button>
                 </div>
@@ -5965,12 +5965,12 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding }) {
         <CardHeader title="Invoice Defaults" />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
           <div style={{ display: "flex", gap: 10 }}>
-            <div style={{ flex: 1 }}><label style={labelStyle}>Number Prefix</label><input style={field} value={cfg.numberPrefix} onChange={e => set("numberPrefix", e.target.value)} placeholder="INV-" /></div>
-            <div style={{ width: 110 }}><label style={labelStyle}>Next #</label><input style={field} value={cfg.nextNumber} onChange={e => set("nextNumber", e.target.value.replace(/[^\d]/g, ""))} inputMode="numeric" /></div>
+            <div style={{ flex: 1 }}><label style={labelStyle}>Number Prefix</label><input type="text" style={field} value={cfg.numberPrefix} onChange={e => set("numberPrefix", e.target.value)} placeholder="INV-" /></div>
+            <div style={{ width: 110 }}><label style={labelStyle}>Next #</label><input type="text" inputMode="numeric" style={field} value={cfg.nextNumber} onChange={e => set("nextNumber", e.target.value.replace(/[^\d]/g, ""))} /></div>
           </div>
           <div style={{ display: "flex", gap: 10 }}>
-            <div style={{ flex: 1 }}><label style={labelStyle}>Default Tax Rate (%)</label><input style={field} value={cfg.taxRate} onChange={e => set("taxRate", e.target.value.replace(/[^\d.]/g, ""))} inputMode="decimal" /></div>
-            <div style={{ flex: 1 }}><label style={labelStyle}>Due In (days)</label><input style={field} value={cfg.dueDays} onChange={e => set("dueDays", e.target.value.replace(/[^\d]/g, ""))} inputMode="numeric" /></div>
+            <div style={{ flex: 1 }}><label style={labelStyle}>Default Tax Rate (%)</label><input type="text" inputMode="decimal" style={field} value={cfg.taxRate} onChange={e => set("taxRate", e.target.value.replace(/[^\d.]/g, ""))} /></div>
+            <div style={{ flex: 1 }}><label style={labelStyle}>Due In (days)</label><input type="text" inputMode="numeric" style={field} value={cfg.dueDays} onChange={e => set("dueDays", e.target.value.replace(/[^\d]/g, ""))} /></div>
           </div>
           <div><label style={labelStyle}>Default Terms / Notes</label><textarea style={{ ...field, resize: "vertical" }} rows={2} value={cfg.terms} onChange={e => set("terms", e.target.value)} /></div>
         </div>
@@ -6303,7 +6303,7 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
         </div>
         <div>
           <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 6 }}>Estimate Title</label>
-          <input style={field} value={form.title} onChange={e => set("title", e.target.value)} placeholder="e.g. Spring Pond Opening, New Installation..." />
+          <input type="text" style={field} value={form.title} onChange={e => set("title", e.target.value)} placeholder="e.g. Spring Pond Opening, New Installation..." />
         </div>
         <div style={{ display: "flex", gap: 10 }}>
           <div style={{ flex: 1 }}>
@@ -6429,7 +6429,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, onSave, onDele
 
       <div style={{ position: "relative", marginBottom: 12 }}>
         <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: T.textMuted, display:"flex" }}><Icon name="clients" size={16} /></span>
-        <input placeholder="Search by number or client..." value={search} onChange={e => setSearch(e.target.value)} style={{ width: "100%", padding: "10px 14px 10px 36px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, boxSizing: "border-box", outline: "none", fontFamily: "inherit", color: T.text, background: T.surface }} />
+        <input type="search" placeholder="Search by number or client..." value={search} onChange={e => setSearch(e.target.value)} style={{ width: "100%", padding: "10px 14px 10px 36px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, boxSizing: "border-box", outline: "none", fontFamily: "inherit", color: T.text, background: T.surface }} />
       </div>
       <div style={{ display: "flex", gap: 7, marginBottom: 16, overflowX: "auto", paddingBottom: 4 }}>
         {["All", ...INVOICE_STATUSES].map(s => (
@@ -6724,7 +6724,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
           title="Brand Palette"
           action={
             <button onClick={() => setEditingPalette(e => !e)}
-              style={{ background: editingPalette ? T.primary : T.surfaceAlt, color: editingPalette ? "#fff" : T.textMuted, border: "none", borderRadius: 8, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+              style={{ background: editingPalette ? T.primary : T.surfaceAlt, color: editingPalette ? "#fff" : T.textMuted, border: "none", borderRadius: 10, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
               {editingPalette ? "Done" : "Edit"}
             </button>
           }
@@ -6747,7 +6747,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
                     </button>
                   )}
                 </div>
-                <div style={{ fontSize: 9, color: T.textMuted, textAlign: "center", maxWidth: 44, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>{p.name}</div>
+                <div style={{ fontSize: 10, color: T.textMuted, textAlign: "center", maxWidth: 44, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>{p.name}</div>
               </div>
             ))}
 
@@ -6815,7 +6815,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ fontSize: 12, color: T.textMuted, fontFamily: "monospace" }}>{currentVal.toUpperCase()}</span>
-                  <div style={{ position: "relative", width: 32, height: 32, borderRadius: 8, overflow: "hidden", border: `2px solid ${T.border}`, background: currentVal, flexShrink: 0 }}>
+                  <div style={{ position: "relative", width: 32, height: 32, borderRadius: 10, overflow: "hidden", border: `2px solid ${T.border}`, background: currentVal, flexShrink: 0 }}>
                     <input type="color" value={currentVal} onChange={e => setCustom(colorKey, e.target.value)}
                       style={{ position: "absolute", inset: -4, width: 44, height: 44, border: "none", padding: 0, cursor: "pointer", background: "none" }} />
                   </div>
@@ -6827,7 +6827,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
                   <button key={pi} onClick={() => setCustom(colorKey, p.hex)}
                     title={`${p.name} ${p.hex}`}
                     style={{
-                      width: 30, height: 30, borderRadius: 8, background: p.hex, border: `2.5px solid ${currentVal === p.hex ? T.text : "transparent"}`,
+                      width: 30, height: 30, borderRadius: 10, background: p.hex, border: `2.5px solid ${currentVal === p.hex ? T.text : "transparent"}`,
                       cursor: "pointer", flexShrink: 0, boxShadow: currentVal === p.hex ? `0 0 0 1px ${T.border}` : "0 1px 3px rgba(0,0,0,0.15)",
                       transition: "transform 0.1s",
                     }}
@@ -6835,7 +6835,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
                 ))}
                 {/* Custom hex input */}
                 <button onClick={() => setShowHex(v => !v)}
-                  style={{ width: 30, height: 30, borderRadius: 8, background: T.surface, border: `1.5px dashed ${T.border}`, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: T.textMuted, fontSize: 16, fontWeight: 300 }}>
+                  style={{ width: 30, height: 30, borderRadius: 10, background: T.surface, border: `1.5px dashed ${T.border}`, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: T.textMuted, fontSize: 16, fontWeight: 300 }}>
                   +
                 </button>
               </div>
@@ -6857,7 +6857,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
                     }}
                     style={{ flex: 1, padding: "8px 12px", border: `1.5px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "monospace", color: T.text, background: T.surface, outline: "none" }}
                   />
-                  <div style={{ width: 30, height: 30, borderRadius: 8, background: currentVal, border: `1px solid ${T.border}`, flexShrink: 0 }} />
+                  <div style={{ width: 30, height: 30, borderRadius: 10, background: currentVal, border: `1px solid ${T.border}`, flexShrink: 0 }} />
                 </div>
               )}
             </div>
@@ -6932,7 +6932,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
               <div style={{ fontSize: 14, color: T.text }}>Portal primary color</div>
               <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <span style={{ fontSize: 12, color: T.textMuted, fontFamily: "monospace" }}>{(localBranding.accentColor || T.primary).toUpperCase()}</span>
-                <span style={{ position: "relative", width: 32, height: 32, borderRadius: 8, overflow: "hidden", border: `1px solid ${T.border}`, background: localBranding.accentColor || T.primary, flexShrink: 0 }}>
+                <span style={{ position: "relative", width: 32, height: 32, borderRadius: 10, overflow: "hidden", border: `1px solid ${T.border}`, background: localBranding.accentColor || T.primary, flexShrink: 0 }}>
                   <input type="color" value={localBranding.accentColor || T.primary} onChange={e => set("accentColor", e.target.value)} style={{ position: "absolute", inset: -4, width: 44, height: 44, border: "none", padding: 0, cursor: "pointer", background: "none" }} />
                 </span>
               </span>
@@ -7306,6 +7306,516 @@ function CPMessages({ client, T, currentUser }) {
 // Per-client breakdown of completed stops for any period.
 // Printable — generates a clean PDF for billing review.
 // ─────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// INVENTORY SCREEN
+// Full treatment/chemical inventory tracker.
+// Shows stock levels, usage history, restock alerts,
+// and lets you adjust inventory manually.
+// ─────────────────────────────────────────────
+
+function InventoryScreen({ catalog, setCatalog, clients, T }) {
+  const LOW_THRESHOLD = 32; // oz — configurable
+  const treatments = catalog.treatments || [];
+  const [adjustModal, setAdjustModal] = useState(null); // { treatment, mode: "restock"|"adjust" }
+  const [adjustAmt, setAdjustAmt] = useState("");
+  const [adjustNote, setAdjustNote] = useState("");
+  const [historyModal, setHistoryModal] = useState(null); // treatment id
+
+  // Build usage history from all client history entries
+  const usageHistory = {};
+  (clients || []).forEach(c => {
+    (c.history || []).forEach(h => {
+      (h.treatmentsUsed || []).forEach(u => {
+        if (!usageHistory[u.id]) usageHistory[u.id] = [];
+        usageHistory[u.id].push({ date: h.date, oz: u.oz, client: c.name, cost: u.cost });
+      });
+    });
+  });
+
+  // Total usage per treatment (all time)
+  const totalUsed = (id) => (usageHistory[id] || []).reduce((s, e) => s + (e.oz || 0), 0);
+  const lastUsed  = (id) => {
+    const h = (usageHistory[id] || []).slice().sort((a,b) => {
+      const p = s => { const [m,d,y]=(s||"").split("/").map(Number); return new Date(y,m-1,d); };
+      return p(b.date) - p(a.date);
+    });
+    return h[0]?.date || null;
+  };
+
+  const statusOf = (oz) => {
+    if (oz <= 0) return { label: "Out of Stock", color: "#E5484D", bg: hexA("#E5484D", 0.1) };
+    if (oz < LOW_THRESHOLD) return { label: "Low Stock", color: "#F59E0B", bg: hexA("#F59E0B", 0.1) };
+    return { label: "In Stock", color: "#16a34a", bg: hexA("#16a34a", 0.1) };
+  };
+
+  const applyAdjust = () => {
+    const t = adjustModal.treatment;
+    const amt = parseFloat(adjustAmt) || 0;
+    if (amt === 0) { setAdjustModal(null); return; }
+    const current = parseFloat(t.inventoryOz) || 0;
+    const newAmt = adjustModal.mode === "restock"
+      ? current + amt
+      : Math.max(0, current + amt); // adjust can be negative
+    setCatalog(cat => ({
+      ...cat,
+      treatments: (cat.treatments || []).map(tr =>
+        tr.id === t.id ? { ...tr, inventoryOz: String(newAmt) } : tr
+      )
+    }));
+    setAdjustModal(null);
+    setAdjustAmt("");
+    setAdjustNote("");
+  };
+
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const lbl   = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
+
+  const low = treatments.filter(t => parseFloat(t.inventoryOz) < LOW_THRESHOLD);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div>
+        <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Inventory</div>
+        <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>
+          {treatments.length} treatment{treatments.length !== 1 ? "s" : ""} tracked · {low.length > 0 ? `${low.length} need restocking` : "All stocked"}
+        </div>
+      </div>
+
+      {/* Low stock alerts */}
+      {low.length > 0 && (
+        <div style={{ background: hexA("#F59E0B", 0.08), border: `1px solid ${hexA("#F59E0B", 0.25)}`, borderRadius: 16, padding: "14px 16px" }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#92400E", marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+            <Icon name="warning" size={15} /> {low.length} item{low.length !== 1 ? "s" : ""} running low
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {low.map(t => {
+              const oz = parseFloat(t.inventoryOz) || 0;
+              return (
+                <div key={t.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: 13, color: T.text, fontWeight: 600 }}>{t.name}</span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 12, color: oz <= 0 ? "#E5484D" : "#F59E0B", fontWeight: 700 }}>
+                      {oz <= 0 ? "OUT" : `${oz}oz left`}
+                    </span>
+                    <button onClick={() => { setAdjustModal({ treatment: t, mode: "restock" }); setAdjustAmt(""); }}
+                      style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 8, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                      Restock
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Treatment cards */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {treatments.map(t => {
+          const oz = parseFloat(t.inventoryOz) || 0;
+          const status = statusOf(oz);
+          const used = totalUsed(t.id);
+          const last = lastUsed(t.id);
+          const maxOz = Math.max(oz + used, 512); // scale bar
+          const pct = Math.min(100, (oz / maxOz) * 100);
+          const barColor = oz <= 0 ? "#E5484D" : oz < LOW_THRESHOLD ? "#F59E0B" : T.primary;
+
+          return (
+            <div key={t.id} style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, padding: "16px 18px", boxShadow: "0 1px 4px rgba(0,0,0,0.04)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{t.name}</div>
+                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>
+                    ${parseFloat(t.costPerOz || 0).toFixed(2)}/oz
+                    {last && <span> · Last used {last}</span>}
+                  </div>
+                </div>
+                <span style={{ fontSize: 11, fontWeight: 700, padding: "4px 12px", borderRadius: 100, background: status.bg, color: status.color, flexShrink: 0, marginLeft: 10 }}>
+                  {status.label}
+                </span>
+              </div>
+
+              {/* Stock bar */}
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+                  <span style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{oz.toFixed(0)}<span style={{ fontSize: 13, fontWeight: 500, color: T.textMuted, marginLeft: 4 }}>oz</span></span>
+                  <span style={{ fontSize: 12, color: T.textMuted }}>{used.toFixed(0)}oz used all time</span>
+                </div>
+                <div style={{ height: 6, background: T.surfaceAlt, borderRadius: 100, overflow: "hidden" }}>
+                  <div style={{ height: "100%", width: `${pct}%`, background: barColor, borderRadius: 100, transition: "width 0.4s ease" }} />
+                </div>
+                {oz < LOW_THRESHOLD && oz > 0 && (
+                  <div style={{ fontSize: 11, color: "#F59E0B", marginTop: 5 }}>Below {LOW_THRESHOLD}oz threshold</div>
+                )}
+              </div>
+
+              {/* Actions */}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => { setAdjustModal({ treatment: t, mode: "restock" }); setAdjustAmt(""); }}
+                  style={{ flex: 1, background: hexA(T.primary, 0.08), color: T.primary, border: "none", borderRadius: 11, padding: "9px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                  + Restock
+                </button>
+                <button onClick={() => { setAdjustModal({ treatment: t, mode: "adjust" }); setAdjustAmt(""); }}
+                  style={{ flex: 1, background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 11, padding: "9px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+                  Adjust
+                </button>
+                {(usageHistory[t.id] || []).length > 0 && (
+                  <button onClick={() => setHistoryModal(t.id)}
+                    style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 11, padding: "9px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+                    History
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Adjust/Restock modal */}
+      {adjustModal && (
+        <Modal title={adjustModal.mode === "restock" ? `Restock — ${adjustModal.treatment.name}` : `Adjust — ${adjustModal.treatment.name}`} onClose={() => setAdjustModal(null)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: "14px 16px" }}>
+              <div style={{ fontSize: 13, color: T.textMuted }}>Current stock</div>
+              <div style={{ fontSize: 28, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginTop: 2 }}>
+                {parseFloat(adjustModal.treatment.inventoryOz || 0).toFixed(0)}<span style={{ fontSize: 14, color: T.textMuted }}> oz</span>
+              </div>
+            </div>
+            <div>
+              <label style={lbl}>{adjustModal.mode === "restock" ? "Add (oz)" : "Adjustment (oz, use – for removal)"}</label>
+              <input type="text" inputMode="decimal" style={field} value={adjustAmt}
+                onChange={e => setAdjustAmt(e.target.value.replace(/[^0-9.\-]/g, ""))}
+                placeholder={adjustModal.mode === "restock" ? "e.g. 128" : "e.g. -16"}
+                autoFocus />
+              {adjustAmt && (
+                <div style={{ fontSize: 13, color: T.textMuted, marginTop: 6 }}>
+                  New total: <strong style={{ color: T.text }}>
+                    {Math.max(0, (parseFloat(adjustModal.treatment.inventoryOz) || 0) + (parseFloat(adjustAmt) || 0)).toFixed(0)}oz
+                  </strong>
+                </div>
+              )}
+            </div>
+            <div>
+              <label style={lbl}>Note <span style={{ textTransform: "none", fontWeight: 400 }}>(optional)</span></label>
+              <input type="text" style={field} value={adjustNote} onChange={e => setAdjustNote(e.target.value)} placeholder="e.g. Received shipment, Spilled, Manual count" />
+            </div>
+            <Btn onClick={applyAdjust} block lg disabled={!adjustAmt}>
+              {adjustModal.mode === "restock" ? "Add to Inventory" : "Apply Adjustment"}
+            </Btn>
+          </div>
+        </Modal>
+      )}
+
+      {/* Usage history modal */}
+      {historyModal && (() => {
+        const t = treatments.find(x => x.id === historyModal);
+        const hist = (usageHistory[historyModal] || []).slice().sort((a,b) => {
+          const p = s => { const [m,d,y]=(s||"").split("/").map(Number); return new Date(y,m-1,d); };
+          return p(b.date) - p(a.date);
+        });
+        return (
+          <Modal title={`Usage — ${t?.name}`} onClose={() => setHistoryModal(null)}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 12 }}>
+                {hist.length} use{hist.length !== 1 ? "s" : ""} · {hist.reduce((s,e) => s + (e.oz||0), 0).toFixed(0)}oz total consumed
+              </div>
+              {hist.map((h, i) => (
+                <div key={i} style={{ padding: "11px 0", borderBottom: i < hist.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{h.client}</div>
+                    <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{h.date}</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{(h.oz || 0).toFixed(1)}oz</div>
+                    {h.cost > 0 && <div style={{ fontSize: 11, color: T.textMuted }}>${(h.cost || 0).toFixed(2)}</div>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Modal>
+        );
+      })()}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// WATER QUALITY TRENDS
+// Charts water readings over time per client.
+// Shows pH, Ammonia, Nitrite, Nitrate, Temp, etc.
+// Highlights out-of-range values.
+// ─────────────────────────────────────────────
+
+// Healthy ranges for common pond water parameters
+const WATER_RANGES = {
+  "pH":          { min: 6.8, max: 8.2,  unit: "",    ideal: "6.8–8.2",  label: "pH" },
+  "Ammonia":     { min: 0,   max: 0.25, unit: "ppm", ideal: "0–0.25",   label: "NH₃" },
+  "Nitrite":     { min: 0,   max: 0.5,  unit: "ppm", ideal: "0–0.5",    label: "NO₂" },
+  "Nitrate":     { min: 0,   max: 40,   unit: "ppm", ideal: "0–40",     label: "NO₃" },
+  "Temperature": { min: 40,  max: 85,   unit: "°F",  ideal: "40–85",    label: "Temp" },
+  "Alkalinity":  { min: 80,  max: 180,  unit: "ppm", ideal: "80–180",   label: "Alk" },
+  "Phosphate":   { min: 0,   max: 0.5,  unit: "ppm", ideal: "0–0.5",    label: "PO₄" },
+  "NH₃":         { min: 0,   max: 0.25, unit: "ppm", ideal: "0–0.25",   label: "NH₃" },
+  "NO₂":         { min: 0,   max: 0.5,  unit: "ppm", ideal: "0–0.5",    label: "NO₂" },
+  "Temp":        { min: 40,  max: 85,   unit: "°F",  ideal: "40–85",    label: "Temp" },
+};
+
+function WaterQualityTrends({ clients, T }) {
+  const [selectedClient, setSelectedClient] = useState("");
+  const [selectedParam, setSelectedParam] = useState("pH");
+
+  // Get clients that have water readings
+  const clientsWithReadings = (clients || []).filter(c =>
+    (c.history || []).some(h => {
+      const r = h.readings || {};
+      return Object.keys(r).length > 0 || h.ph || h.ammonia || h.nitrite || h.temp;
+    })
+  );
+
+  const client = clientsWithReadings.find(c => String(c.id) === selectedClient);
+
+  // Extract all readings for a client, sorted oldest→newest
+  const getReadings = (c, param) => {
+    if (!c) return [];
+    const points = [];
+    (c.history || []).forEach(h => {
+      let val = null;
+      if (h.readings && h.readings[param] !== undefined) {
+        val = parseFloat(h.readings[param]);
+      } else {
+        // Legacy flat fields
+        const legacyMap = { "pH": h.ph, "Ammonia": h.ammonia, "NH₃": h.ammonia, "Nitrite": h.nitrite, "NO₂": h.nitrite, "Temperature": h.temp, "Temp": h.temp };
+        if (legacyMap[param] !== undefined) val = parseFloat(legacyMap[param]);
+      }
+      if (val !== null && !isNaN(val) && h.date) {
+        const [mm, dd, yy] = (h.date || "").split("/").map(Number);
+        points.push({ date: h.date, val, ts: new Date(yy, mm - 1, dd).getTime() });
+      }
+    });
+    return points.sort((a, b) => a.ts - b.ts);
+  };
+
+  // Find all params this client has readings for
+  const availableParams = client ? (() => {
+    const params = new Set();
+    (client.history || []).forEach(h => {
+      if (h.readings) Object.keys(h.readings).forEach(k => { if (parseFloat(h.readings[k]) > 0 || h.readings[k]) params.add(k); });
+      if (h.ph) params.add("pH");
+      if (h.ammonia) params.add("Ammonia");
+      if (h.nitrite) params.add("Nitrite");
+      if (h.temp) params.add("Temperature");
+    });
+    return [...params].filter(p => getReadings(client, p).length > 0);
+  })() : [];
+
+  const points = client ? getReadings(client, selectedParam) : [];
+  const range = WATER_RANGES[selectedParam];
+
+  // Spark line chart — pure SVG, no library needed
+  const ChartSVG = ({ points, range, T }) => {
+    if (points.length < 2) return (
+      <div style={{ textAlign: "center", padding: "32px 0", color: T.textMuted, fontSize: 13 }}>
+        Not enough data points to chart. Need at least 2 readings.
+      </div>
+    );
+
+    const W = 320, H = 140, PAD = { t: 12, r: 12, b: 28, l: 40 };
+    const vals = points.map(p => p.val);
+    const rawMin = Math.min(...vals);
+    const rawMax = Math.max(...vals);
+
+    // Expand range to include healthy band if close
+    const domMin = range ? Math.min(rawMin, range.min * 0.9) : rawMin * 0.9;
+    const domMax = range ? Math.max(rawMax, range.max * 1.1) : rawMax * 1.1;
+    const span = domMax - domMin || 1;
+
+    const xOf = (i) => PAD.l + (i / (points.length - 1)) * (W - PAD.l - PAD.r);
+    const yOf = (v) => PAD.t + (1 - (v - domMin) / span) * (H - PAD.t - PAD.b);
+
+    const pathD = points.map((p, i) => `${i === 0 ? "M" : "L"}${xOf(i).toFixed(1)},${yOf(p.val).toFixed(1)}`).join(" ");
+    const fillD = pathD + ` L${xOf(points.length-1).toFixed(1)},${(H-PAD.b).toFixed(1)} L${xOf(0).toFixed(1)},${(H-PAD.b).toFixed(1)} Z`;
+
+    // Healthy band
+    const bandY1 = range ? yOf(range.max) : null;
+    const bandY2 = range ? yOf(range.min) : null;
+
+    // Y axis labels
+    const yLabels = [domMin, (domMin+domMax)/2, domMax].map(v => ({
+      v: v.toFixed(v < 10 ? 2 : 0),
+      y: yOf(v),
+    }));
+
+    // X axis labels (show up to 6 dates)
+    const step = Math.max(1, Math.floor(points.length / 5));
+    const xLabels = points.filter((_, i) => i % step === 0 || i === points.length - 1).map((p, _, arr) => {
+      const i = points.indexOf(p);
+      const [m, d] = p.date.split("/");
+      return { label: `${m}/${d}`, x: xOf(i) };
+    });
+
+    const lineColor = T.primary;
+    const outOfRange = (v) => range && (v < range.min || v > range.max);
+
+    return (
+      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ overflow: "visible", display: "block" }}>
+        {/* Healthy band */}
+        {range && bandY1 !== null && bandY2 !== null && (
+          <rect x={PAD.l} y={Math.min(bandY1, bandY2)} width={W - PAD.l - PAD.r} height={Math.abs(bandY2 - bandY1)}
+            fill={hexA("#16a34a", 0.08)} rx={2} />
+        )}
+
+        {/* Grid lines */}
+        {yLabels.map((l, i) => (
+          <g key={i}>
+            <line x1={PAD.l} y1={l.y} x2={W - PAD.r} y2={l.y} stroke={T.border} strokeWidth={1} strokeDasharray="3,3" />
+            <text x={PAD.l - 5} y={l.y + 4} textAnchor="end" fontSize={9} fill={T.textMuted}>{l.v}</text>
+          </g>
+        ))}
+
+        {/* X axis labels */}
+        {xLabels.map((l, i) => (
+          <text key={i} x={l.x} y={H - 4} textAnchor="middle" fontSize={9} fill={T.textMuted}>{l.label}</text>
+        ))}
+
+        {/* Fill area */}
+        <path d={fillD} fill={hexA(lineColor, 0.08)} />
+
+        {/* Line */}
+        <path d={pathD} fill="none" stroke={lineColor} strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" />
+
+        {/* Data points */}
+        {points.map((p, i) => {
+          const bad = outOfRange(p.val);
+          return (
+            <g key={i}>
+              <circle cx={xOf(i)} cy={yOf(p.val)} r={bad ? 5 : 4}
+                fill={bad ? "#E5484D" : lineColor}
+                stroke={T.surface} strokeWidth={2}
+              />
+              {bad && <circle cx={xOf(i)} cy={yOf(p.val)} r={8} fill="none" stroke={hexA("#E5484D", 0.3)} strokeWidth={1.5} />}
+            </g>
+          );
+        })}
+
+        {/* Healthy range label */}
+        {range && bandY1 !== null && (
+          <text x={W - PAD.r} y={bandY1 - 3} textAnchor="end" fontSize={8} fill={hexA("#16a34a", 0.7)} fontWeight="600">
+            Ideal range
+          </text>
+        )}
+      </svg>
+    );
+  };
+
+  // Latest reading card for each param
+  const StatChip = ({ param, client }) => {
+    const pts = getReadings(client, param);
+    if (pts.length === 0) return null;
+    const latest = pts[pts.length - 1];
+    const r = WATER_RANGES[param];
+    const bad = r && (latest.val < r.min || latest.val > r.max);
+    const prev = pts.length > 1 ? pts[pts.length - 2].val : null;
+    const trend = prev !== null ? (latest.val > prev ? "↑" : latest.val < prev ? "↓" : "→") : null;
+    const active = selectedParam === param;
+    return (
+      <button onClick={() => setSelectedParam(param)}
+        style={{ background: active ? hexA(T.primary, 0.1) : T.surface, border: `1.5px solid ${active ? T.primary : T.border}`, borderRadius: 14, padding: "12px 14px", cursor: "pointer", fontFamily: "inherit", textAlign: "left", flexShrink: 0, minWidth: 90 }}>
+        <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: active ? T.primary : T.textMuted, marginBottom: 4 }}>{r?.label || param}</div>
+        <div style={{ fontSize: 20, fontWeight: 800, color: bad ? "#E5484D" : active ? T.primary : T.text, letterSpacing: "-0.02em" }}>
+          {latest.val % 1 === 0 ? latest.val : latest.val.toFixed(2)}
+          <span style={{ fontSize: 11, fontWeight: 500, color: T.textMuted }}>{r?.unit}</span>
+        </div>
+        {trend && <div style={{ fontSize: 11, color: bad ? "#E5484D" : T.textMuted, marginTop: 2 }}>{trend} {pts.length} reads</div>}
+        {r && <div style={{ fontSize: 9, color: T.textMuted, marginTop: 2 }}>Ideal: {r.ideal}{r.unit}</div>}
+      </button>
+    );
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div>
+        <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Water Quality</div>
+        <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>Trending readings per client over time</div>
+      </div>
+
+      {/* Client picker */}
+      <select value={selectedClient} onChange={e => { setSelectedClient(e.target.value); setSelectedParam("pH"); }}
+        style={{ width: "100%", padding: "12px 14px", border: `1.5px solid ${T.border}`, borderRadius: 14, fontSize: 15, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", appearance: "none", WebkitAppearance: "none" }}>
+        <option value="">Select a client...</option>
+        {clientsWithReadings.sort((a,b) => (a.name||"").localeCompare(b.name||"")).map(c => (
+          <option key={c.id} value={String(c.id)}>{c.name}</option>
+        ))}
+      </select>
+
+      {clientsWithReadings.length === 0 && (
+        <div style={{ textAlign: "center", padding: "48px 20px" }}>
+          <div style={{ width: 56, height: 56, borderRadius: 18, background: hexA(T.primary, 0.08), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px" }}>
+            <svg viewBox="0 0 24 24" width={28} height={28} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" /><path d="M12 8v4l3 3" />
+            </svg>
+          </div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: T.text, marginBottom: 6 }}>No readings yet</div>
+          <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5, maxWidth: 260, margin: "0 auto" }}>
+            Water quality readings appear here once you log them on completed service stops.
+          </div>
+        </div>
+      )}
+
+      {client && availableParams.length === 0 && (
+        <div style={{ textAlign: "center", padding: "32px 20px", color: T.textMuted, fontSize: 13 }}>
+          No water readings logged for {client.name} yet.
+        </div>
+      )}
+
+      {client && availableParams.length > 0 && (
+        <>
+          {/* Parameter chips — scrollable row */}
+          <div style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 4, WebkitOverflowScrolling: "touch" }}>
+            {availableParams.map(p => <StatChip key={p} param={p} client={client} />)}
+          </div>
+
+          {/* Chart card */}
+          <div style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, padding: "18px 18px 14px", boxShadow: "0 1px 4px rgba(0,0,0,0.04)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 14 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: T.text }}>{WATER_RANGES[selectedParam]?.label || selectedParam}</div>
+              {range && <div style={{ fontSize: 11, color: T.textMuted }}>Healthy: {range.ideal}{range.unit}</div>}
+            </div>
+            <ChartSVG points={points} range={range} T={T} />
+            {/* Out of range callout */}
+            {range && points.some(p => p.val < range.min || p.val > range.max) && (
+              <div style={{ marginTop: 10, background: hexA("#E5484D", 0.07), borderRadius: 10, padding: "9px 12px", fontSize: 12, color: "#E5484D", fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
+                <Icon name="warning" size={13} />
+                {points.filter(p => p.val < range.min || p.val > range.max).length} reading{points.filter(p => p.val < range.min || p.val > range.max).length !== 1 ? "s" : ""} outside healthy range
+              </div>
+            )}
+          </div>
+
+          {/* Reading history table */}
+          <div style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+            <div style={{ padding: "13px 18px", borderBottom: `1px solid ${T.border}`, fontSize: 13, fontWeight: 700, color: T.text }}>
+              All {WATER_RANGES[selectedParam]?.label || selectedParam} Readings
+            </div>
+            {points.slice().reverse().map((p, i) => {
+              const bad = range && (p.val < range.min || p.val > range.max);
+              return (
+                <div key={i} style={{ padding: "11px 18px", borderBottom: i < points.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div style={{ fontSize: 13, color: T.textMuted }}>{p.date}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    {bad && <span style={{ fontSize: 10, fontWeight: 700, color: "#E5484D", background: hexA("#E5484D", 0.1), padding: "2px 8px", borderRadius: 100 }}>OUT OF RANGE</span>}
+                    <span style={{ fontSize: 15, fontWeight: 800, color: bad ? "#E5484D" : T.text, letterSpacing: "-0.01em" }}>
+                      {p.val % 1 === 0 ? p.val : p.val.toFixed(2)}{range?.unit}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function ServiceStopsReport({ clients, invoices, T }) {
   const now = new Date();
 
@@ -7712,16 +8222,18 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
 
       {/* Tab switcher */}
       <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 12, padding: 4, marginBottom: 16, gap: 3 }}>
-        {[["overview", "Overview"], ["stops", "Service Stops"]].map(([id, label]) => (
-          <button key={id} onClick={() => setReportTab(id)} style={{ flex: 1, padding: "9px 4px", border: "none", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer", background: reportTab === id ? T.surface : "transparent", color: reportTab === id ? T.primary : T.textMuted, boxShadow: reportTab === id ? "0 1px 4px rgba(0,0,0,0.1)" : "none", fontFamily: "inherit", transition: "all 0.15s" }}>
+        {[["overview", "Overview"], ["stops", "Service Stops"], ["water", "Water Quality"]].map(([id, label]) => (
+          <button key={id} onClick={() => setReportTab(id)} style={{ flex: 1, padding: "9px 4px", border: "none", borderRadius: 9, fontSize: 12, fontWeight: 700, cursor: "pointer", background: reportTab === id ? T.surface : "transparent", color: reportTab === id ? T.primary : T.textMuted, boxShadow: reportTab === id ? "0 1px 4px rgba(0,0,0,0.1)" : "none", fontFamily: "inherit", transition: "all 0.15s" }}>
             {label}
           </button>
         ))}
       </div>
 
-      {/* ── SERVICE STOPS REPORT ── */}
       {reportTab === "stops" && (
         <ServiceStopsReport clients={clients} invoices={invoices} T={T} />
+      )}
+      {reportTab === "water" && (
+        <WaterQualityTrends clients={clients} T={T} />
       )}
 
       {reportTab === "overview" && <>
@@ -7756,7 +8268,7 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
           <div style={{ display: "flex", gap: 6, alignItems: "flex-end", height: 80 }}>
             {monthlyRevenue.map((m, i) => (
               <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-                <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 600 }}>{m.total > 0 ? money(m.total) : ""}</div>
+                <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 600 }}>{m.total > 0 ? money(m.total) : ""}</div>
                 <div style={{ width: "100%", background: i === monthlyRevenue.length-1 ? T.primary : hexA(T.primary, 0.3), borderRadius: "4px 4px 0 0", height: `${Math.max(4, (m.total/maxBar)*60)}px`, transition: "height 0.3s" }} />
                 <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 600 }}>{m.label}</div>
               </div>
@@ -7856,14 +8368,15 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
 
 // All available pages — the user picks up to 5 for their dock
 const ALL_NAV = [
-  { id: "dashboard", label: "Home",      icon: "home" },
-  { id: "clients",   label: "Clients",   icon: "clients" },
-  { id: "schedule",  label: "Schedule",  icon: "calendar" },
-  { id: "messages",  label: "Messages",  icon: "message" },
-  { id: "invoices",  label: "Invoices",  icon: "invoice",   perm: "canInvoice" },
-  { id: "estimates", label: "Estimates", icon: "clipboard", perm: "canInvoice" },
-  { id: "reports",   label: "Reports",   icon: "dollar",    ownerOnly: true },
-  { id: "settings",  label: "Customize", icon: "sliders" },
+  { id: "dashboard",  label: "Home",      icon: "home" },
+  { id: "clients",    label: "Clients",   icon: "clients" },
+  { id: "schedule",   label: "Schedule",  icon: "calendar" },
+  { id: "messages",   label: "Messages",  icon: "message" },
+  { id: "invoices",   label: "Invoices",  icon: "invoice",   perm: "canInvoice" },
+  { id: "estimates",  label: "Estimates", icon: "clipboard", perm: "canInvoice" },
+  { id: "inventory",  label: "Inventory", icon: "info",      ownerOnly: true },
+  { id: "reports",    label: "Reports",   icon: "dollar",    ownerOnly: true },
+  { id: "settings",   label: "Customize", icon: "sliders" },
 ];
 
 const DEFAULT_DOCK = ["dashboard", "clients", "schedule", "messages", "settings"];
@@ -8037,7 +8550,7 @@ function OverflowMenu({ page, perms, navUnread, dockIds, setDockIds, onNav, onSi
                     </div>
                     <div style={{ flex: 1, fontSize: 13, fontWeight: 600, color: T.text }}>{n.label}</div>
                     <button onClick={() => toggleDock(id)}
-                      style={{ background: hexA("#E5484D", 0.1), color: "#E5484D", border: "none", borderRadius: 8, padding: "5px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>
+                      style={{ background: hexA("#E5484D", 0.1), color: "#E5484D", border: "none", borderRadius: 10, padding: "5px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>
                       Remove
                     </button>
                   </div>
@@ -8057,7 +8570,7 @@ function OverflowMenu({ page, perms, navUnread, dockIds, setDockIds, onNav, onSi
                     <div style={{ flex: 1, fontSize: 13, fontWeight: 600, color: T.text }}>{n.label}</div>
                     <button onClick={() => toggleDock(n.id)}
                       disabled={dockIds.length >= 5}
-                      style={{ background: dockIds.length >= 5 ? T.surfaceAlt : hexA(T.primary, 0.1), color: dockIds.length >= 5 ? T.textMuted : T.primary, border: "none", borderRadius: 8, padding: "5px 10px", fontSize: 11, fontWeight: 700, cursor: dockIds.length >= 5 ? "default" : "pointer", fontFamily: "inherit", flexShrink: 0 }}>
+                      style={{ background: dockIds.length >= 5 ? T.surfaceAlt : hexA(T.primary, 0.1), color: dockIds.length >= 5 ? T.textMuted : T.primary, border: "none", borderRadius: 10, padding: "5px 10px", fontSize: 11, fontWeight: 700, cursor: dockIds.length >= 5 ? "default" : "pointer", fontFamily: "inherit", flexShrink: 0 }}>
                       {dockIds.length >= 5 ? "Full" : "Add"}
                     </button>
                   </div>
@@ -8299,7 +8812,7 @@ function CPHistory({ client, T }) {
                       <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(Object.keys(readings).length, 4)}, 1fr)`, gap: 8 }}>
                         {Object.entries(readings).map(([k, v]) => (
                           <div key={k} style={{ background: T.surfaceAlt, borderRadius: 12, padding: "10px 8px", textAlign: "center" }}>
-                            <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>{k}</div>
+                            <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>{k}</div>
                             <div style={{ fontSize: 18, fontWeight: 800, color: T.text, marginTop: 3 }}>{v}</div>
                           </div>
                         ))}
@@ -8722,7 +9235,7 @@ function CPRequest({ client, branding, onSubmit, T }) {
         </div>
         <div>
           <label style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 8 }}>Preferred Dates</label>
-          <input style={field} value={form.dates} onChange={e => set("dates", e.target.value)} placeholder="e.g. Anytime next week, Mon/Wed mornings" />
+          <input type="text" style={field} value={form.dates} onChange={e => set("dates", e.target.value)} placeholder="e.g. Anytime next week, Mon/Wed mornings" />
         </div>
         <div>
           <label style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 8 }}>Notes</label>
@@ -9206,27 +9719,32 @@ export default function App({ authEmail = "", onSignOut }) {
         ["--ring"]: hexA(T.primary, 0.22), ["--ringBorder"]: T.primary,
       }}>
         <style>{`
-          * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+          *, *::before, *::after { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+          body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
           input, select, textarea {
-            transition: box-shadow .15s ease, border-color .15s ease;
+            transition: border-color .15s ease, box-shadow .15s ease;
             -webkit-appearance: none;
             appearance: none;
             border-radius: 12px;
             font-size: 16px !important;
+            line-height: 1.4;
           }
           input:focus, select:focus, textarea:focus {
             border-color: var(--ringBorder) !important;
-            box-shadow: 0 0 0 3px var(--ring);
+            box-shadow: 0 0 0 3.5px var(--ring);
             outline: none;
           }
-          button, a { transition: transform .08s ease, opacity .15s ease, background .15s ease, box-shadow .15s ease; }
-          button:active, a:active { transform: scale(0.97); }
-          @media (hover: hover) { button:hover:not(:disabled) { filter: brightness(1.04); } }
+          button { -webkit-tap-highlight-color: transparent; }
+          button, a { transition: transform .1s cubic-bezier(.34,1.56,.64,1), opacity .15s ease, background .15s ease; }
+          button:active:not(:disabled) { transform: scale(0.95); opacity: 0.85; }
+          @media (hover: hover) { button:hover:not(:disabled) { filter: brightness(1.05); } }
           ::selection { background: var(--ring); }
-          ::-webkit-scrollbar { width: 6px; height: 6px; }
-          ::-webkit-scrollbar-thumb { background: ${hexA(T.textMuted, 0.25)}; border-radius: 100px; }
+          ::-webkit-scrollbar { width: 5px; height: 5px; }
+          ::-webkit-scrollbar-thumb { background: ${hexA(T.textMuted, 0.2)}; border-radius: 100px; }
           ::-webkit-scrollbar-track { background: transparent; }
-          select { background-image: none; }
+          select { background-image: none; cursor: pointer; }
+          textarea { line-height: 1.6; }
+          img { -webkit-user-drag: none; }
         `}</style>
 
         {/* Header — light frosted, matches theme surface */}
@@ -9258,9 +9776,9 @@ export default function App({ authEmail = "", onSignOut }) {
 
 
         {dbError && (
-          <div style={{ background: "#FEF3C7", borderBottom: "1px solid #F59E0B", padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: "#92400E" }}>
+          <div style={{ background: hexA("#F59E0B", 0.1), borderBottom: `1px solid ${hexA("#F59E0B", 0.3)}`, padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: T.text }}>
             <span style={{ display:"flex", alignItems:"center", gap:6 }}><Icon name="warning" size={15} />{dbError}</span>
-            <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 8, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, display:"flex", alignItems:"center", gap:5 }}>Retry</button>
+            <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 10, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, display:"flex", alignItems:"center", gap:5 }}>Retry</button>
           </div>
         )}
         <main style={{ flex: 1, padding: "22px 16px", maxWidth: 740, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
@@ -9270,6 +9788,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} />}
           {page === "schedule" && <Schedule clients={clients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
           {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
+          {page === "inventory"  && perms.isAdmin && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} T={T} />}
           {page === "reports"   && perms.isAdmin && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
           {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
           {page === "invoices"  && perms.canInvoice && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} />}
