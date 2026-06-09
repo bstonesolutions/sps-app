@@ -335,6 +335,7 @@ const DEFAULT_BRANDING = {
   portalAppName: "",
   portalTagline: "",
   accentColor: "",
+  splashTagline: "",
 };
 
 // Schedule layout preferences
@@ -5137,7 +5138,14 @@ function CatalogManager({ catalog, setCatalog }) {
       {txModal && (
         <Modal title={txModal.mode === "add" ? "Add Treatment" : "Edit Treatment"} onClose={() => setTxModal(null)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <div><label style={labelStyle}>Name</label><input type="text" style={field} value={txModal.data.name} onChange={e => setTxModal(m => ({ ...m, data: { ...m.data, name: e.target.value } }))} placeholder="e.g. Algaecide" autoFocus /></div>
+            <div>
+              <label style={labelStyle}>Name</label>
+              <input type="text" style={field} value={txModal.data.name} onChange={e => setTxModal(m => ({ ...m, data: { ...m.data, name: e.target.value } }))} placeholder="e.g. Algaecide" autoFocus />
+            </div>
+            <div>
+              <label style={labelStyle}>Brand <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
+              <input type="text" style={field} value={txModal.data.brand || ""} onChange={e => setTxModal(m => ({ ...m, data: { ...m.data, brand: e.target.value } }))} placeholder="e.g. CrystalClear, API, Microbe-Lift" />
+            </div>
             <div><label style={labelStyle}>Cost per Ounce</label>
               <div style={{ position: "relative" }}>
                 <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: T.textMuted }}>$</span>
@@ -6917,19 +6925,37 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
 
       {/* ── CLIENT PORTAL BRANDING ── */}
       <Card style={{ marginBottom: 14 }}>
-        <CardHeader title="Client Portal Branding" />
-        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
-          <div style={{ fontSize: 12, color: T.textMuted, marginTop: -4 }}>Controls how your brand appears to clients in their portal.</div>
+        <CardHeader title="Client Portal" />
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: -4, lineHeight: 1.5 }}>Controls what clients see when they open their portal. Changes apply when you save.</div>
+
+          {/* Live portal hero preview */}
+          <div style={{ background: `linear-gradient(145deg, ${localBranding.accentColor || T.primary}, ${mix(localBranding.accentColor || T.primary, "#000", 0.28)})`, borderRadius: 18, padding: "20px 18px", color: "#fff", position: "relative", overflow: "hidden" }}>
+            <div style={{ position: "absolute", right: -20, top: -20, width: 100, height: 100, borderRadius: "50%", background: "rgba(255,255,255,0.08)", pointerEvents: "none" }} />
+            <div style={{ fontSize: 10, fontWeight: 700, opacity: 0.65, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6 }}>Portal Preview</div>
+            <div style={{ fontSize: 20, fontWeight: 800, letterSpacing: "-0.02em", lineHeight: 1.1 }}>{localBranding.portalAppName || localBranding.companyName || "Stone Property Solutions"}</div>
+            <div style={{ fontSize: 12, opacity: 0.8, marginTop: 5 }}>{localBranding.portalTagline || "Your trusted property care partner"}</div>
+          </div>
+
           <FieldRow label="Portal App Name">
             <Input value={localBranding.portalAppName || ""} onChange={e => set("portalAppName", e.target.value)} placeholder={localBranding.companyName || "Stone Property Solutions"} />
           </FieldRow>
-          <FieldRow label="Portal Tagline">
+          <FieldRow label="Welcome Tagline">
             <Input value={localBranding.portalTagline || ""} onChange={e => set("portalTagline", e.target.value)} placeholder="Your trusted property care partner" />
           </FieldRow>
+          <FieldRow label="Welcome Message">
+            <Input value={localBranding.portalWelcome || ""} onChange={e => set("portalWelcome", e.target.value)} placeholder="e.g. Thanks for being a Stone Property Solutions client!" />
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4 }}>Shown below the greeting on the client's Home tab.</div>
+          </FieldRow>
+
+          {/* Portal accent color with palette chips */}
           <div>
-            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Portal Accent Color <span style={{ textTransform: "none", fontWeight: 400 }}>(optional — defaults to brand color)</span></div>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Portal Hero Color</div>
             <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "13px 14px", background: T.surfaceAlt, borderRadius: 12, cursor: "pointer" }}>
-              <div style={{ fontSize: 14, color: T.text }}>Portal primary color</div>
+              <div>
+                <div style={{ fontSize: 14, color: T.text, fontWeight: 600 }}>Hero card gradient</div>
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>Shown on Home and My Service screens</div>
+              </div>
               <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <span style={{ fontSize: 12, color: T.textMuted, fontFamily: "monospace" }}>{(localBranding.accentColor || T.primary).toUpperCase()}</span>
                 <span style={{ position: "relative", width: 32, height: 32, borderRadius: 10, overflow: "hidden", border: `1px solid ${T.border}`, background: localBranding.accentColor || T.primary, flexShrink: 0 }}>
@@ -6937,6 +6963,17 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
                 </span>
               </span>
             </label>
+            <div style={{ display: "flex", gap: 7, marginTop: 8, flexWrap: "wrap" }}>
+              {(palette || DEFAULT_PALETTE).map((p, i) => (
+                <button key={i} onClick={() => set("accentColor", p.hex)} title={`${p.name} ${p.hex}`}
+                  style={{ width: 28, height: 28, borderRadius: 7, background: p.hex, border: `2.5px solid ${(localBranding.accentColor || T.primary) === p.hex ? T.text : "transparent"}`, cursor: "pointer", boxShadow: "0 1px 3px rgba(0,0,0,0.15)", flexShrink: 0 }} />
+              ))}
+              <button onClick={() => set("accentColor", "")} style={{ width: 28, height: 28, borderRadius: 7, background: T.surface, border: `1.5px solid ${T.border}`, cursor: "pointer", fontSize: 10, color: T.textMuted, fontFamily: "inherit" }}>Reset</button>
+            </div>
+          </div>
+
+          <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: "12px 14px", fontSize: 12, color: T.textMuted, lineHeight: 1.6 }}>
+            <strong style={{ color: T.text }}>Plan tier details</strong> — what's listed under each plan (Essential, Signature, Premium) and upgrade copy — edit the <code style={{ background: T.border, padding: "1px 5px", borderRadius: 4 }}>CP_TIERS</code> object near the top of App.jsx. Each tier has a color, tagline, and includes list you can update.
           </div>
         </div>
       </Card>
@@ -8608,11 +8645,55 @@ function OverflowMenu({ page, perms, navUnread, dockIds, setDockIds, onNav, onSi
 
 const CLIENT_NAV = [
   { id: "cp_home",      label: "Home",      icon: "home" },
+  { id: "cp_service",   label: "My Service", icon: "clients" },
   { id: "cp_history",   label: "History",   icon: "history" },
   { id: "cp_invoices",  label: "Invoices",  icon: "invoice" },
-  { id: "cp_estimates", label: "Estimates", icon: "clipboard" },
   { id: "cp_request",   label: "Request",   icon: "plus" },
 ];
+
+const CP_TIERS = {
+  "Essential": {
+    color: "#6B7280",
+    price: "Contact us",
+    tagline: "Reliable seasonal care",
+    includes: [
+      "Monthly service visits",
+      "Basic water quality checks",
+      "Filter maintenance",
+      "Seasonal adjustments",
+    ],
+    upgradeTo: "Signature",
+  },
+  "Signature": {
+    color: "#B81D24",
+    price: "Contact us",
+    tagline: "Our most popular plan",
+    includes: [
+      "Bi-weekly service visits",
+      "Full water chemistry testing",
+      "Filter + skimmer cleaning",
+      "Algae & debris treatment",
+      "Priority scheduling",
+      "Photo documentation each visit",
+    ],
+    upgradeTo: "Premium",
+  },
+  "Premium": {
+    color: "#AF011A",
+    price: "Contact us",
+    tagline: "White-glove pond care",
+    includes: [
+      "Weekly service visits",
+      "Comprehensive water testing",
+      "Equipment health monitoring",
+      "Same-day emergency response",
+      "Seasonal startup & closing",
+      "Annual equipment inspection",
+      "Dedicated technician",
+    ],
+    upgradeTo: null,
+  },
+};
 
 function clientNextVisit(schedule, clientId) {
   const today = new Date(); today.setHours(0,0,0,0);
@@ -8660,82 +8741,285 @@ function CPHome({ client, schedule, invoices, branding, onNav, T }) {
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
   const firstName = (client.name || "").split(" ")[0] || "there";
+  const tier = CP_TIERS[client.plan] || CP_TIERS["Signature"];
+  const tierColor = tier?.color || T.primary;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
+
       {/* Greeting */}
-      <div style={{ paddingTop: 6 }}>
-        <div style={{ fontSize: 28, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", lineHeight: 1.1 }}>{greeting},<br />{firstName}.</div>
-        <div style={{ fontSize: 14, color: T.textMuted, marginTop: 6 }}>{branding.companyName} client portal</div>
+      <div style={{ paddingTop: 4 }}>
+        <div style={{ fontSize: 30, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", lineHeight: 1.1 }}>
+          {greeting},<br /><span style={{ color: T.primary }}>{firstName}.</span>
+        </div>
+        <div style={{ fontSize: 14, color: T.textMuted, marginTop: 8 }}>
+          {branding.portalTagline || `Welcome to your ${branding.companyName} portal`}
+        </div>
       </div>
 
-      {/* Next Visit — premium card */}
-      <div style={{ background: `linear-gradient(135deg, ${T.primary} 0%, ${mix(T.primary, "#000", 0.25)} 100%)`, borderRadius: 22, padding: "22px 22px 20px", color: "#fff", boxShadow: `0 8px 32px ${hexA(T.primary, 0.35)}`, position: "relative", overflow: "hidden" }}>
-        <div style={{ position: "absolute", right: -20, top: -20, width: 120, height: 120, borderRadius: "50%", background: "rgba(255,255,255,0.06)" }} />
-        <div style={{ position: "absolute", right: 20, bottom: -30, width: 80, height: 80, borderRadius: "50%", background: "rgba(255,255,255,0.04)" }} />
-        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", opacity: 0.7, marginBottom: 10 }}>Next Visit</div>
+      {/* Hero: Next Visit + Tier combined card */}
+      <div style={{ background: `linear-gradient(145deg, ${tierColor} 0%, ${mix(tierColor, "#000", 0.3)} 100%)`, borderRadius: 26, padding: "24px 22px", color: "#fff", boxShadow: `0 12px 40px ${hexA(tierColor, 0.4)}`, position: "relative", overflow: "hidden" }}>
+        {/* Decorative circles */}
+        <div style={{ position: "absolute", right: -30, top: -30, width: 160, height: 160, borderRadius: "50%", background: "rgba(255,255,255,0.06)", pointerEvents: "none" }} />
+        <div style={{ position: "absolute", right: 30, bottom: -50, width: 120, height: 120, borderRadius: "50%", background: "rgba(255,255,255,0.04)", pointerEvents: "none" }} />
+        <div style={{ position: "absolute", left: -20, bottom: -20, width: 80, height: 80, borderRadius: "50%", background: "rgba(255,255,255,0.03)", pointerEvents: "none" }} />
+
+        {/* Tier badge */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
+          <div style={{ background: "rgba(255,255,255,0.18)", borderRadius: 100, padding: "5px 14px", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)" }}>
+            <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase" }}>{client.plan || "Signature"} Plan</span>
+          </div>
+          <button onClick={() => onNav("cp_service")}
+            style={{ background: "rgba(255,255,255,0.15)", border: "none", borderRadius: 100, padding: "5px 14px", color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)" }}>
+            Details →
+          </button>
+        </div>
+
+        {/* Next visit */}
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", opacity: 0.65, marginBottom: 6 }}>Next Service Visit</div>
         {next ? (
           <>
-            <div style={{ fontSize: 26, fontWeight: 800, letterSpacing: "-0.02em", lineHeight: 1.1 }}>{fmtDate(next.label)}</div>
-            <div style={{ fontSize: 14, opacity: 0.8, marginTop: 6 }}>{next.stop.type || "Service Visit"}</div>
+            <div style={{ fontSize: 28, fontWeight: 800, letterSpacing: "-0.03em", lineHeight: 1 }}>{fmtDate(next.label)}</div>
+            <div style={{ fontSize: 14, opacity: 0.8, marginTop: 6, fontWeight: 500 }}>{next.stop.type || "Service Visit"}</div>
           </>
         ) : (
-          <div style={{ fontSize: 17, fontWeight: 600, opacity: 0.8 }}>No upcoming visits yet</div>
+          <div style={{ fontSize: 18, fontWeight: 700, opacity: 0.75 }}>No upcoming visits scheduled</div>
         )}
       </div>
 
-      {/* Balance row */}
+      {/* Balance due — urgent card */}
       {totalOwed > 0 && (
-        <button onClick={() => onNav("cp_invoices")} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, padding: "18px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", fontFamily: "inherit", width: "100%", boxSizing: "border-box", boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}>
-          <div style={{ textAlign: "left" }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: T.textMuted, marginBottom: 4, letterSpacing: "0.02em" }}>BALANCE DUE</div>
-            <div style={{ fontSize: 24, fontWeight: 800, color: T.warning, letterSpacing: "-0.02em" }}>${totalOwed.toFixed(2)}</div>
+        <button onClick={() => onNav("cp_invoices")}
+          style={{ background: T.surface, border: `1.5px solid ${hexA("#E5484D", 0.3)}`, borderRadius: 20, padding: "18px 20px", display: "flex", alignItems: "center", gap: 16, cursor: "pointer", fontFamily: "inherit", width: "100%", boxSizing: "border-box", boxShadow: `0 4px 20px ${hexA("#E5484D", 0.1)}`, textAlign: "left" }}>
+          <div style={{ width: 44, height: 44, borderRadius: 14, background: hexA("#E5484D", 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="#E5484D" strokeWidth={2} strokeLinecap="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
           </div>
-          <div style={{ background: T.warning, color: "#fff", borderRadius: 12, padding: "10px 18px", fontSize: 13, fontWeight: 700 }}>View →</div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#E5484D", letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: 3 }}>Balance Due</div>
+            <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>${totalOwed.toFixed(2)}</div>
+          </div>
+          <div style={{ fontSize: 13, color: "#E5484D", fontWeight: 700 }}>Pay →</div>
         </button>
       )}
 
-      {/* Recent Activity */}
+      {/* Stats row */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+        {[
+          { label: "Visits", value: (client.history||[]).length, page: "cp_history" },
+          { label: "Invoices", value: myInvoices.length, page: "cp_invoices" },
+          { label: "Equipment", value: (client.equipment||[]).length, page: null },
+        ].map(s => (
+          <button key={s.label} onClick={() => s.page && onNav(s.page)}
+            style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "16px 10px", textAlign: "center", cursor: s.page ? "pointer" : "default", fontFamily: "inherit" }}>
+            <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{s.value}</div>
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4, fontWeight: 600 }}>{s.label}</div>
+          </button>
+        ))}
+      </div>
+
+      {/* Recent visits */}
       {recentHistory.length > 0 && (
         <div>
-          <div style={{ fontSize: 13, fontWeight: 700, color: T.textMuted, marginBottom: 10, letterSpacing: "0.02em", textTransform: "uppercase" }}>Recent Activity</div>
-          <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden", boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}>
-            {recentHistory.map((h, i) => (
-              <div key={i} style={{ padding: "15px 18px", borderBottom: i < recentHistory.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", gap: 14, alignItems: "center" }}>
-                <div style={{ width: 36, height: 36, borderRadius: 11, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                  <svg viewBox="0 0 24 24" width={18} height={18} fill={T.primary}><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Recent Visits</div>
+            <button onClick={() => onNav("cp_history")} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>See all</button>
+          </div>
+          <div style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+            {recentHistory.map((h, i) => {
+              const readings = h.readings && Object.keys(h.readings).length ? h.readings : null;
+              return (
+                <div key={i} style={{ padding: "15px 18px", borderBottom: i < recentHistory.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", gap: 14, alignItems: "center" }}>
+                  <div style={{ width: 40, height: 40, borderRadius: 13, background: hexA(T.primary, 0.08), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    <svg viewBox="0 0 24 24" width={20} height={20} fill={T.primary}><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{h.type || "Service Visit"}</div>
+                    <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{fmtDate(h.date)}{h.tech ? ` · ${h.tech}` : ""}</div>
+                  </div>
+                  {readings && (
+                    <div style={{ fontSize: 11, color: T.primary, fontWeight: 700, background: hexA(T.primary, 0.08), borderRadius: 8, padding: "3px 8px" }}>
+                      pH {Object.values(readings)[0]}
+                    </div>
+                  )}
                 </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: T.text, letterSpacing: "-0.01em" }}>{h.type || "Service Visit"}</div>
-                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{fmtDate(h.date)}</div>
-                </div>
-              </div>
-            ))}
-            {(client.history || []).length > 3 && (
-              <button onClick={() => onNav("cp_history")} style={{ width: "100%", padding: "13px", background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>View all history →</button>
-            )}
+              );
+            })}
           </div>
         </div>
       )}
 
-      {/* Quick Actions */}
+      {/* Quick actions grid */}
       <div>
-        <div style={{ fontSize: 13, fontWeight: 700, color: T.textMuted, marginBottom: 10, letterSpacing: "0.02em", textTransform: "uppercase" }}>Quick Actions</div>
+        <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginBottom: 12 }}>Quick Actions</div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           {[
-            { label: "Service History", sub: `${(client.history||[]).length} visits`, icon: "history", page: "cp_history" },
-            { label: "Request Service", sub: "Schedule a visit", icon: "plus", page: "cp_request" },
+            { label: "My Service Plan", sub: `${client.plan || "Signature"} — tap to manage`, icon: "clients", page: "cp_service", accent: true },
+            { label: "Request a Visit", sub: "Schedule service", icon: "plus", page: "cp_request", accent: false },
+            { label: "Service History", sub: `${(client.history||[]).length} visits on record`, icon: "history", page: "cp_history", accent: false },
+            { label: "My Invoices", sub: outstanding.length ? `${outstanding.length} outstanding` : "All paid up", icon: "invoice", page: "cp_invoices", accent: false },
           ].map(q => (
-            <button key={q.page} onClick={() => onNav(q.page)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, padding: "18px 16px", cursor: "pointer", fontFamily: "inherit", textAlign: "left", boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}>
-              <div style={{ width: 38, height: 38, borderRadius: 11, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 12, color: T.primary }}>
+            <button key={q.page} onClick={() => onNav(q.page)}
+              style={{ background: q.accent ? hexA(T.primary, 0.06) : T.surface, border: `1.5px solid ${q.accent ? hexA(T.primary, 0.2) : T.border}`, borderRadius: 20, padding: "18px 16px", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+              <div style={{ width: 40, height: 40, borderRadius: 13, background: q.accent ? T.primary : hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 12, color: q.accent ? "#fff" : T.primary }}>
                 <CIcon name={q.icon} size={20} />
               </div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{q.label}</div>
-              <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>{q.sub}</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em", lineHeight: 1.2 }}>{q.label}</div>
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4, lineHeight: 1.4 }}>{q.sub}</div>
             </button>
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── CP SERVICE (My Service Plan) ──
+function CPService({ client, branding, onNav, T }) {
+  const plan = client.plan || "Signature";
+  const tier = CP_TIERS[plan] || CP_TIERS["Signature"];
+  const tierColor = tier?.color || T.primary;
+  const [showUpgrade, setShowUpgrade] = useState(false);
+  const upgradePlan = tier?.upgradeTo;
+  const upgradeTier = upgradePlan ? CP_TIERS[upgradePlan] : null;
+
+  const CheckRow = ({ text, highlighted }) => (
+    <div style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
+      <div style={{ width: 22, height: 22, borderRadius: "50%", background: highlighted ? tierColor : hexA(tierColor, 0.12), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 1 }}>
+        <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke={highlighted ? "#fff" : tierColor} strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
+          <path d="M20 6L9 17l-5-5" />
+        </svg>
+      </div>
+      <span style={{ fontSize: 14, color: T.text, fontWeight: 500, lineHeight: 1.4 }}>{text}</span>
+    </div>
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+      {/* Page title */}
+      <div>
+        <div style={{ fontSize: 26, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>My Service Plan</div>
+        <div style={{ fontSize: 14, color: T.textMuted, marginTop: 4 }}>Your current plan with {branding.companyName}</div>
+      </div>
+
+      {/* Current plan hero */}
+      <div style={{ background: `linear-gradient(145deg, ${tierColor} 0%, ${mix(tierColor, "#000", 0.28)} 100%)`, borderRadius: 26, padding: "28px 24px", color: "#fff", boxShadow: `0 12px 40px ${hexA(tierColor, 0.4)}`, position: "relative", overflow: "hidden" }}>
+        <div style={{ position: "absolute", right: -30, top: -30, width: 180, height: 180, borderRadius: "50%", background: "rgba(255,255,255,0.06)" }} />
+        <div style={{ position: "absolute", left: -20, bottom: -30, width: 130, height: 130, borderRadius: "50%", background: "rgba(255,255,255,0.04)" }} />
+
+        <div style={{ position: "relative" }}>
+          <div style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.12em", opacity: 0.7, marginBottom: 8 }}>Current Plan</div>
+          <div style={{ fontSize: 36, fontWeight: 900, letterSpacing: "-0.03em", lineHeight: 1 }}>{plan}</div>
+          <div style={{ fontSize: 14, opacity: 0.8, marginTop: 8, fontWeight: 500 }}>{tier?.tagline}</div>
+
+          {client.planFreq && (
+            <div style={{ marginTop: 18, display: "inline-flex", alignItems: "center", gap: 8, background: "rgba(255,255,255,0.15)", borderRadius: 12, padding: "8px 16px", backdropFilter: "blur(8px)" }}>
+              <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="#fff" strokeWidth={2} strokeLinecap="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+              <span style={{ fontSize: 13, fontWeight: 700 }}>{client.planFreq} service</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* What's included */}
+      <div style={{ background: T.surface, borderRadius: 22, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+        <div style={{ padding: "18px 20px", borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 32, height: 32, borderRadius: 10, background: hexA(tierColor, 0.1), display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={tierColor} strokeWidth={2} strokeLinecap="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+          </div>
+          <span style={{ fontSize: 15, fontWeight: 800, color: T.text, letterSpacing: "-0.01em" }}>What's Included</span>
+        </div>
+        <div style={{ padding: "4px 20px 14px" }}>
+          {(tier?.includes || []).map((item, i) => (
+            <CheckRow key={i} text={item} highlighted={i === 0} />
+          ))}
+        </div>
+      </div>
+
+      {/* Next service */}
+      {client.nextService && (
+        <div style={{ background: hexA(T.primary, 0.06), borderRadius: 18, border: `1px solid ${hexA(T.primary, 0.15)}`, padding: "16px 20px", display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{ width: 40, height: 40, borderRadius: 13, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: T.primary }}>
+            <svg viewBox="0 0 24 24" width={20} height={20} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+          </div>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 3 }}>Next Service Date</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: T.text }}>{client.nextService}</div>
+          </div>
+        </div>
+      )}
+
+      {/* Upgrade section */}
+      {upgradePlan && upgradeTier && (
+        <div>
+          {!showUpgrade ? (
+            <button onClick={() => setShowUpgrade(true)}
+              style={{ width: "100%", background: "none", border: `2px dashed ${T.border}`, borderRadius: 22, padding: "22px 20px", cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 16, textAlign: "left" }}>
+              <div style={{ width: 44, height: 44, borderRadius: 14, background: hexA(upgradeTier.color, 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke={upgradeTier.color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+              </div>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 800, color: T.text, letterSpacing: "-0.01em" }}>Upgrade to {upgradePlan}</div>
+                <div style={{ fontSize: 13, color: T.textMuted, marginTop: 3 }}>{upgradeTier.tagline} — tap to see what's included</div>
+              </div>
+            </button>
+          ) : (
+            <div style={{ background: T.surface, borderRadius: 22, border: `1.5px solid ${hexA(upgradeTier.color, 0.3)}`, overflow: "hidden", boxShadow: `0 8px 32px ${hexA(upgradeTier.color, 0.1)}` }}>
+              {/* Upgrade header */}
+              <div style={{ background: `linear-gradient(135deg, ${upgradeTier.color}, ${mix(upgradeTier.color, "#000", 0.2)})`, padding: "22px 20px", color: "#fff" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", opacity: 0.7, marginBottom: 6 }}>Upgrade Available</div>
+                <div style={{ fontSize: 28, fontWeight: 900, letterSpacing: "-0.03em" }}>{upgradePlan}</div>
+                <div style={{ fontSize: 13, opacity: 0.8, marginTop: 6 }}>{upgradeTier.tagline}</div>
+              </div>
+
+              <div style={{ padding: "8px 20px 14px" }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", padding: "12px 0 6px" }}>Everything in {plan}, plus:</div>
+                {(upgradeTier.includes || []).filter(item => !(tier?.includes || []).includes(item)).map((item, i, arr) => (
+                  <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "9px 0", borderBottom: i < arr.length - 1 ? `1px solid ${T.border}` : "none" }}>
+                    <div style={{ width: 20, height: 20, borderRadius: "50%", background: hexA(upgradeTier.color, 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 1 }}>
+                      <svg viewBox="0 0 24 24" width={11} height={11} fill="none" stroke={upgradeTier.color} strokeWidth={2.5} strokeLinecap="round"><path d="M20 6L9 17l-5-5"/></svg>
+                    </div>
+                    <span style={{ fontSize: 14, color: T.text, fontWeight: 500 }}>{item}</span>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ padding: "0 20px 20px", display: "flex", gap: 10 }}>
+                <button onClick={() => onNav("cp_request")}
+                  style={{ flex: 1, background: upgradeTier.color, color: "#fff", border: "none", borderRadius: 14, padding: "14px", fontWeight: 800, fontSize: 14, cursor: "pointer", fontFamily: "inherit", boxShadow: `0 4px 16px ${hexA(upgradeTier.color, 0.3)}` }}>
+                  Request Upgrade
+                </button>
+                <button onClick={() => setShowUpgrade(false)}
+                  style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 14, padding: "14px 18px", fontWeight: 600, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>
+                  Close
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Already on top tier */}
+      {!upgradePlan && (
+        <div style={{ background: hexA("#16a34a", 0.06), border: `1px solid ${hexA("#16a34a", 0.2)}`, borderRadius: 18, padding: "18px 20px", display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{ width: 40, height: 40, borderRadius: 13, background: hexA("#16a34a", 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="#16a34a" strokeWidth={2} strokeLinecap="round"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+          </div>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: "#16a34a" }}>You're on our top tier</div>
+            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>The Premium plan includes our highest level of service. Thank you for trusting us with your property.</div>
+          </div>
+        </div>
+      )}
+
+      {/* Contact for questions */}
+      <button onClick={() => onNav("cp_request")}
+        style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", fontFamily: "inherit", width: "100%", boxSizing: "border-box" }}>
+        <div style={{ textAlign: "left" }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Have a question about your plan?</div>
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>Send us a message and we'll get back to you.</div>
+        </div>
+        <div style={{ color: T.primary, fontWeight: 700, fontSize: 13, flexShrink: 0, marginLeft: 10 }}>Contact →</div>
+      </button>
     </div>
   );
 }
@@ -9272,25 +9556,27 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T, f
 
       {/* Header */}
       <header style={{
-        background: hexA(T.surface, 0.92),
-        backdropFilter: "saturate(180%) blur(24px)",
-        WebkitBackdropFilter: "saturate(180%) blur(24px)",
+        background: hexA(T.surface, 0.88),
+        backdropFilter: "saturate(200%) blur(28px)",
+        WebkitBackdropFilter: "saturate(200%) blur(28px)",
         borderBottom: `1px solid ${T.border}`,
         position: "sticky", top: 0, zIndex: 100,
       }}>
-        {/* Safe area spacer — auto-adjusts to any phone's status bar */}
         {!isStaffPreview && <div style={{ height: "env(safe-area-inset-top)" }} />}
-        <div style={{ height: 52, display: "flex", alignItems: "center", justifyContent: "space-between", paddingLeft: 20, paddingRight: 20 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
-            <div style={{ width: 32, height: 32, borderRadius: 9, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+        <div style={{ height: 56, display: "flex", alignItems: "center", justifyContent: "space-between", paddingLeft: 20, paddingRight: 20 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 34, height: 34, borderRadius: 10, background: T.primary, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, boxShadow: `0 2px 8px ${hexA(T.primary, 0.35)}` }}>
               {branding.logoType === "image" && branding.logoImage
                 ? <img src={branding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                : <span style={{ fontSize: 16 }}>{branding.logoEmoji}</span>}
+                : <span style={{ fontSize: 17 }}>{branding.logoEmoji || "💧"}</span>}
             </div>
-            <div style={{ fontSize: 15, fontWeight: 700, color: T.text, letterSpacing: "-0.02em" }}>{branding.companyName}</div>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", lineHeight: 1.1 }}>{branding.portalAppName || branding.companyName}</div>
+              <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 600, letterSpacing: "0.02em" }}>Client Portal</div>
+            </div>
           </div>
           {!isStaffPreview && (
-            <button onClick={onSignOut} style={{ background: "none", border: "none", color: T.textMuted, fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button>
+            <button onClick={onSignOut} style={{ background: T.surfaceAlt, border: "none", borderRadius: 100, color: T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit", padding: "6px 14px" }}>Sign out</button>
           )}
         </div>
       </header>
@@ -9298,6 +9584,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T, f
       {/* Main content */}
       <main style={{ flex: 1, padding: "24px 18px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(100px + env(safe-area-inset-bottom))" }}>
         {page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} onNav={setPage} T={T} />}
+        {page === "cp_service"  && <CPService client={client} branding={branding} onNav={setPage} T={T} />}
         {page === "cp_history"  && <CPHistory client={client} T={T} />}
         {page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} />}
         {page === "cp_equipment" && <CPEquipment client={client} T={T} />}
@@ -9311,11 +9598,11 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T, f
         {CLIENT_NAV.map(n => {
           const active = page === n.id;
           return (
-            <button key={n.id} onClick={() => setPage(n.id)} style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, color: active ? T.primary : T.textMuted, fontFamily: "inherit", padding: "4px 0" }}>
-              <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", transition: "background 0.15s" }}>
-                <CIcon name={n.icon} size={22} />
+            <button key={n.id} onClick={() => setPage(n.id)} style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, color: active ? T.primary : T.textMuted, fontFamily: "inherit", padding: "4px 0" }}>
+              <span style={{ width: 44, height: 28, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", transition: "all 0.15s" }}>
+                <CIcon name={n.icon} size={active ? 22 : 20} />
               </span>
-              <span style={{ fontSize: 10.5, fontWeight: active ? 700 : 500, letterSpacing: "-0.01em" }}>{n.label}</span>
+              <span style={{ fontSize: 10, fontWeight: active ? 800 : 500, letterSpacing: active ? "-0.01em" : "0" }}>{n.label}</span>
             </button>
           );
         })}
@@ -9670,7 +9957,7 @@ export default function App({ authEmail = "", onSignOut }) {
           <div className="splash-logo" style={{ width: 80, height: 80, borderRadius: 22, background: "rgba(255,255,255,0.15)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 36, marginBottom: 18 }}>{branding.logoEmoji || "💧"}</div>
         )}
         <div className="splash-name" style={{ fontSize: 22, fontWeight: 800, letterSpacing: "-0.02em", marginBottom: 4 }}>{branding.companyName}</div>
-        <div className="splash-div" style={{ fontSize: 13, opacity: 0.7, marginBottom: 48 }}>{branding.division || "Field Operations"}</div>
+        <div className="splash-div" style={{ fontSize: 13, opacity: 0.7, marginBottom: 48 }}>{branding.splashTagline || branding.division || "Field Operations"}</div>
         <div className="splash-spin" style={{ width: 22, height: 22, border: "2.5px solid rgba(255,255,255,0.3)", borderTopColor: "#fff", borderRadius: "50%" }} />
       </div>
     );
