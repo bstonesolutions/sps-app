@@ -1017,17 +1017,35 @@ function Btn({ children, onClick, href, variant = "primary", sm, lg, block, disa
   return <button onClick={onClick} disabled={disabled} style={css}>{children}</button>;
 }
 
-function StatCard({ label, value, sub, accent }) {
+function StatCard({ label, value, sub, accent, onClick }) {
   const { T } = useApp();
+  const clickable = !!onClick;
   return (
-    <div style={{
-      background: T.surface,
-      border: `1px solid ${T.border}`,
-      borderRadius: 20,
-      padding: "18px 18px",
-      boxShadow: "0 1px 3px rgba(0,0,0,0.04), 0 4px 16px rgba(0,0,0,0.05)",
-    }}>
-      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.04em", color: T.textMuted, textTransform: "uppercase", marginBottom: 10 }}>{label}</div>
+    <div onClick={onClick}
+      style={{
+        background: T.surface,
+        border: `1px solid ${clickable ? hexA(accent || T.primary, 0.25) : T.border}`,
+        borderRadius: 20,
+        padding: "18px 18px",
+        boxShadow: "0 1px 3px rgba(0,0,0,0.04), 0 4px 16px rgba(0,0,0,0.05)",
+        cursor: clickable ? "pointer" : "default",
+        transition: "box-shadow 0.15s, transform 0.1s",
+        WebkitTapHighlightColor: "transparent",
+        position: "relative",
+      }}
+      onMouseEnter={e => { if (clickable) e.currentTarget.style.boxShadow = "0 4px 20px rgba(0,0,0,0.12)"; }}
+      onMouseLeave={e => { if (clickable) e.currentTarget.style.boxShadow = "0 1px 3px rgba(0,0,0,0.04), 0 4px 16px rgba(0,0,0,0.05)"; }}
+      onTouchStart={e => { if (clickable) e.currentTarget.style.transform = "scale(0.97)"; }}
+      onTouchEnd={e => { if (clickable) e.currentTarget.style.transform = "scale(1)"; }}
+    >
+      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.04em", color: T.textMuted, textTransform: "uppercase", marginBottom: 10, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        {label}
+        {clickable && (
+          <svg viewBox="0 0 24 24" width={13} height={13} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.5 }}>
+            <path d="m9 18 6-6-6-6"/>
+          </svg>
+        )}
+      </div>
       <div style={{ fontSize: 30, fontWeight: 800, color: accent && accent !== T.surface ? accent : T.text, lineHeight: 1, letterSpacing: "-0.03em" }}>{value}</div>
       {sub && <div style={{ fontSize: 12, color: T.textMuted, marginTop: 6 }}>{sub}</div>}
     </div>
@@ -1364,15 +1382,36 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
   const widget = (id) => {
     if (id === "stats") {
       const tiles = [
-        { label: "Active Clients", value: clients.length, sub: "All divisions", accent: T.primary },
-        { label: "Stops Today", value: today.stops.length, sub: today.stops.length === 1 ? "1 stop" : "scheduled", accent: T.headerBg },
+        {
+          label: "Active Clients", value: clients.length,
+          sub: "All divisions", accent: T.primary,
+          onClick: () => onNav("clients", {}),
+        },
+        {
+          label: "Stops Today", value: today.stops.length,
+          sub: today.stops.length === 1 ? "Tap to view" : "Tap to view schedule", accent: T.primary,
+          onClick: () => onNav("schedule"),
+        },
       ];
-      if (perms.seeBalances) tiles.push({ label: "Outstanding", value: money(outstandingTotal), sub: `${outstandingClients.length} ${outstandingClients.length === 1 ? "client" : "clients"}`, accent: T.warning });
-      if (perms.seeProfit) tiles.push({ label: "Profit (mo)", value: money(ma.profit), sub: `${ma.jobs} jobs`, accent: T.accent });
-      else tiles.push({ label: "Jobs (mo)", value: ma.jobs, sub: "completed", accent: T.accent });
+      if (perms.seeBalances) tiles.push({
+        label: "Outstanding", value: money(outstandingTotal),
+        sub: `${outstandingClients.length} ${outstandingClients.length === 1 ? "client" : "clients"} · tap to view`,
+        accent: outstandingTotal > 0 ? T.warning : T.accent,
+        onClick: () => onNav("invoices", { invoiceFilter: "Overdue" }),
+      });
+      if (perms.seeProfit) tiles.push({
+        label: "Profit (mo)", value: money(ma.profit),
+        sub: `${ma.jobs} jobs · tap for reports`, accent: ma.profit >= 0 ? T.accent : "#C0392B",
+        onClick: () => onNav("reports"),
+      });
+      else tiles.push({
+        label: "Jobs (mo)", value: ma.jobs,
+        sub: "Tap to view reports", accent: T.accent,
+        onClick: () => onNav("reports"),
+      });
       return (
         <div key="stats" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
-          {tiles.map(t => <StatCard key={t.label} label={t.label} value={t.value} sub={t.sub} accent={t.accent} />)}
+          {tiles.map(t => <StatCard key={t.label} label={t.label} value={t.value} sub={t.sub} accent={t.accent} onClick={t.onClick} />)}
         </div>
       );
     }
@@ -7324,10 +7363,10 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
   );
 }
 
-function InvoicesScreen({ invoices, clients, invoicing, branding, onSave, onDelete }) {
+function InvoicesScreen({ invoices, clients, invoicing, branding, onSave, onDelete, initialFilter = "All" }) {
   const { T, perms } = useApp();
   const money = (n) => `$${Math.round(n).toLocaleString()}`;
-  const [filter, setFilter] = useState("All");
+  const [filter, setFilter] = useState(initialFilter);
   const [search, setSearch] = useState("");
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -11743,6 +11782,7 @@ export default function App({ authEmail = "", onSignOut }) {
   const [clients, setClients, lc] = useStoredState("sps_clients", DEMO_CLIENTS);
   const [branding, setBranding, lb] = useStoredState("sps_branding", DEFAULT_BRANDING);
   const [page, setPage] = useState(DEFAULT_BRANDING.staffDefaultPage || "dashboard");
+  const [invoiceFilter, setInvoiceFilter] = useState("All"); // deep-link from dashboard tiles
   const [schedule, setSchedule, ls] = useStoredState("sps_schedule", DEFAULT_SCHEDULE);
   const [catalog, setCatalog, lcat] = useStoredState("sps_catalog", DEFAULT_CATALOG);
   const [email, setEmail, lem] = useStoredState("sps_email", DEFAULT_EMAIL);
@@ -11925,7 +11965,13 @@ export default function App({ authEmail = "", onSignOut }) {
   }, [ltm, emailKey, currentUser, anyEmail]);
 
   const handleClientSelect = (c) => { setSelectedClient(c); setAdding(false); setPage("clients"); window.scrollTo({ top: 0, behavior: "instant" }); };
-  const handleNav = (id) => { setPage(id); setSelectedClient(null); setAdding(false); };
+  const handleNav = (id, opts = {}) => {
+    setPage(id);
+    setSelectedClient(null);
+    setAdding(false);
+    setInvoiceFilter(opts.invoiceFilter || "All");
+    window.scrollTo({ top: 0, behavior: "instant" });
+  };
 
   const handleSaveNewClient = (form) => {
     const newClient = {
@@ -12289,7 +12335,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "inventory"  && perms.isAdmin && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} T={T} />}
           {page === "reports"   && perms.isAdmin && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
           {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
-          {page === "invoices"  && perms.canInvoice && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} />}
+          {page === "invoices"  && perms.canInvoice && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} initialFilter={invoiceFilter} />}
           {page === "import"   && perms.canImport && <SkimmerImport onImport={handleImportClients} onGoToClients={() => handleNav("clients")} />}
           {page === "settings" && <AppSettings branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} />}
         </main>
