@@ -622,13 +622,10 @@ const BLANK_CLIENT = {
 const DIVISIONS = ["Pond", "Pool", "Seasonal"];
 
 // Returns the "My ___" label for the client portal tab based on division
-function pondLabel(client) {
+function pondLabel(client, withCare = false) {
   const div = (client.division || "").toLowerCase();
-  if (div === "pond")     return "My Pond";
-  if (div === "pool")     return "My Pool";
-  if (div === "seasonal") return "My Property";
-  // Multiple divisions or unknown — check if the client record mentions both
-  return "My Property";
+  const base = div === "pond" ? "My Pond" : div === "pool" ? "My Pool" : "My Property";
+  return withCare ? base + " Care" : base;
 }
 const PLANS = ["Essential", "Signature", "Premium"];
 
@@ -8365,10 +8362,9 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 10, lineHeight: 1.5 }}>Which screen clients see first every time they open their portal.</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {[
-                { id: "cp_home",     label: "Home",           sub: "Dashboard overview (default)" },
-                { id: "cp_service",  label: "My Service Plan",sub: "Plan details and upgrade" },
-                { id: "cp_pond",     label: "My Pond / Property", sub: "Pond details and history" },
-                { id: "cp_invoices", label: "Invoices",       sub: "Balance and payment history" },
+                { id: "cp_home",     label: "Home",         sub: "Dashboard overview (default)" },
+                { id: "cp_property", label: "My Property", sub: "Pond, pool or property details" },
+                { id: "cp_invoices", label: "Invoices",     sub: "Balance and payment history" },
               ].map(opt => {
                 const active = (localBranding.portalDefaultPage || "cp_home") === opt.id;
                 return (
@@ -10099,7 +10095,7 @@ function OverflowMenu({ page, perms, navUnread, dockIds, setDockIds, onNav, onSi
 
 const CLIENT_NAV = [
   { id: "cp_home",      label: "Home",       icon: "home" },
-  { id: "cp_property",  label: "My Property", icon: "pond" },  // combined pond + service — label overridden by pondLabel()
+  { id: "cp_property",  label: "My Property", icon: "pond" },  // combined pond + service
   { id: "cp_messages",  label: "Messages",   icon: "message" },
   { id: "cp_invoices",  label: "Invoices",   icon: "invoice" },
 ];
@@ -10355,7 +10351,7 @@ function CPHome({ client, schedule, invoices, branding, onNav, T }) {
           {[
             { label: "My Service Plan", sub: `${client.plan || "Signature"} — tap to manage`, icon: "clients", page: "cp_service", accent: true },
             { label: "Messages", sub: "Chat with our team", icon: "message", page: "cp_messages", accent: false },
-            { label: pondLabel(client), sub: `${(client.history||[]).length} visits · ${(client.equipment||[]).length} equipment`, icon: "history", page: "cp_pond", accent: false },
+            { label: "My Property", sub: `${pondLabel(client)} · ${(client.history||[]).length} visits`, icon: "history", page: "cp_property", accent: false },
             { label: "My Invoices", sub: outstanding.length ? `${outstanding.length} outstanding` : "All paid up", icon: "invoice", page: "cp_invoices", accent: false },
           ].map(q => (
             <button key={q.page} onClick={() => onNav(q.page)}
@@ -10606,8 +10602,8 @@ function CPProperty({ client, branding, onNav, onUpgradeRequest, T }) {
     <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
       {/* Page title */}
       <div>
-        <div style={{ fontSize:26, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>{pondLbl}</div>
-        <div style={{ fontSize:14, color:T.textMuted, marginTop:3 }}>{client.division} Division · {client.pondType || m.typeOptions[0]}</div>
+        <div style={{ fontSize:26, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>{pondLabel(client, true)}</div>
+        <div style={{ fontSize:14, color:T.textMuted, marginTop:3 }}>{client.pondType || m.typeOptions[0]}</div>
       </div>
 
       {/* Service plan card — tappable */}
@@ -10882,7 +10878,7 @@ function CPPond({ client, T }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
       {/* Page header */}
       <div style={{ paddingTop: 4 }}>
-        <div style={{ fontSize: 26, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>{pondLabel(client)}</div>
+        <div style={{ fontSize: 26, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>{pondLabel(client, true)}</div>
         {client.pondSize && <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>{client.pondSize}{client.pondType ? ` · ${client.pondType}` : ""}</div>}
         {client.pondGallons && <div style={{ fontSize: 13, color: T.primary, fontWeight: 700, marginTop: 2 }}>{parseInt(client.pondGallons).toLocaleString()} gallons</div>}
       </div>
@@ -11350,7 +11346,7 @@ function CPSettings({ client, branding, prefs, setPrefs, T, onSignOut, isStaffPr
           options={[["light","Light"],["dark","Dark"],["system","Auto"]]}
           onChange={v => set("appearance", v)} />
         <OptionRow label="Default Screen" value={prefs.defaultPage || branding.portalDefaultPage || "cp_home"}
-          options={[["cp_home","Home"],["cp_service","Service"],["cp_pond", pondLbl],["cp_invoices","Invoices"]]}
+          options={[["cp_home","Home"],["cp_property","My Property"],["cp_invoices","Invoices"]]}
           onChange={v => set("defaultPage", v)} />
         <OptionRow label="Text Size" value={prefs.textSize || "normal"}
           options={[["small","S"],["normal","M"],["large","L"]]}
@@ -11485,7 +11481,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
       }}>
         {CLIENT_NAV.map(n => {
           const active = (page === n.id || (n.id === "cp_property" && (page === "cp_pond" || page === "cp_service"))) && !settingsOpen;
-          const label  = n.id === "cp_property" ? pondLabel(client) : n.label;
+          const label  = n.label; // nav always says "My Property"; inside the tab pondLabel() is used
           return (
             <button key={n.id} onClick={() => { setPage(n.id); setSettingsOpen(false); }}
               style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, color: active ? T.primary : T.textMuted, fontFamily: "inherit", position: "relative", WebkitTapHighlightColor: "transparent" }}>
