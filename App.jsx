@@ -6155,14 +6155,176 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
   );
 }
 
-const NAV = [
+// All available pages — the user picks up to 5 for their dock
+const ALL_NAV = [
   { id: "dashboard", label: "Home",      icon: "home" },
   { id: "clients",   label: "Clients",   icon: "clients" },
   { id: "schedule",  label: "Schedule",  icon: "calendar" },
   { id: "messages",  label: "Messages",  icon: "message" },
-  { id: "reports",   label: "Reports",   icon: "dollar",  ownerOnly: true },
+  { id: "invoices",  label: "Invoices",  icon: "invoice",   perm: "canInvoice" },
+  { id: "estimates", label: "Estimates", icon: "clipboard", perm: "canInvoice" },
+  { id: "reports",   label: "Reports",   icon: "dollar",    ownerOnly: true },
   { id: "settings",  label: "Customize", icon: "sliders" },
 ];
+
+const DEFAULT_DOCK = ["dashboard", "clients", "schedule", "messages", "settings"];
+
+// ─────────────────────────────────────────────
+// OVERFLOW MENU + DOCK EDITOR
+// Top-right menu showing all pages not in the dock,
+// plus account info and the ability to edit the dock.
+// ─────────────────────────────────────────────
+
+function OverflowMenu({ page, perms, navUnread, dockIds, setDockIds, onNav, onSignOut, currentUser, T, branding, onClose }) {
+  const [editMode, setEditMode] = useState(false);
+
+  const availableNav = ALL_NAV.filter(n => {
+    if (n.ownerOnly && !perms.isAdmin) return false;
+    if (n.perm && !perms[n.perm]) return false;
+    return true;
+  });
+
+  const inDock    = availableNav.filter(n => dockIds.includes(n.id));
+  const overflow  = availableNav.filter(n => !dockIds.includes(n.id));
+
+  const toggleDock = (id) => {
+    setDockIds(prev => {
+      if (prev.includes(id)) {
+        // Remove from dock (always allowed)
+        return prev.filter(x => x !== id);
+      } else {
+        // Add to dock — max 5
+        if (prev.length >= 5) return prev;
+        return [...prev, id];
+      }
+    });
+  };
+
+  const moveDock = (id, dir) => {
+    setDockIds(prev => {
+      const arr = [...prev];
+      const i = arr.indexOf(id);
+      const j = i + dir;
+      if (j < 0 || j >= arr.length) return prev;
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+      return arr;
+    });
+  };
+
+  return (
+    <>
+      {/* Backdrop */}
+      <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 200, background: "rgba(0,0,0,0.3)", backdropFilter: "blur(4px)", WebkitBackdropFilter: "blur(4px)" }} />
+
+      {/* Sheet */}
+      <div style={{ position: "fixed", top: 0, right: 0, bottom: 0, zIndex: 201, width: "min(320px, 88vw)", background: T.surface, boxShadow: "-8px 0 40px rgba(0,0,0,0.18)", display: "flex", flexDirection: "column", paddingTop: "env(safe-area-inset-top)" }}>
+
+        {/* Header */}
+        <div style={{ padding: "18px 20px 14px", borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 36, height: 36, borderRadius: "50%", background: T.primary, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 13 }}>
+              {initials(currentUser.name)}
+            </div>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{currentUser.name}</div>
+              <div style={{ fontSize: 11, color: T.textMuted }}>{roleLabel(currentUser.role)}</div>
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: T.surfaceAlt, border: "none", borderRadius: "50%", width: 30, height: 30, cursor: "pointer", color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Icon name="close" size={14} />
+          </button>
+        </div>
+
+        {/* Scrollable content */}
+        <div style={{ flex: 1, overflowY: "auto", padding: "16px 0" }}>
+
+          {/* Overflow pages — not in dock */}
+          {overflow.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: T.textMuted, padding: "0 20px 8px" }}>More</div>
+              {overflow.map(n => {
+                const active = page === n.id;
+                return (
+                  <button key={n.id} onClick={() => { onNav(n.id); onClose(); }}
+                    style={{ width: "100%", padding: "12px 20px", background: active ? hexA(T.primary, 0.08) : "none", border: "none", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+                    <div style={{ width: 36, height: 36, borderRadius: 11, background: active ? hexA(T.primary, 0.15) : T.surfaceAlt, color: active ? T.primary : T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, position: "relative" }}>
+                      <Icon name={n.icon} size={18} />
+                      {n.id === "messages" && navUnread > 0 && (
+                        <span style={{ position: "absolute", top: -2, right: -2, width: 8, height: 8, borderRadius: "50%", background: T.primary, border: `2px solid ${T.surface}` }} />
+                      )}
+                    </div>
+                    <span style={{ fontSize: 14, fontWeight: active ? 700 : 500, color: active ? T.primary : T.text }}>{n.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Divider */}
+          <div style={{ height: 1, background: T.border, margin: "8px 0" }} />
+
+          {/* Dock editor */}
+          <div style={{ padding: "12px 20px 0" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: T.textMuted }}>Bottom Bar ({dockIds.length}/5)</div>
+              <button onClick={() => setEditMode(e => !e)}
+                style={{ background: editMode ? T.primary : T.surfaceAlt, color: editMode ? "#fff" : T.textMuted, border: "none", borderRadius: 8, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                {editMode ? "Done" : "Edit"}
+              </button>
+            </div>
+
+            {availableNav.map(n => {
+              const inD = dockIds.includes(n.id);
+              const idx = dockIds.indexOf(n.id);
+              return (
+                <div key={n.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 0", borderBottom: `1px solid ${T.border}` }}>
+                  {/* Reorder arrows — only in edit mode and in dock */}
+                  {editMode && inD && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 2, flexShrink: 0 }}>
+                      <button onClick={() => moveDock(n.id, -1)} disabled={idx === 0}
+                        style={{ background: "none", border: "none", color: idx === 0 ? T.border : T.textMuted, cursor: idx === 0 ? "default" : "pointer", padding: 2, display: "flex" }}>
+                        <Icon name="chevronD" size={12} style={{ transform: "rotate(180deg)" }} />
+                      </button>
+                      <button onClick={() => moveDock(n.id, 1)} disabled={idx === dockIds.length - 1}
+                        style={{ background: "none", border: "none", color: idx === dockIds.length - 1 ? T.border : T.textMuted, cursor: idx === dockIds.length - 1 ? "default" : "pointer", padding: 2, display: "flex" }}>
+                        <Icon name="chevronD" size={12} />
+                      </button>
+                    </div>
+                  )}
+
+                  <div style={{ width: 32, height: 32, borderRadius: 9, background: inD ? hexA(T.primary, 0.1) : T.surfaceAlt, color: inD ? T.primary : T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    <Icon name={n.icon} size={16} />
+                  </div>
+                  <div style={{ flex: 1, fontSize: 13, fontWeight: 600, color: T.text }}>{n.label}</div>
+
+                  {/* Add/remove toggle */}
+                  <button onClick={() => toggleDock(n.id)}
+                    disabled={!inD && dockIds.length >= 5}
+                    style={{ background: inD ? hexA("#E5484D", 0.1) : hexA(T.primary, 0.1), color: inD ? "#E5484D" : (dockIds.length >= 5 ? T.border : T.primary), border: "none", borderRadius: 8, padding: "5px 10px", fontSize: 11, fontWeight: 700, cursor: (!inD && dockIds.length >= 5) ? "default" : "pointer", fontFamily: "inherit", flexShrink: 0 }}>
+                    {inD ? "Remove" : dockIds.length >= 5 ? "Full" : "Add"}
+                  </button>
+                </div>
+              );
+            })}
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 10, lineHeight: 1.5 }}>Choose up to 5 items for your bottom bar. Everything else appears here in the menu.</div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div style={{ padding: "14px 20px", borderTop: `1px solid ${T.border}`, paddingBottom: "calc(14px + env(safe-area-inset-bottom))", display: "flex", gap: 10 }}>
+          <button onClick={() => window.location.reload()}
+            style={{ background: T.surfaceAlt, border: "none", borderRadius: 12, padding: "10px 16px", fontSize: 13, fontWeight: 600, color: T.textMuted, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 6 }}>
+            <Icon name="refresh" size={15} /> Sync
+          </button>
+          <button onClick={onSignOut}
+            style={{ flex: 1, background: hexA("#E5484D", 0.08), border: "none", borderRadius: 12, padding: "10px", fontSize: 13, fontWeight: 700, color: "#E5484D", cursor: "pointer", fontFamily: "inherit" }}>
+            Sign Out
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
 
 // ─────────────────────────────────────────────
 // CLIENT PORTAL
@@ -6781,6 +6943,19 @@ export default function App({ authEmail = "", onSignOut }) {
 
   // Track unread message count for nav badge
   const [navUnread, setNavUnread] = useState(0);
+
+  // Customizable dock — which pages appear in the bottom bar (max 5)
+  const [navDock, setNavDock, lndock] = useStoredState("sps_nav_dock", DEFAULT_DOCK);
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  // Ensure dock only contains pages the user has permission to see
+  const dockIds = (navDock || DEFAULT_DOCK).filter(id => {
+    const n = ALL_NAV.find(x => x.id === id);
+    if (!n) return false;
+    if (n.ownerOnly && !perms.isAdmin) return false;
+    if (n.perm && !perms[n.perm]) return false;
+    return true;
+  });
   useEffect(() => {
     const load = async () => {
       const { data } = await supabase.from("sps_messages").select("id").eq("sender", "client").is("read_at", null);
@@ -7001,21 +7176,17 @@ export default function App({ authEmail = "", onSignOut }) {
               <div style={{ fontSize: 11, color: T.textMuted, letterSpacing: "0.01em" }}>{branding.division}</div>
             </div>
           </div>
-          <button onClick={() => handleNav("settings")}
-            style={{ background: page === "settings" ? hexA(T.primary, 0.12) : T.surfaceAlt, border: "none", color: page === "settings" ? T.primary : T.textMuted, cursor: "pointer", width: 36, height: 36, borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <Icon name="settings" size={18} />
+          <button onClick={() => setMenuOpen(true)}
+            style={{ background: menuOpen ? hexA(T.primary, 0.12) : T.surfaceAlt, border: "none", color: menuOpen ? T.primary : T.textMuted, cursor: "pointer", width: 36, height: 36, borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
+            <Icon name="sliders" size={18} />
+            {navUnread > 0 && !dockIds.includes("messages") && (
+              <span style={{ position: "absolute", top: 6, right: 6, width: 7, height: 7, borderRadius: "50%", background: T.primary, border: `1.5px solid ${T.surface}` }} />
+            )}
           </button>
           </div>
         </header>
 
-        {/* Signed-in identity + sign out / switch user */}
-        <div style={{ position: "sticky", top: "calc(56px + env(safe-area-inset-top))", zIndex: 99, background: T.surfaceAlt, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "7px 16px" }}>
-          <span style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: T.textMuted, minWidth: 0 }}>
-            <span style={{ width: 22, height: 22, borderRadius: "50%", background: currentUser.role === "owner" ? T.primary : hexA(T.primary, 0.16), color: currentUser.role === "owner" ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 9.5, flexShrink: 0 }}>{initials(currentUser.name)}</span>
-            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Signed in as <span style={{ color: T.text, fontWeight: 700 }}>{currentUser.name}</span> · {roleLabel(currentUser.role)}</span>
-          </span>
-          <div style={{ display: "flex", gap: 12, flexShrink: 0, alignItems: "center" }}><button onClick={() => window.location.reload()} title="Sync" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 4, display:"flex", alignItems:"center" }}><Icon name="refresh" size={15} /></button><button onClick={handleSignOut} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button></div>
-        </div>
+
 
         {dbError && (
           <div style={{ background: "#FEF3C7", borderBottom: "1px solid #F59E0B", padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: "#92400E" }}>
@@ -7037,27 +7208,43 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "settings" && <AppSettings branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} />}
         </main>
 
-        {/* Bottom Nav — frosted with active pill */}
-        <nav style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: hexA(T.surface, 0.82), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", borderTop: `1px solid ${T.border}`, display: "flex", zIndex: 90, minHeight: 60, paddingTop: 4, paddingBottom: "calc(8px + env(safe-area-inset-bottom))" }}>
-          {NAV
-            .filter(n => !n.ownerOnly || perms.isAdmin)
-            .flatMap(n => (n.id === "settings" && perms.canInvoice) ? [{ id: "invoices", icon: "invoice", label: "Invoices" }, { id: "estimates", icon: "clipboard", label: "Estimates" }, n] : [n])
-            .map(n => {
-              const active = page === n.id;
-              return (
-                <button key={n.id} onClick={() => handleNav(n.id)}
-                  style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, color: active ? T.primary : T.textMuted, fontFamily: "inherit", position: "relative" }}>
-                  <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s", position: "relative" }}>
-                    <Icon name={n.icon} size={22} />
-                    {n.id === "messages" && navUnread > 0 && (
-                      <span style={{ position: "absolute", top: 2, right: 4, width: 8, height: 8, borderRadius: "50%", background: T.primary, border: `2px solid ${T.bg}` }} />
-                    )}
-                  </span>
-                  <span style={{ fontSize: 10.5, fontWeight: active ? 600 : 500, letterSpacing: "-0.01em" }}>{n.label}</span>
-                </button>
-              );
+        {/* Bottom Nav — shows only the user's chosen dock items */}
+        <nav style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: hexA(T.surface, 0.88), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", borderTop: `1px solid ${T.border}`, display: "flex", zIndex: 90, minHeight: 60, paddingTop: 4, paddingBottom: "calc(8px + env(safe-area-inset-bottom))" }}>
+          {dockIds.map(id => {
+            const n = ALL_NAV.find(x => x.id === id);
+            if (!n) return null;
+            const active = page === n.id;
+            return (
+              <button key={n.id} onClick={() => handleNav(n.id)}
+                style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, color: active ? T.primary : T.textMuted, fontFamily: "inherit", position: "relative" }}>
+                <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s", position: "relative" }}>
+                  <Icon name={n.icon} size={22} />
+                  {n.id === "messages" && navUnread > 0 && (
+                    <span style={{ position: "absolute", top: 2, right: 4, width: 8, height: 8, borderRadius: "50%", background: T.primary, border: `2px solid ${T.bg}` }} />
+                  )}
+                </span>
+                <span style={{ fontSize: 10.5, fontWeight: active ? 600 : 500, letterSpacing: "-0.01em" }}>{n.label}</span>
+              </button>
+            );
           })}
         </nav>
+
+        {/* Overflow menu — slides in from top right */}
+        {menuOpen && (
+          <OverflowMenu
+            page={page}
+            perms={perms}
+            navUnread={navUnread}
+            dockIds={dockIds}
+            setDockIds={setNavDock}
+            onNav={handleNav}
+            onSignOut={handleSignOut}
+            currentUser={currentUser}
+            T={T}
+            branding={branding}
+            onClose={() => setMenuOpen(false)}
+          />
+        )}
       </div>
     </AppCtx.Provider>
   );
