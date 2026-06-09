@@ -336,6 +336,7 @@ const DEFAULT_BRANDING = {
   portalTagline: "",
   accentColor: "",
   splashTagline: "",
+  portalCenterBtn: "cp_request",
 };
 
 // Schedule layout preferences
@@ -524,6 +525,16 @@ const BLANK_CLIENT = {
 };
 
 const DIVISIONS = ["Pond", "Pool", "Seasonal"];
+
+// Returns the "My ___" label for the client portal tab based on division
+function pondLabel(client) {
+  const div = (client.division || "").toLowerCase();
+  if (div === "pond")     return "My Pond";
+  if (div === "pool")     return "My Pool";
+  if (div === "seasonal") return "My Property";
+  // Multiple divisions or unknown — check if the client record mentions both
+  return "My Property";
+}
 const PLANS = ["Essential", "Signature", "Premium"];
 
 // Per-division labels, icon, and type options so the app fits all three divisions.
@@ -938,11 +949,282 @@ function Select({ value, onChange, options }) {
 // ─────────────────────────────────────────────
 // DASHBOARD (configurable home)
 // ─────────────────────────────────────────────
-function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onNav, catalog }) {
+// ─────────────────────────────────────────────
+// UPGRADE WORKFLOW MODAL
+// 4-step process for handling a client upgrade request.
+// Step 1: Contact confirmation
+// Step 2: Contract sent (Dropbox Sign)
+// Step 3: Upload signed document
+// Step 4: Apply the plan change
+// ─────────────────────────────────────────────
+
+const UPGRADE_STEPS = [
+  { id: "contact",  label: "Contact Client",     sub: "Confirm interest and discuss new pricing" },
+  { id: "contract", label: "Send Contract",       sub: "Send updated service agreement via Dropbox Sign" },
+  { id: "document", label: "Upload Signed Doc",   sub: "Download from Dropbox Sign and attach here" },
+  { id: "apply",    label: "Apply Plan Change",   sub: "Update their plan in the app — they'll see it immediately" },
+];
+
+function UpgradeWorkflowModal({ alert: a, clients, T, onConfirm, onClose }) {
+  const client = (clients || []).find(c => String(c.id) === String(a.clientId));
+  const completedSteps = a.upgradeStep || 0; // 0–4
+  const [activeStep, setActiveStep] = useState(completedSteps);
+  const [contactNote, setContactNote] = useState(a.contactNote || "");
+  const [contractNote, setContractNote] = useState(a.contractNote || "");
+  const [uploadedDoc, setUploadedDoc] = useState(a.signedDoc || null);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const fmtSize = (bytes) => bytes > 1e6 ? `${(bytes/1e6).toFixed(1)} MB` : `${(bytes/1e3).toFixed(0)} KB`;
+
+  const handleDocUpload = (files) => {
+    const file = files[0];
+    if (!file) return;
+    setUploading(true);
+    const reader = new FileReader();
+    reader.onload = e => {
+      setUploadedDoc({ src: e.target.result, name: file.name, size: file.size, type: file.type });
+      setUploading(false);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const completeStep = (stepIdx) => {
+    const newCount = Math.max(completedSteps, stepIdx + 1);
+    const updated = { ...a, upgradeStep: newCount, contactNote, contractNote, signedDoc: uploadedDoc };
+    if (stepIdx === 3) updated.fullyComplete = true;
+    onConfirm(updated, client ? { ...client, plan: a.requestedPlan } : null);
+    if (stepIdx < 3) setActiveStep(stepIdx + 1);
+  };
+
+  const StepCheck = ({ done }) => (
+    <div style={{ width: 22, height: 22, borderRadius: "50%", background: done ? "#16a34a" : T.surfaceAlt, border: `2px solid ${done ? "#16a34a" : T.border}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+      {done && <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="#fff" strokeWidth={3} strokeLinecap="round"><path d="M20 6L9 17l-5-5"/></svg>}
+    </div>
+  );
+
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const lbl   = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
+
+  return (
+    <Modal title="Process Upgrade" onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+
+        {/* Client + plan summary */}
+        <div style={{ background: T.surfaceAlt, borderRadius: 16, padding: "14px 16px" }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginBottom: 6 }}>{a.clientName || a.client}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 12, fontWeight: 700, background: T.surface, borderRadius: 8, padding: "4px 12px", color: T.text }}>{a.currentPlan}</span>
+            <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            <span style={{ fontSize: 12, fontWeight: 800, background: hexA(T.primary, 0.1), borderRadius: 8, padding: "4px 12px", color: T.primary }}>{a.requestedPlan}</span>
+          </div>
+          {a.body && a.body !== "No additional message." && (
+            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 8, fontStyle: "italic", lineHeight: 1.5 }}>"{a.body}"</div>
+          )}
+        </div>
+
+        {/* Step list */}
+        {UPGRADE_STEPS.map((step, i) => {
+          const done = completedSteps > i;
+          const active = activeStep === i;
+          const locked = i > completedSteps;
+
+          return (
+            <div key={step.id}>
+              {/* Step header */}
+              <button onClick={() => !locked && setActiveStep(active ? -1 : i)}
+                style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, background: "none", border: "none", cursor: locked ? "default" : "pointer", fontFamily: "inherit", padding: "4px 0", textAlign: "left" }}>
+                <StepCheck done={done} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: locked ? T.textMuted : done ? "#16a34a" : T.text }}>
+                    {i + 1}. {step.label}
+                  </div>
+                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>{step.sub}</div>
+                </div>
+                {!locked && !done && (
+                  <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{ transform: active ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>
+                    <path d="M6 9l6 6 6-6"/>
+                  </svg>
+                )}
+              </button>
+
+              {/* Step content */}
+              {active && !done && (
+                <div style={{ marginLeft: 34, marginTop: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+                  {/* ── Step 1: Contact ── */}
+                  {i === 0 && (
+                    <>
+                      <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.6 }}>
+                        Call or message {a.clientName || "the client"} to confirm they want to upgrade, discuss the new pricing, and let them know a contract is coming.
+                      </div>
+                      {client?.phone && (
+                        <a href={`tel:${client.phone}`}
+                          style={{ display: "flex", alignItems: "center", gap: 10, background: hexA(T.primary, 0.08), borderRadius: 12, padding: "12px 14px", color: T.primary, textDecoration: "none" }}>
+                          <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 13 19.79 19.79 0 0 1 1.61 4.44 2 2 0 0 1 3.6 2.24h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 9.91a16 16 0 0 0 6.12 6.12l.95-.95a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+                          <span style={{ fontWeight: 700, fontSize: 14 }}>Call {client.phone}</span>
+                        </a>
+                      )}
+                      <div>
+                        <label style={lbl}>Contact Note <span style={{ textTransform: "none", fontWeight: 400 }}>(optional)</span></label>
+                        <input type="text" style={field} value={contactNote} onChange={e => setContactNote(e.target.value)} placeholder="e.g. Spoke with client, confirmed $175/mo for Signature" />
+                      </div>
+                      <button onClick={() => completeStep(0)}
+                        style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontWeight: 800, fontSize: 14, cursor: "pointer", fontFamily: "inherit", boxShadow: `0 4px 14px ${hexA(T.primary, 0.3)}` }}>
+                        Mark as Contacted — Next Step
+                      </button>
+                    </>
+                  )}
+
+                  {/* ── Step 2: Contract sent ── */}
+                  {i === 1 && (
+                    <>
+                      <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.6 }}>
+                        Send the updated service agreement through Dropbox Sign. Use your existing template with the new tier and pricing filled in.
+                      </div>
+                      <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: "12px 14px" }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: T.text, marginBottom: 4 }}>Quick checklist before sending:</div>
+                        {[
+                          `Updated plan: ${a.requestedPlan}`,
+                          "New monthly rate confirmed",
+                          "Service frequency updated",
+                          "Client name and address correct",
+                        ].map((item, ii) => (
+                          <div key={ii} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", fontSize: 12, color: T.textMuted }}>
+                            <div style={{ width: 5, height: 5, borderRadius: "50%", background: T.primary, flexShrink: 0 }} />
+                            {item}
+                          </div>
+                        ))}
+                      </div>
+                      <div>
+                        <label style={lbl}>Contract Note <span style={{ textTransform: "none", fontWeight: 400 }}>(optional)</span></label>
+                        <input type="text" style={field} value={contractNote} onChange={e => setContractNote(e.target.value)} placeholder="e.g. Sent via Dropbox Sign 1/15/25" />
+                      </div>
+                      <button onClick={() => completeStep(1)}
+                        style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontWeight: 800, fontSize: 14, cursor: "pointer", fontFamily: "inherit", boxShadow: `0 4px 14px ${hexA(T.primary, 0.3)}` }}>
+                        Mark Contract Sent — Next Step
+                      </button>
+                    </>
+                  )}
+
+                  {/* ── Step 3: Upload signed doc ── */}
+                  {i === 2 && (
+                    <>
+                      <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.6 }}>
+                        Once {a.clientName || "the client"} signs, download the completed PDF from Dropbox Sign and upload it here. It will be saved to their Documents tab.
+                      </div>
+                      <input ref={fileInputRef} type="file" accept=".pdf,application/pdf,image/*"
+                        style={{ display: "none" }}
+                        onChange={e => { handleDocUpload(e.target.files); e.target.value = ""; }} />
+
+                      {uploadedDoc ? (
+                        <div style={{ background: hexA("#16a34a", 0.06), border: `1px solid ${hexA("#16a34a", 0.2)}`, borderRadius: 14, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12 }}>
+                          <div style={{ width: 40, height: 40, borderRadius: 12, background: hexA("#E5484D", 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                            <svg viewBox="0 0 24 24" width={20} height={20} fill="none" stroke="#E5484D" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 13, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{uploadedDoc.name}</div>
+                            <div style={{ fontSize: 11, color: T.textMuted }}>{fmtSize(uploadedDoc.size)}</div>
+                          </div>
+                          <button onClick={() => setUploadedDoc(null)} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 4 }}>
+                            <Icon name="close" size={14} />
+                          </button>
+                        </div>
+                      ) : (
+                        <button onClick={() => fileInputRef.current?.click()}
+                          style={{ padding: "20px 16px", border: `2px dashed ${T.border}`, borderRadius: 14, background: "none", cursor: "pointer", fontFamily: "inherit", display: "flex", flexDirection: "column", alignItems: "center", gap: 10, color: T.textMuted, width: "100%" }}>
+                          <div style={{ width: 44, height: 44, borderRadius: 13, background: hexA(T.primary, 0.08), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                            <Icon name="download" size={22} />
+                          </div>
+                          <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Upload Signed Contract</div>
+                          <div style={{ fontSize: 12, color: T.textMuted }}>PDF from Dropbox Sign · tap to choose</div>
+                        </button>
+                      )}
+
+                      <div style={{ display: "flex", gap: 10 }}>
+                        <button onClick={() => completeStep(2)} disabled={!uploadedDoc}
+                          style={{ flex: 1, background: uploadedDoc ? T.primary : T.surfaceAlt, color: uploadedDoc ? "#fff" : T.textMuted, border: "none", borderRadius: 12, padding: "13px", fontWeight: 800, fontSize: 14, cursor: uploadedDoc ? "pointer" : "default", fontFamily: "inherit", boxShadow: uploadedDoc ? `0 4px 14px ${hexA(T.primary, 0.3)}` : "none", transition: "all 0.2s" }}>
+                          Save Document — Next Step
+                        </button>
+                        <button onClick={() => completeStep(2)}
+                          style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 12, padding: "13px 16px", fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
+                          Upload Later
+                        </button>
+                      </div>
+                      {!uploadedDoc && (
+                        <div style={{ fontSize: 11, color: T.textMuted, textAlign: "center" }}>You can upload the document later from the client's Docs tab.</div>
+                      )}
+                    </>
+                  )}
+
+                  {/* ── Step 4: Apply plan change ── */}
+                  {i === 3 && (
+                    <>
+                      <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.6 }}>
+                        This is the final step. The client's plan will be changed from <strong style={{ color: T.text }}>{a.currentPlan}</strong> to <strong style={{ color: T.primary }}>{a.requestedPlan}</strong> in the app. They will see the update immediately when they open their portal.
+                      </div>
+
+                      {/* Confirmation checklist */}
+                      <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
+                        {[
+                          { label: "Client contacted and confirmed", done: completedSteps >= 1 },
+                          { label: "Contract sent via Dropbox Sign", done: completedSteps >= 2 },
+                          { label: "Signed document on file", done: !!uploadedDoc || (a.signedDoc != null) },
+                        ].map((item, ii) => (
+                          <div key={ii} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            <div style={{ width: 18, height: 18, borderRadius: "50%", background: item.done ? hexA("#16a34a", 0.15) : T.border, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                              {item.done && <svg viewBox="0 0 24 24" width={10} height={10} fill="none" stroke="#16a34a" strokeWidth={3} strokeLinecap="round"><path d="M20 6L9 17l-5-5"/></svg>}
+                            </div>
+                            <span style={{ fontSize: 13, color: item.done ? T.text : T.textMuted, fontWeight: item.done ? 600 : 400 }}>{item.label}</span>
+                          </div>
+                        ))}
+                      </div>
+
+                      {!(uploadedDoc || a.signedDoc) && (
+                        <div style={{ background: hexA("#F59E0B", 0.08), border: `1px solid ${hexA("#F59E0B", 0.2)}`, borderRadius: 12, padding: "11px 14px", fontSize: 12, color: "#92400E", display: "flex", gap: 8, alignItems: "flex-start", lineHeight: 1.5 }}>
+                          <Icon name="warning" size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                          No signed document uploaded yet. You can still apply the plan change, but consider uploading the contract first.
+                        </div>
+                      )}
+
+                      <button onClick={() => completeStep(3)}
+                        style={{ background: "#16a34a", color: "#fff", border: "none", borderRadius: 12, padding: "15px", fontWeight: 800, fontSize: 15, cursor: "pointer", fontFamily: "inherit", boxShadow: "0 4px 16px rgba(22,163,74,0.3)", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+                        <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="#fff" strokeWidth={2.5} strokeLinecap="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                        Confirm Upgrade to {a.requestedPlan}
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* Done state inline */}
+              {done && i < 3 && (
+                <div style={{ marginLeft: 34, marginTop: 4 }}>
+                  {i === 0 && contactNote && <div style={{ fontSize: 12, color: T.textMuted, fontStyle: "italic" }}>{contactNote}</div>}
+                  {i === 1 && contractNote && <div style={{ fontSize: 12, color: T.textMuted, fontStyle: "italic" }}>{contractNote}</div>}
+                  {i === 2 && (uploadedDoc || a.signedDoc) && (
+                    <div style={{ fontSize: 12, color: "#16a34a", fontWeight: 600 }}>{(uploadedDoc || a.signedDoc)?.name}</div>
+                  )}
+                </div>
+              )}
+
+              {/* Divider between steps */}
+              {i < UPGRADE_STEPS.length - 1 && (
+                <div style={{ marginLeft: 11, marginTop: 6, width: 1, height: 16, background: completedSteps > i ? "#16a34a" : T.border }} />
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </Modal>
+  );
+}
+
+function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onNav, catalog, onConfirmUpgrade }) {
   const { T, perms } = useApp();
   const [editing, setEditing] = useState(false);
 
   const today = (schedule && schedule[0]) || { stops: [] };
+  const [upgradeModal, setUpgradeModal] = useState(null); // alert object being confirmed
   const ma = monthActuals(clients);
   const derived = deriveAlerts(clients, invoices, catalog).filter(a => perms.seeBalances || !/outstanding/i.test(a.title || ""));
   const flags = (officeAlerts || []).filter(a => !a.resolved);
@@ -1021,17 +1303,72 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
         <CardHeader title="Alerts" />
         {flags.length === 0 && derived.length === 0 && <div style={{ padding: 18, fontSize: 13, color: T.textMuted }}>All clear — no alerts right now.</div>}
         {/* office flags from the field (resolvable) */}
-        {flags.map((a) => (
-          <div key={a.id} style={{ padding: "14px 18px", borderBottom: `1px solid ${T.border}`, display: "flex", gap: 12, alignItems: "flex-start", background: `${T.warning}08` }}>
-            <Icon name="warning" size={18} />
-            <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 700, fontSize: 13, color: T.text }}>{a.client} — needs office attention</div>
-              <div style={{ fontSize: 12, color: T.textMuted }}>{a.message}</div>
-              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{a.date}</div>
+        {flags.map((a) => {
+          const isUpgrade = a.type === "upgrade_request";
+          return (
+            <div key={a.id} style={{ padding: "16px 18px", borderBottom: `1px solid ${T.border}`, background: isUpgrade ? hexA(T.primary, 0.04) : `${T.warning}08` }}>
+              {isUpgrade ? (
+                /* ── Upgrade request card ── */
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+                    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                      <div style={{ width: 36, height: 36, borderRadius: 11, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                        <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke={T.primary} strokeWidth={2.2} strokeLinecap="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+                      </div>
+                      <div>
+                        <div style={{ fontWeight: 800, fontSize: 14, color: T.text, letterSpacing: "-0.01em" }}>{a.clientName || a.client} wants to upgrade</div>
+                        <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>{a.date}</div>
+                      </div>
+                    </div>
+                    <button onClick={() => onResolveAlert && onResolveAlert(a.id)} style={{ background: "none", border: `1px solid ${T.border}`, borderRadius: 7, padding: "3px 8px", fontSize: 10, fontWeight: 700, color: T.textMuted, cursor: "pointer", fontFamily: "inherit" }}>Dismiss</button>
+                  </div>
+                  {/* Plan change */}
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, background: T.surfaceAlt, borderRadius: 8, padding: "5px 12px", color: T.text }}>{a.currentPlan}</span>
+                    <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+                    <span style={{ fontSize: 13, fontWeight: 800, background: hexA(T.primary, 0.1), borderRadius: 8, padding: "5px 12px", color: T.primary }}>{a.requestedPlan}</span>
+                  </div>
+                  {a.body && a.body !== "No additional message." && (
+                    <div style={{ fontSize: 13, color: T.text, background: T.surfaceAlt, borderRadius: 10, padding: "10px 14px", marginBottom: 10, lineHeight: 1.5, fontStyle: "italic" }}>
+                      "{a.body}"
+                    </div>
+                  )}
+                  {/* Upgrade status badge if already in progress */}
+                  {a.upgradeStep && a.upgradeStep > 0 && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                      {["Contacted","Contract Sent","Doc Uploaded","Plan Updated"].slice(0, a.upgradeStep).map((s, si) => (
+                        <span key={si} style={{ fontSize: 10, fontWeight: 700, background: hexA("#16a34a", 0.1), color: "#16a34a", borderRadius: 100, padding: "3px 9px" }}>{s}</span>
+                      ))}
+                    </div>
+                  )}
+                  {/* Action buttons */}
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={() => setUpgradeModal(a)}
+                      style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "10px 8px", fontWeight: 800, fontSize: 13, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, boxShadow: `0 3px 12px ${hexA(T.primary, 0.3)}` }}>
+                      <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="#fff" strokeWidth={2.5} strokeLinecap="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+                      Process Upgrade
+                    </button>
+                    <button onClick={() => onResolveAlert && onResolveAlert(a.id)}
+                      style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 10, padding: "10px 12px", fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                      Decline
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                /* ── Standard office alert ── */
+                <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                  <Icon name="warning" size={18} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 700, fontSize: 13, color: T.text }}>{a.client || a.clientName} — needs office attention</div>
+                    <div style={{ fontSize: 12, color: T.textMuted }}>{a.message || a.body}</div>
+                    <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{a.date}</div>
+                  </div>
+                  <button onClick={() => onResolveAlert && onResolveAlert(a.id)} style={{ background: "none", border: `1px solid ${T.border}`, borderRadius: 7, padding: "4px 10px", fontSize: 11, fontWeight: 700, color: T.textMuted, cursor: "pointer", fontFamily: "inherit" }}>Resolve</button>
+                </div>
+              )}
             </div>
-            <button onClick={() => onResolveAlert && onResolveAlert(a.id)} style={{ background: "none", border: `1px solid ${T.border}`, borderRadius: 7, padding: "4px 10px", fontSize: 11, fontWeight: 700, color: T.textMuted, cursor: "pointer", fontFamily: "inherit" }}>Resolve</button>
-          </div>
-        ))}
+          );
+        })}
         {derived.map((a, i) => (
           <div key={"d" + i} style={{ padding: "14px 18px", borderBottom: i < derived.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", gap: 12, alignItems: "flex-start" }}>
             <div style={{ width: 34, height: 34, borderRadius: 10, background: hexA(T.warning, 0.1), color: T.warning, display:"flex", alignItems:"center", justifyContent:"center", flexShrink: 0 }}><Icon name={a.icon || "warning"} size={17} /></div>
@@ -1090,6 +1427,24 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
         </Card>
       ) : (
         items.map(it => widget(it.id))
+      )}
+      {/* Upgrade workflow modal */}
+      {upgradeModal && (
+        <UpgradeWorkflowModal
+          alert={upgradeModal}
+          clients={clients}
+          T={T}
+          onConfirm={(updatedAlert, updatedClient) => {
+            if (onConfirmUpgrade) onConfirmUpgrade(updatedAlert, updatedClient);
+            if (updatedAlert.fullyComplete) {
+              onResolveAlert && onResolveAlert(updatedAlert.id);
+              setUpgradeModal(null);
+            } else {
+              setUpgradeModal(updatedAlert);
+            }
+          }}
+          onClose={() => setUpgradeModal(null)}
+        />
       )}
     </div>
   );
@@ -1395,13 +1750,270 @@ function ClientEditForm({ client, onSave, onCancel, title = "Edit Client" }) {
 // ─────────────────────────────────────────────
 // CLIENT DETAIL
 // ─────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// CLIENT DOCUMENTS
+// Store signed contracts, agreements, and any PDF
+// uploaded from Dropbox Sign or elsewhere.
+// ─────────────────────────────────────────────
+
+const DOC_CATEGORIES = [
+  "Service Agreement",
+  "Upgrade Agreement",
+  "Proposal / Estimate",
+  "Invoice",
+  "Photo Report",
+  "Other",
+];
+
+function ClientDocuments({ client, onChange }) {
+  const { T, perms } = useApp();
+  const docs = client.documents || [];
+  const [uploading, setUploading] = useState(false);
+  const [editingDoc, setEditingDoc] = useState(null); // doc index being renamed/categorized
+  const [labelModal, setLabelModal] = useState(null); // { file, src, name, size, type }
+  const [labelForm, setLabelForm] = useState({ label: "", category: "Service Agreement", note: "" });
+  const fileInputRef = useRef(null);
+
+  const fmtSize = (bytes) => {
+    if (!bytes) return "";
+    if (bytes > 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
+    return `${(bytes / 1e3).toFixed(0)} KB`;
+  };
+
+  const fmtDate = (ts) => {
+    if (!ts) return "";
+    return new Date(ts).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  };
+
+  const handleFiles = (files) => {
+    const file = files[0];
+    if (!file) return;
+    setUploading(true);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      setLabelModal({ src: e.target.result, name: file.name, size: file.size, type: file.type });
+      setLabelForm({
+        label: file.name.replace(/\.[^.]+$/, ""),
+        category: file.name.toLowerCase().includes("agreement") || file.name.toLowerCase().includes("contract") ? "Service Agreement" : "Other",
+        note: "",
+      });
+      setUploading(false);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const confirmUpload = () => {
+    if (!labelModal) return;
+    const doc = {
+      id: `doc-${Date.now()}`,
+      src: labelModal.src,
+      name: labelModal.name,
+      size: labelModal.size,
+      type: labelModal.type,
+      label: labelForm.label || labelModal.name,
+      category: labelForm.category,
+      note: labelForm.note,
+      uploadedAt: Date.now(),
+    };
+    onChange([...docs, doc]);
+    setLabelModal(null);
+    setLabelForm({ label: "", category: "Service Agreement", note: "" });
+  };
+
+  const removeDoc = (id) => onChange(docs.filter(d => d.id !== id));
+
+  const updateDoc = (id, changes) => onChange(docs.map(d => d.id === id ? { ...d, ...changes } : d));
+
+  const downloadDoc = (doc) => {
+    const a = document.createElement("a");
+    a.href = doc.src;
+    a.download = doc.name || doc.label || "document";
+    a.click();
+  };
+
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", appearance: "none", WebkitAppearance: "none" };
+  const lbl   = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
+
+  // Group docs by category
+  const grouped = {};
+  docs.forEach(d => {
+    const cat = d.category || "Other";
+    if (!grouped[cat]) grouped[cat] = [];
+    grouped[cat].push(d);
+  });
+
+  const DocIcon = ({ type }) => {
+    const isPdf = (type || "").includes("pdf");
+    const isImg = (type || "").startsWith("image");
+    return (
+      <div style={{ width: 44, height: 44, borderRadius: 13, background: isPdf ? hexA("#E5484D", 0.1) : isImg ? hexA(T.primary, 0.1) : T.surfaceAlt, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+        {isPdf ? (
+          <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="#E5484D" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
+            <line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>
+          </svg>
+        ) : isImg ? (
+          <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke={T.primary} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>
+          </svg>
+        ) : (
+          <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke={T.textMuted} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
+          </svg>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <Card>
+      <CardHeader
+        title={`Documents (${docs.length})`}
+        action={perms.editClients ? (
+          <button onClick={() => fileInputRef.current?.click()}
+            style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "7px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5 }}>
+            <Icon name="plus" size={13} /> Upload
+          </button>
+        ) : null}
+      />
+
+      <input ref={fileInputRef} type="file"
+        accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.heic,.heif,application/pdf,image/*"
+        style={{ display: "none" }}
+        onChange={e => { handleFiles(e.target.files); e.target.value = ""; }} />
+
+      {docs.length === 0 && !uploading ? (
+        <div style={{ padding: "40px 20px", display: "flex", flexDirection: "column", alignItems: "center", gap: 12, textAlign: "center" }}>
+          <div style={{ width: 56, height: 56, borderRadius: 18, background: hexA(T.primary, 0.08), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <svg viewBox="0 0 24 24" width={28} height={28} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
+            </svg>
+          </div>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: T.text, marginBottom: 4 }}>No documents yet</div>
+            <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5, maxWidth: 260 }}>
+              Upload signed service agreements from Dropbox Sign, proposals, photo reports, or any other client documents.
+            </div>
+          </div>
+          {perms.editClients && (
+            <button onClick={() => fileInputRef.current?.click()}
+              style={{ marginTop: 4, background: T.primary, color: "#fff", border: "none", borderRadius: 13, padding: "12px 24px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit", boxShadow: `0 4px 14px ${hexA(T.primary, 0.3)}` }}>
+              Upload a Document
+            </button>
+          )}
+        </div>
+      ) : (
+        <div style={{ padding: docs.length > 0 ? 0 : "16px 18px" }}>
+          {Object.entries(grouped).sort().map(([cat, catDocs]) => (
+            <div key={cat}>
+              {/* Category header */}
+              <div style={{ padding: "10px 18px 6px", fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: T.textMuted, background: T.surfaceAlt, borderBottom: `1px solid ${T.border}` }}>
+                {cat} · {catDocs.length}
+              </div>
+              {catDocs.map((doc, i) => (
+                <div key={doc.id} style={{ padding: "14px 18px", borderBottom: i < catDocs.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 13 }}>
+                  <DocIcon type={doc.type} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    {editingDoc === doc.id ? (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        <input type="text" autoFocus value={doc.label}
+                          onChange={e => updateDoc(doc.id, { label: e.target.value })}
+                          onBlur={() => setEditingDoc(null)}
+                          onKeyDown={e => e.key === "Enter" && setEditingDoc(null)}
+                          style={{ ...field, padding: "7px 11px", fontSize: 13 }} />
+                        <select value={doc.category || "Other"} onChange={e => updateDoc(doc.id, { category: e.target.value })} style={{ ...field, padding: "7px 11px", fontSize: 13 }}>
+                          {DOC_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      </div>
+                    ) : (
+                      <>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{doc.label || doc.name}</div>
+                        <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>
+                          {fmtDate(doc.uploadedAt)}{doc.size ? ` · ${fmtSize(doc.size)}` : ""}
+                        </div>
+                        {doc.note && <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3, fontStyle: "italic" }}>{doc.note}</div>}
+                      </>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                    <button onClick={() => downloadDoc(doc)}
+                      style={{ background: hexA(T.primary, 0.1), color: T.primary, border: "none", borderRadius: 9, padding: "7px 11px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4 }}>
+                      <Icon name="download" size={13} />
+                    </button>
+                    {perms.editClients && (
+                      <button onClick={() => setEditingDoc(editingDoc === doc.id ? null : doc.id)}
+                        style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 9, padding: "7px 11px", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+                        <Icon name="edit" size={13} />
+                      </button>
+                    )}
+                    {perms.editClients && (
+                      <button onClick={() => removeDoc(doc.id)}
+                        style={{ background: hexA("#E5484D", 0.08), color: "#E5484D", border: "none", borderRadius: 9, padding: "7px 10px", fontSize: 12, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center" }}>
+                        <Icon name="close" size={13} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+          {perms.editClients && docs.length > 0 && (
+            <div style={{ padding: "14px 18px" }}>
+              <button onClick={() => fileInputRef.current?.click()}
+                style={{ width: "100%", padding: "11px", border: `2px dashed ${T.border}`, borderRadius: 12, background: "none", color: T.textMuted, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
+                <Icon name="plus" size={15} /> Upload another document
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Label & category modal before saving */}
+      {labelModal && (
+        <Modal title="Add Document" onClose={() => { setLabelModal(null); setUploading(false); }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12 }}>
+              <DocIcon type={labelModal.type} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{labelModal.name}</div>
+                {labelModal.size && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{fmtSize(labelModal.size)}</div>}
+              </div>
+            </div>
+            <div>
+              <label style={lbl}>Document Label</label>
+              <input type="text" autoFocus style={field}
+                value={labelForm.label}
+                onChange={e => setLabelForm(f => ({ ...f, label: e.target.value }))}
+                placeholder="e.g. Service Agreement 2025" />
+            </div>
+            <div>
+              <label style={lbl}>Category</label>
+              <select style={field} value={labelForm.category} onChange={e => setLabelForm(f => ({ ...f, category: e.target.value }))}>
+                {DOC_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={lbl}>Note <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
+              <input type="text" style={field}
+                value={labelForm.note}
+                onChange={e => setLabelForm(f => ({ ...f, note: e.target.value }))}
+                placeholder="e.g. Signed via Dropbox Sign, Jan 2025" />
+            </div>
+            <Btn onClick={confirmUpload} block lg>Save Document</Btn>
+          </div>
+        </Modal>
+      )}
+    </Card>
+  );
+}
+
 function ClientDetail({ client: init, invoices, invoicing, branding, schedule, onBack, onUpdate, onSaveInvoice, onDeleteInvoice }) {
   const { T, perms } = useApp();
   const [client, setClient] = useState(init);
   const [tab, setTab] = useState("overview");
   const [editing, setEditing] = useState(false);
   const pm = planMeta(client.plan, T);
-  const tabs = ["overview", "equipment", "history", ...(perms.canInvoice ? ["invoices"] : []), "portal"];
+  const tabs = ["overview", "equipment", "history", ...(perms.canInvoice ? ["invoices"] : []), "docs", "portal"];
   const owed = clientOutstanding(client, invoices);
 
   // keep local view in sync if the stored record changes (e.g. a completed stop adds history)
@@ -1463,6 +2075,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, schedule, o
       {tab === "equipment" && <ClientEquipment client={client} invoices={invoices} onChange={eq => update({ equipment: eq })} />}
       {tab === "history" && <ClientHistory client={client} onChange={hist => update({ history: hist })} />}
       {tab === "invoices" && perms.canInvoice && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} onSave={onSaveInvoice} onDelete={onDeleteInvoice} />}
+      {tab === "docs"    && <ClientDocuments client={client} onChange={docs => update({ documents: docs })} />}
       {tab === "portal" && <ClientPortal client={client} invoices={invoices} schedule={schedule} branding={branding} />}
     </div>
   );
@@ -2494,6 +3107,7 @@ function StaffClientPreview({ client, invoices, schedule, branding, onClose }) {
           onSignOut={onClose}
           onServiceRequest={() => {}}
           onApproveEstimate={() => {}}
+          onUpgradeRequest={handleUpgradeRequest}
           isStaffPreview={true}
         />
       </div>
@@ -6488,7 +7102,275 @@ function ClientInvoices({ client, invoices, invoicing, branding, onSave, onDelet
   );
 }
 
-function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEmail, costs, setCosts, budget, setBudget, clients, scheduleCfg, setScheduleCfg, team, setTeam, invoicing, setInvoicing, currentUserId, onResetData }) {
+// ─────────────────────────────────────────────
+// SERVICE TIERS MANAGER
+// Edit tier names, pricing, descriptions, and what's included.
+// Bulk-update client pricing by tier.
+// ─────────────────────────────────────────────
+function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
+  const TIER_KEYS = ["Essential", "Signature", "Premium"];
+  const [selected, setSelected] = useState("Signature");
+  const [editingInclude, setEditingInclude] = useState(null); // index
+  const [newInclude, setNewInclude] = useState("");
+  const [bulkPrices, setBulkPrices] = useState({}); // clientId -> price override for this session
+  const [bulkSaved, setBulkSaved] = useState(false);
+  const [confirmBulk, setConfirmBulk] = useState(false);
+
+  const tier = (tiers || DEFAULT_TIERS)[selected] || DEFAULT_TIERS["Signature"];
+  const setTier = (k, v) => setTiers(prev => ({ ...(prev || DEFAULT_TIERS), [selected]: { ...(prev || DEFAULT_TIERS)[selected], [k]: v } }));
+  const setInclude = (i, v) => setTier("includes", tier.includes.map((item, j) => j === i ? v : item));
+  const removeInclude = (i) => setTier("includes", tier.includes.filter((_, j) => j !== i));
+  const addInclude = () => {
+    if (!newInclude.trim()) return;
+    setTier("includes", [...(tier.includes || []), newInclude.trim()]);
+    setNewInclude("");
+  };
+  const moveInclude = (i, dir) => {
+    const arr = [...tier.includes];
+    const j = i + dir;
+    if (j < 0 || j >= arr.length) return;
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+    setTier("includes", arr);
+  };
+
+  // Clients on this tier
+  const tierClients = (clients || []).filter(c => c.plan === selected);
+
+  // Bulk apply prices
+  const applyBulkPrices = () => {
+    if (Object.keys(bulkPrices).length === 0) return;
+    setClients(prev => prev.map(c => {
+      const newRate = bulkPrices[String(c.id)];
+      if (newRate === undefined) return c;
+      return { ...c, monthlyRate: newRate };
+    }));
+    setBulkPrices({});
+    setBulkSaved(true);
+    setConfirmBulk(false);
+    setTimeout(() => setBulkSaved(false), 3000);
+  };
+
+  const field = { width: "100%", padding: "10px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const lbl   = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div>
+        <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>Edit what each service tier offers. Changes sync instantly to the client portal — all clients on that tier see the update immediately.</div>
+      </div>
+
+      {/* Tier selector */}
+      <div style={{ display: "flex", gap: 8 }}>
+        {TIER_KEYS.map(key => {
+          const t = (tiers || DEFAULT_TIERS)[key] || {};
+          const count = (clients || []).filter(c => c.plan === key).length;
+          const active = selected === key;
+          return (
+            <button key={key} onClick={() => { setSelected(key); setBulkPrices({}); setBulkSaved(false); setConfirmBulk(false); }}
+              style={{ flex: 1, padding: "12px 8px", border: `2px solid ${active ? (t.color || T.primary) : T.border}`, borderRadius: 16, background: active ? hexA(t.color || T.primary, 0.08) : T.surface, cursor: "pointer", fontFamily: "inherit", textAlign: "center", transition: "all 0.15s" }}>
+              <div style={{ width: 10, height: 10, borderRadius: "50%", background: t.color || T.primary, margin: "0 auto 6px" }} />
+              <div style={{ fontSize: 13, fontWeight: 800, color: active ? (t.color || T.primary) : T.text }}>{key}</div>
+              <div style={{ fontSize: 10, color: T.textMuted, marginTop: 2 }}>{count} client{count !== 1 ? "s" : ""}</div>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Tier details editor */}
+      <Card>
+        <CardHeader title={`${selected} Tier Settings`} />
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 16 }}>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div>
+              <label style={lbl}>Tagline</label>
+              <input type="text" style={field} value={tier.tagline || ""} onChange={e => setTier("tagline", e.target.value)} placeholder="e.g. Our most popular plan" />
+            </div>
+            <div>
+              <label style={lbl}>Display Price</label>
+              <input type="text" style={field} value={tier.price || ""} onChange={e => setTier("price", e.target.value)} placeholder="e.g. $150/mo or Contact us" />
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4 }}>Shown to clients in their portal.</div>
+            </div>
+          </div>
+
+          <div>
+            <label style={lbl}>Tier Color</label>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ position: "relative", width: 44, height: 44, borderRadius: 12, overflow: "hidden", border: `1.5px solid ${T.border}`, background: tier.color || "#6B7280", flexShrink: 0 }}>
+                <input type="color" value={tier.color || "#6B7280"} onChange={e => setTier("color", e.target.value)} style={{ position: "absolute", inset: -4, width: 56, height: 56, border: "none", cursor: "pointer" }} />
+              </div>
+              <div style={{ fontSize: 13, color: T.textMuted }}>Used on the hero card and tier badge in the client portal.</div>
+            </div>
+          </div>
+
+          <div>
+            <label style={lbl}>Upgrades To</label>
+            <div style={{ display: "flex", gap: 8 }}>
+              {["Signature", "Premium", "none"].map(opt => (
+                <button key={opt} onClick={() => setTier("upgradeTo", opt === "none" ? null : opt)}
+                  style={{ flex: 1, padding: "9px", border: `1.5px solid ${(tier.upgradeTo === opt || (opt === "none" && !tier.upgradeTo)) ? T.primary : T.border}`, borderRadius: 10, background: (tier.upgradeTo === opt || (opt === "none" && !tier.upgradeTo)) ? hexA(T.primary, 0.08) : T.surface, color: (tier.upgradeTo === opt || (opt === "none" && !tier.upgradeTo)) ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                  {opt === "none" ? "None (top tier)" : opt}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* What's included */}
+          <div>
+            <label style={lbl}>What's Included</label>
+            <div style={{ background: T.surfaceAlt, borderRadius: 14, overflow: "hidden" }}>
+              {(tier.includes || []).map((item, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", borderBottom: i < tier.includes.length - 1 ? `1px solid ${T.border}` : "none" }}>
+                  {/* Up/down */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 2, flexShrink: 0 }}>
+                    <button onClick={() => moveInclude(i, -1)} disabled={i === 0}
+                      style={{ background: "none", border: "none", color: i === 0 ? T.border : T.textMuted, cursor: i === 0 ? "default" : "pointer", padding: 2, fontSize: 12, lineHeight: 1 }}>▲</button>
+                    <button onClick={() => moveInclude(i, 1)} disabled={i === tier.includes.length - 1}
+                      style={{ background: "none", border: "none", color: i === tier.includes.length - 1 ? T.border : T.textMuted, cursor: i === tier.includes.length - 1 ? "default" : "pointer", padding: 2, fontSize: 12, lineHeight: 1 }}>▼</button>
+                  </div>
+                  {editingInclude === i ? (
+                    <input type="text" autoFocus value={item}
+                      onChange={e => setInclude(i, e.target.value)}
+                      onBlur={() => setEditingInclude(null)}
+                      onKeyDown={e => e.key === "Enter" && setEditingInclude(null)}
+                      style={{ ...field, flex: 1, padding: "6px 10px" }} />
+                  ) : (
+                    <div onClick={() => setEditingInclude(i)} style={{ flex: 1, fontSize: 13, color: T.text, cursor: "text" }}>{item}</div>
+                  )}
+                  <button onClick={() => removeInclude(i)}
+                    style={{ background: hexA("#E5484D", 0.1), border: "none", borderRadius: 8, color: "#E5484D", width: 28, height: 28, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    <Icon name="close" size={12} />
+                  </button>
+                </div>
+              ))}
+              {/* Add new */}
+              <div style={{ display: "flex", gap: 8, padding: "10px 14px" }}>
+                <input type="text" value={newInclude} onChange={e => setNewInclude(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && addInclude()}
+                  placeholder="Add a benefit..." style={{ ...field, flex: 1, padding: "8px 12px", fontSize: 13 }} />
+                <button onClick={addInclude} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "8px 14px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Add</button>
+              </div>
+            </div>
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>Tap any line to edit. Drag arrows to reorder. Press Enter to confirm.</div>
+          </div>
+        </div>
+      </Card>
+
+      {/* ── BULK CLIENT PRICING ── */}
+      <Card>
+        <CardHeader title={`${selected} Clients — Bulk Pricing`} />
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
+          {tierClients.length === 0 ? (
+            <div style={{ fontSize: 13, color: T.textMuted, textAlign: "center", padding: "16px 0" }}>No clients on the {selected} plan yet.</div>
+          ) : (
+            <>
+              <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>
+                Edit monthly rates for all {selected} clients in one place. Leave unchanged to keep existing pricing. Tap <strong style={{ color: T.text }}>Apply Changes</strong> to save.
+              </div>
+
+              {/* Quick set all */}
+              <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: "12px 14px", display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{ fontSize: 13, color: T.textMuted, flex: 1 }}>Set all to:</div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <div style={{ position: "relative" }}>
+                    <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: T.textMuted, fontSize: 14 }}>$</span>
+                    <input type="text" inputMode="decimal"
+                      id="bulk-all-input"
+                      style={{ ...field, width: 100, paddingLeft: 24 }}
+                      placeholder="0.00"
+                      onKeyDown={e => {
+                        if (e.key === "Enter") {
+                          const v = e.target.value;
+                          const newPrices = {};
+                          tierClients.forEach(c => { newPrices[String(c.id)] = v; });
+                          setBulkPrices(prev => ({ ...prev, ...newPrices }));
+                          e.target.value = "";
+                        }
+                      }} />
+                  </div>
+                  <button onClick={() => {
+                    const el = document.getElementById("bulk-all-input");
+                    const v = el?.value;
+                    if (!v) return;
+                    const newPrices = {};
+                    tierClients.forEach(c => { newPrices[String(c.id)] = v; });
+                    setBulkPrices(prev => ({ ...prev, ...newPrices }));
+                    if (el) el.value = "";
+                  }} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "8px 14px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
+                    Set All
+                  </button>
+                </div>
+              </div>
+
+              {/* Per-client rows */}
+              <div style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+                {tierClients.sort((a,b) => (a.name||"").localeCompare(b.name||"")).map((c, i) => {
+                  const currentRate = bulkPrices[String(c.id)] !== undefined ? bulkPrices[String(c.id)] : (c.monthlyRate || "");
+                  const changed = bulkPrices[String(c.id)] !== undefined;
+                  return (
+                    <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 16px", borderBottom: i < tierClients.length - 1 ? `1px solid ${T.border}` : "none", background: changed ? hexA(T.primary, 0.03) : "transparent" }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{c.name}</div>
+                        <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{c.planFreq || "—"} · {c.address || "No address"}</div>
+                      </div>
+                      <div style={{ position: "relative", width: 110, flexShrink: 0 }}>
+                        <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: T.textMuted, fontSize: 14 }}>$</span>
+                        <input type="text" inputMode="decimal"
+                          value={currentRate}
+                          onChange={e => setBulkPrices(prev => ({ ...prev, [String(c.id)]: e.target.value.replace(/[^0-9.]/g, "") }))}
+                          placeholder={c.monthlyRate || "0.00"}
+                          style={{ ...field, paddingLeft: 24, border: changed ? `1.5px solid ${T.primary}` : `1.5px solid ${T.border}` }} />
+                      </div>
+                      {changed && (
+                        <button onClick={() => setBulkPrices(prev => { const n = { ...prev }; delete n[String(c.id)]; return n; })}
+                          style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 4, fontSize: 11, fontFamily: "inherit" }}>Undo</button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Apply button */}
+              {Object.keys(bulkPrices).length > 0 && !confirmBulk && (
+                <button onClick={() => setConfirmBulk(true)}
+                  style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 14, padding: "14px", fontWeight: 800, fontSize: 15, cursor: "pointer", fontFamily: "inherit", boxShadow: `0 4px 16px ${hexA(T.primary, 0.3)}` }}>
+                  Apply {Object.keys(bulkPrices).length} Price Change{Object.keys(bulkPrices).length !== 1 ? "s" : ""}
+                </button>
+              )}
+              {confirmBulk && (
+                <div style={{ background: hexA(T.primary, 0.06), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 14, padding: "14px 16px" }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text, marginBottom: 10 }}>
+                    Update {Object.keys(bulkPrices).length} client{Object.keys(bulkPrices).length !== 1 ? "s" : ""}?
+                  </div>
+                  <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 14, lineHeight: 1.5 }}>
+                    This updates the monthly rate on each client record. It doesn't automatically generate invoices — use auto-invoice settings per client for that.
+                  </div>
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <button onClick={applyBulkPrices}
+                      style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "12px", fontWeight: 800, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>
+                      Confirm
+                    </button>
+                    <button onClick={() => setConfirmBulk(false)}
+                      style={{ background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 12, padding: "12px 18px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+              {bulkSaved && (
+                <div style={{ background: hexA("#16a34a", 0.1), border: `1px solid ${hexA("#16a34a", 0.2)}`, borderRadius: 12, padding: "12px 16px", fontSize: 13, fontWeight: 700, color: "#16a34a", display: "flex", alignItems: "center", gap: 8 }}>
+                  <Icon name="check" size={16} /> Prices updated for all {selected} clients.
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEmail, costs, setCosts, budget, setBudget, clients, setClients, scheduleCfg, setScheduleCfg, team, setTeam, invoicing, setInvoicing, currentUserId, onResetData, serviceTiers, setServiceTiers }) {
   const { T, perms } = useApp();
   const fileRef = useRef();
   const [tab, setTab] = useState("branding");
@@ -6521,7 +7403,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
   if (perms.seeCostsBudget) { tabs.push(["costs", "Costs"], ["budget", "Budget"]); }
   if (perms.editSettings) tabs.push(["email", "Messaging"], ["schedule", "Schedule"]);
   if (perms.editSettings || perms.canInvoice) tabs.push(["invoicing", "Invoices"]);
-  if (perms.isAdmin) tabs.push(["team", "Team & Logins"]);
+  if (perms.isAdmin) tabs.push(["tiers", "Service Tiers"], ["team", "Team & Logins"]);
   // if the current tab isn't available (e.g. switched to employee view), fall back to the first one
   const activeTab = tabs.some(([id]) => id === tab) ? tab : (tabs[0] ? tabs[0][0] : null);
 
@@ -6559,6 +7441,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
       {activeTab === "costs" && perms.seeCostsBudget && <CostSettings costs={costs} setCosts={setCosts} />}
       {activeTab === "budget" && perms.seeCostsBudget && <BudgetManager budget={budget} setBudget={setBudget} clients={clients} costs={costs} />}
       {activeTab === "schedule" && <ScheduleSettings cfg={scheduleCfg} setCfg={setScheduleCfg} />}
+      {activeTab === "tiers" && perms.isAdmin && <ServiceTiersManager tiers={serviceTiers || DEFAULT_TIERS} setTiers={setServiceTiers} clients={clients} setClients={setClients} T={T} />}
       {activeTab === "team" && perms.isAdmin && <TeamManager team={team} setTeam={setTeam} currentUserId={currentUserId} />}
       {activeTab === "branding" && <>
 
@@ -6972,8 +7855,37 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             </div>
           </div>
 
+          {/* Center button picker */}
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Center Nav Button</div>
+            <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 10, lineHeight: 1.5 }}>The prominent circle button in the middle of the client nav bar. Pick whichever action you want front and center.</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {[
+                { id: "cp_request",  label: "Request Service",  sub: "Client requests a visit" },
+                { id: "cp_service",  label: "My Service Plan",  sub: "View plan & upgrade" },
+                { id: "cp_invoices", label: "My Invoices",      sub: "Pay & view invoices" },
+                { id: "cp_pond",     label: "My Pond / Pool / Property", sub: "Auto-labels by division — equipment, history & photos" },
+              ].map(opt => {
+                const active = (localBranding.portalCenterBtn || "cp_request") === opt.id;
+                return (
+                  <button key={opt.id} onClick={() => set("portalCenterBtn", opt.id)}
+                    style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", border: `1.5px solid ${active ? T.primary : T.border}`, borderRadius: 14, background: active ? hexA(T.primary, 0.06) : T.surface, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%", boxSizing: "border-box" }}>
+                    <div style={{ width: 36, height: 36, borderRadius: "50%", background: active ? T.primary : T.surfaceAlt, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      <div style={{ width: 10, height: 10, borderRadius: "50%", background: active ? "#fff" : T.border }} />
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: active ? T.primary : T.text }}>{opt.label}</div>
+                      <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{opt.sub}</div>
+                    </div>
+                    {active && <div style={{ marginLeft: "auto", color: T.primary }}><Icon name="check" size={16} /></div>}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: "12px 14px", fontSize: 12, color: T.textMuted, lineHeight: 1.6 }}>
-            <strong style={{ color: T.text }}>Plan tier details</strong> — what's listed under each plan (Essential, Signature, Premium) and upgrade copy — edit the <code style={{ background: T.border, padding: "1px 5px", borderRadius: 4 }}>CP_TIERS</code> object near the top of App.jsx. Each tier has a color, tagline, and includes list you can update.
+            <strong style={{ color: T.text }}>Plan tier details</strong> — what's listed under each plan (Essential, Signature, Premium) and upgrade copy — edit in the <strong style={{ color: T.text }}>Service Tiers</strong> tab above.
           </div>
         </div>
       </Card>
@@ -8646,15 +9558,15 @@ function OverflowMenu({ page, perms, navUnread, dockIds, setDockIds, onNav, onSi
 const CLIENT_NAV = [
   { id: "cp_home",      label: "Home",      icon: "home" },
   { id: "cp_service",   label: "My Service", icon: "clients" },
-  { id: "cp_history",   label: "History",   icon: "history" },
+  { id: "cp_pond",      label: "My Pond",   icon: "history" },  // label overridden dynamically in portal
   { id: "cp_invoices",  label: "Invoices",  icon: "invoice" },
   { id: "cp_request",   label: "Request",   icon: "plus" },
 ];
 
-const CP_TIERS = {
+const DEFAULT_TIERS = {
   "Essential": {
     color: "#6B7280",
-    price: "Contact us",
+    price: "",
     tagline: "Reliable seasonal care",
     includes: [
       "Monthly service visits",
@@ -8666,7 +9578,7 @@ const CP_TIERS = {
   },
   "Signature": {
     color: "#B81D24",
-    price: "Contact us",
+    price: "",
     tagline: "Our most popular plan",
     includes: [
       "Bi-weekly service visits",
@@ -8680,7 +9592,7 @@ const CP_TIERS = {
   },
   "Premium": {
     color: "#AF011A",
-    price: "Contact us",
+    price: "",
     tagline: "White-glove pond care",
     includes: [
       "Weekly service visits",
@@ -8694,6 +9606,10 @@ const CP_TIERS = {
     upgradeTo: null,
   },
 };
+
+// CP_TIERS is loaded from stored state in App — this is just the reference
+// Individual components read from the `tiers` context via useApp()
+let CP_TIERS = DEFAULT_TIERS;
 
 function clientNextVisit(schedule, clientId) {
   const today = new Date(); today.setHours(0,0,0,0);
@@ -8805,7 +9721,7 @@ function CPHome({ client, schedule, invoices, branding, onNav, T }) {
       {/* Stats row */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
         {[
-          { label: "Visits", value: (client.history||[]).length, page: "cp_history" },
+          { label: "Visits", value: (client.history||[]).length, page: "cp_pond" },
           { label: "Invoices", value: myInvoices.length, page: "cp_invoices" },
           { label: "Equipment", value: (client.equipment||[]).length, page: null },
         ].map(s => (
@@ -8822,7 +9738,7 @@ function CPHome({ client, schedule, invoices, branding, onNav, T }) {
         <div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
             <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Recent Visits</div>
-            <button onClick={() => onNav("cp_history")} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>See all</button>
+            <button onClick={() => onNav("cp_pond")} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>See all</button>
           </div>
           <div style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, overflow: "hidden" }}>
             {recentHistory.map((h, i) => {
@@ -8855,7 +9771,7 @@ function CPHome({ client, schedule, invoices, branding, onNav, T }) {
           {[
             { label: "My Service Plan", sub: `${client.plan || "Signature"} — tap to manage`, icon: "clients", page: "cp_service", accent: true },
             { label: "Request a Visit", sub: "Schedule service", icon: "plus", page: "cp_request", accent: false },
-            { label: "Service History", sub: `${(client.history||[]).length} visits on record`, icon: "history", page: "cp_history", accent: false },
+            { label: pondLabel(client), sub: `${(client.history||[]).length} visits · ${(client.equipment||[]).length} equipment`, icon: "history", page: "cp_pond", accent: false },
             { label: "My Invoices", sub: outstanding.length ? `${outstanding.length} outstanding` : "All paid up", icon: "invoice", page: "cp_invoices", accent: false },
           ].map(q => (
             <button key={q.page} onClick={() => onNav(q.page)}
@@ -8873,14 +9789,195 @@ function CPHome({ client, schedule, invoices, branding, onNav, T }) {
   );
 }
 
+// ── CP UPGRADE REQUEST ──
+// Multi-step upgrade interest flow shown to the client.
+// Step 1: Compare tiers. Step 2: Write a message. Step 3: Confirmation.
+function CPUpgradeRequest({ client, currentPlan, currentTier, upgradePlan, upgradeTier, tiers, branding, onSubmit, T }) {
+  const [step, setStep] = useState("browse");   // browse | message | done
+  const [selectedPlan, setSelectedPlan] = useState(upgradePlan);
+  const [message, setMessage] = useState("");
+  const allTiers = tiers || CP_TIERS;
+
+  // Build list of plans the client can upgrade to (their current tier's upgradeTo chain)
+  const upgradeOptions = (() => {
+    const opts = [];
+    let next = upgradePlan;
+    while (next && allTiers[next]) {
+      opts.push(next);
+      next = allTiers[next].upgradeTo;
+    }
+    return opts;
+  })();
+
+  const chosen = allTiers[selectedPlan] || upgradeTier;
+  const newItems = (chosen?.includes || []).filter(item => !(currentTier?.includes || []).includes(item));
+
+  const handleSubmit = () => {
+    if (!selectedPlan) return;
+    onSubmit({
+      clientId: client.id,
+      clientName: client.name,
+      currentPlan,
+      requestedPlan: selectedPlan,
+      message: message.trim(),
+      submittedAt: Date.now(),
+    });
+    setStep("done");
+  };
+
+  if (step === "done") {
+    return (
+      <div style={{ background: T.surface, borderRadius: 22, border: `1px solid ${T.border}`, padding: "32px 24px", textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: 14 }}>
+        <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA("#16a34a", 0.1), display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <svg viewBox="0 0 24 24" width={32} height={32} fill="#16a34a"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+        </div>
+        <div>
+          <div style={{ fontSize: 20, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginBottom: 8 }}>Upgrade Request Sent</div>
+          <div style={{ fontSize: 14, color: T.textMuted, lineHeight: 1.6, maxWidth: 260 }}>
+            We'll review your request and reach out within 1–2 business days to confirm your upgrade to <strong>{selectedPlan}</strong>.
+          </div>
+        </div>
+        <button onClick={() => setStep("browse")} style={{ marginTop: 4, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 24px", fontWeight: 700, fontSize: 13, color: T.text, cursor: "pointer", fontFamily: "inherit" }}>
+          Back to My Service
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {/* Section header */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ flex: 1, height: 1, background: T.border }} />
+        <span style={{ fontSize: 12, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.07em" }}>Available Upgrades</span>
+        <div style={{ flex: 1, height: 1, background: T.border }} />
+      </div>
+
+      {step === "browse" && (
+        <>
+          {/* Plan selector — if multiple upgrade paths */}
+          {upgradeOptions.length > 1 && (
+            <div style={{ display: "flex", gap: 8 }}>
+              {upgradeOptions.map(key => {
+                const t = allTiers[key] || {};
+                return (
+                  <button key={key} onClick={() => setSelectedPlan(key)}
+                    style={{ flex: 1, padding: "10px 8px", border: `2px solid ${selectedPlan === key ? (t.color || T.primary) : T.border}`, borderRadius: 14, background: selectedPlan === key ? hexA(t.color || T.primary, 0.08) : T.surface, cursor: "pointer", fontFamily: "inherit", textAlign: "center" }}>
+                    <div style={{ fontSize: 13, fontWeight: 800, color: selectedPlan === key ? (t.color || T.primary) : T.text }}>{key}</div>
+                    {t.price && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{t.price}</div>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Comparison card */}
+          <div style={{ background: T.surface, borderRadius: 22, border: `1.5px solid ${hexA(chosen?.color || T.primary, 0.3)}`, overflow: "hidden", boxShadow: `0 6px 24px ${hexA(chosen?.color || T.primary, 0.1)}` }}>
+            {/* Header gradient */}
+            <div style={{ background: `linear-gradient(135deg, ${chosen?.color || T.primary}, ${mix(chosen?.color || T.primary, "#000", 0.22)})`, padding: "22px 20px", color: "#fff" }}>
+              <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", opacity: 0.65, marginBottom: 6 }}>Upgrade to</div>
+              <div style={{ fontSize: 30, fontWeight: 900, letterSpacing: "-0.03em", lineHeight: 1 }}>{selectedPlan}</div>
+              <div style={{ fontSize: 13, opacity: 0.8, marginTop: 6 }}>{chosen?.tagline}</div>
+              {chosen?.price && (
+                <div style={{ marginTop: 12, display: "inline-flex", background: "rgba(255,255,255,0.2)", borderRadius: 100, padding: "5px 16px", fontSize: 13, fontWeight: 700 }}>
+                  {chosen.price}
+                </div>
+              )}
+            </div>
+
+            <div style={{ padding: "16px 20px" }}>
+              {/* New benefits */}
+              {newItems.length > 0 && (
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>
+                    What you gain
+                  </div>
+                  {newItems.map((item, i) => (
+                    <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 11, padding: "8px 0", borderBottom: i < newItems.length - 1 ? `1px solid ${T.border}` : "none" }}>
+                      <div style={{ width: 20, height: 20, borderRadius: "50%", background: hexA(chosen?.color || T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 1 }}>
+                        <svg viewBox="0 0 24 24" width={11} height={11} fill="none" stroke={chosen?.color || T.primary} strokeWidth={2.5} strokeLinecap="round"><path d="M20 6L9 17l-5-5"/></svg>
+                      </div>
+                      <span style={{ fontSize: 14, color: T.text, fontWeight: 500, lineHeight: 1.4 }}>{item}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Everything you keep */}
+              <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>
+                Plus everything in {currentPlan}
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {(currentTier?.includes || []).map((item, i) => (
+                  <span key={i} style={{ fontSize: 12, background: T.surfaceAlt, color: T.textMuted, borderRadius: 100, padding: "4px 12px", fontWeight: 500 }}>{item}</span>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ padding: "0 20px 20px" }}>
+              <button onClick={() => setStep("message")}
+                style={{ width: "100%", background: chosen?.color || T.primary, color: "#fff", border: "none", borderRadius: 14, padding: "15px", fontWeight: 800, fontSize: 15, cursor: "pointer", fontFamily: "inherit", boxShadow: `0 4px 16px ${hexA(chosen?.color || T.primary, 0.35)}`, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+                <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="#fff" strokeWidth={2.2} strokeLinecap="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+                Request Upgrade to {selectedPlan}
+              </button>
+              <div style={{ fontSize: 12, color: T.textMuted, textAlign: "center", marginTop: 10, lineHeight: 1.5 }}>
+                This is just a request — no changes are made until our team confirms and you sign an updated agreement.
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {step === "message" && (
+        <div style={{ background: T.surface, borderRadius: 22, border: `1px solid ${T.border}`, padding: "22px 20px", display: "flex", flexDirection: "column", gap: 16 }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginBottom: 4 }}>One more step</div>
+            <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>
+              Tell us a bit about why you're interested in upgrading to <strong style={{ color: T.text }}>{selectedPlan}</strong>. Our team will reach out within 1–2 business days.
+            </div>
+          </div>
+
+          <div style={{ background: hexA(chosen?.color || T.primary, 0.06), borderRadius: 14, padding: "12px 16px" }}>
+            <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 2 }}>Upgrading from → to</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{currentPlan} → {selectedPlan}</div>
+          </div>
+
+          <div>
+            <label style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 8 }}>
+              Your Message <span style={{ textTransform: "none", fontWeight: 400 }}>(optional)</span>
+            </label>
+            <textarea
+              value={message}
+              onChange={e => setMessage(e.target.value)}
+              placeholder="e.g. We added a koi pond and would love more frequent service. Interested in the weekly plan."
+              style={{ width: "100%", padding: "13px 15px", border: `1.5px solid ${T.border}`, borderRadius: 13, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical", minHeight: 110, lineHeight: 1.6 }}
+            />
+          </div>
+
+          <div style={{ display: "flex", gap: 10 }}>
+            <button onClick={handleSubmit}
+              style={{ flex: 1, background: chosen?.color || T.primary, color: "#fff", border: "none", borderRadius: 14, padding: "15px", fontWeight: 800, fontSize: 15, cursor: "pointer", fontFamily: "inherit", boxShadow: `0 4px 16px ${hexA(chosen?.color || T.primary, 0.3)}` }}>
+              Send Request
+            </button>
+            <button onClick={() => setStep("browse")}
+              style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 14, padding: "15px 18px", fontWeight: 600, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>
+              Back
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── CP SERVICE (My Service Plan) ──
-function CPService({ client, branding, onNav, T }) {
+function CPService({ client, branding, onNav, onUpgradeRequest, T }) {
+  const { tiers } = useApp();
   const plan = client.plan || "Signature";
-  const tier = CP_TIERS[plan] || CP_TIERS["Signature"];
+  const tier = (tiers || CP_TIERS)[plan] || CP_TIERS["Signature"];
   const tierColor = tier?.color || T.primary;
-  const [showUpgrade, setShowUpgrade] = useState(false);
   const upgradePlan = tier?.upgradeTo;
-  const upgradeTier = upgradePlan ? CP_TIERS[upgradePlan] : null;
+  const upgradeTier = upgradePlan ? (tiers || CP_TIERS)[upgradePlan] : null;
 
   const CheckRow = ({ text, highlighted }) => (
     <div style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
@@ -8950,52 +10047,17 @@ function CPService({ client, branding, onNav, T }) {
 
       {/* Upgrade section */}
       {upgradePlan && upgradeTier && (
-        <div>
-          {!showUpgrade ? (
-            <button onClick={() => setShowUpgrade(true)}
-              style={{ width: "100%", background: "none", border: `2px dashed ${T.border}`, borderRadius: 22, padding: "22px 20px", cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 16, textAlign: "left" }}>
-              <div style={{ width: 44, height: 44, borderRadius: 14, background: hexA(upgradeTier.color, 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke={upgradeTier.color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
-              </div>
-              <div>
-                <div style={{ fontSize: 15, fontWeight: 800, color: T.text, letterSpacing: "-0.01em" }}>Upgrade to {upgradePlan}</div>
-                <div style={{ fontSize: 13, color: T.textMuted, marginTop: 3 }}>{upgradeTier.tagline} — tap to see what's included</div>
-              </div>
-            </button>
-          ) : (
-            <div style={{ background: T.surface, borderRadius: 22, border: `1.5px solid ${hexA(upgradeTier.color, 0.3)}`, overflow: "hidden", boxShadow: `0 8px 32px ${hexA(upgradeTier.color, 0.1)}` }}>
-              {/* Upgrade header */}
-              <div style={{ background: `linear-gradient(135deg, ${upgradeTier.color}, ${mix(upgradeTier.color, "#000", 0.2)})`, padding: "22px 20px", color: "#fff" }}>
-                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", opacity: 0.7, marginBottom: 6 }}>Upgrade Available</div>
-                <div style={{ fontSize: 28, fontWeight: 900, letterSpacing: "-0.03em" }}>{upgradePlan}</div>
-                <div style={{ fontSize: 13, opacity: 0.8, marginTop: 6 }}>{upgradeTier.tagline}</div>
-              </div>
-
-              <div style={{ padding: "8px 20px 14px" }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", padding: "12px 0 6px" }}>Everything in {plan}, plus:</div>
-                {(upgradeTier.includes || []).filter(item => !(tier?.includes || []).includes(item)).map((item, i, arr) => (
-                  <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "9px 0", borderBottom: i < arr.length - 1 ? `1px solid ${T.border}` : "none" }}>
-                    <div style={{ width: 20, height: 20, borderRadius: "50%", background: hexA(upgradeTier.color, 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 1 }}>
-                      <svg viewBox="0 0 24 24" width={11} height={11} fill="none" stroke={upgradeTier.color} strokeWidth={2.5} strokeLinecap="round"><path d="M20 6L9 17l-5-5"/></svg>
-                    </div>
-                    <span style={{ fontSize: 14, color: T.text, fontWeight: 500 }}>{item}</span>
-                  </div>
-                ))}
-              </div>
-
-              <div style={{ padding: "0 20px 20px", display: "flex", gap: 10 }}>
-                <button onClick={() => onNav("cp_request")}
-                  style={{ flex: 1, background: upgradeTier.color, color: "#fff", border: "none", borderRadius: 14, padding: "14px", fontWeight: 800, fontSize: 14, cursor: "pointer", fontFamily: "inherit", boxShadow: `0 4px 16px ${hexA(upgradeTier.color, 0.3)}` }}>
-                  Request Upgrade
-                </button>
-                <button onClick={() => setShowUpgrade(false)}
-                  style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 14, padding: "14px 18px", fontWeight: 600, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>
-                  Close
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
+        <CPUpgradeRequest
+          client={client}
+          currentPlan={plan}
+          currentTier={tier}
+          upgradePlan={upgradePlan}
+          upgradeTier={upgradeTier}
+          tiers={tiers}
+          branding={branding}
+          onSubmit={onUpgradeRequest}
+          T={T}
+        />
       )}
 
       {/* Already on top tier */}
@@ -9025,19 +10087,23 @@ function CPService({ client, branding, onNav, T }) {
 }
 
 // ── CP HISTORY ──
-function CPHistory({ client, T }) {
-  const history = client.history || [];
+function CPPond({ client, T }) {
+  const [section, setSection] = useState("overview"); // overview | service | equipment | fish | purchases
+  const history  = client.history  || [];
+  const equipment = client.equipment || [];
+  const sitePhotos = client.sitePhotos || [];
+  const siteVideos = client.siteVideos || [];
+  const fishHistory = client.fishHistory || [];
+  const purchaseHistory = client.purchaseHistory || [];
   const [expanded, setExpanded] = useState({});
 
-  if (!history.length) {
-    return (
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "80px 20px", gap: 12, textAlign: "center" }}>
-        <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.08), display: "flex", alignItems: "center", justifyContent: "center", color: T.primary }}><CIcon name="history" size={30} /></div>
-        <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>No history yet</div>
-        <div style={{ fontSize: 14, color: T.textMuted, lineHeight: 1.5, maxWidth: 240 }}>Your service records will appear here after each visit.</div>
-      </div>
-    );
-  }
+  const SECTIONS = [
+    { id: "overview",  label: "Overview" },
+    { id: "service",   label: "Service" },
+    { id: "equipment", label: "Equipment" },
+    { id: "fish",      label: "Fish" },
+    { id: "purchases", label: "Purchases" },
+  ];
 
   const getReadings = (h) => {
     if (h.readings && Object.keys(h.readings).length) return h.readings;
@@ -9049,429 +10115,269 @@ function CPHistory({ client, T }) {
     return legacy;
   };
 
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ paddingTop: 4 }}>
-        <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Service History</div>
-        <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>{history.length} visit{history.length !== 1 ? "s" : ""} on record</div>
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {history.map((h, i) => {
-          const readings = getReadings(h);
-          const hasReadings = Object.keys(readings).length > 0;
-          const isOpen = expanded[i];
-          const hasDetails = h.notes || hasReadings || h.services?.length || h.products?.length || h.photos?.length;
-          return (
-            <div key={i} style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden", boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}>
-              {/* Header row */}
-              <div onClick={() => hasDetails && setExpanded(e => ({ ...e, [i]: !e[i] }))}
-                style={{ padding: "16px 18px", display: "flex", gap: 14, alignItems: "center", cursor: hasDetails ? "pointer" : "default" }}>
-                <div style={{ width: 42, height: 42, borderRadius: 13, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: T.primary }}>
-                  <svg viewBox="0 0 24 24" width={20} height={20} fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 15, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{h.type || "Service Visit"}</div>
-                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>{fmtDate(h.date)}{h.tech ? ` · ${h.tech}` : ""}</div>
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  {h.invoice && h.invoice !== "$0" && <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{h.invoice}</div>}
-                  {hasDetails && <div style={{ color: T.textMuted, transform: isOpen ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}><CIcon name="history" size={14} /></div>}
-                </div>
-              </div>
-
-              {/* Expanded detail */}
-              {isOpen && (
-                <div style={{ borderTop: `1px solid ${T.border}` }}>
-                  {/* Notes */}
-                  {h.notes && (
-                    <div style={{ padding: "14px 18px", fontSize: 13, color: T.textMuted, lineHeight: 1.6, borderBottom: (hasReadings || h.services?.length || h.photos?.length) ? `1px solid ${T.border}` : "none" }}>
-                      {h.notes}
-                    </div>
-                  )}
-
-                  {/* Water quality readings */}
-                  {hasReadings && (
-                    <div style={{ padding: "14px 18px", borderBottom: (h.services?.length || h.photos?.length) ? `1px solid ${T.border}` : "none" }}>
-                      <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>Water Quality</div>
-                      <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(Object.keys(readings).length, 4)}, 1fr)`, gap: 8 }}>
-                        {Object.entries(readings).map(([k, v]) => (
-                          <div key={k} style={{ background: T.surfaceAlt, borderRadius: 12, padding: "10px 8px", textAlign: "center" }}>
-                            <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>{k}</div>
-                            <div style={{ fontSize: 18, fontWeight: 800, color: T.text, marginTop: 3 }}>{v}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Services/products */}
-                  {(h.services?.length > 0 || h.products?.length > 0) && (
-                    <div style={{ padding: "12px 18px", display: "flex", flexWrap: "wrap", gap: 6, borderBottom: h.photos?.length ? `1px solid ${T.border}` : "none" }}>
-                      {(h.services || []).map((s, j) => (
-                        <span key={j} style={{ fontSize: 11, fontWeight: 600, background: hexA(T.primary, 0.1), color: T.primary, borderRadius: 100, padding: "4px 11px" }}>{typeof s === "string" ? s : s.name}</span>
-                      ))}
-                      {(h.products || []).map((p, j) => (
-                        <span key={j} style={{ fontSize: 11, fontWeight: 600, background: T.surfaceAlt, color: T.textMuted, borderRadius: 100, padding: "4px 11px" }}>{typeof p === "string" ? p : p.name}</span>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Photos */}
-                  {h.photos?.length > 0 && (
-                    <div style={{ padding: "12px 18px 14px" }}>
-                      <PhotoStrip photos={h.photos} size={72} />
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// ── CP INVOICES ──
-// ── CP ESTIMATES ──
-function CPEstimates({ client, estimates, branding, onApprove, T }) {
-  const myEstimates = (estimates || []).filter(e => e.clientId === String(client.id) || e.clientId === client.id);
-  const [selected, setSelected] = useState(null);
-  const [actioning, setActioning] = useState(false);
-
-  if (!myEstimates.length) {
-    return (
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "80px 20px", gap: 12, textAlign: "center" }}>
-        <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.08), display: "flex", alignItems: "center", justifyContent: "center", color: T.primary }}><CIcon name="invoice" size={30} /></div>
-        <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>No estimates yet</div>
-        <div style={{ fontSize: 14, color: T.textMuted, lineHeight: 1.5, maxWidth: 240 }}>Estimates from Stone Property Solutions will appear here for your review.</div>
-      </div>
-    );
-  }
-
-  if (selected) {
-    const est = selected;
-    const isPending  = est.status === "sent" || est.status === "draft";
-    const isApproved = est.status === "approved";
-    const isDeclined = est.status === "declined";
-    return (
-      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        <button onClick={() => setSelected(null)} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 14, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 6, alignSelf: "flex-start", fontFamily: "inherit" }}>
-          <CIcon name="back" size={16} /> Back
-        </button>
-        <div style={{ background: T.surface, borderRadius: 22, border: `1px solid ${T.border}`, overflow: "hidden", boxShadow: "0 4px 24px rgba(0,0,0,0.06)" }}>
-          <div style={{ padding: "22px 20px 16px", borderBottom: `1px solid ${T.border}` }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-              <div>
-                <div style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, letterSpacing: "0.06em", marginBottom: 4 }}>ESTIMATE</div>
-                <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{est.title || "Service Estimate"}</div>
-              </div>
-              <span style={{ fontSize: 11, fontWeight: 700, padding: "5px 12px", borderRadius: 100, background: isApproved ? hexA("#16a34a", 0.1) : isDeclined ? hexA("#dc2626", 0.1) : hexA(T.primary, 0.1), color: isApproved ? "#16a34a" : isDeclined ? "#dc2626" : T.primary }}>
-                {isApproved ? "APPROVED" : isDeclined ? "DECLINED" : "PENDING"}
-              </span>
-            </div>
-            <div style={{ fontSize: 13, color: T.textMuted, marginTop: 8 }}>
-              {fmtDate(est.date)} · Valid {est.validDays || 30} days
-            </div>
-          </div>
-
-          {/* Line items */}
-          {(est.items || []).filter(it => it.desc).length > 0 && (
-            <div style={{ padding: "16px 20px", borderBottom: `1px solid ${T.border}` }}>
-              {(est.items || []).filter(it => it.desc).map((item, i, arr) => (
-                <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: i < arr.length - 1 ? `1px solid ${T.border}` : "none" }}>
-                  <div>
-                    <div style={{ fontSize: 14, color: T.text, fontWeight: 500 }}>{item.desc}</div>
-                    {item.qty > 1 && <div style={{ fontSize: 12, color: T.textMuted }}>×{item.qty}</div>}
-                  </div>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>${(parseFloat(item.price || 0) * (parseInt(item.qty) || 1)).toFixed(2)}</div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div style={{ padding: "16px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: est.notes ? `1px solid ${T.border}` : "none" }}>
-            <div style={{ fontSize: 15, fontWeight: 700, color: T.text }}>Total</div>
-            <div style={{ fontSize: 26, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{est.total || "$0.00"}</div>
-          </div>
-
-          {est.notes && (
-            <div style={{ padding: "14px 20px", fontSize: 13, color: T.textMuted, lineHeight: 1.6, borderBottom: isPending ? `1px solid ${T.border}` : "none" }}>
-              {est.notes}
-            </div>
-          )}
-
-          {/* Approve/Decline actions */}
-          {isPending && (
-            <div style={{ padding: "18px 20px", display: "flex", flexDirection: "column", gap: 10 }}>
-              <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 4, lineHeight: 1.5 }}>Ready to move forward? Tap Approve and we'll be in touch to schedule your service.</div>
-              <button onClick={() => { onApprove(est.id, "approved"); setActioning(true); setSelected(null); }}
-                style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 14, padding: "15px", fontWeight: 800, fontSize: 15, cursor: "pointer", fontFamily: "inherit", letterSpacing: "-0.01em", boxShadow: `0 4px 16px ${hexA(T.primary, 0.3)}`, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-                <CIcon name="check" size={18} /> Approve This Estimate
-              </button>
-              <button onClick={() => { onApprove(est.id, "declined"); setSelected(null); }}
-                style={{ background: "none", border: `1.5px solid ${T.border}`, borderRadius: 14, padding: "13px", fontWeight: 700, fontSize: 14, cursor: "pointer", color: T.textMuted, fontFamily: "inherit" }}>
-                Decline
-              </button>
-            </div>
-          )}
-
-          {isApproved && (
-            <div style={{ padding: "18px 20px", background: hexA("#16a34a", 0.06), display: "flex", alignItems: "center", gap: 12 }}>
-              <div style={{ color: "#16a34a" }}><CIcon name="check" size={20} /></div>
-              <div style={{ fontSize: 13, color: "#16a34a", fontWeight: 600 }}>You approved this estimate. We'll reach out to schedule your service.</div>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  const pending  = myEstimates.filter(e => e.status === "sent" || e.status === "draft");
-  const closed   = myEstimates.filter(e => e.status === "approved" || e.status === "declined");
-
-  const statusColor = (s) => ({ approved: "#16a34a", declined: "#dc2626", sent: T.primary, draft: T.textMuted }[s] || T.textMuted);
-  const statusLabel = (s) => ({ approved: "Approved", declined: "Declined", sent: "Awaiting Review", draft: "Pending" }[s] || s);
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <div style={{ paddingTop: 4 }}>
-        <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Estimates</div>
-      </div>
-      {pending.length > 0 && (
-        <div>
-          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>Awaiting Your Review</div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {pending.map(e => (
-              <button key={e.id} onClick={() => setSelected(e)}
-                style={{ background: T.surface, border: `2px solid ${T.primary}`, borderRadius: 18, padding: "16px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", fontFamily: "inherit", width: "100%", boxSizing: "border-box", boxShadow: `0 4px 16px ${hexA(T.primary, 0.15)}` }}>
-                <div style={{ textAlign: "left" }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{e.title || "Service Estimate"}</div>
-                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>{fmtDate(e.date)} · Valid {e.validDays || 30} days</div>
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <div style={{ fontSize: 17, fontWeight: 800, color: T.text }}>{e.total || "$0.00"}</div>
-                  <div style={{ background: T.primary, color: "#fff", borderRadius: 10, padding: "5px 12px", fontSize: 11, fontWeight: 700 }}>Review</div>
-                </div>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-      {closed.length > 0 && (
-        <div>
-          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>Past Estimates</div>
-          <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
-            {closed.map((e, i) => (
-              <button key={e.id} onClick={() => setSelected(e)}
-                style={{ width: "100%", padding: "15px 18px", background: "none", border: "none", borderBottom: i < closed.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", fontFamily: "inherit", opacity: 0.7 }}>
-                <div style={{ textAlign: "left" }}>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{e.title || "Service Estimate"}</div>
-                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{fmtDate(e.date)}</div>
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <span style={{ fontSize: 11, fontWeight: 700, color: statusColor(e.status) }}>{statusLabel(e.status)}</span>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{e.total || "$0.00"}</div>
-                </div>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function CPInvoices({ client, invoices, branding, T }) {
-  const myInvoices = (invoices || []).filter(iv => iv.clientId === client.id).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  const [selected, setSelected] = useState(null);
-
-  if (selected) {
-    const iv = selected;
-    const isPaid = iv.status === "paid";
-    const qbLink = iv.qbLink || null;
-    return (
-      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        <button onClick={() => setSelected(null)} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 14, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 6, alignSelf: "flex-start" }}>
-          <svg viewBox="0 0 24 24" width={16} height={16} fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
-          Back
-        </button>
-        <div style={{ background: T.surface, borderRadius: 22, border: `1px solid ${T.border}`, overflow: "hidden", boxShadow: "0 4px 24px rgba(0,0,0,0.06)" }}>
-          <div style={{ padding: "24px 22px 20px", borderBottom: `1px solid ${T.border}` }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-              <div>
-                <div style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, letterSpacing: "0.06em", marginBottom: 6 }}>INVOICE</div>
-                <div style={{ fontSize: 26, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>#{iv.number || iv.id}</div>
-              </div>
-              <span style={{ fontSize: 11, fontWeight: 700, padding: "6px 14px", borderRadius: 100, background: isPaid ? hexA("#16a34a", 0.1) : hexA(T.warning, 0.1), color: isPaid ? "#16a34a" : T.warning, letterSpacing: "0.04em" }}>{isPaid ? "PAID" : "DUE"}</span>
-            </div>
-            <div style={{ fontSize: 13, color: T.textMuted, marginTop: 8 }}>{fmtDate(iv.date || iv.createdAt)}</div>
-          </div>
-          {(iv.items || []).length > 0 && (
-            <div style={{ padding: "16px 22px", borderBottom: `1px solid ${T.border}` }}>
-              {(iv.items || []).map((item, i) => (
-                <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: i < iv.items.length - 1 ? `1px solid ${T.border}` : "none" }}>
-                  <div>
-                    <div style={{ fontSize: 14, color: T.text, fontWeight: 500 }}>{item.desc || item.name || "Service"}</div>
-                    {item.qty > 1 && <div style={{ fontSize: 12, color: T.textMuted }}>×{item.qty}</div>}
-                  </div>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>${(parseFloat(item.price || item.total || 0) * (item.qty || 1)).toFixed(2)}</div>
-                </div>
-              ))}
-            </div>
-          )}
-          <div style={{ padding: "18px 22px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div style={{ fontSize: 15, fontWeight: 700, color: T.text }}>Total</div>
-            <div style={{ fontSize: 26, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{iv.total || "$0.00"}</div>
-          </div>
-          {!isPaid && (
-            <div style={{ padding: "0 22px 22px" }}>
-              {qbLink
-                ? <a href={qbLink} target="_blank" rel="noreferrer" style={{ display: "block", background: T.primary, color: "#fff", borderRadius: 16, padding: "15px", fontWeight: 800, fontSize: 15, textAlign: "center", textDecoration: "none", letterSpacing: "-0.01em", boxShadow: `0 4px 16px ${hexA(T.primary, 0.3)}` }}>Pay Now</a>
-                : <div style={{ background: T.surfaceAlt, borderRadius: 16, padding: "16px", fontSize: 13, color: T.textMuted, textAlign: "center", lineHeight: 1.6 }}>Contact {branding.companyName} at {branding.companyPhone || branding.companyEmail || "the number on file"} to pay.</div>
-              }
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  if (!myInvoices.length) {
-    return (
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "80px 20px", gap: 12, textAlign: "center" }}>
-        <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.08), display: "flex", alignItems: "center", justifyContent: "center", color: T.primary }}><CIcon name="invoice" size={30} /></div>
-        <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>No invoices yet</div>
-        <div style={{ fontSize: 14, color: T.textMuted, lineHeight: 1.5 }}>Your invoices will appear here.</div>
-      </div>
-    );
-  }
-
-  const open = myInvoices.filter(iv => iv.status !== "paid");
-  const paid = myInvoices.filter(iv => iv.status === "paid");
-
-  const InvoiceRow = ({ iv }) => {
-    const isPaid = iv.status === "paid";
-    return (
-      <button onClick={() => setSelected(iv)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, padding: "16px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", fontFamily: "inherit", width: "100%", boxSizing: "border-box", opacity: isPaid ? 0.65 : 1, boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-          <div style={{ width: 40, height: 40, borderRadius: 12, background: isPaid ? hexA("#16a34a", 0.1) : hexA(T.warning, 0.1), display: "flex", alignItems: "center", justifyContent: "center", color: isPaid ? "#16a34a" : T.warning, flexShrink: 0 }}>
-            <CIcon name="invoice" size={18} />
-          </div>
-          <div style={{ textAlign: "left" }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>Invoice #{iv.number || iv.id}</div>
-            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{fmtDate(iv.date || iv.createdAt)}</div>
-          </div>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <div style={{ fontSize: 16, fontWeight: 800, color: isPaid ? "#16a34a" : T.warning, letterSpacing: "-0.01em" }}>{iv.total || "$0.00"}</div>
-          <svg viewBox="0 0 24 24" width={16} height={16} fill={T.textMuted}><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
-        </div>
-      </button>
-    );
-  };
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", paddingTop: 4 }}>Invoices</div>
-      {open.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, letterSpacing: "0.06em", textTransform: "uppercase" }}>Outstanding</div>
-          {open.map(iv => <InvoiceRow key={iv.id} iv={iv} />)}
-        </div>
-      )}
-      {paid.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, letterSpacing: "0.06em", textTransform: "uppercase" }}>Paid</div>
-          {paid.map(iv => <InvoiceRow key={iv.id} iv={iv} />)}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── CP EQUIPMENT ──
-function CPEquipment({ client, T }) {
-  const equipment = client.equipment || [];
-  const [expanded, setExpanded] = useState({});
-
-  if (!equipment.length) {
-    return (
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "80px 20px", gap: 12, textAlign: "center" }}>
-        <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.08), display: "flex", alignItems: "center", justifyContent: "center", color: T.primary }}><CIcon name="history" size={30} /></div>
-        <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>No equipment logged</div>
-        <div style={{ fontSize: 14, color: T.textMuted, lineHeight: 1.5, maxWidth: 260 }}>Your technician will document your equipment during service visits.</div>
-      </div>
-    );
-  }
-
   const statusColor = (s) => s === "Good" ? "#16a34a" : s === "Monitor" ? "#d97706" : "#dc2626";
   const statusBg    = (s) => s === "Good" ? hexA("#16a34a", 0.1) : s === "Monitor" ? hexA("#d97706", 0.1) : hexA("#dc2626", 0.1);
 
+  const EmptyState = ({ icon, title, sub }) => (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "56px 20px", gap: 12, textAlign: "center" }}>
+      <div style={{ width: 56, height: 56, borderRadius: 18, background: hexA(T.primary, 0.08), display: "flex", alignItems: "center", justifyContent: "center", color: T.primary }}>{icon}</div>
+      <div style={{ fontSize: 17, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{title}</div>
+      <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5, maxWidth: 240 }}>{sub}</div>
+    </div>
+  );
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      {/* Page header */}
       <div style={{ paddingTop: 4 }}>
-        <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Equipment</div>
-        <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>{equipment.length} item{equipment.length !== 1 ? "s" : ""} on record</div>
+        <div style={{ fontSize: 26, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>{pondLabel(client)}</div>
+        {client.pondSize && <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>{client.pondSize}{client.pondType ? ` · ${client.pondType}` : ""}</div>}
+        {client.pondGallons && <div style={{ fontSize: 13, color: T.primary, fontWeight: 700, marginTop: 2 }}>{parseInt(client.pondGallons).toLocaleString()} gallons</div>}
       </div>
 
-      {/* Status summary */}
-      {equipment.some(e => e.status !== "Good") && (
-        <div style={{ background: hexA("#d97706", 0.08), border: `1px solid ${hexA("#d97706", 0.2)}`, borderRadius: 16, padding: "14px 16px", display: "flex", alignItems: "flex-start", gap: 10 }}>
-          <div style={{ color: "#d97706", flexShrink: 0, marginTop: 1 }}><CIcon name="history" size={16} /></div>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#d97706", marginBottom: 2 }}>Attention needed</div>
-            <div style={{ fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>
-              {equipment.filter(e => e.status !== "Good").map(e => e.name).join(", ")} {equipment.filter(e => e.status !== "Good").length === 1 ? "needs" : "need"} attention.
-            </div>
+      {/* Section pill scroll */}
+      <div style={{ display: "flex", gap: 7, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch" }}>
+        {SECTIONS.map(s => (
+          <button key={s.id} onClick={() => setSection(s.id)}
+            style={{ flexShrink: 0, padding: "8px 18px", borderRadius: 100, border: "none", fontFamily: "inherit", fontWeight: 700, fontSize: 13, cursor: "pointer", background: section === s.id ? T.primary : T.surfaceAlt, color: section === s.id ? "#fff" : T.textMuted, transition: "all 0.15s" }}>
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── OVERVIEW ── */}
+      {section === "overview" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {/* Pond stats */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+            {[
+              { label: "Service Visits", value: history.length },
+              { label: "Equipment", value: equipment.length },
+              { label: "Fish Logged", value: fishHistory.length },
+            ].map(s => (
+              <div key={s.label} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "14px 10px", textAlign: "center" }}>
+                <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{s.value}</div>
+                <div style={{ fontSize: 10, color: T.textMuted, marginTop: 4, fontWeight: 600, lineHeight: 1.3 }}>{s.label}</div>
+              </div>
+            ))}
           </div>
+
+          {/* Pond details card */}
+          {(client.pondGallons || client.pondType || client.pondSize || client.division) && (
+            <div style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, padding: "18px 20px" }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 12 }}>Pond Details</div>
+              {[
+                client.division && ["Type", client.division],
+                client.pondType && ["Style", client.pondType],
+                client.pondSize && ["Size", client.pondSize],
+                client.pondGallons && ["Volume", `${parseInt(client.pondGallons).toLocaleString()} gallons`],
+                client.address && ["Location", client.address],
+              ].filter(Boolean).map(([k, v]) => (
+                <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: `1px solid ${T.border}` }}>
+                  <span style={{ fontSize: 13, color: T.textMuted }}>{k}</span>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{v}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Site photos */}
+          {sitePhotos.length > 0 && (
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 800, color: T.text, marginBottom: 10 }}>Pond Photos</div>
+              <div style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 4, WebkitOverflowScrolling: "touch" }}>
+                {sitePhotos.map((p, i) => {
+                  const src = typeof p === "string" ? p : p.src;
+                  const cap = typeof p === "object" ? p.caption : "";
+                  return (
+                    <div key={i} style={{ flexShrink: 0, display: "flex", flexDirection: "column", gap: 5 }}>
+                      <img src={src} alt={cap || ""} style={{ width: 130, height: 100, borderRadius: 14, objectFit: "cover", display: "block", border: `1px solid ${T.border}` }} />
+                      {cap && <div style={{ fontSize: 10, color: T.textMuted, textAlign: "center", maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>{cap}</div>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Site videos */}
+          {siteVideos.length > 0 && (
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 800, color: T.text, marginBottom: 10 }}>Pond Videos</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {siteVideos.map((v, i) => (
+                  <div key={i} style={{ background: T.surface, borderRadius: 16, overflow: "hidden", border: `1px solid ${T.border}` }}>
+                    <video src={v.src} controls playsInline preload="metadata" style={{ width: "100%", maxHeight: 220, display: "block", background: "#000", objectFit: "contain", borderRadius: "16px 16px 0 0" }} />
+                    {v.caption && <div style={{ padding: "10px 14px", fontSize: 12, fontWeight: 600, color: T.text }}>{v.caption}</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {!sitePhotos.length && !siteVideos.length && (
+            <div style={{ background: T.surfaceAlt, borderRadius: 16, padding: "20px", textAlign: "center", fontSize: 13, color: T.textMuted }}>
+              No pond photos or videos yet — your technician will add these during service visits.
+            </div>
+          )}
         </div>
       )}
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {equipment.map((eq, i) => {
-          const isOpen = expanded[i];
-          const hasDetail = eq.notes || (eq.photos || []).length > 0;
-          return (
-            <div key={i} style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden", boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}>
-              <div onClick={() => hasDetail && setExpanded(e => ({ ...e, [i]: !e[i] }))}
-                style={{ padding: "15px 18px", display: "flex", alignItems: "center", gap: 14, cursor: hasDetail ? "pointer" : "default" }}>
-                <div style={{ width: 42, height: 42, borderRadius: 13, background: statusBg(eq.status), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                  <svg viewBox="0 0 24 24" width={20} height={20} fill={statusColor(eq.status)}><circle cx="12" cy="12" r="9" stroke="none" fill={statusBg(eq.status)} /><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill={statusColor(eq.status)} /></svg>
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{eq.name}</div>
-                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>
-                    {eq.installed ? `Installed ${eq.installed}` : "Install date unknown"}
-                    {(eq.photos || []).length > 0 && <span style={{ marginLeft: 8, color: T.primary }}>· {eq.photos.length} photo{eq.photos.length > 1 ? "s" : ""}</span>}
+      {/* ── SERVICE HISTORY ── */}
+      {section === "service" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ fontSize: 13, color: T.textMuted }}>{history.length} visit{history.length !== 1 ? "s" : ""} on record</div>
+          {!history.length && <EmptyState icon={<CIcon name="history" size={28} />} title="No service history yet" sub="Your service records will appear here after each visit." />}
+          {history.map((h, i) => {
+            const readings = getReadings(h);
+            const hasReadings = Object.keys(readings).length > 0;
+            const isOpen = expanded[`s${i}`];
+            const hasDetails = h.notes || hasReadings || h.services?.length || h.products?.length || h.photos?.length;
+            return (
+              <div key={i} style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden", boxShadow: "0 2px 10px rgba(0,0,0,0.04)" }}>
+                <div onClick={() => hasDetails && setExpanded(e => ({ ...e, [`s${i}`]: !e[`s${i}`] }))}
+                  style={{ padding: "15px 18px", display: "flex", gap: 13, alignItems: "center", cursor: hasDetails ? "pointer" : "default" }}>
+                  <div style={{ width: 40, height: 40, borderRadius: 13, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: T.primary }}>
+                    <svg viewBox="0 0 24 24" width={20} height={20} fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{h.type || "Service Visit"}</div>
+                    <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{fmtDate(h.date)}{h.tech ? ` · ${h.tech}` : ""}</div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    {h.invoice && h.invoice !== "$0" && <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{h.invoice}</div>}
+                    {hasDetails && <div style={{ color: T.textMuted, transform: isOpen ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}><svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M6 9l6 6 6-6"/></svg></div>}
                   </div>
                 </div>
-                <span style={{ fontSize: 11, fontWeight: 700, padding: "4px 12px", borderRadius: 100, background: statusBg(eq.status), color: statusColor(eq.status) }}>
-                  {eq.status || "Good"}
-                </span>
+                {isOpen && (
+                  <div style={{ borderTop: `1px solid ${T.border}` }}>
+                    {h.notes && <div style={{ padding: "13px 18px", fontSize: 13, color: T.textMuted, lineHeight: 1.6, borderBottom: (hasReadings || h.services?.length) ? `1px solid ${T.border}` : "none" }}>{h.notes}</div>}
+                    {hasReadings && (
+                      <div style={{ padding: "13px 18px", borderBottom: h.services?.length ? `1px solid ${T.border}` : "none" }}>
+                        <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>Water Quality</div>
+                        <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(Object.keys(readings).length, 4)}, 1fr)`, gap: 8 }}>
+                          {Object.entries(readings).map(([k, v]) => (
+                            <div key={k} style={{ background: T.surfaceAlt, borderRadius: 10, padding: "9px 6px", textAlign: "center" }}>
+                              <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>{k}</div>
+                              <div style={{ fontSize: 17, fontWeight: 800, color: T.text, marginTop: 2 }}>{v}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {(h.services?.length > 0 || h.products?.length > 0) && (
+                      <div style={{ padding: "11px 18px", display: "flex", flexWrap: "wrap", gap: 6, borderBottom: h.photos?.length ? `1px solid ${T.border}` : "none" }}>
+                        {(h.services || []).map((s, j) => <span key={j} style={{ fontSize: 11, fontWeight: 600, background: hexA(T.primary, 0.1), color: T.primary, borderRadius: 100, padding: "4px 11px" }}>{typeof s === "string" ? s : s.name}</span>)}
+                        {(h.products || []).map((p, j) => <span key={j} style={{ fontSize: 11, fontWeight: 600, background: T.surfaceAlt, color: T.textMuted, borderRadius: 100, padding: "4px 11px" }}>{typeof p === "string" ? p : p.name}</span>)}
+                      </div>
+                    )}
+                    {h.photos?.length > 0 && <div style={{ padding: "11px 18px 14px" }}><PhotoStrip photos={h.photos} size={68} /></div>}
+                  </div>
+                )}
               </div>
+            );
+          })}
+        </div>
+      )}
 
-              {isOpen && (
-                <div style={{ borderTop: `1px solid ${T.border}` }}>
-                  {eq.notes && (
-                    <div style={{ padding: "14px 18px", fontSize: 13, color: T.textMuted, lineHeight: 1.6, borderBottom: (eq.photos || []).length ? `1px solid ${T.border}` : "none" }}>
-                      {eq.notes}
-                    </div>
-                  )}
-                  {(eq.photos || []).length > 0 && (
-                    <div style={{ padding: "12px 18px 14px" }}>
-                      <PhotoStrip photos={eq.photos} size={72} />
-                    </div>
-                  )}
-                </div>
-              )}
+      {/* ── EQUIPMENT ── */}
+      {section === "equipment" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {!equipment.length && <EmptyState icon={<CIcon name="history" size={28} />} title="No equipment logged" sub="Your technician will document your equipment during service visits." />}
+          {equipment.some(e => e.status !== "Good") && (
+            <div style={{ background: hexA("#d97706", 0.08), border: `1px solid ${hexA("#d97706", 0.2)}`, borderRadius: 16, padding: "13px 16px", display: "flex", alignItems: "flex-start", gap: 10 }}>
+              <div style={{ color: "#d97706", flexShrink: 0 }}><svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div>
+              <div style={{ fontSize: 12, color: T.textMuted }}>
+                <strong style={{ color: "#d97706" }}>Attention needed: </strong>
+                {equipment.filter(e => e.status !== "Good").map(e => e.name).join(", ")}
+              </div>
             </div>
-          );
-        })}
-      </div>
+          )}
+          {equipment.map((eq, i) => {
+            const isOpen = expanded[`eq${i}`];
+            const hasDetail = eq.notes || (eq.photos || []).length > 0 || eq.serialNumber || eq.purchasePrice;
+            return (
+              <div key={i} style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden", boxShadow: "0 2px 10px rgba(0,0,0,0.04)" }}>
+                <div onClick={() => hasDetail && setExpanded(e => ({ ...e, [`eq${i}`]: !e[`eq${i}`] }))}
+                  style={{ padding: "14px 18px", display: "flex", alignItems: "center", gap: 13, cursor: hasDetail ? "pointer" : "default" }}>
+                  <div style={{ width: 40, height: 40, borderRadius: 13, background: statusBg(eq.status), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    <svg viewBox="0 0 24 24" width={20} height={20} fill={statusColor(eq.status)}><circle cx="12" cy="12" r="9" fill={statusBg(eq.status)} /><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill={statusColor(eq.status)} /></svg>
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{eq.name}</div>
+                    <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>
+                      {eq.installed ? `Installed ${eq.installed}` : "Install date unknown"}
+                      {eq.serialNumber && <span> · S/N {eq.serialNumber}</span>}
+                    </div>
+                  </div>
+                  <span style={{ fontSize: 11, fontWeight: 700, padding: "4px 12px", borderRadius: 100, background: statusBg(eq.status), color: statusColor(eq.status), flexShrink: 0 }}>{eq.status || "Good"}</span>
+                </div>
+                {isOpen && (
+                  <div style={{ borderTop: `1px solid ${T.border}` }}>
+                    {eq.notes && <div style={{ padding: "13px 18px", fontSize: 13, color: T.textMuted, lineHeight: 1.6, borderBottom: `1px solid ${T.border}` }}>{eq.notes}</div>}
+                    {(eq.purchasePrice || eq.purchaseDate || eq.origin) && (
+                      <div style={{ padding: "12px 18px", borderBottom: (eq.photos||[]).length ? `1px solid ${T.border}` : "none" }}>
+                        {[eq.origin && ["Origin", eq.origin], eq.purchaseDate && ["Purchase Date", eq.purchaseDate], eq.purchasePrice && ["Purchase Price", `$${eq.purchasePrice}`]].filter(Boolean).map(([k,v]) => (
+                          <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", fontSize: 12 }}>
+                            <span style={{ color: T.textMuted }}>{k}</span>
+                            <span style={{ color: T.text, fontWeight: 600 }}>{v}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {(eq.photos||[]).length > 0 && <div style={{ padding: "11px 18px 14px" }}><PhotoStrip photos={eq.photos} size={68} /></div>}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── FISH ── */}
+      {section === "fish" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {!fishHistory.length
+            ? <EmptyState icon={<svg viewBox="0 0 24 24" width={28} height={28} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>} title="No fish logged" sub="Your technician can document fish species, counts, and health during service visits." />
+            : fishHistory.map((f, i) => (
+              <div key={i} style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, padding: "14px 18px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{f.species || "Unknown species"}</div>
+                    <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{f.date}{f.count ? ` · ${f.count} fish` : ""}</div>
+                  </div>
+                  {f.health && <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 100, background: f.health === "Good" ? hexA("#16a34a", 0.1) : hexA("#d97706", 0.1), color: f.health === "Good" ? "#16a34a" : "#d97706" }}>{f.health}</span>}
+                </div>
+                {f.notes && <div style={{ fontSize: 12, color: T.textMuted, marginTop: 8, lineHeight: 1.5 }}>{f.notes}</div>}
+              </div>
+            ))
+          }
+        </div>
+      )}
+
+      {/* ── PURCHASES ── */}
+      {section === "purchases" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {!purchaseHistory.length
+            ? <EmptyState icon={<svg viewBox="0 0 24 24" width={28} height={28} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>} title="No purchase history" sub="Products and equipment purchased through Stone Property Solutions will appear here." />
+            : purchaseHistory.map((p, i) => (
+              <div key={i} style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{p.item}</div>
+                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{p.date}{p.category ? ` · ${p.category}` : ""}</div>
+                </div>
+                {p.price && <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>${p.price}</div>}
+              </div>
+            ))
+          }
+        </div>
+      )}
     </div>
   );
 }
+
+// Keep CPHistory as an alias for backward compat
+function CPHistory({ client, T }) { return <CPPond client={client} T={T} />; }
 
 // ── CP REQUEST ──
 function CPRequest({ client, branding, onSubmit, T }) {
@@ -9582,31 +10488,65 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T, f
       </header>
 
       {/* Main content */}
-      <main style={{ flex: 1, padding: "24px 18px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(100px + env(safe-area-inset-bottom))" }}>
+      <main style={{ flex: 1, padding: "24px 18px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(110px + env(safe-area-inset-bottom))" }}>
         {page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} onNav={setPage} T={T} />}
         {page === "cp_service"  && <CPService client={client} branding={branding} onNav={setPage} T={T} />}
-        {page === "cp_history"  && <CPHistory client={client} T={T} />}
+        {page === "cp_pond"     && <CPPond client={client} T={T} />}
+        {page === "cp_history"  && <CPPond client={client} T={T} />}
         {page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} />}
-        {page === "cp_equipment" && <CPEquipment client={client} T={T} />}
+
         {page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
         {page === "cp_messages" && <CPMessages client={client} T={T} />}
         {page === "cp_request"  && <CPRequest client={client} branding={branding} onSubmit={onServiceRequest} T={T} />}
       </main>
 
-      {/* Bottom nav — matches staff app style exactly */}
-      <nav style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: hexA(T.surface, 0.88), backdropFilter: "saturate(180%) blur(24px)", WebkitBackdropFilter: "saturate(180%) blur(24px)", borderTop: `1px solid ${T.border}`, display: "flex", zIndex: 90, paddingTop: 6, paddingBottom: "calc(10px + env(safe-area-inset-bottom))" }}>
-        {CLIENT_NAV.map(n => {
-          const active = page === n.id;
-          return (
-            <button key={n.id} onClick={() => setPage(n.id)} style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, color: active ? T.primary : T.textMuted, fontFamily: "inherit", padding: "4px 0" }}>
-              <span style={{ width: 44, height: 28, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", transition: "all 0.15s" }}>
-                <CIcon name={n.icon} size={active ? 22 : 20} />
-              </span>
-              <span style={{ fontSize: 10, fontWeight: active ? 800 : 500, letterSpacing: active ? "-0.01em" : "0" }}>{n.label}</span>
-            </button>
-          );
-        })}
-      </nav>
+      {/* Bottom nav — floating dark pill with center action button */}
+      {(() => {
+        const centerId = branding.portalCenterBtn || "cp_request";
+        const centerItem = CLIENT_NAV.find(n => n.id === centerId) || CLIENT_NAV[CLIENT_NAV.length - 1];
+        const sideItems = CLIENT_NAV.filter(n => n.id !== centerId);
+        const left  = sideItems.slice(0, 2);
+        const right = sideItems.slice(2);
+        const accentColor = branding.accentColor || T.primary;
+
+        return (
+          <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 90, display: "flex", justifyContent: "center", alignItems: "flex-end", paddingBottom: "calc(16px + env(safe-area-inset-bottom))", pointerEvents: "none" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 0, background: T.mode === "dark" ? "rgba(30,30,32,0.96)" : "rgba(22,22,24,0.94)", borderRadius: 100, padding: "6px 6px", boxShadow: "0 8px 32px rgba(0,0,0,0.28), 0 2px 8px rgba(0,0,0,0.18)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)", pointerEvents: "all", maxWidth: "min(380px, 90vw)" }}>
+              {/* Left items */}
+              {left.map(n => {
+                const active = page === n.id;
+                return (
+                  <button key={n.id} onClick={() => setPage(n.id)}
+                    style={{ display: "flex", alignItems: "center", gap: active ? 7 : 0, padding: active ? "10px 18px" : "10px 16px", borderRadius: 100, border: "none", cursor: "pointer", fontFamily: "inherit", background: active ? "rgba(255,255,255,0.15)" : "transparent", color: active ? "#fff" : "rgba(255,255,255,0.45)", transition: "all 0.2s cubic-bezier(.34,1.56,.64,1)", whiteSpace: "nowrap", overflow: "hidden", maxWidth: active ? 160 : 52 }}>
+                    <CIcon name={n.icon} size={20} />
+                    <span style={{ fontSize: 13, fontWeight: 700, letterSpacing: "-0.01em", opacity: active ? 1 : 0, maxWidth: active ? 120 : 0, transition: "all 0.2s cubic-bezier(.34,1.56,.64,1)", overflow: "hidden" }}>{n.id === "cp_pond" ? pondLabel(client) : n.label}</span>
+                  </button>
+                );
+              })}
+
+              {/* Center action button */}
+              <button onClick={() => setPage(centerItem.id)}
+                style={{ width: 52, height: 52, borderRadius: "50%", background: `linear-gradient(135deg, ${accentColor}, ${mix(accentColor, "#000", 0.2)})`, border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, boxShadow: `0 4px 16px ${hexA(accentColor, 0.5)}`, margin: "0 4px", color: "#fff", transition: "transform 0.15s cubic-bezier(.34,1.56,.64,1)", WebkitTapHighlightColor: "transparent" }}
+                onTouchStart={e => e.currentTarget.style.transform = "scale(0.92)"}
+                onTouchEnd={e => e.currentTarget.style.transform = "scale(1)"}>
+                <CIcon name={centerItem.icon} size={24} />
+              </button>
+
+              {/* Right items */}
+              {right.map(n => {
+                const active = page === n.id;
+                return (
+                  <button key={n.id} onClick={() => setPage(n.id)}
+                    style={{ display: "flex", alignItems: "center", gap: active ? 7 : 0, padding: active ? "10px 18px" : "10px 16px", borderRadius: 100, border: "none", cursor: "pointer", fontFamily: "inherit", background: active ? "rgba(255,255,255,0.15)" : "transparent", color: active ? "#fff" : "rgba(255,255,255,0.45)", transition: "all 0.2s cubic-bezier(.34,1.56,.64,1)", whiteSpace: "nowrap", overflow: "hidden", maxWidth: active ? 160 : 52 }}>
+                    <CIcon name={n.icon} size={20} />
+                    <span style={{ fontSize: 13, fontWeight: 700, letterSpacing: "-0.01em", opacity: active ? 1 : 0, maxWidth: active ? 120 : 0, transition: "all 0.2s cubic-bezier(.34,1.56,.64,1)", overflow: "hidden" }}>{n.id === "cp_pond" ? pondLabel(client) : n.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -9801,6 +10741,9 @@ export default function App({ authEmail = "", onSignOut }) {
   // Customizable dock — which pages appear in the bottom bar (max 5)
   const [navDock, setNavDock, lndock] = useStoredState("sps_nav_dock", DEFAULT_DOCK);
   const [estimatesRaw, setEstimatesRaw, lest] = useStoredState("sps_estimates", []);
+  const [serviceTiers, setServiceTiers] = useStoredState("sps_service_tiers", DEFAULT_TIERS);
+  // Keep the module-level reference in sync so client portal uses live tiers
+  CP_TIERS = serviceTiers || DEFAULT_TIERS;
   const [routeAssignments, setRouteAssignments, lra] = useStoredState("sps_route_assignments", []);
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -9909,6 +10852,43 @@ export default function App({ authEmail = "", onSignOut }) {
   // client service requests land as office alerts so staff see them on the dashboard
   const handleServiceRequest = (req) => handleOfficeAlert({ title: `Service Request: ${req.clientName}`, body: `${req.type}${req.dates ? " · " + req.dates : ""}${req.notes ? " — " + req.notes : ""}`, type: "request", clientId: req.clientId });
 
+  const handleConfirmUpgrade = (updatedAlert, updatedClient) => {
+    // Save progress state back to the alert (persists steps across modal opens)
+    setOfficeAlerts(list => list.map(a => a.id === updatedAlert.id ? { ...a, ...updatedAlert } : a));
+    // Final step — apply plan change and save signed doc to client record
+    if (updatedAlert.fullyComplete && updatedClient) {
+      setClients(prev => prev.map(c => {
+        if (String(c.id) !== String(updatedAlert.clientId)) return c;
+        const existingDocs = c.documents || [];
+        const signedDoc = updatedAlert.signedDoc;
+        const newDocs = signedDoc && !existingDocs.find(d => d.name === signedDoc.name)
+          ? [...existingDocs, {
+              id: `doc-${Date.now()}`,
+              ...signedDoc,
+              label: `${updatedAlert.requestedPlan} Service Agreement`,
+              category: "Upgrade Agreement",
+              note: updatedAlert.contractNote || "Signed via Dropbox Sign",
+              uploadedAt: Date.now(),
+            }]
+          : existingDocs;
+        return { ...c, plan: updatedAlert.requestedPlan, documents: newDocs };
+      }));
+    }
+  };
+
+  const handleUpgradeRequest = (req) => handleOfficeAlert({
+    title: `Upgrade Request: ${req.clientName}`,
+    body: req.message || "No additional message.",
+    type: "upgrade_request",
+    clientId: req.clientId,
+    clientName: req.clientName,
+    currentPlan: req.currentPlan,
+    requestedPlan: req.requestedPlan,
+    submittedAt: req.submittedAt,
+    upgradeStep: 0,
+    date: new Date().toLocaleDateString("en-US"),
+  });
+
   const handleSaveInvoice = (inv) => setInvoices(list => {
     const exists = (list || []).some(iv => iv.id === inv.id);
     return exists ? list.map(iv => iv.id === inv.id ? inv : iv) : [inv, ...(list || [])];
@@ -9997,7 +10977,7 @@ export default function App({ authEmail = "", onSignOut }) {
   }
 
   return (
-    <AppCtx.Provider value={{ T, branding, perms }}>
+    <AppCtx.Provider value={{ T, branding, perms, tiers: serviceTiers || DEFAULT_TIERS }}>
       <div style={{
         fontFamily: fontStack,
         background: T.bg, minHeight: "100vh", display: "flex", flexDirection: "column", color: T.text,
@@ -10069,7 +11049,7 @@ export default function App({ authEmail = "", onSignOut }) {
           </div>
         )}
         <main style={{ flex: 1, padding: "22px 16px", maxWidth: 740, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
-          {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} />}
+          {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
           {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
           {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} />}
@@ -10080,7 +11060,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
           {page === "invoices"  && perms.canInvoice && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} />}
           {page === "import"   && perms.canImport && <SkimmerImport onImport={handleImportClients} onGoToClients={() => handleNav("clients")} />}
-          {page === "settings" && <AppSettings branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} />}
+          {page === "settings" && <AppSettings branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} />}
         </main>
 
         {/* Bottom Nav — shows only the user's chosen dock items */}
