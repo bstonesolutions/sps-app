@@ -785,11 +785,14 @@ function compressImage(file, maxDim = 900, quality = 0.6) {
 }
 
 // ─────────────────────────────────────────────
-const planMeta = (plan, T) => ({
-  Premium:   { bg: T.primary,     text: "#fff" },
-  Signature: { bg: T.headerBg,    text: "#fff" },
-  Essential: { bg: T.surfaceAlt,  text: T.text  },
-}[plan] || { bg: T.border, text: T.textMuted });
+const planMeta = (plan, T, tiers) => {
+  const tierColor = (tiers || {})[plan]?.color;
+  return ({
+    Premium:   { bg: tierColor || T.primary,  text: "#fff" },
+    Signature: { bg: tierColor || "#6366F1",   text: "#fff" },
+    Essential: { bg: tierColor || T.surfaceAlt, text: tierColor ? "#fff" : T.text },
+  }[plan] || { bg: T.border, text: T.textMuted });
+};
 
 const statusColor = (s, T) => ({
   Good:          T.accent,
@@ -1649,7 +1652,7 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
           </div>
         )}
         {filtered.map(c => {
-          const pm = planMeta(c.plan, T);
+          const pm = planMeta(c.plan, T, tiers);
           const isSel = !!selected[c.id];
           return (
             <div key={c.id}
@@ -1712,7 +1715,7 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
         <Modal title={`Change Maintenance Plan (${selCount})`} onClose={() => setModal(null)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {PLANS.map(p => {
-              const pm = planMeta(p, T);
+              const pm = planMeta(p, T, tiers);
               return (
                 <button key={p} onClick={() => applyPlan(p)}
                   style={{ padding: "14px 16px", border: `1px solid ${T.border}`, borderRadius: 12, background: T.surface, color: T.text, fontWeight: 700, fontSize: 15, cursor: "pointer", fontFamily: "inherit", textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -2106,7 +2109,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, schedule, o
   const [client, setClient] = useState(init);
   const [tab, setTab] = useState("overview");
   const [editing, setEditing] = useState(false);
-  const pm = planMeta(client.plan, T);
+  const pm = planMeta(client.plan, T, tiers);
   const tabs = ["overview", "equipment", "history", ...(perms.canInvoice ? ["invoices"] : []), "docs", "portal"];
   const owed = clientOutstanding(client, invoices);
 
@@ -7530,25 +7533,60 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
               <div style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, overflow: "hidden" }}>
                 {tierClients.sort((a,b) => (a.name||"").localeCompare(b.name||"")).map((c, i) => {
                   const currentRate = bulkPrices[String(c.id)] !== undefined ? bulkPrices[String(c.id)] : (c.monthlyRate || "");
-                  const changed = bulkPrices[String(c.id)] !== undefined;
+                  const priceChanged = bulkPrices[String(c.id)] !== undefined;
+                  const planChanged  = !!bulkPlans[String(c.id)];
+                  const activePlan   = bulkPlans[String(c.id)] || c.plan || "Essential";
+                  const anyChange    = priceChanged || planChanged;
                   return (
-                    <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 16px", borderBottom: i < tierClients.length - 1 ? `1px solid ${T.border}` : "none", background: changed ? hexA(T.primary, 0.03) : "transparent" }}>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{c.name}</div>
-                        <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{TIER_FREQ[c.plan] || c.planFreq || "—"} · {c.address || "No address"}</div>
+                    <div key={c.id} style={{ padding: "12px 16px", borderBottom: i < tierClients.length - 1 ? `1px solid ${T.border}` : "none", background: anyChange ? hexA(T.primary, 0.03) : "transparent" }}>
+                      {/* Name + current frequency */}
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{c.name}</div>
+                          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>
+                            {planChanged
+                              ? <><span style={{ textDecoration: "line-through", opacity: 0.5 }}>{c.plan}</span> → <span style={{ color: T.primary, fontWeight: 700 }}>{activePlan}</span> · {TIER_FREQ[activePlan]}</>
+                              : <>{c.plan} · {TIER_FREQ[c.plan] || c.planFreq || "—"}</>
+                            }
+                          </div>
+                        </div>
+                        {anyChange && (
+                          <button onClick={() => {
+                            setBulkPrices(prev => { const n = { ...prev }; delete n[String(c.id)]; return n; });
+                            setBulkPlans(prev => { const n = { ...prev }; delete n[String(c.id)]; return n; });
+                          }} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", fontSize: 12, fontFamily: "inherit", flexShrink: 0, marginLeft: 8 }}>Undo</button>
+                        )}
                       </div>
-                      <div style={{ position: "relative", width: 110, flexShrink: 0 }}>
-                        <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: T.textMuted, fontSize: 14 }}>$</span>
-                        <input type="text" inputMode="decimal"
-                          value={currentRate}
-                          onChange={e => setBulkPrices(prev => ({ ...prev, [String(c.id)]: e.target.value.replace(/[^0-9.]/g, "") }))}
-                          placeholder={c.monthlyRate || "0.00"}
-                          style={{ ...field, paddingLeft: 24, border: changed ? `1.5px solid ${T.primary}` : `1.5px solid ${T.border}` }} />
+                      {/* Plan pills + price input on same row */}
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        {/* Plan selector — pill buttons */}
+                        <div style={{ display: "flex", gap: 5, flex: 1 }}>
+                          {Object.keys(TIER_FREQ).map(plan => {
+                            const isActive = activePlan === plan;
+                            return (
+                              <button key={plan} onClick={() => {
+                                if (plan === c.plan) {
+                                  setBulkPlans(prev => { const n = { ...prev }; delete n[String(c.id)]; return n; });
+                                } else {
+                                  setBulkPlans(prev => ({ ...prev, [String(c.id)]: plan }));
+                                }
+                              }}
+                                style={{ flex: 1, padding: "6px 4px", borderRadius: 10, border: `1.5px solid ${isActive ? (planChanged && plan !== c.plan ? T.primary : T.border) : T.border}`, background: isActive ? (planChanged && plan !== c.plan ? hexA(T.primary, 0.1) : T.surfaceAlt) : T.surface, color: isActive ? (planChanged && plan !== c.plan ? T.primary : T.text) : T.textMuted, fontWeight: isActive ? 800 : 500, fontSize: 11, cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s" }}>
+                                {plan}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {/* Price input */}
+                        <div style={{ position: "relative", width: 100, flexShrink: 0 }}>
+                          <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: T.textMuted, fontSize: 14 }}>$</span>
+                          <input type="text" inputMode="decimal"
+                            value={currentRate}
+                            onChange={e => setBulkPrices(prev => ({ ...prev, [String(c.id)]: e.target.value.replace(/[^0-9.]/g, "") }))}
+                            placeholder={c.monthlyRate || "rate"}
+                            style={{ ...field, paddingLeft: 24, border: priceChanged ? `1.5px solid ${T.primary}` : `1.5px solid ${T.border}` }} />
+                        </div>
                       </div>
-                      {changed && (
-                        <button onClick={() => setBulkPrices(prev => { const n = { ...prev }; delete n[String(c.id)]; return n; })}
-                          style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 4, fontSize: 11, fontFamily: "inherit" }}>Undo</button>
-                      )}
                     </div>
                   );
                 })}
@@ -7602,6 +7640,8 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
   const [confirmReset, setConfirmReset] = useState(false);
   const [palette, setPalette, lpal] = useStoredState("sps_palette", DEFAULT_PALETTE);
   const [editingPalette, setEditingPalette] = useState(false);
+  const [newPaletteHex, setNewPaletteHex] = useState("#000000");
+  const [newPaletteName, setNewPaletteName] = useState("");
   const set = (k, v) => setLocalBranding(b => ({ ...b, [k]: v }));
 
   const sysDark = useSystemDark();
@@ -8091,37 +8131,38 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             ))}
 
             {/* Add new color */}
-            {editingPalette && (palette || DEFAULT_PALETTE).length < 16 && (() => {
-              const [newHex, setNewHex] = useState("#000000");
-              const [newName, setNewName] = useState("");
-              return (
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, background: T.surfaceAlt, borderRadius: 12, padding: "10px 12px" }}>
-                    <div style={{ position: "relative", width: 36, height: 36, borderRadius: 9, overflow: "hidden", border: `1px solid ${T.border}`, background: newHex, flexShrink: 0 }}>
-                      <input type="color" value={newHex} onChange={e => setNewHex(e.target.value)}
-                        style={{ position: "absolute", inset: -4, width: 48, height: 48, border: "none", padding: 0, cursor: "pointer" }} />
-                    </div>
-                    <input
-                      type="text"
-                      value={newName}
-                      onChange={e => setNewName(e.target.value)}
-                      placeholder="Color name"
-                      style={{ flex: 1, padding: "6px 10px", border: `1.5px solid ${T.border}`, borderRadius: 9, fontSize: 12, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none" }}
-                    />
-                    <button
-                      onClick={() => {
-                        if (!newName.trim()) return;
-                        setPalette(prev => [...(prev || DEFAULT_PALETTE), { name: newName.trim(), hex: newHex }]);
-                        setNewName("");
-                        setNewHex("#000000");
-                      }}
-                      style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 9, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
-                      Add
-                    </button>
+            {editingPalette && (palette || DEFAULT_PALETTE).length < 16 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, background: T.surfaceAlt, borderRadius: 12, padding: "10px 12px" }}>
+                  <div style={{ position: "relative", width: 36, height: 36, borderRadius: 9, overflow: "hidden", border: `1px solid ${T.border}`, background: newPaletteHex, flexShrink: 0 }}>
+                    <input type="color" value={newPaletteHex} onChange={e => setNewPaletteHex(e.target.value)}
+                      style={{ position: "absolute", inset: -4, width: 48, height: 48, border: "none", padding: 0, cursor: "pointer" }} />
                   </div>
+                  <input
+                    type="text"
+                    value={newPaletteName}
+                    onChange={e => setNewPaletteName(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === "Enter" && newPaletteName.trim()) {
+                        setPalette(prev => [...(prev || DEFAULT_PALETTE), { name: newPaletteName.trim(), hex: newPaletteHex }]);
+                        setNewPaletteName(""); setNewPaletteHex("#000000");
+                      }
+                    }}
+                    placeholder="Color name"
+                    style={{ flex: 1, padding: "6px 10px", border: `1.5px solid ${T.border}`, borderRadius: 9, fontSize: 12, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none" }}
+                  />
+                  <button
+                    onClick={() => {
+                      if (!newPaletteName.trim()) return;
+                      setPalette(prev => [...(prev || DEFAULT_PALETTE), { name: newPaletteName.trim(), hex: newPaletteHex }]);
+                      setNewPaletteName(""); setNewPaletteHex("#000000");
+                    }}
+                    style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 9, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
+                    Add
+                  </button>
                 </div>
-              );
-            })()}
+              </div>
+            )}
           </div>
 
           {editingPalette && (
@@ -11562,7 +11603,7 @@ export default function App({ authEmail = "", onSignOut }) {
     if (splashShown.current) return;
     splashShown.current = true;
     setShowSplash(true);
-    const t = setTimeout(() => setShowSplash(false), 4000);
+    const t = setTimeout(() => setShowSplash(false), 3000);
     return () => clearTimeout(t);
   }, [hydrated]);
 
@@ -11783,7 +11824,7 @@ export default function App({ authEmail = "", onSignOut }) {
           .splash-tag   { animation: splashFadeUp 0.55s cubic-bezier(.34,1.56,.64,1) 0.22s both; }
           .splash-greet { animation: splashFadeUp 0.4s cubic-bezier(.34,1.56,.64,1) 0.28s both; }
           .splash-dot   { animation: splashFadeUp 0.55s cubic-bezier(.34,1.56,.64,1) 0.55s both; }
-          .splash-fade-out { animation: splashFadeOut 0.5s ease 3.4s both; }
+          .splash-fade-out { animation: splashFadeOut 0.5s ease 2.4s both; }
         `}</style>
 
         {/* Decorative circles — only on solid/gradient */}
