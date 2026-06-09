@@ -2639,9 +2639,9 @@ function RouteRing({ done, total, size = 58, label = "stops" }) {
   );
 }
 
-function HeadHereModal({ stop, client, email, branding, onClose }) {
-  const { T } = useApp();
-  const [pref, setPref] = React.useState(() => { try { return localStorage.getItem("sps_map_app") || null; } catch { return null; } });
+function HeadHereModal({ stop, client, email, onClose }) {
+  const { T, branding } = useApp();
+  const [pref, setPref] = useState(() => { try { return localStorage.getItem("sps_map_app") || null; } catch { return null; } });
   const firstName = client && client.name ? client.name.split(" ")[0] : (stop.client || "there");
   const phone = ((client && (client.phone || client.contactPhone || "")) || "").replace(/[^\d+]/g, "");
   const addr = stop.address || "";
@@ -3100,7 +3100,7 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
       {omwModal && (
         <OnMyWayModal stop={omwModal.stop} client={omwModal.client} email={email} onClose={() => setOmwModal(null)} onSent={() => handleOmwSent(omwModal.key)} />
       )}
-      {headHereModal && <HeadHereModal stop={headHereModal.stop} client={headHereModal.client} email={email} branding={branding} onClose={() => setHeadHereModal(null)} />}
+      {headHereModal && <HeadHereModal stop={headHereModal.stop} client={headHereModal.client} email={email} onClose={() => setHeadHereModal(null)} />}
 
       {completeModal && (
         <CompleteStopModal
@@ -5139,7 +5139,7 @@ export default function App({ authEmail = "", onSignOut }) {
     return () => document.removeEventListener("visibilitychange", onVis);
   }, []);
 
-  const [dbError, setDbError] = React.useState(null);
+  const [dbError, setDbError] = useState(null);
   useEffect(() => {
     const onStatus = (e) => {
       if (e.detail.type === "error") setDbError(e.detail.msg);
