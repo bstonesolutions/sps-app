@@ -642,10 +642,10 @@ function Card({ children, style }) {
   return (
     <div style={{
       background: T.surface,
-      border: "none",
+      border: `1px solid ${T.border}`,
       borderRadius: 20,
       overflow: "hidden",
-      boxShadow: T.shadow,
+      boxShadow: "0 1px 3px rgba(0,0,0,0.04), 0 4px 16px rgba(0,0,0,0.05)",
       ...style,
     }}>{children}</div>
   );
@@ -654,8 +654,8 @@ function Card({ children, style }) {
 function CardHeader({ title, action }) {
   const { T } = useApp();
   return (
-    <div style={{ padding: "15px 20px", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-      <span style={{ fontWeight: 600, fontSize: 14, color: T.text, letterSpacing: "-0.01em" }}>{title}</span>
+    <div style={{ padding: "14px 18px", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <span style={{ fontWeight: 700, fontSize: 13, color: T.text, letterSpacing: "-0.01em" }}>{title}</span>
       {action}
     </div>
   );
@@ -663,30 +663,32 @@ function CardHeader({ title, action }) {
 
 function Btn({ children, onClick, href, variant = "primary", sm, lg, block, disabled, style }) {
   const { T } = useApp();
-  const grad = (c) => `linear-gradient(180deg, ${mix(c, "#ffffff", 0.12)} 0%, ${c} 52%, ${mix(c, "#000000", 0.07)} 100%)`;
   const styles = {
-    primary: { background: grad(T.primary), color: "#fff", border: "none", boxShadow: `0 1px 1.5px ${hexA(T.primary, 0.4)}, 0 3px 10px ${hexA(T.primary, 0.22)}` },
-    accent:  { background: grad(T.accent), color: "#fff", border: "none", boxShadow: `0 1px 1.5px ${hexA(T.accent, 0.4)}, 0 3px 10px ${hexA(T.accent, 0.22)}` },
-    ghost:   { background: T.surfaceAlt, color: T.text, border: "none" },
-    outline: { background: "transparent", color: T.primary, border: `1.5px solid ${hexA(T.primary, 0.45)}` },
-    danger:  { background: grad("#E5484D"), color: "#fff", border: "none", boxShadow: `0 1px 1.5px ${hexA("#E5484D", 0.4)}, 0 3px 10px ${hexA("#E5484D", 0.2)}` },
+    primary: { background: T.primary, color: "#fff", border: "none", boxShadow: `0 1px 2px ${hexA(T.primary, 0.3)}, 0 4px 12px ${hexA(T.primary, 0.2)}` },
+    accent:  { background: T.accent, color: "#fff", border: "none", boxShadow: `0 1px 2px ${hexA(T.accent, 0.3)}, 0 4px 12px ${hexA(T.accent, 0.2)}` },
+    ghost:   { background: T.surfaceAlt, color: T.text, border: `1px solid ${T.border}` },
+    outline: { background: "transparent", color: T.primary, border: `1.5px solid ${hexA(T.primary, 0.4)}` },
+    danger:  { background: "#E5484D", color: "#fff", border: "none", boxShadow: `0 1px 2px ${hexA("#E5484D", 0.3)}, 0 4px 12px ${hexA("#E5484D", 0.2)}` },
     text:    { background: "transparent", color: T.primary, border: "none" },
   };
   const css = {
     ...(styles[variant] || styles.primary),
-    borderRadius: lg ? 14 : 12,
-    padding: lg ? "14px 24px" : sm ? "8px 15px" : "11px 20px",
-    fontSize: lg ? 15.5 : sm ? 12.5 : 14,
+    borderRadius: lg ? 14 : sm ? 10 : 12,
+    padding: lg ? "14px 24px" : sm ? "7px 14px" : "10px 18px",
+    fontSize: lg ? 15 : sm ? 12 : 13.5,
     fontWeight: 600,
     cursor: disabled ? "default" : "pointer",
-    opacity: disabled ? 0.5 : 1,
+    opacity: disabled ? 0.45 : 1,
     fontFamily: "inherit",
     letterSpacing: "-0.01em",
     width: block ? "100%" : undefined,
-    display: block ? "block" : (href ? "inline-block" : undefined),
+    display: block ? "flex" : (href ? "inline-flex" : "inline-flex"),
+    alignItems: "center",
+    justifyContent: "center",
     textAlign: "center",
     textDecoration: "none",
     boxSizing: "border-box",
+    transition: "opacity 0.15s, transform 0.08s",
     ...style,
   };
   if (href) return <a href={href} onClick={onClick} style={css}>{children}</a>;
@@ -698,17 +700,14 @@ function StatCard({ label, value, sub, accent }) {
   return (
     <div style={{
       background: T.surface,
-      border: "none",
+      border: `1px solid ${T.border}`,
       borderRadius: 20,
-      padding: "20px 20px",
-      boxShadow: T.shadow,
+      padding: "18px 18px",
+      boxShadow: "0 1px 3px rgba(0,0,0,0.04), 0 4px 16px rgba(0,0,0,0.05)",
     }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 12 }}>
-        <span style={{ width: 8, height: 8, borderRadius: "50%", background: accent || T.primary, flexShrink: 0 }} />
-        <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: "-0.01em", color: T.textMuted }}>{label}</div>
-      </div>
-      <div style={{ fontSize: 32, fontWeight: 700, color: T.text, lineHeight: 1, letterSpacing: "-0.035em" }}>{value}</div>
-      {sub && <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 7 }}>{sub}</div>}
+      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.04em", color: T.textMuted, textTransform: "uppercase", marginBottom: 10 }}>{label}</div>
+      <div style={{ fontSize: 30, fontWeight: 800, color: accent && accent !== T.surface ? accent : T.text, lineHeight: 1, letterSpacing: "-0.03em" }}>{value}</div>
+      {sub && <div style={{ fontSize: 12, color: T.textMuted, marginTop: 6 }}>{sub}</div>}
     </div>
   );
 }
@@ -727,7 +726,7 @@ function Input({ value, onChange, placeholder, type = "text" }) {
   const { T } = useApp();
   return (
     <input type={type} value={value} onChange={onChange} placeholder={placeholder}
-      style={{ width: "100%", padding: "11px 14px", border: `1px solid ${T.border}`, borderRadius: 11, fontSize: 15, fontFamily: "inherit", boxSizing: "border-box", outline: "none", color: T.text, background: T.surface }} />
+      style={{ width: "100%", padding: "12px 14px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 15, fontFamily: "inherit", boxSizing: "border-box", outline: "none", color: T.text, background: T.surface }} />
   );
 }
 
@@ -1036,14 +1035,14 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
         <div style={{ position: "fixed", bottom: "calc(74px + env(safe-area-inset-bottom))", left: 0, right: 0, zIndex: 95, padding: "10px 16px", maxWidth: 740, margin: "0 auto" }}>
           <div style={{ background: T.headerBg, borderRadius: 14, padding: "10px 12px", display: "flex", gap: 8, boxShadow: "0 6px 24px rgba(0,0,0,0.25)", overflowX: "auto" }}>
             {[
-              { label: "📅 Schedule", fn: doSchedule },
-              { label: "🏷️ Division", fn: () => setModal("division") },
-              { label: "⭐ Plan", fn: () => setModal("plan") },
-              { label: "🗑️ Delete", fn: () => setModal("delete"), danger: true },
+              { label: "Schedule", icon: "calendar", fn: doSchedule },
+              { label: "Division", icon: "tag", fn: () => setModal("division") },
+              { label: "Plan", icon: "clipboard", fn: () => setModal("plan") },
+              { label: "Delete", icon: "trash", fn: () => setModal("delete"), danger: true },
             ].map(a => (
               <button key={a.label} onClick={a.fn}
-                style={{ flex: "1 0 auto", background: a.danger ? "rgba(255,80,80,0.15)" : "rgba(255,255,255,0.1)", color: a.danger ? "#ff8080" : "#fff", border: "none", borderRadius: 10, padding: "10px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
-                {a.label}
+                style={{ flex: "1 0 auto", background: a.danger ? "rgba(255,80,80,0.15)" : "rgba(255,255,255,0.1)", color: a.danger ? "#ff8080" : "#fff", border: "none", borderRadius: 10, padding: "10px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap", display:"flex", alignItems:"center", justifyContent:"center", gap:5 }}>
+                <Icon name={a.icon} size={13} />{a.label}
               </button>
             ))}
           </div>
@@ -1154,7 +1153,7 @@ function ClientEditForm({ client, onSave, onCancel, title = "Edit Client" }) {
                     <input style={halfInput} value={form.zip} onChange={e => setAddr("zip", e.target.value)} placeholder="19520" />
                   </div>
                 </div>
-                {combined && <div style={{ fontSize: 12, color: T.textMuted, background: T.surfaceAlt, borderRadius: 9, padding: "9px 12px" }}>📍 {combined}</div>}
+                {combined && <div style={{ fontSize: 12, color: T.textMuted, background: T.surfaceAlt, borderRadius: 9, padding: "9px 12px" }} style={{ display:"flex", alignItems:"center", gap:6 }}><Icon name="location" size={13} />{combined}</div>}
 
                 <FieldRow label="Phone"><Input value={form.phone} onChange={e => set("phone", e.target.value)} /></FieldRow>
                 <FieldRow label="Email"><Input value={form.email} onChange={e => set("email", e.target.value)} /></FieldRow>
@@ -1214,14 +1213,14 @@ function ClientDetail({ client: init, invoices, invoicing, branding, schedule, o
             </div>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <Badge label={client.plan} bg={pm.bg} color={pm.color || pm.text} />
-              {perms.editClients && <Btn variant="ghost" sm onClick={() => setEditing(true)}>✏️ Edit</Btn>}
+              {perms.editClients && <Btn variant="ghost" sm onClick={() => setEditing(true)} style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="edit" size={13} /> Edit</Btn>}
             </div>
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 20px", fontSize: 12, color: T.textMuted }}>
-            <span>📞 {client.phone}</span>
-            <span>✉️ {client.email}</span>
-            <span>📅 {client.nextService}</span>
-            {perms.seeBalances && <span style={{ color: owed <= 0 ? T.accent : T.warning, fontWeight: 600 }}>💰 ${owed.toFixed(2)}</span>}
+            <span style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="phone" size={13} />{client.phone}</span>
+            <span style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="mail" size={13} />{client.email}</span>
+            <span style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="calendar" size={13} />{client.nextService}</span>
+            {perms.seeBalances && <span style={{ color: owed <= 0 ? T.accent : T.warning, fontWeight: 600 }} style={{ display:"flex", alignItems:"center", gap:4 }}><Icon name="dollar" size={13} />${owed.toFixed(2)}</span>}
           </div>
         </div>
       </Card>
@@ -1324,7 +1323,7 @@ function ClientEquipment({ client, onChange }) {
       <CardHeader title={`Equipment (${equipment.length})`} action={perms.editClients ? <Btn sm onClick={openAdd}>+ Add</Btn> : null} />
       {equipment.length === 0 && (
         <div style={{ padding: "28px 18px", textAlign: "center", color: T.textMuted }}>
-          <div style={{ fontSize: 28, marginBottom: 8 }}>⚙️</div>
+          <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="settings" size={26} /></div>
           <div style={{ fontSize: 13 }}>No equipment yet. Tap "+ Add" to log a pump, filter, or other gear.</div>
         </div>
       )}
@@ -1515,7 +1514,7 @@ function ClientHistory({ client, onChange }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       {history.length === 0 && (
         <div style={{ textAlign: "center", padding: "36px 20px", color: T.textMuted }}>
-          <div style={{ fontSize: 28, marginBottom: 8 }}>📋</div>
+          <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="clipboard" size={26} /></div>
           <div style={{ fontSize: 13 }}>No service history yet. Completed stops will appear here.</div>
         </div>
       )}
@@ -1537,7 +1536,7 @@ function ClientHistory({ client, onChange }) {
                     <div style={{ fontWeight: 700, fontSize: 14, color: T.text }}>{h.invoice}</div>
                     {b && perms.seeProfit && <div style={{ fontSize: 11, fontWeight: 700, color: b.profit >= 0 ? T.accent : "#C0392B" }}>{b.profit >= 0 ? "+" : "−"}{money(Math.abs(b.profit))}</div>}
                   </div>
-                  {perms.editHistory && <button onClick={() => setEditIdx(i)} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", fontSize: 14 }}>✏️</button>}
+                  {perms.editHistory && <button onClick={() => setEditIdx(i)} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 4, display:"flex", alignItems:"center" }}><Icon name="edit" size={15} /></button>}
                 </div>
               </div>
 
@@ -1623,7 +1622,7 @@ function ClientPortal({ client, invoices, schedule, branding }) {
       <Card>
         <div style={{ padding: 24 }}>
           <div style={{ display: "flex", gap: 14, alignItems: "center", marginBottom: 18 }}>
-            <div style={{ width: 52, height: 52, borderRadius: 14, background: T.surfaceAlt, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, flexShrink: 0 }}>📱</div>
+            <div style={{ width: 52, height: 52, borderRadius: 14, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="mobile" size={26} /></div>
             <div>
               <div style={{ fontWeight: 800, fontSize: 16, color: T.text }}>Client Portal</div>
               <div style={{ fontSize: 12, color: T.textMuted }}>Preview exactly what {client.name.split(" ")[0]} sees</div>
@@ -1632,20 +1631,20 @@ function ClientPortal({ client, invoices, schedule, branding }) {
 
           {!hasEmail && (
             <div style={{ background: hexA(T.warning, 0.1), border: `1px solid ${hexA(T.warning, 0.3)}`, borderRadius: 10, padding: "10px 14px", fontSize: 12, color: T.warning, marginBottom: 16, display: "flex", gap: 8 }}>
-              <span>⚠️</span>
+              <Icon name="warning" size={14} />
               <span>No email on file. Add this client's email in Edit so they can log in.</span>
             </div>
           )}
 
           {hasEmail && (
             <div style={{ background: T.surfaceAlt, borderRadius: 8, padding: "10px 14px", fontSize: 12, color: T.textMuted, marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>✉️ {client.email}</span>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="mail" size={13} />{client.email}</span>
               <button onClick={copyLink} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>{copied ? "✓ Copied link" : "Copy app link"}</button>
             </div>
           )}
 
-          <Btn onClick={() => setPreview(true)} style={{ width: "100%", padding: "13px", borderRadius: 12, marginBottom: 0 }}>
-            👁️ Preview as {client.name.split(" ")[0]}
+          <Btn onClick={() => setPreview(true)} style={{ width: "100%", padding: "13px", borderRadius: 12, marginBottom: 0, display:"flex", alignItems:"center", justifyContent:"center", gap:7 }}>
+            <Icon name="eye" size={15} /> Preview as {client.name.split(" ")[0]}
           </Btn>
         </div>
       </Card>
@@ -1845,7 +1844,7 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
               {message}
             </div>
             {trackLink && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 8, display: "flex", alignItems: "center", gap: 5 }}>
-              <span>🔗</span> Includes live tracking link
+              <Icon name="link" size={14} /> Includes live tracking link
             </div>}
           </div>
         )}
@@ -1853,7 +1852,7 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
         {/* Actions */}
         <div style={{ display: "flex", gap: 10 }}>
           <Btn onClick={handleSend} style={{ flex: 1, padding: "13px", fontSize: 14, borderRadius: 12, opacity: gpsState === "ready" ? 1 : 0.5, pointerEvents: gpsState === "ready" ? "auto" : "none" }}>
-            📱 Open in Messages
+            <span style={{ display:"flex", alignItems:"center", gap:6 }}><Icon name="message" size={15} /> Open in Messages</span>
           </Btn>
           <button onClick={onClose}
             style={{ background: T.surfaceAlt, border: "none", borderRadius: 12, padding: "13px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer", color: T.text, fontFamily: "inherit" }}>
@@ -2055,7 +2054,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
     return (
       <Modal title="Service Complete" onClose={onClose}>
         <div style={{ textAlign: "center", padding: "4px 0" }}>
-          <div style={{ fontSize: 44, marginBottom: 10 }}>✅</div>
+          <div style={{ width: 60, height: 60, borderRadius: 18, background: hexA("#16a34a", 0.1), color: "#16a34a", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="check" size={28} /></div>
           <div style={{ fontWeight: 800, fontSize: 17, color: T.text, marginBottom: 6 }}>Saved to {firstName}'s history</div>
           {/* profit chip */}
           <div style={{ display: "inline-block", background: profit >= 0 ? `${T.accent}18` : "#C0392B18", color: profit >= 0 ? T.accent : "#C0392B", borderRadius: 20, padding: "6px 16px", fontSize: 14, fontWeight: 800, marginBottom: 16 }}>
@@ -2063,7 +2062,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
           </div>
           <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 18, lineHeight: 1.5 }}>Send the client their report:</div>
           <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
-            <Btn onClick={sendEmail} style={{ flex: 1, padding: "13px", borderRadius: 12 }}>✉️ Email Report</Btn>
+            <Btn onClick={sendEmail} style={{ flex: 1, padding: "13px", borderRadius: 12 }} style={{ display:"flex", alignItems:"center", gap:6 }}><Icon name="mail" size={14} /> Email Report</Btn>
             <Btn onClick={sendText} variant="ghost" style={{ flex: 1, padding: "13px", borderRadius: 12 }}>💬 Text Report</Btn>
           </div>
           <button onClick={onClose} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 8, fontFamily: "inherit" }}>Done</button>
@@ -2587,10 +2586,10 @@ function HeadHereModal({ stop, client, email, onClose }) {
   return (
     <Modal title={`Head to ${stop.client || "Stop"}`} onClose={onClose}>
       <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-        {addr && <div style={{ fontSize: 13, color: T.textMuted, marginTop: -8, lineHeight: 1.4 }}>📍 {addr}</div>}
+        {addr && <div style={{ fontSize: 13, color: T.textMuted, marginTop: -8, lineHeight: 1.4, display:"flex", alignItems:"center", gap:5 }}><Icon name="location" size={13} />{addr}</div>}
         <div>
           <span style={lbl}>On My Way Text</span>
-          {smsHref ? <Btn href={smsHref} variant="outline" block>📱 Send On My Way to {firstName}</Btn>
+          {smsHref ? <Btn href={smsHref} variant="outline" block style={{ display:"flex", alignItems:"center", gap:6 }}><Icon name="message" size={15} /> Send On My Way to {firstName}</Btn>
             : <div style={{ fontSize: 13, color: T.textMuted, background: T.surfaceAlt, borderRadius: 10, padding: "11px 14px" }}>Add a phone number to this client to send texts.</div>}
         </div>
         <div>
@@ -2811,7 +2810,7 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
           {!selectMode && (
             <div style={{ borderTop: `1px solid ${T.border}`, padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, background: isComplete ? `${T.accent}12` : T.surfaceAlt }}>
               {isComplete ? (
-                <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: T.accent, fontWeight: 700 }}><span>✅</span> Completed · Report saved</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: T.accent, fontWeight: 700 }}><Icon name="check" size={13} /> Completed · Report saved</div>
               ) : sent ? (
                 <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: T.accent, fontWeight: 700 }}><span>📍</span> Client notified</div>
               ) : (
@@ -2820,12 +2819,12 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
               <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
                 <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: s, client: c }); }}
                   style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 8, padding: "6px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-                  🗺 Head Here
+                  <span style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="map" size={13} /> Head Here</span>
                 </button>
                 {!isComplete && perms.sendTexts && (
                   <button onClick={e => { e.stopPropagation(); setOmwModal({ stop: s, client: c, key: s.sid }); }}
                     style={{ background: "transparent", color: T.primary, border: `1.5px solid ${T.primary}`, borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-                    📱 {sent ? "Resend" : "On My Way"}
+                    <span style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="message" size={13} /> {sent ? "Resend" : "On My Way"}</span>
                   </button>
                 )}
                 {perms.completeStops && (
@@ -2870,7 +2869,7 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
 
       {schedule.length === 0 && (
         <div style={{ textAlign: "center", padding: "50px 20px", color: T.textMuted }}>
-          <div style={{ fontSize: 36, marginBottom: 12 }}>📅</div>
+          <div style={{ width: 56, height: 56, borderRadius: 18, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 14px" }}><Icon name="calendar" size={28} /></div>
           <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 6 }}>No stops scheduled</div>
           <div style={{ fontSize: 13, marginBottom: 18 }}>{perms.editSchedule ? "Add your first service stop to build the route." : "No stops have been scheduled yet."}</div>
           {perms.editSchedule && <Btn onClick={() => setShowAdd(true)}>+ Add Stop</Btn>}
@@ -2920,7 +2919,7 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
             <div style={{ fontSize: 13, fontWeight: 700, color: T.textMuted, marginBottom: 12 }}>{stripDate(selectedDate)}{selectedDate === todayMDY() ? " · Today" : ""}</div>
             {groups.length === 0 ? (
               <div style={{ textAlign: "center", padding: "44px 20px", color: T.textMuted }}>
-                <div style={{ fontSize: 34, marginBottom: 10 }}>🗓️</div>
+                <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="calendar" size={26} /></div>
                 <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 6 }}>No stops this day</div>
                 {perms.editSchedule && <div style={{ fontSize: 13, marginBottom: 16 }}>Add a stop to start building this route.</div>}
                 {perms.editSchedule && <Btn onClick={() => setShowAdd(true)}>+ Add Stop</Btn>}
@@ -3007,7 +3006,7 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
           <div style={{ background: T.headerBg, borderRadius: 14, padding: "10px 12px", display: "flex", gap: 8, boxShadow: "0 6px 24px rgba(0,0,0,0.25)" }}>
             <button onClick={deleteSelected}
               style={{ flex: 1, background: "rgba(255,80,80,0.15)", color: "#ff8080", border: "none", borderRadius: 10, padding: "12px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-              🗑️ Remove {selCount} {selCount === 1 ? "Stop" : "Stops"}
+              <span style={{ display:"flex", alignItems:"center", gap:6 }}><Icon name="trash" size={14} /> Remove {selCount} {selCount === 1 ? "Stop" : "Stops"}</span>
             </button>
           </div>
         </div>
@@ -3204,14 +3203,14 @@ function SkimmerImport({ onImport, onGoToClients }) {
       <p style={{ margin: "0 0 16px", fontSize: 13, color: T.textMuted }}>Upload a CSV export from Skimmer or QuickBooks. Columns are matched automatically, and you can adjust anything before importing.</p>
 
       <div style={{ background: T.surfaceAlt, borderRadius: 10, padding: "12px 14px", fontSize: 12, color: T.textMuted, display: "flex", gap: 8, marginBottom: 20 }}>
-        <span>🔗</span>
+        <Icon name="link" size={14} />
         <span>Live two-way QuickBooks Online sync is coming in Phase 2 (needs a secure account connection). For now, CSV import works right away.</span>
       </div>
 
       {stage === "idle" && (
         <div>
           <div style={{ border: `2px dashed ${T.border}`, borderRadius: 14, padding: "40px 24px", textAlign: "center", marginBottom: 16, background: T.surface }}>
-            <div style={{ fontSize: 40, marginBottom: 12 }}>📂</div>
+            <div style={{ width: 56, height: 56, borderRadius: 18, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 14px" }}><Icon name="download" size={28} /></div>
             <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 6 }}>Upload CSV Export</div>
             <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 18 }}>Client name, address, phone, email, plan, and more</div>
             <label style={{ background: T.primary, color: "#fff", borderRadius: 8, padding: "10px 22px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
@@ -3286,7 +3285,7 @@ function SkimmerImport({ onImport, onGoToClients }) {
 
       {stage === "done" && (
         <div style={{ textAlign: "center", padding: 48 }}>
-          <div style={{ fontSize: 52, marginBottom: 16 }}>✅</div>
+          <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA("#16a34a", 0.1), color: "#16a34a", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 16px" }}><Icon name="check" size={32} /></div>
           <div style={{ fontWeight: 800, fontSize: 20, color: T.text, marginBottom: 8 }}>Import Complete</div>
           <div style={{ fontSize: 14, color: T.textMuted, marginBottom: 24 }}>{importedCount} {importedCount === 1 ? "client" : "clients"} added to your list.</div>
           <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
@@ -3521,7 +3520,7 @@ function CatalogManager({ catalog, setCatalog }) {
   const Chip = ({ kind, value }) => (
     <button onClick={() => openEditChip(kind, value)}
       style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 20, background: T.surfaceAlt, fontSize: 12, fontWeight: 700, color: T.text, border: "none", cursor: "pointer", fontFamily: "inherit" }}>
-      {value} <span style={{ color: T.textMuted, fontSize: 11 }}>✏️</span>
+      {value} <Icon name="edit" size={13} color={T.textMuted} />
     </button>
   );
 
@@ -3549,7 +3548,7 @@ function CatalogManager({ catalog, setCatalog }) {
                 <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{s.name}</span>
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   {s.price && <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>${s.price}</span>}
-                  <span style={{ color: T.textMuted, fontSize: 13 }}>✏️</span>
+                  <Icon name="edit" size={14} />
                 </div>
               </div>
               {s.description && <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6, lineHeight: 1.4 }}>{s.description}</div>}
@@ -3570,7 +3569,7 @@ function CatalogManager({ catalog, setCatalog }) {
               <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{p.name}</span>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 {p.price && <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>${p.price}</span>}
-                <span style={{ color: T.textMuted, fontSize: 13 }}>✏️</span>
+                <Icon name="edit" size={14} />
               </div>
             </div>
           ))}
@@ -3595,7 +3594,7 @@ function CatalogManager({ catalog, setCatalog }) {
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                     {t.costPerOz && <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>${t.costPerOz}/oz</span>}
-                    <span style={{ color: T.textMuted, fontSize: 13 }}>✏️</span>
+                    <Icon name="edit" size={14} />
                   </div>
                 </div>
               );
@@ -3953,7 +3952,7 @@ function CostSettings({ costs, setCosts }) {
       </Card>
 
       <div style={{ background: T.surfaceAlt, borderRadius: 10, padding: "12px 14px", fontSize: 12, color: T.textMuted, display: "flex", gap: 8 }}>
-        <span>💡</span>
+        <Icon name="info" size={14} />
         <span>Switch any line between /stop and /mo and it re-tabulates automatically — per-stop in job profitability, per-month in the Budget. Per-employee labor rates flow in once tech assignment is added.</span>
       </div>
     </>
@@ -4121,7 +4120,7 @@ function TeamManager({ team, setTeam, currentUserId }) {
                 <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{e.name} {e.id === currentUserId && <span style={{ fontSize: 11, color: T.textMuted, fontWeight: 600 }}>· you</span>}</div>
                 <div style={{ fontSize: 12, color: T.textMuted }}>{roleLabel(e.role)}{e.pin ? " · PIN set" : ""}{e.rate !== "" && e.rate != null ? ` · $${e.rate}/hr` : ""}</div>
               </div>
-              <span style={{ color: T.textMuted, fontSize: 13 }}>✏️</span>
+              <Icon name="edit" size={14} />
             </div>
           ))}
         </div>
@@ -4543,7 +4542,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, onSave, onDele
 
       {filtered.length === 0 ? (
         <div style={{ textAlign: "center", padding: "50px 20px", color: T.textMuted }}>
-          <div style={{ fontSize: 36, marginBottom: 12 }}>🧾</div>
+          <div style={{ width: 56, height: 56, borderRadius: 18, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 14px" }}><Icon name="invoice" size={28} /></div>
           <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 6 }}>No invoices{filter !== "All" ? ` marked ${filter}` : ""}</div>
           {perms.canInvoice && filter === "All" && <><div style={{ fontSize: 13, marginBottom: 18 }}>Create one, or generate it from a completed visit.</div><Btn onClick={() => setCreating(true)}>+ New Invoice</Btn></>}
         </div>
@@ -4629,7 +4628,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
       {tabs.length === 0 ? (
         <Card>
           <div style={{ padding: 28, textAlign: "center" }}>
-            <div style={{ fontSize: 34, marginBottom: 10 }}>🔒</div>
+            <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="lock" size={26} /></div>
             <div style={{ fontSize: 15, fontWeight: 700, color: T.text, marginBottom: 6 }}>Nothing to customize</div>
             <div style={{ fontSize: 13, color: T.textMuted }}>Your access doesn't include any settings. Ask your admin if you need changes.</div>
           </div>
@@ -4874,15 +4873,46 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
 // NAV
 // ─────────────────────────────────────────────
 // Crisp line icons — render identically on every platform, inherit currentColor
-function Icon({ name, size = 22 }) {
-  const common = { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round" };
+function Icon({ name, size = 22, filled = false }) {
+  const sw = filled ? 0 : 1.8;
+  const common = { width: size, height: size, viewBox: "0 0 24 24", fill: filled ? "currentColor" : "none", stroke: filled ? "none" : "currentColor", strokeWidth: sw, strokeLinecap: "round", strokeLinejoin: "round" };
   const paths = {
-    home: <><path d="M4 10.5 12 4l8 6.5" /><path d="M5.5 9.5V19a1 1 0 0 0 1 1H10v-5h4v5h3.5a1 1 0 0 0 1-1V9.5" /></>,
-    clients: <><circle cx="12" cy="8" r="3.4" /><path d="M5.5 20c0-3.6 3-6 6.5-6s6.5 2.4 6.5 6" /></>,
+    // Nav
+    home:     <><path d="M4 10.5 12 4l8 6.5" /><path d="M5.5 9.5V19a1 1 0 0 0 1 1H10v-5h4v5h3.5a1 1 0 0 0 1-1V9.5" /></>,
+    clients:  <><circle cx="12" cy="8" r="3.4" /><path d="M5.5 20c0-3.6 3-6 6.5-6s6.5 2.4 6.5 6" /></>,
     calendar: <><rect x="4" y="5" width="16" height="16" rx="2.5" /><path d="M4 9.5h16M9 3v4M15 3v4" /></>,
-    sliders: <><path d="M5 8h9M19 8h0M5 16h0M10 16h9" /><circle cx="16.5" cy="8" r="2.2" /><circle cx="7.5" cy="16" r="2.2" /></>,
+    sliders:  <><path d="M5 8h9M19 8h0M5 16h0M10 16h9" /><circle cx="16.5" cy="8" r="2.2" /><circle cx="7.5" cy="16" r="2.2" /></>,
+    // Actions
+    edit:     <><path d="M11 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6" /><path d="M17.5 2.5a2.12 2.12 0 0 1 3 3L12 14l-4 1 1-4Z" /></>,
+    trash:    <><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" /><path d="M10 11v6M14 11v6" /></>,
+    check:    <path d="M20 6 9 17l-5-5" />,
+    plus:     <path d="M12 5v14M5 12h14" />,
+    close:    <path d="M18 6 6 18M6 6l12 12" />,
+    back:     <path d="M19 12H5M12 19l-7-7 7-7" />,
+    forward:  <path d="M5 12h14M12 5l7 7-7 7" />,
+    // Content
     download: <><path d="M12 4v11M8 11l4 4 4-4" /><path d="M5 20h14" /></>,
-    invoice: <><rect x="5" y="3" width="14" height="18" rx="2" /><path d="M9 8h6M9 12h6M9 16h3.5" /></>,
+    invoice:  <><rect x="5" y="3" width="14" height="18" rx="2" /><path d="M9 8h6M9 12h6M9 16h3.5" /></>,
+    phone:    <path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1-9.4 0-17-7.6-17-17 0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.3 0 .7-.2 1l-2.3 2.2z" />,
+    mail:     <><rect x="2" y="5" width="20" height="14" rx="2" /><path d="m2 8 10 7 10-7" /></>,
+    location: <><path d="M12 2C8.7 2 6 4.7 6 8c0 5 6 14 6 14s6-9 6-14c0-3.3-2.7-6-6-6z" /><circle cx="12" cy="8" r="2" /></>,
+    map:      <><path d="m3 7 6-3 6 3 6-3v13l-6 3-6-3-6 3V7z" /><path d="M9 4v13M15 7v13" /></>,
+    warning:  <><path d="m10.3 3.4-7.9 13.3A2 2 0 0 0 4.1 20h15.8a2 2 0 0 0 1.7-3.3L13.7 3.4a2 2 0 0 0-3.4 0z" /><path d="M12 9v4M12 17h.01" /></>,
+    info:     <><circle cx="12" cy="12" r="9" /><path d="M12 8h.01M12 12v4" /></>,
+    lock:     <><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></>,
+    eye:      <><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></>,
+    history:  <><path d="M12 8v4l3 3" /><path d="M3.05 11a9 9 0 1 0 .5-3M3 4v4h4" /></>,
+    link:     <><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></>,
+    message:  <><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></>,
+    request:  <><circle cx="12" cy="12" r="9" /><path d="M12 8v8M8 12h8" /></>,
+    refresh:  <><path d="M23 4v6h-6M1 20v-6h6" /><path d="M3.5 9A9 9 0 0 1 20.5 9M20.5 15A9 9 0 0 1 3.5 15" /></>,
+    settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></>,
+    tag:      <><path d="M20.6 11.3 12.7 3.4A2 2 0 0 0 11.3 3H5a2 2 0 0 0-2 2v6.3a2 2 0 0 0 .6 1.4l7.9 7.9a2 2 0 0 0 2.8 0l6.3-6.3a2 2 0 0 0 0-2.7z" /><circle cx="7.5" cy="7.5" r="1.5" /></>,
+    dollar:   <path d="M12 2v20M17 5H9.5a3.5 3.5 0 1 0 0 7h5a3.5 3.5 0 1 1 0 7H6" />,
+    clipboard:<><rect x="9" y="2" width="6" height="4" rx="1" /><path d="M8 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2h-2" /><path d="M9 12h6M9 16h4" /></>,
+    mobile:   <><rect x="7" y="2" width="10" height="20" rx="3" /><circle cx="12" cy="17" r="1" fill="currentColor" stroke="none" /></>,
+    chevronR: <path d="m9 18 6-6-6-6" />,
+    chevronD: <path d="m6 9 6 6 6-6" />,
   };
   return <svg {...common}>{paths[name] || null}</svg>;
 }
@@ -5658,7 +5688,7 @@ export default function App({ authEmail = "", onSignOut }) {
     return (
       <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: fontStack, background: T.bg, color: T.text }}>
         <div style={{ textAlign: "center", maxWidth: 340 }}>
-          <div style={{ fontSize: 40, marginBottom: 12 }}>🔒</div>
+          <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 14px" }}><Icon name="lock" size={32} /></div>
           <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 8 }}>No access yet</div>
           <div style={{ fontSize: 14, color: T.textMuted, marginBottom: 20, lineHeight: 1.5 }}>This app isn't set up for <b>{authEmail}</b>. Ask the owner to add this email under Team &amp; Logins.</div>
           <button onClick={onSignOut} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "12px 20px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button>
@@ -5706,8 +5736,8 @@ export default function App({ authEmail = "", onSignOut }) {
             </div>
           </div>
           <button onClick={() => handleNav("settings")}
-            style={{ background: page === "settings" ? hexA(T.primary, 0.12) : T.surfaceAlt, border: "none", color: page === "settings" ? T.primary : T.textMuted, fontSize: 17, cursor: "pointer", width: 36, height: 36, borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1 }}>
-            ⚙
+            style={{ background: page === "settings" ? hexA(T.primary, 0.12) : T.surfaceAlt, border: "none", color: page === "settings" ? T.primary : T.textMuted, cursor: "pointer", width: 36, height: 36, borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Icon name="settings" size={18} />
           </button>
           </div>
         </header>
@@ -5718,13 +5748,13 @@ export default function App({ authEmail = "", onSignOut }) {
             <span style={{ width: 22, height: 22, borderRadius: "50%", background: currentUser.role === "owner" ? T.primary : hexA(T.primary, 0.16), color: currentUser.role === "owner" ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 9.5, flexShrink: 0 }}>{initials(currentUser.name)}</span>
             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Signed in as <span style={{ color: T.text, fontWeight: 700 }}>{currentUser.name}</span> · {roleLabel(currentUser.role)}</span>
           </span>
-          <div style={{ display: "flex", gap: 12, flexShrink: 0, alignItems: "center" }}><button onClick={() => window.location.reload()} title="Sync" style={{ background: "none", border: "none", color: T.textMuted, fontSize: 16, cursor: "pointer", lineHeight: 1, padding: 0 }}>↻</button><button onClick={handleSignOut} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button></div>
+          <div style={{ display: "flex", gap: 12, flexShrink: 0, alignItems: "center" }}><button onClick={() => window.location.reload()} title="Sync" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 4, display:"flex", alignItems:"center" }}><Icon name="refresh" size={15} /></button><button onClick={handleSignOut} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button></div>
         </div>
 
         {dbError && (
           <div style={{ background: "#FEF3C7", borderBottom: "1px solid #F59E0B", padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: "#92400E" }}>
-            <span>⚠️ {dbError}</span>
-            <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 8, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>↻ Retry</button>
+            <span style={{ display:"flex", alignItems:"center", gap:6 }}><Icon name="warning" size={15} />{dbError}</span>
+            <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 8, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }} style={{ display:"flex", alignItems:"center", gap:5 }}>Retry</button>
           </div>
         )}
         <main style={{ flex: 1, padding: "22px 16px", maxWidth: 740, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
