@@ -201,6 +201,8 @@ function useStoredState(key, initial) {
   useEffect(() => {
     if (!loaded) return;
     store.set(key, JSON.stringify(value));
+    // Notify App of a save so the sync indicator can pulse
+    if (typeof window.__onSpsSync === "function") window.__onSpsSync();
   }, [key, value, loaded]);
   return [value, setValue, loaded];
 }
@@ -2939,6 +2941,12 @@ function ClientPortal({ client, invoices, schedule, branding }) {
     <>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
 
+        {/* Preview button — top so it's easy to find */}
+        <button onClick={() => setPreview(true)}
+          style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: T.primary, color: "#fff", border: "none", borderRadius: 14, padding: "14px", fontWeight: 800, fontSize: 15, cursor: "pointer", fontFamily: "inherit", boxShadow: `0 4px 16px ${hexA(T.primary, 0.3)}`, letterSpacing: "-0.01em" }}>
+          <Icon name="eye" size={18} /> Preview Portal as {firstName}
+        </button>
+
         {/* Invite card */}
         <Card>
           <div style={{ padding: "20px 20px" }}>
@@ -3043,12 +3051,7 @@ function ClientPortal({ client, invoices, schedule, branding }) {
           </div>
         </Card>
 
-        {/* Preview button */}
-        <Btn variant="ghost" onClick={() => setPreview(true)} block style={{ gap: 8 }}>
-          <Icon name="eye" size={15} /> Preview as {firstName}
-        </Btn>
-
-      </div>
+        </div>
 
       {preview && (
         <StaffClientPreview
@@ -3107,7 +3110,7 @@ function StaffClientPreview({ client, invoices, schedule, branding, onClose }) {
           onSignOut={onClose}
           onServiceRequest={() => {}}
           onApproveEstimate={() => {}}
-          onUpgradeRequest={handleUpgradeRequest}
+          onUpgradeRequest={() => {}}
           isStaffPreview={true}
         />
       </div>
@@ -7435,13 +7438,53 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
         ))}
       </div>
 
-      {activeTab === "catalog" && <CatalogManager catalog={catalog} setCatalog={setCatalog} />}
-      {activeTab === "email" && <EmailSettings email={email} setEmail={setEmail} branding={branding} setBranding={setBranding} />}
-      {activeTab === "invoicing" && <InvoiceSettings invoicing={invoicing} setInvoicing={setInvoicing} branding={branding} setBranding={setBranding} />}
-      {activeTab === "costs" && perms.seeCostsBudget && <CostSettings costs={costs} setCosts={setCosts} />}
-      {activeTab === "budget" && perms.seeCostsBudget && <BudgetManager budget={budget} setBudget={setBudget} clients={clients} costs={costs} />}
-      {activeTab === "schedule" && <ScheduleSettings cfg={scheduleCfg} setCfg={setScheduleCfg} />}
-      {activeTab === "tiers" && perms.isAdmin && <ServiceTiersManager tiers={serviceTiers || DEFAULT_TIERS} setTiers={setServiceTiers} clients={clients} setClients={setClients} T={T} />}
+      {activeTab === "services" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
+          {perms.editCatalog && <>
+            <div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", marginBottom: 2 }}>Service Catalog</div>
+              <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 14 }}>Stop types, services, products, treatments, and water tests.</div>
+              <CatalogManager catalog={catalog} setCatalog={setCatalog} />
+            </div>
+          </>}
+          {perms.isAdmin && <>
+            <div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", marginBottom: 2 }}>Service Tiers</div>
+              <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 14 }}>Plan benefits, pricing, and upgrade paths shown in the client portal.</div>
+              <ServiceTiersManager tiers={serviceTiers || DEFAULT_TIERS} setTiers={setServiceTiers} clients={clients} setClients={setClients} T={T} />
+            </div>
+          </>}
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", marginBottom: 2 }}>Schedule Settings</div>
+            <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 14 }}>Sort order, stop density, and what appears on each stop card.</div>
+            <ScheduleSettings cfg={scheduleCfg} setCfg={setScheduleCfg} />
+          </div>
+        </div>
+      )}
+      {activeTab === "business" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
+          {(perms.editSettings || perms.canInvoice) && <div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", marginBottom: 2 }}>Invoicing</div>
+            <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 14 }}>Invoice numbering, tax rate, payment terms, and QuickBooks link.</div>
+            <InvoiceSettings invoicing={invoicing} setInvoicing={setInvoicing} branding={branding} setBranding={setBranding} />
+          </div>}
+          {perms.editSettings && <div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", marginBottom: 2 }}>Messaging & Notifications</div>
+            <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 14 }}>On My Way texts, email templates, and client notification messages.</div>
+            <EmailSettings email={email} setEmail={setEmail} branding={branding} setBranding={setBranding} />
+          </div>}
+          {perms.seeCostsBudget && <div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", marginBottom: 2 }}>Costs & Labor</div>
+            <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 14 }}>Hourly rate, overhead, gas, and per-stop cost assumptions.</div>
+            <CostSettings costs={costs} setCosts={setCosts} />
+          </div>}
+          {perms.seeCostsBudget && <div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", marginBottom: 2 }}>Budget & Targets</div>
+            <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 14 }}>Monthly revenue goals and profitability tracking.</div>
+            <BudgetManager budget={budget} setBudget={setBudget} clients={clients} costs={costs} />
+          </div>}
+        </div>
+      )}
       {activeTab === "team" && perms.isAdmin && <TeamManager team={team} setTeam={setTeam} currentUserId={currentUserId} />}
       {activeTab === "branding" && <>
 
@@ -10746,6 +10789,27 @@ export default function App({ authEmail = "", onSignOut }) {
   CP_TIERS = serviceTiers || DEFAULT_TIERS;
   const [routeAssignments, setRouteAssignments, lra] = useStoredState("sps_route_assignments", []);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [syncState, setSyncState] = useState("idle"); // idle | syncing | saved
+  const syncTimer = useRef(null);
+
+  // Trigger a visible sync pulse whenever any stored state saves
+  const triggerSync = () => {
+    setSyncState("syncing");
+    clearTimeout(syncTimer.current);
+    syncTimer.current = setTimeout(() => setSyncState("saved"), 800);
+    setTimeout(() => setSyncState("idle"), 2400);
+  };
+
+  const manualSync = () => {
+    triggerSync();
+    setTimeout(() => window.location.reload(), 300);
+  };
+
+  // Register global sync hook so useStoredState can notify us
+  useEffect(() => {
+    window.__onSpsSync = triggerSync;
+    return () => { window.__onSpsSync = null; };
+  }, []);
 
   // Ensure dock only contains pages the user has permission to see
   const dockIds = (navDock || DEFAULT_DOCK).filter(id => {
@@ -10925,6 +10989,7 @@ export default function App({ authEmail = "", onSignOut }) {
       <div style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif', background: T.primary, minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#fff", WebkitFontSmoothing: "antialiased" }}>
         <style>{`
           @keyframes spin { to { transform: rotate(360deg); } }
+          @keyframes syncPulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
           @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
           .splash-logo { animation: fadeUp 0.5s ease both; }
           .splash-name { animation: fadeUp 0.5s ease 0.15s both; }
@@ -11030,17 +11095,30 @@ export default function App({ authEmail = "", onSignOut }) {
               <div style={{ fontSize: 11, color: T.textMuted, letterSpacing: "0.01em" }}>{branding.division}</div>
             </div>
           </div>
-          <button onClick={() => setMenuOpen(true)}
-            style={{ background: menuOpen ? hexA(T.primary, 0.12) : T.surfaceAlt, border: "none", color: menuOpen ? T.primary : T.textMuted, cursor: "pointer", width: 36, height: 36, borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
-            <Icon name="sliders" size={18} />
-            {navUnread > 0 && !dockIds.includes("messages") && (
-              <span style={{ position: "absolute", top: 6, right: 6, width: 7, height: 7, borderRadius: "50%", background: T.primary, border: `1.5px solid ${T.surface}` }} />
-            )}
-          </button>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            {/* Sync button */}
+            <button onClick={manualSync} title="Sync"
+              style={{ background: T.surfaceAlt, border: "none", color: syncState === "saved" ? "#16a34a" : T.textMuted, cursor: "pointer", width: 36, height: 36, borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", transition: "color 0.3s" }}>
+              <Icon name="refresh" size={16} style={{ animation: syncState === "syncing" ? "spin 0.7s linear infinite" : "none" }} />
+            </button>
+            {/* Menu button */}
+            <button onClick={() => setMenuOpen(true)}
+              style={{ background: menuOpen ? hexA(T.primary, 0.12) : T.surfaceAlt, border: "none", color: menuOpen ? T.primary : T.textMuted, cursor: "pointer", width: 36, height: 36, borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
+              <Icon name="sliders" size={18} />
+              {navUnread > 0 && !dockIds.includes("messages") && (
+                <span style={{ position: "absolute", top: 6, right: 6, width: 7, height: 7, borderRadius: "50%", background: T.primary, border: `1.5px solid ${T.surface}` }} />
+              )}
+            </button>
+          </div>
           </div>
         </header>
 
 
+
+        {/* Sync indicator strip — minimal, non-intrusive */}
+        {syncState !== "idle" && (
+          <div style={{ height: 2, background: syncState === "syncing" ? T.primary : "#16a34a", transition: "background 0.3s", animation: syncState === "syncing" ? "syncPulse 0.8s ease-in-out" : "none" }} />
+        )}
 
         {dbError && (
           <div style={{ background: hexA("#F59E0B", 0.1), borderBottom: `1px solid ${hexA("#F59E0B", 0.3)}`, padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: T.text }}>
