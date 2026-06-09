@@ -2138,7 +2138,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, schedule, o
 
   return (
     <div>
-      <button onClick={onBack} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", padding: "0 0 16px", display: "flex", alignItems: "center", gap: 4 }}>← Back to Clients</button>
+      <button onClick={() => { onBack(); window.scrollTo({ top: 0, behavior: "instant" }); }} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", padding: "0 0 16px", display: "flex", alignItems: "center", gap: 4 }}>← Back to Clients</button>
 
       <Card style={{ marginBottom: 14, overflow: "hidden" }}>
         {/* Color accent bar at top */}
@@ -10099,7 +10099,7 @@ function OverflowMenu({ page, perms, navUnread, dockIds, setDockIds, onNav, onSi
 
 const CLIENT_NAV = [
   { id: "cp_home",      label: "Home",       icon: "home" },
-  { id: "cp_property",  label: "My Property",icon: "pond" },   // combined pond + service
+  { id: "cp_property",  label: "My Property", icon: "pond" },  // combined pond + service — label overridden by pondLabel()
   { id: "cp_messages",  label: "Messages",   icon: "message" },
   { id: "cp_invoices",  label: "Invoices",   icon: "invoice" },
 ];
@@ -10607,7 +10607,7 @@ function CPProperty({ client, branding, onNav, onUpgradeRequest, T }) {
       {/* Page title */}
       <div>
         <div style={{ fontSize:26, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>{pondLbl}</div>
-        <div style={{ fontSize:14, color:T.textMuted, marginTop:3 }}>{client.division} · {client.pondType || m.typeOptions[0]}</div>
+        <div style={{ fontSize:14, color:T.textMuted, marginTop:3 }}>{client.division} Division · {client.pondType || m.typeOptions[0]}</div>
       </div>
 
       {/* Service plan card — tappable */}
@@ -10630,7 +10630,7 @@ function CPProperty({ client, branding, onNav, onUpgradeRequest, T }) {
       {/* Site details */}
       {(client.pondGallons || client.pondType || client.pondSize) && (
         <div style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, padding:"16px 18px" }}>
-          <div style={{ fontSize:13, fontWeight:800, color:T.text, marginBottom:12 }}>{m.siteLabel} Details</div>
+          <div style={{ fontSize:13, fontWeight:800, color:T.text, marginBottom:12 }}>{client.division === "Pond" ? "Pond" : client.division === "Pool" ? "Pool" : "Property"} Details</div>
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
             {[[m.typeLabel, client.pondType],[m.sizeLabel, client.pondSize || client.pondGallons]].filter(([,v])=>v).map(([k,v]) => (
               <div key={k}>
@@ -11450,20 +11450,18 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
                 <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
               </svg>
             </button>
-            {/* Settings gear */}
-            {!isStaffPreview && (
-              <button onClick={() => setSettingsOpen(s => !s)}
-                style={{ width: 34, height: 34, borderRadius: 10, background: settingsOpen ? hexA(T.primary, 0.12) : T.surfaceAlt, border: "none", color: settingsOpen ? T.primary : T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <Icon name="settings" size={16} />
-              </button>
-            )}
+            {/* Settings gear — always visible */}
+            <button onClick={() => setSettingsOpen(s => !s)}
+              style={{ width: 34, height: 34, borderRadius: 10, background: settingsOpen ? hexA(T.primary, 0.12) : T.surfaceAlt, border: "none", color: settingsOpen ? T.primary : T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Icon name="settings" size={16} />
+            </button>
           </div>
         </div>
       </header>
 
       {/* Main content */}
       <main style={{ flex: 1, padding: "24px 18px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))", fontSize: `${textScale}em` }}>
-        {settingsOpen && !isStaffPreview && (
+        {settingsOpen && (
           <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
         )}
         {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} onNav={setPage} T={T} />}
@@ -11762,7 +11760,7 @@ export default function App({ authEmail = "", onSignOut }) {
     });
   }, [ltm, emailKey, currentUser, anyEmail]);
 
-  const handleClientSelect = (c) => { setSelectedClient(c); setAdding(false); setPage("clients"); };
+  const handleClientSelect = (c) => { setSelectedClient(c); setAdding(false); setPage("clients"); window.scrollTo({ top: 0, behavior: "instant" }); };
   const handleNav = (id) => { setPage(id); setSelectedClient(null); setAdding(false); };
 
   const handleSaveNewClient = (form) => {
