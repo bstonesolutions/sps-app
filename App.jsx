@@ -11344,7 +11344,6 @@ function LoginScreen({ team, branding, T, fontStack, onSignIn }) {
 }
 
 export default function App({ authEmail = "", onSignOut }) {
-  const [page, setPage] = useState(branding.staffDefaultPage || "dashboard");
   const [selectedClient, setSelectedClient] = useState(null);
   const [adding, setAdding] = useState(false);
   const [scheduleSeed, setScheduleSeed] = useState(null);
@@ -11352,6 +11351,7 @@ export default function App({ authEmail = "", onSignOut }) {
   // Persistent data — survives reloads and app updates
   const [clients, setClients, lc] = useStoredState("sps_clients", DEMO_CLIENTS);
   const [branding, setBranding, lb] = useStoredState("sps_branding", DEFAULT_BRANDING);
+  const [page, setPage] = useState(DEFAULT_BRANDING.staffDefaultPage || "dashboard");
   const [schedule, setSchedule, ls] = useStoredState("sps_schedule", DEFAULT_SCHEDULE);
   const [catalog, setCatalog, lcat] = useStoredState("sps_catalog", DEFAULT_CATALOG);
   const [email, setEmail, lem] = useStoredState("sps_email", DEFAULT_EMAIL);
