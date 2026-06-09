@@ -419,7 +419,17 @@ const DEFAULT_BRANDING = {
   portalTagline: "",
   accentColor: "",
   splashTagline: "",
+  splashBgColor: "",       // custom bg color — defaults to T.primary if blank
+  splashBgColor2: "",      // second gradient color — defaults to darkened primary
+  splashBgStyle: "gradient", // "gradient" | "solid" | "image"
+  splashBgImage: "",       // full-bleed background image
+  splashLogoOverride: "",  // separate logo just for splash — defaults to main logo
+  splashTextColor: "light", // "light" | "dark"
+  splashShowGreeting: "true", // "true" | "false"
   portalCenterBtn: "cp_request",
+  portalHeroImage: "",
+  staffDefaultPage: "dashboard",
+  portalDefaultPage: "cp_home",
 };
 
 // Schedule layout preferences
@@ -7321,7 +7331,7 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
           const count = (clients || []).filter(c => c.plan === key).length;
           const active = selected === key;
           return (
-            <button key={key} onClick={() => { setSelected(key); setBulkPrices({}); setBulkSaved(false); setConfirmBulk(false); }}
+            <button key={key} onClick={() => { setSelected(key); setBulkPrices({}); setBulkPlans({}); setBulkSaved(false); setConfirmBulk(false); }}
               style={{ flex: 1, padding: "12px 8px", border: `2px solid ${active ? (t.color || T.primary) : T.border}`, borderRadius: 16, background: active ? hexA(t.color || T.primary, 0.08) : T.surface, cursor: "pointer", fontFamily: "inherit", textAlign: "center", transition: "all 0.15s" }}>
               <div style={{ width: 10, height: 10, borderRadius: "50%", background: t.color || T.primary, margin: "0 auto 6px" }} />
               <div style={{ fontSize: 13, fontWeight: 800, color: active ? (t.color || T.primary) : T.text }}>{key}</div>
@@ -7406,8 +7416,17 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
                 <button onClick={addInclude} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "8px 14px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Add</button>
               </div>
             </div>
-            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>Tap any line to edit. Drag arrows to reorder. Press Enter to confirm.</div>
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>Tap any line to edit. Arrows to reorder. Enter to confirm.</div>
           </div>
+
+          {/* Bottom save button */}
+          <button onClick={saveTierDraft}
+            style={{ width: "100%", background: unsaved ? T.primary : T.surfaceAlt, color: unsaved ? "#fff" : T.textMuted, border: "none", borderRadius: 14, padding: "14px", fontWeight: 800, fontSize: 15, cursor: "pointer", fontFamily: "inherit", transition: "all 0.2s", boxShadow: unsaved ? `0 4px 14px ${hexA(T.primary, 0.3)}` : "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+            {tierSaved && !unsaved
+              ? <><svg viewBox="0 0 24 24" width={17} height={17} fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"><path d="M20 6L9 17l-5-5"/></svg> {selected} Saved</>
+              : `Save ${selected} Tier`
+            }
+          </button>
         </div>
       </Card>
 
@@ -7466,7 +7485,7 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
                     <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 16px", borderBottom: i < tierClients.length - 1 ? `1px solid ${T.border}` : "none", background: changed ? hexA(T.primary, 0.03) : "transparent" }}>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{c.name}</div>
-                        <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{c.planFreq || "—"} · {c.address || "No address"}</div>
+                        <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{TIER_FREQ[c.plan] || c.planFreq || "—"} · {c.address || "No address"}</div>
                       </div>
                       <div style={{ position: "relative", width: 110, flexShrink: 0 }}>
                         <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: T.textMuted, fontSize: 14 }}>$</span>
@@ -7498,7 +7517,7 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
                     Update {Object.keys(bulkPrices).length} client{Object.keys(bulkPrices).length !== 1 ? "s" : ""}?
                   </div>
                   <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 14, lineHeight: 1.5 }}>
-                    This updates the monthly rate on each client record. It doesn't automatically generate invoices — use auto-invoice settings per client for that.
+                    Updates monthly rates and plan assignments on each client record. Plan changes also update their service frequency. Doesn't generate invoices automatically.
                   </div>
                   <div style={{ display: "flex", gap: 10 }}>
                     <button onClick={applyBulkPrices}
@@ -7662,16 +7681,179 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
           <FieldRow label="Division / Tagline">
             <Input value={localBranding.division} onChange={e => set("division", e.target.value)} placeholder="Pond · Pool · Seasonal" />
           </FieldRow>
-          <FieldRow label="Loading Screen Tagline">
-            <Input
-              value={localBranding.splashTagline || ""}
-              onChange={e => set("splashTagline", e.target.value)}
-              placeholder={localBranding.division || "Pond · Pool · Seasonal"}
-            />
-            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5, lineHeight: 1.5 }}>
-              Shows under your logo when the app loads. If blank, uses the Division / Tagline above.
+          <FieldRow label="Staff Default Landing Page">
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {[
+                ["dashboard", "Home / Dashboard"],
+                ["schedule",  "Schedule"],
+                ["clients",   "Clients"],
+                ["invoices",  "Invoices"],
+                ["inventory", "Inventory"],
+                ["reports",   "Reports"],
+              ].map(([v, l]) => {
+                const active = (localBranding.staffDefaultPage || "dashboard") === v;
+                return (
+                  <button key={v} onClick={() => set("staffDefaultPage", v)}
+                    style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 14px", border: `1.5px solid ${active ? T.primary : T.border}`, borderRadius: 12, background: active ? hexA(T.primary, 0.06) : T.surface, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%", boxSizing: "border-box" }}>
+                    <div style={{ width: 8, height: 8, borderRadius: "50%", background: active ? T.primary : T.border, flexShrink: 0 }} />
+                    <span style={{ fontSize: 13, fontWeight: active ? 700 : 500, color: active ? T.primary : T.text }}>{l}</span>
+                    {active && <Icon name="check" size={14} style={{ marginLeft: "auto", color: T.primary }} />}
+                  </button>
+                );
+              })}
             </div>
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>The page staff land on after the splash screen.</div>
           </FieldRow>
+          {/* ── LOADING SCREEN CUSTOMIZER ── */}
+          <div style={{ background: T.surfaceAlt, borderRadius: 16, overflow: "hidden", border: `1px solid ${T.border}` }}>
+            <div style={{ padding: "12px 16px 10px", borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>Loading Screen</div>
+              <div style={{ fontSize: 11, color: T.textMuted }}>Live preview below</div>
+            </div>
+
+            {/* LIVE PREVIEW */}
+            {(() => {
+              const bg1 = localBranding.splashBgColor || T.primary;
+              const bg2 = localBranding.splashBgColor2 || mix(bg1, "#000", 0.3);
+              const style = localBranding.splashBgStyle || "gradient";
+              const textColor = localBranding.splashTextColor === "dark" ? "rgba(0,0,0,0.85)" : "#fff";
+              const tagline = (localBranding.splashTagline || "").trim() || (localBranding.division || "").trim() || "Field Operations";
+              const logoSrc = localBranding.splashLogoOverride || (localBranding.logoType === "image" ? localBranding.logoImage : null);
+              return (
+                <div style={{ margin: "14px 16px", borderRadius: 16, overflow: "hidden", height: 180, position: "relative", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6,
+                  background: style === "gradient" ? `linear-gradient(160deg, ${bg1} 0%, ${bg2} 100%)`
+                    : style === "solid" ? bg1
+                    : style === "image" && localBranding.splashBgImage ? `url(${localBranding.splashBgImage}) center/cover` : `linear-gradient(160deg, ${bg1} 0%, ${bg2} 100%)`,
+                }}>
+                  {style === "image" && localBranding.splashBgImage && <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.35)" }} />}
+                  <div style={{ position: "relative", display: "flex", flexDirection: "column", alignItems: "center", gap: 5 }}>
+                    {logoSrc ? <img src={logoSrc} style={{ width: 44, height: 44, borderRadius: 12, objectFit: "cover" }} alt="logo" />
+                      : <div style={{ width: 44, height: 44, borderRadius: 12, background: "rgba(255,255,255,0.2)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 }}>{localBranding.logoEmoji || "💧"}</div>}
+                    <div style={{ fontSize: 14, fontWeight: 900, color: textColor, letterSpacing: "-0.02em" }}>{localBranding.companyName || "Company Name"}</div>
+                    <div style={{ fontSize: 10, color: textColor, opacity: 0.7 }}>{tagline}</div>
+                    {(localBranding.splashShowGreeting !== "false") && (
+                      <div style={{ marginTop: 8, background: "rgba(255,255,255,0.15)", borderRadius: 100, padding: "5px 14px", backdropFilter: "blur(8px)" }}>
+                        <span style={{ fontSize: 10, fontWeight: 700, color: textColor }}>Good morning, Brandon.</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
+            <div style={{ padding: "12px 16px", display: "flex", flexDirection: "column", gap: 12 }}>
+              {/* Tagline */}
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 }}>Tagline</label>
+                <Input value={localBranding.splashTagline || ""} onChange={e => set("splashTagline", e.target.value)} placeholder={localBranding.division || "e.g. The SPS Way"} />
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4 }}>If blank, uses Division / Tagline above.</div>
+              </div>
+
+              {/* Background style */}
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 }}>Background Style</label>
+                <div style={{ display: "flex", gap: 6 }}>
+                  {[["gradient","Gradient"],["solid","Solid"],["image","Image"]].map(([v,l]) => (
+                    <button key={v} onClick={() => set("splashBgStyle", v)}
+                      style={{ flex: 1, padding: "8px 6px", border: `1.5px solid ${(localBranding.splashBgStyle||"gradient")===v ? T.primary : T.border}`, borderRadius: 10, background: (localBranding.splashBgStyle||"gradient")===v ? hexA(T.primary,0.08) : T.surface, color: (localBranding.splashBgStyle||"gradient")===v ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                      {l}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Colors */}
+              {(localBranding.splashBgStyle || "gradient") !== "image" && (
+                <div style={{ display: "grid", gridTemplateColumns: (localBranding.splashBgStyle||"gradient") === "gradient" ? "1fr 1fr" : "1fr", gap: 10 }}>
+                  <div>
+                    <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 }}>
+                      {(localBranding.splashBgStyle||"gradient") === "gradient" ? "Color 1" : "Background Color"}
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", background: T.surface, borderRadius: 10, border: `1px solid ${T.border}`, cursor: "pointer" }}>
+                      <span style={{ width: 28, height: 28, borderRadius: 8, background: localBranding.splashBgColor || T.primary, display: "block", flexShrink: 0, border: `1px solid ${T.border}`, position: "relative", overflow: "hidden" }}>
+                        <input type="color" value={localBranding.splashBgColor || T.primary} onChange={e => set("splashBgColor", e.target.value)} style={{ position: "absolute", inset: -4, width: 40, height: 40, border: "none", cursor: "pointer" }} />
+                      </span>
+                      <span style={{ fontSize: 12, color: T.text, fontFamily: "monospace" }}>{(localBranding.splashBgColor || T.primary).toUpperCase()}</span>
+                      {localBranding.splashBgColor && <button onClick={() => set("splashBgColor", "")} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 10, cursor: "pointer", marginLeft: "auto", fontFamily: "inherit" }}>Reset</button>}
+                    </label>
+                  </div>
+                  {(localBranding.splashBgStyle||"gradient") === "gradient" && (
+                    <div>
+                      <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 }}>Color 2</label>
+                      <label style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", background: T.surface, borderRadius: 10, border: `1px solid ${T.border}`, cursor: "pointer" }}>
+                        <span style={{ width: 28, height: 28, borderRadius: 8, background: localBranding.splashBgColor2 || mix(localBranding.splashBgColor || T.primary, "#000", 0.3), display: "block", flexShrink: 0, border: `1px solid ${T.border}`, position: "relative", overflow: "hidden" }}>
+                          <input type="color" value={localBranding.splashBgColor2 || mix(localBranding.splashBgColor || T.primary, "#000", 0.3)} onChange={e => set("splashBgColor2", e.target.value)} style={{ position: "absolute", inset: -4, width: 40, height: 40, border: "none", cursor: "pointer" }} />
+                        </span>
+                        <span style={{ fontSize: 12, color: T.text, fontFamily: "monospace" }}>{(localBranding.splashBgColor2 || mix(localBranding.splashBgColor || T.primary, "#000", 0.3)).toUpperCase()}</span>
+                        {localBranding.splashBgColor2 && <button onClick={() => set("splashBgColor2", "")} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 10, cursor: "pointer", marginLeft: "auto", fontFamily: "inherit" }}>Reset</button>}
+                      </label>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Background image upload */}
+              {(localBranding.splashBgStyle||"gradient") === "image" && (
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 }}>Background Image</label>
+                  {localBranding.splashBgImage ? (
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <img src={localBranding.splashBgImage} style={{ width: 56, height: 40, objectFit: "cover", borderRadius: 8, border: `1px solid ${T.border}` }} alt="bg" />
+                      <div style={{ flex: 1, fontSize: 12, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Background set</div>
+                      <button onClick={() => set("splashBgImage", "")} style={{ background: "none", border: "none", color: "#E5484D", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Remove</button>
+                    </div>
+                  ) : (
+                    <label style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 14px", border: `1.5px dashed ${T.border}`, borderRadius: 10, cursor: "pointer" }}>
+                      <Icon name="plus" size={15} /><span style={{ fontSize: 13, color: T.textMuted }}>Upload background image</span>
+                      <input type="file" accept="image/*" style={{ display: "none" }} onChange={e => { const f = e.target.files[0]; if (!f) return; const r = new FileReader(); r.onload = ev => set("splashBgImage", ev.target.result); r.readAsDataURL(f); e.target.value = ""; }} />
+                    </label>
+                  )}
+                </div>
+              )}
+
+              {/* Splash logo override */}
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 }}>Splash Logo <span style={{ textTransform: "none", fontWeight: 400 }}>(optional — defaults to main logo)</span></label>
+                {localBranding.splashLogoOverride ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <img src={localBranding.splashLogoOverride} style={{ width: 44, height: 44, objectFit: "cover", borderRadius: 10, border: `1px solid ${T.border}` }} alt="splash logo" />
+                    <button onClick={() => set("splashLogoOverride", "")} style={{ background: "none", border: "none", color: "#E5484D", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Remove override</button>
+                  </div>
+                ) : (
+                  <label style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 14px", border: `1.5px dashed ${T.border}`, borderRadius: 10, cursor: "pointer" }}>
+                    <Icon name="plus" size={15} /><span style={{ fontSize: 13, color: T.textMuted }}>Upload a different logo for splash</span>
+                    <input type="file" accept="image/*" style={{ display: "none" }} onChange={e => { const f = e.target.files[0]; if (!f) return; const r = new FileReader(); r.onload = ev => set("splashLogoOverride", ev.target.result); r.readAsDataURL(f); e.target.value = ""; }} />
+                  </label>
+                )}
+              </div>
+
+              {/* Text color + greeting toggle */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 }}>Text Color</label>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {[["light","Light"],["dark","Dark"]].map(([v,l]) => (
+                      <button key={v} onClick={() => set("splashTextColor", v)}
+                        style={{ flex: 1, padding: "8px", border: `1.5px solid ${(localBranding.splashTextColor||"light")===v ? T.primary : T.border}`, borderRadius: 10, background: (localBranding.splashTextColor||"light")===v ? hexA(T.primary,0.08) : T.surface, color: (localBranding.splashTextColor||"light")===v ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                        {l}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 }}>Greeting</label>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {[["true","On"],["false","Off"]].map(([v,l]) => (
+                      <button key={v} onClick={() => set("splashShowGreeting", v)}
+                        style={{ flex: 1, padding: "8px", border: `1.5px solid ${(localBranding.splashShowGreeting||"true")===v ? T.primary : T.border}`, borderRadius: 10, background: (localBranding.splashShowGreeting||"true")===v ? hexA(T.primary,0.08) : T.surface, color: (localBranding.splashShowGreeting||"true")===v ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                        {l}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
 
           {/* Logo type */}
           <FieldRow label="Logo">
@@ -8055,6 +8237,33 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
                   style={{ width: 28, height: 28, borderRadius: 7, background: p.hex, border: `2.5px solid ${(localBranding.accentColor || T.primary) === p.hex ? T.text : "transparent"}`, cursor: "pointer", boxShadow: "0 1px 3px rgba(0,0,0,0.15)", flexShrink: 0 }} />
               ))}
               <button onClick={() => set("accentColor", "")} style={{ width: 28, height: 28, borderRadius: 7, background: T.surface, border: `1.5px solid ${T.border}`, cursor: "pointer", fontSize: 10, color: T.textMuted, fontFamily: "inherit" }}>Reset</button>
+            </div>
+          </div>
+
+          {/* Default landing page for clients */}
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Client Default Landing Page</div>
+            <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 10, lineHeight: 1.5 }}>Which screen clients see first every time they open their portal.</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {[
+                { id: "cp_home",     label: "Home",           sub: "Dashboard overview (default)" },
+                { id: "cp_service",  label: "My Service Plan",sub: "Plan details and upgrade" },
+                { id: "cp_pond",     label: "My Pond / Property", sub: "Pond details and history" },
+                { id: "cp_invoices", label: "Invoices",       sub: "Balance and payment history" },
+              ].map(opt => {
+                const active = (localBranding.portalDefaultPage || "cp_home") === opt.id;
+                return (
+                  <button key={opt.id} onClick={() => set("portalDefaultPage", opt.id)}
+                    style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 14px", border: `1.5px solid ${active ? T.primary : T.border}`, borderRadius: 12, background: active ? hexA(T.primary, 0.06) : T.surface, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%", boxSizing: "border-box" }}>
+                    <div style={{ width: 8, height: 8, borderRadius: "50%", background: active ? T.primary : T.border, flexShrink: 0 }} />
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: active ? T.primary : T.text }}>{opt.label}</div>
+                      <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{opt.sub}</div>
+                    </div>
+                    {active && <Icon name="check" size={14} style={{ color: T.primary, flexShrink: 0 }} />}
+                  </button>
+                );
+              })}
             </div>
           </div>
 
@@ -9766,6 +9975,13 @@ const CLIENT_NAV = [
   { id: "cp_request",   label: "Request",    icon: "plus" },
 ];
 
+// Tier → frequency mapping (single source of truth)
+const TIER_FREQ = {
+  "Essential":  "Monthly",
+  "Signature":  "Bi-Weekly",
+  "Premium":    "Weekly",
+};
+
 const DEFAULT_TIERS = {
   "Essential": {
     color: "#6B7280",
@@ -10232,22 +10448,44 @@ function CPService({ client, branding, onNav, onUpgradeRequest, T }) {
         <div style={{ fontSize: 14, color: T.textMuted, marginTop: 4 }}>Your current plan with {branding.companyName}</div>
       </div>
 
-      {/* Current plan hero */}
-      <div style={{ background: `linear-gradient(145deg, ${tierColor} 0%, ${mix(tierColor, "#000", 0.28)} 100%)`, borderRadius: 26, padding: "28px 24px", color: "#fff", boxShadow: `0 12px 40px ${hexA(tierColor, 0.4)}`, position: "relative", overflow: "hidden" }}>
+      {/* Current plan hero — with optional image or logo */}
+      <div style={{ background: `linear-gradient(145deg, ${tierColor} 0%, ${mix(tierColor, "#000", 0.28)} 100%)`, borderRadius: 26, padding: "28px 24px", color: "#fff", boxShadow: `0 12px 40px ${hexA(tierColor, 0.4)}`, position: "relative", overflow: "hidden", minHeight: 140 }}>
+        {/* Background image (pond photo or branding) */}
+        {(branding.portalHeroImage || client.sitePhotos?.[0]?.src || (typeof client.sitePhotos?.[0] === "string" ? client.sitePhotos[0] : null)) && (
+          <div style={{ position: "absolute", inset: 0, backgroundImage: `url(${branding.portalHeroImage || (typeof client.sitePhotos[0] === "string" ? client.sitePhotos[0] : client.sitePhotos[0]?.src)})`, backgroundSize: "cover", backgroundPosition: "center", opacity: 0.22 }} />
+        )}
         <div style={{ position: "absolute", right: -30, top: -30, width: 180, height: 180, borderRadius: "50%", background: "rgba(255,255,255,0.06)" }} />
         <div style={{ position: "absolute", left: -20, bottom: -30, width: 130, height: 130, borderRadius: "50%", background: "rgba(255,255,255,0.04)" }} />
 
         <div style={{ position: "relative" }}>
-          <div style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.12em", opacity: 0.7, marginBottom: 8 }}>Current Plan</div>
-          <div style={{ fontSize: 36, fontWeight: 900, letterSpacing: "-0.03em", lineHeight: 1 }}>{plan}</div>
-          <div style={{ fontSize: 14, opacity: 0.8, marginTop: 8, fontWeight: 500 }}>{tier?.tagline}</div>
-
-          {client.planFreq && (
-            <div style={{ marginTop: 18, display: "inline-flex", alignItems: "center", gap: 8, background: "rgba(255,255,255,0.15)", borderRadius: 12, padding: "8px 16px", backdropFilter: "blur(8px)" }}>
-              <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="#fff" strokeWidth={2} strokeLinecap="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
-              <span style={{ fontSize: 13, fontWeight: 700 }}>{client.planFreq} service</span>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.12em", opacity: 0.7, marginBottom: 8 }}>Current Plan</div>
+              <div style={{ fontSize: 36, fontWeight: 900, letterSpacing: "-0.03em", lineHeight: 1 }}>{plan}</div>
+              <div style={{ fontSize: 14, opacity: 0.8, marginTop: 8, fontWeight: 500 }}>{tier?.tagline}</div>
             </div>
-          )}
+            {/* Logo or branded icon */}
+            {(branding.logoImage || branding.logoEmoji) && (
+              <div style={{ width: 48, height: 48, borderRadius: 14, background: "rgba(255,255,255,0.2)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, backdropFilter: "blur(8px)" }}>
+                {branding.logoType === "image" && branding.logoImage
+                  ? <img src={branding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  : <span style={{ fontSize: 24 }}>{branding.logoEmoji}</span>}
+              </div>
+            )}
+          </div>
+          {/* Price + frequency pills */}
+          <div style={{ marginTop: 16, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {(client.monthlyRate || tier?.price) && (
+              <div style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.2)", borderRadius: 100, padding: "7px 16px", backdropFilter: "blur(8px)" }}>
+                <svg viewBox="0 0 24 24" width={13} height={13} fill="none" stroke="#fff" strokeWidth={2} strokeLinecap="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+                <span style={{ fontSize: 13, fontWeight: 800 }}>{client.monthlyRate ? `$${parseFloat(client.monthlyRate).toLocaleString()}/mo` : tier?.price}</span>
+              </div>
+            )}
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.15)", borderRadius: 100, padding: "7px 16px", backdropFilter: "blur(8px)" }}>
+              <svg viewBox="0 0 24 24" width={13} height={13} fill="none" stroke="#fff" strokeWidth={2} strokeLinecap="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+              <span style={{ fontSize: 13, fontWeight: 700 }}>{TIER_FREQ[plan] || client.planFreq || "—"}</span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -10394,7 +10632,25 @@ function CPPond({ client, T }) {
                 <div style={{ fontSize: 10, color: T.textMuted, marginTop: 4, fontWeight: 600, lineHeight: 1.3 }}>{s.label}</div>
               </div>
             ))}
+
           </div>
+
+          {/* Plan + price card */}
+          {(client.monthlyRate || client.plan) && (
+            <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, padding: "15px 18px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 3 }}>Service Plan</div>
+                <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>{client.plan || "—"}</div>
+                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>{TIER_FREQ[client.plan] || client.planFreq || "—"} service</div>
+              </div>
+              {client.monthlyRate && (
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 3 }}>Monthly</div>
+                  <div style={{ fontSize: 22, fontWeight: 900, color: T.primary, letterSpacing: "-0.02em" }}>${parseFloat(client.monthlyRate).toLocaleString()}</div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Pond details card */}
           {(client.pondGallons || client.pondType || client.pondSize || client.division) && (
@@ -10613,6 +10869,111 @@ function CPPond({ client, T }) {
 // Keep CPHistory as an alias for backward compat
 function CPHistory({ client, T }) { return <CPPond client={client} T={T} />; }
 
+// ── CP INVOICES ──
+function CPInvoices({ client, invoices, branding, T }) {
+  const myInvoices = (invoices || []).filter(iv => String(iv.clientId) === String(client.id));
+  const [open, setOpen] = useState(null);
+
+  const statusColor = (s) => s === "paid" ? "#16a34a" : s === "overdue" ? "#E5484D" : "#d97706";
+  const statusBg    = (s) => s === "paid" ? hexA("#16a34a",0.1) : s === "overdue" ? hexA("#E5484D",0.1) : hexA("#d97706",0.1);
+  const statusLabel = (s) => s === "paid" ? "Paid" : s === "overdue" ? "Overdue" : "Due";
+
+  if (!myInvoices.length) return (
+    <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
+      <div style={{ fontSize:26, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>Invoices</div>
+      <div style={{ textAlign:"center", padding:"56px 20px" }}>
+        <div style={{ width:56, height:56, borderRadius:18, background:hexA(T.primary,0.08), display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 14px", color:T.primary }}>
+          <svg viewBox="0 0 24 24" width={28} height={28} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round"><rect x="4" y="2" width="16" height="20" rx="2"/><path d="M9 7h6M9 11h6M9 15h4"/></svg>
+        </div>
+        <div style={{ fontSize:16, fontWeight:700, color:T.text, marginBottom:6 }}>No invoices yet</div>
+        <div style={{ fontSize:13, color:T.textMuted }}>Invoices from {branding.companyName} will appear here.</div>
+      </div>
+    </div>
+  );
+
+  const outstanding = myInvoices.filter(iv => iv.status !== "paid");
+  const total = outstanding.reduce((s,iv) => s + (parseFloat((iv.total||"0").replace(/[^0-9.-]/g,""))||0), 0);
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
+      <div style={{ fontSize:26, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>Invoices</div>
+
+      {outstanding.length > 0 && (
+        <div style={{ background:`linear-gradient(135deg, #E5484D, #c0392b)`, borderRadius:20, padding:"20px 22px", color:"#fff", boxShadow:"0 8px 24px rgba(229,72,77,0.35)" }}>
+          <div style={{ fontSize:11, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.1em", opacity:0.7, marginBottom:6 }}>Balance Due</div>
+          <div style={{ fontSize:34, fontWeight:900, letterSpacing:"-0.03em" }}>${total.toFixed(2)}</div>
+          <div style={{ fontSize:13, opacity:0.8, marginTop:4 }}>{outstanding.length} outstanding invoice{outstanding.length!==1?"s":""}</div>
+        </div>
+      )}
+
+      <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+        {myInvoices.map((iv,i) => {
+          const isOpen = open === iv.id;
+          const amt = parseFloat((iv.total||"0").replace(/[^0-9.-]/g,""))||0;
+          return (
+            <div key={iv.id} style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, overflow:"hidden" }}>
+              <div onClick={() => setOpen(isOpen ? null : iv.id)}
+                style={{ padding:"15px 18px", display:"flex", alignItems:"center", gap:14, cursor:"pointer" }}>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:14, fontWeight:700, color:T.text }}>Invoice #{iv.number || iv.id}</div>
+                  <div style={{ fontSize:12, color:T.textMuted, marginTop:2 }}>{iv.date || iv.issueDate || ""}</div>
+                </div>
+                <div style={{ textAlign:"right", flexShrink:0 }}>
+                  <div style={{ fontSize:16, fontWeight:800, color:T.text }}>${amt.toFixed(2)}</div>
+                  <div style={{ fontSize:10, fontWeight:700, padding:"2px 9px", borderRadius:100, background:statusBg(iv.status), color:statusColor(iv.status), marginTop:4 }}>{statusLabel(iv.status)}</div>
+                </div>
+                <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{ transform:isOpen?"rotate(180deg)":"none", transition:"transform 0.2s" }}><path d="M6 9l6 6 6-6"/></svg>
+              </div>
+              {isOpen && (
+                <div style={{ borderTop:`1px solid ${T.border}`, padding:"14px 18px", display:"flex", flexDirection:"column", gap:8 }}>
+                  {(iv.lineItems||iv.items||[]).map((li,j) => (
+                    <div key={j} style={{ display:"flex", justifyContent:"space-between", fontSize:13 }}>
+                      <span style={{ color:T.text }}>{li.description||li.name||li.service}</span>
+                      <span style={{ color:T.text, fontWeight:600 }}>${parseFloat(li.amount||li.price||0).toFixed(2)}</span>
+                    </div>
+                  ))}
+                  {iv.notes && <div style={{ fontSize:12, color:T.textMuted, fontStyle:"italic", marginTop:4 }}>{iv.notes}</div>}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── CP ESTIMATES ──
+function CPEstimates({ client, estimates, branding, onApprove, T }) {
+  const mine = (estimates||[]).filter(e => String(e.clientId)===String(client.id));
+  if (!mine.length) return (
+    <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
+      <div style={{ fontSize:26, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>Estimates</div>
+      <div style={{ textAlign:"center", padding:"56px 20px" }}>
+        <div style={{ fontSize:15, fontWeight:700, color:T.text, marginBottom:6 }}>No estimates yet</div>
+        <div style={{ fontSize:13, color:T.textMuted }}>Estimates from {branding.companyName} will appear here.</div>
+      </div>
+    </div>
+  );
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
+      <div style={{ fontSize:26, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>Estimates</div>
+      {mine.map((e,i) => (
+        <div key={e.id} style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, padding:"16px 18px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+          <div>
+            <div style={{ fontSize:14, fontWeight:700, color:T.text }}>Estimate #{e.number||e.id}</div>
+            <div style={{ fontSize:12, color:T.textMuted, marginTop:2 }}>{e.date||""} · ${parseFloat((e.total||"0").replace(/[^0-9.-]/g,"")).toFixed(2)}</div>
+          </div>
+          {e.status !== "approved" && (
+            <button onClick={() => onApprove(e.id)} style={{ background:T.primary, color:"#fff", border:"none", borderRadius:12, padding:"9px 16px", fontWeight:700, fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>Approve</button>
+          )}
+          {e.status === "approved" && <span style={{ fontSize:12, fontWeight:700, color:"#16a34a" }}>Approved</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ── CP REQUEST ──
 function CPRequest({ client, branding, onSubmit, T }) {
   const [form, setForm] = useState({ type: "", dates: "", notes: "" });
@@ -10681,8 +11042,93 @@ function CPRequest({ client, branding, onSubmit, T }) {
 }
 
 // ── SPS CLIENT PORTAL SHELL ──
-function SPSClientPortal({ client, schedule, invoices, estimates, branding, T, fontStack, onSignOut, onServiceRequest, onApproveEstimate, isStaffPreview = false }) {
-  const [page, setPage] = useState("cp_home");
+function CPSettings({ client, branding, prefs, setPrefs, T, onSignOut, isStaffPreview }) {
+  const set = (k, v) => setPrefs(p => ({ ...p, [k]: v }));
+  const pondLbl = pondLabel(client);
+
+  const OptionRow = ({ label, value, options, onChange }) => (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 0", borderBottom: `1px solid ${T.border}` }}>
+      <span style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{label}</span>
+      <div style={{ display: "flex", gap: 6 }}>
+        {options.map(([val, lbl]) => (
+          <button key={val} onClick={() => onChange(val)}
+            style={{ padding: "6px 14px", borderRadius: 100, border: `1.5px solid ${value === val ? T.primary : T.border}`, background: value === val ? hexA(T.primary, 0.1) : T.surface, color: value === val ? T.primary : T.textMuted, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+            {lbl}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+      <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", marginBottom: 20 }}>Settings</div>
+
+      {/* Appearance */}
+      <div style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, padding: "4px 18px", marginBottom: 16 }}>
+        <OptionRow label="Appearance" value={prefs.appearance || "system"}
+          options={[["light","Light"],["dark","Dark"],["system","Auto"]]}
+          onChange={v => set("appearance", v)} />
+        <OptionRow label="Default Screen" value={prefs.defaultPage || branding.portalDefaultPage || "cp_home"}
+          options={[["cp_home","Home"],["cp_service","Service"],["cp_pond", pondLbl],["cp_invoices","Invoices"]]}
+          onChange={v => set("defaultPage", v)} />
+        <OptionRow label="Text Size" value={prefs.textSize || "normal"}
+          options={[["small","S"],["normal","M"],["large","L"]]}
+          onChange={v => set("textSize", v)} />
+        <div style={{ padding: "14px 0", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: T.text }}>Reduce Motion</span>
+          <button onClick={() => set("reduceMotion", !(prefs.reduceMotion))}
+            style={{ width: 48, height: 28, borderRadius: 100, background: prefs.reduceMotion ? T.primary : T.surfaceAlt, border: "none", cursor: "pointer", position: "relative", transition: "background 0.2s" }}>
+            <div style={{ width: 22, height: 22, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: prefs.reduceMotion ? 23 : 3, transition: "left 0.2s", boxShadow: "0 1px 4px rgba(0,0,0,0.2)" }} />
+          </button>
+        </div>
+        <div style={{ padding: "14px 0" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontSize: 14, fontWeight: 600, color: T.text }}>Account</span>
+            <span style={{ fontSize: 12, color: T.textMuted }}>{client.email}</span>
+          </div>
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: 4 }}>{client.name} · {client.plan} Plan</div>
+        </div>
+      </div>
+
+      {!isStaffPreview && (
+        <button onClick={onSignOut}
+          style={{ width: "100%", padding: "14px", background: hexA("#E5484D", 0.08), color: "#E5484D", border: `1px solid ${hexA("#E5484D", 0.2)}`, borderRadius: 16, fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>
+          Sign Out
+        </button>
+      )}
+
+      <div style={{ textAlign: "center", marginTop: 20, fontSize: 11, color: T.textMuted }}>
+        {branding.companyName} · Client Portal
+      </div>
+    </div>
+  );
+}
+
+function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: globalT, fontStack, onSignOut, onServiceRequest, onApproveEstimate, onUpgradeRequest, isStaffPreview = false }) {
+  // Client prefs stored in localStorage — personal per-device settings
+  const prefsKey = `sps_client_prefs_${client.id}`;
+  const [prefs, setPrefs] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(prefsKey) || "{}"); } catch { return {}; }
+  });
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // Persist prefs to localStorage whenever they change
+  useEffect(() => {
+    try { localStorage.setItem(prefsKey, JSON.stringify(prefs)); } catch {}
+  }, [prefs, prefsKey]);
+
+  // Apply appearance preference — override global T if client has set a preference
+  const sysDark = typeof window !== "undefined" && window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)").matches : false;
+  const appearancePref = prefs.appearance || branding.appearance || "system";
+  const effectiveMode = appearancePref === "system" ? (sysDark ? "dark" : "light") : appearancePref;
+  const themeKey = branding.themeKey || "sps";
+  const T = THEMES[themeKey] ? (effectiveMode === "dark" ? THEMES[themeKey].dark : THEMES[themeKey].light) : globalT;
+
+  // Text size scaling
+  const textScale = prefs.textSize === "large" ? 1.1 : prefs.textSize === "small" ? 0.9 : 1;
+
+  const [page, setPage] = useState(prefs.defaultPage || branding.portalDefaultPage || "cp_home");
 
   return (
     <div style={{ fontFamily: fontStack, background: T.bg, minHeight: "100vh", display: "flex", flexDirection: "column", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em" }}>
@@ -10703,7 +11149,8 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T, f
         position: "sticky", top: 0, zIndex: 100,
       }}>
         {!isStaffPreview && <div style={{ height: "env(safe-area-inset-top)" }} />}
-        <div style={{ height: 56, display: "flex", alignItems: "center", justifyContent: "space-between", paddingLeft: 20, paddingRight: 20 }}>
+        <div style={{ height: 56, display: "flex", alignItems: "center", justifyContent: "space-between", paddingLeft: 16, paddingRight: 16 }}>
+          {/* Logo + name */}
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <div style={{ width: 34, height: 34, borderRadius: 10, background: T.primary, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, boxShadow: `0 2px 8px ${hexA(T.primary, 0.35)}` }}>
               {branding.logoType === "image" && branding.logoImage
@@ -10715,23 +11162,42 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T, f
               <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 600, letterSpacing: "0.02em" }}>Client Portal</div>
             </div>
           </div>
-          {!isStaffPreview && (
-            <button onClick={onSignOut} style={{ background: T.surfaceAlt, border: "none", borderRadius: 100, color: T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit", padding: "6px 14px" }}>Sign out</button>
-          )}
+          {/* Right buttons */}
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            {/* Refresh */}
+            <button onClick={() => window.location.reload()}
+              style={{ width: 36, height: 36, borderRadius: 11, background: T.surfaceAlt, border: "none", color: T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+              </svg>
+            </button>
+            {/* Settings */}
+            {!isStaffPreview && (
+              <button onClick={() => setSettingsOpen(s => !s)}
+                style={{ width: 36, height: 36, borderRadius: 11, background: settingsOpen ? hexA(T.primary, 0.12) : T.surfaceAlt, border: "none", color: settingsOpen ? T.primary : T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                </svg>
+              </button>
+            )}
+          </div>
         </div>
       </header>
 
       {/* Main content */}
-      <main style={{ flex: 1, padding: "24px 18px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(110px + env(safe-area-inset-bottom))" }}>
-        {page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} onNav={setPage} T={T} />}
-        {page === "cp_service"  && <CPService client={client} branding={branding} onNav={setPage} T={T} />}
-        {page === "cp_pond"     && <CPPond client={client} T={T} />}
-        {page === "cp_history"  && <CPPond client={client} T={T} />}
-        {page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} />}
+      <main style={{ flex: 1, padding: "24px 18px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(110px + env(safe-area-inset-bottom))", fontSize: `${textScale}em` }}>
+        {settingsOpen && !isStaffPreview && (
+          <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
+        )}
+        {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} onNav={setPage} T={T} />}
+        {!settingsOpen && page === "cp_service"  && <CPService client={client} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
+        {!settingsOpen && page === "cp_pond"     && <CPPond client={client} T={T} />}
+        {!settingsOpen && page === "cp_history"  && <CPPond client={client} T={T} />}
+        {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} />}
 
-        {page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
-        {page === "cp_messages" && <CPMessages client={client} T={T} />}
-        {page === "cp_request"  && <CPRequest client={client} branding={branding} onSubmit={onServiceRequest} T={T} />}
+        {!settingsOpen && page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
+        {!settingsOpen && page === "cp_messages" && <CPMessages client={client} T={T} />}
+        {!settingsOpen && page === "cp_request"  && <CPRequest client={client} branding={branding} onSubmit={onServiceRequest} T={T} />}
       </main>
 
       {/* Bottom nav — stable floating pill, no layout shifts */}
@@ -10751,7 +11217,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T, f
             <button onClick={() => setPage(n.id)}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column",
-                gap: 3, width: 56, height: 52, borderRadius: 14, border: "none", cursor: "pointer",
+                gap: 3, width: 64, height: 52, borderRadius: 14, border: "none", cursor: "pointer",
                 fontFamily: "inherit", flexShrink: 0,
                 background: active ? "rgba(255,255,255,0.14)" : "transparent",
                 color: active ? "#fff" : "rgba(255,255,255,0.4)",
@@ -10763,7 +11229,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T, f
                 fontSize: 9, fontWeight: active ? 700 : 500,
                 letterSpacing: "0.01em", lineHeight: 1,
                 opacity: active ? 1 : 0.7,
-                maxWidth: 52, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                maxWidth: 60, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                 transition: "opacity 0.15s ease",
               }}>{label}</span>
             </button>
@@ -10878,7 +11344,7 @@ function LoginScreen({ team, branding, T, fontStack, onSignIn }) {
 }
 
 export default function App({ authEmail = "", onSignOut }) {
-  const [page, setPage] = useState("dashboard");
+  const [page, setPage] = useState(branding.staffDefaultPage || "dashboard");
   const [selectedClient, setSelectedClient] = useState(null);
   const [adding, setAdding] = useState(false);
   const [scheduleSeed, setScheduleSeed] = useState(null);
@@ -11003,8 +11469,10 @@ export default function App({ authEmail = "", onSignOut }) {
   CP_TIERS = serviceTiers || DEFAULT_TIERS;
   const [routeAssignments, setRouteAssignments, lra] = useStoredState("sps_route_assignments", []);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [syncState, setSyncState] = useState("idle"); // idle | syncing | saved
+  const [syncState, setSyncState] = useState("idle");
   const syncTimer = useRef(null);
+  const [showSplash, setShowSplash] = useState(true);
+  const splashShown = useRef(false);
 
   // Trigger a visible sync pulse whenever any stored state saves
   const triggerSync = () => {
@@ -11024,6 +11492,16 @@ export default function App({ authEmail = "", onSignOut }) {
     window.__onSpsSync = triggerSync;
     return () => { window.__onSpsSync = null; };
   }, []);
+
+  // Branded splash — always shows for 2.2s after hydration
+  useEffect(() => {
+    if (!hydrated) return;
+    if (splashShown.current) return;
+    splashShown.current = true;
+    setShowSplash(true);
+    const t = setTimeout(() => setShowSplash(false), 2200);
+    return () => clearTimeout(t);
+  }, [hydrated]);
 
   // Ensure dock only contains pages the user has permission to see
   const dockIds = (navDock || DEFAULT_DOCK).filter(id => {
@@ -11197,27 +11675,92 @@ export default function App({ authEmail = "", onSignOut }) {
     if (sid) setCompletedSids(m => ({ ...m, [sid]: true }));
   };
 
-  // Loading gate so the saved theme/data are ready before first paint
-  if (!hydrated) {
+  // Branded splash — shows while loading OR for minimum 2.2s after hydration
+  const splashTagline = (branding.splashTagline && branding.splashTagline.trim())
+    ? branding.splashTagline.trim()
+    : (branding.division && branding.division.trim())
+    ? branding.division.trim()
+    : "Field Operations";
+
+  const splashUser = currentUser || clientUser;
+  const splashFirstName = splashUser ? ((splashUser.name || splashUser.email || "").split(" ")[0] || "").split("@")[0] : "";
+  const splashHour = new Date().getHours();
+  const splashGreeting = splashHour < 12 ? "Good morning" : splashHour < 17 ? "Good afternoon" : "Good evening";
+
+  if (!hydrated || showSplash) {
+    // Resolve splash background
+    const splashBg1    = (branding.splashBgColor && branding.splashBgColor.trim()) ? branding.splashBgColor : T.primary;
+    const splashBg2    = (branding.splashBgColor2 && branding.splashBgColor2.trim()) ? branding.splashBgColor2 : mix(splashBg1, "#000", 0.3);
+    const splashStyle  = branding.splashBgStyle || "gradient";
+    const splashBgCss  = splashStyle === "solid" ? splashBg1
+      : splashStyle === "image" && branding.splashBgImage ? `url(${branding.splashBgImage}) center/cover no-repeat`
+      : `linear-gradient(160deg, ${splashBg1} 0%, ${splashBg2} 100%)`;
+    const splashFgColor = branding.splashTextColor === "dark" ? "rgba(0,0,0,0.85)" : "#fff";
+    const splashRingColor = branding.splashTextColor === "dark" ? "rgba(0,0,0,0.2)" : "rgba(255,255,255,0.3)";
+    const splashRingTop   = branding.splashTextColor === "dark" ? "rgba(0,0,0,0.7)" : "#fff";
+    const splashLogoSrc   = branding.splashLogoOverride || (branding.logoType === "image" ? branding.logoImage : null);
+    const showGreeting    = branding.splashShowGreeting !== "false";
+
     return (
-      <div style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif', background: T.primary, minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#fff", WebkitFontSmoothing: "antialiased" }}>
+      <div style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif',
+        background: splashBgCss,
+        minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+        color: splashFgColor, WebkitFontSmoothing: "antialiased", position: "relative", overflow: "hidden" }}>
+        {/* Dim overlay for image backgrounds */}
+        {splashStyle === "image" && branding.splashBgImage && (
+          <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.4)", pointerEvents: "none" }} />
+        )}
         <style>{`
           @keyframes spin { to { transform: rotate(360deg); } }
           @keyframes syncPulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
-          @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
-          .splash-logo { animation: fadeUp 0.5s ease both; }
-          .splash-name { animation: fadeUp 0.5s ease 0.15s both; }
-          .splash-div  { animation: fadeUp 0.5s ease 0.25s both; }
-          .splash-spin { animation: spin 0.9s linear infinite; }
+          @keyframes splashFadeUp { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
+          @keyframes splashFadeOut { from { opacity: 1; } to { opacity: 0; } }
+          .splash-logo  { animation: splashFadeUp 0.55s cubic-bezier(.34,1.56,.64,1) both; }
+          .splash-name  { animation: splashFadeUp 0.55s cubic-bezier(.34,1.56,.64,1) 0.12s both; }
+          .splash-tag   { animation: splashFadeUp 0.55s cubic-bezier(.34,1.56,.64,1) 0.22s both; }
+          .splash-greet { animation: splashFadeUp 0.55s cubic-bezier(.34,1.56,.64,1) 0.38s both; }
+          .splash-dot   { animation: splashFadeUp 0.55s cubic-bezier(.34,1.56,.64,1) 0.55s both; }
+          .splash-fade-out { animation: splashFadeOut 0.4s ease 1.8s both; }
         `}</style>
-        {branding.logoType === "image" && branding.logoImage ? (
-          <img className="splash-logo" src={branding.logoImage} alt="" style={{ width: 80, height: 80, borderRadius: 22, objectFit: "cover", marginBottom: 18, boxShadow: "0 8px 32px rgba(0,0,0,0.25)" }} />
-        ) : (
-          <div className="splash-logo" style={{ width: 80, height: 80, borderRadius: 22, background: "rgba(255,255,255,0.15)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 36, marginBottom: 18 }}>{branding.logoEmoji || "💧"}</div>
-        )}
-        <div className="splash-name" style={{ fontSize: 22, fontWeight: 800, letterSpacing: "-0.02em", marginBottom: 4 }}>{branding.companyName}</div>
-        <div className="splash-div" style={{ fontSize: 13, opacity: 0.7, marginBottom: 48 }}>{(branding.splashTagline && branding.splashTagline.trim()) ? branding.splashTagline.trim() : (branding.division && branding.division.trim()) ? branding.division.trim() : "Field Operations"}</div>
-        <div className="splash-spin" style={{ width: 22, height: 22, border: "2.5px solid rgba(255,255,255,0.3)", borderTopColor: "#fff", borderRadius: "50%" }} />
+
+        {/* Decorative circles — only on solid/gradient */}
+        {splashStyle !== "image" && <>
+          <div style={{ position: "absolute", right: -80, top: -80, width: 300, height: 300, borderRadius: "50%", background: "rgba(255,255,255,0.05)", pointerEvents: "none" }} />
+          <div style={{ position: "absolute", left: -60, bottom: -60, width: 200, height: 200, borderRadius: "50%", background: "rgba(255,255,255,0.04)", pointerEvents: "none" }} />
+        </>}
+
+        <div className="splash-fade-out" style={{ position: "relative", display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", padding: "0 32px" }}>
+          {/* Logo */}
+          {splashLogoSrc ? (
+            <img className="splash-logo" src={splashLogoSrc} alt="" style={{ width: 88, height: 88, borderRadius: 24, objectFit: "cover", marginBottom: 22, boxShadow: "0 12px 40px rgba(0,0,0,0.3)" }} />
+          ) : (
+            <div className="splash-logo" style={{ width: 88, height: 88, borderRadius: 24, background: "rgba(255,255,255,0.18)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 40, marginBottom: 22 }}>
+              {branding.logoEmoji || "💧"}
+            </div>
+          )}
+
+          {/* Company name */}
+          <div className="splash-name" style={{ fontSize: 24, fontWeight: 900, letterSpacing: "-0.03em", marginBottom: 6, color: splashFgColor }}>
+            {branding.companyName}
+          </div>
+
+          {/* Tagline */}
+          <div className="splash-tag" style={{ fontSize: 14, opacity: 0.72, fontWeight: 500, marginBottom: (splashFirstName && showGreeting) ? 24 : 0, letterSpacing: "0.01em", color: splashFgColor }}>
+            {splashTagline}
+          </div>
+
+          {/* Personalised greeting */}
+          {splashFirstName && showGreeting && (
+            <div className="splash-greet" style={{ marginTop: 8, background: "rgba(128,128,128,0.2)", borderRadius: 100, padding: "10px 24px", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)" }}>
+              <span style={{ fontSize: 15, fontWeight: 700, color: splashFgColor }}>{splashGreeting}, {splashFirstName}.</span>
+            </div>
+          )}
+
+          {/* Loading spinner */}
+          {!hydrated && (
+            <div className="splash-dot" style={{ marginTop: 48, width: 22, height: 22, border: `2.5px solid ${splashRingColor}`, borderTopColor: splashRingTop, borderRadius: "50%", animation: "spin 0.9s linear infinite" }} />
+          )}
+        </div>
       </div>
     );
   }
@@ -11236,6 +11779,7 @@ export default function App({ authEmail = "", onSignOut }) {
         fontStack={fontStack}
         onSignOut={handleSignOut}
         onServiceRequest={handleServiceRequest}
+        onUpgradeRequest={handleUpgradeRequest}
       />
     );
   }
