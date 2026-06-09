@@ -206,6 +206,87 @@ function useStoredState(key, initial) {
   }, [key, value, loaded]);
   return [value, setValue, loaded];
 }
+// ─────────────────────────────────────────────
+// AUTOCOMPLETE INPUT
+// Remembers previously entered values and shows
+// them as tappable suggestions as you type.
+// historyKey: localStorage key to persist suggestions
+// ─────────────────────────────────────────────
+function AutocompleteInput({ value, onChange, historyKey, placeholder, style, autoFocus, maxHistory = 30 }) {
+  const [history, setHistory] = useStoredState(historyKey, []);
+  const [open, setOpen] = useState(false);
+  const inputRef = useRef(null);
+
+  const suggestions = (history || []).filter(h =>
+    h && value && value.length > 0 &&
+    h.toLowerCase().includes(value.toLowerCase()) &&
+    h.toLowerCase() !== value.toLowerCase()
+  ).slice(0, 6);
+
+  const commit = (val) => {
+    if (!val || !val.trim()) return;
+    setHistory(prev => {
+      const existing = (prev || []).filter(h => h.toLowerCase() !== val.toLowerCase());
+      return [val.trim(), ...existing].slice(0, maxHistory);
+    });
+  };
+
+  const pick = (suggestion) => {
+    onChange(suggestion);
+    commit(suggestion);
+    setOpen(false);
+    inputRef.current?.blur();
+  };
+
+  const handleBlur = () => {
+    // Delay so tap on suggestion fires before blur hides it
+    setTimeout(() => setOpen(false), 150);
+    if (value && value.trim()) commit(value.trim());
+  };
+
+  return (
+    <div style={{ position: "relative" }}>
+      <input
+        ref={inputRef}
+        type="text"
+        value={value}
+        onChange={e => { onChange(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={handleBlur}
+        placeholder={placeholder}
+        autoFocus={autoFocus}
+        style={style}
+      />
+      {open && suggestions.length > 0 && (
+        <div style={{
+          position: "absolute", top: "100%", left: 0, right: 0, zIndex: 200,
+          background: "var(--sps-surface, #fff)",
+          border: "1px solid rgba(0,0,0,0.1)",
+          borderRadius: 12, marginTop: 4,
+          boxShadow: "0 8px 24px rgba(0,0,0,0.14)",
+          overflow: "hidden",
+        }}>
+          {suggestions.map((s, i) => (
+            <button key={i} onMouseDown={() => pick(s)} onTouchStart={() => pick(s)}
+              style={{
+                width: "100%", padding: "11px 14px", background: "none", border: "none",
+                borderBottom: i < suggestions.length - 1 ? "1px solid rgba(0,0,0,0.07)" : "none",
+                textAlign: "left", cursor: "pointer", fontFamily: "inherit", fontSize: 14,
+                display: "flex", alignItems: "center", gap: 10,
+                color: "var(--sps-text, #1D1D1F)",
+              }}>
+              <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" style={{ opacity: 0.35, flexShrink: 0 }}>
+                <polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/>
+              </svg>
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 // ─────────────────────────────────────────────
 // THEME SYSTEM
@@ -4795,64 +4876,98 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
     const emp = (team || []).find(e => e.id === s.assigneeId);
     const accentLeft = isComplete ? T.accent : (isToday ? T.primary : T.textMuted);
     return (
-      <div key={s.sid} style={{ background: T.surface, border: `1px solid ${isSel ? T.primary : T.border}`, borderRadius: 16, overflow: "hidden", opacity: isComplete ? 0.92 : 1, boxShadow: T.shadow, display: "flex" }}>
+      <div key={s.sid} style={{ background: T.surface, border: `1px solid ${isSel ? T.primary : isComplete ? hexA(T.accent, 0.3) : T.border}`, borderRadius: 20, overflow: "hidden", opacity: isComplete ? 0.88 : 1, boxShadow: isComplete ? "none" : "0 2px 12px rgba(0,0,0,0.06)", display: "flex" }}>
+        {/* Number bar */}
         {!selectMode && displayNum != null && (
-          <div style={{ width: 42, flexShrink: 0, background: isComplete ? T.accent : hexA(accentLeft, 0.12), color: isComplete ? "#fff" : accentLeft, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 17, fontWeight: 800 }}>{displayNum}</div>
+          <div style={{ width: 44, flexShrink: 0, background: isComplete ? hexA(T.accent, 0.12) : hexA(accentLeft, 0.1), color: isComplete ? T.accent : accentLeft, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 900 }}>{displayNum}</div>
         )}
         <div style={{ flex: 1, minWidth: 0 }}>
+          {/* Main info row */}
           <div
             onClick={() => selectMode ? toggle(s.sid) : (perms.completeStops ? setCompleteModal({ stop: s, client: c }) : null)}
-            style={{ padding: compact ? "10px 13px" : "13px 16px", cursor: (selectMode || perms.completeStops) ? "pointer" : "default", display: "flex", gap: compact ? 10 : 12, alignItems: "center" }}
+            style={{ padding: compact ? "11px 14px" : "14px 16px", cursor: (selectMode || perms.completeStops) ? "pointer" : "default", display: "flex", gap: 12, alignItems: "center" }}
           >
             {selectMode && <Checkbox checked={isSel} onChange={() => toggle(s.sid)} />}
-            <div style={{ textAlign: "center", minWidth: 50, flexShrink: 0 }}>
-              <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>{s.time.split(" ")[0]}</div>
-              <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700 }}>{s.time.split(" ")[1]}</div>
+
+            {/* Time */}
+            <div style={{ textAlign: "center", minWidth: 44, flexShrink: 0 }}>
+              <div style={{ fontSize: 15, fontWeight: 900, color: T.text, letterSpacing: "-0.03em", lineHeight: 1 }}>{s.time.split(" ")[0]}</div>
+              <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 700, letterSpacing: "0.06em", marginTop: 2 }}>{s.time.split(" ")[1]}</div>
             </div>
+
+            {/* Client + details */}
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 700, fontSize: 14, color: T.text, display: "flex", alignItems: "center", gap: 6 }}>
-                {isComplete && <span style={{ color: T.accent, marginRight: 4, display:"inline-flex", verticalAlign:"middle" }}><Icon name="check" size={13} /></span>}{s.client}
+              <div style={{ fontWeight: 800, fontSize: 14, color: isComplete ? T.textMuted : T.text, letterSpacing: "-0.01em", display: "flex", alignItems: "center", gap: 5 }}>
+                {isComplete && <Icon name="check" size={13} style={{ color: T.accent, flexShrink: 0 }} />}
+                {s.client}
               </div>
-              {cfg.showAddress && <div style={{ fontSize: 12, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.address}</div>}
-              {cfg.showServices && s.services && s.services.length > 0 ? (
+              {cfg.showAddress && s.address && (
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.address}</div>
+              )}
+              {cfg.showServices && s.services && s.services.length > 0 && (
                 <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {s.services.map(sv => typeof sv === "string" ? sv : `${sv.name}${sv.price ? ` $${sv.price}` : ""}`).join(" · ")}
+                  {s.services.map(sv => typeof sv === "string" ? sv : sv.name).join(" · ")}
                 </div>
-              ) : null}
+              )}
             </div>
-            <div style={{ textAlign: "right", flexShrink: 0, display: "flex", alignItems: "center", gap: 10 }}>
-              <div>
-                {s._arr != null && <div style={{ fontSize: 12.5, fontWeight: 800, color: isComplete ? T.accent : T.text, display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end" }}><span style={{ fontSize: 11, opacity: 0.7 }}>🚚</span>{isComplete ? fmtMin(s._arr) : `est ${fmtMin(s._arr)}`}</div>}
-                <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em", marginTop: s._arr != null ? 3 : 0 }}>{s.type}</div>
-                {cfg.showDuration && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{s.duration}</div>}
-              </div>
-              {emp && <span title={emp.name} style={{ width: 30, height: 30, borderRadius: "50%", background: hexA(T.primary, 0.14), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 11, flexShrink: 0 }}>{initials(emp.name)}</span>}
+
+            {/* Right meta */}
+            <div style={{ textAlign: "right", flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+              {s._arr != null && (
+                <div style={{ fontSize: 11, fontWeight: 800, color: isComplete ? T.accent : T.primary, display: "flex", alignItems: "center", gap: 3 }}>
+                  <Icon name="map" size={11} />
+                  {isComplete ? fmtMin(s._arr) : `~${fmtMin(s._arr)}`}
+                </div>
+              )}
+              <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{s.type}</div>
+              {cfg.showDuration && <div style={{ fontSize: 10, color: T.textMuted }}>{s.duration} min</div>}
+              {emp && (
+                <span title={emp.name} style={{ width: 26, height: 26, borderRadius: "50%", background: hexA(T.primary, 0.12), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 10, flexShrink: 0 }}>
+                  {initials(emp.name)}
+                </span>
+              )}
             </div>
           </div>
+
+          {/* Action bar — full width, no overflow */}
           {!selectMode && (
-            <div style={{ borderTop: `1px solid ${T.border}`, padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, background: isComplete ? `${T.accent}12` : T.surfaceAlt }}>
-              {isComplete ? (
-                <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: T.accent, fontWeight: 700 }}><Icon name="check" size={13} /> Completed · Report saved</div>
-              ) : sent ? (
-                <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: T.accent, fontWeight: 700 }}><Icon name="check" size={13} /> Client notified</div>
-              ) : (
-                <div style={{ fontSize: 12, color: T.textMuted }}>Not yet started</div>
-              )}
-              <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+            <div style={{ borderTop: `1px solid ${T.border}`, background: isComplete ? hexA(T.accent, 0.06) : T.surfaceAlt }}>
+              {/* Status line */}
+              <div style={{ padding: "8px 16px 0", display: "flex", alignItems: "center", gap: 6 }}>
+                {isComplete ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: T.accent, fontWeight: 700 }}>
+                    <Icon name="check" size={12} /> Completed · Report saved
+                  </div>
+                ) : sent ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: T.primary, fontWeight: 700 }}>
+                    <Icon name="check" size={12} /> Client notified
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 11, color: T.textMuted }}>Not yet started</div>
+                )}
+              </div>
+
+              {/* Button row — equal width, never cut off */}
+              <div style={{ padding: "8px 12px 10px", display: "flex", gap: 7 }}>
                 <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: s, client: c }); }}
-                  style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "6px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-                  <span style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="map" size={13} /> Head Here</span>
+                  style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "9px 6px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, minWidth: 0 }}>
+                  <Icon name="map" size={13} />
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Head Here</span>
                 </button>
+
                 {!isComplete && perms.sendTexts && (
                   <button onClick={e => { e.stopPropagation(); setOmwModal({ stop: s, client: c, key: s.sid }); }}
-                    style={{ background: "transparent", color: T.primary, border: `1.5px solid ${T.primary}`, borderRadius: 10, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-                    <span style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="message" size={13} /> {sent ? "Resend" : "On My Way"}</span>
+                    style={{ flex: 1, background: "transparent", color: T.primary, border: `1.5px solid ${hexA(T.primary, 0.4)}`, borderRadius: 12, padding: "9px 6px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, minWidth: 0 }}>
+                    <Icon name="message" size={13} />
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sent ? "Resend" : "On My Way"}</span>
                   </button>
                 )}
+
                 {perms.completeStops && (
                   <button onClick={e => { e.stopPropagation(); setCompleteModal({ stop: s, client: c }); }}
-                    style={{ background: isComplete ? "transparent" : T.accent, color: isComplete ? T.accent : "#fff", border: isComplete ? `1.5px solid ${T.accent}` : "none", borderRadius: 10, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-                    <span style={{ display:"flex", alignItems:"center", gap:4 }}><Icon name="check" size={13} /> {isComplete ? "Re-send" : "Complete"}</span>
+                    style={{ flex: 1, background: isComplete ? hexA(T.accent, 0.1) : T.accent, color: isComplete ? T.accent : "#fff", border: isComplete ? `1.5px solid ${hexA(T.accent, 0.3)}` : "none", borderRadius: 12, padding: "9px 6px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, minWidth: 0 }}>
+                    <Icon name="check" size={13} />
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{isComplete ? "Re-open" : "Complete"}</span>
                   </button>
                 )}
               </div>
@@ -4923,21 +5038,28 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
         </div>
       )}
 
-      {/* Day strip — toggle through days */}
+      {/* Day strip */}
       {!selectMode && schedule.length > 0 && (
-        <div style={{ display: "flex", gap: 7, marginBottom: 16, overflowX: "auto", paddingBottom: 4, WebkitOverflowScrolling: "touch" }}>
+        <div style={{ display: "flex", gap: 6, marginBottom: 18, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none" }}>
           {dayCells.map(cell => {
             const on = cell.ds === selectedDate;
             const isToday = cell.ds === todayMDY();
             return (
               <button key={cell.ds} onClick={() => { setSelectedDate(cell.ds); setViewTech(null); }}
-                style={{ flexShrink: 0, width: 52, padding: "8px 0", borderRadius: 14, border: "none", cursor: "pointer", fontFamily: "inherit", textAlign: "center", background: on ? T.primary : T.surfaceAlt, color: on ? "#fff" : T.text }}>
-                <div style={{ fontSize: 10.5, fontWeight: 700, opacity: on ? 0.9 : 0.6, textTransform: "uppercase", letterSpacing: "0.03em" }}>{cell.weekday}</div>
-                <div style={{ fontSize: 17, fontWeight: 800, marginTop: 2 }}>{cell.num}</div>
-                <div style={{ height: 6, marginTop: 3, display: "flex", justifyContent: "center" }}>
-                  {cell.hasStops && <span style={{ width: 5, height: 5, borderRadius: "50%", background: on ? "#fff" : T.primary }} />}
+                style={{ flexShrink: 0, width: 54, paddingTop: 10, paddingBottom: 10, borderRadius: 16, border: "none", cursor: "pointer", fontFamily: "inherit", textAlign: "center", transition: "background 0.15s, transform 0.1s",
+                  background: on ? T.primary : T.surfaceAlt,
+                  color: on ? "#fff" : T.textMuted,
+                  boxShadow: on ? `0 4px 14px ${hexA(T.primary, 0.35)}` : "none",
+                  transform: on ? "scale(1.06)" : "scale(1)",
+                }}>
+                <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", opacity: on ? 0.85 : 0.7 }}>{cell.weekday}</div>
+                <div style={{ fontSize: 20, fontWeight: 900, marginTop: 3, letterSpacing: "-0.03em" }}>{cell.num}</div>
+                <div style={{ height: 5, marginTop: 4, display: "flex", justifyContent: "center" }}>
+                  {cell.hasStops
+                    ? <span style={{ width: 5, height: 5, borderRadius: "50%", background: on ? "rgba(255,255,255,0.8)" : T.primary }} />
+                    : <span style={{ width: 5, height: 5 }} />
+                  }
                 </div>
-                {isToday && !on && <div style={{ fontSize: 8, fontWeight: 800, color: T.primary, marginTop: -1 }}>TODAY</div>}
               </button>
             );
           })}
@@ -5738,7 +5860,17 @@ function CatalogManager({ catalog, setCatalog }) {
       {prodModal && (
         <Modal title={prodModal.mode === "add" ? "Add Product" : "Edit Product"} onClose={() => setProdModal(null)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <div><label style={labelStyle}>Name</label><input type="text" style={field} value={prodModal.data.name} onChange={e => setProdModal(m => ({ ...m, data: { ...m.data, name: e.target.value } }))} placeholder="Product name" autoFocus /></div>
+            <div>
+              <label style={labelStyle}>Name</label>
+              <AutocompleteInput
+                value={prodModal.data.name}
+                onChange={v => setProdModal(m => ({ ...m, data: { ...m.data, name: v } }))}
+                historyKey="sps_product_name_history"
+                placeholder="e.g. Beneficial Bacteria"
+                style={field}
+                autoFocus
+              />
+            </div>
             <div><label style={labelStyle}>Price</label>
               <div style={{ position: "relative" }}>
                 <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: T.textMuted }}>$</span>
@@ -5757,11 +5889,24 @@ function CatalogManager({ catalog, setCatalog }) {
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             <div>
               <label style={labelStyle}>Name</label>
-              <input type="text" style={field} value={txModal.data.name} onChange={e => setTxModal(m => ({ ...m, data: { ...m.data, name: e.target.value } }))} placeholder="e.g. Algaecide" autoFocus />
+              <AutocompleteInput
+                value={txModal.data.name}
+                onChange={v => setTxModal(m => ({ ...m, data: { ...m.data, name: v } }))}
+                historyKey="sps_treatment_name_history"
+                placeholder="e.g. Algaecide"
+                style={field}
+                autoFocus
+              />
             </div>
             <div>
               <label style={labelStyle}>Brand <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
-              <input type="text" style={field} value={txModal.data.brand || ""} onChange={e => setTxModal(m => ({ ...m, data: { ...m.data, brand: e.target.value } }))} placeholder="e.g. CrystalClear, API, Microbe-Lift" />
+              <AutocompleteInput
+                value={txModal.data.brand || ""}
+                onChange={v => setTxModal(m => ({ ...m, data: { ...m.data, brand: v } }))}
+                historyKey="sps_brand_history"
+                placeholder="e.g. CrystalClear, API, Microbe-Lift"
+                style={field}
+              />
             </div>
             <div><label style={labelStyle}>Cost per Ounce</label>
               <div style={{ position: "relative" }}>
@@ -5809,7 +5954,14 @@ function CatalogManager({ catalog, setCatalog }) {
             <div style={{ display: "flex", gap: 10 }}>
               <div style={{ flex: 2 }}>
                 <label style={labelStyle}>Service Name</label>
-                <input type="text" style={chipInput} value={svcModal.data.name} onChange={e => setSvc("name", e.target.value)} placeholder="e.g. Algae Treatment" autoFocus />
+                <AutocompleteInput
+                  value={svcModal.data.name}
+                  onChange={v => setSvc("name", v)}
+                  historyKey="sps_service_name_history"
+                  placeholder="e.g. Algae Treatment"
+                  style={chipInput}
+                  autoFocus
+                />
               </div>
               <div style={{ flex: 1 }}>
                 <label style={labelStyle}>Price</label>
