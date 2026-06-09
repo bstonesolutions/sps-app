@@ -6176,39 +6176,69 @@ const DEFAULT_DOCK = ["dashboard", "clients", "schedule", "messages", "settings"
 // ─────────────────────────────────────────────
 
 function OverflowMenu({ page, perms, navUnread, dockIds, setDockIds, onNav, onSignOut, currentUser, T, branding, onClose }) {
-  const [editMode, setEditMode] = useState(false);
-
   const availableNav = ALL_NAV.filter(n => {
     if (n.ownerOnly && !perms.isAdmin) return false;
     if (n.perm && !perms[n.perm]) return false;
     return true;
   });
 
-  const inDock    = availableNav.filter(n => dockIds.includes(n.id));
-  const overflow  = availableNav.filter(n => !dockIds.includes(n.id));
+  const overflow = availableNav.filter(n => !dockIds.includes(n.id));
+
+  // ── Drag state ──
+  const dragIdx = useRef(null);    // index being dragged in dockIds
+  const dragOver = useRef(null);   // index currently hovered
+  const [dragging, setDragging] = useState(null); // id of item being dragged
+  const itemRefs = useRef({});
 
   const toggleDock = (id) => {
     setDockIds(prev => {
-      if (prev.includes(id)) {
-        // Remove from dock (always allowed)
-        return prev.filter(x => x !== id);
-      } else {
-        // Add to dock — max 5
-        if (prev.length >= 5) return prev;
-        return [...prev, id];
-      }
+      if (prev.includes(id)) return prev.filter(x => x !== id);
+      if (prev.length >= 5) return prev;
+      return [...prev, id];
     });
   };
 
-  const moveDock = (id, dir) => {
-    setDockIds(prev => {
-      const arr = [...prev];
-      const i = arr.indexOf(id);
-      const j = i + dir;
-      if (j < 0 || j >= arr.length) return prev;
-      [arr[i], arr[j]] = [arr[j], arr[i]];
-      return arr;
+  // ── Touch drag handlers ──
+  const onTouchStart = (e, id) => {
+    dragIdx.current = dockIds.indexOf(id);
+    dragOver.current = dragIdx.current;
+    setDragging(id);
+  };
+
+  const onTouchMove = (e) => {
+    if (dragIdx.current === null) return;
+    e.preventDefault();
+    const touch = e.touches[0];
+    // Find which row the finger is over by checking bounding rects
+    let overIdx = dragOver.current;
+    Object.entries(itemRefs.current).forEach(([id, el]) => {
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      if (touch.clientY >= rect.top && touch.clientY <= rect.bottom) {
+        const idx = dockIds.indexOf(id);
+        if (idx !== -1) overIdx = idx;
+      }
     });
+    if (overIdx !== dragOver.current) {
+      dragOver.current = overIdx;
+      // Reorder in real time
+      setDockIds(prev => {
+        const arr = [...prev];
+        const from = dragIdx.current;
+        const to = overIdx;
+        if (from === to || from === null) return prev;
+        const item = arr.splice(from, 1)[0];
+        arr.splice(to, 0, item);
+        dragIdx.current = to; // update so next move is relative to new position
+        return arr;
+      });
+    }
+  };
+
+  const onTouchEnd = () => {
+    dragIdx.current = null;
+    dragOver.current = null;
+    setDragging(null);
   };
 
   return (
@@ -6236,7 +6266,7 @@ function OverflowMenu({ page, perms, navUnread, dockIds, setDockIds, onNav, onSi
         </div>
 
         {/* Scrollable content */}
-        <div style={{ flex: 1, overflowY: "auto", padding: "16px 0" }}>
+        <div style={{ flex: 1, overflowY: dragging ? "hidden" : "auto", padding: "16px 0" }}>
 
           {/* Overflow pages — not in dock */}
           {overflow.length > 0 && (
@@ -6263,50 +6293,82 @@ function OverflowMenu({ page, perms, navUnread, dockIds, setDockIds, onNav, onSi
           {/* Divider */}
           <div style={{ height: 1, background: T.border, margin: "8px 0" }} />
 
-          {/* Dock editor */}
+          {/* Dock editor — drag to reorder */}
           <div style={{ padding: "12px 20px 0" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-              <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: T.textMuted }}>Bottom Bar ({dockIds.length}/5)</div>
-              <button onClick={() => setEditMode(e => !e)}
-                style={{ background: editMode ? T.primary : T.surfaceAlt, color: editMode ? "#fff" : T.textMuted, border: "none", borderRadius: 8, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-                {editMode ? "Done" : "Edit"}
-              </button>
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: T.textMuted, marginBottom: 4 }}>Bottom Bar ({dockIds.length}/5)</div>
+              <div style={{ fontSize: 11, color: T.textMuted }}>Drag to reorder. Tap Remove to free up a slot.</div>
             </div>
 
-            {availableNav.map(n => {
-              const inD = dockIds.includes(n.id);
-              const idx = dockIds.indexOf(n.id);
-              return (
-                <div key={n.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 0", borderBottom: `1px solid ${T.border}` }}>
-                  {/* Reorder arrows — only in edit mode and in dock */}
-                  {editMode && inD && (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 2, flexShrink: 0 }}>
-                      <button onClick={() => moveDock(n.id, -1)} disabled={idx === 0}
-                        style={{ background: "none", border: "none", color: idx === 0 ? T.border : T.textMuted, cursor: idx === 0 ? "default" : "pointer", padding: 2, display: "flex" }}>
-                        <Icon name="chevronD" size={12} style={{ transform: "rotate(180deg)" }} />
-                      </button>
-                      <button onClick={() => moveDock(n.id, 1)} disabled={idx === dockIds.length - 1}
-                        style={{ background: "none", border: "none", color: idx === dockIds.length - 1 ? T.border : T.textMuted, cursor: idx === dockIds.length - 1 ? "default" : "pointer", padding: 2, display: "flex" }}>
-                        <Icon name="chevronD" size={12} />
-                      </button>
+            {/* Dock items — draggable */}
+            <div onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>
+              {dockIds.map((id) => {
+                const n = ALL_NAV.find(x => x.id === id);
+                if (!n) return null;
+                const isDragging = dragging === id;
+                return (
+                  <div
+                    key={id}
+                    ref={el => { itemRefs.current[id] = el; }}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 12,
+                      padding: "10px 0", borderBottom: `1px solid ${T.border}`,
+                      background: isDragging ? hexA(T.primary, 0.06) : "transparent",
+                      borderRadius: isDragging ? 12 : 0,
+                      transition: "background 0.15s",
+                      transform: isDragging ? "scale(1.01)" : "scale(1)",
+                      opacity: isDragging ? 0.85 : 1,
+                    }}
+                  >
+                    {/* Drag handle */}
+                    <div
+                      onTouchStart={e => onTouchStart(e, id)}
+                      style={{ padding: "4px 6px", color: T.textMuted, cursor: "grab", touchAction: "none", display: "flex", flexDirection: "column", gap: 3, flexShrink: 0 }}>
+                      {[0,1,2].map(i => (
+                        <div key={i} style={{ display: "flex", gap: 3 }}>
+                          {[0,1].map(j => (
+                            <div key={j} style={{ width: 3, height: 3, borderRadius: "50%", background: T.textMuted, opacity: 0.5 }} />
+                          ))}
+                        </div>
+                      ))}
                     </div>
-                  )}
 
-                  <div style={{ width: 32, height: 32, borderRadius: 9, background: inD ? hexA(T.primary, 0.1) : T.surfaceAlt, color: inD ? T.primary : T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                    <Icon name={n.icon} size={16} />
+                    <div style={{ width: 32, height: 32, borderRadius: 9, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      <Icon name={n.icon} size={16} />
+                    </div>
+                    <div style={{ flex: 1, fontSize: 13, fontWeight: 600, color: T.text }}>{n.label}</div>
+                    <button onClick={() => toggleDock(id)}
+                      style={{ background: hexA("#E5484D", 0.1), color: "#E5484D", border: "none", borderRadius: 8, padding: "5px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>
+                      Remove
+                    </button>
                   </div>
-                  <div style={{ flex: 1, fontSize: 13, fontWeight: 600, color: T.text }}>{n.label}</div>
+                );
+              })}
+            </div>
 
-                  {/* Add/remove toggle */}
-                  <button onClick={() => toggleDock(n.id)}
-                    disabled={!inD && dockIds.length >= 5}
-                    style={{ background: inD ? hexA("#E5484D", 0.1) : hexA(T.primary, 0.1), color: inD ? "#E5484D" : (dockIds.length >= 5 ? T.border : T.primary), border: "none", borderRadius: 8, padding: "5px 10px", fontSize: 11, fontWeight: 700, cursor: (!inD && dockIds.length >= 5) ? "default" : "pointer", fontFamily: "inherit", flexShrink: 0 }}>
-                    {inD ? "Remove" : dockIds.length >= 5 ? "Full" : "Add"}
-                  </button>
-                </div>
-              );
-            })}
-            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 10, lineHeight: 1.5 }}>Choose up to 5 items for your bottom bar. Everything else appears here in the menu.</div>
+            {/* Available to add */}
+            {availableNav.filter(n => !dockIds.includes(n.id)).length > 0 && (
+              <div style={{ marginTop: 16 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: T.textMuted, marginBottom: 10 }}>Add to Bottom Bar</div>
+                {availableNav.filter(n => !dockIds.includes(n.id)).map(n => (
+                  <div key={n.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
+                    <div style={{ width: 32, height: 32, borderRadius: 9, background: T.surfaceAlt, color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      <Icon name={n.icon} size={16} />
+                    </div>
+                    <div style={{ flex: 1, fontSize: 13, fontWeight: 600, color: T.text }}>{n.label}</div>
+                    <button onClick={() => toggleDock(n.id)}
+                      disabled={dockIds.length >= 5}
+                      style={{ background: dockIds.length >= 5 ? T.surfaceAlt : hexA(T.primary, 0.1), color: dockIds.length >= 5 ? T.textMuted : T.primary, border: "none", borderRadius: 8, padding: "5px 10px", fontSize: 11, fontWeight: 700, cursor: dockIds.length >= 5 ? "default" : "pointer", fontFamily: "inherit", flexShrink: 0 }}>
+                      {dockIds.length >= 5 ? "Full" : "Add"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 14, lineHeight: 1.5, paddingBottom: 8 }}>
+              Drag the <span style={{ fontWeight: 700 }}>⠿</span> handle to reorder. Max 5 items in the bottom bar.
+            </div>
           </div>
         </div>
 
