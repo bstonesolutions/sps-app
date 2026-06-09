@@ -10384,22 +10384,13 @@ function CPHome({ client, schedule, invoices, branding, onNav, T }) {
 // ── CP UPGRADE REQUEST ──
 // Multi-step upgrade interest flow shown to the client.
 // Step 1: Compare tiers. Step 2: Write a message. Step 3: Confirmation.
-function CPUpgradeRequest({ client, currentPlan, currentTier, upgradePlan, upgradeTier, tiers, branding, onSubmit, T }) {
+function CPUpgradeRequest({ client, currentPlan, currentTier, upgradePlan, upgradeTier, upgradeOptions = [], tiers, branding, onSubmit, T }) {
   const [step, setStep] = useState("browse");   // browse | message | done
   const [selectedPlan, setSelectedPlan] = useState(upgradePlan);
   const [message, setMessage] = useState("");
   const allTiers = tiers || CP_TIERS;
 
-  // Build list of plans the client can upgrade to (their current tier's upgradeTo chain)
-  const upgradeOptions = (() => {
-    const opts = [];
-    let next = upgradePlan;
-    while (next && allTiers[next]) {
-      opts.push(next);
-      next = allTiers[next].upgradeTo;
-    }
-    return opts;
-  })();
+  // upgradeOptions passed in from CPService (all tiers strictly above current)
 
   const chosen = allTiers[selectedPlan] || upgradeTier;
   const newItems = (chosen?.includes || []).filter(item => !(currentTier?.includes || []).includes(item));
@@ -10660,14 +10651,15 @@ function CPService({ client, branding, onNav, onUpgradeRequest, T }) {
       )}
 
       {/* Upgrade section */}
-      {upgradePlan && upgradeTier && (
+      {upgradeOptions.length > 0 && (
         <CPUpgradeRequest
           client={client}
           currentPlan={plan}
           currentTier={tier}
           upgradePlan={upgradePlan}
           upgradeTier={upgradeTier}
-          tiers={tiers}
+          upgradeOptions={upgradeOptions}
+          tiers={allTiers}
           branding={branding}
           onSubmit={onUpgradeRequest}
           T={T}
@@ -10675,7 +10667,7 @@ function CPService({ client, branding, onNav, onUpgradeRequest, T }) {
       )}
 
       {/* Already on top tier */}
-      {!upgradePlan && (
+      {upgradeOptions.length === 0 && (
         <div style={{ background: hexA("#16a34a", 0.06), border: `1px solid ${hexA("#16a34a", 0.2)}`, borderRadius: 18, padding: "18px 20px", display: "flex", alignItems: "center", gap: 14 }}>
           <div style={{ width: 40, height: 40, borderRadius: 13, background: hexA("#16a34a", 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
             <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="#16a34a" strokeWidth={2} strokeLinecap="round"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
@@ -11304,25 +11296,13 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
               <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 600, letterSpacing: "0.02em" }}>Client Portal</div>
             </div>
           </div>
-          {/* Right buttons */}
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            {/* Refresh */}
-            <button onClick={() => window.location.reload()}
-              style={{ width: 36, height: 36, borderRadius: 11, background: T.surfaceAlt, border: "none", color: T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
-              <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-              </svg>
-            </button>
-            {/* Settings */}
-            {!isStaffPreview && (
-              <button onClick={() => setSettingsOpen(s => !s)}
-                style={{ width: 36, height: 36, borderRadius: 11, background: settingsOpen ? hexA(T.primary, 0.12) : T.surfaceAlt, border: "none", color: settingsOpen ? T.primary : T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-                </svg>
-              </button>
-            )}
-          </div>
+          {/* Refresh button only — settings is in nav */}
+          <button onClick={() => window.location.reload()}
+            style={{ width: 34, height: 34, borderRadius: 10, background: T.surfaceAlt, border: "none", color: T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+            </svg>
+          </button>
         </div>
       </header>
 
@@ -11342,98 +11322,43 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
         {!settingsOpen && page === "cp_request"  && <CPRequest client={client} branding={branding} onSubmit={onServiceRequest} T={T} />}
       </main>
 
-      {/* Bottom nav — transparent glass bar like reference UI */}
-      {(() => {
-        const centerId   = branding.portalCenterBtn || "cp_request";
-        const centerItem = CLIENT_NAV.find(n => n.id === centerId) || CLIENT_NAV[CLIENT_NAV.length - 1];
-        const sideItems  = CLIENT_NAV.filter(n => n.id !== centerId);
-        const left       = sideItems.slice(0, 2);
-        const right      = sideItems.slice(2);
-        const accentColor = branding.accentColor || T.primary;
-        const showLabels  = branding.portalNavLabels !== "false";
-
-        const NavBtn = ({ n }) => {
+      {/* Bottom nav — matches staff UI style */}
+      <nav style={{
+        position: "fixed", bottom: 0, left: 0, right: 0,
+        background: hexA(T.surface, 0.88),
+        backdropFilter: "saturate(180%) blur(20px)",
+        WebkitBackdropFilter: "saturate(180%) blur(20px)",
+        borderTop: `1px solid ${T.border}`,
+        display: "flex", zIndex: 90,
+        minHeight: 60, paddingTop: 4,
+        paddingBottom: "calc(8px + env(safe-area-inset-bottom))",
+      }}>
+        {CLIENT_NAV.map(n => {
           const active = page === n.id || (settingsOpen && n.id === "__settings");
           const label  = n.id === "cp_pond" ? pondLabel(client) : n.label;
           return (
-            <button onClick={() => { setPage(n.id); setSettingsOpen(false); }}
-              style={{
-                flex: 1, display: "flex", alignItems: "center", justifyContent: "center",
-                flexDirection: "column", gap: showLabels ? 4 : 0,
-                height: "100%", border: "none", cursor: "pointer",
-                background: "transparent", fontFamily: "inherit",
-                color: active ? "#fff" : "rgba(255,255,255,0.45)",
-                WebkitTapHighlightColor: "transparent",
-                position: "relative", transition: "color 0.18s ease",
-              }}>
-              {/* Active indicator dot above icon */}
-              {active && (
-                <div style={{ position:"absolute", top: 6, left:"50%", transform:"translateX(-50%)", width:4, height:4, borderRadius:"50%", background:"#fff", opacity:0.9 }} />
-              )}
-              <CIcon name={n.icon} size={showLabels ? 22 : 24} />
-              {showLabels && (
-                <span style={{ fontSize: 10, fontWeight: active ? 700 : 500, letterSpacing:"0.01em", lineHeight:1, maxWidth:62, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                  {label}
-                </span>
-              )}
+            <button key={n.id}
+              onClick={() => { setPage(n.id); setSettingsOpen(false); }}
+              style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, color: active ? T.primary : T.textMuted, fontFamily: "inherit", position: "relative", WebkitTapHighlightColor: "transparent" }}>
+              <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s" }}>
+                <CIcon name={n.icon} size={22} />
+              </span>
+              <span style={{ fontSize: 10.5, fontWeight: active ? 600 : 500, letterSpacing: "-0.01em" }}>{label}</span>
             </button>
           );
-        };
-
-        return (
-          <nav style={{
-            position:"fixed", bottom:0, left:0, right:0, zIndex:90,
-            background:"rgba(12,12,14,0.72)",
-            backdropFilter:"saturate(180%) blur(28px)",
-            WebkitBackdropFilter:"saturate(180%) blur(28px)",
-            borderTop:"1px solid rgba(255,255,255,0.08)",
-            paddingBottom:"env(safe-area-inset-bottom)",
-          }}>
-            <div style={{ maxWidth:600, margin:"0 auto", height: showLabels ? 62 : 54, display:"flex", alignItems:"stretch", position:"relative" }}>
-              {/* Left items */}
-              {left.map(n => <NavBtn key={n.id} n={n} />)}
-
-              {/* Center button — raised accent circle */}
-              <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center", position:"relative" }}>
-                {/* Raised platform */}
-                <div style={{
-                  position:"absolute", bottom: showLabels ? -2 : -2, left:"50%", transform:"translateX(-50%)",
-                  width:58, height:58, borderRadius:"50%",
-                  background:"rgba(12,12,14,0.72)",
-                  backdropFilter:"blur(28px)", WebkitBackdropFilter:"blur(28px)",
-                  border:"1px solid rgba(255,255,255,0.08)",
-                }} />
-                <button onClick={() => { setPage(centerItem.id); setSettingsOpen(false); }}
-                  style={{
-                    position:"relative", zIndex:1,
-                    width:52, height:52, borderRadius:"50%",
-                    background:`linear-gradient(145deg, ${accentColor} 0%, ${mix(accentColor,"#000",0.2)} 100%)`,
-                    border:"none", cursor:"pointer",
-                    display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center",
-                    gap: showLabels ? 3 : 0,
-                    color:"#fff",
-                    boxShadow:`0 4px 24px ${hexA(accentColor,0.5)}, 0 2px 8px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.25)`,
-                    WebkitTapHighlightColor:"transparent",
-                    transition:"transform 0.12s cubic-bezier(.34,1.56,.64,1), box-shadow 0.12s ease",
-                    marginBottom: showLabels ? 10 : 6,
-                  }}
-                  onTouchStart={e => { e.currentTarget.style.transform="scale(0.9)"; e.currentTarget.style.boxShadow=`0 2px 12px ${hexA(accentColor,0.4)}`; }}
-                  onTouchEnd={e => { e.currentTarget.style.transform="scale(1)"; e.currentTarget.style.boxShadow=`0 4px 24px ${hexA(accentColor,0.5)}, 0 2px 8px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.25)`; }}>
-                  <CIcon name={centerItem.icon} size={22} />
-                  {showLabels && (
-                    <span style={{ fontSize:9, fontWeight:800, letterSpacing:"0.03em", lineHeight:1, color:"rgba(255,255,255,0.9)", textTransform:"uppercase" }}>
-                      {(centerItem.id === "cp_pond" ? pondLabel(client) : centerItem.label).split(" ")[0]}
-                    </span>
-                  )}
-                </button>
-              </div>
-
-              {/* Right items */}
-              {right.map(n => <NavBtn key={n.id} n={n} />)}
-            </div>
-          </nav>
-        );
-      })()}
+        })}
+        {/* Settings tab */}
+        {!isStaffPreview && (
+          <button
+            onClick={() => setSettingsOpen(s => !s)}
+            style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, color: settingsOpen ? T.primary : T.textMuted, fontFamily: "inherit", WebkitTapHighlightColor: "transparent" }}>
+            <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: settingsOpen ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s" }}>
+              <Icon name="settings" size={22} />
+            </span>
+            <span style={{ fontSize: 10.5, fontWeight: settingsOpen ? 600 : 500, letterSpacing: "-0.01em" }}>Settings</span>
+          </button>
+        )}
+      </nav>
     </div>
   );
 }
