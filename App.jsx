@@ -620,6 +620,8 @@ const BLANK_CLIENT = {
   servicePond: false, servicePool: false, serviceSeasonal: false,
   equipment: [], history: [],
   nextService: "", balance: "$0.00",
+  referralSource: "",   // How they found SPS
+  referredBy: "",       // Client name who referred them
 };
 
 const DIVISIONS = ["Pond", "Pool", "Seasonal"];
@@ -767,7 +769,15 @@ function renderReport(email, ctx, { plain = false } = {}) {
     lines.push("");
   }
   if (email.showPhotosNote && ctx.photoCount > 0) {
-    lines.push(`We took ${ctx.photoCount} photo${ctx.photoCount === 1 ? "" : "s"} during today's visit — you can view them anytime in your client portal.`);
+    const beforeCt = ctx.photosBeforeCount || 0;
+    const afterCt  = ctx.photosAfterCount  || 0;
+    const otherCt  = ctx.photoCount - beforeCt - afterCt;
+    const parts = [];
+    if (beforeCt) parts.push(`${beforeCt} before`);
+    if (afterCt)  parts.push(`${afterCt} after`);
+    if (otherCt)  parts.push(`${otherCt} additional`);
+    const photoDesc = parts.length ? ` (${parts.join(", ")})` : "";
+    lines.push(`We took ${ctx.photoCount} photo${ctx.photoCount === 1 ? "" : "s"}${photoDesc} during today's visit — you can view them anytime in your client portal.`);
     lines.push("");
   }
   lines.push(email.signoff);
@@ -776,21 +786,40 @@ function renderReport(email, ctx, { plain = false } = {}) {
   return lines.join("\n");
 }
 
-// Resize + compress an image file to a small data URL so storage stays light
-function compressImage(file, maxDim = 900, quality = 0.6) {
+// Compress an image — keeps original quality unless result exceeds 1MB,
+// then iteratively reduces quality by 0.05 until it fits.
+function compressImage(file, maxDim = 1600) {
+  const MAX_BYTES = 1 * 1024 * 1024; // 1 MB
   return new Promise((resolve) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       const img = new Image();
       img.onload = () => {
         let { width, height } = img;
+        // Only downscale if the image is very large (keep detail)
         if (width > height && width > maxDim) { height = Math.round(height * maxDim / width); width = maxDim; }
         else if (height > maxDim) { width = Math.round(width * maxDim / height); height = maxDim; }
+
         const canvas = document.createElement("canvas");
-        canvas.width = width; canvas.height = height;
+        canvas.width = width;
+        canvas.height = height;
         canvas.getContext("2d").drawImage(img, 0, 0, width, height);
-        try { resolve(canvas.toDataURL("image/jpeg", quality)); }
-        catch (err) { resolve(e.target.result); }
+
+        // Start at full quality, step down only if needed
+        let quality = 0.95;
+        let result  = "";
+        try {
+          do {
+            result  = canvas.toDataURL("image/jpeg", quality);
+            // base64 is ~4/3 the binary size
+            const approxBytes = Math.round((result.length - 22) * 3 / 4);
+            if (approxBytes <= MAX_BYTES) break;
+            quality = Math.round((quality - 0.05) * 100) / 100;
+          } while (quality >= 0.30);
+          resolve(result);
+        } catch (err) {
+          resolve(e.target.result); // fallback to original
+        }
       };
       img.onerror = () => resolve(e.target.result);
       img.src = e.target.result;
@@ -1971,6 +2000,15 @@ function ClientEditForm({ client, onSave, onCancel, title = "Edit Client" }) {
 
                 <FieldRow label="Phone"><Input value={form.phone} onChange={e => set("phone", e.target.value)} /></FieldRow>
                 <FieldRow label="Email"><Input value={form.email} onChange={e => set("email", e.target.value)} /></FieldRow>
+                <FieldRow label="Referral Source">
+                  <Select value={form.referralSource || ""} onChange={e => set("referralSource", e.target.value)}
+                    options={["", "Google", "Facebook", "Instagram", "Word of Mouth", "Referral", "Door Hanger", "Direct Mail", "Other"]} />
+                </FieldRow>
+                {(form.referralSource === "Referral" || form.referralSource === "Word of Mouth") && (
+                  <FieldRow label="Referred By">
+                    <Input value={form.referredBy || ""} onChange={e => set("referredBy", e.target.value)} placeholder="Client name who referred them" />
+                  </FieldRow>
+                )}
               </>}
               {si === 1 && <>
                 {/* Primary division — drives portal labels */}
@@ -3647,7 +3685,12 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
   const [notesOffice, setNotesOffice] = useState("");
   const [officeFlag, setOfficeFlag] = useState(false);
   const [officeFlagMsg, setOfficeFlagMsg] = useState("");
-  const [photos, setPhotos] = useState([]);
+  // Unified photos: each entry is { src, label } — label is editable per photo
+  const [photos, setPhotos] = useState([]); // [{ src, label }]
+  const [satisfaction,     setSatisfaction]     = useState(0);  // 1-5 stars, 0 = not rated
+  const [satisfactionNote, setSatisfactionNote] = useState(""); // required when rating is set
+  const MAX_PHOTOS = 10;
+  const PHOTO_LABELS = ["Before", "After", "Detail", "Equipment", "Issue", "General"];
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
 
@@ -3712,16 +3755,23 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
   const margin = num(revenue) > 0 ? (profit / num(revenue)) * 100 : 0;
   const money = (n) => `$${n.toFixed(2)}`;
 
-  const addPhotos = async (e) => {
+  const addPhotos = async (e, defaultLabel = "General") => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
+    const remaining = MAX_PHOTOS - photos.length;
+    if (remaining <= 0) return;
     setBusy(true);
     const compressed = [];
-    for (const f of files) compressed.push(await compressImage(f));
+    for (const f of files.slice(0, remaining)) {
+      const src = await compressImage(f);
+      compressed.push({ src, label: defaultLabel });
+    }
     setPhotos(p => [...p, ...compressed]);
     setBusy(false);
+    e.target.value = "";
   };
   const removePhoto = (i) => setPhotos(p => p.filter((_, idx) => idx !== i));
+  const relabelPhoto = (i, label) => setPhotos(p => p.map((ph, idx) => idx === i ? { ...ph, label } : ph));
 
   const treatmentsUsed = treatments
     .filter(t => num(tx[t.id]) > 0)
@@ -3733,6 +3783,8 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
     date: todayStr, tech: "B. Stone", notes: notesClient,
     ph: readings["pH"] || "", ammonia: readings["Ammonia"] || "", nitrite: readings["Nitrite"] || "", temp: readings["Temperature"] || "",
     photoCount: photos.length,
+    photosBeforeCount: photos.filter(p => p.label === "Before").length,
+    photosAfterCount:  photos.filter(p => p.label === "After").length,
   };
   const reportText = renderReport(email, ctx);
 
@@ -3748,7 +3800,9 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
     // legacy fields for older history cards
     ph: readings["pH"] || "—", ammonia: readings["Ammonia"] || "—", nitrite: readings["Nitrite"] || "—", temp: readings["Temperature"] || "—",
     invoice: revenue ? `$${revenue}` : "$0",
-    photos,
+    photos,  // [{ src, label }]
+    satisfaction,
+    satisfactionNote,
     treatmentsUsed, productsUsed,
     breakdown: {
       revenue: num(revenue), minutes: num(minutes), hourlyRate: num(hourlyRate),
@@ -3759,6 +3813,10 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
   });
 
   const finish = () => {
+    if (satisfaction > 0 && !satisfactionNote.trim()) {
+      alert("Please add a note to support your satisfaction rating before completing.");
+      return;
+    }
     onComplete(stop.id, buildEntry(), stop.sid);
     if (officeFlag && officeFlagMsg.trim() && onOfficeAlert) {
       onOfficeAlert({ client: client?.name || "Client", clientId: client?.id, message: officeFlagMsg.trim(), date: todayStr });
@@ -3958,21 +4016,91 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
         </div>
       )}
 
-      {/* Photos */}
+      {/* Photos — up to 10, each labeled */}
       <div style={sectionGap}>
-        <label style={labelStyle}>Photos</label>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-          {photos.map((p, i) => (
-            <div key={i} style={{ position: "relative" }}>
-              <img src={p} alt="" style={{ width: 64, height: 64, borderRadius: 10, objectFit: "cover" }} />
-              <button onClick={() => removePhoto(i)} style={{ position: "absolute", top: -6, right: -6, background: "#C0392B", color: "#fff", border: "none", borderRadius: "50%", width: 20, height: 20, fontSize: 12, cursor: "pointer", lineHeight: 1 }}>×</button>
-            </div>
-          ))}
-          <label style={{ width: 64, height: 64, borderRadius: 10, border: `2px dashed ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, color: T.textMuted, cursor: "pointer" }}>
-            {busy ? "…" : "+"}
-            <input type="file" accept="image/*,image/heic,image/heif" multiple onChange={addPhotos} style={{ display: "none" }} />
+        <label style={labelStyle}>
+          Photos
+          <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}> ({photos.length}/{MAX_PHOTOS})</span>
+        </label>
+
+        {/* Existing photos with label picker */}
+        {photos.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 12 }}>
+            {photos.map((ph, i) => (
+              <div key={i} style={{ display: "flex", gap: 10, alignItems: "center", background: T.surfaceAlt, borderRadius: 12, padding: "8px 10px" }}>
+                <img src={ph.src} alt="" style={{ width: 56, height: 56, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                    {PHOTO_LABELS.map(lbl => (
+                      <button key={lbl} type="button" onClick={() => relabelPhoto(i, lbl)}
+                        style={{ padding: "4px 10px", borderRadius: 20, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit",
+                          background: ph.label === lbl ? T.primary : T.surface,
+                          color: ph.label === lbl ? "#fff" : T.textMuted }}>
+                        {lbl}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <button onClick={() => removePhoto(i)}
+                  style={{ background: "none", border: "none", color: T.textMuted, fontSize: 18, cursor: "pointer", lineHeight: 1, flexShrink: 0, padding: "0 4px" }}>×</button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Add photo button */}
+        {photos.length < MAX_PHOTOS && (
+          <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 14px", borderRadius: 12, border: `2px dashed ${T.border}`, cursor: "pointer", color: T.textMuted, fontSize: 13, fontWeight: 600 }}>
+            <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            {busy ? "Adding…" : `Add photos (${MAX_PHOTOS - photos.length} remaining)`}
+            <input type="file" accept="image/*,image/heic,image/heif" multiple onChange={e => addPhotos(e, "General")} style={{ display: "none" }} />
           </label>
+        )}
+      </div>
+
+      {/* Client Satisfaction */}
+      <div style={sectionGap}>
+        <label style={labelStyle}>
+          Client Satisfaction
+          <span style={{ textTransform: "none", color: T.textMuted, fontWeight: 400 }}> (optional)</span>
+        </label>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: satisfaction > 0 ? 10 : 0 }}>
+          {[1,2,3,4,5].map(star => (
+            <button key={star} type="button"
+              onClick={() => { setSatisfaction(satisfaction === star ? 0 : star); if (satisfaction === star) setSatisfactionNote(""); }}
+              style={{ background: "none", border: "none", cursor: "pointer", padding: "2px 4px", fontSize: 30, lineHeight: 1,
+                color: star <= satisfaction ? "#F59E0B" : T.border,
+                transform: star <= satisfaction ? "scale(1.1)" : "scale(1)",
+                transition: "color 0.12s, transform 0.12s" }}>
+              ★
+            </button>
+          ))}
+          {satisfaction > 0 && (
+            <span style={{ fontSize: 13, fontWeight: 700, color: "#F59E0B", marginLeft: 4 }}>
+              {["","Poor","Fair","Good","Great","Excellent"][satisfaction]}
+            </span>
+          )}
         </div>
+        {satisfaction > 0 && (
+          <div>
+            <textarea
+              value={satisfactionNote}
+              onChange={e => setSatisfactionNote(e.target.value)}
+              placeholder={satisfaction <= 2
+                ? "What went wrong? (required)"
+                : satisfaction === 3
+                  ? "What could have been better? (required)"
+                  : "What stood out about this visit? (required)"}
+              rows={2}
+              style={{ width: "100%", padding: "10px 13px", border: `1.5px solid ${satisfactionNote.trim() ? T.border : "#E5484D"}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical" }}
+            />
+            {!satisfactionNote.trim() && (
+              <div style={{ fontSize: 11, color: "#E5484D", marginTop: 4, fontWeight: 600 }}>
+                A note is required with every rating.
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Notes to client */}
@@ -10747,6 +10875,26 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
   const byDivision = { Pond: 0, Pool: 0, Seasonal: 0 };
   activeClients.forEach(c => { byDivision[c.division] = (byDivision[c.division]||0) + 1; });
 
+  // ── Satisfaction ──
+  const allHistoryWithRatings = allHistory.filter(h => h.satisfaction > 0);
+  const periodRatings  = periodJobs.filter(h => h.satisfaction > 0);
+  const avgSatisfaction = periodRatings.length
+    ? (periodRatings.reduce((s, h) => s + h.satisfaction, 0) / periodRatings.length).toFixed(1)
+    : null;
+  const allTimeAvgSat = allHistoryWithRatings.length
+    ? (allHistoryWithRatings.reduce((s, h) => s + h.satisfaction, 0) / allHistoryWithRatings.length).toFixed(1)
+    : null;
+
+  // ── Referrals ──
+  const referralBreakdown = {};
+  activeClients.forEach(c => {
+    const src = c.referralSource || "Unknown";
+    referralBreakdown[src] = (referralBreakdown[src] || 0) + 1;
+  });
+  const topReferralSources = Object.entries(referralBreakdown)
+    .filter(([k]) => k !== "Unknown" && k !== "")
+    .sort((a, b) => b[1] - a[1]);
+
   // ── Schedule ──
   const periodStops = (schedule||[])
     .filter(d => inPeriod(d.date))
@@ -10869,6 +11017,59 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
           ))}
         </div>
       </Section>
+
+      {/* Satisfaction */}
+      {allHistoryWithRatings.length > 0 && (
+        <Section title="Client Satisfaction">
+          <div style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+            <div style={{ padding: "20px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: `1px solid ${T.border}` }}>
+              <div>
+                <div style={{ fontSize: 13, color: T.textMuted }}>Avg Rating — {PERIODS.find(p => p.id === period)?.label}</div>
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{periodRatings.length} rated visits</div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 28, fontWeight: 900, color: "#F59E0B" }}>{avgSatisfaction || "—"}</div>
+                {avgSatisfaction && <div style={{ fontSize: 12, color: "#F59E0B" }}>{"★".repeat(Math.round(parseFloat(avgSatisfaction)))}</div>}
+              </div>
+            </div>
+            {[1,2,3,4,5].reverse().map(star => {
+              const count = allHistoryWithRatings.filter(h => h.satisfaction === star).length;
+              const pctStar = allHistoryWithRatings.length ? Math.round((count / allHistoryWithRatings.length) * 100) : 0;
+              return (
+                <div key={star} style={{ padding: "10px 18px", display: "flex", alignItems: "center", gap: 12, borderBottom: star > 1 ? `1px solid ${T.border}` : "none" }}>
+                  <span style={{ fontSize: 13, color: "#F59E0B", width: 70, flexShrink: 0 }}>{"★".repeat(star)}{"☆".repeat(5-star)}</span>
+                  <div style={{ flex: 1, height: 8, background: T.surfaceAlt, borderRadius: 4, overflow: "hidden" }}>
+                    <div style={{ width: `${pctStar}%`, height: "100%", background: "#F59E0B", borderRadius: 4, transition: "width 0.5s ease" }} />
+                  </div>
+                  <span style={{ fontSize: 12, color: T.textMuted, width: 30, textAlign: "right", flexShrink: 0 }}>{count}</span>
+                </div>
+              );
+            })}
+            <div style={{ padding: "10px 18px", fontSize: 12, color: T.textMuted }}>
+              All-time average: <strong style={{ color: T.text }}>{allTimeAvgSat || "—"}</strong> from {allHistoryWithRatings.length} visits
+            </div>
+          </div>
+        </Section>
+      )}
+
+      {/* Referrals */}
+      {topReferralSources.length > 0 && (
+        <Section title="Referral Sources">
+          <div style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+            {topReferralSources.map(([src, count], i) => (
+              <div key={src} style={{ padding: "12px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: i < topReferralSources.length - 1 ? `1px solid ${T.border}` : "none" }}>
+                <div style={{ fontSize: 13, color: T.text, fontWeight: 600 }}>{src}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ width: 80, height: 6, background: T.surfaceAlt, borderRadius: 3, overflow: "hidden" }}>
+                    <div style={{ width: `${pct(count, activeClients.length)}%`, height: "100%", background: T.primary, borderRadius: 3 }} />
+                  </div>
+                  <span style={{ fontSize: 13, fontWeight: 800, color: T.text, width: 24, textAlign: "right" }}>{count}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
 
       {/* Client base */}
       <Section title="Client Base">
@@ -11766,10 +11967,36 @@ function CPProperty({ client, branding, onNav, onUpgradeRequest, T }) {
           <div style={{ padding:"14px 18px", borderBottom:`1px solid ${T.border}`, fontSize:13, fontWeight:800, color:T.text }}>Recent Visits</div>
           {history.slice(0,3).map((h,i) => (
             <div key={i} style={{ padding:"12px 18px", borderBottom: i<2 && i<history.length-1 ? `1px solid ${T.border}` : "none", display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:10 }}>
-              <div>
-                <div style={{ fontSize:13, fontWeight:700, color:T.text }}>{h.type || "Service Visit"}</div>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontSize:13, fontWeight:700, color:T.text, display:"flex", alignItems:"center", gap:8 }}>
+                  {h.type || "Service Visit"}
+                  {h.satisfaction > 0 && (
+                    <span style={{ fontSize:11, color:"#F59E0B", letterSpacing:"0.02em" }}>{"★".repeat(h.satisfaction)}</span>
+                  )}
+                </div>
                 <div style={{ fontSize:11, color:T.textMuted, marginTop:2 }}>{h.date}{h.tech ? ` · ${h.tech}` : ""}</div>
                 {h.notes && <div style={{ fontSize:12, color:T.textMuted, marginTop:4, lineHeight:1.4 }}>{h.notes}</div>}
+                {/* Before/After thumbnails */}
+                {(h.photos||[]).length > 0 && (
+                  <div style={{ display:"flex", gap:6, marginTop:8, flexWrap:"wrap" }}>
+                    {(h.photos||[]).slice(0,4).map((ph, i) => {
+                      const src   = typeof ph === "string" ? ph : ph.src;
+                      const label = typeof ph === "string" ? "" : ph.label;
+                      const labelColor = label === "Before" ? "#F59E0B" : label === "After" ? "#16a34a" : "rgba(0,0,0,0.5)";
+                      return (
+                        <div key={i} style={{ position:"relative" }}>
+                          <img src={src} alt="" style={{ width:52, height:52, borderRadius:8, objectFit:"cover", border:`2px solid ${labelColor}` }} />
+                          {label && <div style={{ position:"absolute", bottom:2, left:2, fontSize:8, fontWeight:800, color:"#fff", background:labelColor, borderRadius:3, padding:"1px 4px" }}>{label.slice(0,2).toUpperCase()}</div>}
+                        </div>
+                      );
+                    })}
+                    {(h.photos||[]).length > 4 && (
+                      <div style={{ width:52, height:52, borderRadius:8, background:"rgba(0,0,0,0.1)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, color:T.textMuted }}>
+                        +{(h.photos||[]).length - 4}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
               {h.invoice && <div style={{ fontSize:12, fontWeight:700, color:T.textMuted, flexShrink:0 }}>{h.invoice}</div>}
             </div>
