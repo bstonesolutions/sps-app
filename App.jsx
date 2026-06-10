@@ -930,7 +930,10 @@ const nextInvoiceNumber = (invoices, cfg) => {
   const max = nums.length ? Math.max(...nums) : start - 1;
   return Math.max(max + 1, start);
 };
-const clientInvoicesOf = (invoices, clientId) => (invoices || []).filter(iv => iv.clientId === clientId);
+const clientInvoicesOf = (invoices, clientId, client) => {
+  if (client) return (invoices || []).filter(iv => invoiceMatchesClient(iv, client));
+  return (invoices || []).filter(iv => iv.clientId === clientId);
+};
 // what a client owes: from their unpaid invoices if any exist, else the stored balance
 // Match invoice to client — by ID or by name (for QB imports)
 const invoiceMatchesClient = (iv, client) =>
@@ -939,8 +942,13 @@ const invoiceMatchesClient = (iv, client) =>
    iv.clientName.toLowerCase().trim() === (client.name || "").toLowerCase().trim());
 
 const clientOutstanding = (client, invoices) => {
-  const list = clientInvoicesOf(invoices, client.id);
-  if (list.length) return list.filter(iv => effectiveStatus(iv) !== "Paid" && iv.status !== "Draft").reduce((s, iv) => s + invoiceTotals(iv).total, 0);
+  const list = clientInvoicesOf(invoices, client.id, client);
+  if (list.length) {
+    const isPaidStatus = (iv) => ["Paid","paid"].includes(effectiveStatus(iv));
+    return list
+      .filter(iv => !isPaidStatus(iv) && iv.status !== "Draft" && iv.status !== "draft")
+      .reduce((s, iv) => s + invoiceTotals(iv).total, 0);
+  }
   return parseFloat((client.balance || "").replace(/[^\d.]/g, "")) || 0;
 };
 
@@ -8051,7 +8059,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, onSave, onDele
 
 function ClientInvoices({ client, invoices, invoicing, branding, onSave, onDelete }) {
   const { T, perms } = useApp();
-  const list = clientInvoicesOf(invoices, client.id).map(iv => ({ ...iv, _client: client })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const list = clientInvoicesOf(invoices, client.id, client).map(iv => ({ ...iv, _client: client })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState(null);
   const [preview, setPreview] = useState(null);
@@ -12212,8 +12220,8 @@ function CPInvoices({ client, invoices, branding, T }) {
     </div>
   );
 
-  const outstanding = myInvoices.filter(iv => iv.status !== "paid");
-  const total = outstanding.reduce((s,iv) => s + (parseFloat((iv.total||"0").replace(/[^0-9.-]/g,""))||0), 0);
+  const outstanding = myInvoices.filter(iv => !["Paid","paid"].includes(effectiveStatus(iv)) && iv.status !== "Draft" && iv.status !== "draft");
+  const total = outstanding.reduce((s,iv) => s + invoiceTotals(iv).total, 0);
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
@@ -12230,7 +12238,7 @@ function CPInvoices({ client, invoices, branding, T }) {
       <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
         {myInvoices.map((iv,i) => {
           const isOpen = open === iv.id;
-          const amt = parseFloat((iv.total||"0").replace(/[^0-9.-]/g,""))||0;
+          const amt = invoiceTotals(iv).total;
           return (
             <div key={iv.id} style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, overflow:"hidden" }}>
               <div onClick={() => setOpen(isOpen ? null : iv.id)}
