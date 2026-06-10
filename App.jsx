@@ -895,6 +895,12 @@ const nextInvoiceNumber = (invoices, cfg) => {
 };
 const clientInvoicesOf = (invoices, clientId) => (invoices || []).filter(iv => iv.clientId === clientId);
 // what a client owes: from their unpaid invoices if any exist, else the stored balance
+// Match invoice to client — by ID or by name (for QB imports)
+const invoiceMatchesClient = (iv, client) =>
+  invoiceMatchesClient(iv, client) ||
+  (iv.clientId === null && iv.clientName &&
+   iv.clientName.toLowerCase().trim() === (client.name || "").toLowerCase().trim());
+
 const clientOutstanding = (client, invoices) => {
   const list = clientInvoicesOf(invoices, client.id);
   if (list.length) return list.filter(iv => effectiveStatus(iv) !== "Paid" && iv.status !== "Draft").reduce((s, iv) => s + invoiceTotals(iv).total, 0);
@@ -2343,8 +2349,8 @@ function ClientDetail({ client: init, invoices, invoicing, branding, schedule, o
             </div>
             <div style={{ display: "flex", gap: 7, alignItems: "center", flexShrink: 0 }}>
               <Badge label={client.plan} bg={pm.bg} color={pm.color || pm.text} />
-              {perms.canInvoice && (invoices||[]).filter(iv => iv.clientId === client.id).length > 0 && (
-                <Btn variant="ghost" sm onClick={() => generateStatementPDF(client, (invoices||[]).filter(iv => iv.clientId === client.id), branding)} style={{ display:"flex", alignItems:"center", gap:5 }}>
+              {perms.canInvoice && (invoices||[]).filter(iv => invoiceMatchesClient(iv, client)).length > 0 && (
+                <Btn variant="ghost" sm onClick={() => generateStatementPDF(client, (invoices||[]).filter(iv => invoiceMatchesClient(iv, client)), branding)} style={{ display:"flex", alignItems:"center", gap:5 }}>
                   <Icon name="download" size={13} /> PDF
                 </Btn>
               )}
@@ -2732,7 +2738,7 @@ function ClientEquipment({ client, invoices, onChange }) {
   const [modal, setModal] = useState(null);
   const [expanded, setExpanded] = useState({});
   const equipment = client.equipment || [];
-  const clientInvoices = (invoices || []).filter(iv => iv.clientId === client.id);
+  const clientInvoices = (invoices || []).filter(iv => invoiceMatchesClient(iv, client));
   const STATUSES = ["Good", "Monitor", "Replace Soon"];
   const ORIGINS  = ["Installed by SPS", "Pre-existing (before SPS)", "Client-supplied"];
 
@@ -10791,7 +10797,7 @@ function CIcon({ name, size = 22 }) {
 // ── CP HOME ──
 function CPHome({ client, schedule, invoices, branding, onNav, T }) {
   const next = clientNextVisit(schedule, client.id);
-  const myInvoices = (invoices || []).filter(iv => iv.clientId === client.id);
+  const myInvoices = (invoices || []).filter(iv => invoiceMatchesClient(iv, client));
   const outstanding = myInvoices.filter(iv => iv.status !== "paid");
   const totalOwed = outstanding.reduce((s, iv) => s + (parseFloat((iv.total || "0").replace(/[^0-9.-]/g,"")) || 0), 0);
   const recentHistory = (client.history || []).slice(0, 3);
@@ -12328,57 +12334,74 @@ export default function App({ authEmail = "", onSignOut }) {
   const handleClientSelect = (c) => { setSelectedClient(c); setAdding(false); setPage("clients"); window.scrollTo({ top: 0, behavior: "instant" }); };
   // QuickBooks sync handler — merges QB invoices into app state and matches customers to clients
   const handleQBSync = (qbInvoices, qbCustomers) => {
-    // Map QB invoices to SPS invoice format and merge
-    const newInvoices = qbInvoices.map(qi => ({
-      id:         `qb_${qi.qbId}`,
-      qbId:       qi.qbId,
-      number:     qi.number,
-      clientId:   null, // will be matched below
-      clientName: qi.clientName,
-      date:       qi.date,
-      dueDate:    qi.dueDate,
-      status:     qi.status,
-      items:      qi.lines.map(l => ({ description: l.description, qty: l.qty, rate: l.rate, amount: l.amount })),
-      total:      String(qi.total),
-      balance:    qi.balance,
-      source:     "quickbooks",
-      createdAt:  Date.now(),
-    }));
+    // Build client lookup maps from current clients snapshot
+    const currentClients = clients || [];
 
-    // Match QB customers to existing SPS clients by name or email
-    const clientMap = {};
+    // Build map: qbCustomerId -> spsClientId, using name + email matching
+    const qbIdToClientId = {};
+    const nameToClientId = {};
+
+    // Index SPS clients by name and email for fast lookup
+    currentClients.forEach(c => {
+      if (c.name)  nameToClientId[c.name.toLowerCase().trim()]  = c.id;
+      if (c.email) nameToClientId[c.email.toLowerCase().trim()] = c.id;
+    });
+
+    // Match QB customers to SPS clients
+    const updatedClients = currentClients.map(c => ({ ...c }));
     (qbCustomers || []).forEach(qc => {
-      setClients(cs => cs.map(c => {
-        const nameMatch  = c.name  && qc.name  && c.name.toLowerCase().trim()  === qc.name.toLowerCase().trim();
-        const emailMatch = c.email && qc.email && c.email.toLowerCase().trim() === qc.email.toLowerCase().trim();
-        if (nameMatch || emailMatch) {
-          clientMap[qc.qbId] = c.id;
-          return { ...c, qbId: qc.qbId, qbBalance: qc.balance };
-        }
-        return c;
-      }));
-    });
-
-    // Assign clientIds to invoices based on customer match
-    const matched = newInvoices.map(inv => {
-      const qbInv = qbInvoices.find(q => `qb_${q.qbId}` === inv.id);
-      const clientId = qbInv ? clientMap[qbInv.qbCustomerId] : null;
-      // Also try matching by client name directly
-      if (!clientId && inv.clientName) {
-        setClients(cs => {
-          const match = cs.find(c => c.name && c.name.toLowerCase().trim() === inv.clientName.toLowerCase().trim());
-          if (match) clientMap[inv.clientName] = match.id;
-          return cs;
-        });
+      const nameKey  = (qc.name  || "").toLowerCase().trim();
+      const emailKey = (qc.email || "").toLowerCase().trim();
+      const matchId  = nameToClientId[nameKey] || nameToClientId[emailKey];
+      if (matchId) {
+        qbIdToClientId[qc.qbId] = matchId;
+        // Tag the matching client with their QB ID
+        const idx = updatedClients.findIndex(c => c.id === matchId);
+        if (idx >= 0) updatedClients[idx] = { ...updatedClients[idx], qbId: qc.qbId };
       }
-      return { ...inv, clientId: clientId || clientMap[inv.clientName] || null };
     });
 
-    // Merge into invoices — replace existing QB invoices, keep manual ones
+    // Update clients with QB IDs
+    setClients(updatedClients);
+
+    // Map QB invoices to SPS format with clientId resolved
+    const newInvoices = qbInvoices.map(qi => {
+      // Try qbCustomerId match first, then clientName match
+      const clientId = qbIdToClientId[qi.qbCustomerId]
+        || nameToClientId[(qi.clientName || "").toLowerCase().trim()]
+        || null;
+
+      return {
+        id:         `qb_${qi.qbId}`,
+        qbId:       qi.qbId,
+        number:     qi.number,
+        clientId,
+        clientName: qi.clientName,
+        date:       qi.date,
+        dueDate:    qi.dueDate,
+        status:     qi.status,
+        items:      (qi.lines || []).map(l => ({
+          description: l.description,
+          qty:         l.qty,
+          rate:        l.rate,
+          amount:      l.amount,
+        })),
+        total:      String(qi.total),
+        balance:    qi.balance,
+        source:     "quickbooks",
+        createdAt:  Date.now(),
+      };
+    });
+
+    // Merge — keep manual invoices, replace all QB ones
     setInvoices(prev => {
       const manual = (prev || []).filter(iv => iv.source !== "quickbooks");
-      return [...manual, ...matched];
+      return [...manual, ...newInvoices];
     });
+
+    // Log match stats
+    const matched = newInvoices.filter(iv => iv.clientId).length;
+    console.log(`QB Sync: ${newInvoices.length} invoices, ${matched} matched to clients`);
   };
 
   const handleNav = (id, opts = {}) => {
