@@ -6946,19 +6946,30 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, presetClientId, 
 // ─────────────────────────────────────────────
 function QBConnect() {
   const { T } = useApp();
-  const [status, setStatus]   = useState("idle"); // idle | syncing | done | error
+  const [status, setStatus]   = useState("idle");
   const [result, setResult]   = useState(null);
-  const [connected, setConnected] = useState(false);
+  const [connected, setConnected] = useState(() => !!localStorage.getItem("qb_access_token"));
 
-  // Check if we just returned from QB OAuth
+  // Check if we just returned from QB OAuth callback
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get("qb") === "connected") {
-      setConnected(true);
-      // Clean up URL
+      const accessToken  = params.get("access_token");
+      const refreshToken = params.get("refresh_token");
+      const realmId      = params.get("realmId");
+      const expiresIn    = params.get("expires_in");
+      if (accessToken && realmId) {
+        localStorage.setItem("qb_access_token",  accessToken);
+        localStorage.setItem("qb_refresh_token", refreshToken);
+        localStorage.setItem("qb_realm_id",      realmId);
+        localStorage.setItem("qb_expires_at",    String(Date.now() + Number(expiresIn) * 1000));
+        setConnected(true);
+      }
       window.history.replaceState({}, "", window.location.pathname);
     } else if (params.get("qb") === "error") {
       setStatus("error");
+      setResult({ error: "QuickBooks authorization failed. Please try again." });
+      window.history.replaceState({}, "", window.location.pathname);
     }
   }, []);
 
@@ -6966,15 +6977,34 @@ function QBConnect() {
     window.location.href = "/api/quickbooks/auth";
   };
 
+  const handleDisconnect = () => {
+    localStorage.removeItem("qb_access_token");
+    localStorage.removeItem("qb_refresh_token");
+    localStorage.removeItem("qb_realm_id");
+    localStorage.removeItem("qb_expires_at");
+    setConnected(false);
+    setStatus("idle");
+    setResult(null);
+  };
+
   const handleSync = async () => {
     setStatus("syncing");
     setResult(null);
+    const accessToken = localStorage.getItem("qb_access_token");
+    const realmId     = localStorage.getItem("qb_realm_id");
+    if (!accessToken || !realmId) {
+      setStatus("error");
+      setResult({ error: "Not connected. Please connect QuickBooks first." });
+      setConnected(false);
+      return;
+    }
     try {
-      const res  = await fetch("/api/quickbooks/sync");
+      const url = `/api/quickbooks/sync?access_token=${encodeURIComponent(accessToken)}&realm_id=${encodeURIComponent(realmId)}`;
+      const res = await fetch(url);
       if (res.status === 401) {
         setStatus("error");
         setResult({ error: "Session expired. Please reconnect." });
-        setConnected(false);
+        handleDisconnect();
         return;
       }
       const data = await res.json();
@@ -7005,12 +7035,18 @@ function QBConnect() {
             <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#16a34a", flexShrink: 0 }} />
             <span style={{ fontSize: 13, fontWeight: 700, color: "#16a34a" }}>Connected to QuickBooks</span>
           </div>
-          <button onClick={handleSync} disabled={status === "syncing"}
-            style={{ background: status === "syncing" ? T.surfaceAlt : T.primary, color: status === "syncing" ? T.textMuted : "#fff", border: "none", borderRadius: 12, padding: "12px 18px", fontWeight: 700, fontSize: 14, cursor: status === "syncing" ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-            {status === "syncing" ? (
-              <><div style={{ width: 16, height: 16, border: `2px solid ${T.textMuted}`, borderTopColor: T.primary, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /> Syncing…</>
-            ) : "Sync Now"}
-          </button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={handleSync} disabled={status === "syncing"}
+              style={{ flex: 1, background: status === "syncing" ? T.surfaceAlt : T.primary, color: status === "syncing" ? T.textMuted : "#fff", border: "none", borderRadius: 12, padding: "12px 18px", fontWeight: 700, fontSize: 14, cursor: status === "syncing" ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+              {status === "syncing" ? (
+                <><div style={{ width: 16, height: 16, border: `2px solid ${T.textMuted}`, borderTopColor: T.primary, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /> Syncing…</>
+              ) : "Sync Now"}
+            </button>
+            <button onClick={handleDisconnect}
+              style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 12, padding: "12px 14px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+              Disconnect
+            </button>
+          </div>
         </div>
       )}
 
