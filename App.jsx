@@ -1049,9 +1049,9 @@ function Badge({ label, bg, color, sm }) {
       background: bg, color,
       padding: sm ? "3px 9px" : "4px 12px",
       borderRadius: 100,
-      fontSize: sm ? 9 : 10,
-      fontWeight: 600,
-      letterSpacing: "0.04em",
+      fontSize: sm ? 9.5 : 10.5,
+      fontWeight: 700,
+      letterSpacing: "0.03em",
       textTransform: "uppercase",
       whiteSpace: "nowrap",
     }}>{label}</span>
@@ -1097,7 +1097,7 @@ function Btn({ children, onClick, href, variant = "primary", sm, lg, block, disa
     borderRadius: lg ? 14 : sm ? 10 : 12,
     padding: lg ? "14px 24px" : sm ? "7px 14px" : "10px 18px",
     fontSize: lg ? 15 : sm ? 12 : 13.5,
-    fontWeight: 600,
+    fontWeight: 700,
     cursor: disabled ? "default" : "pointer",
     opacity: disabled ? 0.45 : 1,
     fontFamily: "inherit",
@@ -1477,7 +1477,7 @@ function UpgradeWorkflowModal({ alert: a, clients, T, onConfirm, onClose }) {
   );
 }
 
-function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onNav, catalog, onConfirmUpgrade }) {
+function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onNav, catalog, onConfirmUpgrade, userName }) {
   const { T, perms } = useApp();
   const [editing, setEditing] = useState(false);
 
@@ -1667,7 +1667,7 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22 }}>
         <div>
           <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 4, letterSpacing: "-0.01em" }}>{new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" })}</div>
-          <h2 style={{ margin: 0, fontSize: 28, fontWeight: 700, color: T.text, letterSpacing: "-0.03em" }}>Good morning, Brandon.</h2>
+          <h2 style={{ margin: 0, fontSize: 28, fontWeight: 700, color: T.text, letterSpacing: "-0.03em" }}>{(() => { const h = new Date().getHours(); return h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening"; })()}, {(userName || "Brandon").split(" ")[0]}.</h2>
         </div>
         <Btn variant="ghost" sm onClick={() => setEditing(e => !e)}>{editing ? "Done" : "Edit"}</Btn>
       </div>
@@ -1747,7 +1747,7 @@ function Modal({ title, children, onClose }) {
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", backdropFilter: "blur(4px)", WebkitBackdropFilter: "blur(4px)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={onClose}>
       <div onClick={e => e.stopPropagation()}
-        style={{ background: T.surface, borderRadius: "26px 26px 0 0", width: "100%", maxWidth: 600, maxHeight: "92vh", overflowY: "auto", padding: "14px 22px 34px", boxShadow: T.shadowLg, border: `1px solid ${T.border}`, borderBottom: "none" }}>
+        style={{ background: T.surface, borderRadius: "26px 26px 0 0", width: "100%", maxWidth: 600, maxHeight: "92vh", overflowY: "auto", padding: "14px 22px 34px", boxShadow: T.shadowLg, border: `1px solid ${T.border}`, borderBottom: "none", animation: "spsModalUp 0.28s cubic-bezier(0.16, 1, 0.3, 1)" }}>
         <div style={{ width: 38, height: 5, background: T.border, borderRadius: 100, margin: "0 auto 18px" }} />
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
           <div style={{ fontWeight: 700, fontSize: 20, color: T.text, letterSpacing: "-0.02em" }}>{title}</div>
@@ -13093,7 +13093,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
               <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s" }}>
                 <CIcon name={n.icon} size={22} />
               </span>
-              <span style={{ fontSize: 10.5, fontWeight: active ? 600 : 500, letterSpacing: "-0.01em" }}>{label}</span>
+              <span style={{ fontSize: 10.5, fontWeight: active ? 700 : 500, letterSpacing: "-0.01em" }}>{label}</span>
             </button>
           );
         })}
@@ -13723,6 +13723,8 @@ export default function App({ authEmail = "", onSignOut }) {
           @keyframes sIn  { from { opacity:0; transform:translateY(20px) scale(0.96); } to { opacity:1; transform:translateY(0) scale(1); } }
           @keyframes sOut { from { opacity:1; } to { opacity:0; } }
           @keyframes spin { to { transform:rotate(360deg); } }
+          @keyframes spsModalUp { from { opacity:0; transform:translateY(40px); } to { opacity:1; transform:translateY(0); } }
+          @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
           .si0 { animation: sIn 0.5s cubic-bezier(.22,1,.36,1) 0.05s both; }
           .si1 { animation: sIn 0.5s cubic-bezier(.22,1,.36,1) 0.18s both; }
           .si2 { animation: sIn 0.5s cubic-bezier(.22,1,.36,1) 0.28s both; }
@@ -13900,7 +13902,7 @@ export default function App({ authEmail = "", onSignOut }) {
           </div>
         )}
         <main style={{ flex: 1, padding: "22px 16px", maxWidth: 740, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
-          {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} />}
+          {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
           {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
           {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} />}
@@ -13929,7 +13931,7 @@ export default function App({ authEmail = "", onSignOut }) {
                     <span style={{ position: "absolute", top: 2, right: 4, width: 8, height: 8, borderRadius: "50%", background: T.primary, border: `2px solid ${T.bg}` }} />
                   )}
                 </span>
-                <span style={{ fontSize: 10.5, fontWeight: active ? 600 : 500, letterSpacing: "-0.01em" }}>{n.label}</span>
+                <span style={{ fontSize: 10.5, fontWeight: active ? 700 : 500, letterSpacing: "-0.01em" }}>{n.label}</span>
               </button>
             );
           })}
