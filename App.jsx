@@ -7585,6 +7585,177 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
   );
 }
 
+// ─────────────────────────────────────────────
+// TOTAL SALES SCREEN
+// Full historical sales view with year/month breakdown
+// ─────────────────────────────────────────────
+function TotalSalesScreen({ invoices, clients, onBack, T }) {
+  const [year, setYear] = useState(new Date().getFullYear());
+  const [view, setView] = useState("monthly"); // monthly | clients | all
+
+  const parseAnyDate = (s) => {
+    if (!s) return null;
+    if (typeof s === "string" && s.includes("/")) return parseMDY(s);
+    if (typeof s === "string" && s.includes("-")) { const d = new Date(s + "T00:00:00"); return isNaN(d.getTime()) ? null : d; }
+    return null;
+  };
+
+  const paid = (invoices || []).filter(iv => effectiveStatus(iv) === "Paid" || iv.status === "Paid");
+  const all  = (invoices || []).filter(iv => iv.status !== "Draft");
+
+  // Get available years from invoice data
+  const years = [...new Set(all.map(iv => {
+    const d = parseAnyDate(iv.date) || parseAnyDate(iv.paidDate);
+    return d ? d.getFullYear() : null;
+  }).filter(Boolean))].sort((a,b) => b - a);
+
+  const money = (n) => "$" + parseFloat(n||0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const moneyShort = (n) => n >= 1000 ? `$${(n/1000).toFixed(1)}k` : `$${Math.round(n)}`;
+
+  // All-time totals
+  const totalRevenue  = paid.reduce((s,iv) => s + invoiceTotals(iv).total, 0);
+  const totalInvoices = all.length;
+  const totalPaid     = paid.length;
+  const totalOutstanding = all.filter(iv => effectiveStatus(iv) !== "Paid" && iv.status !== "Draft").reduce((s,iv) => s + invoiceTotals(iv).total, 0);
+
+  const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+  // Monthly breakdown for selected year
+  const monthlyData = MONTHS.map((label, mi) => {
+    const monthPaid = paid.filter(iv => {
+      const d = parseAnyDate(iv.paidDate || iv.date);
+      return d && d.getMonth() === mi && d.getFullYear() === year;
+    });
+    const monthAll = all.filter(iv => {
+      const d = parseAnyDate(iv.date);
+      return d && d.getMonth() === mi && d.getFullYear() === year;
+    });
+    const rev = monthPaid.reduce((s,iv) => s + invoiceTotals(iv).total, 0);
+    return { label, month: mi, revenue: rev, invoiced: monthAll.length, paid: monthPaid.length };
+  });
+
+  const yearTotal = monthlyData.reduce((s,m) => s + m.revenue, 0);
+  const maxMonth  = Math.max(...monthlyData.map(m => m.revenue), 1);
+
+  // Top clients by revenue (all time)
+  const clientTotals = {};
+  paid.forEach(iv => {
+    const name = (clients.find(c => invoiceMatchesClient(iv, c)))?.name || iv.clientName || "Unknown";
+    clientTotals[name] = (clientTotals[name] || 0) + invoiceTotals(iv).total;
+  });
+  const topClients = Object.entries(clientTotals).sort((a,b) => b[1]-a[1]).slice(0, 15);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 4 }}>
+        <button onClick={onBack} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4, fontFamily: "inherit" }}>
+          ← Back
+        </button>
+        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Total Sales</h2>
+      </div>
+
+      {/* All-time summary tiles */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        {[
+          { label: "All-Time Revenue", value: money(totalRevenue), color: T.accent },
+          { label: "Outstanding",      value: money(totalOutstanding), color: totalOutstanding > 0 ? T.warning : T.accent },
+          { label: "Total Invoices",   value: totalInvoices, color: T.primary },
+          { label: "Paid Invoices",    value: totalPaid, color: T.accent },
+        ].map(t => (
+          <div key={t.label} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "14px 16px" }}>
+            <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 6 }}>{t.label}</div>
+            <div style={{ fontSize: 22, fontWeight: 800, color: t.color, letterSpacing: "-0.02em" }}>{t.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* View toggle */}
+      <div style={{ display: "flex", gap: 6, background: T.surfaceAlt, borderRadius: 14, padding: 4 }}>
+        {[["monthly","By Month"],["clients","By Client"]].map(([val,lbl]) => (
+          <button key={val} onClick={() => setView(val)}
+            style={{ flex: 1, padding: "9px 8px", border: "none", borderRadius: 11, background: view === val ? T.surface : "transparent", color: view === val ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", boxShadow: view === val ? "0 1px 4px rgba(0,0,0,0.1)" : "none", transition: "all 0.15s" }}>
+            {lbl}
+          </button>
+        ))}
+      </div>
+
+      {/* Monthly view */}
+      {view === "monthly" && (
+        <div>
+          {/* Year selector */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+            <div style={{ fontSize: 16, fontWeight: 800, color: T.text }}>{year} — {money(yearTotal)}</div>
+            <div style={{ display: "flex", gap: 6 }}>
+              {years.map(y => (
+                <button key={y} onClick={() => setYear(y)}
+                  style={{ padding: "6px 12px", borderRadius: 10, border: `1.5px solid ${year === y ? T.primary : T.border}`, background: year === y ? hexA(T.primary, 0.08) : T.surface, color: year === y ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                  {y}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Bar chart */}
+          <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, padding: "18px 16px" }}>
+            <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 120, marginBottom: 8 }}>
+              {monthlyData.map((m, i) => {
+                const h = maxMonth > 0 ? Math.max((m.revenue / maxMonth) * 100, m.revenue > 0 ? 4 : 0) : 0;
+                const isNow = i === new Date().getMonth() && year === new Date().getFullYear();
+                return (
+                  <div key={m.label} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                    {m.revenue > 0 && <div style={{ fontSize: 8, color: T.textMuted, fontWeight: 600 }}>{moneyShort(m.revenue)}</div>}
+                    <div style={{ width: "100%", height: `${h}%`, minHeight: m.revenue > 0 ? 4 : 0, background: isNow ? T.primary : hexA(T.primary, 0.5), borderRadius: "4px 4px 0 0", transition: "height 0.3s ease" }} />
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              {monthlyData.map(m => (
+                <div key={m.label} style={{ flex: 1, textAlign: "center", fontSize: 9, color: T.textMuted, fontWeight: 600 }}>{m.label}</div>
+              ))}
+            </div>
+          </div>
+
+          {/* Monthly rows */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 14 }}>
+            {monthlyData.filter(m => m.revenue > 0 || m.invoiced > 0).reverse().map(m => (
+              <div key={m.label} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: "13px 16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{m.label} {year}</div>
+                  <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{m.invoiced} invoiced · {m.paid} paid</div>
+                </div>
+                <div style={{ fontSize: 18, fontWeight: 800, color: T.accent }}>{money(m.revenue)}</div>
+              </div>
+            ))}
+            {monthlyData.every(m => m.revenue === 0) && (
+              <div style={{ textAlign: "center", padding: "32px 20px", color: T.textMuted, fontSize: 13 }}>No paid invoices recorded for {year}.</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* By Client view */}
+      {view === "clients" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {topClients.map(([name, rev], i) => (
+            <div key={name} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: "13px 16px", display: "flex", alignItems: "center", gap: 14 }}>
+              <div style={{ width: 28, height: 28, borderRadius: 8, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, color: T.primary, flexShrink: 0 }}>{i+1}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</div>
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>
+                  {paid.filter(iv => (clients.find(c => invoiceMatchesClient(iv,c)))?.name === name || iv.clientName === name).length} invoices
+                </div>
+              </div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: T.accent }}>{money(rev)}</div>
+            </div>
+          ))}
+          {topClients.length === 0 && <div style={{ textAlign: "center", padding: "32px 20px", color: T.textMuted, fontSize: 13 }}>No paid invoices yet.</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function InvoicesScreen({ invoices, clients, invoicing, branding, onSave, onDelete, initialFilter = "All" }) {
   const { T, perms } = useApp();
   const moneyFmt = (n) => `$${Math.round(n).toLocaleString()}`;
@@ -7593,7 +7764,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, onSave, onDele
   // ── Filter / sort state ──
   const [filter,     setFilter]     = useState(initialFilter);
   const [search,     setSearch]     = useState("");
-  const [sortBy,     setSortBy]     = useState("date_desc");   // date_desc | date_asc | amount_desc | amount_asc | client_asc | number_desc
+  const [sortBy,     setSortBy]     = useState("number_desc"); // number_desc | number_asc | date_desc | date_asc | amount_desc | amount_asc | client_asc
   const [clientFilter, setClientFilter] = useState("all");     // "all" or client id
   const [dateRange,  setDateRange]  = useState("all");         // all | this_month | last_month | this_year | custom
   const [dateFrom,   setDateFrom]   = useState("");
@@ -7602,11 +7773,20 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, onSave, onDele
   const [groupBy,    setGroupBy]    = useState("none");        // none | client | status | month
 
   // ── Editor state ──
-  const [creating, setCreating] = useState(false);
-  const [editing,  setEditing]  = useState(null);
-  const [preview,  setPreview]  = useState(null);
+  const [creating,   setCreating]   = useState(false);
+  const [editing,    setEditing]    = useState(null);
+  const [preview,    setPreview]    = useState(null);
+  const [showSales,  setShowSales]  = useState(false);
 
   const now = new Date();
+
+  // Parse date in either MM/DD/YYYY or YYYY-MM-DD (QB) format
+  const parseAnyDate = (s) => {
+    if (!s) return null;
+    if (typeof s === "string" && s.includes("/")) return parseMDY(s);
+    if (typeof s === "string" && s.includes("-")) { const d = new Date(s + "T00:00:00"); return isNaN(d.getTime()) ? null : d; }
+    return null;
+  };
 
   // Enrich with client data
   const all = (invoices || []).map(iv => ({
@@ -7614,12 +7794,13 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, onSave, onDele
     _client: clients.find(c => invoiceMatchesClient(iv, c)),
     _total:  invoiceTotals(iv).total,
     _status: effectiveStatus(iv),
-    _date:   parseMDY(iv.date) || new Date(iv.createdAt || 0),
+    _date:   parseAnyDate(iv.date) || parseAnyDate(iv.paidDate) || new Date(iv.createdAt || 0),
+    _num:    parseInt((String(iv.number || "0")).replace(/[^0-9]/g, "")) || 0,
   }));
 
   // ── Summary stats ──
   const outstanding   = all.filter(iv => iv._status !== "Paid" && iv.status !== "Draft").reduce((s, iv) => s + iv._total, 0);
-  const paidThisMonth = all.filter(iv => iv._status === "Paid").filter(iv => { const d = parseMDY(iv.paidDate || iv.date); return d && d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); }).reduce((s, iv) => s + iv._total, 0);
+  const paidThisMonth = all.filter(iv => iv._status === "Paid").filter(iv => { const d = iv._date; return d && d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); }).reduce((s, iv) => s + iv._total, 0);
   const overdueCount  = all.filter(iv => iv._status === "Overdue").length;
   const totalAll      = all.filter(iv => iv.status !== "Draft").reduce((s, iv) => s + iv._total, 0);
 
@@ -7653,13 +7834,14 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, onSave, onDele
 
   // ── Sort ──
   const sorted = [...filtered].sort((a, b) => {
+    if (sortBy === "number_desc")  return b._num - a._num;
+    if (sortBy === "number_asc")   return a._num - b._num;
     if (sortBy === "date_desc")    return (b._date||0) - (a._date||0);
     if (sortBy === "date_asc")     return (a._date||0) - (b._date||0);
     if (sortBy === "amount_desc")  return b._total - a._total;
     if (sortBy === "amount_asc")   return a._total - b._total;
     if (sortBy === "client_asc")   return (a._client?.name||a.clientName||"").localeCompare(b._client?.name||b.clientName||"");
-    if (sortBy === "number_desc")  return String(b.number||"").localeCompare(String(a.number||""));
-    return 0;
+    return b._num - a._num;
   });
 
   // ── Group ──
@@ -7683,6 +7865,8 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, onSave, onDele
   const livePreview = preview ? ((invoices||[]).find(x => x.id === preview.id) || preview) : null;
   const activeFilterCount = [filter !== "All", clientFilter !== "all", dateRange !== "all", groupBy !== "none"].filter(Boolean).length;
 
+  if (showSales) return <TotalSalesScreen invoices={invoices} clients={clients} onBack={() => setShowSales(false)} T={T} />;
+
   return (
     <div>
       {/* Header */}
@@ -7698,15 +7882,25 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, onSave, onDele
         </div>
       </div>
 
-      {/* Summary tiles */}
+      {/* Summary tiles — tap to see Total Sales */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 }}>
-        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "14px 16px" }}>
-          <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 6 }}>Outstanding</div>
+        <div onClick={() => setShowSales(true)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "14px 16px", cursor: "pointer" }}
+          onMouseEnter={e => e.currentTarget.style.boxShadow="0 4px 16px rgba(0,0,0,0.08)"}
+          onMouseLeave={e => e.currentTarget.style.boxShadow="none"}>
+          <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 6, display:"flex", justifyContent:"space-between" }}>
+            Outstanding
+            <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{opacity:0.5}}><path d="m9 18 6-6-6-6"/></svg>
+          </div>
           <div style={{ fontSize: 24, fontWeight: 800, color: outstanding > 0 ? T.warning : T.accent, letterSpacing: "-0.02em" }}>{moneyFmt(outstanding)}</div>
-          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>{all.filter(iv => iv._status !== "Paid" && iv.status !== "Draft").length} invoices</div>
+          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>{all.filter(iv => iv._status !== "Paid" && iv.status !== "Draft").length} invoices · tap for sales</div>
         </div>
-        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "14px 16px" }}>
-          <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 6 }}>Paid This Month</div>
+        <div onClick={() => setShowSales(true)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "14px 16px", cursor: "pointer" }}
+          onMouseEnter={e => e.currentTarget.style.boxShadow="0 4px 16px rgba(0,0,0,0.08)"}
+          onMouseLeave={e => e.currentTarget.style.boxShadow="none"}>
+          <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 6, display:"flex", justifyContent:"space-between" }}>
+            Paid This Month
+            <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{opacity:0.5}}><path d="m9 18 6-6-6-6"/></svg>
+          </div>
           <div style={{ fontSize: 24, fontWeight: 800, color: T.accent, letterSpacing: "-0.02em" }}>{moneyFmt(paidThisMonth)}</div>
           <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>{overdueCount > 0 ? <span style={{ color: T.warning, fontWeight: 700 }}>{overdueCount} overdue</span> : "No overdue"}</div>
         </div>
@@ -7737,12 +7931,13 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, onSave, onDele
             <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>Sort By</div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
               {[
+                ["number_desc", "Invoice # ↓"],
+                ["number_asc",  "Invoice # ↑"],
                 ["date_desc",   "Newest First"],
                 ["date_asc",    "Oldest First"],
                 ["amount_desc", "Highest Amount"],
                 ["amount_asc",  "Lowest Amount"],
                 ["client_asc",  "Client A–Z"],
-                ["number_desc", "Invoice #"],
               ].map(([val, lbl]) => (
                 <button key={val} onClick={() => setSortBy(val)}
                   style={{ padding: "6px 12px", borderRadius: 10, border: `1.5px solid ${sortBy === val ? T.primary : T.border}`, background: sortBy === val ? hexA(T.primary, 0.08) : T.surface, color: sortBy === val ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
