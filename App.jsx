@@ -1884,7 +1884,10 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
                 </div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 5, alignItems: "flex-end", flexShrink: 0 }}>
-                <Badge label={c.plan || "No tier"} bg={pm.bg} color={pm.color || pm.text} sm />
+                {c.plan
+                  ? <Badge label={c.plan} bg={pm.bg} color={pm.color || pm.text} sm />
+                  : <span style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, border: `1px solid ${T.border}`, borderRadius: 8, padding: "2px 7px" }}>No tier</span>
+                }
                 {c.nextService && <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 600 }}>{c.nextService}</div>}
               </div>
               <div style={{ color: T.textMuted, flexShrink: 0 }}>
@@ -1898,18 +1901,18 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
       {/* Bulk action bar */}
       {selectMode && selCount > 0 && (
         <div style={{ position: "fixed", bottom: "calc(74px + env(safe-area-inset-bottom))", left: 0, right: 0, zIndex: 95, padding: "10px 16px", maxWidth: 740, margin: "0 auto" }}>
-          <div style={{ background: T.headerBg, borderRadius: 14, padding: "10px 12px", display: "flex", gap: 8, boxShadow: "0 6px 24px rgba(0,0,0,0.25)", overflowX: "auto" }}>
+          <div style={{ background: T.primary, borderRadius: 14, padding: "10px 12px", display: "flex", gap: 8, boxShadow: "0 6px 24px rgba(0,0,0,0.25)", overflowX: "auto" }}>
             {[
-              { label: "Schedule", icon: "calendar", fn: doSchedule },
-              { label: "Division", icon: "tag", fn: () => setModal("division") },
-              { label: "Plan", icon: "clipboard", fn: () => setModal("plan") },
-              { label: "Deactivate", icon: "warning", fn: () => setModal("inactive") },
-              { label: "Reactivate", icon: "clients", fn: doMarkActive },
-              { label: "Delete", icon: "trash", fn: () => setModal("delete"), danger: true },
+              { label: "Schedule",   icon: "calendar",  fn: doSchedule },
+              { label: "Division",   icon: "tag",       fn: () => setModal("division") },
+              { label: "Plan",       icon: "clipboard", fn: () => setModal("plan") },
+              { label: "Deactivate", icon: "warning",   fn: () => setModal("inactive") },
+              { label: "Activate",   icon: "clients",   fn: doMarkActive },
+              { label: "Delete",     icon: "trash",     fn: () => setModal("delete"), danger: true },
             ].map(a => (
               <button key={a.label} onClick={a.fn}
-                style={{ flex: "1 0 auto", background: a.danger ? "rgba(255,80,80,0.15)" : "rgba(255,255,255,0.1)", color: a.danger ? "#ff8080" : "#fff", border: "none", borderRadius: 10, padding: "10px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap", display:"flex", alignItems:"center", justifyContent:"center", gap:5 }}>
-                <Icon name={a.icon} size={13} />{a.label}
+                style={{ flexShrink: 0, background: a.danger ? "rgba(255,255,255,0.15)" : "rgba(255,255,255,0.18)", color: a.danger ? "#ffaaaa" : "#fff", border: a.danger ? "1px solid rgba(255,120,120,0.4)" : "1px solid rgba(255,255,255,0.25)", borderRadius: 10, padding: "9px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap", display:"flex", alignItems:"center", justifyContent:"center", gap:4 }}>
+                <Icon name={a.icon} size={12} />{a.label}
               </button>
             ))}
           </div>
@@ -13246,6 +13249,65 @@ export default function App({ authEmail = "", onSignOut }) {
   }, [ltm, emailKey, currentUser, anyEmail]);
 
   const handleClientSelect = (c) => { setSelectedClient(c); setAdding(false); setPage("clients"); window.scrollTo({ top: 0, behavior: "instant" }); };
+
+  // ── Auto-update: check if Vercel deployed a new version and reload if so ──
+  useEffect(() => {
+    const check = async () => {
+      try {
+        // Fetch the root HTML with a cache-busting param
+        const res = await fetch("/?_v=" + Date.now(), { cache: "no-store" });
+        if (!res.ok) return;
+        const html = await res.text();
+        // Vercel injects a unique build ID into the HTML — pull it out
+        const match = html.match(/\/_next\/static\/([^"'/]+)\//);
+        const remoteId = match ? match[1] : null;
+        if (!remoteId) return;
+        const localId = sessionStorage.getItem("sps_build_id");
+        if (!localId) {
+          // First load — store the current ID
+          sessionStorage.setItem("sps_build_id", remoteId);
+          return;
+        }
+        if (remoteId !== localId) {
+          // New build detected — update ID and reload once
+          sessionStorage.setItem("sps_build_id", remoteId);
+          window.location.reload();
+        }
+      } catch (e) {
+        // Network error — silently ignore
+      }
+    };
+    // Check on mount, then every 5 minutes
+    check();
+    const interval = setInterval(check, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // ── QB auto-sync on app open — runs once per session if connected ──
+  useEffect(() => {
+    if (!hydrated) return; // wait for stored data to load first
+    const accessToken = localStorage.getItem("qb_access_token");
+    const realmId     = localStorage.getItem("qb_realm_id");
+    if (!accessToken || !realmId) return;
+    // Only sync once per session (not on every re-render)
+    const lastSync = sessionStorage.getItem("qb_auto_synced");
+    if (lastSync) return;
+    sessionStorage.setItem("qb_auto_synced", "1");
+
+    const autoSync = async () => {
+      try {
+        const url = `/api/quickbooks/sync?access_token=${encodeURIComponent(accessToken)}&realm_id=${encodeURIComponent(realmId)}`;
+        const res = await fetch(url);
+        if (!res.ok) return; // silently fail — user can manually sync
+        const data = await res.json();
+        if (data.invoices) handleQBSync(data.invoices, data.customers);
+      } catch (e) {
+        // Network error — silently ignore
+      }
+    };
+    autoSync();
+  }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // QuickBooks sync handler — merges QB invoices into app state and matches customers to clients
   const handleQBSync = (qbInvoices, qbCustomers) => {
     // Build client lookup maps from current clients snapshot
