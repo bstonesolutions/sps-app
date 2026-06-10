@@ -1543,7 +1543,9 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
   const { T, perms } = useApp();
   const [editing, setEditing] = useState(false);
 
-  const today = (schedule && schedule[0]) || { stops: [] };
+  // Find the schedule entry that matches today's actual date (not just the first row)
+  const todayKey = fmtMDY(new Date());
+  const today = (schedule || []).find(d => d.date === todayKey) || { stops: [], date: todayKey };
   const [upgradeModal, setUpgradeModal] = useState(null); // alert object being confirmed
   const ma = monthActuals(clients, new Date(), invoices);
   const derived = deriveAlerts(clients, invoices, catalog).filter(a => perms.seeBalances || !/outstanding/i.test(a.title || ""));
@@ -14250,13 +14252,14 @@ export default function App({ authEmail = "", onSignOut }) {
 
   // ── Sync body + theme-color to the active screen so the safe-area never shows a mismatched bar ──
   useEffect(() => {
-    const splashColor = (branding.splashBgColor && branding.splashBgColor.trim()) ? branding.splashBgColor : T.primary;
+    const brandColor = (branding.accentColor && branding.accentColor.trim()) ? branding.accentColor : T.primary;
+    const splashColor = (branding.splashBgColor && branding.splashBgColor.trim()) ? branding.splashBgColor : brandColor;
     const activeColor = (!hydrated || showSplash) ? splashColor : T.bg;
     document.body.style.background = activeColor;
     document.documentElement.style.background = activeColor;
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) meta.setAttribute("content", activeColor);
-  }, [hydrated, showSplash, branding.splashBgColor, T.bg, T.primary]);
+  }, [hydrated, showSplash, branding.splashBgColor, branding.accentColor, T.bg, T.primary]);
 
   // ── Auto-update: check if Vercel deployed a new version and reload if so ──
   useEffect(() => {
@@ -14621,7 +14624,8 @@ export default function App({ authEmail = "", onSignOut }) {
   const splashGreeting = splashHour < 12 ? "Good morning" : splashHour < 17 ? "Good afternoon" : "Good evening";
 
   if (!hydrated || showSplash) {
-    const splashBg1    = (branding.splashBgColor && branding.splashBgColor.trim()) ? branding.splashBgColor : T.primary;
+    const brandColor   = (branding.accentColor && branding.accentColor.trim()) ? branding.accentColor : T.primary;
+    const splashBg1    = (branding.splashBgColor && branding.splashBgColor.trim()) ? branding.splashBgColor : brandColor;
     const splashBg2    = (branding.splashBgColor2 && branding.splashBgColor2.trim()) ? branding.splashBgColor2 : mix(splashBg1, "#000", 0.32);
     const splashStyle  = branding.splashBgStyle || "gradient";
     const splashBgCss  = splashStyle === "solid" ? splashBg1
