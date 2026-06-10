@@ -310,6 +310,38 @@ const buildMapUrl = (address, app) => {
   return `https://www.google.com/maps/dir/?api=1&destination=${enc}`;
 };
 
+// ── Inventory helpers ──────────────────────────────────────────
+// Available units for parts and treatments
+const INV_UNITS = ["oz", "gal", "lb", "pieces", "feet", "bags", "boxes", "rolls", "kits"];
+
+// Total stock of an item across all locations (falls back to legacy inventoryOz)
+const invTotal = (item) => {
+  if (item && item.stockByLoc && typeof item.stockByLoc === "object") {
+    return Object.values(item.stockByLoc).reduce((s, v) => s + (parseFloat(v) || 0), 0);
+  }
+  return parseFloat(item?.inventoryOz) || 0;
+};
+// Stock of an item at one location
+const invAtLoc = (item, locId) => {
+  if (item && item.stockByLoc && typeof item.stockByLoc === "object") {
+    return parseFloat(item.stockByLoc[locId]) || 0;
+  }
+  return 0;
+};
+// Migrate a legacy treatment (inventoryOz only) into stockByLoc on first load.
+// Puts all existing stock into the first location, or a synthetic "Unassigned".
+const migrateItemStock = (item, locations) => {
+  if (item.stockByLoc && typeof item.stockByLoc === "object") return item;
+  const firstLoc = (locations && locations[0] && locations[0].id) || "loc_unassigned";
+  return { ...item, unit: item.unit || "oz", stockByLoc: { [firstLoc]: parseFloat(item.inventoryOz) || 0 } };
+};
+// Set stock at a location and keep inventoryOz mirror in sync (for back-compat displays)
+const setStockAtLoc = (item, locId, newAmt) => {
+  const stockByLoc = { ...(item.stockByLoc || {}), [locId]: Math.max(0, newAmt) };
+  const total = Object.values(stockByLoc).reduce((s, v) => s + (parseFloat(v) || 0), 0);
+  return { ...item, stockByLoc, inventoryOz: String(total) };
+};
+
 
 // Selectable fonts (use system-available faces, no external load)
 const FONTS = {
@@ -688,13 +720,28 @@ const DEFAULT_CATALOG = {
     { id: "p4", name: "Filter Pad (replacement)", price: "18" },
     { id: "p5", name: "Pond Dye", price: "22" },
   ],
-  // treatments are consumables tracked by the ounce, with OUR cost per oz + inventory on hand
+  // Inventory storage locations — user-managed (shed, trucks, etc.)
+  locations: [
+    { id: "loc_shed",  name: "Main Shed",   type: "storage" },
+    { id: "loc_t1",    name: "Truck 1",     type: "vehicle" },
+    { id: "loc_t2",    name: "Truck 2",     type: "vehicle" },
+  ],
+  // treatments are consumables tracked by the ounce, with OUR cost per oz.
+  // stockByLoc maps locationId -> amount (in the item's unit). inventoryOz kept for back-compat.
   treatments: [
-    { id: "t1", name: "Beneficial Bacteria (liquid)", costPerOz: "0.85", inventoryOz: "256" },
-    { id: "t2", name: "Algaecide", costPerOz: "1.20", inventoryOz: "128" },
-    { id: "t3", name: "Water Clarifier", costPerOz: "0.65", inventoryOz: "192" },
-    { id: "t4", name: "Dechlorinator", costPerOz: "0.40", inventoryOz: "320" },
-    { id: "t5", name: "Pond Salt", costPerOz: "0.10", inventoryOz: "512" },
+    { id: "t1", name: "Beneficial Bacteria (liquid)", costPerOz: "0.85", unit: "oz", inventoryOz: "256", stockByLoc: { loc_shed: 192, loc_t1: 32, loc_t2: 32 } },
+    { id: "t2", name: "Algaecide",        costPerOz: "1.20", unit: "oz", inventoryOz: "128", stockByLoc: { loc_shed: 96,  loc_t1: 16, loc_t2: 16 } },
+    { id: "t3", name: "Water Clarifier",  costPerOz: "0.65", unit: "oz", inventoryOz: "192", stockByLoc: { loc_shed: 128, loc_t1: 32, loc_t2: 32 } },
+    { id: "t4", name: "Dechlorinator",    costPerOz: "0.40", unit: "oz", inventoryOz: "320", stockByLoc: { loc_shed: 256, loc_t1: 32, loc_t2: 32 } },
+    { id: "t5", name: "Pond Salt",        costPerOz: "0.10", unit: "oz", inventoryOz: "512", stockByLoc: { loc_shed: 448, loc_t1: 32, loc_t2: 32 } },
+  ],
+  // parts are hard goods tracked in flexible units (pieces, feet, etc.) with a unit cost
+  parts: [
+    { id: "pt1", name: "Pond Pump (sub 2000gph)", unit: "pieces", costPer: "145", lowAt: "2", stockByLoc: { loc_shed: 4,   loc_t1: 1,  loc_t2: 1 } },
+    { id: "pt2", name: "PVC Pipe (1.5in)",        unit: "feet",   costPer: "1.80", lowAt: "20", stockByLoc: { loc_shed: 100, loc_t1: 20, loc_t2: 20 } },
+    { id: "pt3", name: "PVC Union (1.5in)",       unit: "pieces", costPer: "4.50", lowAt: "6",  stockByLoc: { loc_shed: 24,  loc_t1: 6,  loc_t2: 6 } },
+    { id: "pt4", name: "Filter Pad",              unit: "pieces", costPer: "12",   lowAt: "4",  stockByLoc: { loc_shed: 16,  loc_t1: 4,  loc_t2: 4 } },
+    { id: "pt5", name: "Tubing (0.75in)",         unit: "feet",   costPer: "0.95", lowAt: "25", stockByLoc: { loc_shed: 150, loc_t1: 25, loc_t2: 25 } },
   ],
 };
 
@@ -905,10 +952,17 @@ function deriveAlerts(clients, invoices, catalog) {
     const owed = clientOutstanding(c, invoices);
     if (owed > 0) alerts.push({ icon: "dollar", title: `${c.name} — $${owed.toFixed(2)} outstanding`, sub: "Open balance" });
   });
-  // Low inventory alerts
+  // Low inventory alerts — treatments (below 32) and parts (below their lowAt)
   ((catalog && catalog.treatments) || []).forEach(t => {
-    const oz = parseFloat(t.inventoryOz) || 0;
-    if (oz < 32) alerts.unshift({ icon: "warning", title: `Low stock: ${t.name}`, sub: `${oz}oz remaining — consider restocking`, type: "inventory" });
+    const total = invTotal(t);
+    const unit = t.unit || "oz";
+    if (total < 32) alerts.unshift({ icon: "warning", title: `Low stock: ${t.name}`, sub: `${total}${unit} remaining — consider restocking`, type: "inventory" });
+  });
+  ((catalog && catalog.parts) || []).forEach(p => {
+    const total = invTotal(p);
+    const low = parseFloat(p.lowAt) || 0;
+    const unit = p.unit || "pieces";
+    if (total < low) alerts.unshift({ icon: "warning", title: `Low stock: ${p.name}`, sub: `${total} ${unit} remaining — consider restocking`, type: "inventory" });
   });
   return alerts.slice(0, 8);
 }
@@ -3439,7 +3493,11 @@ function ClientHistory({ client, onChange }) {
               )}
 
               {h.treatmentsUsed && h.treatmentsUsed.length > 0 && (
-                <div style={{ marginTop: 12, fontSize: 12, color: T.textMuted, display:"flex", alignItems:"center", gap:5 }}><Icon name="info" size={12} /> {h.treatmentsUsed.map(t => `${t.name} (${t.oz}oz)`).join(", ")}</div>
+                <div style={{ marginTop: 12, fontSize: 12, color: T.textMuted, display:"flex", alignItems:"center", gap:5 }}><Icon name="info" size={12} /> {h.treatmentsUsed.map(t => `${t.name} (${t.oz}${t.unit || "oz"})`).join(", ")}</div>
+              )}
+
+              {h.partsUsed && h.partsUsed.length > 0 && (
+                <div style={{ marginTop: 8, fontSize: 12, color: T.textMuted, display:"flex", alignItems:"center", gap:5 }}><Icon name="wrench" size={12} /> {h.partsUsed.map(p => `${p.name} (${p.qty} ${p.unit || "pieces"})`).join(", ")}</div>
               )}
 
               {h.photos && h.photos.length > 0 && (
@@ -3855,6 +3913,8 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
   const [elapsed, setElapsed] = useState(0); // seconds
   const [readings, setReadings] = useState({});
   const [tx, setTx] = useState({});       // treatmentId -> oz
+  const [partsUsed, setPartsUsedState] = useState({}); // partId -> qty
+  const [usageLoc, setUsageLoc] = useState(""); // which location stock is pulled from
   const [prods, setProds] = useState({});  // productId -> true
   const [notesClient, setNotesClient] = useState("");
   const [notesOffice, setNotesOffice] = useState("");
@@ -3920,12 +3980,21 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
   const tests = catalog.tests || [];
   const treatments = catalog.treatments || [];
   const products = catalog.products || [];
+  const parts = catalog.parts || [];
+  const locations = catalog.locations || [];
+
+  // Default the usage location to the assignee's truck if matchable, else first location
+  useEffect(() => {
+    if (usageLoc || locations.length === 0) return;
+    setUsageLoc(locations[0].id);
+  }, [locations, usageLoc]);
 
   // cost math
   const laborCost = (num(minutes) / 60) * num(hourlyRate);
   const treatmentCost = treatments.reduce((sum, t) => sum + num(tx[t.id]) * num(t.costPerOz), 0);
+  const partsCost = parts.reduce((sum, p) => sum + num(partsUsed[p.id]) * num(p.costPer), 0);
   const productCost = products.reduce((sum, p) => sum + (prods[p.id] ? num(p.price) : 0), 0);
-  const totalCost = laborCost + treatmentCost + productCost + num(gas) + num(insurance) + num(equipment) + num(overhead);
+  const totalCost = laborCost + treatmentCost + partsCost + productCost + num(gas) + num(insurance) + num(equipment) + num(overhead);
   const profit = num(revenue) - totalCost;
   const margin = num(revenue) > 0 ? (profit / num(revenue)) * 100 : 0;
   const money = (n) => `$${n.toFixed(2)}`;
@@ -3950,7 +4019,10 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
 
   const treatmentsUsed = treatments
     .filter(t => num(tx[t.id]) > 0)
-    .map(t => ({ id: t.id, name: t.name, oz: num(tx[t.id]), costPerOz: num(t.costPerOz), cost: num(tx[t.id]) * num(t.costPerOz) }));
+    .map(t => ({ id: t.id, name: t.name, oz: num(tx[t.id]), costPerOz: num(t.costPerOz), cost: num(tx[t.id]) * num(t.costPerOz), locId: usageLoc }));
+  const partsUsedArr = parts
+    .filter(p => num(partsUsed[p.id]) > 0)
+    .map(p => ({ id: p.id, name: p.name, qty: num(partsUsed[p.id]), unit: p.unit || "pieces", costPer: num(p.costPer), cost: num(partsUsed[p.id]) * num(p.costPer), locId: usageLoc }));
   const productsUsed = products.filter(p => prods[p.id]).map(p => p.name);
 
   const ctx = {
@@ -3979,9 +4051,11 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
     satisfaction,
     satisfactionNote,
     treatmentsUsed, productsUsed,
+    partsUsed: partsUsedArr,
+    usageLoc,
     breakdown: {
       revenue: num(revenue), minutes: num(minutes), hourlyRate: num(hourlyRate),
-      labor: laborCost, treatment: treatmentCost, product: productCost,
+      labor: laborCost, treatment: treatmentCost, parts: partsCost, product: productCost,
       gas: num(gas), insurance: num(insurance), equipment: num(equipment), overhead: num(overhead),
       total: totalCost, profit, margin,
     },
@@ -4154,24 +4228,72 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
         </div>
       )}
 
+      {/* Pull-from location — shown when treatments or parts exist */}
+      {(treatments.length > 0 || parts.length > 0) && locations.length > 0 && (
+        <div style={sectionGap}>
+          <label style={labelStyle}>Pull Stock From</label>
+          <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+            {locations.map(loc => (
+              <button key={loc.id} onClick={() => setUsageLoc(loc.id)}
+                style={{ display: "flex", alignItems: "center", gap: 5, padding: "8px 13px", borderRadius: 11, border: `1.5px solid ${usageLoc === loc.id ? T.primary : T.border}`, background: usageLoc === loc.id ? T.navActiveBg : T.surface, color: usageLoc === loc.id ? T.primary : T.text, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>
+                <Icon name={loc.type === "vehicle" ? "truck" : "home"} size={13} />{loc.name}
+              </button>
+            ))}
+          </div>
+          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>Inventory used below will be subtracted from this location.</div>
+        </div>
+      )}
+
       {/* Treatments */}
       {treatments.length > 0 && (
         <div style={sectionGap}>
-          <label style={labelStyle}>Treatments Applied (oz)</label>
+          <label style={labelStyle}>Treatments Applied</label>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {treatments.map(t => (
-              <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 10, background: T.surfaceAlt, borderRadius: 10, padding: "8px 12px" }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{t.name}</div>
-                  <div style={{ fontSize: 11, color: (num(tx[t.id]) > num(t.inventoryOz)) ? T.warning : T.textMuted }}>
-                    ${num(t.costPerOz).toFixed(2)}/oz · {num(t.inventoryOz)} oz on hand{num(tx[t.id]) > num(t.inventoryOz) ? " · over!" : ""}
+            {treatments.map(t => {
+              const here = usageLoc ? invAtLoc(t, usageLoc) : invTotal(t);
+              const over = num(tx[t.id]) > here;
+              const unit = t.unit || "oz";
+              return (
+                <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 10, background: T.surfaceAlt, borderRadius: 10, padding: "8px 12px" }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{t.name}</div>
+                    <div style={{ fontSize: 11, color: over ? T.warning : T.textMuted }}>
+                      ${num(t.costPerOz).toFixed(2)}/{unit} · {here} {unit} {usageLoc ? "here" : "on hand"}{over ? " · over!" : ""}
+                    </div>
                   </div>
+                  <input type="text" inputMode="decimal" value={tx[t.id] || ""} onChange={e => setTx(x => ({ ...x, [t.id]: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0" style={{ width: 60, padding: "8px", border: `1px solid ${over ? T.warning : T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
+                  <span style={{ fontSize: 12, color: T.textMuted, width: 32 }}>{unit}</span>
+                  <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: num(tx[t.id]) > 0 ? T.text : T.textMuted }}>{money(num(tx[t.id]) * num(t.costPerOz))}</div>
                 </div>
-                <input type="text" inputMode="decimal" value={tx[t.id] || ""} onChange={e => setTx(x => ({ ...x, [t.id]: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0" style={{ width: 60, padding: "8px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
-                <span style={{ fontSize: 12, color: T.textMuted, width: 14 }}>oz</span>
-                <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: num(tx[t.id]) > 0 ? T.text : T.textMuted }}>{money(num(tx[t.id]) * num(t.costPerOz))}</div>
-              </div>
-            ))}
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Parts */}
+      {parts.length > 0 && (
+        <div style={sectionGap}>
+          <label style={labelStyle}>Parts Used</label>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {parts.map(p => {
+              const here = usageLoc ? invAtLoc(p, usageLoc) : invTotal(p);
+              const over = num(partsUsed[p.id]) > here;
+              const unit = p.unit || "pieces";
+              return (
+                <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, background: T.surfaceAlt, borderRadius: 10, padding: "8px 12px" }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{p.name}</div>
+                    <div style={{ fontSize: 11, color: over ? T.warning : T.textMuted }}>
+                      ${num(p.costPer).toFixed(2)}/{unit} · {here} {unit} {usageLoc ? "here" : "on hand"}{over ? " · over!" : ""}
+                    </div>
+                  </div>
+                  <input type="text" inputMode="decimal" value={partsUsed[p.id] || ""} onChange={e => setPartsUsedState(x => ({ ...x, [p.id]: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0" style={{ width: 60, padding: "8px", border: `1px solid ${over ? T.warning : T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
+                  <span style={{ fontSize: 12, color: T.textMuted, width: 32 }}>{unit}</span>
+                  <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: num(partsUsed[p.id]) > 0 ? T.text : T.textMuted }}>{money(num(partsUsed[p.id]) * num(p.costPer))}</div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -6406,20 +6528,21 @@ function CatalogManager({ catalog, setCatalog }) {
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Treatments" action={<Btn sm onClick={openAddTx}>+ Add</Btn>} />
         <div style={{ padding: 18 }}>
-          <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 12 }}>Tracked by the ounce with your cost per oz and inventory on hand. Usage on a stop subtracts from inventory.</div>
+          <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 12 }}>Define treatments and your cost per unit here. Manage stock levels and locations in the Inventory tab.</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {treatments.length === 0 && <div style={{ fontSize: 13, color: T.textMuted }}>No treatments yet. Tap "+ Add" to create one.</div>}
             {treatments.map(t => {
-              const inv = num(t.inventoryOz);
+              const inv = invTotal(t);
+              const unit = t.unit || "oz";
               const low = inv <= 32;
               return (
                 <div key={t.id} onClick={() => openEditTx(t)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", background: T.surfaceAlt, borderRadius: 12, cursor: "pointer" }}>
                   <div>
                     <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{t.name}</div>
-                    <div style={{ fontSize: 11, color: low ? T.warning : T.textMuted, fontWeight: low ? 700 : 400 }}>{inv} oz on hand{low ? " · low" : ""}</div>
+                    <div style={{ fontSize: 11, color: low ? T.warning : T.textMuted, fontWeight: low ? 700 : 400 }}>{inv} {unit} on hand{low ? " · low" : ""}</div>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    {t.costPerOz && <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>${t.costPerOz}/oz</span>}
+                    {t.costPerOz && <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>${t.costPerOz}/{unit}</span>}
                     <Icon name="edit" size={14} />
                   </div>
                 </div>
@@ -9856,6 +9979,8 @@ function Icon({ name, size = 22, filled = false }) {
   const paths = {
     // Nav
     home:     <><path d="M4 10.5 12 4l8 6.5" /><path d="M5.5 9.5V19a1 1 0 0 0 1 1H10v-5h4v5h3.5a1 1 0 0 0 1-1V9.5" /></>,
+    truck:    <><path d="M1 3h13v10H1z" /><path d="M14 7h4l3 3v3h-7z" /><circle cx="5.5" cy="16.5" r="1.8" /><circle cx="17.5" cy="16.5" r="1.8" /></>,
+    wrench:   <><path d="M14.5 5.5a3.5 3.5 0 0 1-4.6 4.6L4 16v4h4l5.9-5.9a3.5 3.5 0 0 0 4.6-4.6l-2.1 2.1-2-.5-.5-2 2.1-2.1z" /></>,
     clients:  <><circle cx="12" cy="8" r="3.4" /><path d="M5.5 20c0-3.6 3-6 6.5-6s6.5 2.4 6.5 6" /></>,
     calendar: <><rect x="4" y="5" width="16" height="16" rx="2.5" /><path d="M4 9.5h16M9 3v4M15 3v4" /></>,
     sliders:  <><path d="M5 8h9M19 8h0M5 16h0M10 16h9" /><circle cx="16.5" cy="8" r="2.2" /><circle cx="7.5" cy="16" r="2.2" /></>,
@@ -10214,90 +10339,250 @@ function CPMessages({ client, branding, onSubmit, T }) {
 // ─────────────────────────────────────────────
 
 function InventoryScreen({ catalog, setCatalog, clients, T }) {
-  const LOW_THRESHOLD = 32; // oz — configurable
+  const locations = catalog.locations || [];
   const treatments = catalog.treatments || [];
-  const [adjustModal, setAdjustModal] = useState(null); // { treatment, mode: "restock"|"adjust" }
+  const parts = catalog.parts || [];
+
+  const [tab, setTab] = useState("treatments"); // "treatments" | "parts"
+  const [locFilter, setLocFilter] = useState("all"); // "all" | locId
+  const [adjustModal, setAdjustModal] = useState(null); // { item, kind, mode, locId }
   const [adjustAmt, setAdjustAmt] = useState("");
   const [adjustNote, setAdjustNote] = useState("");
-  const [historyModal, setHistoryModal] = useState(null); // treatment id
+  const [adjustLoc, setAdjustLoc] = useState("");
+  const [historyModal, setHistoryModal] = useState(null); // { item, kind }
+  const [itemModal, setItemModal] = useState(null); // { mode, kind, data }
+  const [locModal, setLocModal] = useState(null); // { mode, data }
+  const [showLocs, setShowLocs] = useState(false);
 
-  // Build usage history from all client history entries
+  // Build usage history from client stop history (treatments + parts)
   const usageHistory = {};
   (clients || []).forEach(c => {
     (c.history || []).forEach(h => {
       (h.treatmentsUsed || []).forEach(u => {
-        if (!usageHistory[u.id]) usageHistory[u.id] = [];
-        usageHistory[u.id].push({ date: h.date, oz: u.oz, client: c.name, cost: u.cost });
+        const key = "tx_" + u.id;
+        if (!usageHistory[key]) usageHistory[key] = [];
+        usageHistory[key].push({ date: h.date, amt: u.oz, client: c.name, cost: u.cost, loc: u.locId });
+      });
+      (h.partsUsed || []).forEach(u => {
+        const key = "pt_" + u.id;
+        if (!usageHistory[key]) usageHistory[key] = [];
+        usageHistory[key].push({ date: h.date, amt: u.qty, client: c.name, cost: u.cost, loc: u.locId });
       });
     });
   });
-
-  // Total usage per treatment (all time)
-  const totalUsed = (id) => (usageHistory[id] || []).reduce((s, e) => s + (e.oz || 0), 0);
-  const lastUsed  = (id) => {
-    const h = (usageHistory[id] || []).slice().sort((a,b) => {
-      const p = s => { const [m,d,y]=(s||"").split("/").map(Number); return new Date(y,m-1,d); };
+  const histKey = (item, kind) => (kind === "part" ? "pt_" : "tx_") + item.id;
+  const totalUsed = (item, kind) => (usageHistory[histKey(item, kind)] || []).reduce((s, e) => s + (e.amt || 0), 0);
+  const lastUsed = (item, kind) => {
+    const h = (usageHistory[histKey(item, kind)] || []).slice().sort((a, b) => {
+      const p = s => { const [m, d, y] = (s || "").split("/").map(Number); return new Date(y, m - 1, d); };
       return p(b.date) - p(a.date);
     });
     return h[0]?.date || null;
   };
 
-  const statusOf = (oz) => {
-    if (oz <= 0) return { label: "Out of Stock", color: "#E5484D", bg: hexA("#E5484D", 0.1) };
-    if (oz < LOW_THRESHOLD) return { label: "Low Stock", color: "#F59E0B", bg: hexA("#F59E0B", 0.1) };
+  const lowThreshold = (item, kind) => kind === "part" ? (parseFloat(item.lowAt) || 0) : 32;
+  const statusOf = (item, kind) => {
+    const total = invTotal(item);
+    const low = lowThreshold(item, kind);
+    if (total <= 0) return { label: "Out of Stock", color: "#E5484D", bg: hexA("#E5484D", 0.1) };
+    if (total < low) return { label: "Low Stock", color: "#F59E0B", bg: hexA("#F59E0B", 0.1) };
     return { label: "In Stock", color: "#16a34a", bg: hexA("#16a34a", 0.1) };
   };
 
-  const applyAdjust = () => {
-    const t = adjustModal.treatment;
-    const amt = parseFloat(adjustAmt) || 0;
-    if (amt === 0) { setAdjustModal(null); return; }
-    const current = parseFloat(t.inventoryOz) || 0;
-    const newAmt = adjustModal.mode === "restock"
-      ? current + amt
-      : Math.max(0, current + amt); // adjust can be negative
-    setCatalog(cat => ({
-      ...cat,
-      treatments: (cat.treatments || []).map(tr =>
-        tr.id === t.id ? { ...tr, inventoryOz: String(newAmt) } : tr
-      )
-    }));
-    setAdjustModal(null);
-    setAdjustAmt("");
-    setAdjustNote("");
-  };
+  const items = tab === "treatments" ? treatments : parts;
+  const kind = tab === "treatments" ? "treatment" : "part";
+  const catKey = tab === "treatments" ? "treatments" : "parts";
+
+  // Low items for the current tab
+  const lowItems = items.filter(it => invTotal(it) < lowThreshold(it, kind));
+
+  // Overall valuation
+  const tabValue = items.reduce((s, it) => {
+    const cost = parseFloat(kind === "part" ? it.costPer : it.costPerOz) || 0;
+    return s + cost * invTotal(it);
+  }, 0);
 
   const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
-  const lbl   = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
+  const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
 
-  const low = treatments.filter(t => parseFloat(t.inventoryOz) < LOW_THRESHOLD);
+  // ── Adjust / restock at a location ──
+  const openAdjust = (item, mode, locId) => {
+    setAdjustModal({ item, kind, mode });
+    setAdjustAmt("");
+    setAdjustNote("");
+    setAdjustLoc(locId || (locations[0]?.id ?? ""));
+  };
+  const applyAdjust = () => {
+    const amt = parseFloat(adjustAmt) || 0;
+    if (amt === 0 || !adjustLoc) { setAdjustModal(null); return; }
+    const cur = invAtLoc(adjustModal.item, adjustLoc);
+    const newAmt = adjustModal.mode === "restock" ? cur + amt : Math.max(0, cur + amt);
+    setCatalog(cat => ({
+      ...cat,
+      [catKey]: (cat[catKey] || []).map(it => it.id === adjustModal.item.id ? setStockAtLoc(it, adjustLoc, newAmt) : it),
+    }));
+    setAdjustModal(null); setAdjustAmt(""); setAdjustNote(""); setAdjustLoc("");
+  };
+
+  // ── Transfer between locations ──
+  const [transferModal, setTransferModal] = useState(null);
+  const [transferFrom, setTransferFrom] = useState("");
+  const [transferTo, setTransferTo] = useState("");
+  const [transferAmt, setTransferAmt] = useState("");
+  const openTransfer = (item) => {
+    setTransferModal({ item });
+    setTransferFrom(locations[0]?.id ?? "");
+    setTransferTo(locations[1]?.id ?? "");
+    setTransferAmt("");
+  };
+  const applyTransfer = () => {
+    const amt = parseFloat(transferAmt) || 0;
+    if (amt <= 0 || !transferFrom || !transferTo || transferFrom === transferTo) { setTransferModal(null); return; }
+    setCatalog(cat => ({
+      ...cat,
+      [catKey]: (cat[catKey] || []).map(it => {
+        if (it.id !== transferModal.item.id) return it;
+        const fromAmt = Math.max(0, invAtLoc(it, transferFrom) - amt);
+        let next = setStockAtLoc(it, transferFrom, fromAmt);
+        next = setStockAtLoc(next, transferTo, invAtLoc(next, transferTo) + amt);
+        return next;
+      }),
+    }));
+    setTransferModal(null); setTransferAmt("");
+  };
+
+  // ── Item add / edit / delete ──
+  const blankItem = () => kind === "part"
+    ? { id: "pt" + Date.now(), name: "", unit: "pieces", costPer: "", lowAt: "", stockByLoc: {} }
+    : { id: "t" + Date.now(), name: "", unit: "oz", costPerOz: "", inventoryOz: "0", stockByLoc: {} };
+  const openAddItem = () => setItemModal({ mode: "add", kind, data: blankItem() });
+  const openEditItem = (item) => setItemModal({ mode: "edit", kind, data: { ...item, stockByLoc: { ...(item.stockByLoc || {}) } } });
+  const saveItem = () => {
+    const d = itemModal.data;
+    if (!d.name.trim()) return;
+    setCatalog(cat => {
+      const list = cat[catKey] || [];
+      const exists = list.some(x => x.id === d.id);
+      // keep inventoryOz mirror in sync
+      const total = Object.values(d.stockByLoc || {}).reduce((s, v) => s + (parseFloat(v) || 0), 0);
+      const clean = { ...d, inventoryOz: String(total) };
+      return { ...cat, [catKey]: exists ? list.map(x => x.id === d.id ? clean : x) : [...list, clean] };
+    });
+    setItemModal(null);
+  };
+  const deleteItem = () => {
+    setCatalog(cat => ({ ...cat, [catKey]: (cat[catKey] || []).filter(x => x.id !== itemModal.data.id) }));
+    setItemModal(null);
+  };
+
+  // ── Location add / edit / delete ──
+  const openAddLoc = () => setLocModal({ mode: "add", data: { id: "loc_" + Date.now(), name: "", type: "vehicle" } });
+  const openEditLoc = (loc) => setLocModal({ mode: "edit", data: { ...loc } });
+  const saveLoc = () => {
+    const d = locModal.data;
+    if (!d.name.trim()) return;
+    setCatalog(cat => {
+      const list = cat.locations || [];
+      const exists = list.some(x => x.id === d.id);
+      return { ...cat, locations: exists ? list.map(x => x.id === d.id ? d : x) : [...list, d] };
+    });
+    setLocModal(null);
+  };
+  const deleteLoc = () => {
+    const id = locModal.data.id;
+    setCatalog(cat => ({
+      ...cat,
+      locations: (cat.locations || []).filter(x => x.id !== id),
+      // strip that location's stock from every item
+      treatments: (cat.treatments || []).map(it => { const s = { ...(it.stockByLoc || {}) }; delete s[id]; return { ...it, stockByLoc: s, inventoryOz: String(Object.values(s).reduce((a, v) => a + (parseFloat(v) || 0), 0)) }; }),
+      parts: (cat.parts || []).map(it => { const s = { ...(it.stockByLoc || {}) }; delete s[id]; return { ...it, stockByLoc: s, inventoryOz: String(Object.values(s).reduce((a, v) => a + (parseFloat(v) || 0), 0)) }; }),
+    }));
+    setLocModal(null);
+  };
+
+  const locName = (id) => (locations.find(l => l.id === id)?.name) || "Unassigned";
+  const unitOf = (item) => item.unit || "oz";
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <div>
-        <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Inventory</div>
-        <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>
-          {treatments.length} treatment{treatments.length !== 1 ? "s" : ""} tracked · {low.length > 0 ? `${low.length} need restocking` : "All stocked"}
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div>
+          <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Inventory</div>
+          <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>
+            {treatments.length + parts.length} items · {locations.length} location{locations.length !== 1 ? "s" : ""} · ${(
+              treatments.reduce((s, it) => s + (parseFloat(it.costPerOz) || 0) * invTotal(it), 0) +
+              parts.reduce((s, it) => s + (parseFloat(it.costPer) || 0) * invTotal(it), 0)
+            ).toFixed(0)} on hand
+          </div>
         </div>
+        <Btn sm variant="ghost" onClick={() => setShowLocs(s => !s)}>Locations</Btn>
       </div>
 
-      {/* Low stock alerts */}
-      {low.length > 0 && (
+      {/* Locations manager */}
+      {showLocs && (
+        <Card>
+          <CardHeader title="Storage Locations" action={<button onClick={openAddLoc} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 9, padding: "6px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>+ Add</button>} />
+          <div style={{ padding: "8px 6px" }}>
+            {locations.length === 0 && <div style={{ padding: "14px 14px", fontSize: 13, color: T.textMuted }}>No locations yet. Add a shed or truck to start tracking where stock lives.</div>}
+            {locations.map((loc, i) => (
+              <div key={loc.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 12px", borderBottom: i < locations.length - 1 ? `1px solid ${T.border}` : "none" }}>
+                <div style={{ width: 32, height: 32, borderRadius: 9, background: hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <Icon name={loc.type === "vehicle" ? "truck" : "home"} size={16} />
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{loc.name}</div>
+                  <div style={{ fontSize: 11, color: T.textMuted, textTransform: "capitalize" }}>{loc.type}</div>
+                </div>
+                <button onClick={() => openEditLoc(loc)} style={{ background: T.surfaceAlt, border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 600, color: T.text, cursor: "pointer", fontFamily: "inherit" }}>Edit</button>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {/* Tab switch */}
+      <div style={{ display: "flex", gap: 8, background: T.surfaceAlt, padding: 4, borderRadius: 14 }}>
+        {[["treatments", "Treatments"], ["parts", "Parts"]].map(([val, label]) => (
+          <button key={val} onClick={() => { setTab(val); setLocFilter("all"); }}
+            style={{ flex: 1, padding: "10px", borderRadius: 11, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 14, fontWeight: 700, background: tab === val ? T.surface : "transparent", color: tab === val ? T.primary : T.textMuted, boxShadow: tab === val ? "0 1px 4px rgba(0,0,0,0.08)" : "none", transition: "all 0.15s" }}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* Location filter chips */}
+      {locations.length > 0 && (
+        <div style={{ display: "flex", gap: 7, overflowX: "auto", WebkitOverflowScrolling: "touch", paddingBottom: 2 }}>
+          <button onClick={() => setLocFilter("all")}
+            style={{ flexShrink: 0, padding: "7px 14px", borderRadius: 100, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 600, background: locFilter === "all" ? T.primary : T.surfaceAlt, color: locFilter === "all" ? "#fff" : T.textMuted }}>
+            All Locations
+          </button>
+          {locations.map(loc => (
+            <button key={loc.id} onClick={() => setLocFilter(loc.id)}
+              style={{ flexShrink: 0, padding: "7px 14px", borderRadius: 100, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 600, background: locFilter === loc.id ? T.primary : T.surfaceAlt, color: locFilter === loc.id ? "#fff" : T.textMuted }}>
+              {loc.name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Low stock alert */}
+      {lowItems.length > 0 && (
         <div style={{ background: hexA("#F59E0B", 0.08), border: `1px solid ${hexA("#F59E0B", 0.25)}`, borderRadius: 16, padding: "14px 16px" }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: "#92400E", marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
-            <Icon name="warning" size={15} /> {low.length} item{low.length !== 1 ? "s" : ""} running low
+            <Icon name="warning" size={15} /> {lowItems.length} item{lowItems.length !== 1 ? "s" : ""} running low
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {low.map(t => {
-              const oz = parseFloat(t.inventoryOz) || 0;
+            {lowItems.map(it => {
+              const total = invTotal(it);
               return (
-                <div key={t.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontSize: 13, color: T.text, fontWeight: 600 }}>{t.name}</span>
+                <div key={it.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: 13, color: T.text, fontWeight: 600 }}>{it.name}</span>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ fontSize: 12, color: oz <= 0 ? "#E5484D" : "#F59E0B", fontWeight: 700 }}>
-                      {oz <= 0 ? "OUT" : `${oz}oz left`}
+                    <span style={{ fontSize: 12, color: total <= 0 ? "#E5484D" : "#F59E0B", fontWeight: 700 }}>
+                      {total <= 0 ? "OUT" : `${total} ${unitOf(it)} left`}
                     </span>
-                    <button onClick={() => { setAdjustModal({ treatment: t, mode: "restock" }); setAdjustAmt(""); }}
+                    <button onClick={() => openAdjust(it, "restock", locFilter !== "all" ? locFilter : locations[0]?.id)}
                       style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 8, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
                       Restock
                     </button>
@@ -10309,124 +10594,299 @@ function InventoryScreen({ catalog, setCatalog, clients, T }) {
         </div>
       )}
 
-      {/* Treatment cards */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {treatments.map(t => {
-          const oz = parseFloat(t.inventoryOz) || 0;
-          const status = statusOf(oz);
-          const used = totalUsed(t.id);
-          const last = lastUsed(t.id);
-          const maxOz = Math.max(oz + used, 512); // scale bar
-          const pct = Math.min(100, (oz / maxOz) * 100);
-          const barColor = oz <= 0 ? "#E5484D" : oz < LOW_THRESHOLD ? "#F59E0B" : T.primary;
+      {/* Add item button */}
+      <button onClick={openAddItem}
+        style={{ background: hexA(T.primary, 0.08), color: T.primary, border: `1.5px dashed ${hexA(T.primary, 0.3)}`, borderRadius: 14, padding: "12px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+        + Add {tab === "treatments" ? "Treatment" : "Part"}
+      </button>
 
-          return (
-            <div key={t.id} style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, padding: "16px 18px", boxShadow: "0 1px 4px rgba(0,0,0,0.04)" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 15, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{t.name}</div>
-                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>
-                    ${parseFloat(t.costPerOz || 0).toFixed(2)}/oz
-                    {last && <span> · Last used {last}</span>}
+      {/* Item cards */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {items.length === 0 && (
+          <div style={{ textAlign: "center", padding: "30px 20px", color: T.textMuted, fontSize: 14 }}>
+            No {tab} yet. Tap "Add {tab === "treatments" ? "Treatment" : "Part"}" to get started.
+          </div>
+        )}
+        {items
+          .filter(it => locFilter === "all" ? true : invAtLoc(it, locFilter) > 0 || (it.stockByLoc && locFilter in (it.stockByLoc || {})))
+          .map(it => {
+            const unit = unitOf(it);
+            const total = invTotal(it);
+            const displayAmt = locFilter === "all" ? total : invAtLoc(it, locFilter);
+            const status = statusOf(it, kind);
+            const used = totalUsed(it, kind);
+            const last = lastUsed(it, kind);
+            const cost = parseFloat(kind === "part" ? it.costPer : it.costPerOz) || 0;
+            const low = lowThreshold(it, kind);
+            const maxScale = Math.max(total + used, low * 4, 1);
+            const pct = Math.min(100, (total / maxScale) * 100);
+            const barColor = total <= 0 ? "#E5484D" : total < low ? "#F59E0B" : T.primary;
+
+            return (
+              <div key={it.id} style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, padding: "16px 18px", boxShadow: "0 1px 4px rgba(0,0,0,0.04)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 15, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{it.name}</div>
+                    <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>
+                      ${cost.toFixed(2)}/{unit}{last && <span> · Last used {last}</span>}
+                    </div>
+                  </div>
+                  <span style={{ fontSize: 11, fontWeight: 700, padding: "4px 12px", borderRadius: 100, background: status.bg, color: status.color, flexShrink: 0, marginLeft: 10 }}>
+                    {status.label}
+                  </span>
+                </div>
+
+                {/* Stock amount */}
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+                    <span style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>
+                      {displayAmt % 1 === 0 ? displayAmt : displayAmt.toFixed(1)}
+                      <span style={{ fontSize: 13, fontWeight: 500, color: T.textMuted, marginLeft: 4 }}>{unit}{locFilter !== "all" ? " here" : " total"}</span>
+                    </span>
+                    {used > 0 && <span style={{ fontSize: 12, color: T.textMuted }}>{used % 1 === 0 ? used : used.toFixed(1)} {unit} used all time</span>}
+                  </div>
+                  <div style={{ height: 6, background: T.surfaceAlt, borderRadius: 100, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${pct}%`, background: barColor, borderRadius: 100, transition: "width 0.4s ease" }} />
                   </div>
                 </div>
-                <span style={{ fontSize: 11, fontWeight: 700, padding: "4px 12px", borderRadius: 100, background: status.bg, color: status.color, flexShrink: 0, marginLeft: 10 }}>
-                  {status.label}
-                </span>
-              </div>
 
-              {/* Stock bar */}
-              <div style={{ marginBottom: 12 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
-                  <span style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{oz.toFixed(0)}<span style={{ fontSize: 13, fontWeight: 500, color: T.textMuted, marginLeft: 4 }}>oz</span></span>
-                  <span style={{ fontSize: 12, color: T.textMuted }}>{used.toFixed(0)}oz used all time</span>
-                </div>
-                <div style={{ height: 6, background: T.surfaceAlt, borderRadius: 100, overflow: "hidden" }}>
-                  <div style={{ height: "100%", width: `${pct}%`, background: barColor, borderRadius: 100, transition: "width 0.4s ease" }} />
-                </div>
-                {oz < LOW_THRESHOLD && oz > 0 && (
-                  <div style={{ fontSize: 11, color: "#F59E0B", marginTop: 5 }}>Below {LOW_THRESHOLD}oz threshold</div>
+                {/* Per-location breakdown */}
+                {locFilter === "all" && locations.length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+                    {locations.map(loc => {
+                      const amt = invAtLoc(it, loc.id);
+                      return (
+                        <div key={loc.id} style={{ display: "flex", alignItems: "center", gap: 5, background: T.surfaceAlt, borderRadius: 9, padding: "5px 10px" }}>
+                          <Icon name={loc.type === "vehicle" ? "truck" : "home"} size={11} />
+                          <span style={{ fontSize: 11.5, color: T.textMuted, fontWeight: 600 }}>{loc.name}</span>
+                          <span style={{ fontSize: 11.5, color: amt > 0 ? T.text : T.textMuted, fontWeight: 800 }}>{amt % 1 === 0 ? amt : amt.toFixed(1)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
                 )}
-              </div>
 
-              {/* Actions */}
-              <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => { setAdjustModal({ treatment: t, mode: "restock" }); setAdjustAmt(""); }}
-                  style={{ flex: 1, background: hexA(T.primary, 0.08), color: T.primary, border: "none", borderRadius: 11, padding: "9px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-                  + Restock
-                </button>
-                <button onClick={() => { setAdjustModal({ treatment: t, mode: "adjust" }); setAdjustAmt(""); }}
-                  style={{ flex: 1, background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 11, padding: "9px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
-                  Adjust
-                </button>
-                {(usageHistory[t.id] || []).length > 0 && (
-                  <button onClick={() => setHistoryModal(t.id)}
-                    style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 11, padding: "9px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
-                    History
+                {/* Actions */}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button onClick={() => openAdjust(it, "restock", locFilter !== "all" ? locFilter : undefined)}
+                    style={{ flex: 1, minWidth: 80, background: hexA(T.primary, 0.08), color: T.primary, border: "none", borderRadius: 11, padding: "9px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                    + Restock
                   </button>
-                )}
+                  <button onClick={() => openAdjust(it, "adjust", locFilter !== "all" ? locFilter : undefined)}
+                    style={{ flex: 1, minWidth: 80, background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 11, padding: "9px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+                    Adjust
+                  </button>
+                  {locations.length > 1 && (
+                    <button onClick={() => openTransfer(it)}
+                      style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 11, padding: "9px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+                      Move
+                    </button>
+                  )}
+                  <button onClick={() => openEditItem(it)}
+                    style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 11, padding: "9px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+                    Edit
+                  </button>
+                  {(usageHistory[histKey(it, kind)] || []).length > 0 && (
+                    <button onClick={() => setHistoryModal({ item: it, kind })}
+                      style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 11, padding: "9px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+                      History
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
-          );
-        })}
+            );
+          })}
       </div>
 
-      {/* Adjust/Restock modal */}
+      {/* Adjust / Restock modal */}
       {adjustModal && (
-        <Modal title={adjustModal.mode === "restock" ? `Restock — ${adjustModal.treatment.name}` : `Adjust — ${adjustModal.treatment.name}`} onClose={() => setAdjustModal(null)}>
+        <Modal title={adjustModal.mode === "restock" ? `Restock — ${adjustModal.item.name}` : `Adjust — ${adjustModal.item.name}`} onClose={() => setAdjustModal(null)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div>
+              <label style={lbl}>Location</label>
+              <select value={adjustLoc} onChange={e => setAdjustLoc(e.target.value)} style={field}>
+                {locations.map(loc => (
+                  <option key={loc.id} value={loc.id}>{loc.name} ({invAtLoc(adjustModal.item, loc.id)} {unitOf(adjustModal.item)})</option>
+                ))}
+              </select>
+            </div>
             <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: "14px 16px" }}>
-              <div style={{ fontSize: 13, color: T.textMuted }}>Current stock</div>
+              <div style={{ fontSize: 13, color: T.textMuted }}>Current at this location</div>
               <div style={{ fontSize: 28, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginTop: 2 }}>
-                {parseFloat(adjustModal.treatment.inventoryOz || 0).toFixed(0)}<span style={{ fontSize: 14, color: T.textMuted }}> oz</span>
+                {invAtLoc(adjustModal.item, adjustLoc)}<span style={{ fontSize: 14, color: T.textMuted }}> {unitOf(adjustModal.item)}</span>
               </div>
             </div>
             <div>
-              <label style={lbl}>{adjustModal.mode === "restock" ? "Add (oz)" : "Adjustment (oz, use – for removal)"}</label>
+              <label style={lbl}>{adjustModal.mode === "restock" ? `Add (${unitOf(adjustModal.item)})` : `Adjustment (use – to remove)`}</label>
               <input type="text" inputMode="decimal" style={field} value={adjustAmt}
                 onChange={e => setAdjustAmt(e.target.value.replace(/[^0-9.\-]/g, ""))}
-                placeholder={adjustModal.mode === "restock" ? "e.g. 128" : "e.g. -16"}
-                autoFocus />
-              {adjustAmt && (
+                placeholder={adjustModal.mode === "restock" ? "e.g. 128" : "e.g. -16"} autoFocus />
+              {adjustAmt && adjustLoc && (
                 <div style={{ fontSize: 13, color: T.textMuted, marginTop: 6 }}>
-                  New total: <strong style={{ color: T.text }}>
-                    {Math.max(0, (parseFloat(adjustModal.treatment.inventoryOz) || 0) + (parseFloat(adjustAmt) || 0)).toFixed(0)}oz
+                  New at {locName(adjustLoc)}: <strong style={{ color: T.text }}>
+                    {Math.max(0, invAtLoc(adjustModal.item, adjustLoc) + (parseFloat(adjustAmt) || 0))} {unitOf(adjustModal.item)}
                   </strong>
                 </div>
               )}
             </div>
             <div>
               <label style={lbl}>Note <span style={{ textTransform: "none", fontWeight: 400 }}>(optional)</span></label>
-              <input type="text" style={field} value={adjustNote} onChange={e => setAdjustNote(e.target.value)} placeholder="e.g. Received shipment, Spilled, Manual count" />
+              <input type="text" style={field} value={adjustNote} onChange={e => setAdjustNote(e.target.value)} placeholder="e.g. Received shipment, Manual count" />
             </div>
-            <Btn onClick={applyAdjust} block lg disabled={!adjustAmt}>
+            <Btn onClick={applyAdjust} block lg disabled={!adjustAmt || !adjustLoc}>
               {adjustModal.mode === "restock" ? "Add to Inventory" : "Apply Adjustment"}
             </Btn>
           </div>
         </Modal>
       )}
 
+      {/* Transfer modal */}
+      {transferModal && (
+        <Modal title={`Move — ${transferModal.item.name}`} onClose={() => setTransferModal(null)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div>
+              <label style={lbl}>From</label>
+              <select value={transferFrom} onChange={e => setTransferFrom(e.target.value)} style={field}>
+                {locations.map(loc => <option key={loc.id} value={loc.id}>{loc.name} ({invAtLoc(transferModal.item, loc.id)} {unitOf(transferModal.item)})</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={lbl}>To</label>
+              <select value={transferTo} onChange={e => setTransferTo(e.target.value)} style={field}>
+                {locations.map(loc => <option key={loc.id} value={loc.id}>{loc.name} ({invAtLoc(transferModal.item, loc.id)} {unitOf(transferModal.item)})</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={lbl}>Amount ({unitOf(transferModal.item)})</label>
+              <input type="text" inputMode="decimal" style={field} value={transferAmt}
+                onChange={e => setTransferAmt(e.target.value.replace(/[^0-9.]/g, ""))} placeholder="e.g. 16" autoFocus />
+            </div>
+            <Btn onClick={applyTransfer} block lg disabled={!transferAmt || transferFrom === transferTo}>Move Stock</Btn>
+          </div>
+        </Modal>
+      )}
+
+      {/* Item add/edit modal */}
+      {itemModal && (
+        <Modal title={itemModal.mode === "add" ? `Add ${itemModal.kind === "part" ? "Part" : "Treatment"}` : itemModal.data.name} onClose={() => setItemModal(null)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div>
+              <label style={lbl}>Name</label>
+              <input type="text" style={field} value={itemModal.data.name}
+                onChange={e => setItemModal(m => ({ ...m, data: { ...m.data, name: e.target.value } }))}
+                placeholder={itemModal.kind === "part" ? "e.g. PVC Union (1.5in)" : "e.g. Beneficial Bacteria"} autoFocus />
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <label style={lbl}>Unit</label>
+                <select value={itemModal.data.unit || (itemModal.kind === "part" ? "pieces" : "oz")}
+                  onChange={e => setItemModal(m => ({ ...m, data: { ...m.data, unit: e.target.value } }))} style={field}>
+                  {INV_UNITS.map(u => <option key={u} value={u}>{u}</option>)}
+                </select>
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={lbl}>Cost per {itemModal.data.unit || (itemModal.kind === "part" ? "piece" : "oz")}</label>
+                <input type="text" inputMode="decimal" style={field}
+                  value={itemModal.kind === "part" ? (itemModal.data.costPer ?? "") : (itemModal.data.costPerOz ?? "")}
+                  onChange={e => { const v = e.target.value.replace(/[^0-9.]/g, ""); setItemModal(m => ({ ...m, data: { ...m.data, [itemModal.kind === "part" ? "costPer" : "costPerOz"]: v } })); }}
+                  placeholder="0.00" />
+              </div>
+            </div>
+            <div>
+              <label style={lbl}>Low stock alert at</label>
+              <input type="text" inputMode="decimal" style={field}
+                value={itemModal.kind === "part" ? (itemModal.data.lowAt ?? "") : "32"}
+                disabled={itemModal.kind !== "part"}
+                onChange={e => setItemModal(m => ({ ...m, data: { ...m.data, lowAt: e.target.value.replace(/[^0-9.]/g, "") } }))}
+                placeholder={itemModal.kind === "part" ? "e.g. 6" : "32"} />
+              {itemModal.kind !== "part" && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>Treatments alert below 32 oz by default.</div>}
+            </div>
+
+            {/* Per-location starting stock */}
+            <div>
+              <label style={lbl}>Stock by location</label>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {locations.map(loc => (
+                  <div key={loc.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ flex: 1, fontSize: 13, color: T.text, fontWeight: 600 }}>{loc.name}</span>
+                    <input type="text" inputMode="decimal"
+                      style={{ ...field, width: 90, flex: "none", textAlign: "center" }}
+                      value={itemModal.data.stockByLoc?.[loc.id] ?? ""}
+                      onChange={e => { const v = e.target.value.replace(/[^0-9.]/g, ""); setItemModal(m => ({ ...m, data: { ...m.data, stockByLoc: { ...(m.data.stockByLoc || {}), [loc.id]: v } } })); }}
+                      placeholder="0" />
+                    <span style={{ fontSize: 12, color: T.textMuted, width: 44 }}>{itemModal.data.unit || "oz"}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <Btn onClick={saveItem} block lg disabled={!itemModal.data.name.trim()}>
+              {itemModal.mode === "add" ? "Add Item" : "Save Changes"}
+            </Btn>
+            {itemModal.mode === "edit" && (
+              <button onClick={deleteItem} style={{ background: "none", border: "none", color: "#E5484D", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit", padding: "4px" }}>
+                Delete {itemModal.kind === "part" ? "Part" : "Treatment"}
+              </button>
+            )}
+          </div>
+        </Modal>
+      )}
+
+      {/* Location add/edit modal */}
+      {locModal && (
+        <Modal title={locModal.mode === "add" ? "Add Location" : locModal.data.name} onClose={() => setLocModal(null)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div>
+              <label style={lbl}>Location Name</label>
+              <input type="text" style={field} value={locModal.data.name}
+                onChange={e => setLocModal(m => ({ ...m, data: { ...m.data, name: e.target.value } }))}
+                placeholder="e.g. Truck 3, Back Shed, Trailer" autoFocus />
+            </div>
+            <div>
+              <label style={lbl}>Type</label>
+              <div style={{ display: "flex", gap: 8 }}>
+                {[["vehicle", "Vehicle"], ["storage", "Storage"]].map(([val, label]) => (
+                  <button key={val} onClick={() => setLocModal(m => ({ ...m, data: { ...m.data, type: val } }))}
+                    style={{ flex: 1, padding: "11px", borderRadius: 11, border: `1.5px solid ${locModal.data.type === val ? T.primary : T.border}`, background: locModal.data.type === val ? hexA(T.primary, 0.08) : T.surface, color: locModal.data.type === val ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <Btn onClick={saveLoc} block lg disabled={!locModal.data.name.trim()}>
+              {locModal.mode === "add" ? "Add Location" : "Save Changes"}
+            </Btn>
+            {locModal.mode === "edit" && (
+              <button onClick={deleteLoc} style={{ background: "none", border: "none", color: "#E5484D", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit", padding: "4px" }}>
+                Delete Location
+              </button>
+            )}
+          </div>
+        </Modal>
+      )}
+
       {/* Usage history modal */}
       {historyModal && (() => {
-        const t = treatments.find(x => x.id === historyModal);
-        const hist = (usageHistory[historyModal] || []).slice().sort((a,b) => {
-          const p = s => { const [m,d,y]=(s||"").split("/").map(Number); return new Date(y,m-1,d); };
+        const it = historyModal.item;
+        const unit = unitOf(it);
+        const hist = (usageHistory[histKey(it, historyModal.kind)] || []).slice().sort((a, b) => {
+          const p = s => { const [m, d, y] = (s || "").split("/").map(Number); return new Date(y, m - 1, d); };
           return p(b.date) - p(a.date);
         });
         return (
-          <Modal title={`Usage — ${t?.name}`} onClose={() => setHistoryModal(null)}>
+          <Modal title={`Usage — ${it.name}`} onClose={() => setHistoryModal(null)}>
             <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
               <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 12 }}>
-                {hist.length} use{hist.length !== 1 ? "s" : ""} · {hist.reduce((s,e) => s + (e.oz||0), 0).toFixed(0)}oz total consumed
+                {hist.length} use{hist.length !== 1 ? "s" : ""} · {hist.reduce((s, e) => s + (e.amt || 0), 0)} {unit} total consumed
               </div>
               {hist.map((h, i) => (
                 <div key={i} style={{ padding: "11px 0", borderBottom: i < hist.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <div>
                     <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{h.client}</div>
-                    <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{h.date}</div>
+                    <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{h.date}{h.loc ? ` · ${locName(h.loc)}` : ""}</div>
                   </div>
                   <div style={{ textAlign: "right" }}>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{(h.oz || 0).toFixed(1)}oz</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{h.amt} {unit}</div>
                     {h.cost > 0 && <div style={{ fontSize: 11, color: T.textMuted }}>${(h.cost || 0).toFixed(2)}</div>}
                   </div>
                 </div>
@@ -13206,6 +13666,18 @@ export default function App({ authEmail = "", onSignOut }) {
       if (!next.tests || !next.tests.length) { next.tests = DEFAULT_CATALOG.tests; changed = true; }
       if (!next.treatments || !next.treatments.length) { next.treatments = DEFAULT_CATALOG.treatments; changed = true; }
       if (!next.services) { next.services = DEFAULT_CATALOG.services; changed = true; }
+      // Inventory model: ensure locations exist
+      if (!next.locations || !next.locations.length) { next.locations = DEFAULT_CATALOG.locations; changed = true; }
+      // Ensure parts category exists
+      if (!next.parts) { next.parts = DEFAULT_CATALOG.parts; changed = true; }
+      // Migrate any treatment/part lacking stockByLoc into the location model
+      const migrateList = (list) => (list || []).map(it => {
+        if (it.stockByLoc && typeof it.stockByLoc === "object") return it;
+        changed = true;
+        return migrateItemStock(it, next.locations);
+      });
+      next.treatments = migrateList(next.treatments);
+      next.parts = migrateList(next.parts);
       return changed ? next : c;
     });
   }, [lcat]);
@@ -13671,17 +14143,45 @@ export default function App({ authEmail = "", onSignOut }) {
         ? entry.invoice : c.balance;
       return { ...c, history, balance };
     }));
-    // subtract used treatment ounces from inventory
-    if (entry.treatmentsUsed && entry.treatmentsUsed.length) {
-      setCatalog(cat => ({
-        ...cat,
-        treatments: (cat.treatments || []).map(t => {
-          const used = entry.treatmentsUsed.find(u => u.id === t.id);
-          if (!used) return t;
-          const remaining = Math.max(0, (parseFloat(t.inventoryOz) || 0) - (used.oz || 0));
-          return { ...t, inventoryOz: String(remaining) };
-        }),
-      }));
+    // subtract used treatments + parts from inventory at the chosen location
+    const txUsed = entry.treatmentsUsed || [];
+    const ptUsed = entry.partsUsed || [];
+    if (txUsed.length || ptUsed.length) {
+      setCatalog(cat => {
+        const decFromLoc = (item, usedAmt, locId) => {
+          // Pull from the picked location first, then spill over to other locations if short
+          const stock = { ...(item.stockByLoc || {}) };
+          let toRemove = usedAmt;
+          if (locId && stock[locId] !== undefined) {
+            const take = Math.min(parseFloat(stock[locId]) || 0, toRemove);
+            stock[locId] = (parseFloat(stock[locId]) || 0) - take;
+            toRemove -= take;
+          }
+          // spill to other locations if still owed
+          if (toRemove > 0) {
+            for (const k of Object.keys(stock)) {
+              if (k === locId) continue;
+              const take = Math.min(parseFloat(stock[k]) || 0, toRemove);
+              stock[k] = (parseFloat(stock[k]) || 0) - take;
+              toRemove -= take;
+              if (toRemove <= 0) break;
+            }
+          }
+          const total = Object.values(stock).reduce((s, v) => s + (parseFloat(v) || 0), 0);
+          return { ...item, stockByLoc: stock, inventoryOz: String(total) };
+        };
+        return {
+          ...cat,
+          treatments: (cat.treatments || []).map(t => {
+            const used = txUsed.find(u => u.id === t.id);
+            return used ? decFromLoc(t, used.oz || 0, used.locId || entry.usageLoc) : t;
+          }),
+          parts: (cat.parts || []).map(p => {
+            const used = ptUsed.find(u => u.id === p.id);
+            return used ? decFromLoc(p, used.qty || 0, used.locId || entry.usageLoc) : p;
+          }),
+        };
+      });
     }
     if (sid) setCompletedSids(m => ({ ...m, [sid]: true }));
   };
