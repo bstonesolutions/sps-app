@@ -10632,19 +10632,47 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
   const inPeriod = (ts) => ts && new Date(ts) >= periodStart;
 
   // ── Revenue ──
-  const allInvoices = invoices || [];
-  const periodInvoices = allInvoices.filter(iv => inPeriod(iv.createdAt || iv.date));
-  const paidInvoices  = periodInvoices.filter(iv => iv.status === "paid");
-  const openInvoices  = allInvoices.filter(iv => iv.status !== "paid");
+  // Parse any date format — QB uses YYYY-MM-DD, SPS uses MM/DD/YYYY
+  const parseDate = (s) => {
+    if (!s) return null;
+    if (typeof s === "number") return new Date(s);
+    if (typeof s === "string" && s.includes("/")) {
+      const [m, d, y] = s.split("/").map(Number);
+      return (m && d && y) ? new Date(y, m-1, d) : null;
+    }
+    if (typeof s === "string" && s.includes("-")) {
+      const d = new Date(s + (s.length === 10 ? "T00:00:00" : ""));
+      return isNaN(d.getTime()) ? null : d;
+    }
+    return null;
+  };
 
-  const sumTotal = (arr) => arr.reduce((s, iv) => s + (parseFloat((iv.total||"0").replace(/[^0-9.-]/g,""))||0), 0);
-  const revenue   = sumTotal(paidInvoices);
+  const isPaid = (iv) => {
+    const s = (iv.status || "").toLowerCase();
+    return s === "paid";
+  };
+
+  const ivTotal = (iv) => invoiceTotals(iv).total;
+
+  const ivDate = (iv) => parseDate(iv.paidDate || iv.date) || new Date(iv.createdAt || 0);
+
+  const inPeriodIv = (iv) => ivDate(iv) >= periodStart;
+
+  const allInvoices   = invoices || [];
+  const periodPaid    = allInvoices.filter(iv => isPaid(iv) && inPeriodIv(iv));
+  const openInvoices  = allInvoices.filter(iv => !isPaid(iv) && iv.status !== "Draft" && iv.status !== "draft");
+
+  const sumTotal = (arr) => arr.reduce((s, iv) => s + ivTotal(iv), 0);
+  const revenue   = sumTotal(periodPaid);
   const pipeline  = sumTotal(openInvoices);
-  const allRevenue = sumTotal(allInvoices.filter(iv => iv.status === "paid"));
+  const allRevenue = sumTotal(allInvoices.filter(isPaid));
 
   // ── Jobs ──
   const allHistory = (clients||[]).flatMap(c => (c.history||[]).map(h => ({ ...h, clientId: c.id, division: c.division })));
-  const periodJobs = allHistory.filter(h => inPeriod(h.date));
+  const periodJobs = allHistory.filter(h => {
+    const d = parseDate(h.date);
+    return d && d >= periodStart;
+  });
   const jobsByDivision = { Pond: 0, Pool: 0, Seasonal: 0 };
   periodJobs.forEach(h => { jobsByDivision[h.division] = (jobsByDivision[h.division]||0) + 1; });
 
@@ -10666,8 +10694,8 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
     const start = new Date(d.getFullYear(), d.getMonth(), 1);
     const end   = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59);
     const total = sumTotal(allInvoices.filter(iv => {
-      const dt = new Date(iv.createdAt || iv.date || 0);
-      return iv.status === "paid" && dt >= start && dt <= end;
+      const dt = ivDate(iv);
+      return isPaid(iv) && dt >= start && dt <= end;
     }));
     return { label, total };
   });
