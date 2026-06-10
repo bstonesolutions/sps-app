@@ -1051,6 +1051,31 @@ function StatCard({ label, value, sub, accent, onClick }) {
   );
 }
 
+function Collapsible({ title, subtitle, children, defaultOpen = false }) {
+  const { T } = useApp();
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, overflow: "hidden", marginBottom: 14 }}>
+      <button onClick={() => setOpen(o => !o)}
+        style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 18px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", textAlign: "left", gap: 12, WebkitTapHighlightColor: "transparent" }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: T.text, letterSpacing: "-0.01em" }}>{title}</div>
+          {subtitle && !open && <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subtitle}</div>}
+        </div>
+        <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
+          style={{ flexShrink: 0, transition: "transform 0.2s ease", transform: open ? "rotate(180deg)" : "rotate(0deg)" }}>
+          <path d="m6 9 6 6 6-6"/>
+        </svg>
+      </button>
+      {open && (
+        <div style={{ borderTop: `1px solid ${T.border}`, padding: "16px 18px" }}>
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FieldRow({ label, children }) {
   const { T } = useApp();
   return (
@@ -8095,58 +8120,51 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
       </div>
 
       {activeTab === "services" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
-          {perms.editCatalog && <>
-            <div>
-              <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", marginBottom: 2 }}>Service Catalog</div>
-              <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 14 }}>Stop types, services, products, treatments, and water tests.</div>
+        <div key="services-tab">
+          {perms.editCatalog && (
+            <Collapsible title="Service Catalog" subtitle="Stop types, services, products, treatments, and water tests.">
               <CatalogManager catalog={catalog} setCatalog={setCatalog} />
-            </div>
-          </>}
-          {perms.isAdmin && <>
-            <div>
-              <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", marginBottom: 2 }}>Service Tiers</div>
-              <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 14 }}>Plan benefits, pricing, and upgrade paths shown in the client portal.</div>
+            </Collapsible>
+          )}
+          {perms.isAdmin && (
+            <Collapsible title="Service Tiers" subtitle="Plan benefits, pricing, and upgrade paths shown in the client portal.">
               <ServiceTiersManager tiers={serviceTiers || DEFAULT_TIERS} setTiers={setServiceTiers} clients={clients} setClients={setClients} T={T} />
-            </div>
-          </>}
-          <div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", marginBottom: 2 }}>Schedule Settings</div>
-            <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 14 }}>Sort order, stop density, and what appears on each stop card.</div>
+            </Collapsible>
+          )}
+          <Collapsible title="Schedule Settings" subtitle="Sort order, stop density, and what appears on each stop card.">
             <ScheduleSettings cfg={scheduleCfg} setCfg={setScheduleCfg} />
-          </div>
+          </Collapsible>
         </div>
       )}
       {activeTab === "business" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
-          {(perms.editSettings || perms.canInvoice) && <div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", marginBottom: 2 }}>Invoicing</div>
-            <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 14 }}>Invoice numbering, tax rate, payment terms, and QuickBooks link.</div>
-            <InvoiceSettings invoicing={invoicing} setInvoicing={setInvoicing} branding={branding} setBranding={setBranding} />
-          </div>}
-          {perms.editSettings && <div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", marginBottom: 2 }}>Messaging & Notifications</div>
-            <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 14 }}>On My Way texts, email templates, and client notification messages.</div>
-            <EmailSettings email={email} setEmail={setEmail} branding={branding} setBranding={setBranding} />
-          </div>}
-          {perms.seeCostsBudget && <div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", marginBottom: 2 }}>Costs & Labor</div>
-            <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 14 }}>Hourly rate, overhead, gas, and per-stop cost assumptions.</div>
-            <CostSettings costs={costs} setCosts={setCosts} />
-          </div>}
-          {perms.seeCostsBudget && <div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", marginBottom: 2 }}>Budget & Targets</div>
-            <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 14 }}>Monthly revenue goals and profitability tracking.</div>
-            <BudgetManager budget={budget} setBudget={setBudget} clients={clients} costs={costs} />
-          </div>}
+        <div key="business-tab">
+          {(perms.editSettings || perms.canInvoice) && (
+            <Collapsible title="Invoicing" subtitle="Invoice numbering, tax rate, payment terms, and QuickBooks link.">
+              <InvoiceSettings invoicing={invoicing} setInvoicing={setInvoicing} branding={branding} setBranding={setBranding} />
+            </Collapsible>
+          )}
+          {perms.editSettings && (
+            <Collapsible title="Messaging & Notifications" subtitle="On My Way texts, email templates, and client notification messages.">
+              <EmailSettings email={email} setEmail={setEmail} branding={branding} setBranding={setBranding} />
+            </Collapsible>
+          )}
+          {perms.seeCostsBudget && (
+            <Collapsible title="Costs & Labor" subtitle="Hourly rate, overhead, gas, and per-stop cost assumptions.">
+              <CostSettings costs={costs} setCosts={setCosts} />
+            </Collapsible>
+          )}
+          {perms.seeCostsBudget && (
+            <Collapsible title="Budget & Targets" subtitle="Monthly revenue goals and profitability tracking.">
+              <BudgetManager budget={budget} setBudget={setBudget} clients={clients} costs={costs} />
+            </Collapsible>
+          )}
         </div>
       )}
       {activeTab === "team" && perms.isAdmin && <TeamManager team={team} setTeam={setTeam} currentUserId={currentUserId} />}
       {activeTab === "branding" && <>
 
       {/* ── LOGO & IDENTITY ── */}
-      <Card style={{ marginBottom: 14 }}>
-        <CardHeader title="Logo & Identity" />
+      <Collapsible title="Logo & Identity" subtitle="Name, logo, emoji, and app appearance." defaultOpen={true}>
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
 
           {/* Live preview */}
@@ -8398,11 +8416,10 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             The logo above appears in the header. For the home screen icon (after installing to your iPhone), replace <code style={{ background: T.surfaceAlt, padding: "1px 5px", borderRadius: 4 }}>icon-180.png</code> and <code style={{ background: T.surfaceAlt, padding: "1px 5px", borderRadius: 4 }}>icon-512.png</code> in your GitHub repo with your logo at those sizes.
           </div>
         </div>
-      </Card>
+      </Collapsible>
 
       {/* ── CONTACT INFO ── */}
-      <Card style={{ marginBottom: 14 }}>
-        <CardHeader title="Contact Info" />
+      <Collapsible title="Contact Info" subtitle="Phone, email, address, and company website.">
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
           <div style={{ fontSize: 12, color: T.textMuted, marginTop: -4 }}>These appear on invoices, estimates, and the client portal.</div>
           <FieldRow label="Phone">
@@ -8418,11 +8435,10 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             <Input value={localBranding.companyAddress || ""} onChange={e => set("companyAddress", e.target.value)} placeholder="123 Main St, Honey Brook, PA 19344" />
           </FieldRow>
         </div>
-      </Card>
+      </Collapsible>
 
       {/* ── APPEARANCE ── */}
-      <Card style={{ marginBottom: 14 }}>
-        <CardHeader title="Appearance" />
+      <Collapsible title="Appearance" subtitle="Light mode, dark mode, and font settings.">
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
           <div>
             <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Mode</div>
@@ -8442,11 +8458,10 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             </div>
           </div>
         </div>
-      </Card>
+      </Collapsible>
 
       {/* ── THEME ── */}
-      <Card style={{ marginBottom: 14 }}>
-        <CardHeader title="Color Theme" />
+      <Collapsible title="Color Theme" subtitle="Choose a preset theme or build a custom one.">
         <div style={{ padding: 18 }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
             {Object.entries(THEMES).map(([key, theme]) => {
@@ -8492,19 +8507,16 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             })()}
           </div>
         </div>
-      </Card>
+      </Collapsible>
 
       {/* ── SAVED COLOR PALETTE ── */}
-      <Card style={{ marginBottom: 14 }}>
-        <CardHeader
-          title="Brand Palette"
-          action={
-            <button onClick={() => setEditingPalette(e => !e)}
-              style={{ background: editingPalette ? T.primary : T.surfaceAlt, color: editingPalette ? "#fff" : T.textMuted, border: "none", borderRadius: 10, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-              {editingPalette ? "Done" : "Edit"}
-            </button>
-          }
-        />
+      <Collapsible title="Brand Palette" subtitle="Your saved brand colors for quick access.">
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
+          <button onClick={() => setEditingPalette(e => !e)}
+            style={{ background: editingPalette ? T.primary : T.surfaceAlt, color: editingPalette ? "#fff" : T.textMuted, border: "none", borderRadius: 10, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+            {editingPalette ? "Done" : "Edit"}
+          </button>
+        </div>
         <div style={{ padding: "14px 18px" }}>
           <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 14, lineHeight: 1.5 }}>
             Your saved colors. Tap any chip in the color editor below to apply instantly. These are pre-loaded with SPS brand colors.
@@ -8570,7 +8582,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             </button>
           )}
         </div>
-      </Card>
+      </Collapsible>
 
       {/* ── CUSTOM THEME EDITOR ── */}
       {localBranding.themeKey === "custom" && (() => {
@@ -8642,8 +8654,8 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
         };
 
         return (
-          <Card style={{ marginBottom: 14 }}>
-            <CardHeader title="Custom Theme Editor" />
+          <div style={{ background: T.surfaceAlt, borderRadius: 16, border: `1px solid ${T.border}`, marginTop: 14 }}>
+            <div style={{ padding: "14px 18px", borderBottom: `1px solid ${T.border}`, fontSize: 14, fontWeight: 800, color: T.text }}>Custom Theme Editor</div>
             <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 16 }}>
               {/* Font */}
               <div>
@@ -8688,13 +8700,12 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
 
               <div style={{ fontSize: 11, color: T.textMuted, lineHeight: 1.5 }}>Tap <strong>Apply</strong> at the top right to use this theme across the whole app.</div>
             </div>
-          </Card>
+          </div>
         );
       })()}
 
       {/* ── CLIENT PORTAL BRANDING ── */}
-      <Card style={{ marginBottom: 14 }}>
-        <CardHeader title="Client Portal" />
+      <Collapsible title="Client Portal" subtitle="Portal name, nav labels, default landing page, and accent color.">
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
           <div style={{ fontSize: 12, color: T.textMuted, marginTop: -4, lineHeight: 1.5 }}>Controls what clients see when they open their portal. Changes apply when you save.</div>
 
@@ -8790,11 +8801,10 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             <strong style={{ color: T.text }}>Plan tier details</strong> — what's listed under each plan (Essential, Signature, Premium) and upgrade copy — edit in the <strong style={{ color: T.text }}>Service Tiers</strong> tab above.
           </div>
         </div>
-      </Card>
+      </Collapsible>
 
       {/* ── RESET ── */}
-      <Card style={{ marginTop: 14 }}>
-        <CardHeader title="Reset All Data" />
+      <Collapsible title="Reset All Data" subtitle="Restore all app data to factory defaults.">
         <div style={{ padding: 18 }}>
           {!confirmReset ? (
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
@@ -8811,7 +8821,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             </div>
           )}
         </div>
-      </Card>
+      </Collapsible>
       </>}
       </>)}
     </div>
