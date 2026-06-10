@@ -876,6 +876,11 @@ const addDaysMDY = (s, days) => { const dt = parseMDY(s) || new Date(); dt.setDa
 
 const invoiceTotals = (inv) => {
   const n = (v) => parseFloat(v) || 0;
+  // QB invoices store pre-calculated total directly
+  if (inv.source === "quickbooks") {
+    const total = n(inv.total);
+    return { subtotal: total, taxableBase: 0, tax: 0, total };
+  }
   const items = inv.lineItems || [];
   const subtotal = items.reduce((s, li) => s + n(li.qty) * n(li.unitPrice), 0);
   const taxableBase = items.reduce((s, li) => s + (li.taxable ? n(li.qty) * n(li.unitPrice) : 0), 0);
