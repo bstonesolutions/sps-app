@@ -1759,24 +1759,58 @@ function Modal({ title, children, onClose }) {
   );
 }
 
-function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatchDelete, onBatchSchedule }) {
+function ClientList({ clients, invoices, onSelect, onAdd, onImport, onBatchUpdate, onBatchDelete, onBatchSchedule }) {
   const { T, perms, tiers } = useApp();
-  const [search, setSearch] = useState("");
+  const [search,       setSearch]       = useState("");
   const [showInactive, setShowInactive] = useState(false);
-  const [selectMode, setSelectMode] = useState(false);
-  const [selected, setSelected] = useState({}); // { [id]: true }
-  const [modal, setModal] = useState(null); // "division" | "plan" | "delete" | "inactive"
+  const [showFilters,  setShowFilters]  = useState(false);
+  const [filterTier,   setFilterTier]   = useState("all");   // "all" | tier name | "__none__"
+  const [filterDiv,    setFilterDiv]    = useState("all");   // "all" | division name
+  const [sortBy,       setSortBy]       = useState("alpha"); // "alpha" | "alpha_desc" | "spent_desc" | "spent_asc"
+  const [selectMode,   setSelectMode]   = useState(false);
+  const [selected,     setSelected]     = useState({});
+  const [modal,        setModal]        = useState(null);
+
+  // Total paid invoices per client
+  const clientSpend = (c) => {
+    if (!invoices) return 0;
+    return (invoices)
+      .filter(iv => invoiceMatchesClient(iv, c) && ["Paid","paid"].includes((iv.status||"").trim()))
+      .reduce((s, iv) => s + invoiceTotals(iv).total, 0);
+  };
 
   const q = search.toLowerCase();
-  // When searching, show all clients (including inactive). Otherwise only show active.
-  const filtered = clients.filter(c => {
-    const matchesSearch = (c.name || "").toLowerCase().includes(q) || (c.address || "").toLowerCase().includes(q);
-    if (!matchesSearch) return false;
-    if (q) return true; // search shows everyone
-    if (showInactive) return true;
-    return c.status !== "Inactive"; // default: active only
-  });
   const inactiveCount = clients.filter(c => c.status === "Inactive").length;
+
+  // Determine available tiers and divisions for filter pills
+  const availableTiers = [...new Set(clients.map(c => c.plan || "").filter(Boolean))].sort();
+  const availableDivs  = [...new Set(clients.map(c => c.division || "").filter(Boolean))].sort();
+
+  const filtered = clients
+    .filter(c => {
+      // Search — shows inactive too
+      const matchesSearch = (c.name || "").toLowerCase().includes(q) || (c.address || "").toLowerCase().includes(q);
+      if (!matchesSearch) return false;
+      // Active/inactive
+      if (!q && !showInactive && c.status === "Inactive") return false;
+      // Tier filter
+      if (filterTier !== "all") {
+        if (filterTier === "__none__" && c.plan) return false;
+        if (filterTier !== "__none__" && c.plan !== filterTier) return false;
+      }
+      // Division filter
+      if (filterDiv !== "all" && c.division !== filterDiv) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      if (sortBy === "alpha")       return (a.name || "").localeCompare(b.name || "");
+      if (sortBy === "alpha_desc")  return (b.name || "").localeCompare(a.name || "");
+      if (sortBy === "spent_desc")  return clientSpend(b) - clientSpend(a);
+      if (sortBy === "spent_asc")   return clientSpend(a) - clientSpend(b);
+      return (a.name || "").localeCompare(b.name || "");
+    });
+
+  const activeFilterCount = [filterTier !== "all", filterDiv !== "all", sortBy !== "alpha"].filter(Boolean).length;
 
   const selectedIds = Object.keys(selected).filter(k => selected[k]).map(Number);
   const selCount = selectedIds.length;
@@ -1819,8 +1853,88 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
           style={{ width: "100%", padding: "11px 14px 11px 38px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, boxSizing: "border-box", outline: "none", fontFamily: "inherit", color: T.text, background: T.surface }} />
       </div>
 
-      {/* Show inactive toggle — only when not searching */}
-      {!search && inactiveCount > 0 && (
+      {/* Filter + Sort bar */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "center" }}>
+        <button onClick={() => setShowFilters(f => !f)}
+          style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 12, border: `1.5px solid ${activeFilterCount > 0 ? T.primary : T.border}`, background: activeFilterCount > 0 ? hexA(T.primary, 0.07) : T.surface, color: activeFilterCount > 0 ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>
+          <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M3 6h18M7 12h10M11 18h2"/></svg>
+          {activeFilterCount > 0 ? `Filters (${activeFilterCount})` : "Filter"}
+        </button>
+        {/* Quick sort pills */}
+        <div style={{ display: "flex", gap: 6, overflowX: "auto", WebkitOverflowScrolling: "touch", flex: 1 }}>
+          {[["alpha","A–Z"],["alpha_desc","Z–A"],["spent_desc","Most Spent"],["spent_asc","Least Spent"]].map(([val, lbl]) => (
+            <button key={val} onClick={() => setSortBy(val)}
+              style={{ flexShrink: 0, padding: "7px 12px", borderRadius: 100, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 600, background: sortBy === val ? T.primary : T.surfaceAlt, color: sortBy === val ? "#fff" : T.textMuted, transition: "all 0.15s" }}>
+              {lbl}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Expanded filter panel */}
+      {showFilters && (
+        <div style={{ background: T.surfaceAlt, borderRadius: 16, padding: "14px 16px", marginBottom: 12, display: "flex", flexDirection: "column", gap: 14 }}>
+
+          {/* Tier filter */}
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>Service Tier</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {[["all","All Tiers"], ...availableTiers.map(t => [t, t]), ["__none__","No Tier"]].map(([val, lbl]) => (
+                <button key={val} onClick={() => setFilterTier(val)}
+                  style={{ padding: "6px 13px", borderRadius: 10, border: `1.5px solid ${filterTier === val ? T.primary : T.border}`, background: filterTier === val ? hexA(T.primary, 0.08) : T.surface, color: filterTier === val ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                  {lbl}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Division filter */}
+          {availableDivs.length > 1 && (
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>Division</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {[["all","All"], ...availableDivs.map(d => [d, d])].map(([val, lbl]) => (
+                  <button key={val} onClick={() => setFilterDiv(val)}
+                    style={{ padding: "6px 13px", borderRadius: 10, border: `1.5px solid ${filterDiv === val ? T.primary : T.border}`, background: filterDiv === val ? hexA(T.primary, 0.08) : T.surface, color: filterDiv === val ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                    {lbl}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Show inactive */}
+          {inactiveCount > 0 && (
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>Status</div>
+              <button onClick={() => setShowInactive(s => !s)}
+                style={{ padding: "6px 13px", borderRadius: 10, border: `1.5px solid ${showInactive ? T.primary : T.border}`, background: showInactive ? hexA(T.primary, 0.08) : T.surface, color: showInactive ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                {showInactive ? `Showing ${inactiveCount} inactive` : `Show ${inactiveCount} inactive`}
+              </button>
+            </div>
+          )}
+
+          {/* Clear */}
+          {activeFilterCount > 0 && (
+            <button onClick={() => { setFilterTier("all"); setFilterDiv("all"); setSortBy("alpha"); }}
+              style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", padding: 0, alignSelf: "flex-start" }}>
+              Clear filters
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Results count */}
+      {(activeFilterCount > 0 || search) && filtered.length > 0 && (
+        <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 10 }}>
+          {filtered.length} client{filtered.length !== 1 ? "s" : ""}
+          {filterTier !== "all" ? ` · ${filterTier === "__none__" ? "No tier" : filterTier}` : ""}
+          {filterDiv  !== "all" ? ` · ${filterDiv}` : ""}
+        </div>
+      )}
+
+      {/* Show inactive toggle — legacy, now handled in filter panel */}
+      {!search && inactiveCount > 0 && !showFilters && (
         <button onClick={() => setShowInactive(s => !s)}
           style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: showInactive ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit", padding: "0 0 12px", marginTop: -6 }}>
           <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
@@ -13788,7 +13902,7 @@ export default function App({ authEmail = "", onSignOut }) {
         <main style={{ flex: 1, padding: "22px 16px", maxWidth: 740, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
           {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
-          {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
+          {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
           {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} />}
           {page === "schedule" && <Schedule clients={clients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
           {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
