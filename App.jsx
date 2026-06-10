@@ -8755,7 +8755,7 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
                   const currentRate = bulkPrices[String(c.id)] !== undefined ? bulkPrices[String(c.id)] : (c.monthlyRate || "");
                   const priceChanged = bulkPrices[String(c.id)] !== undefined;
                   const planChanged  = !!bulkPlans[String(c.id)];
-                  const activePlan   = bulkPlans[String(c.id)] || c.plan || "Essential";
+                  const activePlan   = bulkPlans[String(c.id)] !== undefined ? (bulkPlans[String(c.id)] || "") : (c.plan || "");
                   const anyChange    = priceChanged || planChanged;
                   return (
                     <div key={c.id} style={{ padding: "12px 16px", borderBottom: i < tierClients.length - 1 ? `1px solid ${T.border}` : "none", background: anyChange ? hexA(T.primary, 0.03) : "transparent" }}>
@@ -8781,18 +8781,28 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
                       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                         {/* Plan selector — pill buttons */}
                         <div style={{ display: "flex", gap: 5, flex: 1 }}>
-                          {Object.keys(TIER_FREQ).map(plan => {
-                            const isActive = activePlan === plan;
+                          {["Essential", "Signature", "Premium", "None"].map(pill => {
+                            const planVal  = pill === "None" ? "" : pill;
+                            const isActive = activePlan === planVal;
+                            const isNone   = pill === "None";
+                            const changed  = planChanged && planVal !== (c.plan || "");
+                            const activeCol = isNone ? T.textMuted : (changed ? T.primary : T.border);
                             return (
-                              <button key={plan} onClick={() => {
-                                if (plan === c.plan) {
+                              <button key={pill} onClick={() => {
+                                const orig = c.plan || "";
+                                if (planVal === orig) {
+                                  // tapping current plan = undo
                                   setBulkPlans(prev => { const n = { ...prev }; delete n[String(c.id)]; return n; });
                                 } else {
-                                  setBulkPlans(prev => ({ ...prev, [String(c.id)]: plan }));
+                                  setBulkPlans(prev => ({ ...prev, [String(c.id)]: planVal }));
                                 }
                               }}
-                                style={{ flex: 1, padding: "6px 4px", borderRadius: 10, border: `1.5px solid ${isActive ? (planChanged && plan !== c.plan ? T.primary : T.border) : T.border}`, background: isActive ? (planChanged && plan !== c.plan ? hexA(T.primary, 0.1) : T.surfaceAlt) : T.surface, color: isActive ? (planChanged && plan !== c.plan ? T.primary : T.text) : T.textMuted, fontWeight: isActive ? 800 : 500, fontSize: 11, cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s" }}>
-                                {plan}
+                                style={{ flex: 1, padding: "6px 4px", borderRadius: 10,
+                                  border: `1.5px solid ${isActive ? activeCol : T.border}`,
+                                  background: isActive ? (isNone ? hexA(T.textMuted, 0.08) : (changed ? hexA(T.primary, 0.1) : T.surfaceAlt)) : T.surface,
+                                  color: isActive ? (isNone ? T.textMuted : (changed ? T.primary : T.text)) : T.textMuted,
+                                  fontWeight: isActive ? 800 : 500, fontSize: 11, cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s" }}>
+                                {pill}
                               </button>
                             );
                           })}
