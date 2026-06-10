@@ -830,15 +830,15 @@ function compressImage(file, maxDim = 1600) {
 
 // ─────────────────────────────────────────────
 const planMeta = (plan, T, tiers, div) => {
-  // tiers is now { Pond: {...}, Pool: {...}, Seasonal: {...} }
+  if (!plan) return { bg: T.surfaceAlt, text: T.textMuted, color: T.textMuted, label: "No tier" };
   const divKey = div || "Pond";
   const divTierSet = (tiers || {})[divKey] || (tiers || {});
   const tierColor = divTierSet[plan]?.color;
   return ({
-    Premium:   { bg: tierColor || T.primary,  text: "#fff" },
-    Signature: { bg: tierColor || "#6366F1",   text: "#fff" },
-    Essential: { bg: tierColor || T.surfaceAlt, text: tierColor ? "#fff" : T.text },
-  }[plan] || { bg: T.border, text: T.textMuted });
+    Premium:   { bg: tierColor || T.primary,  text: "#fff", color: "#fff" },
+    Signature: { bg: tierColor || "#6366F1",   text: "#fff", color: "#fff" },
+    Essential: { bg: tierColor || T.surfaceAlt, text: tierColor ? "#fff" : T.text, color: tierColor ? "#fff" : T.text },
+  }[plan] || { bg: T.surfaceAlt, text: T.textMuted, color: T.textMuted, label: plan });
 };
 
 const statusColor = (s, T) => ({
@@ -1862,7 +1862,7 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
                 </div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 5, alignItems: "flex-end", flexShrink: 0 }}>
-                <Badge label={c.plan} bg={pm.bg} color={pm.color || pm.text} sm />
+                <Badge label={c.plan || "No tier"} bg={pm.bg} color={pm.color || pm.text} sm />
                 {c.nextService && <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 600 }}>{c.nextService}</div>}
               </div>
               <div style={{ color: T.textMuted, flexShrink: 0 }}>
@@ -2095,22 +2095,30 @@ function ClientEditForm({ client, onSave, onCancel, title = "Edit Client" }) {
                         <div key={div} style={{ background: T.surfaceAlt, borderRadius: 14, padding: "12px 14px" }}>
                           <div style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>{div}</div>
                           <div style={{ display: "flex", gap: 6 }}>
-                            {["Essential","Signature","Premium"].map(p => {
-                              const active = currentPlan === p;
+                            {["Essential","Signature","Premium","None"].map(p => {
+                              const planVal = p === "None" ? "" : p;
+                              const active  = (currentPlan || "") === planVal;
                               return (
                                 <button key={p} type="button"
                                   onClick={() => {
-                                    const newPlans = { ...(form.plans || {}), [div]: p };
+                                    const newPlans = { ...(form.plans || {}), [div]: planVal };
                                     set("plans", newPlans);
-                                    if (div === form.division) { set("plan", p); set("planFreq", TIER_FREQ[p] || form.planFreq); }
+                                    if (div === form.division) {
+                                      set("plan", planVal);
+                                      set("planFreq", planVal ? (TIER_FREQ[planVal] || form.planFreq) : "");
+                                    }
                                   }}
-                                  style={{ flex: 1, padding: "9px 4px", borderRadius: 10, border: `1.5px solid ${active ? T.primary : T.border}`, background: active ? hexA(T.primary, 0.08) : T.surface, color: active ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                                  style={{ flex: 1, padding: "9px 4px", borderRadius: 10,
+                                    border: `1.5px solid ${active ? (p === "None" ? T.textMuted : T.primary) : T.border}`,
+                                    background: active ? (p === "None" ? hexA(T.textMuted, 0.08) : hexA(T.primary, 0.08)) : T.surface,
+                                    color: active ? (p === "None" ? T.textMuted : T.primary) : T.textMuted,
+                                    fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
                                   {p}
                                 </button>
                               );
                             })}
                           </div>
-                          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>{TIER_FREQ[currentPlan] || "—"} service</div>
+                          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>{currentPlan ? (TIER_FREQ[currentPlan] || "—") + " service" : "No tier assigned"}</div>
                         </div>
                       );
                     })}
@@ -2451,7 +2459,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, schedule, o
               </div>
             </div>
             <div style={{ display: "flex", gap: 7, alignItems: "center", flexShrink: 0 }}>
-              <Badge label={client.plan} bg={pm.bg} color={pm.color || pm.text} />
+              <Badge label={client.plan || "No tier"} bg={pm.bg} color={pm.color || pm.text} />
               {perms.canInvoice && (invoices||[]).filter(iv => invoiceMatchesClient(iv, client)).length > 0 && (
                 <Btn variant="ghost" sm onClick={() => generateStatementPDF(client, sortInvoices((invoices||[]).filter(iv => invoiceMatchesClient(iv, client))), branding)} style={{ display:"flex", alignItems:"center", gap:5 }}>
                   <Icon name="download" size={13} /> PDF
@@ -11124,7 +11132,7 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</div>
-                  <div style={{ fontSize: 11, color: T.textMuted }}>{c.division} · {c.plan}</div>
+                  <div style={{ fontSize: 11, color: T.textMuted }}>{c.division}{c.plan ? ` · ${c.plan}` : ""}</div>
                 </div>
                 <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>{visits} <span style={{ fontSize: 11, color: T.textMuted, fontWeight: 500 }}>visits</span></div>
               </div>
@@ -11542,8 +11550,8 @@ function CPHome({ client, schedule, invoices, branding, onNav, T }) {
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
   const firstName = (client.name || "").split(" ")[0] || "there";
-  const tier = CP_TIERS[client.plan] || CP_TIERS["Signature"];
-  const tierColor = tier?.color || T.primary;
+  const tier = client.plan ? (CP_TIERS[client.plan] || CP_TIERS["Signature"]) : null;
+  const tierColor = tier?.color || T.surfaceAlt;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
@@ -11559,7 +11567,7 @@ function CPHome({ client, schedule, invoices, branding, onNav, T }) {
       </div>
 
       {/* Hero: Next Visit + Tier combined card */}
-      <div style={{ background: `linear-gradient(145deg, ${tierColor} 0%, ${mix(tierColor, "#000", 0.3)} 100%)`, borderRadius: 26, padding: "24px 22px", color: "#fff", boxShadow: `0 12px 40px ${hexA(tierColor, 0.4)}`, position: "relative", overflow: "hidden" }}>
+      <div style={{ background: tier ? `linear-gradient(145deg, ${tierColor} 0%, ${mix(tierColor, "#000", 0.3)} 100%)` : `linear-gradient(145deg, ${T.surfaceAlt} 0%, ${T.border} 100%)`, borderRadius: 26, padding: "24px 22px", color: tier ? "#fff" : T.text, boxShadow: tier ? `0 12px 40px ${hexA(tierColor, 0.4)}` : "none", position: "relative", overflow: "hidden", border: tier ? "none" : `1px solid ${T.border}` }}>
         {/* Decorative circles */}
         <div style={{ position: "absolute", right: -30, top: -30, width: 160, height: 160, borderRadius: "50%", background: "rgba(255,255,255,0.06)", pointerEvents: "none" }} />
         <div style={{ position: "absolute", right: 30, bottom: -50, width: 120, height: 120, borderRadius: "50%", background: "rgba(255,255,255,0.04)", pointerEvents: "none" }} />
@@ -11568,7 +11576,7 @@ function CPHome({ client, schedule, invoices, branding, onNav, T }) {
         {/* Tier badge */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
           <div style={{ background: "rgba(255,255,255,0.18)", borderRadius: 100, padding: "5px 14px", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)" }}>
-            <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase" }}>{client.plan || "Signature"} Plan</span>
+            <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase" }}>{client.plan ? `${client.plan} Plan` : "No Service Tier"}</span>
           </div>
           <button onClick={() => onNav("cp_service")}
             style={{ background: "rgba(255,255,255,0.15)", border: "none", borderRadius: 100, padding: "5px 14px", color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)" }}>
@@ -11654,7 +11662,7 @@ function CPHome({ client, schedule, invoices, branding, onNav, T }) {
         <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginBottom: 12 }}>Quick Actions</div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           {[
-            { label: "My Service Plan", sub: `${client.plan || "Signature"} — tap to manage`, icon: "clients", page: "cp_service", accent: true },
+            { label: "My Service Plan", sub: client.plan ? `${client.plan} — tap to manage` : "No tier assigned", icon: "clients", page: "cp_service", accent: !!client.plan },
             { label: "Messages", sub: "Chat with our team", icon: "message", page: "cp_messages", accent: false },
             { label: "My Property", sub: `${pondLabel(client)} · ${(client.history||[]).length} visits`, icon: "history", page: "cp_property", accent: false },
             { label: "My Invoices", sub: outstanding.length ? `${outstanding.length} outstanding` : "All paid up", icon: "invoice", page: "cp_invoices", accent: false },
@@ -11850,15 +11858,15 @@ function CPUpgradeRequest({ client, currentPlan, currentTier, upgradePlan, upgra
 function CPProperty({ client, branding, onNav, onUpgradeRequest, T }) {
   const { tiers } = useApp();
   const [section, setSection] = useState("property"); // "property" | "plan"
-  const plan = client.plan || "Signature";
+  const plan = client.plan || "";
   const clientDiv = client.division || "Pond";
   const allTiers = tiers || CP_TIERS;
   const divTierSet = (allTiers[clientDiv] || allTiers["Pond"] || DEFAULT_TIERS["Pond"]);
-  const tier = divTierSet[plan] || divTierSet["Essential"] || {};
+  const tier = plan ? (divTierSet[plan] || divTierSet["Essential"] || {}) : null;
   const tierColor = tier?.color || T.primary;
   const TIER_ORDER = ["Essential", "Signature", "Premium"];
   const currentIdx = TIER_ORDER.indexOf(plan);
-  const upgradeOptions = TIER_ORDER.slice(currentIdx + 1).filter(p => divTierSet[p]);
+  const upgradeOptions = plan ? TIER_ORDER.slice(currentIdx + 1).filter(p => divTierSet[p]) : [];
   const upgradePlan = upgradeOptions[0] || null;
   const upgradeTier = upgradePlan ? divTierSet[upgradePlan] : null;
   const pondLbl = pondLabel(client);
@@ -11867,14 +11875,14 @@ function CPProperty({ client, branding, onNav, onUpgradeRequest, T }) {
   // Service plan card — tappable to switch to plan section
   const PlanCard = () => (
     <div onClick={() => setSection("plan")}
-      style={{ background: `linear-gradient(145deg, ${tierColor} 0%, ${mix(tierColor,"#000",0.28)} 100%)`, borderRadius: 20, padding: "18px 20px", color: "#fff", cursor: "pointer", boxShadow: `0 8px 28px ${hexA(tierColor,0.35)}`, position: "relative", overflow: "hidden" }}>
+      style={{ background: tier ? `linear-gradient(145deg, ${tierColor} 0%, ${mix(tierColor,"#000",0.28)} 100%)` : T.surfaceAlt, borderRadius: 20, padding: "18px 20px", color: tier ? "#fff" : T.text, cursor: "pointer", boxShadow: tier ? `0 8px 28px ${hexA(tierColor,0.35)}` : "none", position: "relative", overflow: "hidden", border: tier ? "none" : `1px solid ${T.border}` }}>
       <div style={{ position:"absolute", right:-30, top:-30, width:140, height:140, borderRadius:"50%", background:"rgba(255,255,255,0.06)" }} />
       <div style={{ position:"relative" }}>
         <div style={{ fontSize:10, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.1em", opacity:0.7, marginBottom:4 }}>Service Plan</div>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-end" }}>
           <div>
-            <div style={{ fontSize:22, fontWeight:900, letterSpacing:"-0.02em" }}>{plan}</div>
-            <div style={{ fontSize:12, opacity:0.8, marginTop:3 }}>{TIER_FREQ[plan] || client.planFreq || "—"} service</div>
+            <div style={{ fontSize:22, fontWeight:900, letterSpacing:"-0.02em" }}>{plan || "No tier"}</div>
+            <div style={{ fontSize:12, opacity: tier ? 0.8 : 1, marginTop:3, color: tier ? "inherit" : T.textMuted }}>{plan ? (TIER_FREQ[plan] || client.planFreq || "—") + " service" : "Contact us to set up a plan"}</div>
           </div>
           <div style={{ textAlign:"right" }}>
             {client.monthlyRate && <div style={{ fontSize:20, fontWeight:900 }}>${parseFloat(client.monthlyRate).toLocaleString()}<span style={{ fontSize:11, opacity:0.7 }}>/mo</span></div>}
