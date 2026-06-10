@@ -8448,10 +8448,10 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
     setTimeout(() => setTierSaved(false), 2500);
   };
 
-  // Clients on this tier
-  // Clients on this tier for this division
+  // Clients on this tier (or no tier when __none__ is selected)
   const tierClients = (clients || []).filter(c => {
     const clientPlan = (c.plans && c.plans[activeDivision]) || (c.division === activeDivision ? c.plan : null);
+    if (selected === "__none__") return !clientPlan;
     return clientPlan === selected;
   });
 
@@ -8459,16 +8459,22 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
   const applyBulkPrices = () => {
     if (Object.keys(bulkPrices).length === 0 && Object.keys(bulkPlans).length === 0) return;
     setClients(prev => prev.map(c => {
-      const newRate = bulkPrices[String(c.id)];
-      const newPlan = bulkPlans[String(c.id)];
-      if (newRate === undefined && !newPlan) return c;
-      const updatedPlans = newPlan ? { ...(c.plans || {}), [activeDivision]: newPlan } : c.plans;
+      const newRate    = bulkPrices[String(c.id)];
+      const newPlanRaw = bulkPlans[String(c.id)];   // "" = None, undefined = no change
+      if (newRate === undefined && newPlanRaw === undefined) return c;
+      const newPlan = newPlanRaw === "" ? null : newPlanRaw;
+      const updatedPlans = newPlanRaw !== undefined
+        ? { ...(c.plans || {}), [activeDivision]: newPlan || "" }
+        : c.plans;
       const isPrimary = c.division === activeDivision;
       return {
         ...c,
         ...(newRate !== undefined ? { monthlyRate: newRate } : {}),
-        ...(newPlan && isPrimary ? { plan: newPlan, planFreq: TIER_FREQ[newPlan] || c.planFreq } : {}),
-        ...(newPlan ? { plans: updatedPlans } : {}),
+        ...(newPlanRaw !== undefined && isPrimary ? {
+          plan:     newPlan || "",
+          planFreq: newPlan ? (TIER_FREQ[newPlan] || c.planFreq) : "",
+        } : {}),
+        ...(newPlanRaw !== undefined ? { plans: updatedPlans } : {}),
       };
     }));
     setBulkPrices({});
@@ -8596,10 +8602,38 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
             </button>
           );
         })}
+        {/* None tab */}
+        {(() => {
+          const noneCount = (clients || []).filter(c => {
+            const p = (c.plans && c.plans[activeDivision]) || (c.division === activeDivision ? c.plan : null);
+            return !p;
+          }).length;
+          const active = selected === "__none__";
+          return (
+            <button onClick={() => setSelected("__none__")}
+              style={{ flex: 1, padding: "12px 8px", border: `2px solid ${active ? T.textMuted : T.border}`, borderRadius: 16, background: active ? hexA(T.textMuted, 0.06) : T.surface, cursor: "pointer", fontFamily: "inherit", textAlign: "center", transition: "all 0.15s" }}>
+              <div style={{ width: 10, height: 10, borderRadius: "50%", background: T.border, margin: "0 auto 6px" }} />
+              <div style={{ fontSize: 13, fontWeight: 800, color: active ? T.text : T.textMuted }}>None</div>
+              <div style={{ fontSize: 10, color: T.textMuted, marginTop: 2 }}>{noneCount} client{noneCount !== 1 ? "s" : ""}</div>
+            </button>
+          );
+        })()}
       </div>
 
-      {/* Tier details editor */}
-      <Card>
+      {/* None tab — just shows the client list below, no tier editor */}
+      {selected === "__none__" && (
+        <Card>
+          <CardHeader title="No Tier" />
+          <div style={{ padding: "14px 18px" }}>
+            <p style={{ margin: 0, fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>
+              Clients listed here are not assigned to any service tier. Use the bulk pricing section below to assign them to a tier, or set their rate to $0 to keep them here.
+            </p>
+          </div>
+        </Card>
+      )}
+
+      {/* Tier details editor — hidden when None tab is active */}
+      {selected !== "__none__" && <Card>
         <CardHeader title={`${selected} Tier Settings`}
           action={
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -8701,11 +8735,11 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
             }
           </button>
         </div>
-      </Card>
+      </Card>}
 
       {/* ── BULK CLIENT PRICING ── */}
       <Card>
-        <CardHeader title={`${selected} Clients — Bulk Pricing`} />
+        <CardHeader title={selected === "__none__" ? "Untiered Clients" : `${selected} Clients — Bulk Pricing`} />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
           {tierClients.length === 0 ? (
             <div style={{ fontSize: 13, color: T.textMuted, textAlign: "center", padding: "16px 0" }}>No clients on the {selected} plan yet.</div>
@@ -8788,22 +8822,23 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
                             const changed  = planChanged && planVal !== (c.plan || "");
                             const activeCol = isNone ? T.textMuted : (changed ? T.primary : T.border);
                             return (
-                              <button key={pill} onClick={() => {
-                                const orig = c.plan || "";
-                                if (planVal === orig) {
-                                  // tapping current plan = undo
-                                  setBulkPlans(prev => { const n = { ...prev }; delete n[String(c.id)]; return n; });
-                                } else {
-                                  setBulkPlans(prev => ({ ...prev, [String(c.id)]: planVal }));
-                                }
-                              }}
-                                style={{ flex: 1, padding: "6px 4px", borderRadius: 10,
+                             <button key={pill} onClick={() => {
+                               const orig = c.plan || "";
+                               if (planVal === orig) {
+                                 setBulkPlans(prev => { const n = { ...prev }; delete n[String(c.id)]; return n; });
+                                 if (planVal === "") setBulkPrices(prev => { const n = { ...prev }; delete n[String(c.id)]; return n; });
+                               } else {
+                                 setBulkPlans(prev => ({ ...prev, [String(c.id)]: planVal }));
+                                 if (planVal === "") setBulkPrices(prev => ({ ...prev, [String(c.id)]: "0" }));
+                               }
+                             }}
+                               style={{ flex: 1, padding: "6px 4px", borderRadius: 10,
                                   border: `1.5px solid ${isActive ? activeCol : T.border}`,
                                   background: isActive ? (isNone ? hexA(T.textMuted, 0.08) : (changed ? hexA(T.primary, 0.1) : T.surfaceAlt)) : T.surface,
                                   color: isActive ? (isNone ? T.textMuted : (changed ? T.primary : T.text)) : T.textMuted,
                                   fontWeight: isActive ? 800 : 500, fontSize: 11, cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s" }}>
-                                {pill}
-                              </button>
+                               {pill}
+                             </button>
                             );
                           })}
                         </div>
