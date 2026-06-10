@@ -6944,7 +6944,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, presetClientId, 
 // ─────────────────────────────────────────────
 // QUICKBOOKS CONNECT
 // ─────────────────────────────────────────────
-function QBConnect() {
+function QBConnect({ onSyncData }) {
   const { T } = useApp();
   const [status, setStatus]   = useState("idle");
   const [result, setResult]   = useState(null);
@@ -7009,6 +7009,12 @@ function QBConnect() {
       }
       const data = await res.json();
       if (data.error) throw new Error(data.error);
+
+      // ── Save invoices into the app ──
+      if (onSyncData && data.invoices) {
+        onSyncData(data.invoices, data.customers);
+      }
+
       setResult(data);
       setStatus("done");
     } catch (err) {
@@ -7076,7 +7082,7 @@ function QBConnect() {
   );
 }
 
-function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding }) {
+function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyncData }) {
   const { T } = useApp();
   const cfg = { ...DEFAULT_INVOICING, ...(invoicing || {}) };
   const set = (k, v) => setInvoicing({ ...cfg, [k]: v });
@@ -7137,7 +7143,7 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding }) {
       {/* ── QUICKBOOKS ── */}
       <Card style={{ marginTop: 14 }}>
         <CardHeader title="QuickBooks" />
-        <QBConnect />
+        <QBConnect onSyncData={onSyncData} />
       </Card>
     </>
   );
@@ -8195,7 +8201,7 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
   );
 }
 
-function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEmail, costs, setCosts, budget, setBudget, clients, setClients, scheduleCfg, setScheduleCfg, team, setTeam, invoicing, setInvoicing, currentUserId, onResetData, serviceTiers, setServiceTiers }) {
+function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEmail, costs, setCosts, budget, setBudget, clients, setClients, scheduleCfg, setScheduleCfg, team, setTeam, invoicing, setInvoicing, currentUserId, onResetData, serviceTiers, setServiceTiers, onSyncData }) {
   const { T, perms } = useApp();
   const fileRef = useRef();
   const [tab, setTab] = useState("branding");
@@ -8281,7 +8287,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
         <div key="business-tab">
           {(perms.editSettings || perms.canInvoice) && (
             <Collapsible title="Invoicing" subtitle="Invoice numbering, tax rate, payment terms, and QuickBooks link.">
-              <InvoiceSettings invoicing={invoicing} setInvoicing={setInvoicing} branding={branding} setBranding={setBranding} />
+              <InvoiceSettings invoicing={invoicing} setInvoicing={setInvoicing} branding={branding} setBranding={setBranding} onSyncData={onSyncData} />
             </Collapsible>
           )}
           {perms.editSettings && (
@@ -12320,6 +12326,61 @@ export default function App({ authEmail = "", onSignOut }) {
   }, [ltm, emailKey, currentUser, anyEmail]);
 
   const handleClientSelect = (c) => { setSelectedClient(c); setAdding(false); setPage("clients"); window.scrollTo({ top: 0, behavior: "instant" }); };
+  // QuickBooks sync handler — merges QB invoices into app state and matches customers to clients
+  const handleQBSync = (qbInvoices, qbCustomers) => {
+    // Map QB invoices to SPS invoice format and merge
+    const newInvoices = qbInvoices.map(qi => ({
+      id:         `qb_${qi.qbId}`,
+      qbId:       qi.qbId,
+      number:     qi.number,
+      clientId:   null, // will be matched below
+      clientName: qi.clientName,
+      date:       qi.date,
+      dueDate:    qi.dueDate,
+      status:     qi.status,
+      items:      qi.lines.map(l => ({ description: l.description, qty: l.qty, rate: l.rate, amount: l.amount })),
+      total:      String(qi.total),
+      balance:    qi.balance,
+      source:     "quickbooks",
+      createdAt:  Date.now(),
+    }));
+
+    // Match QB customers to existing SPS clients by name or email
+    const clientMap = {};
+    (qbCustomers || []).forEach(qc => {
+      setClients(cs => cs.map(c => {
+        const nameMatch  = c.name  && qc.name  && c.name.toLowerCase().trim()  === qc.name.toLowerCase().trim();
+        const emailMatch = c.email && qc.email && c.email.toLowerCase().trim() === qc.email.toLowerCase().trim();
+        if (nameMatch || emailMatch) {
+          clientMap[qc.qbId] = c.id;
+          return { ...c, qbId: qc.qbId, qbBalance: qc.balance };
+        }
+        return c;
+      }));
+    });
+
+    // Assign clientIds to invoices based on customer match
+    const matched = newInvoices.map(inv => {
+      const qbInv = qbInvoices.find(q => `qb_${q.qbId}` === inv.id);
+      const clientId = qbInv ? clientMap[qbInv.qbCustomerId] : null;
+      // Also try matching by client name directly
+      if (!clientId && inv.clientName) {
+        setClients(cs => {
+          const match = cs.find(c => c.name && c.name.toLowerCase().trim() === inv.clientName.toLowerCase().trim());
+          if (match) clientMap[inv.clientName] = match.id;
+          return cs;
+        });
+      }
+      return { ...inv, clientId: clientId || clientMap[inv.clientName] || null };
+    });
+
+    // Merge into invoices — replace existing QB invoices, keep manual ones
+    setInvoices(prev => {
+      const manual = (prev || []).filter(iv => iv.source !== "quickbooks");
+      return [...manual, ...matched];
+    });
+  };
+
   const handleNav = (id, opts = {}) => {
     setPage(id);
     setSelectedClient(null);
@@ -12692,7 +12753,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
           {page === "invoices"  && perms.canInvoice && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} initialFilter={invoiceFilter} />}
           {page === "import"   && perms.canImport && <SkimmerImport onImport={handleImportClients} onGoToClients={() => handleNav("clients")} />}
-          {page === "settings" && <AppSettings branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} />}
+          {page === "settings" && <AppSettings branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} />}
         </main>
 
         {/* Bottom Nav — shows only the user's chosen dock items */}
