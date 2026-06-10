@@ -819,18 +819,50 @@ const statusColor = (s, T) => ({
 }[s] || T.textMuted);
 
 // Sum revenue/cost/profit from completed jobs in a given month (default: current)
-function monthActuals(clients, when = new Date()) {
+function monthActuals(clients, when = new Date(), invoices = []) {
   const m = when.getMonth(), y = when.getFullYear();
   let revenue = 0, cost = 0, jobs = 0;
+
+  // Count completed stops with breakdowns (field cost tracking)
   (clients || []).forEach(c => (c.history || []).forEach(h => {
     if (!h.breakdown) return;
     const [mm, dd, yy] = (h.date || "").split("/").map(Number);
     if (mm - 1 === m && yy === y) {
-      revenue += h.breakdown.revenue || 0;
       cost += h.breakdown.total || 0;
       jobs += 1;
     }
   }));
+
+  // Count revenue from paid invoices this month (primary revenue source)
+  (invoices || []).forEach(iv => {
+    if (iv.status !== "Paid" && effectiveStatus(iv) !== "Paid") return;
+    const paidDate = iv.paidDate || iv.date;
+    let d = null;
+    if (paidDate) {
+      // Handle both MM/DD/YYYY and YYYY-MM-DD formats
+      if (paidDate.includes("/")) {
+        const [mm, dd, yy] = paidDate.split("/").map(Number);
+        d = new Date(yy, mm - 1, dd);
+      } else {
+        d = new Date(paidDate);
+      }
+    }
+    if (d && d.getMonth() === m && d.getFullYear() === y) {
+      revenue += invoiceTotals(iv).total;
+    }
+  });
+
+  // If no invoices tracked yet, fall back to stop-based revenue
+  if (revenue === 0) {
+    (clients || []).forEach(c => (c.history || []).forEach(h => {
+      if (!h.breakdown) return;
+      const [mm, dd, yy] = (h.date || "").split("/").map(Number);
+      if (mm - 1 === m && yy === y) {
+        revenue += h.breakdown.revenue || 0;
+      }
+    }));
+  }
+
   return { revenue, cost, profit: revenue - cost, jobs };
 }
 
@@ -1394,7 +1426,7 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
 
   const today = (schedule && schedule[0]) || { stops: [] };
   const [upgradeModal, setUpgradeModal] = useState(null); // alert object being confirmed
-  const ma = monthActuals(clients);
+  const ma = monthActuals(clients, new Date(), invoices);
   const derived = deriveAlerts(clients, invoices, catalog).filter(a => perms.seeBalances || !/outstanding/i.test(a.title || ""));
   const flags = (officeAlerts || []).filter(a => !a.resolved);
   const outstandingClients = (clients || []).map(c => ({ c, owed: clientOutstanding(c, invoices) })).filter(x => x.owed > 0);
@@ -6272,7 +6304,7 @@ function CatalogManager({ catalog, setCatalog }) {
 // ─────────────────────────────────────────────
 // BUDGET MANAGER (admin: money in/out, projected vs actual)
 // ─────────────────────────────────────────────
-function BudgetManager({ budget, setBudget, clients, costs }) {
+function BudgetManager({ budget, setBudget, clients, costs, invoices }) {
   const { T } = useApp();
   const money = (n) => `$${Math.round(n).toLocaleString()}`;
   const num = (v) => parseFloat(v) || 0;
@@ -6283,7 +6315,7 @@ function BudgetManager({ budget, setBudget, clients, costs }) {
   const expenseTotal = expenseManual + fixedFromCosts;
   const projectedNet = incomeTotal - expenseTotal;
 
-  const actuals = monthActuals(clients);
+  const actuals = monthActuals(clients, new Date(), invoices || []);
   const actualOut = actuals.cost + fixedFromCosts;
   const actualNet = actuals.revenue - actualOut;
 
@@ -7230,6 +7262,14 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
           {cfg.footer && <div style={{ padding: "0 18px 16px", fontSize: 11, color: T.textMuted, lineHeight: 1.5, borderTop: `1px solid ${T.border}`, paddingTop: 12, marginTop: invoice.notes ? 0 : 2 }}>{cfg.footer}</div>}
         </div>
 
+        {/* QB Payment link */}
+        {invoice.paymentLink && eff !== "Paid" && (
+          <a href={invoice.paymentLink} target="_blank" rel="noopener noreferrer"
+            style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: "#2CA01C", color: "#fff", borderRadius: 14, padding: "14px 20px", fontWeight: 800, fontSize: 15, textDecoration: "none", boxShadow: "0 4px 16px rgba(44,160,28,0.3)" }}>
+            <svg viewBox="0 0 24 24" width={18} height={18} fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>
+            Pay via QuickBooks
+          </a>
+        )}
         {canManage && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
             {eff !== "Paid" && <Btn variant="accent" onClick={() => setStatus("Paid")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Mark Paid</Btn>}
@@ -7547,66 +7587,269 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
 
 function InvoicesScreen({ invoices, clients, invoicing, branding, onSave, onDelete, initialFilter = "All" }) {
   const { T, perms } = useApp();
-  const money = (n) => `$${Math.round(n).toLocaleString()}`;
-  const [filter, setFilter] = useState(initialFilter);
-  const [search, setSearch] = useState("");
+  const moneyFmt = (n) => `$${Math.round(n).toLocaleString()}`;
+  const moneyExact = (n) => `$${parseFloat(n||0).toFixed(2)}`;
+
+  // ── Filter / sort state ──
+  const [filter,     setFilter]     = useState(initialFilter);
+  const [search,     setSearch]     = useState("");
+  const [sortBy,     setSortBy]     = useState("date_desc");   // date_desc | date_asc | amount_desc | amount_asc | client_asc | number_desc
+  const [clientFilter, setClientFilter] = useState("all");     // "all" or client id
+  const [dateRange,  setDateRange]  = useState("all");         // all | this_month | last_month | this_year | custom
+  const [dateFrom,   setDateFrom]   = useState("");
+  const [dateTo,     setDateTo]     = useState("");
+  const [showFilters, setShowFilters] = useState(false);
+  const [groupBy,    setGroupBy]    = useState("none");        // none | client | status | month
+
+  // ── Editor state ──
   const [creating, setCreating] = useState(false);
-  const [editing, setEditing] = useState(null);
-  const [preview, setPreview] = useState(null);
+  const [editing,  setEditing]  = useState(null);
+  const [preview,  setPreview]  = useState(null);
 
-  const all = (invoices || []).map(iv => ({ ...iv, _client: clients.find(c => c.id === iv.clientId) }));
   const now = new Date();
-  const outstanding = all.filter(iv => effectiveStatus(iv) !== "Paid" && iv.status !== "Draft").reduce((s, iv) => s + invoiceTotals(iv).total, 0);
-  const paidThisMonth = all.filter(iv => iv.status === "Paid").filter(iv => { const d = parseMDY(iv.paidDate || iv.date); return d && d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); }).reduce((s, iv) => s + invoiceTotals(iv).total, 0);
-  const overdueCount = all.filter(iv => effectiveStatus(iv) === "Overdue").length;
 
+  // Enrich with client data
+  const all = (invoices || []).map(iv => ({
+    ...iv,
+    _client: clients.find(c => invoiceMatchesClient(iv, c)),
+    _total:  invoiceTotals(iv).total,
+    _status: effectiveStatus(iv),
+    _date:   parseMDY(iv.date) || new Date(iv.createdAt || 0),
+  }));
+
+  // ── Summary stats ──
+  const outstanding   = all.filter(iv => iv._status !== "Paid" && iv.status !== "Draft").reduce((s, iv) => s + iv._total, 0);
+  const paidThisMonth = all.filter(iv => iv._status === "Paid").filter(iv => { const d = parseMDY(iv.paidDate || iv.date); return d && d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); }).reduce((s, iv) => s + iv._total, 0);
+  const overdueCount  = all.filter(iv => iv._status === "Overdue").length;
+  const totalAll      = all.filter(iv => iv.status !== "Draft").reduce((s, iv) => s + iv._total, 0);
+
+  // ── Date range helper ──
+  const inDateRange = (iv) => {
+    if (dateRange === "all") return true;
+    const d = iv._date;
+    if (!d) return true;
+    if (dateRange === "this_month")  return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+    if (dateRange === "last_month")  { const lm = new Date(now.getFullYear(), now.getMonth()-1, 1); return d.getMonth() === lm.getMonth() && d.getFullYear() === lm.getFullYear(); }
+    if (dateRange === "this_year")   return d.getFullYear() === now.getFullYear();
+    if (dateRange === "custom") {
+      const from = dateFrom ? new Date(dateFrom) : null;
+      const to   = dateTo   ? new Date(dateTo)   : null;
+      if (from && d < from) return false;
+      if (to   && d > to)   return false;
+      return true;
+    }
+    return true;
+  };
+
+  // ── Apply all filters ──
   const q = search.toLowerCase();
   const filtered = all.filter(iv => {
-    if (filter !== "All" && effectiveStatus(iv) !== filter) return false;
+    if (filter !== "All" && iv._status !== filter) return false;
+    if (clientFilter !== "all" && String(iv.clientId) !== String(clientFilter) && String(iv._client?.id) !== String(clientFilter)) return false;
+    if (!inDateRange(iv)) return false;
     if (q && !`${iv.number} ${iv._client?.name || iv.clientName || ""}`.toLowerCase().includes(q)) return false;
     return true;
-  }).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0) || String(b.number).localeCompare(String(a.number)));
+  });
 
-  const livePreview = preview ? ((invoices || []).find(x => x.id === preview.id) || preview) : null;
+  // ── Sort ──
+  const sorted = [...filtered].sort((a, b) => {
+    if (sortBy === "date_desc")    return (b._date||0) - (a._date||0);
+    if (sortBy === "date_asc")     return (a._date||0) - (b._date||0);
+    if (sortBy === "amount_desc")  return b._total - a._total;
+    if (sortBy === "amount_asc")   return a._total - b._total;
+    if (sortBy === "client_asc")   return (a._client?.name||a.clientName||"").localeCompare(b._client?.name||b.clientName||"");
+    if (sortBy === "number_desc")  return String(b.number||"").localeCompare(String(a.number||""));
+    return 0;
+  });
+
+  // ── Group ──
+  const grouped = (() => {
+    if (groupBy === "none") return [{ label: null, items: sorted }];
+    const groups = {};
+    sorted.forEach(iv => {
+      let key = "Other";
+      if (groupBy === "client")  key = iv._client?.name || iv.clientName || "Unknown Client";
+      if (groupBy === "status")  key = iv._status || iv.status || "Unknown";
+      if (groupBy === "month") {
+        const d = iv._date;
+        key = d ? d.toLocaleString("default", { month: "long", year: "numeric" }) : "Unknown";
+      }
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(iv);
+    });
+    return Object.entries(groups).map(([label, items]) => ({ label, items }));
+  })();
+
+  const livePreview = preview ? ((invoices||[]).find(x => x.id === preview.id) || preview) : null;
+  const activeFilterCount = [filter !== "All", clientFilter !== "all", dateRange !== "all", groupBy !== "none"].filter(Boolean).length;
 
   return (
     <div>
+      {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <h2 style={{ margin: 0, fontSize: 26, fontWeight: 700, color: T.text, letterSpacing: "-0.03em" }}>Invoices</h2>
-        {perms.canInvoice && <Btn sm onClick={() => setCreating(true)}>+ New</Btn>}
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => setShowFilters(f => !f)}
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 12, border: `1.5px solid ${activeFilterCount > 0 ? T.primary : T.border}`, background: activeFilterCount > 0 ? hexA(T.primary, 0.08) : T.surface, color: activeFilterCount > 0 ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+            <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M3 6h18M7 12h10M11 18h2"/></svg>
+            Filter{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
+          </button>
+          {perms.canInvoice && <Btn sm onClick={() => setCreating(true)}>+ New</Btn>}
+        </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 16 }}>
-        <StatCard label="Outstanding" value={money(outstanding)} accent={T.warning} />
-        <StatCard label="Paid (mo)" value={money(paidThisMonth)} accent={T.accent} />
-        <StatCard label="Overdue" value={overdueCount} accent={overdueCount ? T.warning : T.textMuted} />
+      {/* Summary tiles */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 }}>
+        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "14px 16px" }}>
+          <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 6 }}>Outstanding</div>
+          <div style={{ fontSize: 24, fontWeight: 800, color: outstanding > 0 ? T.warning : T.accent, letterSpacing: "-0.02em" }}>{moneyFmt(outstanding)}</div>
+          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>{all.filter(iv => iv._status !== "Paid" && iv.status !== "Draft").length} invoices</div>
+        </div>
+        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "14px 16px" }}>
+          <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 6 }}>Paid This Month</div>
+          <div style={{ fontSize: 24, fontWeight: 800, color: T.accent, letterSpacing: "-0.02em" }}>{moneyFmt(paidThisMonth)}</div>
+          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>{overdueCount > 0 ? <span style={{ color: T.warning, fontWeight: 700 }}>{overdueCount} overdue</span> : "No overdue"}</div>
+        </div>
       </div>
 
+      {/* Search */}
       <div style={{ position: "relative", marginBottom: 12 }}>
-        <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: T.textMuted, display:"flex" }}><Icon name="clients" size={16} /></span>
-        <input type="search" placeholder="Search by number or client..." value={search} onChange={e => setSearch(e.target.value)} style={{ width: "100%", padding: "10px 14px 10px 36px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, boxSizing: "border-box", outline: "none", fontFamily: "inherit", color: T.text, background: T.surface }} />
+        <span style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", color: T.textMuted, pointerEvents: "none" }}>
+          <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        </span>
+        <input type="search" placeholder="Search by number or client…" value={search} onChange={e => setSearch(e.target.value)}
+          style={{ width: "100%", padding: "11px 14px 11px 38px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, boxSizing: "border-box", outline: "none", fontFamily: "inherit", color: T.text, background: T.surface }} />
       </div>
-      <div style={{ display: "flex", gap: 7, marginBottom: 16, overflowX: "auto", paddingBottom: 4 }}>
+
+      {/* Status filter pills */}
+      <div style={{ display: "flex", gap: 7, marginBottom: showFilters ? 12 : 16, overflowX: "auto", paddingBottom: 4, WebkitOverflowScrolling: "touch" }}>
         {["All", ...INVOICE_STATUSES].map(s => (
           <button key={s} onClick={() => setFilter(s)} style={{ flexShrink: 0, padding: "7px 14px", borderRadius: 100, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 600, background: filter === s ? T.primary : T.surfaceAlt, color: filter === s ? "#fff" : T.textMuted }}>{s}</button>
         ))}
       </div>
 
-      {filtered.length === 0 ? (
+      {/* Expanded filter panel */}
+      {showFilters && (
+        <div style={{ background: T.surfaceAlt, borderRadius: 16, padding: "16px 16px", marginBottom: 16, display: "flex", flexDirection: "column", gap: 14 }}>
+
+          {/* Sort */}
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>Sort By</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {[
+                ["date_desc",   "Newest First"],
+                ["date_asc",    "Oldest First"],
+                ["amount_desc", "Highest Amount"],
+                ["amount_asc",  "Lowest Amount"],
+                ["client_asc",  "Client A–Z"],
+                ["number_desc", "Invoice #"],
+              ].map(([val, lbl]) => (
+                <button key={val} onClick={() => setSortBy(val)}
+                  style={{ padding: "6px 12px", borderRadius: 10, border: `1.5px solid ${sortBy === val ? T.primary : T.border}`, background: sortBy === val ? hexA(T.primary, 0.08) : T.surface, color: sortBy === val ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                  {lbl}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Client filter */}
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>Client</div>
+            <select value={clientFilter} onChange={e => setClientFilter(e.target.value)}
+              style={{ width: "100%", padding: "10px 13px", border: `1.5px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none" }}>
+              <option value="all">All Clients</option>
+              {[...clients].sort((a,b) => (a.name||"").localeCompare(b.name||"")).map(c => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Date range */}
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>Date Range</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: dateRange === "custom" ? 10 : 0 }}>
+              {[["all","All Time"],["this_month","This Month"],["last_month","Last Month"],["this_year","This Year"],["custom","Custom"]].map(([val,lbl]) => (
+                <button key={val} onClick={() => setDateRange(val)}
+                  style={{ padding: "6px 12px", borderRadius: 10, border: `1.5px solid ${dateRange === val ? T.primary : T.border}`, background: dateRange === val ? hexA(T.primary, 0.08) : T.surface, color: dateRange === val ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                  {lbl}
+                </button>
+              ))}
+            </div>
+            {dateRange === "custom" && (
+              <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4 }}>From</div>
+                  <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
+                    style={{ width: "100%", padding: "9px 12px", border: `1.5px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none" }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4 }}>To</div>
+                  <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
+                    style={{ width: "100%", padding: "9px 12px", border: `1.5px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none" }} />
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Group by */}
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>Group By</div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {[["none","None"],["client","Client"],["status","Status"],["month","Month"]].map(([val,lbl]) => (
+                <button key={val} onClick={() => setGroupBy(val)}
+                  style={{ padding: "6px 12px", borderRadius: 10, border: `1.5px solid ${groupBy === val ? T.primary : T.border}`, background: groupBy === val ? hexA(T.primary, 0.08) : T.surface, color: groupBy === val ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                  {lbl}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Reset */}
+          {activeFilterCount > 0 && (
+            <button onClick={() => { setFilter("All"); setClientFilter("all"); setDateRange("all"); setGroupBy("none"); setSortBy("date_desc"); setDateFrom(""); setDateTo(""); }}
+              style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", padding: 0, alignSelf: "flex-start" }}>
+              Clear all filters
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Results summary */}
+      {sorted.length > 0 && (
+        <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 10, display: "flex", justifyContent: "space-between" }}>
+          <span>{sorted.length} invoice{sorted.length !== 1 ? "s" : ""}</span>
+          <span style={{ fontWeight: 700, color: T.text }}>{moneyExact(sorted.reduce((s,iv) => s + iv._total, 0))} total</span>
+        </div>
+      )}
+
+      {/* Invoice list */}
+      {sorted.length === 0 ? (
         <div style={{ textAlign: "center", padding: "50px 20px", color: T.textMuted }}>
           <div style={{ width: 56, height: 56, borderRadius: 18, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 14px" }}><Icon name="invoice" size={28} /></div>
           <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 6 }}>No invoices{filter !== "All" ? ` marked ${filter}` : ""}</div>
           {perms.canInvoice && filter === "All" && <><div style={{ fontSize: 13, marginBottom: 18 }}>Create one, or generate it from a completed visit.</div><Btn onClick={() => setCreating(true)}>+ New Invoice</Btn></>}
         </div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {filtered.map(iv => <InvoiceRow key={iv.id} iv={iv} onClick={() => setPreview(iv)} />)}
+        <div style={{ display: "flex", flexDirection: "column", gap: groupBy !== "none" ? 20 : 8 }}>
+          {grouped.map(({ label, items }) => (
+            <div key={label || "all"}>
+              {label && (
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{label}</div>
+                  <div style={{ fontSize: 12, color: T.textMuted }}>{moneyExact(items.reduce((s,iv) => s + iv._total, 0))}</div>
+                </div>
+              )}
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {items.map(iv => <InvoiceRow key={iv.id} iv={iv} onClick={() => setPreview(iv)} />)}
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
       {creating && <InvoiceEditor clients={clients} invoices={invoices} invoicing={invoicing} onSave={onSave} onClose={() => setCreating(false)} />}
-      {editing && <InvoiceEditor invoice={editing} clients={clients} invoices={invoices} invoicing={invoicing} onSave={onSave} onDelete={onDelete} onClose={() => setEditing(null)} />}
-      {livePreview && <InvoicePreview invoice={livePreview} client={clients.find(c => c.id === livePreview.clientId)} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
+      {editing  && <InvoiceEditor invoice={editing} clients={clients} invoices={invoices} invoicing={invoicing} onSave={onSave} onDelete={onDelete} onClose={() => setEditing(null)} />}
+      {livePreview && <InvoicePreview invoice={livePreview} client={clients.find(c => invoiceMatchesClient(livePreview, c))} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
     </div>
   );
 }
@@ -8212,7 +8455,7 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
   );
 }
 
-function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEmail, costs, setCosts, budget, setBudget, clients, setClients, scheduleCfg, setScheduleCfg, team, setTeam, invoicing, setInvoicing, currentUserId, onResetData, serviceTiers, setServiceTiers, onSyncData }) {
+function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEmail, costs, setCosts, budget, setBudget, clients, setClients, invoices, scheduleCfg, setScheduleCfg, team, setTeam, invoicing, setInvoicing, currentUserId, onResetData, serviceTiers, setServiceTiers, onSyncData }) {
   const { T, perms } = useApp();
   const fileRef = useRef();
   const [tab, setTab] = useState("branding");
@@ -8313,7 +8556,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
           )}
           {perms.seeCostsBudget && (
             <Collapsible title="Budget & Targets" subtitle="Monthly revenue goals and profitability tracking.">
-              <BudgetManager budget={budget} setBudget={setBudget} clients={clients} costs={costs} />
+              <BudgetManager budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} />
             </Collapsible>
           )}
         </div>
@@ -11726,7 +11969,7 @@ function CPHistory({ client, T }) { return <CPPond client={client} T={T} />; }
 
 // ── CP INVOICES ──
 function CPInvoices({ client, invoices, branding, T }) {
-  const myInvoices = (invoices || []).filter(iv => String(iv.clientId) === String(client.id));
+  const myInvoices = (invoices || []).filter(iv => invoiceMatchesClient(iv, client));
   const [open, setOpen] = useState(null);
 
   const statusColor = (s) => s === "paid" ? "#16a34a" : s === "overdue" ? "#E5484D" : "#d97706";
@@ -11788,6 +12031,12 @@ function CPInvoices({ client, invoices, branding, T }) {
                     </div>
                   ))}
                   {iv.notes && <div style={{ fontSize:12, color:T.textMuted, fontStyle:"italic", marginTop:4 }}>{iv.notes}</div>}
+                  {iv.paymentLink && iv.status !== "paid" && iv.status !== "Paid" && (
+                    <a href={iv.paymentLink} target="_blank" rel="noopener noreferrer"
+                      style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:8, marginTop:8, background:"#2CA01C", color:"#fff", borderRadius:12, padding:"12px 18px", fontWeight:800, fontSize:14, textDecoration:"none", boxShadow:"0 4px 14px rgba(44,160,28,0.3)" }}>
+                      Pay Now via QuickBooks
+                    </a>
+                  )}
                 </div>
               )}
             </div>
@@ -12409,6 +12658,36 @@ export default function App({ authEmail = "", onSignOut }) {
     console.log(`QB Sync: ${newInvoices.length} invoices, ${matched} matched to clients`);
   };
 
+  // Push a new invoice to QuickBooks and get back payment link
+  const pushInvoiceToQB = async (invoice, client) => {
+    const accessToken = localStorage.getItem("qb_access_token");
+    const realmId     = localStorage.getItem("qb_realm_id");
+    if (!accessToken || !realmId) return null;
+    try {
+      const res = await fetch("/api/quickbooks/create-invoice", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          access_token: accessToken,
+          realm_id:     realmId,
+          invoice: {
+            ...invoice,
+            qbCustomerId: client?.qbId || null,
+            clientName:   client?.name  || invoice.clientName,
+            clientEmail:  client?.email || invoice.clientEmail,
+            clientPhone:  client?.phone || "",
+          },
+        }),
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data; // { qbId, paymentLink }
+    } catch (err) {
+      console.error("QB push invoice error:", err);
+      return null;
+    }
+  };
+
   const handleNav = (id, opts = {}) => {
     setPage(id);
     setSelectedClient(null);
@@ -12526,10 +12805,25 @@ export default function App({ authEmail = "", onSignOut }) {
     date: new Date().toLocaleDateString("en-US"),
   });
 
-  const handleSaveInvoice = (inv) => setInvoices(list => {
-    const exists = (list || []).some(iv => iv.id === inv.id);
-    return exists ? list.map(iv => iv.id === inv.id ? inv : iv) : [inv, ...(list || [])];
-  });
+  const handleSaveInvoice = async (inv) => {
+    // Push new invoices to QuickBooks if connected
+    const isNew = !(invoices || []).some(iv => iv.id === inv.id);
+    const accessToken = localStorage.getItem("qb_access_token");
+    let finalInv = { ...inv };
+
+    if (isNew && accessToken && inv.source !== "quickbooks") {
+      const client = (clients || []).find(c => c.id === inv.clientId);
+      const qbResult = await pushInvoiceToQB(inv, client);
+      if (qbResult?.qbId) {
+        finalInv = { ...finalInv, qbId: qbResult.qbId, paymentLink: qbResult.paymentLink, source: "sps+qb" };
+      }
+    }
+
+    setInvoices(list => {
+      const exists = (list || []).some(iv => iv.id === finalInv.id);
+      return exists ? list.map(iv => iv.id === finalInv.id ? finalInv : iv) : [finalInv, ...(list || [])];
+    });
+  };
   const handleDeleteInvoice = (id) => setInvoices(list => (list || []).filter(iv => iv.id !== id));
 
   // mark a stop complete: prepend the visit to the client's history (with photos)
@@ -12781,7 +13075,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
           {page === "invoices"  && perms.canInvoice && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} initialFilter={invoiceFilter} />}
           {page === "import"   && perms.canImport && <SkimmerImport onImport={handleImportClients} onGoToClients={() => handleNav("clients")} />}
-          {page === "settings" && <AppSettings branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} />}
+          {page === "settings" && <AppSettings branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} />}
         </main>
 
         {/* Bottom Nav — shows only the user's chosen dock items */}
