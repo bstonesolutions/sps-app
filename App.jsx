@@ -886,7 +886,10 @@ function deriveAlerts(clients, invoices, catalog) {
 
 // ── Invoicing ──
 const INVOICE_STATUSES = ["Draft", "Sent", "Paid", "Overdue"];
-const invStatusColor = (s, T) => ({ Draft: T.textMuted, Sent: T.primary, Paid: T.accent, Overdue: T.warning }[s] || T.textMuted);
+const invStatusColor = (s, T) => {
+  const n = (s||"").charAt(0).toUpperCase() + (s||"").slice(1).toLowerCase();
+  return { Draft: T.textMuted, Sent: T.primary, Paid: T.accent, Overdue: T.warning }[n] || ({ paid: T.accent, overdue: T.warning, sent: T.primary }[(s||"").toLowerCase()] || T.textMuted);
+};
 
 const DEFAULT_INVOICING = {
   taxRate: "6",            // default sales-tax rate applied to taxable lines (PA = 6%)
@@ -930,6 +933,23 @@ const nextInvoiceNumber = (invoices, cfg) => {
   const max = nums.length ? Math.max(...nums) : start - 1;
   return Math.max(max + 1, start);
 };
+// Sort invoices: highest invoice number first, fall back to most recent date
+const sortInvoices = (arr) => [...arr].sort((a, b) => {
+  const na = parseInt((String(a.number || "0")).replace(/[^0-9]/g, "")) || 0;
+  const nb = parseInt((String(b.number || "0")).replace(/[^0-9]/g, "")) || 0;
+  if (nb !== na) return nb - na;
+  // Fall back to date
+  const parseD = (s) => {
+    if (!s) return 0;
+    if (typeof s === "string" && s.includes("/")) { const [m,d,y] = s.split("/").map(Number); return new Date(y,m-1,d).getTime(); }
+    if (typeof s === "string" && s.includes("-")) return new Date(s + "T00:00:00").getTime();
+    return 0;
+  };
+  const da = parseD(a.date) || (a.createdAt || 0);
+  const db = parseD(b.date) || (b.createdAt || 0);
+  return db - da;
+});
+
 const clientInvoicesOf = (invoices, clientId, client) => {
   if (client) return (invoices || []).filter(iv => invoiceMatchesClient(iv, client));
   return (invoices || []).filter(iv => iv.clientId === clientId);
@@ -2395,7 +2415,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, schedule, o
             <div style={{ display: "flex", gap: 7, alignItems: "center", flexShrink: 0 }}>
               <Badge label={client.plan} bg={pm.bg} color={pm.color || pm.text} />
               {perms.canInvoice && (invoices||[]).filter(iv => invoiceMatchesClient(iv, client)).length > 0 && (
-                <Btn variant="ghost" sm onClick={() => generateStatementPDF(client, (invoices||[]).filter(iv => invoiceMatchesClient(iv, client)), branding)} style={{ display:"flex", alignItems:"center", gap:5 }}>
+                <Btn variant="ghost" sm onClick={() => generateStatementPDF(client, sortInvoices((invoices||[]).filter(iv => invoiceMatchesClient(iv, client))), branding)} style={{ display:"flex", alignItems:"center", gap:5 }}>
                   <Icon name="download" size={13} /> PDF
                 </Btn>
               )}
@@ -2783,7 +2803,7 @@ function ClientEquipment({ client, invoices, onChange }) {
   const [modal, setModal] = useState(null);
   const [expanded, setExpanded] = useState({});
   const equipment = client.equipment || [];
-  const clientInvoices = (invoices || []).filter(iv => invoiceMatchesClient(iv, client));
+  const clientInvoices = sortInvoices((invoices || []).filter(iv => invoiceMatchesClient(iv, client)));
   const STATUSES = ["Good", "Monitor", "Replace Soon"];
   const ORIGINS  = ["Installed by SPS", "Pre-existing (before SPS)", "Client-supplied"];
 
@@ -6835,18 +6855,40 @@ function TeamManager({ team, setTeam, currentUserId }) {
 // ─────────────────────────────────────────────
 function InvoiceRow({ iv, onClick }) {
   const { T } = useApp();
-  const eff = effectiveStatus(iv);
+  const rawEff = effectiveStatus(iv);
+  // Normalize — QB returns "Paid", SPS uses "Paid", both should display same
+  const eff = rawEff;
   const total = invoiceTotals(iv).total;
+  // Format date — handles YYYY-MM-DD (QB) and MM/DD/YYYY (SPS)
+  const displayDate = (() => {
+    const s = iv.date || "";
+    if (s.includes("-") && s.length === 10) {
+      const [y,m,d] = s.split("-");
+      const mo = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+      return `${mo[parseInt(m)-1]} ${parseInt(d)}, ${y}`;
+    }
+    return s;
+  })();
   return (
-    <div onClick={onClick} style={{ background: T.surface, borderRadius: 14, boxShadow: T.shadow, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}>
+    <div onClick={onClick}
+      style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, cursor: "pointer", transition: "box-shadow 0.15s" }}
+      onMouseEnter={e => e.currentTarget.style.boxShadow = "0 4px 16px rgba(0,0,0,0.08)"}
+      onMouseLeave={e => e.currentTarget.style.boxShadow = "none"}>
+      {/* Status accent bar */}
+      <div style={{ width: 3, alignSelf: "stretch", borderRadius: 3, background: invStatusColor(eff, T), flexShrink: 0, minHeight: 36 }} />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 14, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{iv._client?.name || iv.clientName || "Client"}</div>
-        <div style={{ fontSize: 12, color: T.textMuted }}>{iv.number} · {iv.date}</div>
+        <div style={{ fontSize: 14, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: "-0.01em" }}>{iv._client?.name || iv.clientName || "Client"}</div>
+        <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2, display: "flex", gap: 8 }}>
+          <span>#{iv.number}</span>
+          <span style={{ opacity: 0.4 }}>·</span>
+          <span>{displayDate}</span>
+        </div>
       </div>
       <div style={{ textAlign: "right", flexShrink: 0 }}>
-        <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>{`$${total.toFixed(2)}`}</div>
-        <span style={{ display: "inline-block", marginTop: 3, background: hexA(invStatusColor(eff, T), 0.14), color: invStatusColor(eff, T), padding: "2px 9px", borderRadius: 100, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em" }}>{eff}</span>
+        <div style={{ fontSize: 15, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{`$${total.toFixed(2)}`}</div>
+        <span style={{ display: "inline-block", marginTop: 4, background: hexA(invStatusColor(eff, T), 0.12), color: invStatusColor(eff, T), padding: "2px 9px", borderRadius: 100, fontSize: 10, fontWeight: 700, letterSpacing: "0.03em" }}>{eff}</span>
       </div>
+      <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{ opacity: 0.4, flexShrink: 0 }}><path d="m9 18 6-6-6-6"/></svg>
     </div>
   );
 }
@@ -8059,18 +8101,34 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, onSave, onDele
 
 function ClientInvoices({ client, invoices, invoicing, branding, onSave, onDelete }) {
   const { T, perms } = useApp();
-  const list = clientInvoicesOf(invoices, client.id, client).map(iv => ({ ...iv, _client: client })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const list = sortInvoices(clientInvoicesOf(invoices, client.id, client)).map(iv => ({ ...iv, _client: client }));
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState(null);
   const [preview, setPreview] = useState(null);
   const owed = clientOutstanding(client, invoices);
   const livePreview = preview ? ((invoices || []).find(x => x.id === preview.id) || preview) : null;
 
+  const paid   = list.filter(iv => ["Paid","paid"].includes(effectiveStatus(iv)));
+  const unpaid = list.filter(iv => !["Paid","paid"].includes(effectiveStatus(iv)) && iv.status !== "Draft");
+
   return (
     <Card>
       <CardHeader title={`Invoices (${list.length})`} action={perms.canInvoice ? <Btn sm onClick={() => setCreating(true)}>+ New</Btn> : null} />
-      <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 8 }}>
-        {owed > 0 && <div style={{ background: hexA(T.warning, 0.12), borderRadius: 10, padding: "10px 13px", fontSize: 13, color: T.text, fontWeight: 600 }}>Outstanding: ${owed.toFixed(2)}</div>}
+      {list.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1, borderBottom: `1px solid ${T.border}`, background: T.border }}>
+          <div style={{ background: T.surfaceAlt, padding: "12px 16px" }}>
+            <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 4 }}>Outstanding</div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: owed > 0 ? T.warning : T.accent }}>${owed.toFixed(2)}</div>
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{unpaid.length} unpaid</div>
+          </div>
+          <div style={{ background: T.surfaceAlt, padding: "12px 16px" }}>
+            <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 4 }}>Collected</div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: T.accent }}>${paid.reduce((s,iv) => s + invoiceTotals(iv).total, 0).toFixed(2)}</div>
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{paid.length} paid</div>
+          </div>
+        </div>
+      )}
+      <div style={{ padding: "12px 16px", display: "flex", flexDirection: "column", gap: 8 }}>
         {list.length === 0 && <div style={{ fontSize: 13, color: T.textMuted, padding: "6px 0" }}>No invoices yet for this client.</div>}
         {list.map(iv => <InvoiceRow key={iv.id} iv={iv} onClick={() => setPreview(iv)} />)}
       </div>
@@ -11276,9 +11334,9 @@ function CIcon({ name, size = 22 }) {
 // ── CP HOME ──
 function CPHome({ client, schedule, invoices, branding, onNav, T }) {
   const next = clientNextVisit(schedule, client.id);
-  const myInvoices = (invoices || []).filter(iv => invoiceMatchesClient(iv, client));
-  const outstanding = myInvoices.filter(iv => iv.status !== "paid");
-  const totalOwed = outstanding.reduce((s, iv) => s + (parseFloat((iv.total || "0").replace(/[^0-9.-]/g,"")) || 0), 0);
+  const myInvoices = sortInvoices((invoices || []).filter(iv => invoiceMatchesClient(iv, client)));
+  const outstanding = myInvoices.filter(iv => !["Paid","paid"].includes(effectiveStatus(iv)) && iv.status !== "Draft");
+  const totalOwed = outstanding.reduce((s, iv) => s + invoiceTotals(iv).total, 0);
   const recentHistory = (client.history || []).slice(0, 3);
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
@@ -12200,12 +12258,32 @@ function CPHistory({ client, T }) { return <CPPond client={client} T={T} />; }
 
 // ── CP INVOICES ──
 function CPInvoices({ client, invoices, branding, T }) {
-  const myInvoices = (invoices || []).filter(iv => invoiceMatchesClient(iv, client));
+  const myInvoices = sortInvoices((invoices || []).filter(iv => invoiceMatchesClient(iv, client)));
   const [open, setOpen] = useState(null);
 
+  // Normalize status — handles both "Paid" and "paid", "Overdue"/"overdue" etc.
+  const normStatus = (iv) => {
+    const s = effectiveStatus(iv) || iv.status || "";
+    const sl = s.toLowerCase();
+    if (sl === "paid") return "paid";
+    if (sl === "overdue") return "overdue";
+    if (sl === "draft") return "draft";
+    return "due";
+  };
   const statusColor = (s) => s === "paid" ? "#16a34a" : s === "overdue" ? "#E5484D" : "#d97706";
   const statusBg    = (s) => s === "paid" ? hexA("#16a34a",0.1) : s === "overdue" ? hexA("#E5484D",0.1) : hexA("#d97706",0.1);
   const statusLabel = (s) => s === "paid" ? "Paid" : s === "overdue" ? "Overdue" : "Due";
+
+  // Format date — handles YYYY-MM-DD and MM/DD/YYYY
+  const fmtDate = (s) => {
+    if (!s) return "";
+    if (s.includes("-") && s.length === 10) {
+      const [y, m, d] = s.split("-");
+      const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+      return `${months[parseInt(m)-1]} ${parseInt(d)}, ${y}`;
+    }
+    return s;
+  };
 
   if (!myInvoices.length) return (
     <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
@@ -12220,7 +12298,7 @@ function CPInvoices({ client, invoices, branding, T }) {
     </div>
   );
 
-  const outstanding = myInvoices.filter(iv => !["Paid","paid"].includes(effectiveStatus(iv)) && iv.status !== "Draft" && iv.status !== "draft");
+  const outstanding = myInvoices.filter(iv => normStatus(iv) !== "paid" && normStatus(iv) !== "draft");
   const total = outstanding.reduce((s,iv) => s + invoiceTotals(iv).total, 0);
 
   return (
@@ -12236,35 +12314,48 @@ function CPInvoices({ client, invoices, branding, T }) {
       )}
 
       <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-        {myInvoices.map((iv,i) => {
+        {myInvoices.map((iv) => {
           const isOpen = open === iv.id;
-          const amt = invoiceTotals(iv).total;
+          const amt    = invoiceTotals(iv).total;
+          const st     = normStatus(iv);
+          const isPaidSt = st === "paid";
           return (
-            <div key={iv.id} style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, overflow:"hidden" }}>
+            <div key={iv.id} style={{ background:T.surface, borderRadius:18, border:`1px solid ${isPaidSt ? T.border : hexA(statusColor(st), 0.3)}`, overflow:"hidden", transition:"box-shadow 0.15s" }}>
               <div onClick={() => setOpen(isOpen ? null : iv.id)}
-                style={{ padding:"15px 18px", display:"flex", alignItems:"center", gap:14, cursor:"pointer" }}>
+                style={{ padding:"16px 18px", display:"flex", alignItems:"center", gap:14, cursor:"pointer" }}>
+                {/* Left accent */}
+                <div style={{ width:3, alignSelf:"stretch", borderRadius:3, background:statusColor(st), flexShrink:0, minHeight:40 }} />
                 <div style={{ flex:1, minWidth:0 }}>
-                  <div style={{ fontSize:14, fontWeight:700, color:T.text }}>Invoice #{iv.number || iv.id}</div>
-                  <div style={{ fontSize:12, color:T.textMuted, marginTop:2 }}>{iv.date || iv.issueDate || ""}</div>
+                  <div style={{ fontSize:14, fontWeight:700, color:T.text, letterSpacing:"-0.01em" }}>Invoice #{iv.number || iv.id}</div>
+                  <div style={{ fontSize:12, color:T.textMuted, marginTop:2 }}>{fmtDate(iv.date || iv.issueDate || "")}</div>
                 </div>
                 <div style={{ textAlign:"right", flexShrink:0 }}>
-                  <div style={{ fontSize:16, fontWeight:800, color:T.text }}>${amt.toFixed(2)}</div>
-                  <div style={{ fontSize:10, fontWeight:700, padding:"2px 9px", borderRadius:100, background:statusBg(iv.status), color:statusColor(iv.status), marginTop:4 }}>{statusLabel(iv.status)}</div>
+                  <div style={{ fontSize:16, fontWeight:800, color: isPaidSt ? T.textMuted : T.text, letterSpacing:"-0.02em", textDecoration: isPaidSt ? "none" : "none" }}>${amt.toFixed(2)}</div>
+                  <div style={{ fontSize:10, fontWeight:700, padding:"3px 10px", borderRadius:100, background:statusBg(st), color:statusColor(st), marginTop:4, display:"inline-block" }}>{statusLabel(st)}</div>
                 </div>
-                <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{ transform:isOpen?"rotate(180deg)":"none", transition:"transform 0.2s" }}><path d="M6 9l6 6 6-6"/></svg>
+                <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{ transform:isOpen?"rotate(180deg)":"rotate(0)", transition:"transform 0.2s", opacity:0.5, flexShrink:0 }}><path d="M6 9l6 6 6-6"/></svg>
               </div>
               {isOpen && (
-                <div style={{ borderTop:`1px solid ${T.border}`, padding:"14px 18px", display:"flex", flexDirection:"column", gap:8 }}>
-                  {(iv.lineItems||iv.items||[]).map((li,j) => (
-                    <div key={j} style={{ display:"flex", justifyContent:"space-between", fontSize:13 }}>
-                      <span style={{ color:T.text }}>{li.description||li.name||li.service}</span>
-                      <span style={{ color:T.text, fontWeight:600 }}>${parseFloat(li.amount||li.price||0).toFixed(2)}</span>
+                <div style={{ borderTop:`1px solid ${T.border}`, padding:"14px 18px", display:"flex", flexDirection:"column", gap:10 }}>
+                  {(iv.lineItems||iv.items||[]).length > 0 && (
+                    <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                      {(iv.lineItems||iv.items||[]).map((li,j) => (
+                        <div key={j} style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:10, fontSize:13 }}>
+                          <span style={{ color:T.text, flex:1 }}>{li.description||li.name||li.service}</span>
+                          <span style={{ color:T.text, fontWeight:700, flexShrink:0 }}>${parseFloat(li.amount||li.price||0).toFixed(2)}</span>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                  {iv.notes && <div style={{ fontSize:12, color:T.textMuted, fontStyle:"italic", marginTop:4 }}>{iv.notes}</div>}
-                  {iv.paymentLink && iv.status !== "paid" && iv.status !== "Paid" && (
+                  )}
+                  {iv.dueDate && !isPaidSt && (
+                    <div style={{ fontSize:12, color: new Date(iv.dueDate) < new Date() ? T.warning : T.textMuted }}>
+                      Due {fmtDate(iv.dueDate)}
+                    </div>
+                  )}
+                  {iv.notes && <div style={{ fontSize:12, color:T.textMuted, fontStyle:"italic" }}>{iv.notes}</div>}
+                  {iv.paymentLink && !isPaidSt && (
                     <a href={iv.paymentLink} target="_blank" rel="noopener noreferrer"
-                      style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:8, marginTop:8, background:"#2CA01C", color:"#fff", borderRadius:12, padding:"12px 18px", fontWeight:800, fontSize:14, textDecoration:"none", boxShadow:"0 4px 14px rgba(44,160,28,0.3)" }}>
+                      style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:8, background:"#2CA01C", color:"#fff", borderRadius:12, padding:"12px 18px", fontWeight:800, fontSize:14, textDecoration:"none", boxShadow:"0 4px 14px rgba(44,160,28,0.3)" }}>
                       Pay Now via QuickBooks
                     </a>
                   )}
