@@ -1,7 +1,6 @@
 // api/quickbooks/callback.js
-// Handles the OAuth callback, exchanges code for tokens, stores them
 export default async function handler(req, res) {
-  const { code, realmId, state, error } = req.query;
+  const { code, realmId, error } = req.query;
 
   if (error) {
     return res.redirect('/?qb=error&reason=' + encodeURIComponent(error));
@@ -14,8 +13,8 @@ export default async function handler(req, res) {
   const clientSecret = process.env.QB_CLIENT_SECRET;
   const redirectUri  = process.env.QB_REDIRECT_URI;
 
-  // Exchange auth code for tokens
   const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+
   const tokenRes = await fetch('https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer', {
     method: 'POST',
     headers: {
@@ -37,15 +36,15 @@ export default async function handler(req, res) {
   }
 
   const tokens = await tokenRes.json();
-  // Store tokens + realmId in cookies (short-lived; in production use a DB or KV store)
-  const expires = new Date(Date.now() + tokens.expires_in * 1000).toUTCString();
-  const cookieOpts = `Path=/; HttpOnly; SameSite=Lax; Expires=${expires}`;
-  res.setHeader('Set-Cookie', [
-    `qb_access_token=${tokens.access_token}; ${cookieOpts}`,
-    `qb_refresh_token=${tokens.refresh_token}; Path=/; HttpOnly; SameSite=Lax`,
-    `qb_realm_id=${realmId}; ${cookieOpts}`,
-  ]);
 
-  // Redirect back to app with success flag
-  res.redirect('/?qb=connected&realmId=' + realmId);
+  // Pass tokens back to the app via URL params so they can be stored in localStorage
+  const params = new URLSearchParams({
+    qb:            'connected',
+    realmId,
+    access_token:  tokens.access_token,
+    refresh_token: tokens.refresh_token,
+    expires_in:    tokens.expires_in,
+  });
+
+  res.redirect('/?' + params.toString());
 }
