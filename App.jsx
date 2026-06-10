@@ -1762,15 +1762,21 @@ function Modal({ title, children, onClose }) {
 function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatchDelete, onBatchSchedule }) {
   const { T, perms, tiers } = useApp();
   const [search, setSearch] = useState("");
+  const [showInactive, setShowInactive] = useState(false);
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState({}); // { [id]: true }
-  const [modal, setModal] = useState(null); // "division" | "plan" | "delete"
+  const [modal, setModal] = useState(null); // "division" | "plan" | "delete" | "inactive"
 
   const q = search.toLowerCase();
-  const filtered = clients.filter(c =>
-    (c.name || "").toLowerCase().includes(q) ||
-    (c.address || "").toLowerCase().includes(q)
-  );
+  // When searching, show all clients (including inactive). Otherwise only show active.
+  const filtered = clients.filter(c => {
+    const matchesSearch = (c.name || "").toLowerCase().includes(q) || (c.address || "").toLowerCase().includes(q);
+    if (!matchesSearch) return false;
+    if (q) return true; // search shows everyone
+    if (showInactive) return true;
+    return c.status !== "Inactive"; // default: active only
+  });
+  const inactiveCount = clients.filter(c => c.status === "Inactive").length;
 
   const selectedIds = Object.keys(selected).filter(k => selected[k]).map(Number);
   const selCount = selectedIds.length;
@@ -1787,6 +1793,8 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
   const applyPlan = (plan) => { onBatchUpdate(selectedIds, { plan }); setModal(null); exitSelect(); };
   const doDelete = () => { onBatchDelete(selectedIds); setModal(null); exitSelect(); };
   const doSchedule = () => { onBatchSchedule(selectedIds); exitSelect(); };
+  const doMarkInactive = () => { onBatchUpdate(selectedIds, { status: "Inactive" }); setModal(null); exitSelect(); };
+  const doMarkActive   = () => { onBatchUpdate(selectedIds, { status: "Active" }); setModal(null); exitSelect(); };
 
   return (
     <div>
@@ -1810,6 +1818,17 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
           value={search} onChange={e => setSearch(e.target.value)}
           style={{ width: "100%", padding: "11px 14px 11px 38px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, boxSizing: "border-box", outline: "none", fontFamily: "inherit", color: T.text, background: T.surface }} />
       </div>
+
+      {/* Show inactive toggle — only when not searching */}
+      {!search && inactiveCount > 0 && (
+        <button onClick={() => setShowInactive(s => !s)}
+          style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: showInactive ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit", padding: "0 0 12px", marginTop: -6 }}>
+          <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
+            {showInactive ? <><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></> : <><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></>}
+          </svg>
+          {showInactive ? `Hiding ${inactiveCount} inactive` : `Show ${inactiveCount} inactive`}
+        </button>
+      )}
 
       {!selectMode && perms.canImport && onImport && (
         <button onClick={onImport} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 7, width: "100%", marginBottom: 14, padding: "10px", borderRadius: 10, border: `1.5px dashed ${T.border}`, background: "none", color: T.primary, fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
@@ -1849,7 +1868,10 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
               {/* Division color bar instead of emoji */}
               <div style={{ width: 4, alignSelf: "stretch", borderRadius: 4, background: pm.bg, flexShrink: 0, minHeight: 44 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 700, fontSize: 15, color: T.text, letterSpacing: "-0.01em" }}>{c.name}</div>
+                <div style={{ fontWeight: 700, fontSize: 15, letterSpacing: "-0.01em", display: "flex", alignItems: "center", gap: 7, color: c.status === "Inactive" ? T.textMuted : T.text }}>
+                  {c.name}
+                  {c.status === "Inactive" && <span style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 6, padding: "1px 6px", flexShrink: 0 }}>Inactive</span>}
+                </div>
                 <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.address || "No address"}</div>
                 <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
                   {clientServices(c, tiers).map((s, si) => (
@@ -1881,6 +1903,8 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
               { label: "Schedule", icon: "calendar", fn: doSchedule },
               { label: "Division", icon: "tag", fn: () => setModal("division") },
               { label: "Plan", icon: "clipboard", fn: () => setModal("plan") },
+              { label: "Deactivate", icon: "warning", fn: () => setModal("inactive") },
+              { label: "Reactivate", icon: "clients", fn: doMarkActive },
               { label: "Delete", icon: "trash", fn: () => setModal("delete"), danger: true },
             ].map(a => (
               <button key={a.label} onClick={a.fn}
@@ -1920,6 +1944,19 @@ function ClientList({ clients, onSelect, onAdd, onImport, onBatchUpdate, onBatch
                 </button>
               );
             })}
+          </div>
+        </Modal>
+      )}
+
+      {/* Inactive confirm */}
+      {modal === "inactive" && (
+        <Modal title={`Deactivate ${selCount} Client${selCount !== 1 ? "s" : ""}?`} onClose={() => setModal(null)}>
+          <p style={{ fontSize: 14, color: T.text, lineHeight: 1.5, marginTop: 0 }}>
+            These clients will be hidden from your client list but won't be deleted. They still show up when you search. You can reactivate them any time.
+          </p>
+          <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
+            <button onClick={doMarkInactive} style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Deactivate {selCount}</button>
+            <button onClick={() => setModal(null)} style={{ background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 12, padding: "13px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
           </div>
         </Modal>
       )}
@@ -2438,6 +2475,12 @@ function ClientDetail({ client: init, invoices, invoicing, branding, schedule, o
 
   return (
     <div>
+      {client.status === "Inactive" && (
+        <div style={{ background: hexA(T.textMuted, 0.08), border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 14px", marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ fontSize: 13, color: T.textMuted, fontWeight: 600 }}>This client is inactive and hidden from the main list.</span>
+          <Btn sm variant="ghost" onClick={() => update({ status: "Active" })}>Reactivate</Btn>
+        </div>
+      )}
       <button onClick={() => { onBack(); window.scrollTo({ top: 0, behavior: "instant" }); }} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", padding: "0 0 16px", display: "flex", alignItems: "center", gap: 4 }}>← Back to Clients</button>
 
       <Card style={{ marginBottom: 14, overflow: "hidden" }}>
@@ -2463,6 +2506,13 @@ function ClientDetail({ client: init, invoices, invoicing, branding, schedule, o
               {perms.canInvoice && (invoices||[]).filter(iv => invoiceMatchesClient(iv, client)).length > 0 && (
                 <Btn variant="ghost" sm onClick={() => generateStatementPDF(client, sortInvoices((invoices||[]).filter(iv => invoiceMatchesClient(iv, client))), branding)} style={{ display:"flex", alignItems:"center", gap:5 }}>
                   <Icon name="download" size={13} /> PDF
+                </Btn>
+              )}
+              {perms.editClients && (
+                <Btn variant="ghost" sm
+                  onClick={() => update({ status: client.status === "Inactive" ? "Active" : "Inactive" })}
+                  style={{ display:"flex", alignItems:"center", gap:5, color: client.status === "Inactive" ? T.accent : T.textMuted }}>
+                  {client.status === "Inactive" ? "Reactivate" : "Deactivate"}
                 </Btn>
               )}
               {perms.editClients && <Btn variant="ghost" sm onClick={() => setEditing(true)} style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="edit" size={13} /> Edit</Btn>}
@@ -8804,12 +8854,20 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
                             }
                           </div>
                         </div>
-                        {anyChange && (
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          {anyChange && (
+                            <button onClick={() => {
+                              setBulkPrices(prev => { const n = { ...prev }; delete n[String(c.id)]; return n; });
+                              setBulkPlans(prev => { const n = { ...prev }; delete n[String(c.id)]; return n; });
+                            }} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", fontSize: 12, fontFamily: "inherit", flexShrink: 0 }}>Undo</button>
+                          )}
                           <button onClick={() => {
-                            setBulkPrices(prev => { const n = { ...prev }; delete n[String(c.id)]; return n; });
-                            setBulkPlans(prev => { const n = { ...prev }; delete n[String(c.id)]; return n; });
-                          }} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", fontSize: 12, fontFamily: "inherit", flexShrink: 0, marginLeft: 8 }}>Undo</button>
-                        )}
+                            const isInactive = c.status === "Inactive";
+                            setClients(prev => prev.map(cl => cl.id === c.id ? { ...cl, status: isInactive ? "Active" : "Inactive" } : cl));
+                          }} style={{ background: "none", border: `1px solid ${c.status === "Inactive" ? T.accent : T.border}`, borderRadius: 8, padding: "3px 10px", color: c.status === "Inactive" ? T.accent : T.textMuted, cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit", flexShrink: 0 }}>
+                            {c.status === "Inactive" ? "Reactivate" : "Deactivate"}
+                          </button>
+                        </div>
                       </div>
                       {/* Plan pills + price input on same row */}
                       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
