@@ -897,7 +897,7 @@ const clientInvoicesOf = (invoices, clientId) => (invoices || []).filter(iv => i
 // what a client owes: from their unpaid invoices if any exist, else the stored balance
 // Match invoice to client — by ID or by name (for QB imports)
 const invoiceMatchesClient = (iv, client) =>
-  invoiceMatchesClient(iv, client) ||
+  iv.clientId === client.id ||
   (iv.clientId === null && iv.clientName &&
    iv.clientName.toLowerCase().trim() === (client.name || "").toLowerCase().trim());
 
