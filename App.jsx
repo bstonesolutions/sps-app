@@ -480,8 +480,12 @@ const DEFAULT_ROLES = {
   current: "admin",        // "admin" | "employee" (view-as)
   // SEE (visibility)
   canSeeProfit: false,
+  canSeeReportsPnl: false, // company-wide P&L / Reports page
+  canSeeTotalSales: false, // all-time Total Sales rollup
   canSeeCostsBudget: false,
   canSeeBalances: true,
+  canSeeInventory: false,  // view stock levels + locations (cost/margin stays owner-only)
+  canViewInvoices: false,  // see invoices (read-only)
   // CHANGE (edit)
   canEditClients: false,   // add / edit / delete clients + equipment
   canEditSchedule: true,   // add / remove / reorder stops
@@ -495,10 +499,10 @@ const DEFAULT_ROLES = {
   canInvoice: false,       // create, send, and manage invoices
 };
 const ROLE_PRESETS = {
-  field:    { label: "Field Crew",  canSeeProfit: false, canSeeCostsBudget: false, canSeeBalances: false, canEditClients: false, canEditSchedule: false, canEditHistory: false, canEditCatalog: false, canEditSettings: false, canImport: false, canCompleteStops: true,  canSendTexts: true,  canInvoice: false },
-  lead:     { label: "Lead Tech",   canSeeProfit: false, canSeeCostsBudget: false, canSeeBalances: true,  canEditClients: true,  canEditSchedule: true,  canEditHistory: true,  canEditCatalog: false, canEditSettings: false, canImport: false, canCompleteStops: true,  canSendTexts: true,  canInvoice: true },
-  viewer:   { label: "View Only",   canSeeProfit: false, canSeeCostsBudget: false, canSeeBalances: false, canEditClients: false, canEditSchedule: false, canEditHistory: false, canEditCatalog: false, canEditSettings: false, canImport: false, canCompleteStops: false, canSendTexts: false, canInvoice: false },
-  full:     { label: "Full Access", canSeeProfit: true,  canSeeCostsBudget: true,  canSeeBalances: true,  canEditClients: true,  canEditSchedule: true,  canEditHistory: true,  canEditCatalog: true,  canEditSettings: true,  canImport: true,  canCompleteStops: true,  canSendTexts: true,  canInvoice: true },
+  field:    { label: "Field Crew",  canSeeProfit: false, canSeeReportsPnl: false, canSeeTotalSales: false, canSeeCostsBudget: false, canSeeBalances: false, canSeeInventory: true, canViewInvoices: false, canEditClients: false, canEditSchedule: false, canEditHistory: false, canEditCatalog: false, canEditSettings: false, canImport: false, canCompleteStops: true,  canSendTexts: true,  canInvoice: false },
+  lead:     { label: "Lead Tech",   canSeeProfit: false, canSeeReportsPnl: false, canSeeTotalSales: false, canSeeCostsBudget: false, canSeeBalances: true,  canSeeInventory: true,  canViewInvoices: true,  canEditClients: true,  canEditSchedule: true,  canEditHistory: true,  canEditCatalog: false, canEditSettings: false, canImport: false, canCompleteStops: true,  canSendTexts: true,  canInvoice: true },
+  viewer:   { label: "View Only",   canSeeProfit: false, canSeeReportsPnl: false, canSeeTotalSales: false, canSeeCostsBudget: false, canSeeBalances: false, canSeeInventory: false, canViewInvoices: true,  canEditClients: false, canEditSchedule: false, canEditHistory: false, canEditCatalog: false, canEditSettings: false, canImport: false, canCompleteStops: false, canSendTexts: false, canInvoice: false },
+  full:     { label: "Full Access", canSeeProfit: true,  canSeeReportsPnl: true,  canSeeTotalSales: true,  canSeeCostsBudget: true,  canSeeBalances: true,  canSeeInventory: true,  canViewInvoices: true,  canEditClients: true,  canEditSchedule: true,  canEditHistory: true,  canEditCatalog: true,  canEditSettings: true,  canImport: true,  canCompleteStops: true,  canSendTexts: true,  canInvoice: true },
 };
 
 // Team roster — each member has a login role + optional PIN, and their own hourly labor cost
@@ -525,8 +529,12 @@ function memberPerms(member) {
   return {
     isAdmin,
     seeProfit: P("canSeeProfit", false),
+    seeReportsPnl: P("canSeeReportsPnl", false),
+    seeTotalSales: P("canSeeTotalSales", false),
     seeCostsBudget: P("canSeeCostsBudget", false),
     seeBalances: P("canSeeBalances", true),
+    seeInventory: P("canSeeInventory", false),
+    viewInvoices: P("canViewInvoices", false),
     editClients: P("canEditClients", false),
     editSchedule: P("canEditSchedule", true),
     editHistory: P("canEditHistory", false),
@@ -1579,13 +1587,13 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
       });
       if (perms.seeProfit) tiles.push({
         label: "Profit (mo)", value: money(ma.profit),
-        sub: `${ma.jobs} jobs · tap for reports`, accent: ma.profit >= 0 ? T.accent : "#C0392B",
-        onClick: () => onNav("reports"),
+        sub: (perms.seeReportsPnl || perms.isAdmin) ? `${ma.jobs} jobs · tap for reports` : `${ma.jobs} jobs this month`, accent: ma.profit >= 0 ? T.accent : "#C0392B",
+        onClick: (perms.seeReportsPnl || perms.isAdmin) ? () => onNav("reports") : undefined,
       });
       else tiles.push({
         label: "Jobs (mo)", value: ma.jobs,
-        sub: "Tap to view reports", accent: T.accent,
-        onClick: () => onNav("reports"),
+        sub: (perms.seeReportsPnl || perms.isAdmin) ? "Tap to view reports" : "This month", accent: T.accent,
+        onClick: (perms.seeReportsPnl || perms.isAdmin) ? () => onNav("reports") : undefined,
       });
       return (
         <div key="stats" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
@@ -2629,7 +2637,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, sc
   const [tab, setTab] = useState("overview");
   const [editing, setEditing] = useState(false);
   const pm = planMeta(client.plan, T, tiers);
-  const tabs = ["overview", "equipment", "history", ...(perms.canInvoice ? ["invoices"] : []), "docs", "portal"];
+  const tabs = ["overview", "equipment", "history", ...((perms.canInvoice || perms.viewInvoices) ? ["invoices"] : []), "docs", "portal"];
   const owed = clientOutstanding(client, invoices);
 
   // keep local view in sync if the stored record changes (e.g. a completed stop adds history)
@@ -2715,7 +2723,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, sc
       {tab === "overview" && <ClientOverview client={client} invoices={invoices} onUpdate={onUpdate} />}
       {tab === "equipment" && <ClientEquipment client={client} invoices={invoices} onChange={eq => update({ equipment: eq })} />}
       {tab === "history" && <ClientHistory client={client} onChange={hist => update({ history: hist })} />}
-      {tab === "invoices" && perms.canInvoice && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} onSave={onSaveInvoice} onDelete={onDeleteInvoice} />}
+      {tab === "invoices" && (perms.canInvoice || perms.viewInvoices) && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} onSave={onSaveInvoice} onDelete={onDeleteInvoice} />}
       {tab === "docs"    && <ClientDocuments client={client} onChange={docs => update({ documents: docs })} />}
       {tab === "portal" && <ClientPortal client={client} invoices={invoices} schedule={schedule} branding={branding} />}
     </div>
@@ -6918,7 +6926,7 @@ function BudgetManager({ budget, setBudget, clients, costs, invoices }) {
 // ─────────────────────────────────────────────
 // COST SETTINGS (admin cost assumptions)
 // ─────────────────────────────────────────────
-function CostSettings({ costs, setCosts }) {
+function CostSettings({ costs, setCosts, clients }) {
   const { T } = useApp();
   const n = (v) => parseFloat(v) || 0;
   const setRate = (v) => setCosts(c => ({ ...c, hourlyRate: v.replace(/[^\d.]/g, "") }));
@@ -6926,7 +6934,14 @@ function CostSettings({ costs, setCosts }) {
 
   const perStop = perStopCosts(costs);
   const monthlyFixed = monthlyFixedCosts(costs);
-  const totalPerStop = perStop.gas + perStop.insurance + perStop.equipment + perStop.overhead;
+
+  // Average treatment cost per stop, computed from real usage history
+  const allHist = (clients || []).flatMap(c => c.history || []);
+  const stopsWithData = allHist.filter(h => Array.isArray(h.treatmentsUsed));
+  const totalTxCost = allHist.reduce((s, h) => s + (h.treatmentsUsed || []).reduce((a, t) => a + (t.cost || 0), 0), 0);
+  const avgTreatmentPerStop = stopsWithData.length > 0 ? totalTxCost / stopsWithData.length : 0;
+
+  const totalPerStop = perStop.gas + perStop.insurance + perStop.equipment + perStop.overhead + avgTreatmentPerStop;
 
   const rows = [["gas", "Gas / Fuel"], ["insurance", "Insurance"], ["equipment", "Equipment"], ["overhead", "Overhead"]];
 
@@ -6978,6 +6993,15 @@ function CostSettings({ costs, setCosts }) {
             })}
           </div>
           <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 8 }}>
+            {avgTreatmentPerStop > 0 && (
+              <div style={{ background: T.surfaceAlt, borderRadius: 10, padding: "12px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Avg treatment cost / stop</span>
+                  <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>Auto-calculated from {stopsWithData.length} logged stop{stopsWithData.length !== 1 ? "s" : ""}</div>
+                </div>
+                <span style={{ fontSize: 15, fontWeight: 800, color: T.text }}>${avgTreatmentPerStop.toFixed(2)}</span>
+              </div>
+            )}
             <div style={{ background: T.surfaceAlt, borderRadius: 10, padding: "12px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Per-stop overhead (hits each job)</span>
               <span style={{ fontSize: 15, fontWeight: 800, color: T.text }}>${totalPerStop.toFixed(2)}</span>
@@ -6992,7 +7016,7 @@ function CostSettings({ costs, setCosts }) {
 
       <div style={{ background: T.surfaceAlt, borderRadius: 10, padding: "12px 14px", fontSize: 12, color: T.textMuted, display: "flex", gap: 8 }}>
         <Icon name="info" size={14} />
-        <span>Switch any line between /stop and /mo and it re-tabulates automatically — per-stop in job profitability, per-month in the Budget. Per-employee labor rates flow in once tech assignment is added.</span>
+        <span>Switch any line between /stop and /mo and it re-tabulates automatically — per-stop in job profitability, per-month in the Budget. Average treatment cost per stop is pulled automatically from your logged usage and folded into each job's profit. Per-employee labor rates flow in once tech assignment is added.</span>
       </div>
     </>
   );
@@ -7101,10 +7125,14 @@ function PermissionGroups({ value, onChange }) {
   );
   return (
     <>
-      {groupCard("Can See", "Visibility of sensitive numbers.", <>
-        {permRow("canSeeProfit", "Profitability", "Per-job profit, margins, the money math")}
+      {groupCard("Can See", "Visibility of sensitive numbers and pages.", <>
+        {permRow("canSeeProfit", "Job Profitability", "Per-stop and per-client profit, margins")}
+        {permRow("canSeeReportsPnl", "Reports & Company P&L", "The Reports page and company-wide profit/loss")}
+        {permRow("canSeeTotalSales", "Total Sales", "All-time sales rollup from the Invoices page")}
         {permRow("canSeeCostsBudget", "Costs & Budget", "Cost assumptions and the budget tab")}
         {permRow("canSeeBalances", "Client Balances", "What each client owes")}
+        {permRow("canSeeInventory", "Inventory", "Stock levels and locations (cost & pricing stay owner-only)")}
+        {permRow("canViewInvoices", "View Invoices", "See client invoices (read-only)")}
       </>)}
       {groupCard("Can Change", "Editing and managing records.", <>
         {permRow("canEditClients", "Clients", "Add, edit, delete clients and their equipment")}
@@ -7117,7 +7145,7 @@ function PermissionGroups({ value, onChange }) {
       {groupCard("Can Do", "Day-to-day field actions.", <>
         {permRow("canCompleteStops", "Complete Service Visits", "Open the workspace, log work, save reports")}
         {permRow("canSendTexts", "Send \"On My Way\" Texts", "Notify clients of arrival")}
-        {permRow("canInvoice", "Create & Send Invoices", "Build invoices, mark them sent and paid")}
+        {permRow("canInvoice", "Manage Invoices", "Create, edit, send, and mark invoices paid")}
       </>)}
     </>
   );
@@ -8406,7 +8434,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, onSav
   const livePreview = preview ? ((invoices||[]).find(x => x.id === preview.id) || preview) : null;
   const activeFilterCount = [filter !== "All", clientFilter !== "all", dateRange !== "all", groupBy !== "none"].filter(Boolean).length;
 
-  if (showSales) return <TotalSalesScreen invoices={invoices} clients={clients} onBack={() => setShowSales(false)} T={T} />;
+  if (showSales && (perms.seeTotalSales || perms.isAdmin)) return <TotalSalesScreen invoices={invoices} clients={clients} onBack={() => setShowSales(false)} T={T} />;
 
   return (
     <div>
@@ -8425,22 +8453,22 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, onSav
 
       {/* Summary tiles — tap to see Total Sales */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 }}>
-        <div onClick={() => setShowSales(true)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "14px 16px", cursor: "pointer" }}
-          onMouseEnter={e => e.currentTarget.style.boxShadow="0 4px 16px rgba(0,0,0,0.08)"}
+        <div onClick={() => (perms.seeTotalSales || perms.isAdmin) && setShowSales(true)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "14px 16px", cursor: (perms.seeTotalSales || perms.isAdmin) ? "pointer" : "default" }}
+          onMouseEnter={e => { if (perms.seeTotalSales || perms.isAdmin) e.currentTarget.style.boxShadow="0 4px 16px rgba(0,0,0,0.08)"; }}
           onMouseLeave={e => e.currentTarget.style.boxShadow="none"}>
           <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 6, display:"flex", justifyContent:"space-between" }}>
             Outstanding
-            <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{opacity:0.5}}><path d="m9 18 6-6-6-6"/></svg>
+            {(perms.seeTotalSales || perms.isAdmin) && <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{opacity:0.5}}><path d="m9 18 6-6-6-6"/></svg>}
           </div>
           <div style={{ fontSize: 24, fontWeight: 800, color: outstanding > 0 ? T.warning : T.accent, letterSpacing: "-0.02em" }}>{moneyFmt(outstanding)}</div>
-          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>{all.filter(iv => iv._status !== "Paid" && iv.status !== "Draft").length} invoices · tap for sales</div>
+          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>{all.filter(iv => iv._status !== "Paid" && iv.status !== "Draft").length} invoices{(perms.seeTotalSales || perms.isAdmin) ? " · tap for sales" : ""}</div>
         </div>
-        <div onClick={() => setShowSales(true)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "14px 16px", cursor: "pointer" }}
-          onMouseEnter={e => e.currentTarget.style.boxShadow="0 4px 16px rgba(0,0,0,0.08)"}
+        <div onClick={() => (perms.seeTotalSales || perms.isAdmin) && setShowSales(true)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "14px 16px", cursor: (perms.seeTotalSales || perms.isAdmin) ? "pointer" : "default" }}
+          onMouseEnter={e => { if (perms.seeTotalSales || perms.isAdmin) e.currentTarget.style.boxShadow="0 4px 16px rgba(0,0,0,0.08)"; }}
           onMouseLeave={e => e.currentTarget.style.boxShadow="none"}>
           <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 6, display:"flex", justifyContent:"space-between" }}>
             Paid This Month
-            <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{opacity:0.5}}><path d="m9 18 6-6-6-6"/></svg>
+            {(perms.seeTotalSales || perms.isAdmin) && <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{opacity:0.5}}><path d="m9 18 6-6-6-6"/></svg>}
           </div>
           <div style={{ fontSize: 24, fontWeight: 800, color: T.accent, letterSpacing: "-0.02em" }}>{moneyFmt(paidThisMonth)}</div>
           <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>{overdueCount > 0 ? <span style={{ color: T.warning, fontWeight: 700 }}>{overdueCount} overdue</span> : "No overdue"}</div>
@@ -9356,7 +9384,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
           )}
           {perms.seeCostsBudget && (
             <Collapsible title="Costs & Labor" subtitle="Hourly rate, overhead, gas, and per-stop cost assumptions.">
-              <CostSettings costs={costs} setCosts={setCosts} />
+              <CostSettings costs={costs} setCosts={setCosts} clients={clients} />
             </Collapsible>
           )}
           {perms.seeCostsBudget && (
@@ -10045,6 +10073,7 @@ function Icon({ name, size = 22, filled = false }) {
     // Nav
     home:     <><path d="M4 10.5 12 4l8 6.5" /><path d="M5.5 9.5V19a1 1 0 0 0 1 1H10v-5h4v5h3.5a1 1 0 0 0 1-1V9.5" /></>,
     truck:    <><path d="M1 3h13v10H1z" /><path d="M14 7h4l3 3v3h-7z" /><circle cx="5.5" cy="16.5" r="1.8" /><circle cx="17.5" cy="16.5" r="1.8" /></>,
+    box:      <><path d="M21 8v8a2 2 0 0 1-1 1.73l-7 4a2 2 0 0 1-2 0l-7-4A2 2 0 0 1 3 16V8a2 2 0 0 1 1-1.73l7-4a2 2 0 0 1 2 0l7 4A2 2 0 0 1 21 8z" /><path d="M3.3 7 12 12l8.7-5" /><path d="M12 22V12" /></>,
     wrench:   <><path d="M14.5 5.5a3.5 3.5 0 0 1-4.6 4.6L4 16v4h4l5.9-5.9a3.5 3.5 0 0 0 4.6-4.6l-2.1 2.1-2-.5-.5-2 2.1-2.1z" /></>,
     clients:  <><circle cx="12" cy="8" r="3.4" /><path d="M5.5 20c0-3.6 3-6 6.5-6s6.5 2.4 6.5 6" /></>,
     calendar: <><rect x="4" y="5" width="16" height="16" rx="2.5" /><path d="M4 9.5h16M9 3v4M15 3v4" /></>,
@@ -10403,7 +10432,7 @@ function CPMessages({ client, branding, onSubmit, T }) {
 // and lets you adjust inventory manually.
 // ─────────────────────────────────────────────
 
-function InventoryScreen({ catalog, setCatalog, clients, T }) {
+function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, T }) {
   const locations = catalog.locations || [];
   const treatments = catalog.treatments || [];
   const parts = catalog.parts || [];
@@ -10601,16 +10630,17 @@ function InventoryScreen({ catalog, setCatalog, clients, T }) {
         <div>
           <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Inventory</div>
           <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>
-            {treatments.length + parts.length} items · {locations.length} location{locations.length !== 1 ? "s" : ""} · ${(
+            {treatments.length + parts.length} items · {locations.length} location{locations.length !== 1 ? "s" : ""}{canSeeCost ? ` · $${(
               treatments.reduce((s, it) => s + (parseFloat(it.costPerOz) || 0) * invTotal(it), 0) +
               parts.reduce((s, it) => s + (parseFloat(it.costPer) || 0) * invTotal(it), 0)
-            ).toFixed(0)} on hand
+            ).toFixed(0)} on hand` : ""}
           </div>
         </div>
         <Btn sm variant="ghost" onClick={() => setShowLocs(s => !s)}>Locations</Btn>
       </div>
 
-      {/* Quick action row */}
+      {/* Quick action row — value/reorder visible only to those who can see cost */}
+      {canSeeCost && (
       <div style={{ display: "flex", gap: 8 }}>
         <button onClick={() => { setShowValue(s => !s); setShowReorder(false); }}
           style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2, padding: "12px 14px", borderRadius: 14, border: `1.5px solid ${showValue ? T.primary : T.border}`, background: showValue ? hexA(T.primary, 0.06) : T.surface, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
@@ -10623,6 +10653,7 @@ function InventoryScreen({ catalog, setCatalog, clients, T }) {
           <span style={{ fontSize: 20, fontWeight: 800, color: reorderItems.length ? "#B45309" : T.text, letterSpacing: "-0.02em" }}>{reorderItems.length} item{reorderItems.length !== 1 ? "s" : ""}</span>
         </button>
       </div>
+      )}
 
       {/* Valuation panel */}
       {showValue && (
@@ -10819,7 +10850,7 @@ function InventoryScreen({ catalog, setCatalog, clients, T }) {
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 15, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{it.name}</div>
                     <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>
-                      ${cost.toFixed(2)}/{unit}{last && <span> · Last used {last}</span>}
+                      {canSeeCost ? <>${cost.toFixed(2)}/{unit}{last && <span> · Last used {last}</span>}</> : <>{last ? `Last used ${last}` : `Tracked in ${unit}`}</>}
                     </div>
                   </div>
                   <span style={{ fontSize: 11, fontWeight: 700, padding: "4px 12px", borderRadius: 100, background: status.bg, color: status.color, flexShrink: 0, marginLeft: 10 }}>
@@ -10985,7 +11016,8 @@ function InventoryScreen({ catalog, setCatalog, clients, T }) {
               </div>
             </div>
 
-            {/* Cost + Retail pricing */}
+            {/* Cost + Retail pricing — owner only */}
+            {canSeeCost && (<>
             <div style={{ display: "flex", gap: 10 }}>
               <div style={{ flex: 1 }}>
                 <label style={lbl}>Cost per {itemModal.data.unit || (itemModal.kind === "part" ? "piece" : "oz")}</label>
@@ -11017,6 +11049,7 @@ function InventoryScreen({ catalog, setCatalog, clients, T }) {
                 </div>
               );
             })()}
+            </>)}
 
             {/* Per-location starting stock */}
             <div>
@@ -11833,6 +11866,32 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
   const jobsWithTreatment = periodJobs.filter(h => (h.treatmentsUsed || []).length > 0).length;
   const avgTreatmentPerStop = jobsWithTreatment > 0 ? totalTreatmentCost / jobsWithTreatment : 0;
 
+  // ── Consolidated P&L (owner oversight) ──
+  // Roll up every cost category from this period's completed stops + fixed monthly overhead
+  const pnl = (() => {
+    let labor = 0, treatment = 0, parts = 0, product = 0, gas = 0, insurance = 0, equipment = 0, overhead = 0;
+    periodJobs.forEach(h => {
+      const b = h.breakdown || {};
+      labor += b.labor || 0;
+      treatment += b.treatment || 0;
+      parts += b.parts || 0;
+      product += b.product || 0;
+      gas += b.gas || 0;
+      insurance += b.insurance || 0;
+      equipment += b.equipment || 0;
+      overhead += b.overhead || 0;
+    });
+    const directCost = labor + treatment + parts + product + gas + insurance + equipment + overhead;
+    // Fixed monthly overhead applies to a month period (prorate roughly for other periods)
+    const fixedMonthly = costs ? monthlyFixedCosts(costs) : 0;
+    const monthsInPeriod = period === "month" ? 1 : period === "quarter" ? 3 : period === "year" ? 12 : 12;
+    const fixedCost = fixedMonthly * monthsInPeriod;
+    const totalCost = directCost + fixedCost;
+    const net = revenue - totalCost;
+    const margin = revenue > 0 ? (net / revenue) * 100 : 0;
+    return { labor, treatment, parts, product, gas, insurance, equipment, overhead, directCost, fixedCost, totalCost, net, margin };
+  })();
+
   // ── Referrals ──
   const referralBreakdown = {};
   activeClients.forEach(c => {
@@ -11914,6 +11973,57 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
           </button>
         ))}
       </div>
+
+      {/* Owner P&L summary */}
+      <Section title="Profit & Loss">
+        <div style={{ background: `linear-gradient(160deg, ${T.primary} 0%, ${mix(T.primary, "#000", 0.3)} 100%)`, borderRadius: 20, padding: "20px 20px 18px", marginBottom: 12, color: "#fff" }}>
+          <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", opacity: 0.8 }}>Net Profit</div>
+          <div style={{ fontSize: 38, fontWeight: 800, letterSpacing: "-0.03em", marginTop: 2, marginBottom: 2 }}>
+            {pnl.net < 0 ? "-" : ""}${Math.abs(Math.round(pnl.net)).toLocaleString()}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, opacity: 0.9 }}>
+            <span style={{ background: "rgba(255,255,255,0.2)", borderRadius: 100, padding: "2px 10px", fontWeight: 700 }}>{pnl.margin.toFixed(0)}% margin</span>
+            <span>on ${Math.round(revenue).toLocaleString()} collected</span>
+          </div>
+        </div>
+
+        {/* Cost breakdown */}
+        <div style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, overflow: "hidden", marginBottom: 10 }}>
+          <div style={{ padding: "12px 18px", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between" }}>
+            <span style={{ fontSize: 13, fontWeight: 800, color: T.text }}>Revenue Collected</span>
+            <span style={{ fontSize: 14, fontWeight: 800, color: T.accent }}>${Math.round(revenue).toLocaleString()}</span>
+          </div>
+          {[
+            ["Labor", pnl.labor],
+            ["Treatments", pnl.treatment],
+            ["Parts", pnl.parts],
+            ["Products", pnl.product],
+            ["Gas / Fuel", pnl.gas],
+            ["Equipment", pnl.equipment],
+            ["Insurance", pnl.insurance],
+            ["Per-stop overhead", pnl.overhead],
+            ["Fixed monthly overhead", pnl.fixedCost],
+          ].filter(([, v]) => v > 0).map(([label, val], i) => (
+            <div key={label} style={{ padding: "10px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: `1px solid ${T.border}` }}>
+              <span style={{ fontSize: 13, color: T.text }}>{label}</span>
+              <span style={{ fontSize: 13, color: T.textMuted }}>−${Math.round(val).toLocaleString()}</span>
+            </div>
+          ))}
+          <div style={{ padding: "12px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", background: T.surfaceAlt }}>
+            <span style={{ fontSize: 13, fontWeight: 800, color: T.text }}>Total Cost</span>
+            <span style={{ fontSize: 14, fontWeight: 800, color: T.text }}>−${Math.round(pnl.totalCost).toLocaleString()}</span>
+          </div>
+          <div style={{ padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontSize: 14, fontWeight: 800, color: T.text }}>{pnl.net >= 0 ? "Net Profit" : "Net Loss"}</span>
+            <span style={{ fontSize: 18, fontWeight: 800, color: pnl.net >= 0 ? T.accent : "#C0392B", letterSpacing: "-0.02em" }}>
+              {pnl.net < 0 ? "-" : ""}${Math.abs(Math.round(pnl.net)).toLocaleString()}
+            </span>
+          </div>
+        </div>
+        <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5 }}>
+          Pulled from completed stops in this period plus fixed monthly overhead. Revenue is from paid invoices. This is your owner-only view; staff don't see it unless you grant profitability access.
+        </div>
+      </Section>
 
       {/* Revenue */}
       <Section title="Revenue">
@@ -12133,10 +12243,10 @@ const ALL_NAV = [
   { id: "clients",    label: "Clients",   icon: "clients" },
   { id: "schedule",   label: "Schedule",  icon: "calendar" },
   { id: "messages",   label: "Messages",  icon: "message" },
-  { id: "invoices",   label: "Invoices",  icon: "invoice",   perm: "canInvoice" },
+  { id: "invoices",   label: "Invoices",  icon: "invoice",   permAny: ["viewInvoices", "canInvoice"] },
   { id: "estimates",  label: "Estimates", icon: "clipboard", perm: "canInvoice" },
-  { id: "inventory",  label: "Inventory", icon: "info",      ownerOnly: true },
-  { id: "reports",    label: "Reports",   icon: "dollar",    ownerOnly: true },
+  { id: "inventory",  label: "Inventory", icon: "box",       perm: "seeInventory" },
+  { id: "reports",    label: "Reports",   icon: "dollar",    perm: "seeReportsPnl" },
   { id: "settings",   label: "Customize", icon: "sliders" },
 ];
 
@@ -12152,6 +12262,7 @@ function OverflowMenu({ page, perms, navUnread, dockIds, setDockIds, onNav, onSi
   const availableNav = ALL_NAV.filter(n => {
     if (n.ownerOnly && !perms.isAdmin) return false;
     if (n.perm && !perms[n.perm]) return false;
+    if (n.permAny && !perms.isAdmin && !n.permAny.some(k => perms[k])) return false;
     return true;
   });
 
@@ -14110,6 +14221,7 @@ export default function App({ authEmail = "", onSignOut }) {
     if (!n) return false;
     if (n.ownerOnly && !perms.isAdmin) return false;
     if (n.perm && !perms[n.perm]) return false;
+    if (n.permAny && !perms.isAdmin && !n.permAny.some(k => perms[k])) return false;
     return true;
   });
   useEffect(() => {
@@ -14135,6 +14247,16 @@ export default function App({ authEmail = "", onSignOut }) {
   }, [ltm, emailKey, currentUser, anyEmail]);
 
   const handleClientSelect = (c) => { setSelectedClient(c); setAdding(false); setPage("clients"); window.scrollTo({ top: 0, behavior: "instant" }); };
+
+  // ── Sync body + theme-color to the active screen so the safe-area never shows a mismatched bar ──
+  useEffect(() => {
+    const splashColor = (branding.splashBgColor && branding.splashBgColor.trim()) ? branding.splashBgColor : T.primary;
+    const activeColor = (!hydrated || showSplash) ? splashColor : T.bg;
+    document.body.style.background = activeColor;
+    document.documentElement.style.background = activeColor;
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute("content", activeColor);
+  }, [hydrated, showSplash, branding.splashBgColor, T.bg, T.primary]);
 
   // ── Auto-update: check if Vercel deployed a new version and reload if so ──
   useEffect(() => {
@@ -14514,7 +14636,13 @@ export default function App({ authEmail = "", onSignOut }) {
       <div style={{
         fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif',
         background: splashBgCss,
-        position: "fixed", inset: 0,
+        position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
+        width: "100vw", height: "100dvh", minHeight: "100vh",
+        marginTop: "calc(-1 * env(safe-area-inset-top))",
+        marginBottom: "calc(-1 * env(safe-area-inset-bottom))",
+        paddingTop: "env(safe-area-inset-top)",
+        paddingBottom: "env(safe-area-inset-bottom)",
+        boxSizing: "border-box",
         display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
         color: splashFgColor, WebkitFontSmoothing: "antialiased", overflow: "hidden",
         zIndex: 9999,
@@ -14620,7 +14748,7 @@ export default function App({ authEmail = "", onSignOut }) {
     <AppCtx.Provider value={{ T, branding, perms, tiers: serviceTiers || DEFAULT_TIERS }}>
       <div style={{
         fontFamily: fontStack,
-        background: T.bg, minHeight: "100vh", display: "flex", flexDirection: "column", color: T.text,
+        background: T.bg, minHeight: "100dvh", display: "flex", flexDirection: "column", color: T.text,
         WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em",
         // CSS vars used by the global polish layer below
         ["--ring"]: hexA(T.primary, 0.22), ["--ringBorder"]: T.primary,
@@ -14708,10 +14836,10 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} />}
           {page === "schedule" && <Schedule clients={clients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
           {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
-          {page === "inventory"  && perms.isAdmin && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} T={T} />}
-          {page === "reports"   && perms.isAdmin && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
+          {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin} T={T} />}
+          {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
           {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
-          {page === "invoices"  && perms.canInvoice && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} initialFilter={invoiceFilter} />}
+          {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} initialFilter={invoiceFilter} />}
           {page === "import"   && perms.canImport && <SkimmerImport onImport={handleImportClients} onGoToClients={() => handleNav("clients")} />}
           {page === "settings" && <AppSettings branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} />}
         </main>
