@@ -6941,6 +6941,105 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, presetClientId, 
   );
 }
 
+// ─────────────────────────────────────────────
+// QUICKBOOKS CONNECT
+// ─────────────────────────────────────────────
+function QBConnect() {
+  const { T } = useApp();
+  const [status, setStatus]   = useState("idle"); // idle | syncing | done | error
+  const [result, setResult]   = useState(null);
+  const [connected, setConnected] = useState(false);
+
+  // Check if we just returned from QB OAuth
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("qb") === "connected") {
+      setConnected(true);
+      // Clean up URL
+      window.history.replaceState({}, "", window.location.pathname);
+    } else if (params.get("qb") === "error") {
+      setStatus("error");
+    }
+  }, []);
+
+  const handleConnect = () => {
+    window.location.href = "/api/quickbooks/auth";
+  };
+
+  const handleSync = async () => {
+    setStatus("syncing");
+    setResult(null);
+    try {
+      const res  = await fetch("/api/quickbooks/sync");
+      if (res.status === 401) {
+        setStatus("error");
+        setResult({ error: "Session expired. Please reconnect." });
+        setConnected(false);
+        return;
+      }
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setResult(data);
+      setStatus("done");
+    } catch (err) {
+      setStatus("error");
+      setResult({ error: err.message });
+    }
+  };
+
+  return (
+    <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>
+        Connect your QuickBooks Online account to sync invoices and client records. Invoice history will appear on each client's record.
+      </div>
+
+      {!connected ? (
+        <button onClick={handleConnect}
+          style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, background: "#2CA01C", color: "#fff", border: "none", borderRadius: 14, padding: "14px 20px", fontWeight: 800, fontSize: 15, cursor: "pointer", fontFamily: "inherit", boxShadow: "0 4px 16px rgba(44,160,28,0.3)" }}>
+          <svg viewBox="0 0 24 24" width={20} height={20} fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>
+          Connect QuickBooks
+        </button>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, background: hexA("#16a34a", 0.08), border: `1px solid ${hexA("#16a34a", 0.2)}`, borderRadius: 12, padding: "10px 14px" }}>
+            <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#16a34a", flexShrink: 0 }} />
+            <span style={{ fontSize: 13, fontWeight: 700, color: "#16a34a" }}>Connected to QuickBooks</span>
+          </div>
+          <button onClick={handleSync} disabled={status === "syncing"}
+            style={{ background: status === "syncing" ? T.surfaceAlt : T.primary, color: status === "syncing" ? T.textMuted : "#fff", border: "none", borderRadius: 12, padding: "12px 18px", fontWeight: 700, fontSize: 14, cursor: status === "syncing" ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+            {status === "syncing" ? (
+              <><div style={{ width: 16, height: 16, border: `2px solid ${T.textMuted}`, borderTopColor: T.primary, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /> Syncing…</>
+            ) : "Sync Now"}
+          </button>
+        </div>
+      )}
+
+      {status === "done" && result && (
+        <div style={{ background: hexA("#16a34a", 0.06), border: `1px solid ${hexA("#16a34a", 0.2)}`, borderRadius: 14, padding: "14px 16px" }}>
+          <div style={{ fontSize: 14, fontWeight: 800, color: T.text, marginBottom: 6 }}>Sync complete</div>
+          <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.6 }}>
+            {result.invoices?.length || 0} invoices · {result.customers?.length || 0} customers imported from QuickBooks.
+          </div>
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: 6 }}>
+            Go to a client record to see their invoice history, or the Invoices tab to see all.
+          </div>
+        </div>
+      )}
+
+      {status === "error" && (
+        <div style={{ background: hexA("#E5484D", 0.06), border: `1px solid ${hexA("#E5484D", 0.2)}`, borderRadius: 14, padding: "14px 16px" }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#E5484D" }}>
+            {result?.error || "Something went wrong. Try reconnecting."}
+          </div>
+          <button onClick={handleConnect} style={{ marginTop: 10, background: "none", border: `1px solid ${T.border}`, borderRadius: 10, padding: "8px 14px", fontSize: 12, fontWeight: 700, color: T.text, cursor: "pointer", fontFamily: "inherit" }}>
+            Reconnect
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding }) {
   const { T } = useApp();
   const cfg = { ...DEFAULT_INVOICING, ...(invoicing || {}) };
@@ -6997,6 +7096,12 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding }) {
             {cfg.accent ? <button onClick={() => set("accent", "")} style={{ background: T.surfaceAlt, border: "none", borderRadius: 9, padding: "8px 12px", fontSize: 12, fontWeight: 700, color: T.textMuted, cursor: "pointer", fontFamily: "inherit" }}>Use theme</button> : null}
           </div>
         </div>
+      </Card>
+
+      {/* ── QUICKBOOKS ── */}
+      <Card style={{ marginTop: 14 }}>
+        <CardHeader title="QuickBooks" />
+        <QBConnect />
       </Card>
     </>
   );
