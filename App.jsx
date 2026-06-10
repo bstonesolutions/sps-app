@@ -726,22 +726,22 @@ const DEFAULT_CATALOG = {
     { id: "loc_t1",    name: "Truck 1",     type: "vehicle" },
     { id: "loc_t2",    name: "Truck 2",     type: "vehicle" },
   ],
-  // treatments are consumables tracked by the ounce, with OUR cost per oz.
+  // treatments are consumables tracked by the ounce, with OUR cost per oz and a retail value.
   // stockByLoc maps locationId -> amount (in the item's unit). inventoryOz kept for back-compat.
   treatments: [
-    { id: "t1", name: "Beneficial Bacteria (liquid)", costPerOz: "0.85", unit: "oz", inventoryOz: "256", stockByLoc: { loc_shed: 192, loc_t1: 32, loc_t2: 32 } },
-    { id: "t2", name: "Algaecide",        costPerOz: "1.20", unit: "oz", inventoryOz: "128", stockByLoc: { loc_shed: 96,  loc_t1: 16, loc_t2: 16 } },
-    { id: "t3", name: "Water Clarifier",  costPerOz: "0.65", unit: "oz", inventoryOz: "192", stockByLoc: { loc_shed: 128, loc_t1: 32, loc_t2: 32 } },
-    { id: "t4", name: "Dechlorinator",    costPerOz: "0.40", unit: "oz", inventoryOz: "320", stockByLoc: { loc_shed: 256, loc_t1: 32, loc_t2: 32 } },
-    { id: "t5", name: "Pond Salt",        costPerOz: "0.10", unit: "oz", inventoryOz: "512", stockByLoc: { loc_shed: 448, loc_t1: 32, loc_t2: 32 } },
+    { id: "t1", name: "Beneficial Bacteria (liquid)", costPerOz: "0.85", retailPerOz: "2.50", unit: "oz", inventoryOz: "256", stockByLoc: { loc_shed: 192, loc_t1: 32, loc_t2: 32 } },
+    { id: "t2", name: "Algaecide",        costPerOz: "1.20", retailPerOz: "3.50", unit: "oz", inventoryOz: "128", stockByLoc: { loc_shed: 96,  loc_t1: 16, loc_t2: 16 } },
+    { id: "t3", name: "Water Clarifier",  costPerOz: "0.65", retailPerOz: "1.95", unit: "oz", inventoryOz: "192", stockByLoc: { loc_shed: 128, loc_t1: 32, loc_t2: 32 } },
+    { id: "t4", name: "Dechlorinator",    costPerOz: "0.40", retailPerOz: "1.25", unit: "oz", inventoryOz: "320", stockByLoc: { loc_shed: 256, loc_t1: 32, loc_t2: 32 } },
+    { id: "t5", name: "Pond Salt",        costPerOz: "0.10", retailPerOz: "0.35", unit: "oz", inventoryOz: "512", stockByLoc: { loc_shed: 448, loc_t1: 32, loc_t2: 32 } },
   ],
-  // parts are hard goods tracked in flexible units (pieces, feet, etc.) with a unit cost
+  // parts are hard goods tracked in flexible units (pieces, feet, etc.) with a unit cost and retail
   parts: [
-    { id: "pt1", name: "Pond Pump (sub 2000gph)", unit: "pieces", costPer: "145", lowAt: "2", stockByLoc: { loc_shed: 4,   loc_t1: 1,  loc_t2: 1 } },
-    { id: "pt2", name: "PVC Pipe (1.5in)",        unit: "feet",   costPer: "1.80", lowAt: "20", stockByLoc: { loc_shed: 100, loc_t1: 20, loc_t2: 20 } },
-    { id: "pt3", name: "PVC Union (1.5in)",       unit: "pieces", costPer: "4.50", lowAt: "6",  stockByLoc: { loc_shed: 24,  loc_t1: 6,  loc_t2: 6 } },
-    { id: "pt4", name: "Filter Pad",              unit: "pieces", costPer: "12",   lowAt: "4",  stockByLoc: { loc_shed: 16,  loc_t1: 4,  loc_t2: 4 } },
-    { id: "pt5", name: "Tubing (0.75in)",         unit: "feet",   costPer: "0.95", lowAt: "25", stockByLoc: { loc_shed: 150, loc_t1: 25, loc_t2: 25 } },
+    { id: "pt1", name: "Pond Pump (sub 2000gph)", unit: "pieces", costPer: "145", retailPer: "289", lowAt: "2", stockByLoc: { loc_shed: 4,   loc_t1: 1,  loc_t2: 1 } },
+    { id: "pt2", name: "PVC Pipe (1.5in)",        unit: "feet",   costPer: "1.80", retailPer: "4.50", lowAt: "20", stockByLoc: { loc_shed: 100, loc_t1: 20, loc_t2: 20 } },
+    { id: "pt3", name: "PVC Union (1.5in)",       unit: "pieces", costPer: "4.50", retailPer: "11", lowAt: "6",  stockByLoc: { loc_shed: 24,  loc_t1: 6,  loc_t2: 6 } },
+    { id: "pt4", name: "Filter Pad",              unit: "pieces", costPer: "12",   retailPer: "28", lowAt: "4",  stockByLoc: { loc_shed: 16,  loc_t1: 4,  loc_t2: 4 } },
+    { id: "pt5", name: "Tubing (0.75in)",         unit: "feet",   costPer: "0.95", retailPer: "2.50", lowAt: "25", stockByLoc: { loc_shed: 150, loc_t1: 25, loc_t2: 25 } },
   ],
 };
 
@@ -2623,7 +2623,7 @@ function ClientDocuments({ client, onChange }) {
   );
 }
 
-function ClientDetail({ client: init, invoices, invoicing, branding, schedule, onBack, onUpdate, onSaveInvoice, onDeleteInvoice }) {
+function ClientDetail({ client: init, invoices, invoicing, branding, catalog, schedule, onBack, onUpdate, onSaveInvoice, onDeleteInvoice }) {
   const { T, perms, tiers } = useApp();
   const [client, setClient] = useState(init);
   const [tab, setTab] = useState("overview");
@@ -2715,7 +2715,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, schedule, o
       {tab === "overview" && <ClientOverview client={client} invoices={invoices} onUpdate={onUpdate} />}
       {tab === "equipment" && <ClientEquipment client={client} invoices={invoices} onChange={eq => update({ equipment: eq })} />}
       {tab === "history" && <ClientHistory client={client} onChange={hist => update({ history: hist })} />}
-      {tab === "invoices" && perms.canInvoice && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} onSave={onSaveInvoice} onDelete={onDeleteInvoice} />}
+      {tab === "invoices" && perms.canInvoice && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} onSave={onSaveInvoice} onDelete={onDeleteInvoice} />}
       {tab === "docs"    && <ClientDocuments client={client} onChange={docs => update({ documents: docs })} />}
       {tab === "portal" && <ClientPortal client={client} invoices={invoices} schedule={schedule} branding={branding} />}
     </div>
@@ -3914,6 +3914,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
   const [readings, setReadings] = useState({});
   const [tx, setTx] = useState({});       // treatmentId -> oz
   const [partsUsed, setPartsUsedState] = useState({}); // partId -> qty
+  const [partBill, setPartBill] = useState({}); // partId -> bool (bill to client?)
   const [usageLoc, setUsageLoc] = useState(""); // which location stock is pulled from
   const [prods, setProds] = useState({});  // productId -> true
   const [notesClient, setNotesClient] = useState("");
@@ -3992,11 +3993,16 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
   // cost math
   const laborCost = (num(minutes) / 60) * num(hourlyRate);
   const treatmentCost = treatments.reduce((sum, t) => sum + num(tx[t.id]) * num(t.costPerOz), 0);
+  const treatmentRetail = treatments.reduce((sum, t) => sum + num(tx[t.id]) * num(t.retailPerOz), 0);
+  // Parts: billed ones add retail value to the job; all parts cost us their cost basis
   const partsCost = parts.reduce((sum, p) => sum + num(partsUsed[p.id]) * num(p.costPer), 0);
+  const partsBilledRetail = parts.reduce((sum, p) => sum + ((partBill[p.id] !== false && num(partsUsed[p.id]) > 0) ? num(partsUsed[p.id]) * num(p.retailPer) : 0), 0);
   const productCost = products.reduce((sum, p) => sum + (prods[p.id] ? num(p.price) : 0), 0);
   const totalCost = laborCost + treatmentCost + partsCost + productCost + num(gas) + num(insurance) + num(equipment) + num(overhead);
-  const profit = num(revenue) - totalCost;
-  const margin = num(revenue) > 0 ? (profit / num(revenue)) * 100 : 0;
+  // Revenue includes the flat service fee plus any parts billed to the client at retail
+  const effectiveRevenue = num(revenue) + partsBilledRetail;
+  const profit = effectiveRevenue - totalCost;
+  const margin = effectiveRevenue > 0 ? (profit / effectiveRevenue) * 100 : 0;
   const money = (n) => `$${n.toFixed(2)}`;
 
   const addPhotos = async (e, defaultLabel = "General") => {
@@ -4019,10 +4025,10 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
 
   const treatmentsUsed = treatments
     .filter(t => num(tx[t.id]) > 0)
-    .map(t => ({ id: t.id, name: t.name, oz: num(tx[t.id]), costPerOz: num(t.costPerOz), cost: num(tx[t.id]) * num(t.costPerOz), locId: usageLoc }));
+    .map(t => ({ id: t.id, name: t.name, oz: num(tx[t.id]), unit: t.unit || "oz", costPerOz: num(t.costPerOz), retailPerOz: num(t.retailPerOz), cost: num(tx[t.id]) * num(t.costPerOz), retail: num(tx[t.id]) * num(t.retailPerOz), locId: usageLoc }));
   const partsUsedArr = parts
     .filter(p => num(partsUsed[p.id]) > 0)
-    .map(p => ({ id: p.id, name: p.name, qty: num(partsUsed[p.id]), unit: p.unit || "pieces", costPer: num(p.costPer), cost: num(partsUsed[p.id]) * num(p.costPer), locId: usageLoc }));
+    .map(p => ({ id: p.id, name: p.name, qty: num(partsUsed[p.id]), unit: p.unit || "pieces", costPer: num(p.costPer), retailPer: num(p.retailPer), cost: num(partsUsed[p.id]) * num(p.costPer), retail: num(partsUsed[p.id]) * num(p.retailPer), locId: usageLoc, bill: partBill[p.id] !== false }));
   const productsUsed = products.filter(p => prods[p.id]).map(p => p.name);
 
   const ctx = {
@@ -4055,9 +4061,9 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
     usageLoc,
     breakdown: {
       revenue: num(revenue), minutes: num(minutes), hourlyRate: num(hourlyRate),
-      labor: laborCost, treatment: treatmentCost, parts: partsCost, product: productCost,
+      labor: laborCost, treatment: treatmentCost, treatmentRetail, parts: partsCost, partsBilledRetail, product: productCost,
       gas: num(gas), insurance: num(insurance), equipment: num(equipment), overhead: num(overhead),
-      total: totalCost, profit, margin,
+      total: totalCost, effectiveRevenue, profit, margin,
     },
   });
 
@@ -4278,19 +4284,35 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {parts.map(p => {
               const here = usageLoc ? invAtLoc(p, usageLoc) : invTotal(p);
-              const over = num(partsUsed[p.id]) > here;
+              const qty = num(partsUsed[p.id]);
+              const over = qty > here;
               const unit = p.unit || "pieces";
+              const willBill = partBill[p.id] !== false; // default true
+              const shownPrice = willBill ? num(p.retailPer) : num(p.costPer);
               return (
-                <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, background: T.surfaceAlt, borderRadius: 10, padding: "8px 12px" }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{p.name}</div>
-                    <div style={{ fontSize: 11, color: over ? T.warning : T.textMuted }}>
-                      ${num(p.costPer).toFixed(2)}/{unit} · {here} {unit} {usageLoc ? "here" : "on hand"}{over ? " · over!" : ""}
+                <div key={p.id} style={{ background: T.surfaceAlt, borderRadius: 10, padding: "8px 12px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{p.name}</div>
+                      <div style={{ fontSize: 11, color: over ? T.warning : T.textMuted }}>
+                        ${num(p.costPer).toFixed(2)} cost · ${num(p.retailPer).toFixed(2)} retail · {here} {unit} {usageLoc ? "here" : "on hand"}{over ? " · over!" : ""}
+                      </div>
                     </div>
+                    <input type="text" inputMode="decimal" value={partsUsed[p.id] || ""} onChange={e => setPartsUsedState(x => ({ ...x, [p.id]: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0" style={{ width: 60, padding: "8px", border: `1px solid ${over ? T.warning : T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
+                    <span style={{ fontSize: 12, color: T.textMuted, width: 32 }}>{unit}</span>
+                    <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: qty > 0 ? T.text : T.textMuted }}>{money(qty * shownPrice)}</div>
                   </div>
-                  <input type="text" inputMode="decimal" value={partsUsed[p.id] || ""} onChange={e => setPartsUsedState(x => ({ ...x, [p.id]: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0" style={{ width: 60, padding: "8px", border: `1px solid ${over ? T.warning : T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
-                  <span style={{ fontSize: 12, color: T.textMuted, width: 32 }}>{unit}</span>
-                  <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: num(partsUsed[p.id]) > 0 ? T.text : T.textMuted }}>{money(num(partsUsed[p.id]) * num(p.costPer))}</div>
+                  {qty > 0 && (
+                    <button onClick={() => setPartBill(b => ({ ...b, [p.id]: !willBill }))}
+                      style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", padding: 0 }}>
+                      <div style={{ width: 34, height: 20, borderRadius: 100, background: willBill ? T.primary : T.border, position: "relative", transition: "background 0.2s", flexShrink: 0 }}>
+                        <div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: willBill ? 16 : 2, transition: "left 0.2s" }} />
+                      </div>
+                      <span style={{ fontSize: 11.5, color: willBill ? T.primary : T.textMuted, fontWeight: 700 }}>
+                        {willBill ? `Bill client at retail (${money(qty * num(p.retailPer))})` : "Internal cost only — not billed"}
+                      </span>
+                    </button>
+                  )}
                 </div>
               );
             })}
@@ -4447,13 +4469,38 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
 
         {/* computed cost lines */}
         {[["Labor", money(laborCost), `${minutes} min @ $${num(hourlyRate)}/hr`],
-          ["Treatments", money(treatmentCost), null],
           ["Products", money(productCost), null]].map(([k, v, sub]) => (
           <div key={k} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
             <span style={{ fontSize: 13, color: T.text }}>{k}{sub && <span style={{ fontSize: 11, color: T.textMuted }}> · {sub}</span>}</span>
             <span style={{ fontSize: 13, color: T.textMuted }}>−{v}</span>
           </div>
         ))}
+
+        {/* Treatments — show cost (counted) and retail value (reference) */}
+        {treatmentCost > 0 && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <span style={{ fontSize: 13, color: T.text }}>Treatments
+              <span style={{ fontSize: 11, color: T.textMuted }}> · ${treatmentRetail.toFixed(2)} retail value</span>
+            </span>
+            <span style={{ fontSize: 13, color: T.textMuted }}>−{money(treatmentCost)}</span>
+          </div>
+        )}
+
+        {/* Parts cost (all parts cost us their basis) */}
+        {partsCost > 0 && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <span style={{ fontSize: 13, color: T.text }}>Parts cost</span>
+            <span style={{ fontSize: 13, color: T.textMuted }}>−{money(partsCost)}</span>
+          </div>
+        )}
+
+        {/* Parts billed back to client at retail (adds to revenue) */}
+        {partsBilledRetail > 0 && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <span style={{ fontSize: 13, color: "#15803D" }}>Parts billed to client</span>
+            <span style={{ fontSize: 13, color: "#15803D", fontWeight: 700 }}>+{money(partsBilledRetail)}</span>
+          </div>
+        )}
 
         {/* editable cost lines */}
         {[["Labor rate /hr", hourlyRate, setHourlyRate],["Gas", gas, setGas],["Insurance", insurance, setInsurance],["Equipment", equipment, setEquipment],["Overhead", overhead, setOverhead]].map(([k, val, setter]) => (
@@ -4467,6 +4514,12 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
         ))}
 
         <div style={{ borderTop: `1px solid ${T.border}`, margin: "10px 0", paddingTop: 10 }} />
+        {partsBilledRetail > 0 && (
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+            <span style={{ fontSize: 13, color: T.textMuted }}>Service + billed parts</span>
+            <span style={{ fontSize: 13, color: T.textMuted }}>{money(effectiveRevenue)}</span>
+          </div>
+        )}
         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
           <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Total Cost</span>
           <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{money(totalCost)}</span>
@@ -7319,7 +7372,7 @@ function InvoiceRow({ iv, onClick }) {
   );
 }
 
-function InvoiceEditor({ invoice, clients, invoices, invoicing, presetClientId, onSave, onClose, onDelete }) {
+function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, presetClientId, onSave, onClose, onDelete }) {
   const { T } = useApp();
   const money = (n) => `$${(n || 0).toFixed(2)}`;
   const toISO = (mdy) => { const d = parseMDY(mdy); return d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}` : ""; };
@@ -7350,6 +7403,12 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, presetClientId, 
 
   const importVisit = (h) => {
     const items = (h.services || []).map((sv, i) => ({ id: `l${Date.now()}${i}`, desc: typeof sv === "string" ? sv : sv.name, qty: "1", unitPrice: String(typeof sv === "string" ? "" : (sv.price || "")), taxable: false }));
+    // Treatments are NOT billed as line items — they're folded into the service fee.
+    // Only pull in parts the tech marked to bill the client, priced at retail.
+    (h.partsUsed || []).forEach((p, i) => {
+      if (p.bill === false) return;
+      items.push({ id: `lp${Date.now()}${i}`, desc: `${p.name} (${p.qty} ${p.unit || "pieces"})`, qty: String(p.qty || 1), unitPrice: String(p.retailPer || p.costPer || ""), taxable: true });
+    });
     if (items.length) setInv(s => ({ ...s, lineItems: items }));
     setVisitPick(false);
   };
@@ -7397,12 +7456,18 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, presetClientId, 
           {visitPick && (
             <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: 10, marginBottom: 10, display: "flex", flexDirection: "column", gap: 6 }}>
               <div style={{ fontSize: 11, color: T.textMuted, padding: "2px 4px" }}>Pull line items from a completed visit:</div>
-              {completedHistory.slice(0, 8).map((h, i) => (
-                <button key={i} onClick={() => importVisit(h)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 9, padding: "9px 11px", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-                  <span style={{ fontSize: 13, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{h.date} · {(h.services || []).map(s => typeof s === "string" ? s : s.name).join(", ") || h.type}</span>
-                  <span style={{ fontSize: 13, fontWeight: 700, color: T.text, flexShrink: 0 }}>{h.invoice}</span>
-                </button>
-              ))}
+              {completedHistory.slice(0, 8).map((h, i) => {
+                const billCount = (h.partsUsed || []).filter(p => p.bill !== false).length;
+                return (
+                  <button key={i} onClick={() => importVisit(h)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 9, padding: "9px 11px", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+                    <span style={{ fontSize: 13, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {h.date} · {(h.services || []).map(s => typeof s === "string" ? s : s.name).join(", ") || h.type}
+                      {billCount > 0 && <span style={{ color: T.primary, fontWeight: 700 }}> · +{billCount} part{billCount !== 1 ? "s" : ""}</span>}
+                    </span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: T.text, flexShrink: 0 }}>{h.invoice}</span>
+                  </button>
+                );
+              })}
             </div>
           )}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -8232,7 +8297,7 @@ function TotalSalesScreen({ invoices, clients, onBack, T }) {
   );
 }
 
-function InvoicesScreen({ invoices, clients, invoicing, branding, onSave, onDelete, initialFilter = "All" }) {
+function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, onSave, onDelete, initialFilter = "All" }) {
   const { T, perms } = useApp();
   const moneyFmt = (n) => `$${Math.round(n).toLocaleString()}`;
   const moneyExact = (n) => `$${parseFloat(n||0).toFixed(2)}`;
@@ -8518,14 +8583,14 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, onSave, onDele
         </div>
       )}
 
-      {creating && <InvoiceEditor clients={clients} invoices={invoices} invoicing={invoicing} onSave={onSave} onClose={() => setCreating(false)} />}
-      {editing  && <InvoiceEditor invoice={editing} clients={clients} invoices={invoices} invoicing={invoicing} onSave={onSave} onDelete={onDelete} onClose={() => setEditing(null)} />}
+      {creating && <InvoiceEditor clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} onSave={onSave} onClose={() => setCreating(false)} />}
+      {editing  && <InvoiceEditor invoice={editing} clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} onSave={onSave} onDelete={onDelete} onClose={() => setEditing(null)} />}
       {livePreview && <InvoicePreview invoice={livePreview} client={clients.find(c => invoiceMatchesClient(livePreview, c))} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
     </div>
   );
 }
 
-function ClientInvoices({ client, invoices, invoicing, branding, onSave, onDelete }) {
+function ClientInvoices({ client, invoices, invoicing, branding, catalog, onSave, onDelete }) {
   const { T, perms } = useApp();
   const list = sortInvoices(clientInvoicesOf(invoices, client.id, client)).map(iv => ({ ...iv, _client: client }));
   const [creating, setCreating] = useState(false);
@@ -8558,7 +8623,7 @@ function ClientInvoices({ client, invoices, invoicing, branding, onSave, onDelet
         {list.length === 0 && <div style={{ fontSize: 13, color: T.textMuted, padding: "6px 0" }}>No invoices yet for this client.</div>}
         {list.map(iv => <InvoiceRow key={iv.id} iv={iv} onClick={() => setPreview(iv)} />)}
       </div>
-      {creating && <InvoiceEditor clients={[client]} presetClientId={client.id} invoices={invoices} invoicing={invoicing} onSave={onSave} onClose={() => setCreating(false)} />}
+      {creating && <InvoiceEditor clients={[client]} presetClientId={client.id} invoices={invoices} invoicing={invoicing} catalog={catalog} onSave={onSave} onClose={() => setCreating(false)} />}
       {editing && <InvoiceEditor invoice={editing} clients={[client]} invoices={invoices} invoicing={invoicing} onSave={onSave} onDelete={onDelete} onClose={() => setEditing(null)} />}
       {livePreview && <InvoicePreview invoice={livePreview} client={client} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
     </Card>
@@ -10353,20 +10418,23 @@ function InventoryScreen({ catalog, setCatalog, clients, T }) {
   const [itemModal, setItemModal] = useState(null); // { mode, kind, data }
   const [locModal, setLocModal] = useState(null); // { mode, data }
   const [showLocs, setShowLocs] = useState(false);
+  const [showValue, setShowValue] = useState(false);
+  const [showReorder, setShowReorder] = useState(false);
 
   // Build usage history from client stop history (treatments + parts)
   const usageHistory = {};
   (clients || []).forEach(c => {
     (c.history || []).forEach(h => {
+      const tech = h.tech || "Unassigned";
       (h.treatmentsUsed || []).forEach(u => {
         const key = "tx_" + u.id;
         if (!usageHistory[key]) usageHistory[key] = [];
-        usageHistory[key].push({ date: h.date, amt: u.oz, client: c.name, cost: u.cost, loc: u.locId });
+        usageHistory[key].push({ date: h.date, amt: u.oz, client: c.name, cost: u.cost, loc: u.locId, tech });
       });
       (h.partsUsed || []).forEach(u => {
         const key = "pt_" + u.id;
         if (!usageHistory[key]) usageHistory[key] = [];
-        usageHistory[key].push({ date: h.date, amt: u.qty, client: c.name, cost: u.cost, loc: u.locId });
+        usageHistory[key].push({ date: h.date, amt: u.qty, client: c.name, cost: u.cost, loc: u.locId, tech });
       });
     });
   });
@@ -10502,6 +10570,30 @@ function InventoryScreen({ catalog, setCatalog, clients, T }) {
 
   const locName = (id) => (locations.find(l => l.id === id)?.name) || "Unassigned";
   const unitOf = (item) => item.unit || "oz";
+  const itemCost = (it) => parseFloat(it.unit && it.costPer !== undefined ? it.costPer : (it.costPer ?? it.costPerOz)) || 0;
+  const allItems = [...treatments.map(it => ({ ...it, _kind: "treatment", _cost: parseFloat(it.costPerOz) || 0, _retail: parseFloat(it.retailPerOz) || 0, _low: 32 })),
+                    ...parts.map(it => ({ ...it, _kind: "part", _cost: parseFloat(it.costPer) || 0, _retail: parseFloat(it.retailPer) || 0, _low: parseFloat(it.lowAt) || 0 }))];
+
+  // Total inventory value at cost and at retail
+  const totalValue = allItems.reduce((s, it) => s + it._cost * invTotal(it), 0);
+  const totalRetail = allItems.reduce((s, it) => s + it._retail * invTotal(it), 0);
+  const valueByLoc = locations.map(loc => ({
+    loc,
+    value: allItems.reduce((s, it) => s + it._cost * invAtLoc(it, loc.id), 0),
+    retail: allItems.reduce((s, it) => s + it._retail * invAtLoc(it, loc.id), 0),
+    units: allItems.reduce((s, it) => s + invAtLoc(it, loc.id), 0),
+  }));
+
+  // Reorder list — anything below its low threshold, with suggested restock to 2x low
+  const reorderItems = allItems
+    .filter(it => invTotal(it) < (it._kind === "part" ? it._low : 32))
+    .map(it => {
+      const total = invTotal(it);
+      const target = (it._kind === "part" ? it._low : 32) * 2;
+      const suggest = Math.max(0, Math.ceil(target - total));
+      return { ...it, total, suggest, estCost: suggest * it._cost };
+    });
+  const reorderTotal = reorderItems.reduce((s, it) => s + it.estCost, 0);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
@@ -10517,6 +10609,105 @@ function InventoryScreen({ catalog, setCatalog, clients, T }) {
         </div>
         <Btn sm variant="ghost" onClick={() => setShowLocs(s => !s)}>Locations</Btn>
       </div>
+
+      {/* Quick action row */}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={() => { setShowValue(s => !s); setShowReorder(false); }}
+          style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2, padding: "12px 14px", borderRadius: 14, border: `1.5px solid ${showValue ? T.primary : T.border}`, background: showValue ? hexA(T.primary, 0.06) : T.surface, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+          <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted }}>Total Value</span>
+          <span style={{ fontSize: 20, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>${totalValue.toFixed(0)}</span>
+        </button>
+        <button onClick={() => { setShowReorder(s => !s); setShowValue(false); }}
+          style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2, padding: "12px 14px", borderRadius: 14, border: `1.5px solid ${showReorder ? T.primary : (reorderItems.length ? hexA("#F59E0B", 0.5) : T.border)}`, background: showReorder ? hexA(T.primary, 0.06) : (reorderItems.length ? hexA("#F59E0B", 0.06) : T.surface), cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+          <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: reorderItems.length ? "#B45309" : T.textMuted }}>Reorder List</span>
+          <span style={{ fontSize: 20, fontWeight: 800, color: reorderItems.length ? "#B45309" : T.text, letterSpacing: "-0.02em" }}>{reorderItems.length} item{reorderItems.length !== 1 ? "s" : ""}</span>
+        </button>
+      </div>
+
+      {/* Valuation panel */}
+      {showValue && (
+        <Card>
+          <CardHeader title="Inventory Value by Location" />
+          <div style={{ padding: "8px 16px 16px" }}>
+            {/* Cost vs retail summary */}
+            <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+              <div style={{ flex: 1, background: T.surfaceAlt, borderRadius: 12, padding: "10px 12px" }}>
+                <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: T.textMuted }}>At Cost</div>
+                <div style={{ fontSize: 17, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginTop: 2 }}>${totalValue.toFixed(0)}</div>
+              </div>
+              <div style={{ flex: 1, background: T.surfaceAlt, borderRadius: 12, padding: "10px 12px" }}>
+                <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: T.textMuted }}>At Retail</div>
+                <div style={{ fontSize: 17, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginTop: 2 }}>${totalRetail.toFixed(0)}</div>
+              </div>
+              <div style={{ flex: 1, background: hexA("#16a34a", 0.08), borderRadius: 12, padding: "10px 12px" }}>
+                <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: "#15803D" }}>Potential</div>
+                <div style={{ fontSize: 17, fontWeight: 800, color: "#15803D", letterSpacing: "-0.02em", marginTop: 2 }}>${(totalRetail - totalValue).toFixed(0)}</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "10px 0", borderBottom: `2px solid ${T.border}`, marginBottom: 4 }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: T.textMuted }}>Location</span>
+              <span style={{ fontSize: 13, fontWeight: 700, color: T.textMuted }}>Cost basis</span>
+            </div>
+            {valueByLoc.sort((a, b) => b.value - a.value).map(({ loc, value, units }) => {
+              const pct = totalValue > 0 ? (value / totalValue) * 100 : 0;
+              return (
+                <div key={loc.id} style={{ padding: "11px 0", borderBottom: `1px solid ${T.border}` }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                    <span style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 13.5, fontWeight: 700, color: T.text }}>
+                      <Icon name={loc.type === "vehicle" ? "truck" : "home"} size={14} />{loc.name}
+                    </span>
+                    <span style={{ fontSize: 15, fontWeight: 800, color: T.text }}>${value.toFixed(2)}</span>
+                  </div>
+                  <div style={{ height: 5, background: T.surfaceAlt, borderRadius: 100, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${pct}%`, background: T.primary, borderRadius: 100 }} />
+                  </div>
+                  <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4 }}>{pct.toFixed(0)}% of total · {units % 1 === 0 ? units : units.toFixed(1)} units</div>
+                </div>
+              );
+            })}
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 10 }}>Value is your cost basis (cost per unit × quantity on hand).</div>
+          </div>
+        </Card>
+      )}
+
+      {/* Reorder panel */}
+      {showReorder && (
+        <Card>
+          <CardHeader title="Suggested Reorder" action={reorderItems.length > 0 ? <button onClick={() => {
+            const lines = reorderItems.map(it => `${it.name}: ${it.suggest} ${it.unit || (it._kind === "part" ? "pieces" : "oz")} (~$${it.estCost.toFixed(2)})`);
+            const text = `SPS Reorder List — ${new Date().toLocaleDateString()}\n\n${lines.join("\n")}\n\nEstimated total: $${reorderTotal.toFixed(2)}`;
+            if (navigator.share) navigator.share({ text }).catch(() => {});
+            else { navigator.clipboard?.writeText(text); }
+          }} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 9, padding: "6px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Share List</button> : null} />
+          <div style={{ padding: "8px 16px 16px" }}>
+            {reorderItems.length === 0 ? (
+              <div style={{ padding: "20px 0", textAlign: "center", color: T.textMuted, fontSize: 14 }}>Everything's stocked. Nothing to reorder.</div>
+            ) : (
+              <>
+                {reorderItems.map((it, i) => (
+                  <div key={it.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "11px 0", borderBottom: i < reorderItems.length - 1 ? `1px solid ${T.border}` : "none" }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text }}>{it.name}</div>
+                      <div style={{ fontSize: 11.5, color: "#B45309", marginTop: 2 }}>
+                        {it.total} {it.unit || (it._kind === "part" ? "pieces" : "oz")} left · suggest +{it.suggest}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>${it.estCost.toFixed(2)}</div>
+                      <button onClick={() => openAdjust(it, "restock", locFilter !== "all" ? locFilter : locations[0]?.id)}
+                        style={{ marginTop: 3, background: hexA(T.primary, 0.1), color: T.primary, border: "none", borderRadius: 7, padding: "4px 11px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Restock</button>
+                    </div>
+                  </div>
+                ))}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", paddingTop: 12, marginTop: 4 }}>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: T.textMuted }}>Estimated total</span>
+                  <span style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>${reorderTotal.toFixed(2)}</span>
+                </div>
+              </>
+            )}
+          </div>
+        </Card>
+      )}
 
       {/* Locations manager */}
       {showLocs && (
@@ -10785,22 +10976,47 @@ function InventoryScreen({ catalog, setCatalog, clients, T }) {
                 </select>
               </div>
               <div style={{ flex: 1 }}>
+                <label style={lbl}>Low stock at</label>
+                <input type="text" inputMode="decimal" style={field}
+                  value={itemModal.kind === "part" ? (itemModal.data.lowAt ?? "") : "32"}
+                  disabled={itemModal.kind !== "part"}
+                  onChange={e => setItemModal(m => ({ ...m, data: { ...m.data, lowAt: e.target.value.replace(/[^0-9.]/g, "") } }))}
+                  placeholder={itemModal.kind === "part" ? "e.g. 6" : "32"} />
+              </div>
+            </div>
+
+            {/* Cost + Retail pricing */}
+            <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ flex: 1 }}>
                 <label style={lbl}>Cost per {itemModal.data.unit || (itemModal.kind === "part" ? "piece" : "oz")}</label>
                 <input type="text" inputMode="decimal" style={field}
                   value={itemModal.kind === "part" ? (itemModal.data.costPer ?? "") : (itemModal.data.costPerOz ?? "")}
                   onChange={e => { const v = e.target.value.replace(/[^0-9.]/g, ""); setItemModal(m => ({ ...m, data: { ...m.data, [itemModal.kind === "part" ? "costPer" : "costPerOz"]: v } })); }}
                   placeholder="0.00" />
+                <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 4 }}>What you pay</div>
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={lbl}>Retail per {itemModal.data.unit || (itemModal.kind === "part" ? "piece" : "oz")}</label>
+                <input type="text" inputMode="decimal" style={field}
+                  value={itemModal.kind === "part" ? (itemModal.data.retailPer ?? "") : (itemModal.data.retailPerOz ?? "")}
+                  onChange={e => { const v = e.target.value.replace(/[^0-9.]/g, ""); setItemModal(m => ({ ...m, data: { ...m.data, [itemModal.kind === "part" ? "retailPer" : "retailPerOz"]: v } })); }}
+                  placeholder="0.00" />
+                <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 4 }}>What you charge</div>
               </div>
             </div>
-            <div>
-              <label style={lbl}>Low stock alert at</label>
-              <input type="text" inputMode="decimal" style={field}
-                value={itemModal.kind === "part" ? (itemModal.data.lowAt ?? "") : "32"}
-                disabled={itemModal.kind !== "part"}
-                onChange={e => setItemModal(m => ({ ...m, data: { ...m.data, lowAt: e.target.value.replace(/[^0-9.]/g, "") } }))}
-                placeholder={itemModal.kind === "part" ? "e.g. 6" : "32"} />
-              {itemModal.kind !== "part" && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>Treatments alert below 32 oz by default.</div>}
-            </div>
+            {/* Margin preview */}
+            {(() => {
+              const c = parseFloat(itemModal.kind === "part" ? itemModal.data.costPer : itemModal.data.costPerOz) || 0;
+              const r = parseFloat(itemModal.kind === "part" ? itemModal.data.retailPer : itemModal.data.retailPerOz) || 0;
+              if (c <= 0 || r <= 0) return null;
+              const margin = ((r - c) / r) * 100;
+              const markup = ((r - c) / c) * 100;
+              return (
+                <div style={{ background: hexA(margin >= 0 ? "#16a34a" : "#E5484D", 0.08), borderRadius: 12, padding: "10px 14px", fontSize: 12.5, color: margin >= 0 ? "#15803D" : "#E5484D", fontWeight: 600 }}>
+                  ${(r - c).toFixed(2)} profit per {itemModal.data.unit || "unit"} · {margin.toFixed(0)}% margin · {markup.toFixed(0)}% markup
+                </div>
+              );
+            })()}
 
             {/* Per-location starting stock */}
             <div>
@@ -10879,11 +11095,37 @@ function InventoryScreen({ catalog, setCatalog, clients, T }) {
               <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 12 }}>
                 {hist.length} use{hist.length !== 1 ? "s" : ""} · {hist.reduce((s, e) => s + (e.amt || 0), 0)} {unit} total consumed
               </div>
+
+              {/* By Tech breakdown */}
+              {(() => {
+                const byTech = {};
+                hist.forEach(h => { const t = h.tech || "Unassigned"; byTech[t] = (byTech[t] || 0) + (h.amt || 0); });
+                const rows = Object.entries(byTech).sort((a, b) => b[1] - a[1]);
+                if (rows.length <= 1) return null;
+                const max = rows[0][1] || 1;
+                return (
+                  <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: "12px 14px", marginBottom: 14 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 10 }}>By Tech</div>
+                    {rows.map(([tech, amt]) => (
+                      <div key={tech} style={{ marginBottom: 8 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                          <span style={{ fontSize: 12.5, fontWeight: 600, color: T.text }}>{tech}</span>
+                          <span style={{ fontSize: 12.5, fontWeight: 700, color: T.text }}>{amt % 1 === 0 ? amt : amt.toFixed(1)} {unit}</span>
+                        </div>
+                        <div style={{ height: 4, background: T.surface, borderRadius: 100, overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${(amt / max) * 100}%`, background: T.primary, borderRadius: 100 }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+
               {hist.map((h, i) => (
                 <div key={i} style={{ padding: "11px 0", borderBottom: i < hist.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <div>
                     <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{h.client}</div>
-                    <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{h.date}{h.loc ? ` · ${locName(h.loc)}` : ""}</div>
+                    <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{h.date}{h.tech ? ` · ${h.tech}` : ""}{h.loc ? ` · ${locName(h.loc)}` : ""}</div>
                   </div>
                   <div style={{ textAlign: "right" }}>
                     <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{h.amt} {unit}</div>
@@ -11573,6 +11815,24 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
     ? (allHistoryWithRatings.reduce((s, h) => s + h.satisfaction, 0) / allHistoryWithRatings.length).toFixed(1)
     : null;
 
+  // ── Treatment usage / material cost ──
+  const treatmentStats = {};
+  let totalTreatmentCost = 0;
+  let totalTreatmentRetail = 0;
+  periodJobs.forEach(h => {
+    (h.treatmentsUsed || []).forEach(t => {
+      if (!treatmentStats[t.id]) treatmentStats[t.id] = { name: t.name, unit: t.unit || "oz", qty: 0, cost: 0, retail: 0 };
+      treatmentStats[t.id].qty += t.oz || 0;
+      treatmentStats[t.id].cost += t.cost || 0;
+      treatmentStats[t.id].retail += t.retail || ((t.oz || 0) * (t.retailPerOz || 0));
+      totalTreatmentCost += t.cost || 0;
+      totalTreatmentRetail += t.retail || ((t.oz || 0) * (t.retailPerOz || 0));
+    });
+  });
+  const treatmentRows = Object.values(treatmentStats).sort((a, b) => b.cost - a.cost);
+  const jobsWithTreatment = periodJobs.filter(h => (h.treatmentsUsed || []).length > 0).length;
+  const avgTreatmentPerStop = jobsWithTreatment > 0 ? totalTreatmentCost / jobsWithTreatment : 0;
+
   // ── Referrals ──
   const referralBreakdown = {};
   activeClients.forEach(c => {
@@ -11736,6 +11996,46 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
             <div style={{ padding: "10px 18px", fontSize: 12, color: T.textMuted }}>
               All-time average: <strong style={{ color: T.text }}>{allTimeAvgSat || "—"}</strong> from {allHistoryWithRatings.length} visits
             </div>
+          </div>
+        </Section>
+      )}
+
+      {/* Treatment / Material Usage */}
+      {treatmentRows.length > 0 && (
+        <Section title="Treatment Usage & Cost">
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <div style={{ flex: 1, background: T.surface, borderRadius: 14, border: `1px solid ${T.border}`, padding: "12px 14px" }}>
+              <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: T.textMuted }}>Total Cost</div>
+              <div style={{ fontSize: 19, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginTop: 2 }}>{money(totalTreatmentCost)}</div>
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>what it cost you</div>
+            </div>
+            <div style={{ flex: 1, background: T.surface, borderRadius: 14, border: `1px solid ${T.border}`, padding: "12px 14px" }}>
+              <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: T.textMuted }}>Retail Value</div>
+              <div style={{ fontSize: 19, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginTop: 2 }}>{money(totalTreatmentRetail)}</div>
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>included in service</div>
+            </div>
+            <div style={{ flex: 1, background: T.surface, borderRadius: 14, border: `1px solid ${T.border}`, padding: "12px 14px" }}>
+              <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: T.textMuted }}>Avg / Stop</div>
+              <div style={{ fontSize: 19, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginTop: 2 }}>{money(avgTreatmentPerStop)}</div>
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{jobsWithTreatment} stop{jobsWithTreatment !== 1 ? "s" : ""}</div>
+            </div>
+          </div>
+          <div style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+            {treatmentRows.map((t, i) => (
+              <div key={i} style={{ padding: "12px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: i < treatmentRows.length - 1 ? `1px solid ${T.border}` : "none" }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, color: T.text, fontWeight: 600 }}>{t.name}</div>
+                  <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{t.qty % 1 === 0 ? t.qty : t.qty.toFixed(1)} {t.unit} used</div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{money(t.cost)}</div>
+                  <div style={{ fontSize: 11, color: T.textMuted }}>{money(t.retail)} retail</div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 8, lineHeight: 1.5 }}>
+            Treatments aren't billed to clients separately. This is the material cost folded into your service fees, so you can see how much product eats into each stop's margin.
           </div>
         </Section>
       )}
@@ -14405,13 +14705,13 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
           {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
-          {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} />}
+          {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} />}
           {page === "schedule" && <Schedule clients={clients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
           {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
           {page === "inventory"  && perms.isAdmin && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} T={T} />}
           {page === "reports"   && perms.isAdmin && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
           {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
-          {page === "invoices"  && perms.canInvoice && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} initialFilter={invoiceFilter} />}
+          {page === "invoices"  && perms.canInvoice && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} initialFilter={invoiceFilter} />}
           {page === "import"   && perms.canImport && <SkimmerImport onImport={handleImportClients} onGoToClients={() => handleNav("clients")} />}
           {page === "settings" && <AppSettings branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} />}
         </main>
