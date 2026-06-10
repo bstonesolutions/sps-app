@@ -10701,7 +10701,7 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
   });
   const maxBar = Math.max(...monthlyRevenue.map(m => m.total), 1);
 
-  const money = (n) => n >= 1000 ? `$${(n/1000).toFixed(1)}k` : `$${n.toFixed(0)}`;
+  const money = (n) => { const v = parseFloat(n) || 0; return v >= 1000 ? `$${(v/1000).toFixed(1)}k` : `$${v.toFixed(0)}`; };
   const pct = (n, total) => total ? Math.round((n/total)*100) : 0;
 
   const PERIODS = [
@@ -10757,7 +10757,7 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
       <Section title="Revenue">
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
           {[
-            { label: "Collected", value: money(revenue), sub: `${paidInvoices.length} invoices`, color: T.accent },
+            { label: "Collected", value: money(revenue), sub: `${periodPaid.length} invoices`, color: T.accent },
             { label: "Outstanding", value: money(pipeline), sub: `${openInvoices.length} open`, color: T.warning },
           ].map(s => (
             <div key={s.label} style={{ background: T.surface, borderRadius: 16, padding: "16px 16px", border: `1px solid ${T.border}` }}>
@@ -10812,7 +10812,7 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
             { label: "Pond Clients", value: byDivision.Pond, sub: `${pct(byDivision.Pond, activeClients.length)}%` },
             { label: "Pool Clients", value: byDivision.Pool, sub: `${pct(byDivision.Pool, activeClients.length)}%` },
             { label: "Seasonal Clients", value: byDivision.Seasonal, sub: `${pct(byDivision.Seasonal, activeClients.length)}%` },
-            { label: "All-Time Revenue / Client", value: activeClients.length ? money(allRevenue / activeClients.length) : "$0", sub: "average" },
+            { label: "All-Time Revenue / Client", value: activeClients.length ? money(activeClients.length ? allRevenue / activeClients.length : 0) : "$0", sub: "average" },
           ].map((row, i, arr) => (
             <div key={row.label} style={{ padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: i < arr.length-1 ? `1px solid ${T.border}` : "none" }}>
               <div style={{ fontSize: 13, color: T.textMuted }}>{row.label}</div>
