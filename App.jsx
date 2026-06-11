@@ -15286,7 +15286,7 @@ export default function App({ authEmail = "", onSignOut }) {
   const [scheduleSeed, setScheduleSeed] = useState(null);
 
   // Persistent data — survives reloads and app updates
-  const [clients, setClients, lc] = useStoredState("sps_clients", DEMO_CLIENTS);
+  const [clients, setClients, lc] = useStoredState("sps_clients", []);
   const [branding, setBranding, lb] = useStoredState("sps_branding", DEFAULT_BRANDING);
   const [page, setPage] = useState(DEFAULT_BRANDING.staffDefaultPage || "dashboard");
   const [invoiceFilter, setInvoiceFilter] = useState("All"); // deep-link from dashboard tiles
