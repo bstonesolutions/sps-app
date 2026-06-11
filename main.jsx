@@ -9,7 +9,6 @@ const inp = { width: "100%", padding: "13px 14px", border: "1px solid #e5e7eb", 
 const btn = { width: "100%", padding: "13px", border: "none", borderRadius: 12, background: "#B81D24", color: "#fff", fontWeight: 700, fontSize: 15, cursor: "pointer", fontFamily: "inherit" };
 const linkBtn = { background: "none", border: "none", color: "#B81D24", fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "inherit", padding: 0 };
 
-// Detect if we landed here via a magic link (Supabase puts tokens in the URL hash)
 function hasMagicLinkToken() {
   const hash = window.location.hash || "";
   return hash.includes("access_token") || hash.includes("type=magiclink") || hash.includes("type=recovery");
@@ -20,7 +19,7 @@ function Login() {
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
-  const [mode, setMode] = useState("password"); // "password" | "magic" | "sent"
+  const [mode, setMode] = useState("password");
   const [brand, setBrand] = useState({ type: "image", image: "/icon-192.png", name: "Stone Property Solutions" });
 
   useEffect(() => {
@@ -59,7 +58,7 @@ function Login() {
           <div style={{ textAlign: "center", padding: "16px 0 8px" }}>
             <div style={{ fontSize: 36, marginBottom: 12 }}>📬</div>
             <div style={{ fontSize: 16, fontWeight: 700, color: "#111", marginBottom: 8 }}>Check your email</div>
-            <div style={{ fontSize: 13, color: "#6b7280", lineHeight: 1.6, marginBottom: 20 }}>We sent a login link to <b>{email}</b>. Tap the link to sign in. You can close this tab.</div>
+            <div style={{ fontSize: 13, color: "#6b7280", lineHeight: 1.6, marginBottom: 20 }}>We sent a login link to <b>{email}</b>. Tap the link to sign in.</div>
             <button style={linkBtn} onClick={() => { setMode("magic"); setErr(""); }}>Try a different email</button>
           </div>
         ) : mode === "magic" ? (
@@ -75,8 +74,8 @@ function Login() {
         ) : (
           <>
             <p style={{ textAlign: "center", color: "#6b7280", fontSize: 13, margin: "0 0 20px" }}>Sign in to your account</p>
-            <input style={inp} placeholder="Email" type="email" autoCapitalize="none" value={email} onChange={e => setEmail(e.target.value)} />
-            <input style={inp} placeholder="Password" type="password" value={pw} onChange={e => setPw(e.target.value)} onKeyDown={e => e.key === "Enter" && signInPassword()} />
+            <input style={inp} placeholder="Email" type="email" autoCapitalize="none" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} />
+            <input style={inp} placeholder="Password" type="password" autoComplete="current-password" value={pw} onChange={e => setPw(e.target.value)} onKeyDown={e => e.key === "Enter" && signInPassword()} />
             {err && <div style={{ color: "#dc2626", fontSize: 13, margin: "2px 0 10px" }}>{err}</div>}
             <button style={{ ...btn, opacity: busy ? 0.6 : 1 }} onClick={signInPassword} disabled={busy}>{busy ? "Signing in…" : "Sign In"}</button>
             <div style={{ textAlign: "center", marginTop: 14 }}>
@@ -93,15 +92,9 @@ function Root() {
   const [session, setSession] = useState(undefined);
 
   useEffect(() => {
-    // Handle magic link tokens in the URL hash on load
-    if (hasMagicLinkToken()) {
-      supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    } else {
-      supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    }
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
     const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
       setSession(s);
-      // Clean the token out of the URL after a successful magic link login
       if (s && window.location.hash.includes("access_token")) {
         window.history.replaceState(null, "", window.location.pathname);
       }

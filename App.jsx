@@ -2808,7 +2808,7 @@ function ClientDocuments({ client, onChange }) {
   );
 }
 
-function ClientDetail({ client: init, invoices, invoicing, branding, catalog, team, schedule, onBack, onUpdate, onSaveInvoice, onDeleteInvoice }) {
+function ClientDetail({ client: init, invoices, invoicing, branding, catalog, team, schedule, onBack, onUpdate, onSaveInvoice, onDeleteInvoice, onDelete }) {
   const { T, perms, tiers } = useApp();
   const [client, setClient] = useState(init);
   const [tab, setTab] = useState("overview");
@@ -2863,6 +2863,12 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, te
               </Btn>
             )}
             {perms.editClients && <Btn variant="ghost" sm onClick={() => setEditing(true)} style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="edit" size={13} /> Edit</Btn>}
+            {perms.editClients && onDelete && (
+              <Btn variant="ghost" sm onClick={() => { if (confirm(`Delete ${client.name}? This cannot be undone.`)) onDelete(client.id); }}
+                style={{ display:"flex", alignItems:"center", gap:5, color:"#C0392B" }}>
+                <Icon name="trash" size={13} /> Delete
+              </Btn>
+            )}
           </div>
 
           {/* Address + services */}
@@ -10790,93 +10796,140 @@ function fmtMsgTime(ts) {
 // ── STAFF: Full messages inbox ──
 function MessagesScreen({ clients, currentUser, T }) {
   const [selectedClientId, setSelectedClientId] = useState(null);
+  const [showNewMsg, setShowNewMsg] = useState(false);
+  const [newSearch, setNewSearch] = useState("");
   const selectedClient = (clients || []).find(c => String(c.id) === String(selectedClientId)) || null;
 
-  // Get unread counts per client — loaded once then refreshed
-  const [unreadMap, setUnreadMap] = useState({});
+  // Load all threads — last message + unread count per client
+  const [threadMap, setThreadMap] = useState({});
   useEffect(() => {
     const load = async () => {
       const { data } = await supabase
         .from("sps_messages")
-        .select("client_id, read_at, sender")
-        .eq("sender", "client")
-        .is("read_at", null);
-      if (data) {
-        const map = {};
-        data.forEach(m => { map[m.client_id] = (map[m.client_id] || 0) + 1; });
-        setUnreadMap(map);
-      }
+        .select("client_id, body, sender, created_at, read_at")
+        .order("created_at", { ascending: false });
+      if (!data) return;
+      const map = {};
+      data.forEach(m => {
+        const cid = String(m.client_id);
+        if (!map[cid]) map[cid] = { lastMsg: m.body, lastAt: m.created_at, unread: 0 };
+        if (m.sender === "client" && !m.read_at) map[cid].unread++;
+      });
+      setThreadMap(map);
     };
     load();
-    const interval = setInterval(load, 10000);
+    const interval = setInterval(load, 8000);
     return () => clearInterval(interval);
   }, []);
 
   if (selectedClient) {
-    return (
-      <StaffChat
-        client={selectedClient}
-        currentUser={currentUser}
-        T={T}
-        onBack={() => setSelectedClientId(null)}
-      />
-    );
+    return <StaffChat client={selectedClient} currentUser={currentUser} T={T} onBack={() => setSelectedClientId(null)} />;
   }
 
-  const clientsWithMessages = (clients || []).filter(c => unreadMap[String(c.id)] > 0);
-  const otherClients = (clients || []).filter(c => !unreadMap[String(c.id)]);
+  // Conversations sorted by most recent
+  const threads = Object.entries(threadMap)
+    .map(([cid, meta]) => ({ client: (clients || []).find(c => String(c.id) === cid), ...meta }))
+    .filter(t => t.client)
+    .sort((a, b) => new Date(b.lastAt) - new Date(a.lastAt));
 
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <div style={{ paddingTop: 4 }}>
-        <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Messages</div>
-        <div style={{ fontSize: 14, color: T.textMuted, marginTop: 3 }}>Client conversations</div>
-      </div>
+  const totalUnread = threads.reduce((s, t) => s + (t.unread || 0), 0);
 
-      {clientsWithMessages.length > 0 && (
-        <div>
-          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>Unread</div>
-          <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
-            {clientsWithMessages.map((c, i) => (
-              <button key={c.id} onClick={() => setSelectedClientId(c.id)}
-                style={{ width: "100%", padding: "14px 18px", background: "none", border: "none", borderBottom: i < clientsWithMessages.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-                <div style={{ width: 42, height: 42, borderRadius: 13, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 800, flexShrink: 0 }}>
-                  {(c.name || "?")[0].toUpperCase()}
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{c.name}</div>
-                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>Tap to view conversation</div>
-                </div>
-                <div style={{ background: T.primary, color: "#fff", borderRadius: 100, width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, flexShrink: 0 }}>
-                  {unreadMap[String(c.id)]}
-                </div>
-              </button>
-            ))}
-          </div>
+  // New message picker
+  const activeClients = (clients || []).filter(c => c.status !== "Inactive");
+  const filteredNew = activeClients.filter(c =>
+    (c.name || "").toLowerCase().includes(newSearch.toLowerCase()) ||
+    (c.address || "").toLowerCase().includes(newSearch.toLowerCase())
+  );
+
+  if (showNewMsg) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <button onClick={() => { setShowNewMsg(false); setNewSearch(""); }}
+            style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4, padding: 0 }}>
+            <Icon name="back" size={16} /> Messages
+          </button>
+          <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>New Message</div>
         </div>
-      )}
-
-      <div>
-        {clientsWithMessages.length > 0 && <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>All Clients</div>}
+        <input type="search" placeholder="Search clients..." value={newSearch} onChange={e => setNewSearch(e.target.value)}
+          style={{ width: "100%", padding: "11px 14px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", background: T.surface, color: T.text, outline: "none", boxSizing: "border-box" }} />
         <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
-          {otherClients.length === 0 && clientsWithMessages.length === 0 && (
-            <div style={{ padding: "40px 20px", textAlign: "center", color: T.textMuted, fontSize: 14 }}>No clients yet. Add clients to start messaging.</div>
-          )}
-          {otherClients.map((c, i) => (
-            <button key={c.id} onClick={() => setSelectedClientId(c.id)}
-              style={{ width: "100%", padding: "14px 18px", background: "none", border: "none", borderBottom: i < otherClients.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-              <div style={{ width: 42, height: 42, borderRadius: 13, background: T.surfaceAlt, color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 800, flexShrink: 0 }}>
+          {filteredNew.length === 0 && <div style={{ padding: "32px 20px", textAlign: "center", color: T.textMuted, fontSize: 14 }}>No clients found</div>}
+          {filteredNew.map((c, i) => (
+            <button key={c.id} onClick={() => { setSelectedClientId(c.id); setShowNewMsg(false); setNewSearch(""); }}
+              style={{ width: "100%", padding: "14px 18px", background: "none", border: "none", borderBottom: i < filteredNew.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+              <div style={{ width: 42, height: 42, borderRadius: 13, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 800, flexShrink: 0 }}>
                 {(c.name || "?")[0].toUpperCase()}
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{c.name}</div>
-                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{c.division || "Pond"} · {c.status || "Active"}</div>
+                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>{c.division || "Pond"} · {c.address || ""}</div>
               </div>
               <Icon name="chevronR" size={16} />
             </button>
           ))}
         </div>
       </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", display: "flex", alignItems: "center", gap: 10 }}>
+            Messages
+            {totalUnread > 0 && <span style={{ background: T.primary, color: "#fff", borderRadius: 100, fontSize: 11, fontWeight: 800, padding: "2px 8px" }}>{totalUnread}</span>}
+          </div>
+          <div style={{ fontSize: 13, color: T.textMuted, marginTop: 2 }}>{threads.length} conversation{threads.length !== 1 ? "s" : ""}</div>
+        </div>
+        <button onClick={() => setShowNewMsg(true)}
+          style={{ display: "flex", alignItems: "center", gap: 6, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "10px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+          <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          New Message
+        </button>
+      </div>
+
+      {threads.length === 0 ? (
+        <div style={{ background: T.surface, borderRadius: 18, border: `1px dashed ${T.border}`, padding: "48px 20px", textAlign: "center" }}>
+          <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 12px" }}>
+            <Icon name="message" size={24} />
+          </div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: T.text, marginBottom: 6 }}>No conversations yet</div>
+          <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5, marginBottom: 18 }}>Start a message with any client, or wait for one to reach out through their portal.</div>
+          <button onClick={() => setShowNewMsg(true)}
+            style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "11px 22px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>
+            Start a Conversation
+          </button>
+        </div>
+      ) : (
+        <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+          {threads.map((t, i) => {
+            const c = t.client;
+            const hasUnread = t.unread > 0;
+            return (
+              <button key={c.id} onClick={() => setSelectedClientId(c.id)}
+                style={{ width: "100%", padding: "14px 18px", background: hasUnread ? hexA(T.primary, 0.04) : "none", border: "none", borderBottom: i < threads.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+                <div style={{ position: "relative", flexShrink: 0 }}>
+                  <div style={{ width: 44, height: 44, borderRadius: 14, background: hasUnread ? T.primary : hexA(T.primary, 0.1), color: hasUnread ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 800 }}>
+                    {(c.name || "?")[0].toUpperCase()}
+                  </div>
+                  {hasUnread && <div style={{ position: "absolute", top: -3, right: -3, width: 18, height: 18, borderRadius: "50%", background: "#E5484D", border: `2px solid ${T.bg}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 800, color: "#fff" }}>{t.unread}</div>}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 3 }}>
+                    <div style={{ fontSize: 14, fontWeight: hasUnread ? 800 : 600, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{c.name}</div>
+                    <div style={{ fontSize: 11, color: T.textMuted, flexShrink: 0, marginLeft: 8 }}>{fmtMsgTime(t.lastAt)}</div>
+                  </div>
+                  <div style={{ fontSize: 13, color: hasUnread ? T.text : T.textMuted, fontWeight: hasUnread ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {t.lastMsg || "No messages yet"}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -15935,7 +15988,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} scheduleCfg={scheduleCfg} reminderLog={reminderLog} vp={vp} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
           {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
-          {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} team={team} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} />}
+          {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} team={team} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} />}
           {page === "schedule" && <Schedule clients={clients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
           {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
           {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin} T={T} />}
