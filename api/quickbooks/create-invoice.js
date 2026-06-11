@@ -75,6 +75,18 @@ export default async function handler(req, res) {
       EmailStatus:  "NeedToSend",
     };
 
+    // Apply an invoice-level discount if present (QB DiscountLineDetail)
+    if (invoice.invoiceDiscount && parseFloat(invoice.invoiceDiscount) > 0) {
+      const isPct = invoice.invoiceDiscountType === "pct";
+      qbInvoice.Line.push({
+        DetailType: "DiscountLineDetail",
+        Amount: isPct ? undefined : parseFloat(invoice.invoiceDiscount),
+        DiscountLineDetail: isPct
+          ? { PercentBased: true, DiscountPercent: parseFloat(invoice.invoiceDiscount) }
+          : { PercentBased: false },
+      });
+    }
+
     // Step 3: Create invoice in QB
     const createRes = await fetch(`${base}/invoice?minorversion=65`, {
       method: "POST",
