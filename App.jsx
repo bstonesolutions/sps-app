@@ -1081,6 +1081,24 @@ const DEFAULT_INVOICING = {
 const parseMDY = (s) => { const [m, d, y] = (s || "").split("/").map(Number); return (m && d && y) ? new Date(y, m - 1, d) : null; };
 const fmtMDY = (dt) => `${String(dt.getMonth() + 1).padStart(2, "0")}/${String(dt.getDate()).padStart(2, "0")}/${dt.getFullYear()}`;
 
+// Responsive viewport hook — the foundation for adapting layout to phone / tablet / desktop.
+// Returns { width, isPhone, isTablet, isDesktop }. Breakpoints: phone <700, tablet 700-1024, desktop >1024.
+function useViewport() {
+  const [width, setWidth] = useState(typeof window !== "undefined" ? window.innerWidth : 390);
+  useEffect(() => {
+    const onResize = () => setWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    onResize();
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  return {
+    width,
+    isPhone: width < 700,
+    isTablet: width >= 700 && width < 1024,
+    isDesktop: width >= 1024,
+  };
+}
+
 // Derive a client's next service date from the live schedule (today or later, earliest first).
 // Falls back to the stored nextService field if the schedule has nothing.
 function nextServiceFor(client, schedule, completedSids = {}) {
@@ -1643,7 +1661,7 @@ function UpgradeWorkflowModal({ alert: a, clients, T, onConfirm, onClose }) {
   );
 }
 
-function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onNav, catalog, onConfirmUpgrade, userName, scheduleCfg, reminderLog }) {
+function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onNav, catalog, onConfirmUpgrade, userName, scheduleCfg, reminderLog, vp = {} }) {
   const { T, perms } = useApp();
   const [editing, setEditing] = useState(false);
 
@@ -1707,7 +1725,7 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
         onClick: (perms.seeReportsPnl || perms.isAdmin) ? () => onNav("reports") : undefined,
       });
       return (
-        <div key="stats" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+        <div key="stats" style={{ display: "grid", gridTemplateColumns: vp.isDesktop ? "repeat(4, 1fr)" : vp.isTablet ? "repeat(3, 1fr)" : "1fr 1fr", gap: 12, marginBottom: 16 }}>
           {tiles.map(t => <StatCard key={t.label} label={t.label} value={t.value} sub={t.sub} accent={t.accent} onClick={t.onClick} />)}
         </div>
       );
@@ -1948,7 +1966,7 @@ function Modal({ title, children, onClose }) {
   );
 }
 
-function ClientList({ clients, invoices, schedule, onSelect, onAdd, onImport, onBatchUpdate, onBatchDelete, onBatchSchedule }) {
+function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onImport, onBatchUpdate, onBatchDelete, onBatchSchedule }) {
   const { T, perms, tiers } = useApp();
   const [search,       setSearch]       = useState("");
   const [showInactive, setShowInactive] = useState(false);
@@ -2149,7 +2167,7 @@ function ClientList({ clients, invoices, schedule, onSelect, onAdd, onImport, on
         </div>
       )}
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: selectMode && selCount > 0 ? 90 : 0 }}>
+      <div style={{ display: vp.isPhone ? "flex" : "grid", flexDirection: "column", gridTemplateColumns: vp.isDesktop ? "1fr 1fr 1fr" : vp.isTablet ? "1fr 1fr" : undefined, gap: 10, paddingBottom: selectMode && selCount > 0 ? 90 : 0 }}>
         {filtered.length === 0 && (
           <div style={{ textAlign: "center", padding: "40px 20px", color: T.textMuted }}>
             <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="clients" size={26} /></div>
@@ -13260,7 +13278,7 @@ function CPHome({ client, schedule, invoices, branding, onNav, T }) {
         {[
           { label: "Visits", value: (client.history||[]).length, page: "cp_pond" },
           { label: "Invoices", value: myInvoices.length, page: "cp_invoices" },
-          { label: "Equipment", value: (client.equipment||[]).length, page: null },
+          { label: "Equipment", value: (client.equipment||[]).length, page: "cp_property" },
         ].map(s => (
           <button key={s.label} onClick={() => s.page && onNav(s.page)}
             style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "16px 10px", textAlign: "center", cursor: s.page ? "pointer" : "default", fontFamily: "inherit" }}>
@@ -13281,7 +13299,7 @@ function CPHome({ client, schedule, invoices, branding, onNav, T }) {
             {recentHistory.map((h, i) => {
               const readings = h.readings && Object.keys(h.readings).length ? h.readings : null;
               return (
-                <div key={i} style={{ padding: "15px 18px", borderBottom: i < recentHistory.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", gap: 14, alignItems: "center" }}>
+                <div key={i} onClick={() => onNav("cp_property")} style={{ padding: "15px 18px", borderBottom: i < recentHistory.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", gap: 14, alignItems: "center", cursor: "pointer" }}>
                   <div style={{ width: 40, height: 40, borderRadius: 13, background: hexA(T.primary, 0.08), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                     <svg viewBox="0 0 24 24" width={20} height={20} fill={T.primary}><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
                   </div>
@@ -13294,6 +13312,7 @@ function CPHome({ client, schedule, invoices, branding, onNav, T }) {
                       pH {Object.values(readings)[0]}
                     </div>
                   )}
+                  <div style={{ color: T.textMuted, flexShrink: 0 }}><svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="m9 18 6-6-6-6"/></svg></div>
                 </div>
               );
             })}
@@ -13502,6 +13521,7 @@ function CPUpgradeRequest({ client, currentPlan, currentTier, upgradePlan, upgra
 function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T }) {
   const { tiers } = useApp();
   const [section, setSection] = useState("property"); // "property" | "plan"
+  const [expandedVisit, setExpandedVisit] = useState(null); // index of expanded recent visit
   const plan = client.plan || "";
   const clientDiv = client.division || "Pond";
   const allTiers = tiers || CP_TIERS;
@@ -13636,46 +13656,87 @@ function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T }) 
         </div>
       )}
 
-      {/* Recent service */}
+      {/* Recent service — tap to expand full detail */}
       {history.length > 0 && (
         <div style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, overflow:"hidden" }}>
           <div style={{ padding:"14px 18px", borderBottom:`1px solid ${T.border}`, fontSize:13, fontWeight:800, color:T.text }}>Recent Visits</div>
-          {history.slice(0,3).map((h,i) => (
-            <div key={i} style={{ padding:"12px 18px", borderBottom: i<2 && i<history.length-1 ? `1px solid ${T.border}` : "none", display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:10 }}>
-              <div style={{ flex:1, minWidth:0 }}>
-                <div style={{ fontSize:13, fontWeight:700, color:T.text, display:"flex", alignItems:"center", gap:8 }}>
-                  {h.type || "Service Visit"}
-                  {h.satisfaction > 0 && (
-                    <span style={{ fontSize:11, color:"#F59E0B", letterSpacing:"0.02em" }}>{"★".repeat(h.satisfaction)}</span>
-                  )}
+          {history.slice(0,5).map((h,i) => {
+            const isOpen = expandedVisit === i;
+            const readings = (h.readings && Object.keys(h.readings).length)
+              ? h.readings
+              : Object.fromEntries([["pH", h.ph],["NH₃", h.ammonia],["NO₂", h.nitrite],["Temp", h.temp]].filter(([,v]) => v && v !== "—"));
+            const hasReadings = Object.keys(readings).length > 0;
+            const photos = h.photos || [];
+            const services = h.services || [];
+            const products = h.products || [];
+            const hasDetail = hasReadings || photos.length || services.length || products.length || h.notes;
+            return (
+              <div key={i} style={{ borderBottom: i<Math.min(history.length,5)-1 ? `1px solid ${T.border}` : "none" }}>
+                {/* Header row — tappable */}
+                <div onClick={() => hasDetail && setExpandedVisit(isOpen ? null : i)}
+                  style={{ padding:"14px 18px", display:"flex", justifyContent:"space-between", alignItems:"center", gap:10, cursor: hasDetail ? "pointer" : "default" }}>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontSize:14, fontWeight:700, color:T.text, display:"flex", alignItems:"center", gap:8 }}>
+                      {h.type || "Service Visit"}
+                      {h.satisfaction > 0 && <span style={{ fontSize:11, color:"#F59E0B" }}>{"★".repeat(h.satisfaction)}</span>}
+                    </div>
+                    <div style={{ fontSize:11.5, color:T.textMuted, marginTop:2 }}>{fmtDate(h.date)}{h.tech ? ` · ${h.tech}` : ""}</div>
+                  </div>
+                  <div style={{ display:"flex", alignItems:"center", gap:10, flexShrink:0 }}>
+                    {h.invoice && h.invoice !== "$0" && <div style={{ fontSize:13, fontWeight:700, color:T.text }}>{h.invoice}</div>}
+                    {hasDetail && <div style={{ color:T.textMuted, transform: isOpen ? "rotate(180deg)" : "none", transition:"transform 0.2s" }}><svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M6 9l6 6 6-6"/></svg></div>}
+                  </div>
                 </div>
-                <div style={{ fontSize:11, color:T.textMuted, marginTop:2 }}>{h.date}{h.tech ? ` · ${h.tech}` : ""}</div>
-                {h.notes && <div style={{ fontSize:12, color:T.textMuted, marginTop:4, lineHeight:1.4 }}>{h.notes}</div>}
-                {/* Before/After thumbnails */}
-                {(h.photos||[]).length > 0 && (
-                  <div style={{ display:"flex", gap:6, marginTop:8, flexWrap:"wrap" }}>
-                    {(h.photos||[]).slice(0,4).map((ph, i) => {
-                      const src   = typeof ph === "string" ? ph : ph.src;
-                      const label = typeof ph === "string" ? "" : ph.label;
-                      const labelColor = label === "Before" ? "#F59E0B" : label === "After" ? "#16a34a" : "rgba(0,0,0,0.5)";
-                      return (
-                        <div key={i} style={{ position:"relative" }}>
-                          <img src={src} alt="" style={{ width:52, height:52, borderRadius:8, objectFit:"cover", border:`2px solid ${labelColor}` }} />
-                          {label && <div style={{ position:"absolute", bottom:2, left:2, fontSize:8, fontWeight:800, color:"#fff", background:labelColor, borderRadius:3, padding:"1px 4px" }}>{label.slice(0,2).toUpperCase()}</div>}
+
+                {/* Expanded detail */}
+                {isOpen && (
+                  <div style={{ padding:"0 18px 16px", display:"flex", flexDirection:"column", gap:14 }}>
+                    {h.notes && <div style={{ fontSize:13, color:T.text, lineHeight:1.6, background:T.surfaceAlt, borderRadius:12, padding:"11px 14px" }}>{h.notes}</div>}
+
+                    {hasReadings && (
+                      <div>
+                        <div style={{ fontSize:10, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.06em", color:T.textMuted, marginBottom:8 }}>Water Quality</div>
+                        <div style={{ display:"grid", gridTemplateColumns:`repeat(${Math.min(Object.keys(readings).length,4)}, 1fr)`, gap:8 }}>
+                          {Object.entries(readings).map(([k,v]) => (
+                            <div key={k} style={{ background:T.surfaceAlt, borderRadius:12, padding:"10px 6px", textAlign:"center" }}>
+                              <div style={{ fontSize:9, color:T.textMuted, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.04em" }}>{k}</div>
+                              <div style={{ fontSize:18, fontWeight:800, color:T.text, marginTop:2 }}>{v}</div>
+                            </div>
+                          ))}
                         </div>
-                      );
-                    })}
-                    {(h.photos||[]).length > 4 && (
-                      <div style={{ width:52, height:52, borderRadius:8, background:"rgba(0,0,0,0.1)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, color:T.textMuted }}>
-                        +{(h.photos||[]).length - 4}
+                      </div>
+                    )}
+
+                    {(services.length > 0 || products.length > 0) && (
+                      <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+                        {services.map((s,j) => <span key={`s${j}`} style={{ fontSize:11.5, fontWeight:600, background:hexA(tierColor,0.1), color:tierColor, borderRadius:100, padding:"5px 12px" }}>{typeof s === "string" ? s : s.name}</span>)}
+                        {products.map((p,j) => <span key={`p${j}`} style={{ fontSize:11.5, fontWeight:600, background:T.surfaceAlt, color:T.textMuted, borderRadius:100, padding:"5px 12px" }}>{typeof p === "string" ? p : p.name}</span>)}
+                      </div>
+                    )}
+
+                    {photos.length > 0 && (
+                      <div>
+                        <div style={{ fontSize:10, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.06em", color:T.textMuted, marginBottom:8 }}>Photos</div>
+                        <div style={{ display:"flex", gap:8, overflowX:"auto", WebkitOverflowScrolling:"touch", paddingBottom:2 }}>
+                          {photos.map((ph,j) => {
+                            const src = typeof ph === "string" ? ph : ph.src;
+                            const label = typeof ph === "string" ? "" : ph.label;
+                            const lc = label === "Before" ? "#F59E0B" : label === "After" ? "#16a34a" : T.textMuted;
+                            return (
+                              <div key={j} style={{ flexShrink:0, position:"relative" }}>
+                                <img src={src} alt="" style={{ width:110, height:110, borderRadius:12, objectFit:"cover", display:"block", border:`1px solid ${T.border}` }} />
+                                {label && <div style={{ position:"absolute", bottom:6, left:6, fontSize:9, fontWeight:800, color:"#fff", background:lc, borderRadius:5, padding:"2px 7px" }}>{label}</div>}
+                              </div>
+                            );
+                          })}
+                        </div>
                       </div>
                     )}
                   </div>
                 )}
               </div>
-              {h.invoice && <div style={{ fontSize:12, fontWeight:700, color:T.textMuted, flexShrink:0 }}>{h.invoice}</div>}
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -13683,18 +13744,41 @@ function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T }) 
       {equipment.length > 0 && (
         <div style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, overflow:"hidden" }}>
           <div style={{ padding:"14px 18px", borderBottom:`1px solid ${T.border}`, fontSize:13, fontWeight:800, color:T.text }}>Equipment</div>
-          {equipment.map((eq,i) => (
-            <div key={i} style={{ padding:"12px 18px", borderBottom: i<equipment.length-1 ? `1px solid ${T.border}` : "none", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-              <div>
-                <div style={{ fontSize:13, fontWeight:700, color:T.text }}>{eq.name}</div>
-                {eq.installed && <div style={{ fontSize:11, color:T.textMuted, marginTop:1 }}>Installed {eq.installed}</div>}
+          {equipment.map((eq,i) => {
+            const photos = eq.photos || [];
+            return (
+              <div key={i} style={{ padding:"14px 18px", borderBottom: i<equipment.length-1 ? `1px solid ${T.border}` : "none" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:10 }}>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontSize:14, fontWeight:700, color:T.text }}>{eq.name}</div>
+                    <div style={{ fontSize:11, color:T.textMuted, marginTop:2, display:"flex", flexWrap:"wrap", gap:"2px 10px" }}>
+                      {eq.installed && <span>Installed {eq.installed}</span>}
+                      {eq.serialNumber && <span>S/N {eq.serialNumber}</span>}
+                    </div>
+                  </div>
+                  <div style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
+                    <div style={{ width:7, height:7, borderRadius:"50%", background: eq.status==="Good" ? "#16a34a" : eq.status==="Monitor" ? "#F59E0B" : T.primary }} />
+                    <span style={{ fontSize:11, color:T.textMuted, fontWeight:600 }}>{eq.status || "Good"}</span>
+                  </div>
+                </div>
+                {eq.notes && <div style={{ fontSize:12, color:T.textMuted, marginTop:6, lineHeight:1.5 }}>{eq.notes}</div>}
+                {photos.length > 0 && (
+                  <div style={{ display:"flex", gap:8, marginTop:10, overflowX:"auto", WebkitOverflowScrolling:"touch", paddingBottom:2 }}>
+                    {photos.map((p, j) => {
+                      const src = typeof p === "string" ? p : p.src;
+                      const cap = typeof p === "string" ? "" : p.caption;
+                      return (
+                        <div key={j} style={{ flexShrink:0 }}>
+                          <img src={src} alt="" style={{ width:92, height:92, borderRadius:12, objectFit:"cover", display:"block", border:`1px solid ${T.border}` }} />
+                          {cap && <div style={{ fontSize:10, color:T.textMuted, marginTop:3, textAlign:"center", maxWidth:92, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{cap}</div>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-              <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-                <div style={{ width:7, height:7, borderRadius:"50%", background: eq.status==="Good" ? "#16a34a" : eq.status==="Monitor" ? "#F59E0B" : T.primary }} />
-                <span style={{ fontSize:11, color:T.textMuted, fontWeight:600 }}>{eq.status || "Good"}</span>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -14655,6 +14739,7 @@ export default function App({ authEmail = "", onSignOut }) {
   const [invoices, setInvoices, linv] = useStoredState("sps_invoices", DEMO_INVOICES);
   const [invoicing, setInvoicing, linvc] = useStoredState("sps_invoicing", DEFAULT_INVOICING);
   const [completedSids, setCompletedSids, lcomp] = useStoredState("sps_completed", {});
+  const vp = useViewport();
   const [reminderLog, setReminderLog, lrem] = useStoredState("sps_reminders", {}); // { [sid]: { sentAt, method } }
   const hydrated = lc && lb && ls && lcat && lem && lco && lh && lbud && loa && lscfg && lrol && ltm && lsesh && linv && linvc && lcomp && lrem;
 
@@ -15440,10 +15525,10 @@ export default function App({ authEmail = "", onSignOut }) {
             <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 10, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, display:"flex", alignItems:"center", gap:5 }}>Retry</button>
           </div>
         )}
-        <main style={{ flex: 1, padding: "22px 16px", maxWidth: 740, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
-          {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} scheduleCfg={scheduleCfg} reminderLog={reminderLog} />}
+        <main style={{ flex: 1, padding: vp.isPhone ? "22px 16px" : "28px 32px", maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
+          {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} scheduleCfg={scheduleCfg} reminderLog={reminderLog} vp={vp} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
-          {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
+          {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
           {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} team={team} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} />}
           {page === "schedule" && <Schedule clients={clients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
           {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
