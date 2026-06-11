@@ -13107,15 +13107,20 @@ const getTierNames = (tiers, div) => {
   return divData._tierNames || globalNames;
 };
 
-function clientNextVisit(schedule, clientId) {
-  const today = new Date(); today.setHours(0,0,0,0);
+function clientNextVisit(schedule, clientId, clientName) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
   let best = null;
   (schedule || []).forEach(day => {
+    const [m, dd, y] = (day.date || "").split("/").map(Number);
+    if (!m || !dd || !y) return;
+    const d = new Date(y, m - 1, dd);
+    if (isNaN(d) || d < today) return;
     (day.stops || []).forEach(stop => {
-      if (stop.clientId !== clientId) return;
-      const d = new Date(day.date);
-      if (isNaN(d)) return;
-      if (d >= today && (!best || d < best.date)) best = { date: d, label: day.date, stop };
+      const matches = String(stop.clientId) === String(clientId)
+        || String(stop.id) === String(clientId)
+        || (clientName && stop.client === clientName);
+      if (!matches) return;
+      if (!best || d < best.date) best = { date: d, label: day.date, stop };
     });
   });
   return best;
@@ -13181,7 +13186,7 @@ function CIcon({ name, size = 22 }) {
 
 // ── CP HOME ──
 function CPHome({ client, schedule, invoices, branding, onNav, T }) {
-  const next = clientNextVisit(schedule, client.id);
+  const next = clientNextVisit(schedule, client.id, client.name);
   const myInvoices = sortInvoices((invoices || []).filter(iv => invoiceMatchesClient(iv, client)));
   const outstanding = myInvoices.filter(iv => !["Paid","paid"].includes(effectiveStatus(iv)) && iv.status !== "Draft");
   const totalOwed = outstanding.reduce((s, iv) => s + invoiceTotals(iv).total, 0);
@@ -13494,7 +13499,7 @@ function CPUpgradeRequest({ client, currentPlan, currentTier, upgradePlan, upgra
 }
 
 // ── CP PROPERTY — combines pond/property details + service plan ──
-function CPProperty({ client, branding, onNav, onUpgradeRequest, T }) {
+function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T }) {
   const { tiers } = useApp();
   const [section, setSection] = useState("property"); // "property" | "plan"
   const plan = client.plan || "";
@@ -13562,6 +13567,29 @@ function CPProperty({ client, branding, onNav, onUpgradeRequest, T }) {
 
       {/* Service plan card — tappable */}
       <PlanCard />
+
+      {/* Next visit — clear, prominent */}
+      {(() => {
+        const nv = clientNextVisit(schedule, client.id, client.name);
+        return (
+          <div style={{ background: nv ? hexA(tierColor, 0.08) : T.surface, border: `1px solid ${nv ? hexA(tierColor, 0.3) : T.border}`, borderRadius: 18, padding: "16px 18px", display: "flex", alignItems: "center", gap: 14 }}>
+            <div style={{ width: 46, height: 46, borderRadius: 13, background: nv ? tierColor : T.surfaceAlt, color: nv ? "#fff" : T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+              <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.08em", color: T.textMuted, marginBottom: 2 }}>Next Service Visit</div>
+              {nv ? (
+                <>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{fmtDate(nv.label)}</div>
+                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>{nv.stop.type || "Service Visit"}{nv.stop.time ? ` · ${nv.stop.time}` : ""}</div>
+                </>
+              ) : (
+                <div style={{ fontSize: 15, fontWeight: 700, color: T.textMuted }}>No upcoming visits scheduled</div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Stats row */}
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:10 }}>
@@ -13667,6 +13695,19 @@ function CPProperty({ client, branding, onNav, onUpgradeRequest, T }) {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Welcoming empty state for brand-new clients */}
+      {history.length === 0 && equipment.length === 0 && sitePhotos.length === 0 && (
+        <div style={{ background: T.surface, border: `1px dashed ${T.border}`, borderRadius: 18, padding: "28px 20px", textAlign: "center" }}>
+          <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(tierColor, 0.1), color: tierColor, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 12px" }}>
+            <svg viewBox="0 0 24 24" width={26} height={26} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          </div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: T.text, marginBottom: 4 }}>You're all set up</div>
+          <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5, maxWidth: 300, margin: "0 auto" }}>
+            Your service records, photos, and equipment will appear here after your first visit. We'll keep everything documented for you.
+          </div>
         </div>
       )}
     </div>
@@ -14485,8 +14526,8 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
           <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
         )}
         {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} onNav={setPage} T={T} />}
-        {!settingsOpen && page === "cp_property" && <CPProperty client={client} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
-        {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
+        {!settingsOpen && page === "cp_property" && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
+        {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
         {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} />}
         {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} onSubmit={onServiceRequest} T={T} />}
         {!settingsOpen && page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
