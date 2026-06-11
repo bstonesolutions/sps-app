@@ -2068,7 +2068,8 @@ function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onI
   const doMarkActive   = () => { onBatchUpdate(selectedIds, { status: "Active" }); setModal(null); exitSelect(); };
 
   return (
-    <div style={{ maxWidth: vp.isPhone ? "100%" : 860, margin: "0 auto", width: "100%" }}>
+    <div style={{ display: "flex", justifyContent: "center", width: "100%" }}>
+    <div style={{ maxWidth: vp.isPhone ? "100%" : 820, width: "100%" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
         <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Clients</h2>
         {selectMode ? (
@@ -2327,6 +2328,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onI
           </div>
         </Modal>
       )}
+    </div>
     </div>
   );
 }
@@ -13534,27 +13536,6 @@ function CPHome({ client, schedule, invoices, branding, onNav, T, vp = {} }) {
   );
 
   // WIDE: MindBridge-style two-column dashboard. PHONE: original single stack.
-  if (wide) {
-    return (
-      <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
-        {greetingBlock}
-        <div style={{ display: "grid", gridTemplateColumns: vp.isDesktop ? "1.6fr 1fr" : "1.4fr 1fr", gap: 20, alignItems: "start" }}>
-          {/* Left column — hero + recent activity */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-            {heroBlock}
-            {recentBlock}
-            {quickActionsBlock}
-          </div>
-          {/* Right column — balance, stats, quick glance */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-            {balanceBlock}
-            {statsBlock}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
       {greetingBlock}
@@ -14839,7 +14820,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
       </header>
 
       {/* Main content */}
-      <main style={{ flex: 1, padding: wide ? "32px 32px" : "24px 18px", maxWidth: vp.isDesktop ? 1080 : wide ? 880 : 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))", fontSize: `${textScale}em` }}>
+      <main style={{ flex: 1, padding: "24px 18px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))", fontSize: `${textScale}em` }}>
         {settingsOpen && (
           <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
         )}
@@ -14861,7 +14842,6 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
         display: "flex", zIndex: 90,
         minHeight: 60, paddingTop: 4,
         paddingBottom: "calc(8px + env(safe-area-inset-bottom))",
-        maxWidth: wide ? 560 : "none", margin: "0 auto", borderTopLeftRadius: wide ? 0 : 0, ...(wide ? { left: "50%", right: "auto", transform: "translateX(-50%)", width: 560, borderRadius: "20px 20px 0 0", border: `1px solid ${T.border}`, borderBottom: "none" } : {}),
       }}>
         {CLIENT_NAV.map(n => {
           const active = (page === n.id || (n.id === "cp_property" && (page === "cp_pond" || page === "cp_service"))) && !settingsOpen;
@@ -15760,7 +15740,7 @@ export default function App({ authEmail = "", onSignOut }) {
             <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 10, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, display:"flex", alignItems:"center", gap:5 }}>Retry</button>
           </div>
         )}
-        <main style={{ flex: 1, padding: vp.isPhone ? "22px 16px" : "28px 32px", maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
+        <main style={{ flex: 1, alignSelf: "center", padding: vp.isPhone ? "22px 16px" : "28px 32px", maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
           {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} scheduleCfg={scheduleCfg} reminderLog={reminderLog} vp={vp} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
           {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
