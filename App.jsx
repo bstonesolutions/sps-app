@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useContext, createContext } from "react";
+import { useState, useRef, useEffect, useContext, createContext, useMemo } from "react";
 import { store, supabase } from "./supabaseClient";
 
 // ── PDF generation (jsPDF) ──
@@ -314,6 +314,84 @@ const buildMapUrl = (address, app) => {
 // Available units for parts and treatments
 const INV_UNITS = ["oz", "gal", "lb", "pieces", "feet", "bags", "boxes", "rolls", "kits"];
 
+// ── Geocoding (free, via OpenStreetMap Nominatim) with localStorage cache ──
+const GEO_CACHE_KEY = "sps_geocache";
+const loadGeoCache = () => { try { return JSON.parse(localStorage.getItem(GEO_CACHE_KEY) || "{}"); } catch { return {}; } };
+const saveGeoCache = (cache) => { try { localStorage.setItem(GEO_CACHE_KEY, JSON.stringify(cache)); } catch {} };
+const geoKey = (addr) => (addr || "").trim().toLowerCase();
+// Geocode one address, using cache first. Returns {lat, lng} or null.
+const geocodeAddress = async (addr, cache) => {
+  const key = geoKey(addr);
+  if (!key) return null;
+  if (cache[key]) return cache[key];
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(addr)}`;
+    const res = await fetch(url, { headers: { "Accept": "application/json" } });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data && data[0]) {
+      const coord = { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+      cache[key] = coord;
+      return coord;
+    }
+  } catch {}
+  return null;
+};
+// Straight-line distance between two coords in miles (haversine)
+const haversineMiles = (a, b) => {
+  if (!a || !b) return Infinity;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const R = 3959; // earth radius miles
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat), lat2 = toRad(b.lat);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+};
+
+// ── Appointment reminders ──
+// Build the reminder queue: upcoming stops within the lead window that haven't been reminded yet.
+// Each entry carries its scheduled send time and whether it's due now.
+function buildReminderQueue(schedule, clients, cfg, reminderLog, now = new Date()) {
+  if (!cfg || !cfg.remindersOn) return { due: [], upcoming: [], sent: [] };
+  const leadMs = (parseFloat(cfg.reminderLeadHours) || 24) * 3600 * 1000;
+  const [sendH, sendM] = String(cfg.reminderSendAt || "17:00").split(":").map(Number);
+
+  const due = [], upcoming = [], sent = [];
+  (schedule || []).forEach(d => {
+    const [mm, dd, yy] = (d.date || "").split("/").map(Number);
+    if (!mm || !dd || !yy) return;
+    (d.stops || []).forEach(s => {
+      // Stop datetime (use its time if present, else 9am)
+      let hh = 9, mn = 0;
+      if (s.time) {
+        const t = s.time.match(/(\d+):(\d+)\s*(AM|PM)?/i);
+        if (t) { hh = parseInt(t[1]); mn = parseInt(t[2]); if (/pm/i.test(t[3]||"") && hh !== 12) hh += 12; if (/am/i.test(t[3]||"") && hh === 12) hh = 0; }
+      }
+      const stopDate = new Date(yy, mm - 1, dd, hh, mn);
+      if (stopDate < now) return; // past
+
+      const client = (clients || []).find(c => c.id === s.clientId);
+      const phone = (client?.phone || "").replace(/\D/g, "");
+      const entry = { sid: s.sid, stop: s, client, date: d.date, stopDate, phone };
+
+      const already = reminderLog && reminderLog[s.sid];
+      if (already) { sent.push({ ...entry, sentAt: already.sentAt }); return; }
+
+      // Scheduled send time = stop date minus lead, snapped to preferred send-time for day+ leads
+      let sendTime = new Date(stopDate.getTime() - leadMs);
+      if (leadMs >= 12 * 3600 * 1000) { sendTime.setHours(sendH, sendM, 0, 0); }
+      entry.sendTime = sendTime;
+
+      if (sendTime <= now) due.push(entry);
+      else upcoming.push(entry);
+    });
+  });
+  due.sort((a, b) => a.stopDate - b.stopDate);
+  upcoming.sort((a, b) => a.sendTime - b.sendTime);
+  return { due, upcoming, sent };
+}
+
 // Total stock of an item across all locations (falls back to legacy inventoryOz)
 const invTotal = (item) => {
   if (item && item.stockByLoc && typeof item.stockByLoc === "object") {
@@ -473,6 +551,11 @@ const DEFAULT_SCHEDULE_CFG = {
   showAddress: true,
   showServices: true,
   showDuration: true,
+  // Appointment reminders
+  remindersOn: false,         // master switch (off until you turn it on)
+  reminderLeadHours: 24,      // default: how far ahead to send (24 = day before)
+  reminderSendAt: "17:00",    // preferred send time for day-before reminders (24h)
+  reminderAutoSend: false,    // when true + backend wired, sends automatically; else surfaces a queue
 };
 
 // Roles & access — admin configures exactly what employees can see, change, and do
@@ -1539,7 +1622,7 @@ function UpgradeWorkflowModal({ alert: a, clients, T, onConfirm, onClose }) {
   );
 }
 
-function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onNav, catalog, onConfirmUpgrade, userName }) {
+function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onNav, catalog, onConfirmUpgrade, userName, scheduleCfg, reminderLog }) {
   const { T, perms } = useApp();
   const [editing, setEditing] = useState(false);
 
@@ -1553,6 +1636,11 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
   const outstandingClients = (clients || []).map(c => ({ c, owed: clientOutstanding(c, invoices) })).filter(x => x.owed > 0);
   const outstandingTotal = outstandingClients.reduce((s, x) => s + x.owed, 0);
   const money = (n) => `$${Math.round(n).toLocaleString()}`;
+
+  // Due appointment reminders (in-app surfacing)
+  const remCfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
+  const remQueue = buildReminderQueue(schedule, clients, remCfg, reminderLog || {}, new Date());
+  const dueReminders = remQueue.due || [];
 
   const items = (home && home.items) || DEFAULT_HOME.items;
   const setItems = (next) => setHome({ ...home, items: next });
@@ -1735,6 +1823,22 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
         </div>
         <Btn variant="ghost" sm onClick={() => setEditing(e => !e)}>{editing ? "Done" : "Edit"}</Btn>
       </div>
+
+      {/* Reminders due — in-app surfacing */}
+      {!editing && dueReminders.length > 0 && (
+        <div onClick={() => onNav("reminders")} style={{ background: hexA(T.primary, 0.08), border: `1px solid ${hexA(T.primary, 0.25)}`, borderRadius: 16, padding: "14px 16px", marginBottom: 16, cursor: "pointer", display: "flex", alignItems: "center", gap: 13 }}>
+          <div style={{ width: 40, height: 40, borderRadius: 11, background: T.primary, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <Icon name="message" size={19} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>{dueReminders.length} reminder{dueReminders.length !== 1 ? "s" : ""} ready to send</div>
+            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {dueReminders.slice(0, 3).map(r => (r.client?.name || r.stop.client || "Client").split(" ")[0]).join(", ")}{dueReminders.length > 3 ? ` +${dueReminders.length - 3} more` : ""}
+            </div>
+          </div>
+          <Icon name="chevronD" size={16} style={{ transform: "rotate(-90deg)", color: T.primary, flexShrink: 0 }} />
+        </div>
+      )}
 
       {editing ? (
         <Card>
@@ -5553,9 +5657,49 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
     return ordered;
   };
 
-  const optimizeRoute = (date, techKey, currentStops) => {
+  const optimizeRoute = async (date, techKey, currentStops) => {
+    if (!currentStops || currentStops.length <= 1) return;
     setOptimizing(true);
-    const optimized = nearestNeighbor(currentStops, clients);
+    setOptimizeMsg("Finding best route…");
+
+    // Resolve each stop's address
+    const getAddr = (s) => {
+      const c = clients.find(c => c.id === s.clientId);
+      return s.address || c?.address || "";
+    };
+
+    // Geocode any uncached addresses (sequential to respect the free service)
+    const cache = loadGeoCache();
+    let geocodedCount = 0;
+    for (const s of currentStops) {
+      const addr = getAddr(s);
+      if (addr && !cache[geoKey(addr)]) {
+        await geocodeAddress(addr, cache);
+        geocodedCount++;
+        // be polite to the free endpoint
+        if (geocodedCount > 0) await new Promise(r => setTimeout(r, 1100));
+      }
+    }
+    saveGeoCache(cache);
+
+    // Nearest-neighbor ordering using real coords where available, ZIP distance otherwise
+    const coordOf = (s) => cache[geoKey(getAddr(s))] || null;
+    const remaining = [...currentStops];
+    const ordered = [remaining.shift()];
+    while (remaining.length) {
+      const last = ordered[ordered.length - 1];
+      const lastCoord = coordOf(last);
+      let bestIdx = 0, bestDist = Infinity;
+      remaining.forEach((s, i) => {
+        const c = coordOf(s);
+        const d = (lastCoord && c)
+          ? haversineMiles(lastCoord, c)
+          : zipDistance(getAddr(last), getAddr(s)) * 5; // rough miles-per-zip-step fallback
+        if (d < bestDist) { bestDist = d; bestIdx = i; }
+      });
+      ordered.push(remaining.splice(bestIdx, 1)[0]);
+    }
+
     setSchedule(prev => prev.map(d => {
       if (d.date !== date) return d;
       const otherStops = d.stops.filter(s => {
@@ -5563,10 +5707,13 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
         if (techKey === "__un") return (s.assignee || "__un") !== "__un";
         return s.assignee !== techKey;
       });
-      return { ...d, stops: [...otherStops, ...optimized] };
+      return { ...d, stops: [...otherStops, ...ordered] };
     }));
-    setOptimizeMsg("Route optimized");
-    setTimeout(() => { setOptimizing(false); setOptimizeMsg(""); }, 2000);
+
+    const anyGeo = currentStops.some(s => coordOf(s));
+    setOptimizeMsg(anyGeo ? "Route optimized by location" : "Route optimized (approx)");
+    setOptimizing(false);
+    setTimeout(() => setOptimizeMsg(""), 2500);
   };
 
   // ── Route-dashboard state + helpers ──
@@ -5921,9 +6068,9 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <span style={{ fontSize: 12, color: T.textMuted, fontWeight: 600 }}>{stripDate(selectedDate)}{isToday ? " · Today" : ""}</span>
                 {perms.editSchedule && stops.length > 1 && (
-                  <button onClick={() => optimizeRoute(selectedDate, viewTech, stops)}
-                    style={{ background: hexA(T.primary, 0.1), border: `1px solid ${hexA(T.primary, 0.2)}`, color: T.primary, borderRadius: 10, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5 }}>
-                    <Icon name="refresh" size={13} /> Optimize Route
+                  <button onClick={() => !optimizing && optimizeRoute(selectedDate, viewTech, stops)} disabled={optimizing}
+                    style={{ background: hexA(T.primary, 0.1), border: `1px solid ${hexA(T.primary, 0.2)}`, color: T.primary, borderRadius: 10, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: optimizing ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5, opacity: optimizing ? 0.7 : 1 }}>
+                    <Icon name="refresh" size={13} /> {optimizing ? "Optimizing…" : "Optimize Route"}
                   </button>
                 )}
               </div>
@@ -6000,12 +6147,19 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
           onOfficeAlert={onOfficeAlert}
         />
       )}
+      {/* Optimize toast */}
+      {optimizeMsg && (
+        <div style={{ position: "fixed", bottom: "calc(86px + env(safe-area-inset-bottom))", left: 0, right: 0, zIndex: 200, display: "flex", justifyContent: "center", pointerEvents: "none" }}>
+          <div style={{ background: T.text, color: T.surface, borderRadius: 100, padding: "10px 20px", fontSize: 13, fontWeight: 700, boxShadow: "0 6px 24px rgba(0,0,0,0.25)", display: "flex", alignItems: "center", gap: 8 }}>
+            {optimizing && <span style={{ width: 13, height: 13, border: `2px solid ${hexA(T.surface, 0.4)}`, borderTopColor: T.surface, borderRadius: "50%", display: "inline-block", animation: "spin 0.7s linear infinite" }} />}
+            {optimizeMsg}
+          </div>
+        </div>
+      )}
       </>}
     </div>
   );
 }
-
-// time helpers for sorting
 const to24 = (t) => {
   const [hm, ap] = t.split(" ");
   let [h, m] = hm.split(":").map(Number);
@@ -10434,6 +10588,174 @@ function CPMessages({ client, branding, onSubmit, T }) {
 // and lets you adjust inventory manually.
 // ─────────────────────────────────────────────
 
+function RemindersScreen({ schedule, clients, scheduleCfg, setScheduleCfg, email, setEmail, branding, reminderLog, setReminderLog, T }) {
+  const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
+  const setCfg = (k, v) => setScheduleCfg({ ...cfg, [k]: v });
+  const now = new Date();
+  const queue = buildReminderQueue(schedule, clients, cfg, reminderLog, now);
+
+  const tpl = (email && email.smsReminder) || DEFAULT_EMAIL.smsReminder;
+  const buildMsg = (entry) => {
+    const first = (entry.client?.name || "there").split(" ")[0];
+    return tpl
+      .replace(/{first}/g, first)
+      .replace(/{company}/g, branding?.companyName || "Stone Property Solutions")
+      .replace(/{date}/g, entry.date || "");
+  };
+
+  const markSent = (sid, method) => setReminderLog(m => ({ ...m, [sid]: { sentAt: new Date().toISOString(), method } }));
+  const undoSent = (sid) => setReminderLog(m => { const n = { ...m }; delete n[sid]; return n; });
+
+  const sendOne = (entry) => {
+    const msg = buildMsg(entry);
+    if (entry.phone) {
+      window.location.href = `sms:${entry.phone}?&body=${encodeURIComponent(msg)}`;
+    } else {
+      navigator.clipboard?.writeText(msg);
+    }
+    markSent(entry.sid, "manual");
+  };
+
+  const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+
+  const card = (entry, isDue) => (
+    <div key={entry.sid} style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12 }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{entry.client?.name || entry.stop.client || "Client"}</div>
+        <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>
+          {entry.stop.type || "Service"} · {entry.date}{entry.stop.time ? ` · ${entry.stop.time}` : ""}
+        </div>
+        {!entry.phone && <div style={{ fontSize: 11, color: T.warning, marginTop: 3 }}>No phone on file — text will copy to clipboard</div>}
+        {!isDue && entry.sendTime && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>Sends {entry.sendTime.toLocaleDateString("en-US", { month: "short", day: "numeric" })} at {entry.sendTime.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}</div>}
+      </div>
+      {isDue ? (
+        <button onClick={() => sendOne(entry)} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "8px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Send</button>
+      ) : (
+        <span style={{ fontSize: 11, color: T.textMuted, fontWeight: 600, flexShrink: 0 }}>Queued</span>
+      )}
+    </div>
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <div>
+        <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Reminders</div>
+        <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>
+          {cfg.remindersOn ? `${queue.due.length} due · ${queue.upcoming.length} queued` : "Appointment reminders are off"}
+        </div>
+      </div>
+
+      {/* Settings */}
+      <Card>
+        <CardHeader title="Reminder Settings" />
+        <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Appointment Reminders</div>
+              <div style={{ fontSize: 12, color: T.textMuted }}>Remind clients before their visit</div>
+            </div>
+            <Toggle on={cfg.remindersOn} onChange={v => setCfg("remindersOn", v)} />
+          </div>
+
+          {cfg.remindersOn && (<>
+            <div>
+              <label style={lbl}>Default Lead Time</label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+                {[[2, "2 hours"], [12, "12 hours"], [24, "1 day"], [48, "2 days"], [72, "3 days"]].map(([h, label]) => (
+                  <button key={h} onClick={() => setCfg("reminderLeadHours", h)}
+                    style={{ padding: "8px 14px", borderRadius: 10, border: `1.5px solid ${cfg.reminderLeadHours === h ? T.primary : T.border}`, background: cfg.reminderLeadHours === h ? hexA(T.primary, 0.08) : T.surface, color: cfg.reminderLeadHours === h ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {cfg.reminderLeadHours >= 12 && (
+              <div>
+                <label style={lbl}>Preferred Send Time</label>
+                <input type="time" value={cfg.reminderSendAt || "17:00"} onChange={e => setCfg("reminderSendAt", e.target.value)} style={{ ...field, width: 140 }} />
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>For day-ahead reminders, send around this time.</div>
+              </div>
+            )}
+            <div>
+              <label style={lbl}>Reminder Message</label>
+              <textarea rows={3} value={email?.smsReminder ?? tpl}
+                onChange={e => setEmail && setEmail(em => ({ ...em, smsReminder: e.target.value }))}
+                style={{ ...field, resize: "vertical" }} />
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>Tags: {"{first}"} name, {"{company}"}, {"{date}"}. This is the same message you can edit in Customize.</div>
+              {/* Live preview */}
+              {(() => {
+                const sample = queue.due[0] || queue.upcoming[0];
+                const preview = (email?.smsReminder ?? tpl)
+                  .replace(/{first}/g, sample ? (sample.client?.name || "there").split(" ")[0] : "Sarah")
+                  .replace(/{company}/g, branding?.companyName || "Stone Property Solutions")
+                  .replace(/{date}/g, sample ? sample.date : "Fri, Jun 13");
+                return (
+                  <div style={{ marginTop: 10 }}>
+                    <label style={lbl}>Preview</label>
+                    <div style={{ background: hexA(T.primary, 0.1), borderRadius: 14, borderTopLeftRadius: 4, padding: "11px 14px", fontSize: 13, color: T.text, lineHeight: 1.5 }}>{preview}</div>
+                  </div>
+                );
+              })()}
+            </div>
+            <div style={{ background: hexA(T.primary, 0.06), borderRadius: 12, padding: "12px 14px", fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>
+              Automatic sending isn't active yet — reminders show up here when due, and you tap Send to fire off the text. When automated SMS is connected later, flip this to fully hands-off.
+            </div>
+          </>)}
+        </div>
+      </Card>
+
+      {cfg.remindersOn && (<>
+        {/* Due now */}
+        {queue.due.length > 0 && (
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 10, display: "flex", alignItems: "center", gap: 7 }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: T.primary }} /> Due Now ({queue.due.length})
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {queue.due.map(e => card(e, true))}
+            </div>
+          </div>
+        )}
+
+        {/* Upcoming */}
+        {queue.upcoming.length > 0 && (
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 800, color: T.textMuted, marginBottom: 10 }}>Queued ({queue.upcoming.length})</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {queue.upcoming.slice(0, 20).map(e => card(e, false))}
+            </div>
+          </div>
+        )}
+
+        {/* Sent */}
+        {queue.sent.length > 0 && (
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 800, color: T.textMuted, marginBottom: 10 }}>Recently Sent ({queue.sent.length})</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {queue.sent.slice(0, 10).map(e => (
+                <div key={e.sid} style={{ background: T.surfaceAlt, borderRadius: 14, padding: "12px 16px", display: "flex", alignItems: "center", gap: 12 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{e.client?.name || e.stop.client || "Client"}</div>
+                    <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>Reminded · {e.date}</div>
+                  </div>
+                  <button onClick={() => undoSent(e.sid)} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>Undo</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {queue.due.length === 0 && queue.upcoming.length === 0 && queue.sent.length === 0 && (
+          <div style={{ textAlign: "center", padding: "30px 20px", color: T.textMuted, fontSize: 14 }}>
+            No upcoming stops to remind about yet. Schedule some visits and they'll show up here.
+          </div>
+        )}
+      </>)}
+    </div>
+  );
+}
+
 function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, T }) {
   const locations = catalog.locations || [];
   const treatments = catalog.treatments || [];
@@ -12248,6 +12570,7 @@ const ALL_NAV = [
   { id: "invoices",   label: "Invoices",  icon: "invoice",   permAny: ["viewInvoices", "canInvoice"] },
   { id: "estimates",  label: "Estimates", icon: "clipboard", perm: "canInvoice" },
   { id: "inventory",  label: "Inventory", icon: "box",       perm: "seeInventory" },
+  { id: "reminders",  label: "Reminders", icon: "message",   perm: "editSchedule" },
   { id: "reports",    label: "Reports",   icon: "dollar",    perm: "seeReportsPnl" },
   { id: "settings",   label: "Customize", icon: "sliders" },
 ];
@@ -12260,7 +12583,7 @@ const DEFAULT_DOCK = ["dashboard", "clients", "schedule", "messages", "settings"
 // plus account info and the ability to edit the dock.
 // ─────────────────────────────────────────────
 
-function OverflowMenu({ page, perms, navUnread, dockIds, setDockIds, onNav, onSignOut, currentUser, T, branding, onClose }) {
+function OverflowMenu({ page, perms, navUnread, reminderDue, dockIds, setDockIds, onNav, onSignOut, currentUser, T, branding, onClose }) {
   const availableNav = ALL_NAV.filter(n => {
     if (n.ownerOnly && !perms.isAdmin) return false;
     if (n.perm && !perms[n.perm]) return false;
@@ -12367,6 +12690,9 @@ function OverflowMenu({ page, perms, navUnread, dockIds, setDockIds, onNav, onSi
                       <Icon name={n.icon} size={18} />
                       {n.id === "messages" && navUnread > 0 && (
                         <span style={{ position: "absolute", top: -2, right: -2, width: 8, height: 8, borderRadius: "50%", background: T.primary, border: `2px solid ${T.surface}` }} />
+                      )}
+                      {n.id === "reminders" && reminderDue > 0 && (
+                        <span style={{ position: "absolute", top: -5, right: -5, minWidth: 16, height: 16, padding: "0 4px", borderRadius: 8, background: T.primary, color: "#fff", fontSize: 10, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", border: `2px solid ${T.surface}` }}>{reminderDue}</span>
                       )}
                     </div>
                     <span style={{ fontSize: 14, fontWeight: active ? 700 : 500, color: active ? T.primary : T.text }}>{n.label}</span>
@@ -14068,7 +14394,8 @@ export default function App({ authEmail = "", onSignOut }) {
   const [invoices, setInvoices, linv] = useStoredState("sps_invoices", DEMO_INVOICES);
   const [invoicing, setInvoicing, linvc] = useStoredState("sps_invoicing", DEFAULT_INVOICING);
   const [completedSids, setCompletedSids, lcomp] = useStoredState("sps_completed", {});
-  const hydrated = lc && lb && ls && lcat && lem && lco && lh && lbud && loa && lscfg && lrol && ltm && lsesh && linv && linvc && lcomp;
+  const [reminderLog, setReminderLog, lrem] = useStoredState("sps_reminders", {}); // { [sid]: { sentAt, method } }
+  const hydrated = lc && lb && ls && lcat && lem && lco && lh && lbud && loa && lscfg && lrol && ltm && lsesh && linv && linvc && lcomp && lrem;
 
   // Backfill newer catalog/cost fields for anyone with older saved data
   useEffect(() => {
@@ -14174,6 +14501,11 @@ export default function App({ authEmail = "", onSignOut }) {
 
   // Track unread message count for nav badge
   const [navUnread, setNavUnread] = useState(0);
+  // Count of reminders due now, for the nav badge + dashboard alert
+  const reminderDueCount = useMemo(() => {
+    try { return buildReminderQueue(schedule, clients, scheduleCfg, reminderLog, new Date()).due.length; }
+    catch { return 0; }
+  }, [schedule, clients, scheduleCfg, reminderLog]);
 
   // Customizable dock — which pages appear in the bottom bar (max 5)
   const [navDock, setNavDock, lndock] = useStoredState("sps_nav_dock", DEFAULT_DOCK);
@@ -14834,13 +15166,14 @@ export default function App({ authEmail = "", onSignOut }) {
           </div>
         )}
         <main style={{ flex: 1, padding: "22px 16px", maxWidth: 740, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
-          {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} />}
+          {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} scheduleCfg={scheduleCfg} reminderLog={reminderLog} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
           {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
           {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} />}
           {page === "schedule" && <Schedule clients={clients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
           {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
           {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin} T={T} />}
+          {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
           {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
           {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
           {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} initialFilter={invoiceFilter} />}
@@ -14875,6 +15208,7 @@ export default function App({ authEmail = "", onSignOut }) {
             page={page}
             perms={perms}
             navUnread={navUnread}
+            reminderDue={reminderDueCount}
             dockIds={dockIds}
             setDockIds={setNavDock}
             onNav={handleNav}
