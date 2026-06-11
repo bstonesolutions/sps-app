@@ -5844,6 +5844,14 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
     });
   };
 
+  const deleteStop = (origDate, sid) => {
+    setSchedule(prev => {
+      let copy = prev.map(d => ({ ...d, stops: d.stops.filter(s => s.sid !== sid) }));
+      copy = copy.filter(d => d.stops.length > 0 || d.date === todayMDY());
+      return copy;
+    });
+  };
+
   // open add form automatically if clients were sent over from the Clients tab
   useEffect(() => {
     if (seedClientIds && seedClientIds.length) setShowAdd(true);
@@ -6116,7 +6124,7 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
                 </div>
               )}
               <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{s.type}</div>
-              {cfg.showDuration && <div style={{ fontSize: 10, color: T.textMuted }}>{s.duration} min</div>}
+              {cfg.showDuration && <div style={{ fontSize: 10, color: T.textMuted }}>{String(s.duration || "").replace(/\s*min\s*$/i, "")} min</div>}
               {emp && (
                 <span title={emp.name} style={{ width: 26, height: 26, borderRadius: "50%", background: hexA(T.primary, 0.12), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 10, flexShrink: 0 }}>
                   {initials(emp.name)}
@@ -6143,38 +6151,45 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
                 )}
               </div>
 
-              {/* Button row — equal width, never cut off */}
-              <div style={{ padding: "8px 12px 10px", display: "flex", gap: 7 }}>
-                {perms.editSchedule && (
-                  <button onClick={e => { e.stopPropagation(); setEditStopModal({ stop: s, dayDate }); }}
-                    style={{ flex: 1, background: "transparent", color: T.textMuted, border: `1.5px solid ${T.border}`, borderRadius: 12, padding: "9px 6px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, minWidth: 0 }}>
-                    <Icon name="edit" size={13} />
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Edit</span>
-                  </button>
-                )}
-                {!isComplete && (
-                  <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: s, client: c }); }}
-                    style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "9px 6px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, minWidth: 0 }}>
-                    <Icon name="map" size={13} />
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Head Here</span>
-                  </button>
-                )}
-
-                {!isComplete && perms.sendTexts && (
-                  <button onClick={e => { e.stopPropagation(); setOmwModal({ stop: s, client: c, key: s.sid }); }}
-                    style={{ flex: 1, background: "transparent", color: T.primary, border: `1.5px solid ${hexA(T.primary, 0.4)}`, borderRadius: 12, padding: "9px 6px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, minWidth: 0 }}>
-                    <Icon name="message" size={13} />
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sent ? "Resend" : "On My Way"}</span>
-                  </button>
-                )}
-
+              {/* Actions — primary on top (full width), secondary row below */}
+              <div style={{ padding: "8px 12px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+                {/* Primary: Complete / Re-open */}
                 {perms.completeStops && (
                   <button onClick={e => { e.stopPropagation(); if (isComplete) { if (confirm("Re-open this stop? This removes its completed record so you can redo it.")) onUncomplete(s.id, s.sid); } else { setCompleteModal({ stop: s, client: c }); } }}
-                    style={{ flex: 1, background: isComplete ? hexA(T.accent, 0.1) : T.accent, color: isComplete ? T.accent : "#fff", border: isComplete ? `1.5px solid ${hexA(T.accent, 0.3)}` : "none", borderRadius: 12, padding: "9px 6px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, minWidth: 0 }}>
-                    <Icon name={isComplete ? "refresh" : "check"} size={13} />
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{isComplete ? "Re-open" : "Complete"}</span>
+                    style={{ width: "100%", background: isComplete ? hexA(T.accent, 0.1) : T.accent, color: isComplete ? T.accent : "#fff", border: isComplete ? `1.5px solid ${hexA(T.accent, 0.3)}` : "none", borderRadius: 12, padding: "12px", fontSize: 14, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
+                    <Icon name={isComplete ? "refresh" : "check"} size={16} />
+                    {isComplete ? "Re-open Stop" : "Complete Stop"}
                   </button>
                 )}
+
+                {/* Secondary row */}
+                <div style={{ display: "flex", gap: 7 }}>
+                  {perms.editSchedule && (
+                    <button onClick={e => { e.stopPropagation(); setEditStopModal({ stop: s, dayDate }); }}
+                      style={{ flex: 1, background: "transparent", color: T.textMuted, border: `1.5px solid ${T.border}`, borderRadius: 11, padding: "10px 6px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
+                      <Icon name="edit" size={14} /> Edit
+                    </button>
+                  )}
+                  {!isComplete && (
+                    <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: s, client: c }); }}
+                      style={{ flex: 1, background: hexA(T.primary, 0.08), color: T.primary, border: `1.5px solid ${hexA(T.primary, 0.25)}`, borderRadius: 11, padding: "10px 6px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
+                      <Icon name="map" size={14} /> Head Here
+                    </button>
+                  )}
+                  {!isComplete && perms.sendTexts && (
+                    <button onClick={e => { e.stopPropagation(); setOmwModal({ stop: s, client: c, key: s.sid }); }}
+                      style={{ flex: 1, background: "transparent", color: T.primary, border: `1.5px solid ${hexA(T.primary, 0.4)}`, borderRadius: 11, padding: "10px 6px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
+                      <Icon name="message" size={14} /> {sent ? "Resend" : "On My Way"}
+                    </button>
+                  )}
+                  {perms.editSchedule && (
+                    <button onClick={e => { e.stopPropagation(); if (confirm(`Delete this stop for ${c?.name || "this client"}? This can't be undone.`)) deleteStop(dayDate, s.sid); }}
+                      style={{ width: 44, flexShrink: 0, background: "transparent", color: "#C0392B", border: `1.5px solid ${hexA("#C0392B", 0.3)}`, borderRadius: 11, padding: "10px 0", cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center" }}
+                      title="Delete stop">
+                      <Icon name="trash" size={15} />
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -15178,13 +15193,13 @@ export default function App({ authEmail = "", onSignOut }) {
     return () => { window.__onSpsSync = null; };
   }, []);
 
-  // Branded splash — always shows for 2.2s after hydration
+  // Branded splash — shows briefly after hydration, then fades into the app
   useEffect(() => {
     if (!hydrated) return;
     if (splashShown.current) return;
     splashShown.current = true;
     setShowSplash(true);
-    const t = setTimeout(() => setShowSplash(false), 3000);
+    const t = setTimeout(() => setShowSplash(false), 1800);
     return () => clearTimeout(t);
   }, [hydrated]);
 
@@ -15622,7 +15637,7 @@ export default function App({ authEmail = "", onSignOut }) {
     const greetPrefix   = (branding.splashGreetingPrefix || "").trim();
 
     return (
-      <div style={{
+      <div className={hydrated ? "splash-veil" : ""} style={{
         fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif',
         background: splashBgCss,
         position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
@@ -15637,16 +15652,18 @@ export default function App({ authEmail = "", onSignOut }) {
         zIndex: 9999,
       }}>
         <style>{`
-          @keyframes sIn  { from { opacity:0; transform:translateY(20px) scale(0.96); } to { opacity:1; transform:translateY(0) scale(1); } }
-          @keyframes sOut { from { opacity:1; } to { opacity:0; } }
+          @keyframes sIn  { from { opacity:0; transform:translateY(16px) scale(0.97); } to { opacity:1; transform:translateY(0) scale(1); } }
+          @keyframes sOut { from { opacity:1; transform:scale(1); } to { opacity:0; transform:scale(1.04); } }
+          @keyframes splashVeil { from { opacity:1; } to { opacity:0; } }
           @keyframes spin { to { transform:rotate(360deg); } }
           @keyframes spsModalUp { from { opacity:0; transform:translateY(40px); } to { opacity:1; transform:translateY(0); } }
           @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
-          .si0 { animation: sIn 0.5s cubic-bezier(.22,1,.36,1) 0.05s both; }
-          .si1 { animation: sIn 0.5s cubic-bezier(.22,1,.36,1) 0.18s both; }
-          .si2 { animation: sIn 0.5s cubic-bezier(.22,1,.36,1) 0.28s both; }
-          .si3 { animation: sIn 0.5s cubic-bezier(.22,1,.36,1) 0.42s both; }
-          .s-out { animation: sOut 0.6s ease 2.3s both; }
+          .si0 { animation: sIn 0.42s cubic-bezier(.22,1,.36,1) 0.02s both; }
+          .si1 { animation: sIn 0.42s cubic-bezier(.22,1,.36,1) 0.12s both; }
+          .si2 { animation: sIn 0.42s cubic-bezier(.22,1,.36,1) 0.20s both; }
+          .si3 { animation: sIn 0.42s cubic-bezier(.22,1,.36,1) 0.30s both; }
+          .s-out { animation: sOut 0.45s cubic-bezier(.4,0,.6,1) 1.15s both; }
+          .splash-veil { animation: splashVeil 0.4s ease 1.4s both; }
         `}</style>
 
         {splashStyle === "image" && branding.splashBgImage && (
@@ -15659,7 +15676,7 @@ export default function App({ authEmail = "", onSignOut }) {
           </>
         )}
 
-        <div className="s-out" style={{ position:"relative", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", padding:"0 36px", gap: 0 }}>
+        <div className={hydrated ? "s-out" : ""} style={{ position:"relative", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", padding:"0 36px", gap: 0 }}>
           {/* Logo */}
           <div className="si0" style={{ marginBottom: 24 }}>
             {splashLogoSrc ? (
