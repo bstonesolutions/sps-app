@@ -2068,7 +2068,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onI
   const doMarkActive   = () => { onBatchUpdate(selectedIds, { status: "Active" }); setModal(null); exitSelect(); };
 
   return (
-    <div>
+    <div style={{ maxWidth: vp.isPhone ? "100%" : 860, margin: "0 auto", width: "100%" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
         <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Clients</h2>
         {selectMode ? (
@@ -2197,9 +2197,9 @@ function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onI
         </div>
       )}
 
-      <div style={{ display: vp.isPhone ? "flex" : "grid", flexDirection: "column", gridTemplateColumns: vp.isDesktop ? "1fr 1fr 1fr" : vp.isTablet ? "1fr 1fr" : undefined, alignItems: vp.isPhone ? undefined : "stretch", gap: 10, paddingBottom: selectMode && selCount > 0 ? 90 : 0 }}>
+      <div style={{ display: vp.isPhone ? "flex" : "grid", flexDirection: "column", gridTemplateColumns: vp.isDesktop ? "1fr 1fr" : vp.isTablet ? "1fr 1fr" : undefined, alignItems: vp.isPhone ? undefined : "start", gap: 12, width: "100%", paddingBottom: selectMode && selCount > 0 ? 90 : 0 }}>
         {filtered.length === 0 && (
-          <div style={{ textAlign: "center", padding: "40px 20px", color: T.textMuted }}>
+          <div style={{ gridColumn: "1 / -1", textAlign: "center", padding: "40px 20px", color: T.textMuted }}>
             <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="clients" size={26} /></div>
             <div style={{ fontWeight: 700, fontSize: 14, color: T.text, marginBottom: 4 }}>No clients found</div>
             <div style={{ fontSize: 13 }}>{search ? `Nothing matches "${search}"` : "Add your first client to get started"}</div>
@@ -13398,7 +13398,8 @@ function CIcon({ name, size = 22 }) {
 }
 
 // ── CP HOME ──
-function CPHome({ client, schedule, invoices, branding, onNav, T }) {
+function CPHome({ client, schedule, invoices, branding, onNav, T, vp = {} }) {
+  const wide = vp.isTablet || vp.isDesktop;
   const next = clientNextVisit(schedule, client.id, client.name);
   const myInvoices = sortInvoices((invoices || []).filter(iv => invoiceMatchesClient(iv, client)));
   const outstanding = myInvoices.filter(iv => !["Paid","paid"].includes(effectiveStatus(iv)) && iv.status !== "Draft");
@@ -13410,132 +13411,158 @@ function CPHome({ client, schedule, invoices, branding, onNav, T }) {
   const tier = client.plan ? (CP_TIERS[client.plan] || CP_TIERS["Signature"]) : null;
   const tierColor = tier?.color || T.surfaceAlt;
 
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
-
-      {/* Greeting */}
-      <div style={{ paddingTop: 4 }}>
-        <div style={{ fontSize: 30, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", lineHeight: 1.1 }}>
-          {greeting},<br /><span style={{ color: T.primary }}>{firstName}.</span>
-        </div>
-        <div style={{ fontSize: 14, color: T.textMuted, marginTop: 8 }}>
-          {branding.portalTagline || `Welcome to your ${branding.companyName} portal`}
-        </div>
+  // Shared block JSX so phone (single column) and wide (dashboard grid) can both use them
+  const greetingBlock = (
+    <div style={{ paddingTop: 4 }}>
+      <div style={{ fontSize: wide ? 34 : 30, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", lineHeight: 1.1 }}>
+        {greeting},{wide ? " " : <br />}<span style={{ color: T.primary }}>{firstName}.</span>
       </div>
-
-      {/* Hero: Next Visit + Tier combined card */}
-      <div style={{ background: tier ? `linear-gradient(145deg, ${tierColor} 0%, ${mix(tierColor, "#000", 0.3)} 100%)` : `linear-gradient(145deg, ${T.surfaceAlt} 0%, ${T.border} 100%)`, borderRadius: 26, padding: "24px 22px", color: tier ? "#fff" : T.text, boxShadow: tier ? `0 12px 40px ${hexA(tierColor, 0.4)}` : "none", position: "relative", overflow: "hidden", border: tier ? "none" : `1px solid ${T.border}` }}>
-        {/* Decorative circles */}
-        <div style={{ position: "absolute", right: -30, top: -30, width: 160, height: 160, borderRadius: "50%", background: "rgba(255,255,255,0.06)", pointerEvents: "none" }} />
-        <div style={{ position: "absolute", right: 30, bottom: -50, width: 120, height: 120, borderRadius: "50%", background: "rgba(255,255,255,0.04)", pointerEvents: "none" }} />
-        <div style={{ position: "absolute", left: -20, bottom: -20, width: 80, height: 80, borderRadius: "50%", background: "rgba(255,255,255,0.03)", pointerEvents: "none" }} />
-
-        {/* Tier badge */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
-          <div style={{ background: "rgba(255,255,255,0.18)", borderRadius: 100, padding: "5px 14px", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)" }}>
-            <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase" }}>{client.plan ? `${client.plan} Plan` : "No Service Tier"}</span>
-          </div>
-          <button onClick={() => onNav("cp_service")}
-            style={{ background: "rgba(255,255,255,0.15)", border: "none", borderRadius: 100, padding: "5px 14px", color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)" }}>
-            Details →
-          </button>
-        </div>
-
-        {/* Next visit */}
-        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", opacity: 0.65, marginBottom: 6 }}>Next Service Visit</div>
-        {next ? (
-          <>
-            <div style={{ fontSize: 28, fontWeight: 800, letterSpacing: "-0.03em", lineHeight: 1 }}>{fmtDate(next.label)}</div>
-            <div style={{ fontSize: 14, opacity: 0.8, marginTop: 6, fontWeight: 500 }}>{next.stop.type || "Service Visit"}</div>
-          </>
-        ) : (
-          <div style={{ fontSize: 18, fontWeight: 700, opacity: 0.75 }}>No upcoming visits scheduled</div>
-        )}
+      <div style={{ fontSize: 14, color: T.textMuted, marginTop: 8 }}>
+        {branding.portalTagline || `Welcome to your ${branding.companyName} portal`}
       </div>
+    </div>
+  );
 
-      {/* Balance due — urgent card */}
-      {totalOwed > 0 && (
-        <button onClick={() => onNav("cp_invoices")}
-          style={{ background: T.surface, border: `1.5px solid ${hexA("#E5484D", 0.3)}`, borderRadius: 20, padding: "18px 20px", display: "flex", alignItems: "center", gap: 16, cursor: "pointer", fontFamily: "inherit", width: "100%", boxSizing: "border-box", boxShadow: `0 4px 20px ${hexA("#E5484D", 0.1)}`, textAlign: "left" }}>
-          <div style={{ width: 44, height: 44, borderRadius: 14, background: hexA("#E5484D", 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-            <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="#E5484D" strokeWidth={2} strokeLinecap="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-          </div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "#E5484D", letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: 3 }}>Balance Due</div>
-            <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>${totalOwed.toFixed(2)}</div>
-          </div>
-          <div style={{ fontSize: 13, color: "#E5484D", fontWeight: 700 }}>Pay →</div>
+  const heroBlock = (
+    <div style={{ background: tier ? `linear-gradient(145deg, ${tierColor} 0%, ${mix(tierColor, "#000", 0.3)} 100%)` : `linear-gradient(145deg, ${T.surfaceAlt} 0%, ${T.border} 100%)`, borderRadius: 26, padding: "24px 22px", color: tier ? "#fff" : T.text, boxShadow: tier ? `0 12px 40px ${hexA(tierColor, 0.4)}` : "none", position: "relative", overflow: "hidden", border: tier ? "none" : `1px solid ${T.border}` }}>
+      <div style={{ position: "absolute", right: -30, top: -30, width: 160, height: 160, borderRadius: "50%", background: "rgba(255,255,255,0.06)", pointerEvents: "none" }} />
+      <div style={{ position: "absolute", right: 30, bottom: -50, width: 120, height: 120, borderRadius: "50%", background: "rgba(255,255,255,0.04)", pointerEvents: "none" }} />
+      <div style={{ position: "absolute", left: -20, bottom: -20, width: 80, height: 80, borderRadius: "50%", background: "rgba(255,255,255,0.03)", pointerEvents: "none" }} />
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
+        <div style={{ background: "rgba(255,255,255,0.18)", borderRadius: 100, padding: "5px 14px", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)" }}>
+          <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase" }}>{client.plan ? `${client.plan} Plan` : "No Service Tier"}</span>
+        </div>
+        <button onClick={() => onNav("cp_service")}
+          style={{ background: "rgba(255,255,255,0.15)", border: "none", borderRadius: 100, padding: "5px 14px", color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)" }}>
+          Details →
         </button>
+      </div>
+      <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", opacity: 0.65, marginBottom: 6 }}>Next Service Visit</div>
+      {next ? (
+        <>
+          <div style={{ fontSize: 28, fontWeight: 800, letterSpacing: "-0.03em", lineHeight: 1 }}>{fmtDate(next.label)}</div>
+          <div style={{ fontSize: 14, opacity: 0.8, marginTop: 6, fontWeight: 500 }}>{next.stop.type || "Service Visit"}{next.stop.time ? ` · ${next.stop.time}` : ""}</div>
+        </>
+      ) : (
+        <div style={{ fontSize: 18, fontWeight: 700, opacity: 0.75 }}>No upcoming visits scheduled</div>
       )}
+    </div>
+  );
 
-      {/* Stats row */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+  const balanceBlock = totalOwed > 0 ? (
+    <button onClick={() => onNav("cp_invoices")}
+      style={{ background: T.surface, border: `1.5px solid ${hexA("#E5484D", 0.3)}`, borderRadius: 20, padding: "18px 20px", display: "flex", alignItems: "center", gap: 16, cursor: "pointer", fontFamily: "inherit", width: "100%", boxSizing: "border-box", boxShadow: `0 4px 20px ${hexA("#E5484D", 0.1)}`, textAlign: "left" }}>
+      <div style={{ width: 44, height: 44, borderRadius: 14, background: hexA("#E5484D", 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+        <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="#E5484D" strokeWidth={2} strokeLinecap="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+      </div>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: "#E5484D", letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: 3 }}>Balance Due</div>
+        <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>${totalOwed.toFixed(2)}</div>
+      </div>
+      <div style={{ fontSize: 13, color: "#E5484D", fontWeight: 700 }}>Pay →</div>
+    </button>
+  ) : null;
+
+  const statsBlock = (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+      {[
+        { label: "Visits", value: (client.history||[]).length, page: "cp_pond" },
+        { label: "Invoices", value: myInvoices.length, page: "cp_invoices" },
+        { label: "Equipment", value: (client.equipment||[]).length, page: "cp_property" },
+      ].map(s => (
+        <button key={s.label} onClick={() => s.page && onNav(s.page)}
+          style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "16px 10px", textAlign: "center", cursor: s.page ? "pointer" : "default", fontFamily: "inherit" }}>
+          <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{s.value}</div>
+          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4, fontWeight: 600 }}>{s.label}</div>
+        </button>
+      ))}
+    </div>
+  );
+
+  const recentBlock = recentHistory.length > 0 ? (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Recent Visits</div>
+        <button onClick={() => onNav("cp_pond")} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>See all</button>
+      </div>
+      <div style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+        {recentHistory.map((h, i) => {
+          const readings = h.readings && Object.keys(h.readings).length ? h.readings : null;
+          return (
+            <div key={i} onClick={() => onNav("cp_property")} style={{ padding: "15px 18px", borderBottom: i < recentHistory.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", gap: 14, alignItems: "center", cursor: "pointer" }}>
+              <div style={{ width: 40, height: 40, borderRadius: 13, background: hexA(T.primary, 0.08), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                <svg viewBox="0 0 24 24" width={20} height={20} fill={T.primary}><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{h.type || "Service Visit"}</div>
+                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{fmtDate(h.date)}{h.tech ? ` · ${h.tech}` : ""}</div>
+              </div>
+              {readings && (
+                <div style={{ fontSize: 11, color: T.primary, fontWeight: 700, background: hexA(T.primary, 0.08), borderRadius: 8, padding: "3px 8px" }}>
+                  pH {Object.values(readings)[0]}
+                </div>
+              )}
+              <div style={{ color: T.textMuted, flexShrink: 0 }}><svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="m9 18 6-6-6-6"/></svg></div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  ) : null;
+
+  const quickActionsBlock = (
+    <div>
+      <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginBottom: 12 }}>Quick Actions</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
         {[
-          { label: "Visits", value: (client.history||[]).length, page: "cp_pond" },
-          { label: "Invoices", value: myInvoices.length, page: "cp_invoices" },
-          { label: "Equipment", value: (client.equipment||[]).length, page: "cp_property" },
-        ].map(s => (
-          <button key={s.label} onClick={() => s.page && onNav(s.page)}
-            style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "16px 10px", textAlign: "center", cursor: s.page ? "pointer" : "default", fontFamily: "inherit" }}>
-            <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{s.value}</div>
-            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4, fontWeight: 600 }}>{s.label}</div>
+          { label: "My Service Plan", sub: client.plan ? `${client.plan} — tap to manage` : "No tier assigned", icon: "clients", page: "cp_service", accent: !!client.plan },
+          { label: "Messages", sub: "Chat with our team", icon: "message", page: "cp_messages", accent: false },
+          { label: "My Property", sub: `${pondLabel(client)} · ${(client.history||[]).length} visits`, icon: "history", page: "cp_property", accent: false },
+          { label: "My Invoices", sub: outstanding.length ? `${outstanding.length} outstanding` : "All paid up", icon: "invoice", page: "cp_invoices", accent: false },
+        ].map(q => (
+          <button key={q.page} onClick={() => onNav(q.page)}
+            style={{ background: q.accent ? hexA(T.primary, 0.06) : T.surface, border: `1.5px solid ${q.accent ? hexA(T.primary, 0.2) : T.border}`, borderRadius: 20, padding: "18px 16px", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+            <div style={{ width: 40, height: 40, borderRadius: 13, background: q.accent ? T.primary : hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 12, color: q.accent ? "#fff" : T.primary }}>
+              <CIcon name={q.icon} size={20} />
+            </div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em", lineHeight: 1.2 }}>{q.label}</div>
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4, lineHeight: 1.4 }}>{q.sub}</div>
           </button>
         ))}
       </div>
+    </div>
+  );
 
-      {/* Recent visits */}
-      {recentHistory.length > 0 && (
-        <div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-            <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Recent Visits</div>
-            <button onClick={() => onNav("cp_pond")} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>See all</button>
+  // WIDE: MindBridge-style two-column dashboard. PHONE: original single stack.
+  if (wide) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+        {greetingBlock}
+        <div style={{ display: "grid", gridTemplateColumns: vp.isDesktop ? "1.6fr 1fr" : "1.4fr 1fr", gap: 20, alignItems: "start" }}>
+          {/* Left column — hero + recent activity */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+            {heroBlock}
+            {recentBlock}
+            {quickActionsBlock}
           </div>
-          <div style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, overflow: "hidden" }}>
-            {recentHistory.map((h, i) => {
-              const readings = h.readings && Object.keys(h.readings).length ? h.readings : null;
-              return (
-                <div key={i} onClick={() => onNav("cp_property")} style={{ padding: "15px 18px", borderBottom: i < recentHistory.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", gap: 14, alignItems: "center", cursor: "pointer" }}>
-                  <div style={{ width: 40, height: 40, borderRadius: 13, background: hexA(T.primary, 0.08), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                    <svg viewBox="0 0 24 24" width={20} height={20} fill={T.primary}><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{h.type || "Service Visit"}</div>
-                    <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{fmtDate(h.date)}{h.tech ? ` · ${h.tech}` : ""}</div>
-                  </div>
-                  {readings && (
-                    <div style={{ fontSize: 11, color: T.primary, fontWeight: 700, background: hexA(T.primary, 0.08), borderRadius: 8, padding: "3px 8px" }}>
-                      pH {Object.values(readings)[0]}
-                    </div>
-                  )}
-                  <div style={{ color: T.textMuted, flexShrink: 0 }}><svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="m9 18 6-6-6-6"/></svg></div>
-                </div>
-              );
-            })}
+          {/* Right column — balance, stats, quick glance */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+            {balanceBlock}
+            {statsBlock}
           </div>
-        </div>
-      )}
-
-      {/* Quick actions grid */}
-      <div>
-        <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginBottom: 12 }}>Quick Actions</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          {[
-            { label: "My Service Plan", sub: client.plan ? `${client.plan} — tap to manage` : "No tier assigned", icon: "clients", page: "cp_service", accent: !!client.plan },
-            { label: "Messages", sub: "Chat with our team", icon: "message", page: "cp_messages", accent: false },
-            { label: "My Property", sub: `${pondLabel(client)} · ${(client.history||[]).length} visits`, icon: "history", page: "cp_property", accent: false },
-            { label: "My Invoices", sub: outstanding.length ? `${outstanding.length} outstanding` : "All paid up", icon: "invoice", page: "cp_invoices", accent: false },
-          ].map(q => (
-            <button key={q.page} onClick={() => onNav(q.page)}
-              style={{ background: q.accent ? hexA(T.primary, 0.06) : T.surface, border: `1.5px solid ${q.accent ? hexA(T.primary, 0.2) : T.border}`, borderRadius: 20, padding: "18px 16px", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-              <div style={{ width: 40, height: 40, borderRadius: 13, background: q.accent ? T.primary : hexA(T.primary, 0.1), display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 12, color: q.accent ? "#fff" : T.primary }}>
-                <CIcon name={q.icon} size={20} />
-              </div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em", lineHeight: 1.2 }}>{q.label}</div>
-              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4, lineHeight: 1.4 }}>{q.sub}</div>
-            </button>
-          ))}
         </div>
       </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
+      {greetingBlock}
+      {heroBlock}
+      {balanceBlock}
+      {statsBlock}
+      {recentBlock}
+      {quickActionsBlock}
     </div>
   );
 }
@@ -14749,6 +14776,8 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
   const textScale = prefs.textSize === "large" ? 1.1 : prefs.textSize === "small" ? 0.9 : 1;
 
   const [page, setPage] = useState(prefs.defaultPage || branding.portalDefaultPage || "cp_home");
+  const vp = useViewport();
+  const wide = vp.isTablet || vp.isDesktop;
 
   return (
     <div style={{ fontFamily: fontStack, background: T.bg, minHeight: "100vh", display: "flex", flexDirection: "column", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em" }}>
@@ -14810,11 +14839,11 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
       </header>
 
       {/* Main content */}
-      <main style={{ flex: 1, padding: "24px 18px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))", fontSize: `${textScale}em` }}>
+      <main style={{ flex: 1, padding: wide ? "32px 32px" : "24px 18px", maxWidth: vp.isDesktop ? 1080 : wide ? 880 : 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))", fontSize: `${textScale}em` }}>
         {settingsOpen && (
           <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
         )}
-        {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} onNav={setPage} T={T} />}
+        {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} onNav={setPage} T={T} vp={vp} />}
         {!settingsOpen && page === "cp_property" && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
         {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
         {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} />}
@@ -14832,6 +14861,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
         display: "flex", zIndex: 90,
         minHeight: 60, paddingTop: 4,
         paddingBottom: "calc(8px + env(safe-area-inset-bottom))",
+        maxWidth: wide ? 560 : "none", margin: "0 auto", borderTopLeftRadius: wide ? 0 : 0, ...(wide ? { left: "50%", right: "auto", transform: "translateX(-50%)", width: 560, borderRadius: "20px 20px 0 0", border: `1px solid ${T.border}`, borderBottom: "none" } : {}),
       }}>
         {CLIENT_NAV.map(n => {
           const active = (page === n.id || (n.id === "cp_property" && (page === "cp_pond" || page === "cp_service"))) && !settingsOpen;
