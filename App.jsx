@@ -4250,6 +4250,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
 
   const assignedMember = (team || []).find(e => e.id === assigneeId);
   const buildEntry = () => ({
+    sid: stop.sid,
     date: todayStr, tech: assignedMember ? assignedMember.name : "Unassigned", type: stop.type,
     assigneeId: assigneeId || "",
     notes: notesClient || "Service completed.",
@@ -5715,7 +5716,7 @@ function StopEditModal({ stop, dayDate, catalog, team, T, onSave, onClose }) {
   );
 }
 
-function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg, team, onClientSelect, seedClientIds, clearSeed, email, onComplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments }) {
+function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg, team, onClientSelect, seedClientIds, clearSeed, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments }) {
   const { T, perms } = useApp();
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
   const compact = cfg.density === "compact";
@@ -6073,18 +6074,20 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
 
               {/* Button row — equal width, never cut off */}
               <div style={{ padding: "8px 12px 10px", display: "flex", gap: 7 }}>
-                {!isComplete && perms.editSchedule && (
+                {perms.editSchedule && (
                   <button onClick={e => { e.stopPropagation(); setEditStopModal({ stop: s, dayDate }); }}
                     style={{ flex: 1, background: "transparent", color: T.textMuted, border: `1.5px solid ${T.border}`, borderRadius: 12, padding: "9px 6px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, minWidth: 0 }}>
                     <Icon name="edit" size={13} />
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Edit</span>
                   </button>
                 )}
-                <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: s, client: c }); }}
-                  style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "9px 6px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, minWidth: 0 }}>
-                  <Icon name="map" size={13} />
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Head Here</span>
-                </button>
+                {!isComplete && (
+                  <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: s, client: c }); }}
+                    style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "9px 6px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, minWidth: 0 }}>
+                    <Icon name="map" size={13} />
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Head Here</span>
+                  </button>
+                )}
 
                 {!isComplete && perms.sendTexts && (
                   <button onClick={e => { e.stopPropagation(); setOmwModal({ stop: s, client: c, key: s.sid }); }}
@@ -6095,9 +6098,9 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
                 )}
 
                 {perms.completeStops && (
-                  <button onClick={e => { e.stopPropagation(); setCompleteModal({ stop: s, client: c }); }}
+                  <button onClick={e => { e.stopPropagation(); if (isComplete) { if (confirm("Re-open this stop? This removes its completed record so you can redo it.")) onUncomplete(s.id, s.sid); } else { setCompleteModal({ stop: s, client: c }); } }}
                     style={{ flex: 1, background: isComplete ? hexA(T.accent, 0.1) : T.accent, color: isComplete ? T.accent : "#fff", border: isComplete ? `1.5px solid ${hexA(T.accent, 0.3)}` : "none", borderRadius: 12, padding: "9px 6px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, minWidth: 0 }}>
-                    <Icon name="check" size={13} />
+                    <Icon name={isComplete ? "refresh" : "check"} size={13} />
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{isComplete ? "Re-open" : "Complete"}</span>
                   </button>
                 )}
@@ -15160,6 +15163,20 @@ export default function App({ authEmail = "", onSignOut }) {
     if (sid) setCompletedSids(m => ({ ...m, [sid]: true }));
   };
 
+  // Un-finish a stop: clear its completed flag and remove the history entry it created
+  const handleUncompleteStop = (clientId, sid) => {
+    setCompletedSids(m => { const n = { ...m }; delete n[sid]; return n; });
+    setClients(cs => cs.map(c => {
+      if (c.id !== clientId) return c;
+      const hist = [...(c.history || [])];
+      // remove the entry tied to this sid, else the most recent one
+      let idx = hist.findIndex(h => h.sid === sid);
+      if (idx < 0) idx = 0;
+      if (idx >= 0) hist.splice(idx, 1);
+      return { ...c, history: hist };
+    }));
+  };
+
   // Branded splash — shows while loading OR for minimum 2.2s after hydration
   const splashTagline = (branding.splashTagline && branding.splashTagline.trim())
     ? branding.splashTagline.trim()
@@ -15387,7 +15404,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
           {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
           {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} team={team} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} />}
-          {page === "schedule" && <Schedule clients={clients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
+          {page === "schedule" && <Schedule clients={clients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
           {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
           {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin} T={T} />}
           {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
