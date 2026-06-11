@@ -843,9 +843,39 @@ const DEFAULT_COSTS = {
   insurance: { amount: "400", mode: "month" },
   equipment: { amount: "12",  mode: "stop" },
   overhead:  { amount: "800", mode: "month" },
+  // Tax planning (estimates, not filing-grade — your CPA is the source of truth)
+  tax: {
+    enabled: true,
+    paStateRate: "3.07",      // PA flat personal income tax
+    localEitRate: "1.0",      // Honey Brook Borough Earned Income Tax (Keystone Collections)
+    selfEmploymentRate: "15.3", // federal SE tax (Social Security + Medicare) on net profit
+    federalRate: "12",        // estimated effective federal income tax bracket — adjust with your CPA
+    sCorpElected: false,      // if S-Corp: SE tax applies to reasonable salary, not full profit
+    reasonableSalary: "",     // annual W-2 salary if S-Corp elected
+  },
 };
 const COST_LINES = ["gas", "insurance", "equipment", "overhead"];
 const costLine = (c) => (typeof c === "object" && c !== null) ? c : { amount: String(c ?? "0"), mode: "stop" };
+
+// Estimate taxes on a given net profit figure (annualized). Returns a breakdown.
+// This is a planning estimate only — actual liability depends on deductions, filing status, and your CPA.
+function estimateTaxes(netProfit, costs) {
+  const t = { ...(DEFAULT_COSTS.tax), ...((costs && costs.tax) || {}) };
+  if (!t.enabled || netProfit <= 0) return { se: 0, federal: 0, paState: 0, local: 0, total: 0, takeHome: Math.max(0, netProfit), effectiveRate: 0 };
+  const n = (v) => parseFloat(v) || 0;
+  // Self-employment tax base: full profit, or just reasonable salary if S-Corp
+  const seBase = t.sCorpElected ? n(t.reasonableSalary) : netProfit;
+  const se = seBase * (n(t.selfEmploymentRate) / 100);
+  // Federal income tax: applied to profit minus half the SE tax (the deductible employer portion)
+  const fedBase = Math.max(0, netProfit - se / 2);
+  const federal = fedBase * (n(t.federalRate) / 100);
+  const paState = netProfit * (n(t.paStateRate) / 100);
+  const local = netProfit * (n(t.localEitRate) / 100);
+  const total = se + federal + paState + local;
+  const takeHome = netProfit - total;
+  const effectiveRate = netProfit > 0 ? (total / netProfit) * 100 : 0;
+  return { se, federal, paState, local, total, takeHome, effectiveRate };
+}
 
 // Per-stop portion of overhead (only lines set to per-stop apply to each job)
 function perStopCosts(costs) {
@@ -2167,7 +2197,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onI
         </div>
       )}
 
-      <div style={{ display: vp.isPhone ? "flex" : "grid", flexDirection: "column", gridTemplateColumns: vp.isDesktop ? "1fr 1fr 1fr" : vp.isTablet ? "1fr 1fr" : undefined, gap: 10, paddingBottom: selectMode && selCount > 0 ? 90 : 0 }}>
+      <div style={{ display: vp.isPhone ? "flex" : "grid", flexDirection: "column", gridTemplateColumns: vp.isDesktop ? "1fr 1fr 1fr" : vp.isTablet ? "1fr 1fr" : undefined, alignItems: vp.isPhone ? undefined : "stretch", gap: 10, paddingBottom: selectMode && selCount > 0 ? 90 : 0 }}>
         {filtered.length === 0 && (
           <div style={{ textAlign: "center", padding: "40px 20px", color: T.textMuted }}>
             <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="clients" size={26} /></div>
@@ -2181,7 +2211,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onI
           return (
             <div key={c.id}
               onClick={() => selectMode ? toggle(c.id) : onSelect(c)}
-              style={{ background: T.surface, border: `1px solid ${isSel ? T.primary : T.border}`, borderRadius: 16, padding: "15px 16px", cursor: "pointer", display: "flex", gap: 14, alignItems: "center", transition: "box-shadow 0.15s, border-color 0.15s", boxShadow: "0 1px 4px rgba(0,0,0,0.04)" }}
+              style={{ background: T.surface, border: `1px solid ${isSel ? T.primary : T.border}`, borderRadius: 16, padding: "15px 16px", cursor: "pointer", display: "flex", gap: 14, alignItems: "flex-start", transition: "box-shadow 0.15s, border-color 0.15s", boxShadow: "0 1px 4px rgba(0,0,0,0.04)" }}
               onMouseEnter={e => e.currentTarget.style.boxShadow = "0 4px 16px rgba(0,0,0,0.09)"}
               onMouseLeave={e => e.currentTarget.style.boxShadow = "0 1px 4px rgba(0,0,0,0.04)"}
             >
@@ -4796,7 +4826,7 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
   const [assigneeId, setAssigneeId] = useState("");   // "" = unassigned
 
   const q = clientSearch.toLowerCase();
-  const filteredClients = clients.filter(c => (c.name || "").toLowerCase().includes(q));
+  const filteredClients = clients.filter(c => c.status !== "Inactive" && (c.name || "").toLowerCase().includes(q));
   const selClientIds = Object.keys(selClients).filter(k => selClients[k]).map(Number);
 
   const toggleClient = (id) => setSelClients(s => ({ ...s, [id]: !s[id] }));
@@ -4848,7 +4878,7 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
   };
 
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
-  const nativeInput = { width: "100%", padding: "10px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const nativeInput = { width: "100%", padding: "12px 14px", minHeight: 46, border: `1px solid ${T.border}`, borderRadius: 11, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", cursor: "pointer" };
 
   return (
     <Modal title="New Service Stop" onClose={onClose}>
@@ -6192,13 +6222,14 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
 
       {/* Day strip */}
       {!selectMode && schedule.length > 0 && (
-        <div style={{ display: "flex", gap: 6, marginBottom: 18, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 18 }}>
+          <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", flex: 1 }}>
           {dayCells.map(cell => {
             const on = cell.ds === selectedDate;
             const isToday = cell.ds === todayMDY();
             return (
               <button key={cell.ds} onClick={() => { setSelectedDate(cell.ds); setViewTech(null); }}
-                style={{ flexShrink: 0, width: 54, paddingTop: 10, paddingBottom: 10, borderRadius: 16, border: "none", cursor: "pointer", fontFamily: "inherit", textAlign: "center", transition: "background 0.15s, transform 0.1s",
+                style={{ flexShrink: 0, width: 54, paddingTop: 10, paddingBottom: 10, borderRadius: 16, border: isToday && !on ? `2px solid ${hexA(T.primary, 0.4)}` : "none", cursor: "pointer", fontFamily: "inherit", textAlign: "center", transition: "background 0.15s, transform 0.1s",
                   background: on ? T.primary : T.surfaceAlt,
                   color: on ? "#fff" : T.textMuted,
                   boxShadow: on ? `0 4px 14px ${hexA(T.primary, 0.35)}` : "none",
@@ -6215,6 +6246,14 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
               </button>
             );
           })}
+          </div>
+          {selectedDate !== todayMDY() && (
+            <button onClick={() => { setSelectedDate(todayMDY()); setViewTech(null); }}
+              style={{ flexShrink: 0, alignSelf: "stretch", padding: "0 16px", borderRadius: 16, border: `1.5px solid ${T.primary}`, background: hexA(T.primary, 0.06), color: T.primary, fontFamily: "inherit", fontWeight: 800, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}>
+              <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+              Today
+            </button>
+          )}
         </div>
       )}
 
@@ -7313,6 +7352,70 @@ function BudgetManager({ budget, setBudget, clients, costs, invoices }) {
           </div>
         </div>
       </Card>
+
+      {/* Take-home after taxes */}
+      {(() => {
+        const taxCfg = { ...DEFAULT_COSTS.tax, ...((costs && costs.tax) || {}) };
+        if (!taxCfg.enabled) return null;
+        // Annualize the monthly net so federal brackets apply sensibly, then divide back to monthly
+        const annualProjected = projectedNet * 12;
+        const annualActual = actualNet * 12;
+        const txP = estimateTaxes(annualProjected, costs);
+        const txA = estimateTaxes(annualActual, costs);
+        const mo = (n) => n / 12;
+        return (
+          <Card style={{ marginTop: 14 }}>
+            <CardHeader title="Take-Home (After Taxes)" />
+            <div style={{ padding: 18 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 14, lineHeight: 1.5 }}>
+                Planning estimate based on PA 3.07%, Honey Brook 1% local EIT, federal self-employment 15.3%, and your set federal rate. This is not filing advice — your CPA is the source of truth.
+              </div>
+
+              {/* Hero: monthly take-home from actuals */}
+              <div style={{ background: `linear-gradient(150deg, ${T.primary} 0%, ${mix(T.primary, "#000", 0.3)} 100%)`, borderRadius: 16, padding: "18px 20px", color: "#fff", marginBottom: 14 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", opacity: 0.8 }}>Est. Monthly Take-Home</div>
+                <div style={{ fontSize: 30, fontWeight: 800, letterSpacing: "-0.03em", marginTop: 3 }}>{money(Math.max(0, mo(txA.takeHome)))}</div>
+                <div style={{ fontSize: 12, opacity: 0.85, marginTop: 3 }}>from {money(actualNet)} net · ~{txA.effectiveRate.toFixed(0)}% effective tax</div>
+              </div>
+
+              {/* Tax breakdown (monthly, from actuals) */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                {[
+                  ["Net profit (pre-tax)", actualNet, T.text, false],
+                  ["Self-employment tax", -mo(txA.se), T.textMuted, true],
+                  ["Federal income (est.)", -mo(txA.federal), T.textMuted, true],
+                  ["PA state (3.07%)", -mo(txA.paState), T.textMuted, true],
+                  ["Local EIT (1%)", -mo(txA.local), T.textMuted, true],
+                ].map(([k, v, col, neg]) => (
+                  <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+                    <span style={{ color: col }}>{k}</span>
+                    <span style={{ color: neg ? "#C0392B" : T.text, fontWeight: neg ? 600 : 700 }}>{neg ? "−" : ""}{money(Math.abs(v))}</span>
+                  </div>
+                ))}
+                <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 4, paddingTop: 8, display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ fontSize: 14, fontWeight: 800, color: T.text }}>Take-home / month</span>
+                  <span style={{ fontSize: 16, fontWeight: 800, color: T.accent }}>{money(Math.max(0, mo(txA.takeHome)))}</span>
+                </div>
+              </div>
+
+              {/* Annual + set-aside guidance */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 16 }}>
+                <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: "12px 14px" }}>
+                  <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>Est. Annual Tax</div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: T.text, marginTop: 2 }}>{money(txA.total)}</div>
+                </div>
+                <div style={{ background: hexA(T.warning, 0.1), borderRadius: 12, padding: "12px 14px" }}>
+                  <div style={{ fontSize: 10, color: "#B45309", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>Set Aside / Month</div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: "#B45309", marginTop: 2 }}>{money(Math.max(0, mo(txA.total)))}</div>
+                </div>
+              </div>
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 10, lineHeight: 1.5 }}>
+                Tip: park the "set aside" amount in a separate account for quarterly estimated payments. Adjust rates in Costs &amp; Labor → Taxes.
+              </div>
+            </div>
+          </Card>
+        );
+      })()}
     </>
   );
 }
@@ -7325,6 +7428,21 @@ function CostSettings({ costs, setCosts, clients }) {
   const n = (v) => parseFloat(v) || 0;
   const setRate = (v) => setCosts(c => ({ ...c, hourlyRate: v.replace(/[^\d.]/g, "") }));
   const setLine = (key, patch) => setCosts(c => ({ ...c, [key]: { ...costLine(c[key]), ...patch } }));
+  const setTax = (key, val) => setCosts(c => ({ ...c, tax: { ...DEFAULT_COSTS.tax, ...(c.tax || {}), [key]: val } }));
+  const tax = { ...DEFAULT_COSTS.tax, ...((costs && costs.tax) || {}) };
+  const taxRateInput = (key, label, hint) => (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
+      <div style={{ flex: 1, minWidth: 0, paddingRight: 12 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{label}</div>
+        {hint && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{hint}</div>}
+      </div>
+      <div style={{ position: "relative", width: 88, flexShrink: 0 }}>
+        <input type="text" inputMode="decimal" value={tax[key]} onChange={e => setTax(key, e.target.value.replace(/[^\d.]/g, ""))}
+          style={{ width: "100%", padding: "9px 22px 9px 10px", border: `1px solid ${T.border}`, borderRadius: 9, fontSize: 14, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
+        <span style={{ position: "absolute", right: 9, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>%</span>
+      </div>
+    </div>
+  );
 
   const perStop = perStopCosts(costs);
   const monthlyFixed = monthlyFixedCosts(costs);
@@ -7405,6 +7523,64 @@ function CostSettings({ costs, setCosts, clients }) {
               <span style={{ fontSize: 15, fontWeight: 800, color: T.text }}>${monthlyFixed.toFixed(2)}</span>
             </div>
           </div>
+        </div>
+      </Card>
+
+      <Card style={{ marginTop: 14 }}>
+        <CardHeader title="Taxes" />
+        <div style={{ padding: 18 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+            <div style={{ flex: 1, paddingRight: 12 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Show take-home (after taxes)</div>
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>Adds an after-tax view to the Budget and Reports.</div>
+            </div>
+            <button onClick={() => setTax("enabled", !tax.enabled)}
+              style={{ width: 46, height: 27, borderRadius: 100, border: "none", background: tax.enabled ? T.accent : T.border, position: "relative", cursor: "pointer", flexShrink: 0, transition: "background 0.2s" }}>
+              <div style={{ width: 21, height: 21, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: tax.enabled ? 22 : 3, transition: "left 0.2s", boxShadow: "0 1px 3px rgba(0,0,0,0.3)" }} />
+            </button>
+          </div>
+
+          {tax.enabled && (
+            <>
+              <div style={{ marginTop: 8 }}>
+                {taxRateInput("paStateRate", "PA state income tax", "Flat 3.07% statewide")}
+                {taxRateInput("localEitRate", "Local Earned Income Tax", "Honey Brook Borough 1% (Keystone Collections)")}
+                {taxRateInput("selfEmploymentRate", "Self-employment tax", "Federal Social Security + Medicare, 15.3%")}
+                {taxRateInput("federalRate", "Federal income tax (est.)", "Your effective bracket — set with your CPA")}
+              </div>
+
+              {/* S-Corp toggle */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 0 0" }}>
+                <div style={{ flex: 1, paddingRight: 12 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>S-Corp elected</div>
+                  <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>SE tax applies to your salary, not full profit</div>
+                </div>
+                <button onClick={() => setTax("sCorpElected", !tax.sCorpElected)}
+                  style={{ width: 46, height: 27, borderRadius: 100, border: "none", background: tax.sCorpElected ? T.accent : T.border, position: "relative", cursor: "pointer", flexShrink: 0, transition: "background 0.2s" }}>
+                  <div style={{ width: 21, height: 21, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: tax.sCorpElected ? 22 : 3, transition: "left 0.2s", boxShadow: "0 1px 3px rgba(0,0,0,0.3)" }} />
+                </button>
+              </div>
+
+              {tax.sCorpElected && (
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 0 0" }}>
+                  <div style={{ flex: 1, paddingRight: 12 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>Reasonable salary (annual)</div>
+                    <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>The W-2 wage you pay yourself</div>
+                  </div>
+                  <div style={{ position: "relative", width: 110, flexShrink: 0 }}>
+                    <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>$</span>
+                    <input type="text" inputMode="decimal" value={tax.reasonableSalary} onChange={e => setTax("reasonableSalary", e.target.value.replace(/[^\d.]/g, ""))}
+                      style={{ width: "100%", padding: "9px 10px 9px 22px", border: `1px solid ${T.border}`, borderRadius: 9, fontSize: 14, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
+                  </div>
+                </div>
+              )}
+
+              <div style={{ background: hexA(T.primary, 0.06), borderRadius: 10, padding: "11px 13px", fontSize: 11.5, color: T.textMuted, marginTop: 14, lineHeight: 1.5, display: "flex", gap: 8 }}>
+                <Icon name="info" size={14} />
+                <span>These are planning estimates to show roughly what you keep. Actual tax depends on deductions, quarterly payments, and filing details. Your CPA is the source of truth.</span>
+              </div>
+            </>
+          )}
         </div>
       </Card>
 
@@ -12430,6 +12606,7 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
 
   // ── Consolidated P&L (owner oversight) ──
   // Roll up every cost category from this period's completed stops + fixed monthly overhead
+  const monthsInPeriod = period === "month" ? 1 : period === "quarter" ? 3 : period === "year" ? 12 : 12;
   const pnl = (() => {
     let labor = 0, treatment = 0, parts = 0, product = 0, gas = 0, insurance = 0, equipment = 0, overhead = 0;
     periodJobs.forEach(h => {
@@ -12446,7 +12623,6 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
     const directCost = labor + treatment + parts + product + gas + insurance + equipment + overhead;
     // Fixed monthly overhead applies to a month period (prorate roughly for other periods)
     const fixedMonthly = costs ? monthlyFixedCosts(costs) : 0;
-    const monthsInPeriod = period === "month" ? 1 : period === "quarter" ? 3 : period === "year" ? 12 : 12;
     const fixedCost = fixedMonthly * monthsInPeriod;
     const totalCost = directCost + fixedCost;
     const net = revenue - totalCost;
@@ -12581,6 +12757,25 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
               {pnl.net < 0 ? "-" : ""}${Math.abs(Math.round(pnl.net)).toLocaleString()}
             </span>
           </div>
+          {/* After-tax take-home */}
+          {(() => {
+            const taxCfg = { ...DEFAULT_COSTS.tax, ...((costs && costs.tax) || {}) };
+            if (!taxCfg.enabled || pnl.net <= 0) return null;
+            // Annualize for bracket math, scale tax back to the selected period
+            const annualNet = pnl.net * (12 / monthsInPeriod);
+            const txAnnual = estimateTaxes(annualNet, costs);
+            const periodTax = txAnnual.total * (monthsInPeriod / 12);
+            const periodTakeHome = pnl.net - periodTax;
+            return (
+              <div style={{ borderTop: `1px solid ${T.border}`, padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", background: hexA(T.primary, 0.04) }}>
+                <div>
+                  <span style={{ fontSize: 14, fontWeight: 800, color: T.text }}>Est. Take-Home</span>
+                  <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>after ~${Math.round(periodTax).toLocaleString()} taxes (~{txAnnual.effectiveRate.toFixed(0)}%)</div>
+                </div>
+                <span style={{ fontSize: 18, fontWeight: 800, color: T.primary, letterSpacing: "-0.02em" }}>${Math.max(0, Math.round(periodTakeHome)).toLocaleString()}</span>
+              </div>
+            );
+          })()}
         </div>
         <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5 }}>
           Pulled from completed stops in this period plus fixed monthly overhead. Revenue is from paid invoices. This is your owner-only view; staff don't see it unless you grant profitability access.
@@ -14563,6 +14758,16 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
         input:focus, select:focus, textarea:focus { border-color: ${T.primary} !important; outline: none; box-shadow: 0 0 0 3px ${hexA(T.primary, 0.15)}; }
         button { transition: transform 0.08s ease, opacity 0.15s ease; }
         button:active { transform: scale(0.97); }
+        /* Keep the native calendar / clock picker affordance on date & time fields */
+        input[type="date"], input[type="time"] { -webkit-appearance: none; appearance: none; position: relative; }
+        input[type="date"]::-webkit-calendar-picker-indicator,
+        input[type="time"]::-webkit-calendar-picker-indicator {
+          opacity: 1; cursor: pointer; width: 20px; height: 20px;
+          padding: 2px; border-radius: 6px;
+          filter: invert(11%) sepia(98%) saturate(5000%) hue-rotate(351deg);
+        }
+        input[type="date"]::-webkit-calendar-picker-indicator:hover,
+        input[type="time"]::-webkit-calendar-picker-indicator:hover { background: ${hexA(T.primary, 0.1)}; }
       `}</style>
 
       {/* Header */}
