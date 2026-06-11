@@ -8271,74 +8271,95 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     if (items.length) setInv(s => ({ ...s, lineItems: items }));
     setVisitPick(false);
   };
-  const save = () => { onSave({ ...inv, clientName: client?.name || "", clientAddress: client?.address || "", clientEmail: client?.email || "" }); onClose(); };
-
-  // ── Send to QuickBooks: creates the invoice in QB, gets back the payment link ──
   const [qbState, setQbState] = useState("idle"); // idle | sending | done | error
   const [qbMsg, setQbMsg] = useState("");
   const qbConnected = !!localStorage.getItem("qb_access_token");
 
-  const sendToQuickBooks = async () => {
+  // Build the QB payload from the current invoice
+  const buildQbPayload = () => ({
+    number: inv.number,
+    date: toISO(inv.date),
+    dueDate: toISO(inv.dueDate),
+    clientName: client?.name || "",
+    clientEmail: client?.email || "",
+    clientPhone: client?.phone || "",
+    qbCustomerId: client?.qbCustomerId || null,
+    qbId: inv.qbId || null,
+    lineItems: (inv.lineItems || []).map(l => {
+      const gross = (parseFloat(l.qty) || 0) * (parseFloat(l.unitPrice) || 0);
+      let disc = 0;
+      if (l.discountType === "pct") disc = gross * ((parseFloat(l.discount) || 0) / 100);
+      else if (l.discountType === "amt") disc = parseFloat(l.discount) || 0;
+      const net = Math.max(0, gross - disc);
+      const qty = parseFloat(l.qty) || 1;
+      return {
+        description: l.bundleNote ? `${l.desc} (${l.bundleNote})` : l.desc,
+        qty: String(qty),
+        unitPrice: String(qty > 0 ? (net / qty).toFixed(2) : net.toFixed(2)),
+      };
+    }),
+    invoiceDiscountType: inv.discountType || "",
+    invoiceDiscount: inv.discount || "",
+  });
+
+  // Save the invoice. If QuickBooks is connected, sync automatically (no extra button).
+  const save = async () => {
+    const baseInv = { ...inv, clientName: client?.name || "", clientAddress: client?.address || "", clientEmail: client?.email || "" };
+
+    // Not connected to QB, or no client selected — just save locally and close.
     const access_token = localStorage.getItem("qb_access_token");
     const realm_id = localStorage.getItem("qb_realm_id");
-    if (!access_token || !realm_id) { setQbState("error"); setQbMsg("Connect QuickBooks first under Customize."); return; }
-    if (!client) { setQbState("error"); setQbMsg("Select a client first."); return; }
+    if (!access_token || !realm_id || !client) {
+      onSave(baseInv);
+      onClose();
+      return;
+    }
+
     setQbState("sending"); setQbMsg("");
     try {
-      const payload = {
-        number: inv.number,
-        date: toISO(inv.date),
-        dueDate: toISO(inv.dueDate),
-        clientName: client.name,
-        clientEmail: client.email || "",
-        clientPhone: client.phone || "",
-        qbCustomerId: client.qbCustomerId || null,
-        lineItems: (inv.lineItems || []).map(l => {
-          const gross = (parseFloat(l.qty) || 0) * (parseFloat(l.unitPrice) || 0);
-          let disc = 0;
-          if (l.discountType === "pct") disc = gross * ((parseFloat(l.discount) || 0) / 100);
-          else if (l.discountType === "amt") disc = parseFloat(l.discount) || 0;
-          const net = Math.max(0, gross - disc);
-          const qty = parseFloat(l.qty) || 1;
-          return {
-            description: l.bundleNote ? `${l.desc} (${l.bundleNote})` : l.desc,
-            qty: String(qty),
-            unitPrice: String(qty > 0 ? (net / qty).toFixed(2) : net.toFixed(2)),
-          };
-        }),
-        invoiceDiscountType: inv.discountType || "",
-        invoiceDiscount: inv.discount || "",
-      };
-      const res = await fetch("/api/quickbooks/create-invoice", {
+      const endpoint = inv.qbId ? "/api/quickbooks/update-invoice" : "/api/quickbooks/create-invoice";
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ access_token, realm_id, invoice: payload }),
+        body: JSON.stringify({ access_token, realm_id, invoice: buildQbPayload() }),
       });
-      if (res.status === 401) { setQbState("error"); setQbMsg("QuickBooks session expired. Reconnect under Customize."); return; }
+      if (res.status === 401) {
+        // Session expired — still save locally so work isn't lost
+        onSave(baseInv);
+        setQbState("error"); setQbMsg("Saved locally. QuickBooks session expired — reconnect under Customize to sync.");
+        return;
+      }
       const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      // Store QB id + payment link on the invoice, mark as sent, and save.
-      // NOTE: we do NOT set source:"quickbooks" — that flag is only for QB-imported
-      // invoices. App-created invoices keep their editable line items and recompute totals.
+      // If updating and QB says the invoice is gone, recreate it fresh
+      if (data.recreate) {
+        const createRes = await fetch("/api/quickbooks/create-invoice", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ access_token, realm_id, invoice: { ...buildQbPayload(), qbId: null } }),
+        });
+        const createData = await createRes.json();
+        if (createData.error) { onSave(baseInv); setQbState("error"); setQbMsg("Saved locally. QuickBooks sync failed: " + createData.error); return; }
+        onSave({ ...baseInv, qbId: createData.qbId, paymentLink: createData.paymentLink, status: inv.status === "Draft" ? "Sent" : inv.status, qbPushed: true });
+        onClose();
+        return;
+      }
+      if (data.error) {
+        // QB failed but keep the local save
+        onSave(baseInv);
+        setQbState("error"); setQbMsg("Saved locally. QuickBooks sync failed: " + data.error);
+        return;
+      }
       const updated = {
-        ...inv,
-        clientName: client.name, clientAddress: client.address || "", clientEmail: client.email || "",
-        qbId: data.qbId,
-        paymentLink: data.paymentLink,
+        ...baseInv,
+        qbId: data.qbId || inv.qbId,
+        paymentLink: data.paymentLink || inv.paymentLink,
         status: inv.status === "Draft" ? "Sent" : inv.status,
         qbPushed: true,
       };
-      setInv(updated);
       onSave(updated);
-      setQbState("done");
-      setQbMsg(data.warning
-        ? "Invoice created in QuickBooks. Online pay link may take a moment to activate — the QuickBooks link works now."
-        : data.hasOnlineLink
-          ? "Invoice created in QuickBooks with an online payment link."
-          : "Invoice created in QuickBooks. If the pay link isn't online yet, confirm QuickBooks Payments is enabled.");
+      onClose();
     } catch (err) {
-      setQbState("error");
-      setQbMsg(err.message || "Could not reach QuickBooks.");
+      onSave(baseInv);
+      setQbState("error"); setQbMsg("Saved locally. Could not reach QuickBooks: " + (err.message || "network error"));
     }
   };
 
@@ -8534,37 +8555,32 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           <textarea rows={2} style={{ ...field, resize: "vertical" }} value={inv.notes} onChange={e => set("notes", e.target.value)} />
         </div>
 
-        <Btn onClick={save} style={{ width: "100%", padding: "13px", borderRadius: 12 }}>{invoice ? "Save Invoice" : "Create Invoice"}</Btn>
+        <Btn onClick={save} disabled={qbState === "sending"} style={{ width: "100%", padding: "13px", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", gap: 9 }}>
+          {qbState === "sending"
+            ? <><div style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /> Saving &amp; syncing…</>
+            : (invoice ? "Save Invoice" : "Create Invoice") + (qbConnected ? " & Sync to QuickBooks" : "")}
+        </Btn>
 
-        {/* Send to QuickBooks — creates the invoice in QB with a pay-online link */}
-        {qbConnected ? (
-          <button onClick={sendToQuickBooks} disabled={qbState === "sending"}
-            style={{ width: "100%", padding: "13px", borderRadius: 12, border: "none", background: qbState === "sending" ? T.surfaceAlt : "#2CA01C", color: qbState === "sending" ? T.textMuted : "#fff", fontWeight: 800, fontSize: 14, cursor: qbState === "sending" ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 9 }}>
-            {qbState === "sending"
-              ? <><div style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /> Sending to QuickBooks…</>
-              : <><svg viewBox="0 0 24 24" width={17} height={17} fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg> {inv.qbId ? "Update in QuickBooks" : "Send to QuickBooks + Get Pay Link"}</>}
-          </button>
-        ) : (
+        {!qbConnected && (
           <div style={{ fontSize: 12, color: T.textMuted, textAlign: "center", lineHeight: 1.5 }}>
-            Connect QuickBooks under Customize to send invoices with an online payment link.
+            Connect QuickBooks under Customize to auto-sync invoices with an online payment link.
           </div>
         )}
 
-        {qbState === "done" && (
+        {/* Payment link (once the invoice has been synced) */}
+        {inv.paymentLink && (
           <div style={{ background: hexA("#16a34a", 0.07), border: `1px solid ${hexA("#16a34a", 0.25)}`, borderRadius: 12, padding: "12px 14px" }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#16a34a", marginBottom: inv.paymentLink ? 8 : 0 }}>{qbMsg}</div>
-            {inv.paymentLink && (
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <a href={inv.paymentLink} target="_blank" rel="noopener noreferrer"
-                  style={{ flex: 1, minWidth: 140, textAlign: "center", background: "#fff", border: `1px solid ${hexA("#16a34a", 0.3)}`, color: "#16a34a", borderRadius: 10, padding: "9px 12px", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>
-                  Open Payment Link
-                </a>
-                <button onClick={() => { navigator.clipboard?.writeText(inv.paymentLink); setQbMsg("Link copied."); }}
-                  style={{ flex: 1, minWidth: 140, background: "#16a34a", color: "#fff", border: "none", borderRadius: 10, padding: "9px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-                  Copy Link
-                </button>
-              </div>
-            )}
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#16a34a", marginBottom: 8 }}>Payment link ready</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <a href={inv.paymentLink} target="_blank" rel="noopener noreferrer"
+                style={{ flex: 1, minWidth: 140, textAlign: "center", background: "#fff", border: `1px solid ${hexA("#16a34a", 0.3)}`, color: "#16a34a", borderRadius: 10, padding: "9px 12px", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>
+                Open Payment Link
+              </a>
+              <button onClick={() => { navigator.clipboard?.writeText(inv.paymentLink); setQbMsg("Link copied."); }}
+                style={{ flex: 1, minWidth: 140, background: "#16a34a", color: "#fff", border: "none", borderRadius: 10, padding: "9px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                Copy Link
+              </button>
+            </div>
           </div>
         )}
         {qbState === "error" && (
@@ -16268,23 +16284,12 @@ export default function App({ authEmail = "", onSignOut }) {
     date: new Date().toLocaleDateString("en-US"),
   });
 
-  const handleSaveInvoice = async (inv) => {
-    // Push new invoices to QuickBooks if connected
-    const isNew = !(invoices || []).some(iv => iv.id === inv.id);
-    const accessToken = localStorage.getItem("qb_access_token");
-    let finalInv = { ...inv };
-
-    if (isNew && accessToken && inv.source !== "quickbooks") {
-      const client = (clients || []).find(c => c.id === inv.clientId);
-      const qbResult = await pushInvoiceToQB(inv, client);
-      if (qbResult?.qbId) {
-        finalInv = { ...finalInv, qbId: qbResult.qbId, paymentLink: qbResult.paymentLink, source: "sps+qb" };
-      }
-    }
-
+  const handleSaveInvoice = (inv) => {
+    // QuickBooks sync is handled inside the invoice editor's Save (create or update),
+    // so here we only persist locally. This avoids double-pushing / duplicates.
     setInvoices(list => {
-      const exists = (list || []).some(iv => iv.id === finalInv.id);
-      return exists ? list.map(iv => iv.id === finalInv.id ? finalInv : iv) : [finalInv, ...(list || [])];
+      const exists = (list || []).some(iv => iv.id === inv.id);
+      return exists ? list.map(iv => iv.id === inv.id ? inv : iv) : [inv, ...(list || [])];
     });
   };
   const handleDeleteInvoice = (id) => {
