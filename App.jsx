@@ -15614,9 +15614,7 @@ export default function App({ authEmail = "", onSignOut }) {
   // Branded splash — shows while loading OR for minimum 2.2s after hydration
   const splashTagline = (branding.splashTagline && branding.splashTagline.trim())
     ? branding.splashTagline.trim()
-    : (branding.division && branding.division.trim())
-    ? branding.division.trim()
-    : "Field Operations";
+    : "";
 
   const splashUser = currentUser || clientUser;
   const splashFirstName = splashUser ? ((splashUser.name || splashUser.email || "").split(" ")[0] || "").split("@")[0] : "";
@@ -15694,9 +15692,11 @@ export default function App({ authEmail = "", onSignOut }) {
           </div>
 
           {/* Tagline */}
-          <div className="si2" style={{ fontSize:14, fontWeight:500, letterSpacing:"0.04em", textTransform:"uppercase", opacity:0.6, color:splashFgColor, marginBottom: splashFirstName && showGreeting ? 28 : 0 }}>
-            {splashTagline}
-          </div>
+          {splashTagline && (
+            <div className="si2" style={{ fontSize:14, fontWeight:500, letterSpacing:"0.04em", textTransform:"uppercase", opacity:0.6, color:splashFgColor, marginBottom: splashFirstName && showGreeting ? 28 : 0 }}>
+              {splashTagline}
+            </div>
+          )}
 
           {/* Greeting pill */}
           {splashFirstName && showGreeting && (
