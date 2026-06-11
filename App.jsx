@@ -200,8 +200,10 @@ function useStoredState(key, initial) {
   // save on change, but only after the initial load (so we don't overwrite saved data with defaults)
   useEffect(() => {
     if (!loaded) return;
+    // Extra safety: never save if the value is referentially identical to the initial default
+    // (means load failed and we'd overwrite real data with placeholder defaults)
+    if (value === initial) return;
     store.set(key, JSON.stringify(value));
-    // Notify App of a save so the sync indicator can pulse
     if (typeof window.__onSpsSync === "function") window.__onSpsSync();
   }, [key, value, loaded]);
   return [value, setValue, loaded];
