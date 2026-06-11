@@ -3,13 +3,24 @@ import { createRoot } from "react-dom/client";
 import { supabase } from "./supabaseClient";
 import App from "./App.jsx";
 
-const wrap = { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom)) 24px", background: "#F5F5F7", fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif" };
-const card = { width: "100%", maxWidth: 360, background: "#fff", borderRadius: 22, boxShadow: "0 10px 40px rgba(0,0,0,0.08)", padding: 28 };
-const inp = { width: "100%", padding: "13px 14px", border: "1px solid #e5e7eb", borderRadius: 12, fontSize: 15, marginBottom: 10, boxSizing: "border-box", outline: "none", fontFamily: "inherit" };
-const btn = { width: "100%", padding: "13px", border: "none", borderRadius: 12, background: "#B81D24", color: "#fff", fontWeight: 700, fontSize: 15, cursor: "pointer", fontFamily: "inherit" };
-const linkBtn = { background: "none", border: "none", color: "#B81D24", fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "inherit", padding: 0 };
+const BG = "#F5F5F7";
+const PRIMARY = "#B81D24";
 
-// Detect if we landed here via a magic link (Supabase puts tokens in the URL hash)
+// Cover the full screen including areas behind the keyboard — no red bleed-through
+const wrap = {
+  position: "fixed", inset: 0,
+  display: "flex", alignItems: "center", justifyContent: "center",
+  padding: "max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom)) 24px",
+  background: BG,
+  fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif",
+  overflowY: "auto",
+  boxSizing: "border-box",
+};
+const card = { width: "100%", maxWidth: 360, background: "#fff", borderRadius: 22, boxShadow: "0 10px 40px rgba(0,0,0,0.08)", padding: 28 };
+const inp = { width: "100%", padding: "13px 14px", border: "1px solid #e5e7eb", borderRadius: 12, fontSize: 15, marginBottom: 10, boxSizing: "border-box", outline: "none", fontFamily: "inherit", background: "#fff", color: "#111" };
+const btn = { width: "100%", padding: "13px", border: "none", borderRadius: 12, background: PRIMARY, color: "#fff", fontWeight: 700, fontSize: 15, cursor: "pointer", fontFamily: "inherit", marginTop: 4 };
+const linkBtn = { background: "none", border: "none", color: PRIMARY, fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "inherit", padding: 0 };
+
 function hasMagicLinkToken() {
   const hash = window.location.hash || "";
   return hash.includes("access_token") || hash.includes("type=magiclink") || hash.includes("type=recovery");
@@ -20,11 +31,18 @@ function Login() {
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
-  const [mode, setMode] = useState("password"); // "password" | "magic" | "sent"
+  const [mode, setMode] = useState("password");
   const [brand, setBrand] = useState({ type: "image", image: "/icon-192.png", name: "Stone Property Solutions" });
 
   useEffect(() => {
+    // Keep body background matching login so no color bleeds through behind keyboard
+    document.body.style.background = BG;
+    document.documentElement.style.background = BG;
     try { const raw = localStorage.getItem("sps_brand_logo"); if (raw) setBrand(JSON.parse(raw)); } catch (e) {}
+    return () => {
+      document.body.style.background = "";
+      document.documentElement.style.background = "";
+    };
   }, []);
 
   const signInPassword = async () => {
@@ -59,7 +77,7 @@ function Login() {
           <div style={{ textAlign: "center", padding: "16px 0 8px" }}>
             <div style={{ fontSize: 36, marginBottom: 12 }}>📬</div>
             <div style={{ fontSize: 16, fontWeight: 700, color: "#111", marginBottom: 8 }}>Check your email</div>
-            <div style={{ fontSize: 13, color: "#6b7280", lineHeight: 1.6, marginBottom: 20 }}>We sent a login link to <b>{email}</b>. Tap the link to sign in. You can close this tab.</div>
+            <div style={{ fontSize: 13, color: "#6b7280", lineHeight: 1.6, marginBottom: 20 }}>We sent a login link to <b>{email}</b>. Tap the link to sign in.</div>
             <button style={linkBtn} onClick={() => { setMode("magic"); setErr(""); }}>Try a different email</button>
           </div>
         ) : mode === "magic" ? (
@@ -75,8 +93,8 @@ function Login() {
         ) : (
           <>
             <p style={{ textAlign: "center", color: "#6b7280", fontSize: 13, margin: "0 0 20px" }}>Sign in to your account</p>
-            <input style={inp} placeholder="Email" type="email" autoCapitalize="none" value={email} onChange={e => setEmail(e.target.value)} />
-            <input style={inp} placeholder="Password" type="password" value={pw} onChange={e => setPw(e.target.value)} onKeyDown={e => e.key === "Enter" && signInPassword()} />
+            <input style={inp} placeholder="Email" type="email" autoCapitalize="none" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} />
+            <input style={inp} placeholder="Password" type="password" autoComplete="current-password" value={pw} onChange={e => setPw(e.target.value)} onKeyDown={e => e.key === "Enter" && signInPassword()} />
             {err && <div style={{ color: "#dc2626", fontSize: 13, margin: "2px 0 10px" }}>{err}</div>}
             <button style={{ ...btn, opacity: busy ? 0.6 : 1 }} onClick={signInPassword} disabled={busy}>{busy ? "Signing in…" : "Sign In"}</button>
             <div style={{ textAlign: "center", marginTop: 14 }}>
@@ -93,7 +111,6 @@ function Root() {
   const [session, setSession] = useState(undefined);
 
   useEffect(() => {
-    // Handle magic link tokens in the URL hash on load
     if (hasMagicLinkToken()) {
       supabase.auth.getSession().then(({ data }) => setSession(data.session));
     } else {
@@ -101,7 +118,6 @@ function Root() {
     }
     const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
       setSession(s);
-      // Clean the token out of the URL after a successful magic link login
       if (s && window.location.hash.includes("access_token")) {
         window.history.replaceState(null, "", window.location.pathname);
       }

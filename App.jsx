@@ -10790,110 +10790,160 @@ function fmtMsgTime(ts) {
 // ── STAFF: Full messages inbox ──
 function MessagesScreen({ clients, currentUser, T }) {
   const [selectedClientId, setSelectedClientId] = useState(null);
+  const [showNewMsg, setShowNewMsg] = useState(false);
+  const [newSearch, setNewSearch] = useState("");
   const selectedClient = (clients || []).find(c => String(c.id) === String(selectedClientId)) || null;
 
-  // Get unread counts per client — loaded once then refreshed
-  const [unreadMap, setUnreadMap] = useState({});
+  // Load all message threads — last message + unread count per client
+  const [threadMap, setThreadMap] = useState({});
   useEffect(() => {
     const load = async () => {
       const { data } = await supabase
         .from("sps_messages")
-        .select("client_id, read_at, sender")
-        .eq("sender", "client")
-        .is("read_at", null);
-      if (data) {
-        const map = {};
-        data.forEach(m => { map[m.client_id] = (map[m.client_id] || 0) + 1; });
-        setUnreadMap(map);
-      }
+        .select("client_id, body, sender, created_at, read_at")
+        .order("created_at", { ascending: false });
+      if (!data) return;
+      const map = {};
+      data.forEach(m => {
+        const cid = String(m.client_id);
+        if (!map[cid]) map[cid] = { lastMsg: m.body, lastAt: m.created_at, unread: 0 };
+        if (m.sender === "client" && !m.read_at) map[cid].unread++;
+      });
+      setThreadMap(map);
     };
     load();
-    const interval = setInterval(load, 10000);
+    const interval = setInterval(load, 8000);
     return () => clearInterval(interval);
   }, []);
 
   if (selectedClient) {
     return (
-      <StaffChat
-        client={selectedClient}
-        currentUser={currentUser}
-        T={T}
-        onBack={() => setSelectedClientId(null)}
-      />
+      <StaffChat client={selectedClient} currentUser={currentUser} T={T} onBack={() => setSelectedClientId(null)} />
     );
   }
 
-  const clientsWithMessages = (clients || []).filter(c => unreadMap[String(c.id)] > 0);
-  const otherClients = (clients || []).filter(c => !unreadMap[String(c.id)]);
+  // Conversations sorted by most recent
+  const threads = Object.entries(threadMap)
+    .map(([cid, meta]) => ({ client: (clients || []).find(c => String(c.id) === cid), ...meta }))
+    .filter(t => t.client)
+    .sort((a, b) => new Date(b.lastAt) - new Date(a.lastAt));
 
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <div style={{ paddingTop: 4 }}>
-        <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Messages</div>
-        <div style={{ fontSize: 14, color: T.textMuted, marginTop: 3 }}>Client conversations</div>
-      </div>
+  const totalUnread = threads.reduce((s, t) => s + (t.unread || 0), 0);
 
-      {clientsWithMessages.length > 0 && (
-        <div>
-          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>Unread</div>
-          <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
-            {clientsWithMessages.map((c, i) => (
-              <button key={c.id} onClick={() => setSelectedClientId(c.id)}
-                style={{ width: "100%", padding: "14px 18px", background: "none", border: "none", borderBottom: i < clientsWithMessages.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-                <div style={{ width: 42, height: 42, borderRadius: 13, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 800, flexShrink: 0 }}>
-                  {(c.name || "?")[0].toUpperCase()}
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{c.name}</div>
-                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>Tap to view conversation</div>
-                </div>
-                <div style={{ background: T.primary, color: "#fff", borderRadius: 100, width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, flexShrink: 0 }}>
-                  {unreadMap[String(c.id)]}
-                </div>
-              </button>
-            ))}
-          </div>
+  // New message picker
+  const activeClients = (clients || []).filter(c => c.status !== "Inactive");
+  const filteredNew = activeClients.filter(c =>
+    (c.name || "").toLowerCase().includes(newSearch.toLowerCase()) ||
+    (c.address || "").toLowerCase().includes(newSearch.toLowerCase())
+  );
+
+  if (showNewMsg) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <button onClick={() => { setShowNewMsg(false); setNewSearch(""); }}
+            style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4, padding: 0 }}>
+            <Icon name="back" size={16} /> Messages
+          </button>
+          <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>New Message</div>
         </div>
-      )}
-
-      <div>
-        {clientsWithMessages.length > 0 && <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>All Clients</div>}
+        <input type="search" placeholder="Search clients..." value={newSearch} onChange={e => setNewSearch(e.target.value)}
+          style={{ width: "100%", padding: "11px 14px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", background: T.surface, color: T.text, outline: "none", boxSizing: "border-box" }} />
         <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
-          {otherClients.length === 0 && clientsWithMessages.length === 0 && (
-            <div style={{ padding: "40px 20px", textAlign: "center", color: T.textMuted, fontSize: 14 }}>No clients yet. Add clients to start messaging.</div>
-          )}
-          {otherClients.map((c, i) => (
-            <button key={c.id} onClick={() => setSelectedClientId(c.id)}
-              style={{ width: "100%", padding: "14px 18px", background: "none", border: "none", borderBottom: i < otherClients.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-              <div style={{ width: 42, height: 42, borderRadius: 13, background: T.surfaceAlt, color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 800, flexShrink: 0 }}>
+          {filteredNew.length === 0 && <div style={{ padding: "32px 20px", textAlign: "center", color: T.textMuted, fontSize: 14 }}>No clients found</div>}
+          {filteredNew.map((c, i) => (
+            <button key={c.id} onClick={() => { setSelectedClientId(c.id); setShowNewMsg(false); setNewSearch(""); }}
+              style={{ width: "100%", padding: "14px 18px", background: "none", border: "none", borderBottom: i < filteredNew.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+              <div style={{ width: 42, height: 42, borderRadius: 13, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 800, flexShrink: 0 }}>
                 {(c.name || "?")[0].toUpperCase()}
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{c.name}</div>
-                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{c.division || "Pond"} · {c.status || "Active"}</div>
+                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>{c.division || "Pond"} · {c.address || ""}</div>
               </div>
               <Icon name="chevronR" size={16} />
             </button>
           ))}
         </div>
       </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", display: "flex", alignItems: "center", gap: 10 }}>
+            Messages
+            {totalUnread > 0 && <span style={{ background: T.primary, color: "#fff", borderRadius: 100, fontSize: 11, fontWeight: 800, padding: "2px 8px" }}>{totalUnread}</span>}
+          </div>
+          <div style={{ fontSize: 13, color: T.textMuted, marginTop: 2 }}>{threads.length} conversation{threads.length !== 1 ? "s" : ""}</div>
+        </div>
+        <button onClick={() => setShowNewMsg(true)}
+          style={{ display: "flex", alignItems: "center", gap: 6, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "10px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", boxShadow: `0 3px 12px ${hexA(T.primary, 0.3)}` }}>
+          <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          New Message
+        </button>
+      </div>
+
+      {threads.length === 0 ? (
+        <div style={{ background: T.surface, borderRadius: 18, border: `1px dashed ${T.border}`, padding: "48px 20px", textAlign: "center" }}>
+          <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 12px" }}>
+            <Icon name="message" size={24} />
+          </div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: T.text, marginBottom: 6 }}>No conversations yet</div>
+          <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5, marginBottom: 18 }}>Start a message with any client, or wait for one to reach out through their portal.</div>
+          <button onClick={() => setShowNewMsg(true)}
+            style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "11px 22px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>
+            Start a Conversation
+          </button>
+        </div>
+      ) : (
+        <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+          {threads.map((t, i) => {
+            const c = t.client;
+            const hasUnread = t.unread > 0;
+            return (
+              <button key={c.id} onClick={() => setSelectedClientId(c.id)}
+                style={{ width: "100%", padding: "14px 18px", background: hasUnread ? hexA(T.primary, 0.04) : "none", border: "none", borderBottom: i < threads.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+                <div style={{ position: "relative", flexShrink: 0 }}>
+                  <div style={{ width: 44, height: 44, borderRadius: 14, background: hasUnread ? T.primary : hexA(T.primary, 0.1), color: hasUnread ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 800 }}>
+                    {(c.name || "?")[0].toUpperCase()}
+                  </div>
+                  {hasUnread && (
+                    <div style={{ position: "absolute", top: -3, right: -3, width: 18, height: 18, borderRadius: "50%", background: "#E5484D", border: `2px solid ${T.bg}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 800, color: "#fff" }}>
+                      {t.unread}
+                    </div>
+                  )}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 3 }}>
+                    <div style={{ fontSize: 14, fontWeight: hasUnread ? 800 : 600, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{c.name}</div>
+                    <div style={{ fontSize: 11, color: T.textMuted, flexShrink: 0, marginLeft: 8 }}>{fmtMsgTime(t.lastAt)}</div>
+                  </div>
+                  <div style={{ fontSize: 13, color: hasUnread ? T.text : T.textMuted, fontWeight: hasUnread ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {t.lastMsg || "No messages yet"}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
 
-// ── Shared chat thread UI (used by both staff and client) ──
-function ChatThread({ clientId, sender, senderName, T, accentSide = "right" }) {
+
+// ── Staff chat view (single client thread) ──
+function ChatThread({ clientId, sender, senderName, T }) {
   const { messages, loading, send, markRead } = useMessages(clientId);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const bottomRef = useRef(null);
+  const textareaRef = useRef(null);
 
-  // Scroll to bottom on new messages
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length]);
-
-  // Mark incoming messages as read
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages.length]);
   useEffect(() => {
     const unread = messages.filter(m => m.sender !== sender && !m.read_at).map(m => m.id);
     if (unread.length) markRead(unread);
@@ -10904,21 +10954,18 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right" }) {
     setSending(true);
     await send(draft, sender, senderName);
     setDraft("");
+    if (textareaRef.current) { textareaRef.current.style.height = "auto"; }
     setSending(false);
   };
 
   if (loading) {
-    return (
-      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: T.textMuted, fontSize: 14 }}>
-        <div style={{ width: 18, height: 18, border: `2px solid ${T.border}`, borderTopColor: T.primary, borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />
-      </div>
-    );
+    return <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}><div style={{ width: 18, height: 18, border: `2px solid ${T.border}`, borderTopColor: T.primary, borderRadius: "50%", animation: "spin 0.7s linear infinite" }} /></div>;
   }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      {/* Messages */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "12px 0", display: "flex", flexDirection: "column", gap: 8 }}>
+      {/* Message list */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "12px 0", display: "flex", flexDirection: "column", gap: 8, overflowAnchor: "none" }}>
         {messages.length === 0 && (
           <div style={{ textAlign: "center", padding: "40px 20px", color: T.textMuted, fontSize: 13 }}>No messages yet. Start the conversation below.</div>
         )}
@@ -10927,53 +10974,45 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right" }) {
           const showTime = i === 0 || (new Date(m.created_at) - new Date(messages[i-1].created_at)) > 300000;
           return (
             <div key={m.id}>
-              {showTime && (
-                <div style={{ textAlign: "center", fontSize: 11, color: T.textMuted, padding: "6px 0", marginBottom: 2 }}>{fmtMsgTime(m.created_at)}</div>
-              )}
+              {showTime && <div style={{ textAlign: "center", fontSize: 11, color: T.textMuted, padding: "6px 0", marginBottom: 2 }}>{fmtMsgTime(m.created_at)}</div>}
               <div style={{ display: "flex", justifyContent: isMine ? "flex-end" : "flex-start", paddingLeft: isMine ? 48 : 0, paddingRight: isMine ? 0 : 48 }}>
-                <div style={{
-                  background: isMine ? T.primary : T.surfaceAlt,
-                  color: isMine ? "#fff" : T.text,
-                  borderRadius: isMine ? "18px 18px 4px 18px" : "18px 18px 18px 4px",
-                  padding: "10px 14px",
-                  fontSize: 14,
-                  lineHeight: 1.5,
-                  maxWidth: "100%",
-                  wordBreak: "break-word",
-                  boxShadow: isMine ? `0 2px 8px ${hexA(T.primary, 0.25)}` : "none",
-                }}>
+                <div style={{ background: isMine ? T.primary : T.surfaceAlt, color: isMine ? "#fff" : T.text, borderRadius: isMine ? "18px 18px 4px 18px" : "18px 18px 18px 4px", padding: "10px 14px", fontSize: 14, lineHeight: 1.5, maxWidth: "100%", wordBreak: "break-word", boxShadow: isMine ? `0 2px 8px ${hexA(T.primary, 0.25)}` : "none" }}>
                   {m.body}
                 </div>
               </div>
             </div>
           );
         })}
-        <div ref={bottomRef} />
+        <div ref={bottomRef} style={{ overflowAnchor: "auto", height: 1 }} />
       </div>
 
-      {/* Input */}
-      <div style={{ borderTop: `1px solid ${T.border}`, padding: "12px 0 0", display: "flex", gap: 10, alignItems: "flex-end" }}>
+      {/* Compose bar — flexShrink 0 keeps it anchored at bottom on all screen sizes */}
+      <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 10, paddingBottom: 4, display: "flex", gap: 10, alignItems: "flex-end", background: T.bg, flexShrink: 0 }}>
         <textarea
+          ref={textareaRef}
           value={draft}
-          onChange={e => setDraft(e.target.value)}
+          onChange={e => {
+            setDraft(e.target.value);
+            e.target.style.height = "auto";
+            e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px";
+          }}
           onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
           placeholder="Type a message..."
           rows={1}
-          style={{ flex: 1, padding: "11px 14px", border: `1.5px solid ${T.border}`, borderRadius: 14, fontSize: 14, fontFamily: "inherit", resize: "none", outline: "none", color: T.text, background: T.surface, lineHeight: 1.5, maxHeight: 120, overflowY: "auto" }}
+          style={{ flex: 1, padding: "11px 14px", border: `1.5px solid ${T.border}`, borderRadius: 20, fontSize: 15, fontFamily: "inherit", resize: "none", outline: "none", color: T.text, background: T.surface, lineHeight: 1.5, overflowY: "hidden", display: "block" }}
         />
         <button onClick={handleSend} disabled={!draft.trim() || sending}
-          style={{ width: 42, height: 42, borderRadius: 13, background: draft.trim() ? T.primary : T.surfaceAlt, border: "none", color: draft.trim() ? "#fff" : T.textMuted, cursor: draft.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "background 0.15s" }}>
-          <svg viewBox="0 0 24 24" width={18} height={18} fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+          style={{ width: 44, height: 44, borderRadius: "50%", background: draft.trim() ? T.primary : T.surfaceAlt, border: "none", color: draft.trim() ? "#fff" : T.textMuted, cursor: draft.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "background 0.15s", boxShadow: draft.trim() ? `0 2px 10px ${hexA(T.primary, 0.4)}` : "none" }}>
+          <svg viewBox="0 0 24 24" width={18} height={18} fill="currentColor"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
         </button>
       </div>
     </div>
   );
 }
 
-// ── Staff chat view (single client thread) ──
 function StaffChat({ client, currentUser, T, onBack }) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 180px)" }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "calc(100dvh - 160px)", minHeight: 320 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, paddingBottom: 16, borderBottom: `1px solid ${T.border}` }}>
         <button onClick={onBack} style={{ background: "none", border: "none", color: T.primary, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4, fontWeight: 700, fontSize: 13, fontFamily: "inherit" }}>
           <Icon name="back" size={16} /> Back
@@ -14949,6 +14988,23 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
   const vp = useViewport();
   const wide = vp.isTablet || vp.isDesktop;
 
+  // Poll for unread messages from staff so the badge shows on the Messages tab
+  const [portalUnread, setPortalUnread] = useState(0);
+  useEffect(() => {
+    const load = async () => {
+      const { data } = await supabase
+        .from("sps_messages")
+        .select("id")
+        .eq("client_id", client.id)
+        .eq("sender", "staff")
+        .is("read_at", null);
+      setPortalUnread(data ? data.length : 0);
+    };
+    load();
+    const iv = setInterval(load, 12000);
+    return () => clearInterval(iv);
+  }, [client.id]);
+
   return (
     <div style={{ fontFamily: fontStack, background: T.bg, minHeight: "100vh", display: "flex", flexDirection: "column", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em" }}>
       <style>{`
@@ -15038,8 +15094,11 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
           return (
             <button key={n.id} onClick={() => { setPage(n.id); setSettingsOpen(false); }}
               style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, color: active ? T.primary : T.textMuted, fontFamily: "inherit", position: "relative", WebkitTapHighlightColor: "transparent" }}>
-              <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s" }}>
+              <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s", position: "relative" }}>
                 <CIcon name={n.icon} size={22} />
+                {n.id === "cp_messages" && portalUnread > 0 && !active && (
+                  <span style={{ position: "absolute", top: 3, right: 6, width: 8, height: 8, borderRadius: "50%", background: "#E5484D", border: `1.5px solid ${T.bg}` }} />
+                )}
               </span>
               <span style={{ fontSize: 10.5, fontWeight: active ? 700 : 500, letterSpacing: "-0.01em" }}>{label}</span>
             </button>
