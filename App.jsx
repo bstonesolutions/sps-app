@@ -7290,7 +7290,7 @@ function CatalogManager({ catalog, setCatalog }) {
 // ─────────────────────────────────────────────
 // BUDGET MANAGER (admin: money in/out, projected vs actual)
 // ─────────────────────────────────────────────
-function BudgetManager({ budget, setBudget, clients, costs, invoices }) {
+function BudgetManager({ budget, setBudget, clients, costs, invoices, embedded = false }) {
   const { T } = useApp();
   const money = (n) => `$${Math.round(n).toLocaleString()}`;
   const num = (v) => parseFloat(v) || 0;
@@ -7345,7 +7345,7 @@ function BudgetManager({ budget, setBudget, clients, costs, invoices }) {
 
   return (
     <>
-      <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 14 }}>Admin only. Set your expected monthly money in and out, then compare against what's actually been completed this month.</div>
+      {!embedded && <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 14 }}>Admin only. Set your expected monthly money in and out, then compare against what's actually been completed this month.</div>}
 
       {/* Projected net */}
       <Card style={{ marginBottom: 14 }}>
@@ -9896,7 +9896,7 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
   );
 }
 
-function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEmail, costs, setCosts, budget, setBudget, clients, setClients, invoices, scheduleCfg, setScheduleCfg, team, setTeam, invoicing, setInvoicing, currentUserId, onResetData, serviceTiers, setServiceTiers, onSyncData }) {
+function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEmail, costs, setCosts, budget, setBudget, clients, setClients, invoices, scheduleCfg, setScheduleCfg, team, setTeam, invoicing, setInvoicing, currentUserId, onResetData, serviceTiers, setServiceTiers, onSyncData, onNav }) {
   const { T, perms } = useApp();
   const fileRef = useRef();
   const [tab, setTab] = useState("branding");
@@ -9996,8 +9996,15 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             </Collapsible>
           )}
           {perms.seeCostsBudget && (
-            <Collapsible title="Budget & Targets" subtitle="Monthly revenue goals and profitability tracking.">
-              <BudgetManager budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} />
+            <Collapsible title="Budget & Targets" subtitle="Now its own page. Set monthly revenue goals and track profitability there.">
+              <div style={{ padding: 18 }}>
+                <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.6, marginBottom: 14 }}>
+                  Budget moved to its own page so it's easier to get to and ties together your targets, live actuals, profit, and after-tax take-home. The cost assumptions and tax rates that feed it stay here under Costs &amp; Labor.
+                </div>
+                <Btn onClick={() => onNav && onNav("budget")} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <Icon name="chart" size={15} /> Open Budget Page
+                </Btn>
+              </div>
             </Collapsible>
           )}
         </div>
@@ -10713,6 +10720,7 @@ function Icon({ name, size = 22, filled = false }) {
     settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></>,
     tag:      <><path d="M20.6 11.3 12.7 3.4A2 2 0 0 0 11.3 3H5a2 2 0 0 0-2 2v6.3a2 2 0 0 0 .6 1.4l7.9 7.9a2 2 0 0 0 2.8 0l6.3-6.3a2 2 0 0 0 0-2.7z" /><circle cx="7.5" cy="7.5" r="1.5" /></>,
     dollar:   <path d="M12 2v20M17 5H9.5a3.5 3.5 0 1 0 0 7h5a3.5 3.5 0 1 1 0 7H6" />,
+    chart:    <><path d="M3 3v18h18" /><rect x="7" y="12" width="3" height="6" /><rect x="12" y="8" width="3" height="10" /><rect x="17" y="5" width="3" height="13" /></>,
     clipboard:<><rect x="9" y="2" width="6" height="4" rx="1" /><path d="M8 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2h-2" /><path d="M9 12h6M9 16h4" /></>,
     mobile:   <><rect x="7" y="2" width="10" height="20" rx="3" /><circle cx="12" cy="17" r="1" fill="currentColor" stroke="none" /></>,
     chevronR: <path d="m9 18 6-6-6-6" />,
@@ -11002,8 +11010,8 @@ function CPMessages({ client, branding, onSubmit, T }) {
   }
 
   return (
-    <div style={{ display:"flex", flexDirection:"column", gap:14, height:"calc(100vh - 200px)" }}>
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", paddingTop:4 }}>
+    <div style={{ display:"flex", flexDirection:"column", gap:14, height:"calc(100dvh - 56px - 48px - 70px - env(safe-area-inset-top) - env(safe-area-inset-bottom))", minHeight: 340 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", paddingTop:4, flexShrink: 0 }}>
         <div>
           <div style={{ fontSize:22, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>Messages</div>
           <div style={{ fontSize:14, color:T.textMuted, marginTop:3 }}>Chat with {branding?.companyName || "us"}</div>
@@ -13033,6 +13041,74 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
 }
 
 // All available pages — the user picks up to 5 for their dock
+// ─────────────────────────────────────────────
+// STANDALONE BUDGET PAGE (admin)
+// Robust financial dashboard: targets vs actuals, P&L, take-home.
+// Cost assumptions + tax rates live in Customize → Costs & Labor.
+// ─────────────────────────────────────────────
+function BudgetScreen({ budget, setBudget, clients, costs, invoices, onNav, T, vp = {} }) {
+  const money = (n) => `$${Math.round(n).toLocaleString()}`;
+  const num = (v) => parseFloat(v) || 0;
+
+  const fixedFromCosts = costs ? monthlyFixedCosts(costs) : 0;
+  const incomeTotal = (budget.income || []).reduce((s, r) => s + num(r.amount), 0);
+  const expenseTotal = (budget.expenses || []).reduce((s, r) => s + num(r.amount), 0) + fixedFromCosts;
+  const projectedNet = incomeTotal - expenseTotal;
+  const actuals = monthActuals(clients, new Date(), invoices || []);
+  const actualOut = actuals.cost + fixedFromCosts;
+  const actualNet = actuals.revenue - actualOut;
+  const taxCfg = { ...DEFAULT_COSTS.tax, ...((costs && costs.tax) || {}) };
+  const txA = estimateTaxes(actualNet * 12, costs);
+  const moTakeHome = taxCfg.enabled ? txA.takeHome / 12 : actualNet;
+  const pctToTarget = incomeTotal > 0 ? Math.round((actuals.revenue / incomeTotal) * 100) : 0;
+
+  const heroStat = (label, value, sub, big) => (
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", opacity: 0.8 }}>{label}</div>
+      <div style={{ fontSize: big ? 30 : 22, fontWeight: 800, letterSpacing: "-0.03em", marginTop: 2, lineHeight: 1 }}>{value}</div>
+      {sub && <div style={{ fontSize: 11.5, opacity: 0.82, marginTop: 4 }}>{sub}</div>}
+    </div>
+  );
+
+  return (
+    <div style={{ maxWidth: vp.isPhone ? "100%" : 820, margin: "0 auto", width: "100%" }}>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Budget</h2>
+        <Btn sm variant="outline" onClick={() => onNav("settings")} style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          <Icon name="sliders" size={13} /> Cost Settings
+        </Btn>
+      </div>
+
+      {/* Hero — this month at a glance */}
+      <div style={{ background: `linear-gradient(150deg, ${T.primary} 0%, ${mix(T.primary, "#000", 0.32)} 100%)`, borderRadius: 22, padding: "22px 22px", color: "#fff", marginBottom: 16, boxShadow: `0 10px 36px ${hexA(T.primary, 0.32)}`, position: "relative", overflow: "hidden" }}>
+        <div style={{ position: "absolute", right: -40, top: -40, width: 180, height: 180, borderRadius: "50%", background: "rgba(255,255,255,0.06)" }} />
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", opacity: 0.75, marginBottom: 14 }}>This Month</div>
+        <div style={{ display: "flex", gap: 16, position: "relative" }}>
+          {heroStat("Revenue", money(actuals.revenue), `${actuals.jobs} jobs done`)}
+          {heroStat("Net Profit", money(actualNet), `${actuals.revenue > 0 ? Math.round((actualNet / actuals.revenue) * 100) : 0}% margin`)}
+          {taxCfg.enabled && heroStat("Take-Home", money(Math.max(0, moTakeHome)), "after taxes")}
+        </div>
+        {/* Target progress */}
+        {incomeTotal > 0 && (
+          <div style={{ marginTop: 18, position: "relative" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, opacity: 0.9, marginBottom: 6 }}>
+              <span>Revenue vs target</span>
+              <span style={{ fontWeight: 800 }}>{pctToTarget}% of {money(incomeTotal)}</span>
+            </div>
+            <div style={{ height: 8, borderRadius: 100, background: "rgba(255,255,255,0.22)", overflow: "hidden" }}>
+              <div style={{ width: `${Math.min(100, pctToTarget)}%`, height: "100%", borderRadius: 100, background: "#fff", transition: "width 0.4s" }} />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* The full budget detail — targets, actuals, P&L, take-home */}
+      <BudgetManager budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} embedded />
+    </div>
+  );
+}
+
 const ALL_NAV = [
   { id: "dashboard",  label: "Home",      icon: "home" },
   { id: "clients",    label: "Clients",   icon: "clients" },
@@ -13043,6 +13119,7 @@ const ALL_NAV = [
   { id: "inventory",  label: "Inventory", icon: "box",       perm: "seeInventory" },
   { id: "reminders",  label: "Reminders", icon: "message",   perm: "editSchedule" },
   { id: "reports",    label: "Reports",   icon: "dollar",    perm: "seeReportsPnl" },
+  { id: "budget",     label: "Budget",    icon: "chart",     perm: "seeCostsBudget" },
   { id: "settings",   label: "Customize", icon: "sliders" },
 ];
 
@@ -14698,13 +14775,17 @@ function CPEstimates({ client, estimates, branding, onApprove, T }) {
 // ── CP REQUEST ──
 function CPRequest({ client, branding, onSubmit, T }) {
   const [form, setForm] = useState({ type: "", dates: "", notes: "" });
+  const [picks, setPicks] = useState([]);
   const [sent, setSent] = useState(false);
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const serviceTypes = ["General Service Visit", "Water Quality Issue", "Equipment Problem", "Spring Opening", "Fall Closing", "Estimate / Quote", "Other"];
+  const quickPicks = ["Add fish food", "Trim plants", "Algae concern", "Check water quality", "Clean filter", "Fish looking unwell", "Pump / equipment issue", "Add new plants", "Leak or water loss", "General check-up"];
+  const togglePick = (p) => setPicks(ps => ps.includes(p) ? ps.filter(x => x !== p) : [...ps, p]);
 
   const handleSend = () => {
-    if (!form.type) return;
-    onSubmit({ ...form, clientId: client.id, clientName: client.name, submittedAt: Date.now() });
+    if (!form.type && picks.length === 0) return;
+    const combinedNotes = [picks.length ? `Requests: ${picks.join(", ")}` : "", form.notes].filter(Boolean).join("\n");
+    onSubmit({ ...form, type: form.type || "Service Request", notes: combinedNotes, clientId: client.id, clientName: client.name, submittedAt: Date.now() });
     setSent(true);
   };
 
@@ -14733,7 +14814,7 @@ function CPRequest({ client, branding, onSubmit, T }) {
       </div>
       <div style={{ background: T.surface, borderRadius: 22, border: `1px solid ${T.border}`, padding: "22px 20px", display: "flex", flexDirection: "column", gap: 18, boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}>
         <div>
-          <label style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 8 }}>Service Type</label>
+          <label style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 8 }}>Service Type <span style={{ textTransform: "none", letterSpacing: 0, fontWeight: 500 }}>(optional)</span></label>
           <select value={form.type} onChange={e => set("type", e.target.value)} style={field}>
             <option value="">Select a type...</option>
             {serviceTypes.map(s => <option key={s} value={s}>{s}</option>)}
@@ -14744,10 +14825,25 @@ function CPRequest({ client, branding, onSubmit, T }) {
           <input type="text" style={field} value={form.dates} onChange={e => set("dates", e.target.value)} placeholder="e.g. Anytime next week, Mon/Wed mornings" />
         </div>
         <div>
-          <label style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 8 }}>Notes</label>
-          <textarea style={{ ...field, minHeight: 100, resize: "vertical", lineHeight: 1.6 }} value={form.notes} onChange={e => set("notes", e.target.value)} placeholder="Describe what you're seeing or any specific concerns..." />
+          <label style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 8 }}>Quick Requests <span style={{ textTransform: "none", letterSpacing: 0, fontWeight: 500, color: T.textMuted }}>(tap any that apply)</span></label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {quickPicks.map(p => {
+              const on = picks.includes(p);
+              return (
+                <button key={p} onClick={() => togglePick(p)}
+                  style={{ padding: "9px 14px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.1) : T.surface, color: on ? T.primary : T.text, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 6, transition: "all 0.15s" }}>
+                  {on && <svg viewBox="0 0 24 24" width={13} height={13} fill="none" stroke={T.primary} strokeWidth={3} strokeLinecap="round"><path d="M20 6 9 17l-5-5"/></svg>}
+                  {p}
+                </button>
+              );
+            })}
+          </div>
         </div>
-        <button onClick={handleSend} disabled={!form.type} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 14, padding: "15px", fontWeight: 800, fontSize: 15, cursor: form.type ? "pointer" : "not-allowed", opacity: form.type ? 1 : 0.45, fontFamily: "inherit", letterSpacing: "-0.01em", boxShadow: form.type ? `0 4px 16px ${hexA(T.primary, 0.3)}` : "none", transition: "all 0.2s" }}>Send Request</button>
+        <div>
+          <label style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 8 }}>Notes</label>
+          <textarea style={{ ...field, minHeight: 100, resize: "vertical", lineHeight: 1.6 }} value={form.notes} onChange={e => set("notes", e.target.value)} placeholder="Anything else — describe what you're seeing or any specific concerns..." />
+        </div>
+        <button onClick={handleSend} disabled={!form.type && picks.length === 0} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 14, padding: "15px", fontWeight: 800, fontSize: 15, cursor: (form.type || picks.length) ? "pointer" : "not-allowed", opacity: (form.type || picks.length) ? 1 : 0.45, fontFamily: "inherit", letterSpacing: "-0.01em", boxShadow: (form.type || picks.length) ? `0 4px 16px ${hexA(T.primary, 0.3)}` : "none", transition: "all 0.2s" }}>Send Request</button>
       </div>
       {(branding.companyPhone || branding.companyEmail) && (
         <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -15845,10 +15941,11 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin} T={T} />}
           {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
           {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
+          {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetScreen budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} />}
           {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
           {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} initialFilter={invoiceFilter} />}
           {page === "import"   && perms.canImport && <SkimmerImport onImport={handleImportClients} onGoToClients={() => handleNav("clients")} />}
-          {page === "settings" && <AppSettings branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} />}
+          {page === "settings" && <AppSettings onNav={handleNav} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} />}
         </main>
 
         {/* Bottom Nav — shows only the user's chosen dock items */}
