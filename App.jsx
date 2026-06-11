@@ -1181,10 +1181,11 @@ const addDaysMDY = (s, days) => { const dt = parseMDY(s) || new Date(); dt.setDa
 
 const invoiceTotals = (inv) => {
   const n = (v) => parseFloat(v) || 0;
-  // QB invoices store pre-calculated total directly
-  if (inv.source === "quickbooks") {
+  // QB-imported invoices with no editable line items store a pre-calculated total.
+  // App-created invoices (even after pushing to QB) always compute from their line items.
+  if (inv.source === "quickbooks" && (!inv.lineItems || inv.lineItems.length === 0)) {
     const total = n(inv.total);
-    return { subtotal: total, taxableBase: 0, tax: 0, total, discountTotal: 0, cost: 0, profit: 0, margin: 0 };
+    return { subtotal: total, grossSubtotal: total, taxableBase: 0, tax: 0, total, discountTotal: 0, lineDiscountTotal: 0, invDiscount: 0, cost: 0, profit: 0, margin: 0 };
   }
   const items = inv.lineItems || [];
   // Per-line: gross = qty * unitPrice, then subtract the line discount (flat $ or %)
@@ -8316,19 +8317,25 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
       if (res.status === 401) { setQbState("error"); setQbMsg("QuickBooks session expired. Reconnect under Customize."); return; }
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      // Store QB id + payment link on the invoice, mark as sent, and save
+      // Store QB id + payment link on the invoice, mark as sent, and save.
+      // NOTE: we do NOT set source:"quickbooks" — that flag is only for QB-imported
+      // invoices. App-created invoices keep their editable line items and recompute totals.
       const updated = {
         ...inv,
         clientName: client.name, clientAddress: client.address || "", clientEmail: client.email || "",
         qbId: data.qbId,
         paymentLink: data.paymentLink,
         status: inv.status === "Draft" ? "Sent" : inv.status,
-        source: "quickbooks",
+        qbPushed: true,
       };
       setInv(updated);
       onSave(updated);
       setQbState("done");
-      setQbMsg("Invoice created in QuickBooks. Payment link ready.");
+      setQbMsg(data.warning
+        ? "Invoice created in QuickBooks. Online pay link may take a moment to activate — the QuickBooks link works now."
+        : data.hasOnlineLink
+          ? "Invoice created in QuickBooks with an online payment link."
+          : "Invoice created in QuickBooks. If the pay link isn't online yet, confirm QuickBooks Payments is enabled.");
     } catch (err) {
       setQbState("error");
       setQbMsg(err.message || "Could not reach QuickBooks.");
@@ -8355,8 +8362,23 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           </div>
         </div>
 
+        <div>
+          <label style={label}>Payment Terms</label>
+          <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+            {[["0", "Due on receipt"], ["7", "Net 7"], ["15", "Net 15"], ["30", "Net 30"], ["45", "Net 45"], ["60", "Net 60"]].map(([days, lab]) => {
+              const active = String(inv.termsDays ?? invoicing.dueDays ?? 15) === days;
+              return (
+                <button key={days} onClick={() => { set("termsDays", days); set("dueDate", addDaysMDY(inv.date, days)); }}
+                  style={{ padding: "8px 12px", borderRadius: 10, border: `1.5px solid ${active ? T.primary : T.border}`, background: active ? hexA(T.primary, 0.1) : T.surface, color: active ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                  {lab}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         <div style={{ display: "flex", gap: 10 }}>
-          <div style={{ flex: 1 }}><label style={label}>Issued</label><input type="date" style={field} value={toISO(inv.date)} onChange={e => set("date", fromISO(e.target.value))} /></div>
+          <div style={{ flex: 1 }}><label style={label}>Issued</label><input type="date" style={field} value={toISO(inv.date)} onChange={e => { const newDate = fromISO(e.target.value); set("date", newDate); if (inv.termsDays != null) set("dueDate", addDaysMDY(newDate, inv.termsDays)); }} /></div>
           <div style={{ flex: 1 }}><label style={label}>Due</label><input type="date" style={field} value={toISO(inv.dueDate)} onChange={e => set("dueDate", fromISO(e.target.value))} /></div>
         </div>
 
@@ -8865,7 +8887,17 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyn
           </div>
           <div style={{ display: "flex", gap: 10 }}>
             <div style={{ flex: 1 }}><label style={labelStyle}>Default Tax Rate (%)</label><input type="text" inputMode="decimal" style={field} value={cfg.taxRate} onChange={e => set("taxRate", e.target.value.replace(/[^\d.]/g, ""))} /></div>
-            <div style={{ flex: 1 }}><label style={labelStyle}>Due In (days)</label><input type="text" inputMode="numeric" style={field} value={cfg.dueDays} onChange={e => set("dueDays", e.target.value.replace(/[^\d]/g, ""))} /></div>
+            <div style={{ flex: 1 }}>
+              <label style={labelStyle}>Default Payment Terms</label>
+              <select style={{ ...field, appearance: "none", WebkitAppearance: "none" }} value={String(cfg.dueDays)} onChange={e => set("dueDays", e.target.value)}>
+                <option value="0">Due on receipt</option>
+                <option value="7">Net 7</option>
+                <option value="15">Net 15</option>
+                <option value="30">Net 30</option>
+                <option value="45">Net 45</option>
+                <option value="60">Net 60</option>
+              </select>
+            </div>
           </div>
           <div><label style={labelStyle}>Default Terms / Notes</label><textarea style={{ ...field, resize: "vertical" }} rows={2} value={cfg.terms} onChange={e => set("terms", e.target.value)} /></div>
         </div>
@@ -16255,7 +16287,24 @@ export default function App({ authEmail = "", onSignOut }) {
       return exists ? list.map(iv => iv.id === finalInv.id ? finalInv : iv) : [finalInv, ...(list || [])];
     });
   };
-  const handleDeleteInvoice = (id) => setInvoices(list => (list || []).filter(iv => iv.id !== id));
+  const handleDeleteInvoice = (id) => {
+    const target = (invoices || []).find(iv => iv.id === id);
+    // If this invoice was pushed to QuickBooks, delete it there too
+    if (target && target.qbId) {
+      const access_token = localStorage.getItem("qb_access_token");
+      const realm_id = localStorage.getItem("qb_realm_id");
+      if (access_token && realm_id) {
+        fetch("/api/quickbooks/delete-invoice", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ access_token, realm_id, qb_id: target.qbId }),
+        }).then(r => r.json()).then(d => {
+          if (d.error) console.error("QB delete failed:", d.error);
+        }).catch(e => console.error("QB delete error:", e.message));
+      }
+    }
+    setInvoices(list => (list || []).filter(iv => iv.id !== id));
+  };
 
   // mark a stop complete: prepend the visit to the client's history (with photos)
   const handleCompleteStop = (clientId, entry, sid) => {
