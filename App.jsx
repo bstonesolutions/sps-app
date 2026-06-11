@@ -8806,13 +8806,31 @@ function QBConnect({ onSyncData }) {
       return;
     }
     try {
-      const url = `/api/quickbooks/sync?access_token=${encodeURIComponent(accessToken)}&realm_id=${encodeURIComponent(realmId)}`;
-      const res = await fetch(url);
+      const doSync = (token) => fetch(`/api/quickbooks/sync?access_token=${encodeURIComponent(token)}&realm_id=${encodeURIComponent(realmId)}`);
+      let res = await doSync(accessToken);
       if (res.status === 401) {
-        setStatus("error");
-        setResult({ error: "Session expired. Please reconnect." });
-        handleDisconnect();
-        return;
+        // Try refreshing the token before giving up
+        const refresh_token = localStorage.getItem("qb_refresh_token");
+        let refreshed = null;
+        if (refresh_token) {
+          const rr = await fetch("/api/quickbooks/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refresh_token }) });
+          if (rr.ok) {
+            const rd = await rr.json();
+            if (rd.access_token) {
+              localStorage.setItem("qb_access_token", rd.access_token);
+              if (rd.refresh_token) localStorage.setItem("qb_refresh_token", rd.refresh_token);
+              if (rd.expires_in) localStorage.setItem("qb_expires_at", String(Date.now() + Number(rd.expires_in) * 1000));
+              refreshed = rd.access_token;
+            }
+          }
+        }
+        if (!refreshed) {
+          setStatus("error");
+          setResult({ error: "Session expired. Please reconnect." });
+          handleDisconnect();
+          return;
+        }
+        res = await doSync(refreshed);
       }
       const data = await res.json();
       if (data.error) throw new Error(data.error);
@@ -9718,9 +9736,38 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
     const realm_id = localStorage.getItem("qb_realm_id");
     if (!access_token || !realm_id) { setQbSyncMsg("Connect QuickBooks under Customize first."); setTimeout(() => setQbSyncMsg(""), 4000); return; }
     setQbSyncing(true); setQbSyncMsg("");
+
+    // Try a sync with the given token; on 401, refresh once and retry.
+    const doSync = async (token) => {
+      const r = await fetch(`/api/quickbooks/sync?access_token=${encodeURIComponent(token)}&realm_id=${encodeURIComponent(realm_id)}`);
+      return r;
+    };
+    const refreshToken = async () => {
+      const refresh_token = localStorage.getItem("qb_refresh_token");
+      if (!refresh_token) return null;
+      const rr = await fetch("/api/quickbooks/refresh", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token }),
+      });
+      if (!rr.ok) return null;
+      const rd = await rr.json();
+      if (rd.access_token) {
+        localStorage.setItem("qb_access_token", rd.access_token);
+        if (rd.refresh_token) localStorage.setItem("qb_refresh_token", rd.refresh_token);
+        if (rd.expires_in) localStorage.setItem("qb_expires_at", String(Date.now() + Number(rd.expires_in) * 1000));
+        return rd.access_token;
+      }
+      return null;
+    };
+
     try {
-      const res = await fetch(`/api/quickbooks/sync?access_token=${encodeURIComponent(access_token)}&realm_id=${encodeURIComponent(realm_id)}`);
-      if (res.status === 401) { setQbSyncMsg("QuickBooks session expired. Reconnect under Customize."); return; }
+      let res = await doSync(access_token);
+      if (res.status === 401) {
+        // Token expired — silently refresh and retry once
+        const fresh = await refreshToken();
+        if (!fresh) { setQbSyncMsg("QuickBooks session expired. Reconnect under Customize."); return; }
+        res = await doSync(fresh);
+      }
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       if (onSyncData && data.invoices) onSyncData(data.invoices, data.customers);
@@ -9834,11 +9881,9 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
         <div style={{ display: "flex", gap: 8 }}>
           {qbConnected && (
             <button onClick={syncQuickBooks} disabled={qbSyncing} title="Sync with QuickBooks"
-              style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 12px", borderRadius: 12, border: `1.5px solid ${T.border}`, background: T.surface, color: "#2CA01C", fontWeight: 700, fontSize: 13, cursor: qbSyncing ? "default" : "pointer", fontFamily: "inherit" }}>
-              {qbSyncing
-                ? <div style={{ width: 14, height: 14, border: "2px solid rgba(44,160,28,0.3)", borderTopColor: "#2CA01C", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
-                : <svg viewBox="0 0 24 24" width={14} height={14} fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>}
-              QB
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 13px", borderRadius: 12, border: `1.5px solid ${T.border}`, background: T.surface, color: T.textMuted, fontWeight: 700, fontSize: 13, cursor: qbSyncing ? "default" : "pointer", fontFamily: "inherit" }}>
+              <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" style={{ animation: qbSyncing ? "spin 0.8s linear infinite" : "none" }}><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+              Sync
             </button>
           )}
           <button onClick={() => setShowFilters(f => !f)}
