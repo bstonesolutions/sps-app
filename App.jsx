@@ -4126,29 +4126,50 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
 // ─────────────────────────────────────────────
 function PhotoViewer({ photos, index, onClose }) {
   const [i, setI] = useState(index || 0);
+  const norm = (p) => typeof p === "string" ? { src: p } : (p || {});
+  const cur = norm(photos[i]);
   const prev = (e) => { e.stopPropagation(); setI(x => (x - 1 + photos.length) % photos.length); };
   const next = (e) => { e.stopPropagation(); setI(x => (x + 1) % photos.length); };
+  const label = cur.label, caption = cur.caption;
+  const lc = label === "Before" ? "#F59E0B" : label === "After" ? "#16a34a" : "rgba(255,255,255,0.5)";
   return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)", zIndex: 400, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <button onClick={onClose} style={{ position: "absolute", top: 16, right: 16, background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 38, height: 38, cursor: "pointer", display:"flex", alignItems:"center", justifyContent:"center" }}><Icon name="close" size={18} /></button>
-      {photos.length > 1 && <button onClick={prev} style={{ position: "absolute", left: 12, background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 42, height: 42, cursor: "pointer", display:"flex", alignItems:"center", justifyContent:"center" }}><Icon name="back" size={20} /></button>}
-      <img src={photos[i]} alt="" style={{ maxWidth: "92%", maxHeight: "82%", borderRadius: 10, objectFit: "contain" }} onClick={e => e.stopPropagation()} />
-      {photos.length > 1 && <button onClick={next} style={{ position: "absolute", right: 12, background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 42, height: 42, fontSize: 22, cursor: "pointer" }}>›</button>}
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)", zIndex: 400, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <button onClick={onClose} style={{ position: "absolute", top: 16, right: 16, background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 38, height: 38, cursor: "pointer", display:"flex", alignItems:"center", justifyContent:"center", zIndex: 2 }}><Icon name="close" size={18} /></button>
+      {photos.length > 1 && <button onClick={prev} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 42, height: 42, cursor: "pointer", display:"flex", alignItems:"center", justifyContent:"center", zIndex: 2 }}><Icon name="back" size={20} /></button>}
+      <img src={cur.src} alt="" style={{ maxWidth: "92%", maxHeight: (label || caption) ? "74%" : "82%", borderRadius: 10, objectFit: "contain" }} onClick={e => e.stopPropagation()} />
+      {(label || caption) && (
+        <div onClick={e => e.stopPropagation()} style={{ marginTop: 14, textAlign: "center", maxWidth: "90%" }}>
+          {label && <span style={{ display: "inline-block", fontSize: 11, fontWeight: 800, color: "#fff", background: lc, borderRadius: 6, padding: "3px 10px", marginBottom: caption ? 8 : 0 }}>{label}</span>}
+          {caption && <div style={{ color: "rgba(255,255,255,0.92)", fontSize: 14, lineHeight: 1.5 }}>{caption}</div>}
+        </div>
+      )}
+      {photos.length > 1 && <button onClick={next} style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 42, height: 42, cursor: "pointer", display:"flex", alignItems:"center", justifyContent:"center", zIndex: 2 }}><svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="#fff" strokeWidth={2.2} strokeLinecap="round"><path d="m9 18 6-6-6-6"/></svg></button>}
       <div style={{ position: "absolute", bottom: 20, color: "rgba(255,255,255,0.7)", fontSize: 13 }}>{i + 1} / {photos.length}</div>
     </div>
   );
 }
 
 function PhotoStrip({ photos, size = 56 }) {
+  const { T } = useApp();
   const [viewer, setViewer] = useState(null);
   if (!photos || photos.length === 0) return null;
   return (
     <>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        {photos.map((p, i) => (
-          <img key={i} src={p} alt="" onClick={() => setViewer(i)}
-            style={{ width: size, height: size, borderRadius: 10, objectFit: "cover", cursor: "pointer" }} />
-        ))}
+        {photos.map((p, i) => {
+          const src = typeof p === "string" ? p : p.src;
+          const label = typeof p === "string" ? "" : p.label;
+          const lc = label === "Before" ? "#F59E0B" : label === "After" ? "#16a34a" : null;
+          return (
+            <div key={i} onClick={() => setViewer(i)} style={{ position: "relative", cursor: "pointer", flexShrink: 0 }}>
+              <img src={src} alt="" style={{ width: size, height: size, borderRadius: 10, objectFit: "cover", display: "block" }} />
+              {label && <div style={{ position: "absolute", bottom: 4, left: 4, fontSize: 8, fontWeight: 800, color: "#fff", background: lc, borderRadius: 4, padding: "1px 5px" }}>{label}</div>}
+              <div style={{ position: "absolute", top: 4, right: 4, width: 18, height: 18, borderRadius: "50%", background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <svg viewBox="0 0 24 24" width={10} height={10} fill="none" stroke="#fff" strokeWidth={2.5} strokeLinecap="round"><path d="M15 3h6v6M14 10l7-7M9 21H3v-6M10 14l-7 7"/></svg>
+              </div>
+            </div>
+          );
+        })}
       </div>
       {viewer !== null && <PhotoViewer photos={photos} index={viewer} onClose={() => setViewer(null)} />}
     </>
@@ -13721,10 +13742,52 @@ function CPUpgradeRequest({ client, currentPlan, currentTier, upgradePlan, upgra
 }
 
 // ── CP PROPERTY — combines pond/property details + service plan ──
+// Portal photo lightbox — handles both string and {src,label,caption} formats, swipeable
+function CPLightbox({ photos, index, onClose, T }) {
+  const [i, setI] = useState(index || 0);
+  const norm = (p) => typeof p === "string" ? { src: p } : p;
+  const cur = norm(photos[i]);
+  const prev = (e) => { e.stopPropagation(); setI(x => (x - 1 + photos.length) % photos.length); };
+  const next = (e) => { e.stopPropagation(); setI(x => (x + 1) % photos.length); };
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); if (e.key === "ArrowLeft") setI(x => (x - 1 + photos.length) % photos.length); if (e.key === "ArrowRight") setI(x => (x + 1) % photos.length); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [photos.length, onClose]);
+  const label = cur.label, caption = cur.caption;
+  const lc = label === "Before" ? "#F59E0B" : label === "After" ? "#16a34a" : T.primary;
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.94)", zIndex: 500, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <button onClick={onClose} style={{ position: "absolute", top: "calc(16px + env(safe-area-inset-top))", right: 16, background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 40, height: 40, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2 }}>
+        <svg viewBox="0 0 24 24" width={20} height={20} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+      {photos.length > 1 && (
+        <button onClick={prev} style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 44, height: 44, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2 }}>
+          <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round"><path d="m15 18-6-6 6-6"/></svg>
+        </button>
+      )}
+      <img src={cur.src} alt="" onClick={e => e.stopPropagation()} style={{ maxWidth: "92%", maxHeight: caption || label ? "74%" : "82%", borderRadius: 12, objectFit: "contain" }} />
+      {(label || caption) && (
+        <div onClick={e => e.stopPropagation()} style={{ marginTop: 16, textAlign: "center", maxWidth: "90%" }}>
+          {label && <span style={{ display: "inline-block", fontSize: 11, fontWeight: 800, color: "#fff", background: lc, borderRadius: 6, padding: "3px 10px", marginBottom: 8 }}>{label}</span>}
+          {caption && <div style={{ color: "rgba(255,255,255,0.92)", fontSize: 14, lineHeight: 1.5 }}>{caption}</div>}
+        </div>
+      )}
+      {photos.length > 1 && (
+        <button onClick={next} style={{ position: "absolute", right: 14, top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 44, height: 44, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2 }}>
+          <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round"><path d="m9 18 6-6-6-6"/></svg>
+        </button>
+      )}
+      <div style={{ position: "absolute", bottom: "calc(20px + env(safe-area-inset-bottom))", color: "rgba(255,255,255,0.7)", fontSize: 13, fontWeight: 600 }}>{i + 1} / {photos.length}</div>
+    </div>
+  );
+}
+
 function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T }) {
   const { tiers } = useApp();
   const [section, setSection] = useState("property"); // "property" | "plan"
   const [expandedVisit, setExpandedVisit] = useState(null); // index of expanded recent visit
+  const [lightbox, setLightbox] = useState(null); // { photos, index }
   const plan = client.plan || "";
   const clientDiv = client.division || "Pond";
   const allTiers = tiers || CP_TIERS;
@@ -13853,7 +13916,14 @@ function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T }) 
           <div style={{ display:"flex", gap:8, overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
             {sitePhotos.map((p,i) => {
               const src = typeof p === "string" ? p : p.src;
-              return <img key={i} src={src} alt="" style={{ width:90, height:90, borderRadius:12, objectFit:"cover", flexShrink:0 }} />;
+              return (
+                <div key={i} onClick={() => setLightbox({ photos: sitePhotos, index: i })} style={{ flexShrink:0, position:"relative", cursor:"pointer" }}>
+                  <img src={src} alt="" style={{ width:90, height:90, borderRadius:12, objectFit:"cover", display:"block" }} />
+                  <div style={{ position:"absolute", top:5, right:5, width:20, height:20, borderRadius:"50%", background:"rgba(0,0,0,0.45)", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                    <svg viewBox="0 0 24 24" width={11} height={11} fill="none" stroke="#fff" strokeWidth={2.4} strokeLinecap="round"><path d="M15 3h6v6M14 10l7-7M9 21H3v-6M10 14l-7 7"/></svg>
+                  </div>
+                </div>
+              );
             })}
           </div>
         </div>
@@ -13926,9 +13996,12 @@ function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T }) 
                             const label = typeof ph === "string" ? "" : ph.label;
                             const lc = label === "Before" ? "#F59E0B" : label === "After" ? "#16a34a" : T.textMuted;
                             return (
-                              <div key={j} style={{ flexShrink:0, position:"relative" }}>
+                              <div key={j} onClick={() => setLightbox({ photos, index: j })} style={{ flexShrink:0, position:"relative", cursor:"pointer" }}>
                                 <img src={src} alt="" style={{ width:110, height:110, borderRadius:12, objectFit:"cover", display:"block", border:`1px solid ${T.border}` }} />
                                 {label && <div style={{ position:"absolute", bottom:6, left:6, fontSize:9, fontWeight:800, color:"#fff", background:lc, borderRadius:5, padding:"2px 7px" }}>{label}</div>}
+                                <div style={{ position:"absolute", top:6, right:6, width:22, height:22, borderRadius:"50%", background:"rgba(0,0,0,0.45)", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                                  <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="#fff" strokeWidth={2.4} strokeLinecap="round"><path d="M15 3h6v6M14 10l7-7M9 21H3v-6M10 14l-7 7"/></svg>
+                                </div>
                               </div>
                             );
                           })}
@@ -13971,8 +14044,11 @@ function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T }) 
                       const src = typeof p === "string" ? p : p.src;
                       const cap = typeof p === "string" ? "" : p.caption;
                       return (
-                        <div key={j} style={{ flexShrink:0 }}>
+                        <div key={j} onClick={() => setLightbox({ photos, index: j })} style={{ flexShrink:0, cursor:"pointer", position:"relative" }}>
                           <img src={src} alt="" style={{ width:92, height:92, borderRadius:12, objectFit:"cover", display:"block", border:`1px solid ${T.border}` }} />
+                          <div style={{ position:"absolute", top:5, right:5, width:20, height:20, borderRadius:"50%", background:"rgba(0,0,0,0.45)", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                            <svg viewBox="0 0 24 24" width={11} height={11} fill="none" stroke="#fff" strokeWidth={2.4} strokeLinecap="round"><path d="M15 3h6v6M14 10l7-7M9 21H3v-6M10 14l-7 7"/></svg>
+                          </div>
                           {cap && <div style={{ fontSize:10, color:T.textMuted, marginTop:3, textAlign:"center", maxWidth:92, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{cap}</div>}
                         </div>
                       );
@@ -13997,6 +14073,8 @@ function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T }) 
           </div>
         </div>
       )}
+
+      {lightbox && <CPLightbox photos={lightbox.photos} index={lightbox.index} onClose={() => setLightbox(null)} T={T} />}
     </div>
   );
 }
