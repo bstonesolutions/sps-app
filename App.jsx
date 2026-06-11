@@ -2233,6 +2233,9 @@ function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onI
                       {s.type && <><span style={{ opacity: 0.3 }}>·</span><span>{s.type}</span></>}
                     </span>
                   ))}
+                  {c.preferredDay && (
+                    <><span style={{ opacity: 0.3 }}>·</span><span style={{ color: c.preferredDayOverride ? T.primary : T.textMuted, fontWeight: c.preferredDayOverride ? 700 : 400 }}>{c.preferredDay.slice(0,3)}{c.preferredDayOverride ? " ★" : ""}</span></>
+                  )}
                 </div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 5, alignItems: "flex-end", flexShrink: 0 }}>
@@ -2258,6 +2261,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onI
               { label: "Schedule",   icon: "calendar",  fn: doSchedule },
               { label: "Division",   icon: "tag",       fn: () => setModal("division") },
               { label: "Plan",       icon: "clipboard", fn: () => setModal("plan") },
+              { label: "Pref Day",   icon: "calendar",  fn: () => setModal("prefDay") },
               { label: "Deactivate", icon: "warning",   fn: () => setModal("inactive") },
               { label: "Activate",   icon: "clients",   fn: doMarkActive },
               { label: "Delete",     icon: "trash",     fn: () => setModal("delete"), danger: true },
@@ -2316,7 +2320,27 @@ function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onI
         </Modal>
       )}
 
-      {/* Delete confirm */}
+      {/* Preferred Day modal */}
+      {modal === "prefDay" && (
+        <Modal title={`Set Preferred Day (${selCount} clients)`} onClose={() => setModal(null)}>
+          <div style={{ marginBottom: 10, fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>
+            Set the preferred service day for the selected clients. Mark as a client request to distinguish it from the route default.
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+            {DAYS_OF_WEEK.map(d => (
+              <button key={d} onClick={() => { onBatchUpdate(selectedIds, { preferredDay: d, preferredDayOverride: true }); setModal(null); exitSelect(); }}
+                style={{ padding: "14px 16px", border: `1px solid ${T.border}`, borderRadius: 12, background: T.surface, color: T.text, fontWeight: 700, fontSize: 15, cursor: "pointer", fontFamily: "inherit", textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                {d}
+                <span style={{ fontSize: 11, color: T.textMuted, fontWeight: 500 }}>Client request</span>
+              </button>
+            ))}
+            <button onClick={() => { onBatchUpdate(selectedIds, { preferredDay: "", preferredDayOverride: false }); setModal(null); exitSelect(); }}
+              style={{ padding: "14px 16px", border: `1px dashed ${T.border}`, borderRadius: 12, background: "transparent", color: T.textMuted, fontWeight: 600, fontSize: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "center" }}>
+              Clear (use route default)
+            </button>
+          </div>
+        </Modal>
+      )}
       {modal === "delete" && (
         <Modal title="Delete Clients?" onClose={() => setModal(null)}>
           <p style={{ fontSize: 14, color: T.text, lineHeight: 1.5, marginTop: 0 }}>
@@ -2518,6 +2542,29 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
                   </div>
                 </div>
                 <FieldRow label="Next Service"><Input value={form.nextService} onChange={e => set("nextService", e.target.value)} placeholder="MM/DD/YYYY" /></FieldRow>
+                {/* Preferred service day — set by route default, overridable per client */}
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "#6b7280", display: "block", marginBottom: 7 }}>
+                    Preferred Service Day
+                    {form.preferredDayOverride && <span style={{ color: T.primary, marginLeft: 6, fontWeight: 600, textTransform: "none", letterSpacing: 0 }}>· Client request</span>}
+                  </label>
+                  <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 6 }}>
+                    {["No Preference", ...DAYS_OF_WEEK].map(d => {
+                      const val = d === "No Preference" ? "" : d;
+                      const on = (form.preferredDay || "") === val;
+                      return (
+                        <button key={d} type="button"
+                          onClick={() => { set("preferredDay", val); set("preferredDayOverride", val ? true : false); }}
+                          style={{ padding: "7px 10px", borderRadius: 9, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.1) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>
+                          {d === "No Preference" ? d : d.slice(0, 3)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {form.routeDay && !form.preferredDayOverride && (
+                    <div style={{ fontSize: 11, color: T.textMuted }}>Route default: {form.routeDay}</div>
+                  )}
+                </div>
                 <FieldRow label="Monthly Rate">
                   <div style={{ position: "relative" }}>
                     <span style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: "#9ca3af" }}>$</span>
@@ -2880,7 +2927,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, te
           {/* Address + services */}
           <div style={{ marginBottom: 12 }}>
             <div style={{ fontSize: 12.5, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{client.address}</div>
-            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3, display: "flex", gap: 4, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3, display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
               {clientServices(client, tiers).map((s, i) => (
                 <span key={i} style={{ display:"inline-flex", alignItems:"center", gap:3 }}>
                   {i > 0 && <span style={{ opacity:0.3 }}>·</span>}
@@ -2895,6 +2942,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, te
             {client.phone && <span style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color:T.textMuted }}><Icon name="phone" size={12} />{client.phone}</span>}
             {client.email && <span style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color:T.textMuted }}><Icon name="mail" size={12} />{client.email}</span>}
             {(() => { const ns = nextServiceFor(client, schedule); return ns && <span style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color:T.textMuted }}><Icon name="calendar" size={12} />Next: {ns}</span>; })()}
+            {client.preferredDay && <span style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color: client.preferredDayOverride ? T.primary : T.textMuted, fontWeight: client.preferredDayOverride ? 700 : 400 }}><Icon name="calendar" size={12} />{client.preferredDay}{client.preferredDayOverride ? " (client request)" : " (route day)"}</span>}
             {perms.seeBalances && <span style={{ display:"flex", alignItems:"center", gap:4, fontSize:12, fontWeight:700, color: owed <= 0 ? T.accent : T.warning }}><Icon name="dollar" size={12} />${owed.toFixed(2)}{owed > 0 ? " due" : " balance"}</span>}
           </div>
         </div>
@@ -5246,6 +5294,19 @@ function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, o
   const clientObj = (clients||[]).find(c => String(c.id) === String(form.clientId));
   const techObj   = (team||[]).find(t => t.id === form.techId);
 
+  // When client changes, auto-fill frequency from their tier and preferred day
+  const handleClientChange = (clientId) => {
+    set("clientId", clientId);
+    const c = (clients||[]).find(cl => String(cl.id) === String(clientId));
+    if (!c) return;
+    // Auto-fill frequency from tier
+    const tierFreqMap = { "Weekly": "weekly", "Bi-Weekly": "biweekly", "Monthly": "monthly" };
+    const tierFreq = TIER_FREQ[c.plan];
+    if (tierFreq && tierFreqMap[tierFreq]) set("frequency", tierFreqMap[tierFreq]);
+    // Auto-fill day from client's preferred day
+    if (c.preferredDay) set("dayOfWeek", c.preferredDay);
+  };
+
   const toggleService = (id) => set("serviceIds",
     form.serviceIds.includes(id) ? form.serviceIds.filter(x => x !== id) : [...form.serviceIds, id]
   );
@@ -5259,15 +5320,17 @@ function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, o
         {/* Client */}
         <div>
           <label style={lbl}>Client</label>
-          <select style={field} value={form.clientId} onChange={e => set("clientId", e.target.value)}>
+          <select style={field} value={form.clientId} onChange={e => handleClientChange(e.target.value)}>
             <option value="">Select a client...</option>
             {(clients||[]).sort((a,b) => (a.name||"").localeCompare(b.name||"")).map(c => (
               <option key={c.id} value={c.id}>{c.name} — {c.plan || c.division}</option>
             ))}
           </select>
           {clientObj && (
-            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>
-              {clientObj.division} · {clientObj.plan} · {clientObj.planFreq} · {clientObj.address}
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5, display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <span>{clientObj.division}</span>
+              {clientObj.plan && <span>· {clientObj.plan} ({TIER_FREQ[clientObj.plan] || clientObj.planFreq})</span>}
+              {clientObj.preferredDay && <span style={{ color: clientObj.preferredDayOverride ? T.primary : T.textMuted }}>· Preferred: {clientObj.preferredDay}{clientObj.preferredDayOverride ? " (client request)" : " (route default)"}</span>}
             </div>
           )}
         </div>
@@ -5381,7 +5444,7 @@ function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, o
   );
 }
 
-function RouteAssignmentsTab({ clients, catalog, team, schedule, setSchedule, assignments, setAssignments, T }) {
+function RouteAssignmentsTab({ clients, catalog, team, schedule, setSchedule, assignments, setAssignments, setClients, T }) {
   const [view, setView]   = useState("matrix"); // "matrix" | "list"
   const [modal, setModal] = useState(null);
   const [populating, setPopulating] = useState(false);
@@ -5399,6 +5462,23 @@ function RouteAssignmentsTab({ clients, catalog, team, schedule, setSchedule, as
     if (a === null) setAssignments(prev => prev.filter(x => x.id !== modal.id));
     else if (modal === "add") setAssignments(prev => [...(prev||[]), a]);
     else setAssignments(prev => prev.map(x => x.id === a.id ? a : x));
+    // Write preferredDay + preferredFrequency back to the client record (route as default)
+    // Only if the client hasn't set a manual override
+    if (a && a.clientId && a.dayOfWeek && setClients) {
+      setClients(prev => prev.map(c => {
+        if (String(c.id) !== String(a.clientId)) return c;
+        // Only update if no manual override, or the route is being set for the first time
+        const routeDay = a.dayOfWeek;
+        const routeFreq = a.frequency;
+        return {
+          ...c,
+          preferredDay: c.preferredDayOverride ? c.preferredDay : routeDay,
+          preferredFreq: routeFreq,
+          routeDay, // always track what the route says
+          routeFreq,
+        };
+      }));
+    }
     setModal(null);
   };
 
@@ -5537,6 +5617,14 @@ function RouteAssignmentsTab({ clients, catalog, team, schedule, setSchedule, as
                       <div style={{ padding: "11px 14px", display: "flex", flexDirection: "column", justifyContent: "center" }}>
                         <div style={{ fontSize: 13, fontWeight: 700, color: T.text, lineHeight: 1.3 }}>{c?.name || "?"}</div>
                         {a.techId && <div style={{ fontSize: 10, color: T.textMuted, marginTop: 1 }}>{techName(a.techId)}</div>}
+                        {c?.preferredDayOverride && c?.preferredDay && c.preferredDay !== a.dayOfWeek && (
+                          <div style={{ fontSize: 10, color: "#F59E0B", fontWeight: 700, marginTop: 2 }}>
+                            ★ Prefers {c.preferredDay}
+                          </div>
+                        )}
+                        {c?.preferredDayOverride && c?.preferredDay && c.preferredDay === a.dayOfWeek && (
+                          <div style={{ fontSize: 10, color: T.accent, fontWeight: 700, marginTop: 2 }}>✓ Day matches</div>
+                        )}
                       </div>
 
                       {/* Week cells */}
@@ -6245,6 +6333,7 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
           setSchedule={setSchedule}
           assignments={routeAssignments}
           setAssignments={setRouteAssignments}
+          setClients={setClients}
           T={T}
         />
       )}
