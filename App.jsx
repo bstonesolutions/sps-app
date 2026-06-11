@@ -1132,6 +1132,18 @@ const DEFAULT_INVOICING = {
   showLogo: true,          // show the company logo on invoices
   showContact: true,       // show business phone/email/website/address block
   footer: "",              // small print at the bottom of every invoice
+  // ── Template / layout ──
+  headerStyle: "band",     // "band" (color bar across top) | "minimal" | "centered"
+  accentStyle: "totalOnly",// where the accent shows: "totalOnly" | "headerBand" | "everywhere"
+  showQtyPrice: true,      // show the "qty × price" subline under each item
+  showItemTax: true,       // show the * taxable marker + footnote
+  zebraRows: false,        // alternating row shading on line items
+  density: "comfortable",  // "comfortable" | "compact"
+  cornerStyle: "rounded",  // "rounded" | "square"
+  thankYou: "Thank you for your business!", // big thank-you line above footer
+  showThankYou: true,
+  showDueBanner: true,     // a colored "Amount Due / Due date" banner near the top
+  labelInvoice: "INVOICE", // the big heading word (e.g. INVOICE, RECEIPT, BILL)
 };
 
 // date helpers (MM/DD/YYYY)
@@ -8945,12 +8957,224 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyn
         </div>
       </Card>
 
+      {/* ── TEMPLATE DESIGNER ── */}
+      <Card style={{ marginBottom: 14 }}>
+        <CardHeader title="Invoice Layout" />
+        <div style={{ padding: "0 18px", marginTop: -6, fontSize: 12, color: T.textMuted }}>Design exactly how client invoices look.</div>
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 18 }}>
+          {/* Live preview */}
+          <div>
+            <label style={labelStyle}>Live Preview</label>
+            <div style={{ background: T.bg, borderRadius: 12, padding: 12, border: `1px solid ${T.border}` }}>
+              <InvoiceDocument
+                invoice={{
+                  number: (cfg.numberPrefix || "INV-") + (cfg.nextNumber || 1001),
+                  date: todayMDY(), dueDate: addDaysMDY(todayMDY(), cfg.dueDays),
+                  status: "Sent", taxRate: cfg.taxRate,
+                  clientName: "Sample Client", clientAddress: "123 Pond Lane, Honey Brook PA", clientEmail: "client@email.com",
+                  notes: cfg.terms,
+                  lineItems: [
+                    { id: "s1", desc: "Monthly Pond Service", qty: "1", unitPrice: "145", taxable: false },
+                    { id: "s2", desc: "Beneficial Bacteria Treatment", qty: "2", unitPrice: "32", taxable: true },
+                    { id: "s3", desc: "Parts & Materials", qty: "1", unitPrice: "78", taxable: true, bundleNote: "Filter Pad ×2, Pond Dye" },
+                  ],
+                }}
+                client={{ name: "Sample Client" }}
+                branding={branding}
+                cfg={cfg}
+                T={T}
+              />
+            </div>
+          </div>
+
+          {/* Header style */}
+          <div>
+            <label style={labelStyle}>Header Style</label>
+            <div style={{ display: "flex", gap: 6 }}>
+              {[["band", "Color Band"], ["minimal", "Minimal"], ["centered", "Centered"]].map(([v, lab]) => (
+                <button key={v} onClick={() => set("headerStyle", v)} style={{ flex: 1, padding: "10px 6px", borderRadius: 10, border: `1.5px solid ${cfg.headerStyle === v ? accent : T.border}`, background: cfg.headerStyle === v ? hexA(accent, 0.1) : T.surface, color: cfg.headerStyle === v ? accent : T.textMuted, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>{lab}</button>
+              ))}
+            </div>
+          </div>
+
+          {/* Heading word */}
+          <div>
+            <label style={labelStyle}>Heading Word</label>
+            <div style={{ display: "flex", gap: 6 }}>
+              {["INVOICE", "RECEIPT", "BILL", "STATEMENT"].map(w => (
+                <button key={w} onClick={() => set("labelInvoice", w)} style={{ flex: 1, padding: "9px 4px", borderRadius: 9, border: `1.5px solid ${cfg.labelInvoice === w ? accent : T.border}`, background: cfg.labelInvoice === w ? hexA(accent, 0.1) : T.surface, color: cfg.labelInvoice === w ? accent : T.textMuted, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>{w}</button>
+              ))}
+            </div>
+          </div>
+
+          {/* Density + corners */}
+          <div style={{ display: "flex", gap: 12 }}>
+            <div style={{ flex: 1 }}>
+              <label style={labelStyle}>Spacing</label>
+              <div style={{ display: "flex", gap: 6 }}>
+                {[["comfortable", "Roomy"], ["compact", "Compact"]].map(([v, lab]) => (
+                  <button key={v} onClick={() => set("density", v)} style={{ flex: 1, padding: "9px 6px", borderRadius: 9, border: `1.5px solid ${cfg.density === v ? accent : T.border}`, background: cfg.density === v ? hexA(accent, 0.1) : T.surface, color: cfg.density === v ? accent : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>{lab}</button>
+                ))}
+              </div>
+            </div>
+            <div style={{ flex: 1 }}>
+              <label style={labelStyle}>Corners</label>
+              <div style={{ display: "flex", gap: 6 }}>
+                {[["rounded", "Rounded"], ["square", "Square"]].map(([v, lab]) => (
+                  <button key={v} onClick={() => set("cornerStyle", v)} style={{ flex: 1, padding: "9px 6px", borderRadius: 9, border: `1.5px solid ${cfg.cornerStyle === v ? accent : T.border}`, background: cfg.cornerStyle === v ? hexA(accent, 0.1) : T.surface, color: cfg.cornerStyle === v ? accent : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>{lab}</button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Toggles */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 14, borderTop: `1px solid ${T.border}`, paddingTop: 14 }}>
+            {row("Amount Due Banner", "Highlighted total near the top", cfg.showDueBanner !== false, v => set("showDueBanner", v))}
+            {row("Qty × Price line", "Show the math under each item", cfg.showQtyPrice !== false, v => set("showQtyPrice", v))}
+            {row("Taxable markers", "Show the * on taxable items", cfg.showItemTax !== false, v => set("showItemTax", v))}
+            {row("Striped rows", "Alternating row shading", !!cfg.zebraRows, v => set("zebraRows", v))}
+            {row("Thank-you line", "Friendly note above the footer", cfg.showThankYou !== false, v => set("showThankYou", v))}
+          </div>
+
+          {cfg.showThankYou !== false && (
+            <div><label style={labelStyle}>Thank-You Message</label><input style={field} value={cfg.thankYou || ""} onChange={e => set("thankYou", e.target.value)} placeholder="Thank you for your business!" /></div>
+          )}
+        </div>
+      </Card>
+
       {/* ── QUICKBOOKS ── */}
       <Card style={{ marginTop: 14 }}>
         <CardHeader title="QuickBooks" />
         <QBConnect onSyncData={onSyncData} />
       </Card>
     </>
+  );
+}
+
+// ── Reusable invoice document renderer — driven entirely by the template config ──
+// Used by both the client-facing preview and the live designer preview.
+function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
+  const money = (n) => `$${(parseFloat(n) || 0).toFixed(2)}`;
+  const totals = invoiceTotals(invoice);
+  const eff = effectiveStatus(invoice);
+  const accent = cfg.accent || T.primary;
+  const contactBits = [branding.companyPhone, branding.companyEmail, branding.companyWebsite].filter(Boolean);
+  const anyTaxable = (invoice.lineItems || []).some(l => l.taxable);
+  const radius = cfg.cornerStyle === "square" ? 0 : 16;
+  const pad = cfg.density === "compact" ? 12 : 18;
+  const rowPad = cfg.density === "compact" ? "7px 0" : "10px 0";
+  const headerWord = cfg.labelInvoice || "INVOICE";
+  const centered = cfg.headerStyle === "centered";
+
+  const brandBlock = (light) => (
+    <div style={{ display: "flex", gap: 11, alignItems: "center", flexDirection: centered ? "column" : "row", textAlign: centered ? "center" : "left" }}>
+      {cfg.showLogo !== false && (
+        <div style={{ width: 42, height: 42, borderRadius: 12, background: light ? "rgba(255,255,255,0.2)" : hexA(accent, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+          {branding.logoType === "image" && branding.logoImage ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontSize: 22 }}>{branding.logoEmoji}</span>}
+        </div>
+      )}
+      <div>
+        <div style={{ fontSize: 15, fontWeight: 800, color: light ? "#fff" : T.text, letterSpacing: "-0.02em" }}>{branding.companyName}</div>
+        <div style={{ fontSize: 11, color: light ? "rgba(255,255,255,0.85)" : T.textMuted }}>{branding.division}</div>
+        {cfg.showContact !== false && contactBits.length > 0 && <div style={{ fontSize: 10.5, color: light ? "rgba(255,255,255,0.8)" : T.textMuted, marginTop: 3, lineHeight: 1.4 }}>{contactBits.join(" · ")}</div>}
+        {cfg.showContact !== false && branding.companyAddress && <div style={{ fontSize: 10.5, color: light ? "rgba(255,255,255,0.8)" : T.textMuted, lineHeight: 1.4 }}>{branding.companyAddress}</div>}
+      </div>
+    </div>
+  );
+
+  const headerRight = (light) => (
+    <div style={{ textAlign: centered ? "center" : "right", marginTop: centered ? 10 : 0 }}>
+      <div style={{ fontSize: 18, fontWeight: 800, color: light ? "#fff" : accent, letterSpacing: "-0.02em" }}>{headerWord}</div>
+      <div style={{ fontSize: 12, color: light ? "rgba(255,255,255,0.85)" : T.textMuted }}>{invoice.number}</div>
+      <span style={{ display: "inline-block", marginTop: 6, background: light ? "rgba(255,255,255,0.2)" : hexA(invStatusColor(eff, T), 0.14), color: light ? "#fff" : invStatusColor(eff, T), padding: "3px 10px", borderRadius: 100, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>{eff}</span>
+    </div>
+  );
+
+  return (
+    <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: radius, overflow: "hidden", fontSize: `${scale}em` }}>
+      {cfg.headerStyle === "band" ? (
+        <div style={{ background: accent, padding: `${pad}px`, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+          {brandBlock(true)}
+          {headerRight(true)}
+        </div>
+      ) : centered ? (
+        <div style={{ padding: `${pad + 4}px ${pad}px`, borderBottom: `1px solid ${T.border}`, display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+          {brandBlock(false)}
+          {headerRight(false)}
+        </div>
+      ) : (
+        <div style={{ padding: `${pad}px ${pad}px 14px`, borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+          {brandBlock(false)}
+          {headerRight(false)}
+        </div>
+      )}
+
+      {cfg.showDueBanner && eff !== "Paid" && (
+        <div style={{ background: hexA(accent, 0.08), padding: `10px ${pad}px`, display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: `1px solid ${T.border}` }}>
+          <span style={{ fontSize: 12, fontWeight: 700, color: accent, textTransform: "uppercase", letterSpacing: "0.05em" }}>Amount Due</span>
+          <span style={{ fontSize: 18, fontWeight: 800, color: accent }}>{money(totals.total)}</span>
+        </div>
+      )}
+
+      <div style={{ padding: `14px ${pad}px`, display: "flex", justifyContent: "space-between", gap: 12, borderBottom: `1px solid ${T.border}` }}>
+        <div>
+          <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 4 }}>Bill To</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{invoice.clientName || client?.name}</div>
+          {(invoice.clientAddress || client?.address) && <div style={{ fontSize: 12, color: T.textMuted }}>{invoice.clientAddress || client?.address}</div>}
+          {(invoice.clientEmail || client?.email) && <div style={{ fontSize: 12, color: T.textMuted }}>{invoice.clientEmail || client?.email}</div>}
+        </div>
+        <div style={{ textAlign: "right", fontSize: 12, color: T.textMuted }}>
+          <div>Issued: <span style={{ color: T.text, fontWeight: 600 }}>{invoice.date}</span></div>
+          <div style={{ marginTop: 3 }}>Due: <span style={{ color: T.text, fontWeight: 600 }}>{invoice.dueDate}</span></div>
+        </div>
+      </div>
+
+      <div style={{ padding: `4px ${pad}px` }}>
+        {(invoice.lineItems || []).map((l, idx) => {
+          const nn = (v) => parseFloat(v) || 0;
+          const gross = nn(l.qty) * nn(l.unitPrice);
+          let disc = 0;
+          if (l.discountType === "pct") disc = gross * (nn(l.discount) / 100);
+          else if (l.discountType === "amt") disc = nn(l.discount);
+          const net = Math.max(0, gross - disc);
+          return (
+            <div key={l.id || idx} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: rowPad, borderBottom: `1px solid ${T.border}`, background: cfg.zebraRows && idx % 2 === 1 ? hexA(T.textMuted, 0.04) : "transparent" }}>
+              <div style={{ flex: 1, paddingRight: 10 }}>
+                <div style={{ fontSize: 13, color: T.text }}>{l.desc || "—"}{l.taxable && cfg.showItemTax !== false && <span style={{ color: T.textMuted }}> *</span>}</div>
+                {cfg.showQtyPrice !== false && <div style={{ fontSize: 11, color: T.textMuted }}>{l.qty} × {money(nn(l.unitPrice))}</div>}
+                {l.bundleNote && <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 2, fontStyle: "italic" }}>Includes: {l.bundleNote}</div>}
+                {disc > 0 && <div style={{ fontSize: 11, color: T.accent, fontWeight: 700, marginTop: 2 }}>Discount {l.discountType === "pct" ? `${l.discount}%` : money(disc)} off</div>}
+              </div>
+              <div style={{ textAlign: "right" }}>
+                {disc > 0 && <div style={{ fontSize: 11, color: T.textMuted, textDecoration: "line-through" }}>{money(gross)}</div>}
+                <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{money(net)}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ padding: `10px ${pad}px 16px` }}>
+        {totals.discountTotal > 0 ? (
+          <>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted }}><span>Subtotal</span><span>{money(totals.grossSubtotal)}</span></div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.accent, fontWeight: 700, marginTop: 4 }}><span>Total savings</span><span>−{money(totals.discountTotal)}</span></div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted, marginTop: 4 }}><span>After discount</span><span>{money(totals.subtotal)}</span></div>
+          </>
+        ) : (
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted }}><span>Subtotal</span><span>{money(totals.subtotal)}</span></div>
+        )}
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted, marginTop: 4 }}><span>Tax ({invoice.taxRate || 0}%{totals.taxableBase > 0 ? " on taxable" : ""})</span><span>{money(totals.tax)}</span></div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 18, fontWeight: 800, color: accent, marginTop: 8, borderTop: `2px solid ${T.border}`, paddingTop: 8 }}><span>Total Due</span><span>{money(totals.total)}</span></div>
+        {anyTaxable && cfg.showItemTax !== false && <div style={{ fontSize: 10, color: T.textMuted, marginTop: 6 }}>* taxable item</div>}
+      </div>
+
+      {cfg.showThankYou && cfg.thankYou && (
+        <div style={{ padding: `0 ${pad}px 14px`, fontSize: 14, fontWeight: 700, color: accent, textAlign: centered ? "center" : "left" }}>{cfg.thankYou}</div>
+      )}
+      {invoice.notes && <div style={{ padding: `0 ${pad}px 14px`, fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>{invoice.notes}</div>}
+      {cfg.footer && <div style={{ padding: `0 ${pad}px 16px`, fontSize: 11, color: T.textMuted, lineHeight: 1.5, borderTop: `1px solid ${T.border}`, paddingTop: 12 }}>{cfg.footer}</div>}
+    </div>
   );
 }
 
@@ -8969,79 +9193,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
   return (
     <Modal title={invoice.number} onClose={onClose}>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, overflow: "hidden" }}>
-          <div style={{ padding: "18px 18px 14px", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
-            <div style={{ display: "flex", gap: 11, alignItems: "center" }}>
-              {cfg.showLogo !== false && <div style={{ width: 42, height: 42, borderRadius: 12, background: hexA(accent, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
-                {branding.logoType === "image" && branding.logoImage ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontSize: 22 }}>{branding.logoEmoji}</span>}
-              </div>}
-              <div>
-                <div style={{ fontSize: 15, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{branding.companyName}</div>
-                <div style={{ fontSize: 11, color: T.textMuted }}>{branding.division}</div>
-                {cfg.showContact !== false && contactBits.length > 0 && <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 3, lineHeight: 1.4 }}>{contactBits.join(" · ")}</div>}
-                {cfg.showContact !== false && branding.companyAddress && <div style={{ fontSize: 10.5, color: T.textMuted, lineHeight: 1.4 }}>{branding.companyAddress}</div>}
-              </div>
-            </div>
-            <div style={{ textAlign: "right" }}>
-              <div style={{ fontSize: 18, fontWeight: 800, color: accent, letterSpacing: "-0.02em" }}>INVOICE</div>
-              <div style={{ fontSize: 12, color: T.textMuted }}>{invoice.number}</div>
-              <span style={{ display: "inline-block", marginTop: 6, background: hexA(invStatusColor(eff, T), 0.14), color: invStatusColor(eff, T), padding: "3px 10px", borderRadius: 100, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>{eff}</span>
-            </div>
-          </div>
-          <div style={{ padding: "14px 18px", display: "flex", justifyContent: "space-between", gap: 12, borderBottom: `1px solid ${T.border}` }}>
-            <div>
-              <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 4 }}>Bill To</div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{invoice.clientName || client?.name}</div>
-              {(invoice.clientAddress || client?.address) && <div style={{ fontSize: 12, color: T.textMuted }}>{invoice.clientAddress || client?.address}</div>}
-              {(invoice.clientEmail || client?.email) && <div style={{ fontSize: 12, color: T.textMuted }}>{invoice.clientEmail || client?.email}</div>}
-            </div>
-            <div style={{ textAlign: "right", fontSize: 12, color: T.textMuted }}>
-              <div>Issued: <span style={{ color: T.text, fontWeight: 600 }}>{invoice.date}</span></div>
-              <div style={{ marginTop: 3 }}>Due: <span style={{ color: T.text, fontWeight: 600 }}>{invoice.dueDate}</span></div>
-            </div>
-          </div>
-          <div style={{ padding: "4px 18px" }}>
-            {(invoice.lineItems || []).map(l => {
-              const nn = (v) => parseFloat(v) || 0;
-              const gross = nn(l.qty) * nn(l.unitPrice);
-              let disc = 0;
-              if (l.discountType === "pct") disc = gross * (nn(l.discount) / 100);
-              else if (l.discountType === "amt") disc = nn(l.discount);
-              const net = Math.max(0, gross - disc);
-              return (
-                <div key={l.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
-                  <div style={{ flex: 1, paddingRight: 10 }}>
-                    <div style={{ fontSize: 13, color: T.text }}>{l.desc || "—"}{l.taxable && <span style={{ color: T.textMuted }}> *</span>}</div>
-                    <div style={{ fontSize: 11, color: T.textMuted }}>{l.qty} × {money(nn(l.unitPrice))}</div>
-                    {l.bundleNote && <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 2, fontStyle: "italic" }}>Includes: {l.bundleNote}</div>}
-                    {disc > 0 && <div style={{ fontSize: 11, color: T.accent, fontWeight: 700, marginTop: 2 }}>Discount {l.discountType === "pct" ? `${l.discount}%` : money(disc)} off</div>}
-                  </div>
-                  <div style={{ textAlign: "right" }}>
-                    {disc > 0 && <div style={{ fontSize: 11, color: T.textMuted, textDecoration: "line-through" }}>{money(gross)}</div>}
-                    <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{money(net)}</div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-          <div style={{ padding: "10px 18px 16px" }}>
-            {totals.discountTotal > 0 && (
-              <>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted }}><span>Subtotal</span><span>{money(totals.grossSubtotal)}</span></div>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.accent, fontWeight: 700, marginTop: 4 }}><span>Total savings</span><span>−{money(totals.discountTotal)}</span></div>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted, marginTop: 4 }}><span>After discount</span><span>{money(totals.subtotal)}</span></div>
-              </>
-            )}
-            {totals.discountTotal === 0 && (
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted }}><span>Subtotal</span><span>{money(totals.subtotal)}</span></div>
-            )}
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted, marginTop: 4 }}><span>Tax ({invoice.taxRate || 0}%{totals.taxableBase > 0 ? " on taxable" : ""})</span><span>{money(totals.tax)}</span></div>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 18, fontWeight: 800, color: accent, marginTop: 8, borderTop: `2px solid ${T.border}`, paddingTop: 8 }}><span>Total Due</span><span>{money(totals.total)}</span></div>
-            {anyTaxable && <div style={{ fontSize: 10, color: T.textMuted, marginTop: 6 }}>* taxable item</div>}
-          </div>
-          {invoice.notes && <div style={{ padding: "0 18px 14px", fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>{invoice.notes}</div>}
-          {cfg.footer && <div style={{ padding: "0 18px 16px", fontSize: 11, color: T.textMuted, lineHeight: 1.5, borderTop: `1px solid ${T.border}`, paddingTop: 12, marginTop: invoice.notes ? 0 : 2 }}>{cfg.footer}</div>}
-        </div>
+        <InvoiceDocument invoice={invoice} client={client} branding={branding} cfg={cfg} T={T} />
 
         {/* QB Payment link */}
         {invoice.paymentLink && eff !== "Paid" && (
