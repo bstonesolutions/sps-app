@@ -1069,7 +1069,10 @@ function monthActuals(clients, when = new Date(), invoices = []) {
       }
     }
     if (d && d.getMonth() === m && d.getFullYear() === y) {
-      revenue += invoiceTotals(iv).total;
+      const t = invoiceTotals(iv);
+      revenue += t.total;
+      // Cost of goods sold on the invoice (products, parts, treatments) feeds margin
+      if (t.cost) cost += t.cost;
     }
   });
 
@@ -1181,13 +1184,45 @@ const invoiceTotals = (inv) => {
   // QB invoices store pre-calculated total directly
   if (inv.source === "quickbooks") {
     const total = n(inv.total);
-    return { subtotal: total, taxableBase: 0, tax: 0, total };
+    return { subtotal: total, taxableBase: 0, tax: 0, total, discountTotal: 0, cost: 0, profit: 0, margin: 0 };
   }
   const items = inv.lineItems || [];
-  const subtotal = items.reduce((s, li) => s + n(li.qty) * n(li.unitPrice), 0);
-  const taxableBase = items.reduce((s, li) => s + (li.taxable ? n(li.qty) * n(li.unitPrice) : 0), 0);
+  // Per-line: gross = qty * unitPrice, then subtract the line discount (flat $ or %)
+  const lineNet = (li) => {
+    const gross = n(li.qty) * n(li.unitPrice);
+    let disc = 0;
+    if (li.discountType === "pct") disc = gross * (n(li.discount) / 100);
+    else if (li.discountType === "amt") disc = n(li.discount);
+    return Math.max(0, gross - disc);
+  };
+  const lineGross = (li) => n(li.qty) * n(li.unitPrice);
+  const lineCost = (li) => n(li.qty) * n(li.unitCost);
+
+  const grossSubtotal = items.reduce((s, li) => s + lineGross(li), 0);
+  const subtotalAfterLineDisc = items.reduce((s, li) => s + lineNet(li), 0);
+  const lineDiscountTotal = grossSubtotal - subtotalAfterLineDisc;
+
+  // Invoice-level discount applies on top of line-discounted subtotal
+  let invDiscount = 0;
+  if (inv.discountType === "pct") invDiscount = subtotalAfterLineDisc * (n(inv.discount) / 100);
+  else if (inv.discountType === "amt") invDiscount = n(inv.discount);
+  invDiscount = Math.min(invDiscount, subtotalAfterLineDisc);
+
+  const subtotal = subtotalAfterLineDisc - invDiscount;
+  const discountTotal = lineDiscountTotal + invDiscount;
+
+  // Tax on taxable lines, proportionally reduced by the invoice-level discount
+  const taxableAfterLine = items.reduce((s, li) => s + (li.taxable ? lineNet(li) : 0), 0);
+  const invDiscFactor = subtotalAfterLineDisc > 0 ? (1 - invDiscount / subtotalAfterLineDisc) : 1;
+  const taxableBase = taxableAfterLine * invDiscFactor;
   const tax = taxableBase * (n(inv.taxRate) / 100);
-  return { subtotal, taxableBase, tax, total: subtotal + tax };
+
+  // Cost + profit (admin view) — uses unitCost stored on each line
+  const cost = items.reduce((s, li) => s + lineCost(li), 0);
+  const profit = subtotal - cost;
+  const margin = subtotal > 0 ? (profit / subtotal) * 100 : 0;
+
+  return { subtotal, grossSubtotal, taxableBase, tax, total: subtotal + tax, discountTotal, lineDiscountTotal, invDiscount, cost, profit, margin };
 };
 // a Sent invoice past its due date reads as Overdue
 const effectiveStatus = (inv) => {
@@ -2891,7 +2926,7 @@ function ClientDocuments({ client, onChange }) {
   );
 }
 
-function ClientDetail({ client: init, invoices, invoicing, branding, catalog, team, schedule, onBack, onUpdate, onSaveInvoice, onDeleteInvoice, onDelete }) {
+function ClientDetail({ client: init, invoices, invoicing, branding, catalog, setCatalog, team, schedule, onBack, onUpdate, onSaveInvoice, onDeleteInvoice, onDelete }) {
   const { T, perms, tiers } = useApp();
   const [client, setClient] = useState(init);
   const [tab, setTab] = useState("overview");
@@ -2988,7 +3023,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, te
       {tab === "overview" && <ClientOverview client={client} invoices={invoices} onUpdate={onUpdate} />}
       {tab === "equipment" && <ClientEquipment client={client} invoices={invoices} onChange={eq => update({ equipment: eq })} />}
       {tab === "history" && <ClientHistory client={client} catalog={catalog} team={team} onChange={hist => update({ history: hist })} />}
-      {tab === "invoices" && (perms.canInvoice || perms.viewInvoices) && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} onSave={onSaveInvoice} onDelete={onDeleteInvoice} />}
+      {tab === "invoices" && (perms.canInvoice || perms.viewInvoices) && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={onSaveInvoice} onDelete={onDeleteInvoice} />}
       {tab === "docs"    && <ClientDocuments client={client} onChange={docs => update({ documents: docs })} />}
       {tab === "portal" && <ClientPortal client={client} invoices={invoices} schedule={schedule} branding={branding} />}
     </div>
@@ -8133,7 +8168,7 @@ function InvoiceRow({ iv, onClick }) {
   );
 }
 
-function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, presetClientId, onSave, onClose, onDelete }) {
+function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCatalog, presetClientId, onSave, onClose, onDelete }) {
   const { T } = useApp();
   const money = (n) => `$${(n || 0).toFixed(2)}`;
   const toISO = (mdy) => { const d = parseMDY(mdy); return d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}` : ""; };
@@ -8155,8 +8190,70 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, presetC
   const [visitPick, setVisitPick] = useState(false);
   const set = (k, v) => setInv(s => ({ ...s, [k]: v }));
   const setLine = (id, k, v) => setInv(s => ({ ...s, lineItems: s.lineItems.map(l => l.id === id ? { ...l, [k]: v } : l) }));
-  const addLine = () => setInv(s => ({ ...s, lineItems: [...s.lineItems, { id: `l${Date.now()}`, desc: "", qty: "1", unitPrice: "", taxable: false }] }));
+  const addLine = () => setInv(s => ({ ...s, lineItems: [...s.lineItems, { id: `l${Date.now()}`, desc: "", qty: "1", unitPrice: "", unitCost: "", taxable: false, kind: "custom" }] }));
   const removeLine = (id) => setInv(s => ({ ...s, lineItems: s.lineItems.filter(l => l.id !== id) }));
+
+  // ── Catalog item picker — add Services, Products, Treatments, Parts ──
+  const [picker, setPicker] = useState(false);       // show the add-from-catalog sheet
+  const [pickerTab, setPickerTab] = useState("services");
+  const [bundleMode, setBundleMode] = useState(null); // { items: [{partId, qty}] } when bundling parts into one line
+  const n = (v) => parseFloat(v) || 0;
+
+  // Add a single catalog entry as a line item, carrying its price AND our cost (for margin)
+  const addCatalogLine = (kind, item) => {
+    let line;
+    if (kind === "service") {
+      line = { id: `l${Date.now()}`, desc: item.name, qty: "1", unitPrice: String(item.price || ""), unitCost: String(item.cost || "0"), taxable: false, kind: "service", refId: item.id };
+    } else if (kind === "product") {
+      line = { id: `l${Date.now()}`, desc: item.name, qty: "1", unitPrice: String(item.price || ""), unitCost: String(item.cost || "0"), taxable: true, kind: "product", refId: item.id };
+    } else if (kind === "treatment") {
+      line = { id: `l${Date.now()}`, desc: item.name, qty: "1", unitPrice: String(item.retailPerOz || ""), unitCost: String(item.costPerOz || "0"), taxable: true, kind: "treatment", refId: item.id, unit: item.unit || "oz" };
+    } else if (kind === "part") {
+      line = { id: `l${Date.now()}`, desc: item.name, qty: "1", unitPrice: String(item.retailPer || ""), unitCost: String(item.costPer || "0"), taxable: true, kind: "part", refId: item.id, unit: item.unit || "pieces" };
+    }
+    setInv(s => ({ ...s, lineItems: [...s.lineItems, line] }));
+    setPicker(false);
+  };
+
+  // Bundle several parts into ONE clean line item (keeps the invoice short)
+  const addBundledParts = (selected) => {
+    // selected: [{ part, qty }]
+    if (!selected.length) return;
+    const totalPrice = selected.reduce((s, x) => s + n(x.part.retailPer) * n(x.qty), 0);
+    const totalCost  = selected.reduce((s, x) => s + n(x.part.costPer) * n(x.qty), 0);
+    const names = selected.map(x => `${x.part.name}${n(x.qty) > 1 ? ` ×${x.qty}` : ""}`).join(", ");
+    const line = {
+      id: `l${Date.now()}`,
+      desc: "Parts & Materials",
+      qty: "1",
+      unitPrice: String(totalPrice.toFixed(2)),
+      unitCost: String(totalCost.toFixed(2)),
+      taxable: true,
+      kind: "bundle",
+      bundleNote: names, // shows under the line so the client sees what's included
+      bundleItems: selected.map(x => ({ refId: x.part.id, name: x.part.name, qty: x.qty, unit: x.part.unit })),
+    };
+    setInv(s => ({ ...s, lineItems: [...s.lineItems, line] }));
+    setBundleMode(null);
+    setPicker(false);
+  };
+
+  // Create a new catalog item (service/product/treatment/part) and save it for reuse
+  const onCreateCatalogItem = (type, data) => {
+    if (!setCatalog) {
+      // No catalog setter available — return an ephemeral item so it still adds to this invoice
+      return { id: `tmp${Date.now()}`, name: data.name, price: data.price, cost: data.cost, retailPerOz: data.price, costPerOz: data.cost, retailPer: data.price, costPer: data.cost };
+    }
+    const id = `${type[0]}${Date.now()}`;
+    let item;
+    if (type === "service")      item = { id, name: data.name, price: data.price || "", cost: data.cost || "0", products: [], tests: [] };
+    else if (type === "product") item = { id, name: data.name, price: data.price || "", cost: data.cost || "0" };
+    else if (type === "treatment") item = { id, name: data.name, retailPerOz: data.price || "", costPerOz: data.cost || "0", unit: "oz", stockByLoc: {} };
+    else if (type === "part")    item = { id, name: data.name, retailPer: data.price || "", costPer: data.cost || "0", unit: "pieces", stockByLoc: {} };
+    const key = type === "service" ? "services" : type === "product" ? "products" : type === "treatment" ? "treatments" : "parts";
+    setCatalog(c => ({ ...c, [key]: [...(c[key] || []), item] }));
+    return item;
+  };
 
   const client = clients.find(c => c.id === inv.clientId);
   const totals = invoiceTotals(inv);
@@ -8195,11 +8292,21 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, presetC
         clientEmail: client.email || "",
         clientPhone: client.phone || "",
         qbCustomerId: client.qbCustomerId || null,
-        lineItems: (inv.lineItems || []).map(l => ({
-          description: l.desc,
-          qty: l.qty || "1",
-          unitPrice: l.unitPrice || "0",
-        })),
+        lineItems: (inv.lineItems || []).map(l => {
+          const gross = (parseFloat(l.qty) || 0) * (parseFloat(l.unitPrice) || 0);
+          let disc = 0;
+          if (l.discountType === "pct") disc = gross * ((parseFloat(l.discount) || 0) / 100);
+          else if (l.discountType === "amt") disc = parseFloat(l.discount) || 0;
+          const net = Math.max(0, gross - disc);
+          const qty = parseFloat(l.qty) || 1;
+          return {
+            description: l.bundleNote ? `${l.desc} (${l.bundleNote})` : l.desc,
+            qty: String(qty),
+            unitPrice: String(qty > 0 ? (net / qty).toFixed(2) : net.toFixed(2)),
+          };
+        }),
+        invoiceDiscountType: inv.discountType || "",
+        invoiceDiscount: inv.discount || "",
       };
       const res = await fetch("/api/quickbooks/create-invoice", {
         method: "POST",
@@ -8285,31 +8392,92 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, presetC
             </div>
           )}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {inv.lineItems.map(l => (
-              <div key={l.id} style={{ background: T.surfaceAlt, borderRadius: 12, padding: 10 }}>
-                <input style={{ ...field, marginBottom: 8 }} value={l.desc} onChange={e => setLine(l.id, "desc", e.target.value)} placeholder="Description" />
-                <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-                  <div style={{ width: 50 }}>
-                    <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 3 }}>Qty</div>
-                    <input style={{ ...small, textAlign: "center" }} value={l.qty} onChange={e => setLine(l.id, "qty", e.target.value.replace(/[^\d.]/g, ""))} />
+            {inv.lineItems.map(l => {
+              const lineGross = n(l.qty) * n(l.unitPrice);
+              let lineDisc = 0;
+              if (l.discountType === "pct") lineDisc = lineGross * (n(l.discount) / 100);
+              else if (l.discountType === "amt") lineDisc = n(l.discount);
+              const lineNet = Math.max(0, lineGross - lineDisc);
+              const lineCost = n(l.qty) * n(l.unitCost);
+              const lineProfit = lineNet - lineCost;
+              const lineMargin = lineNet > 0 ? (lineProfit / lineNet) * 100 : 0;
+              return (
+                <div key={l.id} style={{ background: T.surfaceAlt, borderRadius: 12, padding: 10 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                    {l.kind && l.kind !== "custom" && (
+                      <span style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.04em", color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 6, padding: "2px 6px", flexShrink: 0 }}>{l.kind === "bundle" ? "Parts" : l.kind}</span>
+                    )}
+                    <input style={{ ...field, marginBottom: 0 }} value={l.desc} onChange={e => setLine(l.id, "desc", e.target.value)} placeholder="Description" />
                   </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 3 }}>Unit price</div>
-                    <div style={{ position: "relative" }}>
-                      <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
-                      <input style={{ ...small, paddingLeft: 18, textAlign: "left" }} value={l.unitPrice} onChange={e => setLine(l.id, "unitPrice", e.target.value.replace(/[^\d.]/g, ""))} placeholder="0.00" />
+                  {l.bundleNote && (
+                    <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 8, paddingLeft: 2, fontStyle: "italic" }}>Includes: {l.bundleNote}</div>
+                  )}
+                  <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                    <div style={{ width: 44 }}>
+                      <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 3 }}>Qty</div>
+                      <input style={{ ...small, textAlign: "center" }} value={l.qty} onChange={e => setLine(l.id, "qty", e.target.value.replace(/[^\d.]/g, ""))} />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 3 }}>Price</div>
+                      <div style={{ position: "relative" }}>
+                        <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
+                        <input style={{ ...small, paddingLeft: 18, textAlign: "left" }} value={l.unitPrice} onChange={e => setLine(l.id, "unitPrice", e.target.value.replace(/[^\d.]/g, ""))} placeholder="0.00" />
+                      </div>
+                    </div>
+                    <div style={{ width: 60 }}>
+                      <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 3 }}>Cost ea</div>
+                      <div style={{ position: "relative" }}>
+                        <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
+                        <input style={{ ...small, paddingLeft: 18, textAlign: "left" }} value={l.unitCost || ""} onChange={e => setLine(l.id, "unitCost", e.target.value.replace(/[^\d.]/g, ""))} placeholder="0" />
+                      </div>
+                    </div>
+                    <div style={{ textAlign: "center" }}>
+                      <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 3 }}>Tax</div>
+                      <div onClick={() => setLine(l.id, "taxable", !l.taxable)} title="Taxable" style={{ width: 32, height: 32, borderRadius: 10, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", background: l.taxable ? T.primary : T.surface, border: `1.5px solid ${l.taxable ? T.primary : T.border}`, color: "#fff", fontWeight: 800, fontSize: 13 }}>{l.taxable ? "✓" : ""}</div>
+                    </div>
+                    <button onClick={() => removeLine(l.id)} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 18, cursor: "pointer", padding: "4px 2px", height: 32 }}>×</button>
+                  </div>
+                  {/* Per-line discount */}
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+                    <span style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em", fontWeight: 700 }}>Discount</span>
+                    <div style={{ display: "flex", background: T.surface, borderRadius: 8, padding: 2, border: `1px solid ${T.border}` }}>
+                      {[["", "Off"], ["amt", "$"], ["pct", "%"]].map(([v, lab]) => (
+                        <button key={v} onClick={() => setLine(l.id, "discountType", v)} style={{ padding: "4px 9px", border: "none", borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: (l.discountType || "") === v ? T.primary : "transparent", color: (l.discountType || "") === v ? "#fff" : T.textMuted }}>{lab}</button>
+                      ))}
+                    </div>
+                    {l.discountType && (
+                      <input style={{ ...small, width: 64, textAlign: "center" }} value={l.discount || ""} onChange={e => setLine(l.id, "discount", e.target.value.replace(/[^\d.]/g, ""))} placeholder={l.discountType === "pct" ? "%" : "$"} />
+                    )}
+                    <div style={{ marginLeft: "auto", textAlign: "right" }}>
+                      <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{money(lineNet)}</div>
+                      {n(l.unitCost) > 0 && (
+                        <div style={{ fontSize: 10, color: lineProfit >= 0 ? T.accent : "#E5484D", fontWeight: 700 }}>
+                          {lineProfit >= 0 ? "+" : ""}{money(lineProfit)} ({Math.round(lineMargin)}%)
+                        </div>
+                      )}
                     </div>
                   </div>
-                  <div style={{ textAlign: "center" }}>
-                    <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 3 }}>Tax</div>
-                    <div onClick={() => setLine(l.id, "taxable", !l.taxable)} title="Taxable" style={{ width: 32, height: 32, borderRadius: 10, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", background: l.taxable ? T.primary : T.surface, border: `1.5px solid ${l.taxable ? T.primary : T.border}`, color: "#fff", fontWeight: 800, fontSize: 13 }}>{l.taxable ? "✓" : ""}</div>
-                  </div>
-                  <button onClick={() => removeLine(l.id)} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 18, cursor: "pointer", padding: "4px 2px", height: 32 }}>×</button>
                 </div>
-              </div>
+              );
+            })}
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button onClick={() => { setPicker(true); setBundleMode(null); }} style={{ flex: 1, padding: "10px", borderRadius: 10, border: "none", background: T.primary, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>+ Add from Catalog</button>
+            <button onClick={addLine} style={{ padding: "10px 14px", borderRadius: 10, border: `1.5px dashed ${T.border}`, background: "none", color: T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Custom line</button>
+          </div>
+        </div>
+
+        {/* Invoice-wide discount */}
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <label style={{ ...label, marginBottom: 0 }}>Whole Invoice Discount</label>
+          <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 8, padding: 2, border: `1px solid ${T.border}` }}>
+            {[["", "Off"], ["amt", "$"], ["pct", "%"]].map(([v, lab]) => (
+              <button key={v} onClick={() => set("discountType", v)} style={{ padding: "5px 11px", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: (inv.discountType || "") === v ? T.primary : "transparent", color: (inv.discountType || "") === v ? "#fff" : T.textMuted }}>{lab}</button>
             ))}
           </div>
-          <button onClick={addLine} style={{ marginTop: 8, width: "100%", padding: "10px", borderRadius: 10, border: `1.5px dashed ${T.border}`, background: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>+ Add line</button>
+          {inv.discountType && (
+            <input style={{ ...small, width: 80, textAlign: "center" }} value={inv.discount || ""} onChange={e => set("discount", e.target.value.replace(/[^\d.]/g, ""))} placeholder={inv.discountType === "pct" ? "%" : "$"} />
+          )}
         </div>
 
         <div style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
@@ -8321,9 +8489,21 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, presetC
             </div>
           </div>
           <div style={{ flex: 1, background: T.surfaceAlt, borderRadius: 12, padding: "10px 14px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted }}><span>Subtotal</span><span>{money(totals.subtotal)}</span></div>
+            {totals.discountTotal > 0 && (
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted }}><span>Before discount</span><span>{money(totals.grossSubtotal)}</span></div>
+            )}
+            {totals.discountTotal > 0 && (
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.accent, fontWeight: 700, marginTop: 4 }}><span>Discount</span><span>−{money(totals.discountTotal)}</span></div>
+            )}
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted, marginTop: 4 }}><span>Subtotal</span><span>{money(totals.subtotal)}</span></div>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted, marginTop: 4 }}><span>Tax</span><span>{money(totals.tax)}</span></div>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 16, fontWeight: 800, color: T.text, marginTop: 6, borderTop: `1px solid ${T.border}`, paddingTop: 6 }}><span>Total</span><span>{money(totals.total)}</span></div>
+            {/* Admin profit readout — never sent to the client */}
+            {totals.cost > 0 && (
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginTop: 6, paddingTop: 6, borderTop: `1px dashed ${T.border}`, color: totals.profit >= 0 ? T.accent : "#E5484D", fontWeight: 700 }}>
+                <span>Your profit</span><span>{money(totals.profit)} ({Math.round(totals.margin)}%)</span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -8371,7 +8551,150 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, presetC
 
         {invoice && onDelete && <button onClick={() => { onDelete(inv.id); onClose(); }} style={{ background: "none", border: "none", color: "#C0392B", fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 6, fontFamily: "inherit" }}>Delete this invoice</button>}
       </div>
+
+      {/* Catalog item picker sheet */}
+      {picker && (
+        <CatalogPickerSheet
+          catalog={catalog}
+          onClose={() => { setPicker(false); setBundleMode(null); }}
+          onAddCatalog={addCatalogLine}
+          onAddBundle={addBundledParts}
+          onCreateItem={onCreateCatalogItem}
+          T={T}
+        />
+      )}
     </Modal>
+  );
+}
+
+// ── Catalog picker: add services/products/treatments/parts to an invoice ──
+function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCreateItem, T }) {
+  const [tab, setTab] = useState("services");
+  const [search, setSearch] = useState("");
+  const [bundle, setBundle] = useState({});   // partId -> qty (for bundling)
+  const [creating, setCreating] = useState(null); // {type} when creating a new item
+  const [newItem, setNewItem] = useState({ name: "", price: "", cost: "" });
+  const n = (v) => parseFloat(v) || 0;
+  const money = (v) => `$${(n(v)).toFixed(2)}`;
+
+  const tabs = [["services", "Services"], ["products", "Products"], ["treatments", "Treatments"], ["parts", "Parts"]];
+  const lists = {
+    services: catalog?.services || [],
+    products: catalog?.products || [],
+    treatments: catalog?.treatments || [],
+    parts: catalog?.parts || [],
+  };
+  const filtered = (lists[tab] || []).filter(it => !search || (it.name || "").toLowerCase().includes(search.toLowerCase()));
+
+  const priceOf = (it) => tab === "treatments" ? it.retailPerOz : tab === "parts" ? it.retailPer : it.price;
+  const costOf  = (it) => tab === "treatments" ? it.costPerOz   : tab === "parts" ? it.costPer   : it.cost;
+  const kindOf  = () => tab === "services" ? "service" : tab === "products" ? "product" : tab === "treatments" ? "treatment" : "part";
+
+  const toggleBundle = (id) => setBundle(b => { const c = { ...b }; if (c[id]) delete c[id]; else c[id] = "1"; return c; });
+  const bundleCount = Object.keys(bundle).length;
+  const confirmBundle = () => {
+    const selected = Object.entries(bundle).map(([id, qty]) => ({ part: (catalog.parts || []).find(p => p.id === id), qty })).filter(x => x.part);
+    onAddBundle(selected);
+  };
+
+  const saveNewItem = () => {
+    if (!newItem.name.trim()) return;
+    const created = onCreateItem(creating.type, newItem);
+    if (created) onAddCatalog(kindOf(), created);
+    setCreating(null);
+    setNewItem({ name: "", price: "", cost: "" });
+  };
+
+  const cell = { width: "100%", padding: "10px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 300, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: T.bg, borderRadius: "20px 20px 0 0", width: "100%", maxWidth: 600, maxHeight: "85vh", display: "flex", flexDirection: "column", paddingBottom: "env(safe-area-inset-bottom)" }}>
+        {/* Header */}
+        <div style={{ padding: "16px 18px 10px", borderBottom: `1px solid ${T.border}` }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <div style={{ fontSize: 17, fontWeight: 800, color: T.text }}>Add to Invoice</div>
+            <button onClick={onClose} style={{ background: T.surfaceAlt, border: "none", borderRadius: 9, width: 30, height: 30, fontSize: 16, color: T.textMuted, cursor: "pointer", fontFamily: "inherit" }}>×</button>
+          </div>
+          <div style={{ display: "flex", gap: 4, background: T.surfaceAlt, borderRadius: 10, padding: 3 }}>
+            {tabs.map(([id, lab]) => (
+              <button key={id} onClick={() => { setTab(id); setBundle({}); }} style={{ flex: 1, padding: "8px 4px", border: "none", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: tab === id ? T.surface : "transparent", color: tab === id ? T.primary : T.textMuted }}>{lab}</button>
+            ))}
+          </div>
+        </div>
+
+        {/* Body */}
+        <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+          {creating ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>New {creating.type}</div>
+              <div>
+                <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 5, fontWeight: 700, textTransform: "uppercase" }}>Name</div>
+                <input style={cell} value={newItem.name} onChange={e => setNewItem(s => ({ ...s, name: e.target.value }))} placeholder="e.g. Pond Liner Repair" autoFocus />
+              </div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 5, fontWeight: 700, textTransform: "uppercase" }}>Price</div>
+                  <input style={cell} value={newItem.price} onChange={e => setNewItem(s => ({ ...s, price: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0.00" />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 5, fontWeight: 700, textTransform: "uppercase" }}>Our cost</div>
+                  <input style={cell} value={newItem.cost} onChange={e => setNewItem(s => ({ ...s, cost: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0.00" />
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={saveNewItem} style={{ flex: 1, padding: "12px", borderRadius: 10, border: "none", background: T.primary, color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Save & Add</button>
+                <button onClick={() => setCreating(null)} style={{ padding: "12px 18px", borderRadius: 10, border: "none", background: T.surfaceAlt, color: T.textMuted, fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <input style={{ ...cell, marginBottom: 12 }} value={search} onChange={e => setSearch(e.target.value)} placeholder={`Search ${tab}...`} />
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {filtered.map(it => {
+                  const isBundling = tab === "parts";
+                  const selected = !!bundle[it.id];
+                  const price = priceOf(it), cost = costOf(it);
+                  const profit = n(price) - n(cost);
+                  return (
+                    <div key={it.id}
+                      onClick={() => isBundling ? toggleBundle(it.id) : onAddCatalog(kindOf(), it)}
+                      style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", background: selected ? hexA(T.primary, 0.08) : T.surface, border: `1px solid ${selected ? T.primary : T.border}`, borderRadius: 12, cursor: "pointer" }}>
+                      {isBundling && (
+                        <div style={{ width: 22, height: 22, borderRadius: 6, flexShrink: 0, border: `1.5px solid ${selected ? T.primary : T.border}`, background: selected ? T.primary : "transparent", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 13, fontWeight: 800 }}>{selected ? "✓" : ""}</div>
+                      )}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{it.name}</div>
+                        <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>
+                          {money(price)}{it.unit ? `/${it.unit}` : ""}
+                          {n(cost) > 0 && <span style={{ color: profit >= 0 ? T.accent : "#E5484D", fontWeight: 700 }}> · {profit >= 0 ? "+" : ""}{money(profit)} profit</span>}
+                        </div>
+                      </div>
+                      {!isBundling && <span style={{ fontSize: 20, color: T.primary, fontWeight: 300 }}>+</span>}
+                    </div>
+                  );
+                })}
+                {filtered.length === 0 && <div style={{ textAlign: "center", padding: "24px", color: T.textMuted, fontSize: 13 }}>No {tab} found</div>}
+              </div>
+              {/* Create new */}
+              <button onClick={() => { setCreating({ type: tab === "services" ? "service" : tab === "products" ? "product" : tab === "treatments" ? "treatment" : "part" }); setNewItem({ name: search, price: "", cost: "" }); }}
+                style={{ marginTop: 12, width: "100%", padding: "11px", borderRadius: 10, border: `1.5px dashed ${T.border}`, background: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+                + Create new {tab === "services" ? "service" : tab === "products" ? "product" : tab === "treatments" ? "treatment" : "part"}
+              </button>
+            </>
+          )}
+        </div>
+
+        {/* Bundle footer for parts */}
+        {!creating && tab === "parts" && bundleCount > 0 && (
+          <div style={{ padding: "12px 16px", borderTop: `1px solid ${T.border}`, background: T.surface }}>
+            <button onClick={confirmBundle} style={{ width: "100%", padding: "13px", borderRadius: 12, border: "none", background: T.primary, color: "#fff", fontWeight: 800, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>
+              Add {bundleCount} part{bundleCount !== 1 ? "s" : ""} as one line
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -8631,20 +8954,39 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
           </div>
           <div style={{ padding: "4px 18px" }}>
             {(invoice.lineItems || []).map(l => {
-              const amt = (parseFloat(l.qty) || 0) * (parseFloat(l.unitPrice) || 0);
+              const nn = (v) => parseFloat(v) || 0;
+              const gross = nn(l.qty) * nn(l.unitPrice);
+              let disc = 0;
+              if (l.discountType === "pct") disc = gross * (nn(l.discount) / 100);
+              else if (l.discountType === "amt") disc = nn(l.discount);
+              const net = Math.max(0, gross - disc);
               return (
                 <div key={l.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
                   <div style={{ flex: 1, paddingRight: 10 }}>
                     <div style={{ fontSize: 13, color: T.text }}>{l.desc || "—"}{l.taxable && <span style={{ color: T.textMuted }}> *</span>}</div>
-                    <div style={{ fontSize: 11, color: T.textMuted }}>{l.qty} × {money(parseFloat(l.unitPrice) || 0)}</div>
+                    <div style={{ fontSize: 11, color: T.textMuted }}>{l.qty} × {money(nn(l.unitPrice))}</div>
+                    {l.bundleNote && <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 2, fontStyle: "italic" }}>Includes: {l.bundleNote}</div>}
+                    {disc > 0 && <div style={{ fontSize: 11, color: T.accent, fontWeight: 700, marginTop: 2 }}>Discount {l.discountType === "pct" ? `${l.discount}%` : money(disc)} off</div>}
                   </div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{money(amt)}</div>
+                  <div style={{ textAlign: "right" }}>
+                    {disc > 0 && <div style={{ fontSize: 11, color: T.textMuted, textDecoration: "line-through" }}>{money(gross)}</div>}
+                    <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{money(net)}</div>
+                  </div>
                 </div>
               );
             })}
           </div>
           <div style={{ padding: "10px 18px 16px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted }}><span>Subtotal</span><span>{money(totals.subtotal)}</span></div>
+            {totals.discountTotal > 0 && (
+              <>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted }}><span>Subtotal</span><span>{money(totals.grossSubtotal)}</span></div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.accent, fontWeight: 700, marginTop: 4 }}><span>Total savings</span><span>−{money(totals.discountTotal)}</span></div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted, marginTop: 4 }}><span>After discount</span><span>{money(totals.subtotal)}</span></div>
+              </>
+            )}
+            {totals.discountTotal === 0 && (
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted }}><span>Subtotal</span><span>{money(totals.subtotal)}</span></div>
+            )}
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted, marginTop: 4 }}><span>Tax ({invoice.taxRate || 0}%{totals.taxableBase > 0 ? " on taxable" : ""})</span><span>{money(totals.tax)}</span></div>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 18, fontWeight: 800, color: accent, marginTop: 8, borderTop: `2px solid ${T.border}`, paddingTop: 8 }}><span>Total Due</span><span>{money(totals.total)}</span></div>
             {anyTaxable && <div style={{ fontSize: 10, color: T.textMuted, marginTop: 6 }}>* taxable item</div>}
@@ -9147,7 +9489,7 @@ function TotalSalesScreen({ invoices, clients, onBack, T }) {
   );
 }
 
-function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, onSave, onDelete, initialFilter = "All" }) {
+function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCatalog, onSave, onDelete, initialFilter = "All" }) {
   const { T, perms } = useApp();
   const moneyFmt = (n) => `$${Math.round(n).toLocaleString()}`;
   const moneyExact = (n) => `$${parseFloat(n||0).toFixed(2)}`;
@@ -9433,14 +9775,14 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, onSav
         </div>
       )}
 
-      {creating && <InvoiceEditor clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} onSave={onSave} onClose={() => setCreating(false)} />}
-      {editing  && <InvoiceEditor invoice={editing} clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} onSave={onSave} onDelete={onDelete} onClose={() => setEditing(null)} />}
+      {creating && <InvoiceEditor clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onClose={() => setCreating(false)} />}
+      {editing  && <InvoiceEditor invoice={editing} clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onDelete={onDelete} onClose={() => setEditing(null)} />}
       {livePreview && <InvoicePreview invoice={livePreview} client={clients.find(c => invoiceMatchesClient(livePreview, c))} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
     </div>
   );
 }
 
-function ClientInvoices({ client, invoices, invoicing, branding, catalog, onSave, onDelete }) {
+function ClientInvoices({ client, invoices, invoicing, branding, catalog, setCatalog, onSave, onDelete }) {
   const { T, perms } = useApp();
   const list = sortInvoices(clientInvoicesOf(invoices, client.id, client)).map(iv => ({ ...iv, _client: client }));
   const [creating, setCreating] = useState(false);
@@ -9473,8 +9815,8 @@ function ClientInvoices({ client, invoices, invoicing, branding, catalog, onSave
         {list.length === 0 && <div style={{ fontSize: 13, color: T.textMuted, padding: "6px 0" }}>No invoices yet for this client.</div>}
         {list.map(iv => <InvoiceRow key={iv.id} iv={iv} onClick={() => setPreview(iv)} />)}
       </div>
-      {creating && <InvoiceEditor clients={[client]} presetClientId={client.id} invoices={invoices} invoicing={invoicing} catalog={catalog} onSave={onSave} onClose={() => setCreating(false)} />}
-      {editing && <InvoiceEditor invoice={editing} clients={[client]} invoices={invoices} invoicing={invoicing} onSave={onSave} onDelete={onDelete} onClose={() => setEditing(null)} />}
+      {creating && <InvoiceEditor clients={[client]} presetClientId={client.id} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onClose={() => setCreating(false)} />}
+      {editing && <InvoiceEditor invoice={editing} clients={[client]} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onDelete={onDelete} onClose={() => setEditing(null)} />}
       {livePreview && <InvoicePreview invoice={livePreview} client={client} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
     </Card>
   );
@@ -16209,7 +16551,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} scheduleCfg={scheduleCfg} reminderLog={reminderLog} vp={vp} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
           {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
-          {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} team={team} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} />}
+          {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} />}
           {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
           {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
           {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin} T={T} />}
@@ -16217,7 +16559,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
           {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetScreen budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} />}
           {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
-          {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} initialFilter={invoiceFilter} />}
+          {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} initialFilter={invoiceFilter} />}
           {page === "import"   && perms.canImport && <SkimmerImport onImport={handleImportClients} onGoToClients={() => handleNav("clients")} />}
           {page === "settings" && <AppSettings onNav={handleNav} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} />}
         </main>
