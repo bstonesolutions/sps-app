@@ -1,5 +1,7 @@
 // api/quickbooks/create-invoice.js
-// Creates an invoice in QuickBooks and returns the payment link
+// Creates an invoice in QuickBooks and returns a shareable payment link.
+// Key principle: once the invoice is created in QB, that is a SUCCESS even if
+// fetching the payment link later fails. We never report failure after creation.
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
@@ -18,12 +20,16 @@ export default async function handler(req, res) {
     "Accept":        "application/json",
   };
 
+  // Helper: build the QBO web link for an invoice (always works as a fallback)
+  const webLink = (qbId) => `https://app.qbo.intuit.com/app/invoice?txnId=${qbId}`;
+
+  let qbId = null;
+
   try {
-    // Step 1: Find or create the customer in QB
+    // ── Step 1: Find or create the customer ──
     let qbCustomerId = invoice.qbCustomerId;
 
     if (!qbCustomerId && invoice.clientName) {
-      // Search for existing customer by name
       const query = encodeURIComponent(`SELECT * FROM Customer WHERE DisplayName = '${invoice.clientName.replace(/'/g, "\\'")}'`);
       const searchRes = await fetch(`${base}/query?query=${query}&minorversion=65`, { headers });
       const searchData = await searchRes.json();
@@ -32,7 +38,6 @@ export default async function handler(req, res) {
       if (existing) {
         qbCustomerId = existing.Id;
       } else {
-        // Create new customer
         const createCustRes = await fetch(`${base}/customer?minorversion=65`, {
           method: "POST",
           headers,
@@ -48,34 +53,41 @@ export default async function handler(req, res) {
     }
 
     if (!qbCustomerId) {
-      return res.status(400).json({ error: "Could not find or create QB customer" });
+      return res.status(400).json({ error: "Could not find or create the QuickBooks customer." });
     }
 
-    // Step 2: Build QB invoice payload
-    const lineItems = (invoice.lineItems || invoice.items || []).map((li, i) => ({
-      Id:         String(i + 1),
-      LineNum:    i + 1,
-      Amount:     parseFloat(li.amount || (parseFloat(li.qty || 1) * parseFloat(li.unitPrice || li.rate || 0))) || 0,
-      DetailType: "SalesItemLineDetail",
-      Description: li.description || li.name || "Service",
-      SalesItemLineDetail: {
-        ItemRef:   { value: "1", name: "Services" }, // Default service item
-        Qty:       parseFloat(li.qty) || 1,
-        UnitPrice: parseFloat(li.unitPrice || li.rate) || 0,
-      },
-    }));
+    // ── Step 2: Build the invoice payload ──
+    const lineItems = (invoice.lineItems || invoice.items || []).map((li, i) => {
+      const qty = parseFloat(li.qty) || 1;
+      const unitPrice = parseFloat(li.unitPrice || li.rate) || 0;
+      const amount = parseFloat(li.amount) || (qty * unitPrice);
+      return {
+        Id:          String(i + 1),
+        LineNum:     i + 1,
+        Amount:      amount,
+        DetailType:  "SalesItemLineDetail",
+        Description: li.description || li.name || "Service",
+        SalesItemLineDetail: {
+          ItemRef:   { value: "1", name: "Services" },
+          Qty:       qty,
+          UnitPrice: unitPrice,
+        },
+      };
+    });
 
     const qbInvoice = {
       CustomerRef:  { value: qbCustomerId },
       DocNumber:    invoice.number,
       TxnDate:      invoice.date || new Date().toISOString().split("T")[0],
-      DueDate:      invoice.dueDate,
+      DueDate:      invoice.dueDate || undefined,
       Line:         lineItems,
       BillEmail:    invoice.clientEmail ? { Address: invoice.clientEmail } : undefined,
-      EmailStatus:  "NeedToSend",
+      // Turn ON online payment options so a real Pay-Now link is generated
+      AllowOnlineCreditCardPayment: true,
+      AllowOnlineACHPayment: true,
     };
 
-    // Apply an invoice-level discount if present (QB DiscountLineDetail)
+    // Invoice-level discount
     if (invoice.invoiceDiscount && parseFloat(invoice.invoiceDiscount) > 0) {
       const isPct = invoice.invoiceDiscountType === "pct";
       qbInvoice.Line.push({
@@ -87,7 +99,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // Step 3: Create invoice in QB
+    // ── Step 3: Create the invoice ──
     const createRes = await fetch(`${base}/invoice?minorversion=65`, {
       method: "POST",
       headers,
@@ -97,35 +109,50 @@ export default async function handler(req, res) {
     if (!createRes.ok) {
       const err = await createRes.text();
       console.error("QB create invoice error:", err);
-      return res.status(500).json({ error: "Failed to create QB invoice", details: err });
+      // Nothing was created — safe to report failure
+      return res.status(500).json({ error: "QuickBooks rejected the invoice.", details: err });
     }
 
     const created = await createRes.json();
-    const qbId = created?.Invoice?.Id;
-    const invoiceLink = created?.Invoice?.InvoiceLink;
+    qbId = created?.Invoice?.Id;
+    let paymentLink = created?.Invoice?.InvoiceLink || null;
 
-    // Step 4: Get payment link if not returned directly
-    let paymentLink = invoiceLink;
+    // ── Step 4 (best-effort): get the shareable payment link ──
+    // From here on, the invoice EXISTS. Any failure below still returns success
+    // with the QBO web link so the app stays in sync with QuickBooks.
     if (!paymentLink && qbId) {
-      // Try to send invoice to get payment link
-      const sendRes = await fetch(`${base}/invoice/${qbId}/send?sendTo=${encodeURIComponent(invoice.clientEmail || "")}`, {
-        method: "POST",
-        headers,
-      });
-      if (sendRes.ok) {
-        const sent = await sendRes.json();
-        paymentLink = sent?.Invoice?.InvoiceLink;
+      try {
+        // Re-fetch the invoice asking for the sharable link
+        const getRes = await fetch(`${base}/invoice/${qbId}?minorversion=65`, { headers });
+        if (getRes.ok) {
+          const got = await getRes.json();
+          paymentLink = got?.Invoice?.InvoiceLink || null;
+        }
+      } catch (linkErr) {
+        console.error("QB payment link fetch failed (invoice still created):", linkErr.message);
       }
     }
 
-    res.status(200).json({
+    return res.status(200).json({
       qbId,
-      paymentLink: paymentLink || `https://app.qbo.intuit.com/app/invoice?txnId=${qbId}`,
+      paymentLink: paymentLink || webLink(qbId),
+      hasOnlineLink: !!paymentLink,
       success: true,
     });
 
   } catch (err) {
-    console.error("QB create invoice error:", err);
-    res.status(500).json({ error: err.message });
+    console.error("QB create invoice error:", err.message);
+    // If the invoice was already created before the error, report SUCCESS so the
+    // app doesn't think it failed and try again (which would duplicate it in QB).
+    if (qbId) {
+      return res.status(200).json({
+        qbId,
+        paymentLink: webLink(qbId),
+        hasOnlineLink: false,
+        success: true,
+        warning: "Invoice created, but the payment link could not be confirmed.",
+      });
+    }
+    return res.status(500).json({ error: err.message });
   }
 }
