@@ -8965,7 +8965,7 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyn
           {/* Live preview */}
           <div>
             <label style={labelStyle}>Live Preview</label>
-            <div style={{ background: T.bg, borderRadius: 12, padding: 12, border: `1px solid ${T.border}` }}>
+            <div style={{ background: T.bg, borderRadius: 14, padding: 14 }}>
               <InvoiceDocument
                 invoice={{
                   number: (cfg.numberPrefix || "INV-") + (cfg.nextNumber || 1001),
@@ -9067,31 +9067,32 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
   const centered = cfg.headerStyle === "centered";
 
   const brandBlock = (light) => (
-    <div style={{ display: "flex", gap: 11, alignItems: "center", flexDirection: centered ? "column" : "row", textAlign: centered ? "center" : "left" }}>
+    <div style={{ display: "flex", gap: 11, alignItems: centered ? "center" : "flex-start", flexDirection: centered ? "column" : "row", textAlign: centered ? "center" : "left", minWidth: 0, flex: centered ? "none" : 1 }}>
       {cfg.showLogo !== false && (
-        <div style={{ width: 42, height: 42, borderRadius: 12, background: light ? "rgba(255,255,255,0.2)" : hexA(accent, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
-          {branding.logoType === "image" && branding.logoImage ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontSize: 22 }}>{branding.logoEmoji}</span>}
+        <div style={{ width: 40, height: 40, borderRadius: 11, background: light ? "rgba(255,255,255,0.22)" : hexA(accent, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+          {branding.logoType === "image" && branding.logoImage ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontSize: 21 }}>{branding.logoEmoji}</span>}
         </div>
       )}
-      <div>
-        <div style={{ fontSize: 15, fontWeight: 800, color: light ? "#fff" : T.text, letterSpacing: "-0.02em" }}>{branding.companyName}</div>
-        <div style={{ fontSize: 11, color: light ? "rgba(255,255,255,0.85)" : T.textMuted }}>{branding.division}</div>
-        {cfg.showContact !== false && contactBits.length > 0 && <div style={{ fontSize: 10.5, color: light ? "rgba(255,255,255,0.8)" : T.textMuted, marginTop: 3, lineHeight: 1.4 }}>{contactBits.join(" · ")}</div>}
-        {cfg.showContact !== false && branding.companyAddress && <div style={{ fontSize: 10.5, color: light ? "rgba(255,255,255,0.8)" : T.textMuted, lineHeight: 1.4 }}>{branding.companyAddress}</div>}
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 15, fontWeight: 800, color: light ? "#fff" : T.text, letterSpacing: "-0.02em", lineHeight: 1.2 }}>{branding.companyName}</div>
+        <div style={{ fontSize: 11, color: light ? "rgba(255,255,255,0.82)" : T.textMuted, marginTop: 1 }}>{branding.division}</div>
+        {cfg.showContact !== false && contactBits.length > 0 && <div style={{ fontSize: 10.5, color: light ? "rgba(255,255,255,0.82)" : T.textMuted, marginTop: 5, lineHeight: 1.5, wordBreak: "break-word" }}>{contactBits.join("  ·  ")}</div>}
+        {cfg.showContact !== false && branding.companyAddress && <div style={{ fontSize: 10.5, color: light ? "rgba(255,255,255,0.82)" : T.textMuted, lineHeight: 1.5 }}>{branding.companyAddress}</div>}
       </div>
     </div>
   );
 
   const headerRight = (light) => (
-    <div style={{ textAlign: centered ? "center" : "right", marginTop: centered ? 10 : 0 }}>
-      <div style={{ fontSize: 18, fontWeight: 800, color: light ? "#fff" : accent, letterSpacing: "-0.02em" }}>{headerWord}</div>
-      <div style={{ fontSize: 12, color: light ? "rgba(255,255,255,0.85)" : T.textMuted }}>{invoice.number}</div>
-      <span style={{ display: "inline-block", marginTop: 6, background: light ? "rgba(255,255,255,0.2)" : hexA(invStatusColor(eff, T), 0.14), color: light ? "#fff" : invStatusColor(eff, T), padding: "3px 10px", borderRadius: 100, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>{eff}</span>
+    <div style={{ textAlign: centered ? "center" : "right", marginTop: centered ? 10 : 0, flexShrink: 0, whiteSpace: "nowrap" }}>
+      <div style={{ fontSize: 17, fontWeight: 800, color: light ? "#fff" : accent, letterSpacing: "0.04em", lineHeight: 1 }}>{headerWord}</div>
+      <div style={{ fontSize: 11.5, color: light ? "rgba(255,255,255,0.82)" : T.textMuted, marginTop: 3 }}>{invoice.number}</div>
+      <span style={{ display: "inline-block", marginTop: 7, background: light ? "rgba(255,255,255,0.22)" : hexA(invStatusColor(eff, T), 0.14), color: light ? "#fff" : invStatusColor(eff, T), padding: "3px 10px", borderRadius: 100, fontSize: 9.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.06em" }}>{eff}</span>
     </div>
   );
 
   return (
-    <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: radius, overflow: "hidden", fontSize: `${scale}em` }}>
+    <div className="sps-inv" style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: radius, overflow: "hidden", fontSize: `${scale}em` }}>
+      <style>{`.sps-inv a { color: inherit !important; text-decoration: none !important; }`}</style>
       {cfg.headerStyle === "band" ? (
         <div style={{ background: accent, padding: `${pad}px`, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
           {brandBlock(true)}
@@ -9689,7 +9690,7 @@ function TotalSalesScreen({ invoices, clients, onBack, T }) {
   );
 }
 
-function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCatalog, onSave, onDelete, initialFilter = "All" }) {
+function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCatalog, onSave, onDelete, onSyncData, initialFilter = "All" }) {
   const { T, perms } = useApp();
   const moneyFmt = (n) => `$${Math.round(n).toLocaleString()}`;
   const moneyExact = (n) => `$${parseFloat(n||0).toFixed(2)}`;
@@ -9707,6 +9708,31 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
 
   // ── Editor state ──
   const [creating,   setCreating]   = useState(false);
+
+  // ── QuickBooks sync from the Invoices tab ──
+  const [qbSyncing, setQbSyncing] = useState(false);
+  const [qbSyncMsg, setQbSyncMsg] = useState("");
+  const qbConnected = typeof window !== "undefined" && !!localStorage.getItem("qb_access_token");
+  const syncQuickBooks = async () => {
+    const access_token = localStorage.getItem("qb_access_token");
+    const realm_id = localStorage.getItem("qb_realm_id");
+    if (!access_token || !realm_id) { setQbSyncMsg("Connect QuickBooks under Customize first."); setTimeout(() => setQbSyncMsg(""), 4000); return; }
+    setQbSyncing(true); setQbSyncMsg("");
+    try {
+      const res = await fetch(`/api/quickbooks/sync?access_token=${encodeURIComponent(access_token)}&realm_id=${encodeURIComponent(realm_id)}`);
+      if (res.status === 401) { setQbSyncMsg("QuickBooks session expired. Reconnect under Customize."); return; }
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      if (onSyncData && data.invoices) onSyncData(data.invoices, data.customers);
+      setQbSyncMsg(`Synced ${data.invoices?.length || 0} invoices from QuickBooks.`);
+      setTimeout(() => setQbSyncMsg(""), 4000);
+    } catch (err) {
+      setQbSyncMsg("Sync failed: " + (err.message || "try again"));
+      setTimeout(() => setQbSyncMsg(""), 5000);
+    } finally {
+      setQbSyncing(false);
+    }
+  };
   const [editing,    setEditing]    = useState(null);
   const [preview,    setPreview]    = useState(null);
   const [showSales,  setShowSales]  = useState(false);
@@ -9806,6 +9832,15 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <h2 style={{ margin: 0, fontSize: 26, fontWeight: 700, color: T.text, letterSpacing: "-0.03em" }}>Invoices</h2>
         <div style={{ display: "flex", gap: 8 }}>
+          {qbConnected && (
+            <button onClick={syncQuickBooks} disabled={qbSyncing} title="Sync with QuickBooks"
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 12px", borderRadius: 12, border: `1.5px solid ${T.border}`, background: T.surface, color: "#2CA01C", fontWeight: 700, fontSize: 13, cursor: qbSyncing ? "default" : "pointer", fontFamily: "inherit" }}>
+              {qbSyncing
+                ? <div style={{ width: 14, height: 14, border: "2px solid rgba(44,160,28,0.3)", borderTopColor: "#2CA01C", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+                : <svg viewBox="0 0 24 24" width={14} height={14} fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>}
+              QB
+            </button>
+          )}
           <button onClick={() => setShowFilters(f => !f)}
             style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 12, border: `1.5px solid ${activeFilterCount > 0 ? T.primary : T.border}`, background: activeFilterCount > 0 ? hexA(T.primary, 0.08) : T.surface, color: activeFilterCount > 0 ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
             <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M3 6h18M7 12h10M11 18h2"/></svg>
@@ -9814,6 +9849,10 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
           {perms.canInvoice && <Btn sm onClick={() => setCreating(true)}>+ New</Btn>}
         </div>
       </div>
+
+      {qbSyncMsg && (
+        <div style={{ marginBottom: 12, padding: "10px 14px", borderRadius: 12, background: hexA("#2CA01C", 0.08), border: `1px solid ${hexA("#2CA01C", 0.25)}`, fontSize: 13, fontWeight: 600, color: "#157a12" }}>{qbSyncMsg}</div>
+      )}
 
       {/* Summary tiles — tap to see Total Sales */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 }}>
@@ -16765,7 +16804,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
           {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetScreen budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} />}
           {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
-          {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} initialFilter={invoiceFilter} />}
+          {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} />}
           {page === "import"   && perms.canImport && <SkimmerImport onImport={handleImportClients} onGoToClients={() => handleNav("clients")} />}
           {page === "settings" && <AppSettings onNav={handleNav} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} />}
         </main>
