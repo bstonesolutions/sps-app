@@ -5641,6 +5641,12 @@ function RouteAssignmentsTab({ clients, catalog, team, schedule, setSchedule, as
                       <div style={{ padding: "11px 14px", display: "flex", flexDirection: "column", justifyContent: "center" }}>
                         <div style={{ fontSize: 13, fontWeight: 700, color: T.text, lineHeight: 1.3 }}>{c?.name || "?"}</div>
                         {a.techId && <div style={{ fontSize: 10, color: T.textMuted, marginTop: 1 }}>{techName(a.techId)}</div>}
+                        {c?.preferredDayOverride && c?.preferredDay && c.preferredDay !== a.dayOfWeek && (
+                          <div style={{ fontSize: 10, color: "#F59E0B", fontWeight: 700, marginTop: 2 }}>★ Prefers {c.preferredDay}</div>
+                        )}
+                        {c?.preferredDayOverride && c?.preferredDay && c.preferredDay === a.dayOfWeek && (
+                          <div style={{ fontSize: 10, color: T.accent, fontWeight: 700, marginTop: 2 }}>✓ Day matches</div>
+                        )}
                       </div>
 
                       {/* Week cells */}
@@ -5903,7 +5909,7 @@ function StopEditModal({ stop, dayDate, catalog, team, T, onSave, onClose }) {
   );
 }
 
-function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg, team, onClientSelect, seedClientIds, clearSeed, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments }) {
+function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, onClientSelect, seedClientIds, clearSeed, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments }) {
   const { T, perms } = useApp();
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
   const compact = cfg.density === "compact";
@@ -16115,7 +16121,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
           {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
           {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} team={team} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} />}
-          {page === "schedule" && <Schedule clients={clients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
+          {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
           {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
           {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin} T={T} />}
           {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
