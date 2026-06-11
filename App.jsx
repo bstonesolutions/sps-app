@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useContext, createContext, useMemo } from "react";
+import { useState, useRef, useEffect, useContext, createContext, useMemo, Component } from "react";
 import { store, supabase } from "./supabaseClient";
 
 // ── PDF generation (jsPDF) ──
@@ -673,6 +673,30 @@ const splitAddress = (addr) => {
 };
 
 const AppCtx = createContext(null);
+
+// Catches render crashes in a section and shows the error instead of a blank screen
+class SectionErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { console.error("Section crashed:", error, info); }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 20, margin: "12px 0", borderRadius: 14, background: "rgba(192,57,43,0.06)", border: "1px solid rgba(192,57,43,0.3)" }}>
+          <div style={{ fontSize: 14, fontWeight: 800, color: "#C0392B", marginBottom: 8 }}>This section hit an error</div>
+          <div style={{ fontSize: 12, color: "#6b7280", lineHeight: 1.5, fontFamily: "monospace", wordBreak: "break-word" }}>
+            {String(this.state.error?.message || this.state.error)}
+          </div>
+          <button onClick={() => this.setState({ error: null })}
+            style={{ marginTop: 14, background: "#C0392B", color: "#fff", border: "none", borderRadius: 10, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+            Try again
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 const useApp = () => useContext(AppCtx);
 
 // ─────────────────────────────────────────────
@@ -5617,14 +5641,6 @@ function RouteAssignmentsTab({ clients, catalog, team, schedule, setSchedule, as
                       <div style={{ padding: "11px 14px", display: "flex", flexDirection: "column", justifyContent: "center" }}>
                         <div style={{ fontSize: 13, fontWeight: 700, color: T.text, lineHeight: 1.3 }}>{c?.name || "?"}</div>
                         {a.techId && <div style={{ fontSize: 10, color: T.textMuted, marginTop: 1 }}>{techName(a.techId)}</div>}
-                        {c?.preferredDayOverride && c?.preferredDay && c.preferredDay !== a.dayOfWeek && (
-                          <div style={{ fontSize: 10, color: "#F59E0B", fontWeight: 700, marginTop: 2 }}>
-                            ★ Prefers {c.preferredDay}
-                          </div>
-                        )}
-                        {c?.preferredDayOverride && c?.preferredDay && c.preferredDay === a.dayOfWeek && (
-                          <div style={{ fontSize: 10, color: T.accent, fontWeight: 700, marginTop: 2 }}>✓ Day matches</div>
-                        )}
                       </div>
 
                       {/* Week cells */}
@@ -6325,17 +6341,19 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
       </div>
 
       {schedTab === "routes" && (
-        <RouteAssignmentsTab
-          clients={clients}
-          catalog={catalog}
-          team={team}
-          schedule={schedule}
-          setSchedule={setSchedule}
-          assignments={routeAssignments}
-          setAssignments={setRouteAssignments}
-          setClients={setClients}
-          T={T}
-        />
+        <SectionErrorBoundary>
+          <RouteAssignmentsTab
+            clients={clients}
+            catalog={catalog}
+            team={team}
+            schedule={schedule}
+            setSchedule={setSchedule}
+            assignments={routeAssignments}
+            setAssignments={setRouteAssignments}
+            setClients={setClients}
+            T={T}
+          />
+        </SectionErrorBoundary>
       )}
 
       {schedTab === "schedule" && <>
