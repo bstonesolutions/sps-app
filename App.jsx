@@ -16069,8 +16069,8 @@ export default function App({ authEmail = "", onSignOut }) {
           img { -webkit-user-drag: none; }
         `}</style>
 
-        {/* Header — light frosted, matches theme surface */}
-        <header style={{ background: hexA(T.surface, 0.9), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, position: "sticky", top: 0, zIndex: 100, borderBottom: `1px solid ${T.border}` }}>
+        {/* Header — frosted, frozen in place */}
+        <header style={{ background: hexA(T.surface, 0.9), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, position: "fixed", top: 0, left: 0, right: 0, zIndex: 100, borderBottom: `1px solid ${T.border}` }}>
           {/* Safe area spacer — grows to exactly the status bar height on any iPhone, zero on Android */}
           <div style={{ height: "env(safe-area-inset-top)", background: "transparent" }} />
           <div style={{ height: 56, display: "flex", alignItems: "center", justifyContent: "space-between", paddingLeft: 18, paddingRight: 18 }}>
@@ -16105,9 +16105,9 @@ export default function App({ authEmail = "", onSignOut }) {
 
 
 
-        {/* Sync indicator strip — minimal, non-intrusive */}
+        {/* Sync indicator strip — fixed just under the header */}
         {syncState !== "idle" && (
-          <div style={{ height: 2, background: syncState === "syncing" ? T.primary : "#16a34a", transition: "background 0.3s", animation: syncState === "syncing" ? "syncPulse 0.8s ease-in-out" : "none" }} />
+          <div style={{ position: "fixed", top: "calc(env(safe-area-inset-top) + 56px)", left: 0, right: 0, height: 2, zIndex: 99, background: syncState === "syncing" ? T.primary : "#16a34a", transition: "background 0.3s", animation: syncState === "syncing" ? "syncPulse 0.8s ease-in-out" : "none" }} />
         )}
 
         {dbError && (
@@ -16116,7 +16116,7 @@ export default function App({ authEmail = "", onSignOut }) {
             <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 10, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, display:"flex", alignItems:"center", gap:5 }}>Retry</button>
           </div>
         )}
-        <main style={{ flex: 1, alignSelf: "center", padding: vp.isPhone ? "22px 16px" : "28px 32px", maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
+        <main style={{ flex: 1, alignSelf: "center", padding: vp.isPhone ? "22px 16px" : "28px 32px", paddingTop: `calc(env(safe-area-inset-top) + 56px + ${vp.isPhone ? "22px" : "28px"})`, maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
           {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} scheduleCfg={scheduleCfg} reminderLog={reminderLog} vp={vp} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
           {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
