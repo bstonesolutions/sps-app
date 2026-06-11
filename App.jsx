@@ -1080,6 +1080,27 @@ const DEFAULT_INVOICING = {
 // date helpers (MM/DD/YYYY)
 const parseMDY = (s) => { const [m, d, y] = (s || "").split("/").map(Number); return (m && d && y) ? new Date(y, m - 1, d) : null; };
 const fmtMDY = (dt) => `${String(dt.getMonth() + 1).padStart(2, "0")}/${String(dt.getDate()).padStart(2, "0")}/${dt.getFullYear()}`;
+
+// Derive a client's next service date from the live schedule (today or later, earliest first).
+// Falls back to the stored nextService field if the schedule has nothing.
+function nextServiceFor(client, schedule, completedSids = {}) {
+  if (!client || !schedule) return client?.nextService || "";
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  let best = null;
+  schedule.forEach(d => {
+    const [m, dd, y] = (d.date || "").split("/").map(Number);
+    if (!m || !dd || !y) return;
+    const day = new Date(y, m - 1, dd);
+    if (day < today) return;
+    (d.stops || []).forEach(s => {
+      const matches = String(s.id) === String(client.id) || String(s.clientId) === String(client.id) || s.client === client.name;
+      if (!matches) return;
+      if (completedSids[s.sid]) return; // skip already-done
+      if (!best || day < best) best = day;
+    });
+  });
+  return best ? fmtMDY(best) : (client.nextService || "");
+}
 const todayMDY = () => fmtMDY(new Date());
 const addDaysMDY = (s, days) => { const dt = parseMDY(s) || new Date(); dt.setDate(dt.getDate() + (parseInt(days) || 0)); return fmtMDY(dt); };
 
@@ -1927,7 +1948,7 @@ function Modal({ title, children, onClose }) {
   );
 }
 
-function ClientList({ clients, invoices, onSelect, onAdd, onImport, onBatchUpdate, onBatchDelete, onBatchSchedule }) {
+function ClientList({ clients, invoices, schedule, onSelect, onAdd, onImport, onBatchUpdate, onBatchDelete, onBatchSchedule }) {
   const { T, perms, tiers } = useApp();
   const [search,       setSearch]       = useState("");
   const [showInactive, setShowInactive] = useState(false);
@@ -2170,7 +2191,7 @@ function ClientList({ clients, invoices, onSelect, onAdd, onImport, onBatchUpdat
                   ? <Badge label={c.plan} bg={pm.bg} color={pm.color || pm.text} sm />
                   : <span style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, border: `1px solid ${T.border}`, borderRadius: 8, padding: "2px 7px" }}>No tier</span>
                 }
-                {c.nextService && <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 600 }}>{c.nextService}</div>}
+                {(() => { const ns = nextServiceFor(c, schedule); return ns && <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 600 }}>{ns}</div>; })()}
               </div>
               <div style={{ color: T.textMuted, flexShrink: 0 }}>
                 <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="m9 18 6-6-6-6"/></svg>
@@ -2737,7 +2758,7 @@ function ClientDocuments({ client, onChange }) {
   );
 }
 
-function ClientDetail({ client: init, invoices, invoicing, branding, catalog, schedule, onBack, onUpdate, onSaveInvoice, onDeleteInvoice }) {
+function ClientDetail({ client: init, invoices, invoicing, branding, catalog, team, schedule, onBack, onUpdate, onSaveInvoice, onDeleteInvoice }) {
   const { T, perms, tiers } = useApp();
   const [client, setClient] = useState(init);
   const [tab, setTab] = useState("overview");
@@ -2772,42 +2793,46 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, sc
         {/* Color accent bar at top */}
         <div style={{ height: 4, background: pm.bg }} />
         <div style={{ padding: "16px 18px 14px" }}>
-          {/* Name row */}
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10, gap: 10 }}>
-            <div style={{ minWidth: 0 }}>
-              <h2 style={{ margin: "0 0 2px", fontSize: 21, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{client.name}</h2>
-              <div style={{ fontSize: 12, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{client.address}</div>
-              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2, display: "flex", gap: 4, flexWrap: "wrap" }}>
-                {clientServices(client, tiers).map((s, i) => (
-                  <span key={i} style={{ display:"inline-flex", alignItems:"center", gap:3 }}>
-                    {i > 0 && <span style={{ opacity:0.3 }}>·</span>}
-                    <span style={{ fontWeight:600 }}>{s.div}{s.type ? ` — ${s.type}` : ""}</span>
-                  </span>
-                ))}
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: 7, alignItems: "center", flexShrink: 0 }}>
-              <Badge label={client.plan || "No tier"} bg={pm.bg} color={pm.color || pm.text} />
-              {perms.canInvoice && (invoices||[]).filter(iv => invoiceMatchesClient(iv, client)).length > 0 && (
-                <Btn variant="ghost" sm onClick={() => generateStatementPDF(client, sortInvoices((invoices||[]).filter(iv => invoiceMatchesClient(iv, client))), branding)} style={{ display:"flex", alignItems:"center", gap:5 }}>
-                  <Icon name="download" size={13} /> PDF
-                </Btn>
-              )}
-              {perms.editClients && (
-                <Btn variant="ghost" sm
-                  onClick={() => update({ status: client.status === "Inactive" ? "Active" : "Inactive" })}
-                  style={{ display:"flex", alignItems:"center", gap:5, color: client.status === "Inactive" ? T.accent : T.textMuted }}>
-                  {client.status === "Inactive" ? "Reactivate" : "Deactivate"}
-                </Btn>
-              )}
-              {perms.editClients && <Btn variant="ghost" sm onClick={() => setEditing(true)} style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="edit" size={13} /> Edit</Btn>}
+          {/* Name — full width, focal point */}
+          <h2 style={{ margin: "0 0 6px", fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", lineHeight: 1.15 }}>{client.name}</h2>
+
+          {/* Tier badge + action buttons */}
+          <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 10 }}>
+            <Badge label={client.plan || "No tier"} bg={pm.bg} color={pm.color || pm.text} />
+            <div style={{ flex: 1 }} />
+            {perms.canInvoice && (invoices||[]).filter(iv => invoiceMatchesClient(iv, client)).length > 0 && (
+              <Btn variant="ghost" sm onClick={() => generateStatementPDF(client, sortInvoices((invoices||[]).filter(iv => invoiceMatchesClient(iv, client))), branding)} style={{ display:"flex", alignItems:"center", gap:5 }}>
+                <Icon name="download" size={13} /> PDF
+              </Btn>
+            )}
+            {perms.editClients && (
+              <Btn variant="ghost" sm
+                onClick={() => update({ status: client.status === "Inactive" ? "Active" : "Inactive" })}
+                style={{ display:"flex", alignItems:"center", gap:5, color: client.status === "Inactive" ? T.accent : T.textMuted }}>
+                {client.status === "Inactive" ? "Reactivate" : "Deactivate"}
+              </Btn>
+            )}
+            {perms.editClients && <Btn variant="ghost" sm onClick={() => setEditing(true)} style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="edit" size={13} /> Edit</Btn>}
+          </div>
+
+          {/* Address + services */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 12.5, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{client.address}</div>
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3, display: "flex", gap: 4, flexWrap: "wrap" }}>
+              {clientServices(client, tiers).map((s, i) => (
+                <span key={i} style={{ display:"inline-flex", alignItems:"center", gap:3 }}>
+                  {i > 0 && <span style={{ opacity:0.3 }}>·</span>}
+                  <span style={{ fontWeight:600 }}>{s.div}{s.type ? ` — ${s.type}` : ""}</span>
+                </span>
+              ))}
             </div>
           </div>
+
           {/* Contact info row */}
           <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px" }}>
             {client.phone && <span style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color:T.textMuted }}><Icon name="phone" size={12} />{client.phone}</span>}
             {client.email && <span style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color:T.textMuted }}><Icon name="mail" size={12} />{client.email}</span>}
-            {client.nextService && <span style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color:T.textMuted }}><Icon name="calendar" size={12} />Next: {client.nextService}</span>}
+            {(() => { const ns = nextServiceFor(client, schedule); return ns && <span style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color:T.textMuted }}><Icon name="calendar" size={12} />Next: {ns}</span>; })()}
             {perms.seeBalances && <span style={{ display:"flex", alignItems:"center", gap:4, fontSize:12, fontWeight:700, color: owed <= 0 ? T.accent : T.warning }}><Icon name="dollar" size={12} />${owed.toFixed(2)}{owed > 0 ? " due" : " balance"}</span>}
           </div>
         </div>
@@ -2828,7 +2853,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, sc
 
       {tab === "overview" && <ClientOverview client={client} invoices={invoices} onUpdate={onUpdate} />}
       {tab === "equipment" && <ClientEquipment client={client} invoices={invoices} onChange={eq => update({ equipment: eq })} />}
-      {tab === "history" && <ClientHistory client={client} onChange={hist => update({ history: hist })} />}
+      {tab === "history" && <ClientHistory client={client} catalog={catalog} team={team} onChange={hist => update({ history: hist })} />}
       {tab === "invoices" && (perms.canInvoice || perms.viewInvoices) && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} onSave={onSaveInvoice} onDelete={onDeleteInvoice} />}
       {tab === "docs"    && <ClientDocuments client={client} onChange={docs => update({ documents: docs })} />}
       {tab === "portal" && <ClientPortal client={client} invoices={invoices} schedule={schedule} branding={branding} />}
@@ -3142,12 +3167,18 @@ function ClientOverview({ client, onUpdate }) {
       <Card>
         <CardHeader title="Service Details" />
         <div style={{ padding: 18, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-          {[["Division", client.division || "Pond"],[m.typeLabel, client.pondType],[m.sizeLabel, client.pondSize],["Plan", `${client.plan} (${client.planFreq})`]].map(([k,v]) => (
+          {[["Division", client.division || "Pond"],[m.typeLabel, client.pondType],[m.sizeLabel, client.pondSize]].map(([k,v]) => (
             <div key={k}>
               <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 3 }}>{k}</div>
               <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{v || "—"}</div>
             </div>
           ))}
+          {/* Plan — tier name as title, frequency derived from the tier underneath */}
+          <div>
+            <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 3 }}>Plan</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{client.plan || "—"}</div>
+            {client.plan && <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 1 }}>{TIER_FREQ[client.plan] || client.planFreq || "—"}</div>}
+          </div>
         </div>
       </Card>
 
@@ -3413,7 +3444,7 @@ function ClientEquipment({ client, invoices, onChange }) {
   );
 }
 
-function HistoryEditModal({ entry, onSave, onClose }) {
+function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
   const { T } = useApp();
   const num = (v) => parseFloat(v) || 0;
   const b = entry.breakdown || {};
@@ -3427,6 +3458,11 @@ function HistoryEditModal({ entry, onSave, onClose }) {
   const [readings, setReadings] = useState(initReadings);
   const [photos, setPhotos] = useState(entry.photos || []);
   const [busy, setBusy] = useState(false);
+  // Service type, tech, services performed, products used — to mirror the full stop view
+  const [type, setType] = useState(entry.type || "");
+  const [tech, setTech] = useState(entry.tech || "");
+  const [svcList, setSvcList] = useState((entry.services || []).map(s => typeof s === "string" ? { name: s, price: "" } : { name: s.name, price: s.price || "" }));
+  const [prodList, setProdList] = useState((entry.products || []).map(p => typeof p === "string" ? p : p.name));
   const [revenue, setRevenue] = useState(String(b.revenue ?? (entry.invoice || "").replace(/[^\d.]/g, "")));
   const [labor, setLabor] = useState(String(b.labor ?? 0));
   const [treatment, setTreatment] = useState(String(b.treatment ?? 0));
@@ -3454,6 +3490,8 @@ function HistoryEditModal({ entry, onSave, onClose }) {
   const save = () => {
     onSave({
       ...entry,
+      type: type || entry.type, tech,
+      services: svcList.filter(s => s.name), products: prodList,
       notes, officeNotes, readings, photos,
       invoice: revenue ? `$${revenue}` : "$0",
       ph: readings["pH"] || "—", ammonia: readings["Ammonia"] || "—", nitrite: readings["Nitrite"] || "—", temp: readings["Temperature"] || "—",
@@ -3477,6 +3515,61 @@ function HistoryEditModal({ entry, onSave, onClose }) {
   return (
     <Modal title={`Edit Service — ${entry.date}`} onClose={onClose}>
       <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        {/* Service type + tech */}
+        <div style={{ display: "flex", gap: 10 }}>
+          <div style={{ flex: 1 }}>
+            <label style={labelStyle}>Service Type</label>
+            <select value={type} onChange={e => setType(e.target.value)} style={{ ...ta, resize: "none" }}>
+              {!type && <option value="">Select…</option>}
+              {(catalog?.stopTypes || []).map(t => <option key={t} value={t}>{t}</option>)}
+              {type && !(catalog?.stopTypes || []).includes(type) && <option value={type}>{type}</option>}
+            </select>
+          </div>
+          <div style={{ flex: 1 }}>
+            <label style={labelStyle}>Tech</label>
+            <select value={tech} onChange={e => setTech(e.target.value)} style={{ ...ta, resize: "none" }}>
+              <option value="">Unassigned</option>
+              {(team || []).map(emp => <option key={emp.id} value={emp.name}>{emp.name}</option>)}
+              {tech && !(team || []).some(e => e.name === tech) && <option value={tech}>{tech}</option>}
+            </select>
+          </div>
+        </div>
+
+        {/* Services performed */}
+        <div>
+          <label style={labelStyle}>Services Performed</label>
+          <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+            {svcList.map((s, i) => (
+              <div key={i} style={{ display: "flex", gap: 7, alignItems: "center" }}>
+                <input value={s.name} onChange={e => setSvcList(l => l.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} placeholder="Service name" style={{ ...ta, flex: 1, resize: "none" }} />
+                <div style={{ position: "relative", width: 90 }}>
+                  <span style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
+                  <input value={s.price} onChange={e => setSvcList(l => l.map((x, j) => j === i ? { ...x, price: e.target.value.replace(/[^\d.]/g, "") } : x))} placeholder="0" style={{ width: "100%", padding: "10px 8px 10px 20px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
+                </div>
+                <button onClick={() => setSvcList(l => l.filter((_, j) => j !== i))} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", fontSize: 18, lineHeight: 1, padding: "0 2px" }}>×</button>
+              </div>
+            ))}
+            <button onClick={() => setSvcList(l => [...l, { name: "", price: "" }])} style={{ alignSelf: "flex-start", background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4, padding: "2px 0" }}><Icon name="plus" size={13} /> Add service</button>
+          </div>
+        </div>
+
+        {/* Products used */}
+        {(catalog?.products || []).length > 0 && (
+          <div>
+            <label style={labelStyle}>Products Used</label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+              {(catalog.products || []).map(p => {
+                const name = typeof p === "string" ? p : p.name;
+                const on = prodList.includes(name);
+                return (
+                  <button key={name} onClick={() => setProdList(l => on ? l.filter(x => x !== name) : [...l, name])}
+                    style={{ padding: "8px 13px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.08) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>{name}</button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <div><label style={labelStyle}>Notes to Client</label><textarea rows={2} value={notes} onChange={e => setNotes(e.target.value)} style={ta} /></div>
         <div><label style={labelStyle}>Notes to Office (internal)</label><textarea rows={2} value={officeNotes} onChange={e => setOfficeNotes(e.target.value)} style={ta} /></div>
 
@@ -3541,7 +3634,7 @@ function HistoryEditModal({ entry, onSave, onClose }) {
   );
 }
 
-function ClientHistory({ client, onChange }) {
+function ClientHistory({ client, catalog, team, onChange }) {
   const { T, perms } = useApp();
   const [editIdx, setEditIdx] = useState(null);
   const money = (n) => `$${(n || 0).toFixed(2)}`;
@@ -3643,7 +3736,7 @@ function ClientHistory({ client, onChange }) {
       })}
 
       {editIdx !== null && (
-        <HistoryEditModal entry={history[editIdx]} onSave={u => saveEntry(editIdx, u)} onClose={() => setEditIdx(null)} />
+        <HistoryEditModal entry={history[editIdx]} catalog={catalog} team={team} onSave={u => saveEntry(editIdx, u)} onClose={() => setEditIdx(null)} />
       )}
     </div>
   );
@@ -5545,6 +5638,83 @@ function RouteAssignmentsTab({ clients, catalog, team, schedule, setSchedule, as
   );
 }
 
+function StopEditModal({ stop, dayDate, catalog, team, T, onSave, onClose }) {
+  const [time, setTime] = useState(stop.time || "9:00 AM");
+  const [type, setType] = useState(stop.type || (catalog?.stopTypes?.[0]) || "Service");
+  const [duration, setDuration] = useState(String(stop.duration || "60").replace(/[^\d]/g, ""));
+  const [assigneeId, setAssigneeId] = useState(stop.assigneeId || "");
+  const [date, setDate] = useState(dayDate);
+
+  const parsed = (() => {
+    const m = (time || "").match(/(\d+):(\d+)\s*(AM|PM)/i);
+    return m ? { h: m[1], min: m[2], ap: m[3].toUpperCase() } : { h: "9", min: "00", ap: "AM" };
+  })();
+  const setTimeparts = (h, min, ap) => setTime(`${h}:${String(min).padStart(2, "0")} ${ap}`);
+
+  const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 };
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+
+  const toISO = (val) => { const [m, d, y] = (val || "").split("/"); return (y && m && d) ? `${y}-${m.padStart(2,"0")}-${d.padStart(2,"0")}` : ""; };
+  const fromISO = (iso) => { const [y, m, d] = (iso || "").split("-"); return (y && m && d) ? `${m}/${d}/${y}` : date; };
+
+  const save = () => {
+    onSave({ time, type, duration: duration || "60", assigneeId: assigneeId || "", date });
+  };
+
+  return (
+    <Modal title="Edit Stop" onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{stop.client}</div>
+
+        <div>
+          <label style={lbl}>Date</label>
+          <input type="date" value={toISO(date)} onChange={e => setDate(fromISO(e.target.value))} style={field} />
+        </div>
+
+        <div>
+          <label style={lbl}>Time</label>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input type="number" min="1" max="12" value={parsed.h} onChange={e => setTimeparts(e.target.value || "9", parsed.min, parsed.ap)} style={{ ...field, width: 70 }} />
+            <span style={{ fontWeight: 800, color: T.textMuted }}>:</span>
+            <input type="number" min="0" max="59" value={parsed.min} onChange={e => setTimeparts(parsed.h, e.target.value || "00", parsed.ap)} style={{ ...field, width: 70 }} />
+            <div style={{ display: "flex", gap: 4 }}>
+              {["AM", "PM"].map(ap => (
+                <button key={ap} onClick={() => setTimeparts(parsed.h, parsed.min, ap)}
+                  style={{ padding: "10px 14px", borderRadius: 10, border: `1.5px solid ${parsed.ap === ap ? T.primary : T.border}`, background: parsed.ap === ap ? hexA(T.primary, 0.08) : T.surface, color: parsed.ap === ap ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>{ap}</button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <label style={lbl}>Service Type</label>
+          <select value={type} onChange={e => setType(e.target.value)} style={field}>
+            {(catalog?.stopTypes || []).map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </div>
+
+        <div>
+          <label style={lbl}>Duration (minutes)</label>
+          <input type="number" value={duration} onChange={e => setDuration(e.target.value.replace(/[^\d]/g, ""))} style={field} placeholder="60" />
+        </div>
+
+        <div>
+          <label style={lbl}>Assigned Tech</label>
+          <select value={assigneeId} onChange={e => setAssigneeId(e.target.value)} style={field}>
+            <option value="">Unassigned</option>
+            {(team || []).map(emp => <option key={emp.id} value={emp.id}>{emp.name}</option>)}
+          </select>
+        </div>
+
+        <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+          <button onClick={onClose} style={{ flex: 1, background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 12, padding: "13px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+          <button onClick={save} style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Save Changes</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg, team, onClientSelect, seedClientIds, clearSeed, email, onComplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments }) {
   const { T, perms } = useApp();
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
@@ -5552,6 +5722,7 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
   const [omwModal, setOmwModal] = useState(null);
   const [headHereModal, setHeadHereModal] = useState(null);
   const [completeModal, setCompleteModal] = useState(null);
+  const [editStopModal, setEditStopModal] = useState(null); // { stop, dayDate }
   const [sentStops, setSentStops] = useState({});
   const [showAdd, setShowAdd] = useState(false);
   const [selectMode, setSelectMode] = useState(false);
@@ -5572,6 +5743,33 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
       [stops[idx], stops[j]] = [stops[j], stops[idx]];
       return { ...d, stops };
     }));
+  };
+
+  // Edit a stop's details in place (time, type, duration, tech, date)
+  const updateStop = (origDate, sid, changes) => {
+    setSchedule(prev => {
+      let copy = prev.map(d => ({ ...d, stops: [...d.stops] }));
+      const fromDay = copy.find(d => d.date === origDate);
+      if (!fromDay) return prev;
+      const idx = fromDay.stops.findIndex(s => s.sid === sid);
+      if (idx < 0) return prev;
+      const updated = { ...fromDay.stops[idx], ...changes };
+      const newDate = changes.date || origDate;
+      if (newDate !== origDate) {
+        // moving to another day
+        fromDay.stops.splice(idx, 1);
+        let toDay = copy.find(d => d.date === newDate);
+        if (toDay) { toDay.stops.push(updated); }
+        else { copy.push({ date: newDate, day: dayLabel(newDate), stops: [updated] }); copy.sort((a, b) => toDateNum(a.date) - toDateNum(b.date)); }
+        if (toDay && cfg.sort === "time") toDay.stops.sort((a, b) => to24(a.time) - to24(b.time));
+      } else {
+        fromDay.stops[idx] = updated;
+        if (cfg.sort === "time") fromDay.stops.sort((a, b) => to24(a.time) - to24(b.time));
+      }
+      // drop any now-empty days (but keep today)
+      copy = copy.filter(d => d.stops.length > 0 || d.date === todayMDY());
+      return copy;
+    });
   };
 
   // open add form automatically if clients were sent over from the Clients tab
@@ -5875,6 +6073,13 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
 
               {/* Button row — equal width, never cut off */}
               <div style={{ padding: "8px 12px 10px", display: "flex", gap: 7 }}>
+                {!isComplete && perms.editSchedule && (
+                  <button onClick={e => { e.stopPropagation(); setEditStopModal({ stop: s, dayDate }); }}
+                    style={{ flex: 1, background: "transparent", color: T.textMuted, border: `1.5px solid ${T.border}`, borderRadius: 12, padding: "9px 6px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, minWidth: 0 }}>
+                    <Icon name="edit" size={13} />
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Edit</span>
+                  </button>
+                )}
                 <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: s, client: c }); }}
                   style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "9px 6px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, minWidth: 0 }}>
                   <Icon name="map" size={13} />
@@ -6133,6 +6338,18 @@ function Schedule({ clients, catalog, costs, schedule, setSchedule, scheduleCfg,
       )}
       {headHereModal && <HeadHereModal stop={headHereModal.stop} client={headHereModal.client} email={email} onClose={() => setHeadHereModal(null)} />}
 
+      {editStopModal && (
+        <StopEditModal
+          stop={editStopModal.stop}
+          dayDate={editStopModal.dayDate}
+          catalog={catalog}
+          team={team}
+          T={T}
+          onSave={(changes) => { updateStop(editStopModal.dayDate, editStopModal.stop.sid, changes); setEditStopModal(null); }}
+          onClose={() => setEditStopModal(null)}
+        />
+      )}
+
       {completeModal && (
         <CompleteStopModal
           stop={completeModal.stop}
@@ -6383,7 +6600,7 @@ function SkimmerImport({ onImport, onGoToClients }) {
               <Card>
                 <CardHeader title="Preview (first record)" />
                 <div style={{ padding: 16, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                  {[["Name", preview.name],["Address", preview.address],["Phone", preview.phone],["Email", preview.email],["Division", preview.division],["Plan", `${preview.plan} (${preview.planFreq})`]].map(([k, v]) => (
+                  {[["Name", preview.name],["Address", preview.address],["Phone", preview.phone],["Email", preview.email],["Division", preview.division],["Plan", preview.plan ? `${preview.plan} (${TIER_FREQ[preview.plan] || preview.planFreq})` : ""]].map(([k, v]) => (
                     <div key={k}>
                       <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 2 }}>{k}</div>
                       <div style={{ fontSize: 13, fontWeight: 600, color: v && v !== "Unnamed Client" ? T.text : T.textMuted }}>{v || "—"}</div>
@@ -15168,8 +15385,8 @@ export default function App({ authEmail = "", onSignOut }) {
         <main style={{ flex: 1, padding: "22px 16px", maxWidth: 740, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
           {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} scheduleCfg={scheduleCfg} reminderLog={reminderLog} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
-          {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
-          {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} />}
+          {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
+          {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} team={team} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} />}
           {page === "schedule" && <Schedule clients={clients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
           {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
           {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin} T={T} />}
