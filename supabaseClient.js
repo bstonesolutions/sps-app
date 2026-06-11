@@ -7,6 +7,7 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let _cache = {};
 let _loaded = false;
+let _loadFailed = false;
 let _loadPromise = null;
 let _lastErrorAt = 0;
 
@@ -19,15 +20,16 @@ function _throttledError(msg) {
   if (now - _lastErrorAt > 10000) { _lastErrorAt = now; _notify("error", msg); }
 }
 
+// _init runs exactly once. On error, _loadFailed = true so callers know
+// data didn't load — useStoredState checks this before saving defaults.
 async function _init() {
-  if (_loaded) return;
+  if (_loaded || _loadFailed) return;
   if (_loadPromise) return _loadPromise;
   _loadPromise = supabase.from("app_state").select("key, value").then(({ data, error }) => {
     if (error) {
       console.error("store.init failed:", error.message);
-      _notify("error", "Cannot reach the database.");
-      // Do NOT set _loaded = true on error — let it retry rather than fall back to defaults
-      _loadPromise = null; // reset so next call retries
+      _notify("error", "Cannot reach the database. Changes won't be saved until reconnected.");
+      _loadFailed = true;
     } else {
       if (data) data.forEach(row => { _cache[row.key] = row.value; });
       _notify("ok", "Connected");
@@ -38,13 +40,25 @@ async function _init() {
 }
 
 export const store = {
-  async get(key) { await _init(); const val = _cache[key]; return val !== undefined ? { value: val } : null; },
+  async get(key) {
+    await _init();
+    const val = _cache[key];
+    return val !== undefined ? { value: val } : null;
+  },
   async set(key, value) {
+    // Never write if the initial load failed — protects real data from being
+    // overwritten with in-memory defaults when there's a connectivity problem.
+    if (_loadFailed && !_loaded) {
+      console.warn("store.set skipped — database not loaded:", key);
+      return null;
+    }
     _cache[key] = value;
     const { error } = await supabase.from("app_state").upsert({ key, value, updated_at: new Date().toISOString() });
     if (error) { console.error("store.set failed:", key, error.message); _throttledError("Save failed — your changes aren't syncing."); }
     return null;
   },
   async remove(key) { delete _cache[key]; await supabase.from("app_state").delete().eq("key", key); return null; },
-  reset() { _cache = {}; _loaded = false; _loadPromise = null; },
+  isLoaded() { return _loaded; },
+  loadFailed() { return _loadFailed; },
+  reset() { _cache = {}; _loaded = false; _loadFailed = false; _loadPromise = null; },
 };

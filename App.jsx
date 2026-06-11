@@ -197,12 +197,12 @@ function useStoredState(key, initial) {
     })();
     return () => { alive = false; };
   }, [key]);
-  // save on change, but only after the initial load (so we don't overwrite saved data with defaults)
+  // save on change, but only after the initial load AND only if load succeeded
+  // (prevents overwriting real Supabase data with in-memory defaults on network error)
   useEffect(() => {
     if (!loaded) return;
-    // Extra safety: never save if the value is referentially identical to the initial default
-    // (means load failed and we'd overwrite real data with placeholder defaults)
-    if (value === initial) return;
+    if (store.loadFailed && store.loadFailed()) return; // load failed — never save defaults
+    if (value === initial) return; // still the default — don't overwrite real data
     store.set(key, JSON.stringify(value));
     if (typeof window.__onSpsSync === "function") window.__onSpsSync();
   }, [key, value, loaded]);
