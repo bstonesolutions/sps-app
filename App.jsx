@@ -8175,6 +8175,59 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, presetC
   };
   const save = () => { onSave({ ...inv, clientName: client?.name || "", clientAddress: client?.address || "", clientEmail: client?.email || "" }); onClose(); };
 
+  // ── Send to QuickBooks: creates the invoice in QB, gets back the payment link ──
+  const [qbState, setQbState] = useState("idle"); // idle | sending | done | error
+  const [qbMsg, setQbMsg] = useState("");
+  const qbConnected = !!localStorage.getItem("qb_access_token");
+
+  const sendToQuickBooks = async () => {
+    const access_token = localStorage.getItem("qb_access_token");
+    const realm_id = localStorage.getItem("qb_realm_id");
+    if (!access_token || !realm_id) { setQbState("error"); setQbMsg("Connect QuickBooks first under Customize."); return; }
+    if (!client) { setQbState("error"); setQbMsg("Select a client first."); return; }
+    setQbState("sending"); setQbMsg("");
+    try {
+      const payload = {
+        number: inv.number,
+        date: toISO(inv.date),
+        dueDate: toISO(inv.dueDate),
+        clientName: client.name,
+        clientEmail: client.email || "",
+        clientPhone: client.phone || "",
+        qbCustomerId: client.qbCustomerId || null,
+        lineItems: (inv.lineItems || []).map(l => ({
+          description: l.desc,
+          qty: l.qty || "1",
+          unitPrice: l.unitPrice || "0",
+        })),
+      };
+      const res = await fetch("/api/quickbooks/create-invoice", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ access_token, realm_id, invoice: payload }),
+      });
+      if (res.status === 401) { setQbState("error"); setQbMsg("QuickBooks session expired. Reconnect under Customize."); return; }
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      // Store QB id + payment link on the invoice, mark as sent, and save
+      const updated = {
+        ...inv,
+        clientName: client.name, clientAddress: client.address || "", clientEmail: client.email || "",
+        qbId: data.qbId,
+        paymentLink: data.paymentLink,
+        status: inv.status === "Draft" ? "Sent" : inv.status,
+        source: "quickbooks",
+      };
+      setInv(updated);
+      onSave(updated);
+      setQbState("done");
+      setQbMsg("Invoice created in QuickBooks. Payment link ready.");
+    } catch (err) {
+      setQbState("error");
+      setQbMsg(err.message || "Could not reach QuickBooks.");
+    }
+  };
+
   const field = { width: "100%", padding: "11px 13px", border: `1px solid ${T.border}`, borderRadius: 11, fontSize: 15, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
   const small = { width: "100%", padding: "9px 8px", border: `1px solid ${T.border}`, borderRadius: 9, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" };
   const label = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 };
@@ -8280,6 +8333,42 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, presetC
         </div>
 
         <Btn onClick={save} style={{ width: "100%", padding: "13px", borderRadius: 12 }}>{invoice ? "Save Invoice" : "Create Invoice"}</Btn>
+
+        {/* Send to QuickBooks — creates the invoice in QB with a pay-online link */}
+        {qbConnected ? (
+          <button onClick={sendToQuickBooks} disabled={qbState === "sending"}
+            style={{ width: "100%", padding: "13px", borderRadius: 12, border: "none", background: qbState === "sending" ? T.surfaceAlt : "#2CA01C", color: qbState === "sending" ? T.textMuted : "#fff", fontWeight: 800, fontSize: 14, cursor: qbState === "sending" ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 9 }}>
+            {qbState === "sending"
+              ? <><div style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /> Sending to QuickBooks…</>
+              : <><svg viewBox="0 0 24 24" width={17} height={17} fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg> {inv.qbId ? "Update in QuickBooks" : "Send to QuickBooks + Get Pay Link"}</>}
+          </button>
+        ) : (
+          <div style={{ fontSize: 12, color: T.textMuted, textAlign: "center", lineHeight: 1.5 }}>
+            Connect QuickBooks under Customize to send invoices with an online payment link.
+          </div>
+        )}
+
+        {qbState === "done" && (
+          <div style={{ background: hexA("#16a34a", 0.07), border: `1px solid ${hexA("#16a34a", 0.25)}`, borderRadius: 12, padding: "12px 14px" }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#16a34a", marginBottom: inv.paymentLink ? 8 : 0 }}>{qbMsg}</div>
+            {inv.paymentLink && (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <a href={inv.paymentLink} target="_blank" rel="noopener noreferrer"
+                  style={{ flex: 1, minWidth: 140, textAlign: "center", background: "#fff", border: `1px solid ${hexA("#16a34a", 0.3)}`, color: "#16a34a", borderRadius: 10, padding: "9px 12px", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>
+                  Open Payment Link
+                </a>
+                <button onClick={() => { navigator.clipboard?.writeText(inv.paymentLink); setQbMsg("Link copied."); }}
+                  style={{ flex: 1, minWidth: 140, background: "#16a34a", color: "#fff", border: "none", borderRadius: 10, padding: "9px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                  Copy Link
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+        {qbState === "error" && (
+          <div style={{ background: hexA("#E5484D", 0.06), border: `1px solid ${hexA("#E5484D", 0.25)}`, borderRadius: 12, padding: "11px 14px", fontSize: 13, fontWeight: 600, color: "#E5484D" }}>{qbMsg}</div>
+        )}
+
         {invoice && onDelete && <button onClick={() => { onDelete(inv.id); onClose(); }} style={{ background: "none", border: "none", color: "#C0392B", fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 6, fontFamily: "inherit" }}>Delete this invoice</button>}
       </div>
     </Modal>
