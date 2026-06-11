@@ -2336,7 +2336,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onI
 // ─────────────────────────────────────────────
 // CLIENT EDIT FORM
 // ─────────────────────────────────────────────
-function ClientEditForm({ client, onSave, onCancel, title = "Edit Client" }) {
+function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Client" }) {
   const { T, tiers } = useApp();
   const [form, setForm] = useState(() => {
     const base = { ...client };
@@ -2543,6 +2543,18 @@ function ClientEditForm({ client, onSave, onCancel, title = "Edit Client" }) {
             </div>
           </Card>
         ))}
+
+        {/* Danger zone — delete client */}
+        {onDelete && title !== "Add Client" && (
+          <div style={{ marginTop: 8, padding: "16px 18px", background: "rgba(192,57,43,0.05)", borderRadius: 16, border: "1px solid rgba(192,57,43,0.2)" }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#C0392B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>Danger Zone</div>
+            <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 12, lineHeight: 1.5 }}>Permanently delete this client and all their data. This cannot be undone.</div>
+            <button onClick={() => { if (confirm(`Delete ${client.name}? This permanently removes all their data and cannot be undone.`)) { onDelete(client.id); onCancel(); } }}
+              style={{ background: "#C0392B", color: "#fff", border: "none", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 6 }}>
+              <Icon name="trash" size={13} /> Delete {client.name}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2827,7 +2839,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, te
     if (onUpdate) onUpdate(next);
   };
 
-  if (editing) return <ClientEditForm client={client} onSave={u => { update(u); setEditing(false); }} onCancel={() => setEditing(false)} />;
+  if (editing) return <ClientEditForm client={client} onSave={u => { update(u); setEditing(false); }} onCancel={() => setEditing(false)} onDelete={onDelete} />;
 
   return (
     <div>
@@ -2863,12 +2875,6 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, te
               </Btn>
             )}
             {perms.editClients && <Btn variant="ghost" sm onClick={() => setEditing(true)} style={{ display:"flex", alignItems:"center", gap:5 }}><Icon name="edit" size={13} /> Edit</Btn>}
-            {perms.editClients && onDelete && (
-              <Btn variant="ghost" sm onClick={() => { if (confirm(`Delete ${client.name}? This cannot be undone.`)) onDelete(client.id); }}
-                style={{ display:"flex", alignItems:"center", gap:5, color:"#C0392B" }}>
-                <Icon name="trash" size={13} /> Delete
-              </Btn>
-            )}
           </div>
 
           {/* Address + services */}
@@ -11063,24 +11069,21 @@ function CPMessages({ client, branding, onSubmit, T }) {
   }
 
   return (
-    <div style={{ display:"flex", flexDirection:"column", gap:14, height:"calc(100dvh - 56px - 48px - 70px - env(safe-area-inset-top) - env(safe-area-inset-bottom))", minHeight: 340 }}>
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", paddingTop:4, flexShrink: 0 }}>
-        <div>
-          <div style={{ fontSize:22, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>Messages</div>
-          <div style={{ fontSize:14, color:T.textMuted, marginTop:3 }}>Chat with {branding?.companyName || "us"}</div>
+    <div style={{ display:"flex", flexDirection:"column", position:"fixed", top:0, left:0, right:0, bottom:0, paddingTop:"calc(56px + env(safe-area-inset-top))", paddingBottom:"calc(70px + env(safe-area-inset-bottom))", background:"transparent", zIndex:1, pointerEvents:"none" }}>
+      <div style={{ display:"flex", flexDirection:"column", flex:1, padding:"0 18px", overflow:"hidden", pointerEvents:"all" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", paddingTop:12, paddingBottom:10, flexShrink:0 }}>
+          <div>
+            <div style={{ fontSize:22, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>Messages</div>
+            <div style={{ fontSize:14, color:T.textMuted, marginTop:3 }}>Chat with {branding?.companyName || "us"}</div>
+          </div>
+          <button onClick={() => setView("request")}
+            style={{ display:"flex", alignItems:"center", gap:7, background:T.primary, color:"#fff", border:"none", borderRadius:12, padding:"9px 16px", fontWeight:700, fontSize:13, cursor:"pointer", fontFamily:"inherit", flexShrink:0, boxShadow:`0 3px 12px ${hexA(T.primary,0.3)}` }}>
+            <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            Request Service
+          </button>
         </div>
-        <button onClick={() => setView("request")}
-          style={{ display:"flex", alignItems:"center", gap:7, background:T.primary, color:"#fff", border:"none", borderRadius:12, padding:"9px 16px", fontWeight:700, fontSize:13, cursor:"pointer", fontFamily:"inherit", flexShrink:0, boxShadow:`0 3px 12px ${hexA(T.primary,0.3)}` }}>
-          <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"><path d="M12 5v14M5 12h14"/></svg>
-          Request Service
-        </button>
+        <ChatThread clientId={client.id} sender="client" senderName={client.name} T={T} />
       </div>
-      <ChatThread
-        clientId={client.id}
-        sender="client"
-        senderName={client.name}
-        T={T}
-      />
     </div>
   );
 }
@@ -14999,6 +15002,19 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
   const textScale = prefs.textSize === "large" ? 1.1 : prefs.textSize === "small" ? 0.9 : 1;
 
   const [page, setPage] = useState(prefs.defaultPage || branding.portalDefaultPage || "cp_home");
+
+  // Poll for unread staff replies — shows dot on Messages tab
+  const [portalUnread, setPortalUnread] = useState(0);
+  useEffect(() => {
+    const load = async () => {
+      const { data } = await supabase.from("sps_messages").select("id")
+        .eq("client_id", client.id).eq("sender", "staff").is("read_at", null);
+      setPortalUnread(data ? data.length : 0);
+    };
+    load();
+    const iv = setInterval(load, 15000);
+    return () => clearInterval(iv);
+  }, [client.id]);
   const vp = useViewport();
   const wide = vp.isTablet || vp.isDesktop;
 
@@ -15091,8 +15107,11 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
           return (
             <button key={n.id} onClick={() => { setPage(n.id); setSettingsOpen(false); }}
               style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, color: active ? T.primary : T.textMuted, fontFamily: "inherit", position: "relative", WebkitTapHighlightColor: "transparent" }}>
-              <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s" }}>
+              <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s", position: "relative" }}>
                 <CIcon name={n.icon} size={22} />
+                {n.id === "cp_messages" && portalUnread > 0 && !active && (
+                  <span style={{ position: "absolute", top: 2, right: 4, width: 9, height: 9, borderRadius: "50%", background: "#E5484D", border: `2px solid ${T.bg}` }} />
+                )}
               </span>
               <span style={{ fontSize: 10.5, fontWeight: active ? 700 : 500, letterSpacing: "-0.01em" }}>{label}</span>
             </button>
