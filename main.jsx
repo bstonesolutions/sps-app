@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { supabase } from "./supabaseClient";
+import { PROD_URL } from "./config";
 import App from "./App.jsx";
 
 const wrap = { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom)) 24px", background: "#F5F5F7", fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif" };
@@ -36,7 +37,7 @@ function Login() {
   const sendMagicLink = async () => {
     if (!email.trim()) { setErr("Enter your email address."); return; }
     setBusy(true); setErr("");
-    const { error } = await supabase.auth.signInWithOtp({ email: email.trim(), options: { shouldCreateUser: false } });
+    const { error } = await supabase.auth.signInWithOtp({ email: email.trim(), options: { shouldCreateUser: false, emailRedirectTo: PROD_URL } });
     if (error) { setErr(error.message); setBusy(false); return; }
     setMode("sent");
     setBusy(false);

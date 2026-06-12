@@ -1,5 +1,27 @@
 import { useState, useRef, useEffect, useContext, createContext, useMemo, Component } from "react";
 import { store, supabase } from "./supabaseClient";
+import { PROD_URL } from "./config";
+
+// Render an email template's text vars (everything except {link}, which the
+// server injects when it mints the sign-in link).
+const fillEmailVars = (str, vars) => String(str || "")
+  .replace(/\{company\}/g, vars.company || "")
+  .replace(/\{name\}/g, vars.name || "")
+  .replace(/\{first\}/g, vars.first || "");
+
+// Send a branded staff-invite / client magic-link email via the Resend endpoint.
+// Throws on failure (incl. the server not being configured yet) so callers can
+// fall back to Supabase's built-in email until Resend env vars are set.
+async function sendBrandedAuthEmail(payload) {
+  const r = await fetch("/api/send-auth-email", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(d.error || "Email send failed"), { missingEnv: !!d.missingEnv });
+  return d;
+}
 
 // ── PDF generation (jsPDF) ──
 // Loaded lazily so it doesn't block initial render
@@ -2945,7 +2967,7 @@ function ClientDocuments({ client, onChange }) {
   );
 }
 
-function ClientDetail({ client: init, invoices, invoicing, branding, catalog, setCatalog, team, schedule, onBack, onUpdate, onSaveInvoice, onDeleteInvoice, onDelete }) {
+function ClientDetail({ client: init, invoices, invoicing, branding, catalog, setCatalog, team, schedule, email, onBack, onUpdate, onSaveInvoice, onDeleteInvoice, onDelete }) {
   const { T, perms, tiers } = useApp();
   const [client, setClient] = useState(init);
   const [tab, setTab] = useState("overview");
@@ -3044,7 +3066,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
       {tab === "history" && <ClientHistory client={client} catalog={catalog} team={team} onChange={hist => update({ history: hist })} />}
       {tab === "invoices" && (perms.canInvoice || perms.viewInvoices) && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={onSaveInvoice} onDelete={onDeleteInvoice} />}
       {tab === "docs"    && <ClientDocuments client={client} onChange={docs => update({ documents: docs })} />}
-      {tab === "portal" && <ClientPortal client={client} invoices={invoices} schedule={schedule} branding={branding} />}
+      {tab === "portal" && <ClientPortal client={client} invoices={invoices} schedule={schedule} branding={branding} email={email} />}
     </div>
   );
 }
@@ -3930,14 +3952,14 @@ function ClientHistory({ client, catalog, team, onChange }) {
   );
 }
 
-function ClientPortal({ client, invoices, schedule, branding }) {
+function ClientPortal({ client, invoices, schedule, branding, email }) {
   const { T } = useApp();
   const [preview, setPreview] = useState(false);
   const [inviteState, setInviteState] = useState("idle"); // idle | sending | sent | error
   const [inviteMsg, setInviteMsg] = useState("");
   const [copied, setCopied] = useState(false);
   const hasEmail = !!(client.email || "").trim();
-  const appUrl = window.location.origin;
+  const appUrl = PROD_URL; // always the real site, never localhost / a preview host
   const firstName = client.name.split(" ")[0];
 
   const copyLink = () => {
@@ -3946,26 +3968,32 @@ function ClientPortal({ client, invoices, schedule, branding }) {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // Fallback: Supabase's built-in magic link (used until Resend env is configured).
+  const sendInviteViaSupabase = async () => {
+    const { error } = await supabase.auth.signInWithOtp({
+      email: client.email.trim(),
+      options: { shouldCreateUser: true, emailRedirectTo: appUrl, data: { name: client.name } },
+    });
+    if (error) { setInviteState("error"); setInviteMsg(error.message); }
+    else { setInviteState("sent"); }
+  };
+
   const sendInvite = async () => {
     if (!hasEmail || inviteState === "sending") return;
     setInviteState("sending");
     setInviteMsg("");
     try {
-      // signInWithOtp with shouldCreateUser:true creates the account if it
-      // doesn't exist yet AND sends the magic link — one call does both.
-      const { error } = await supabase.auth.signInWithOtp({
-        email: client.email.trim(),
-        options: {
-          shouldCreateUser: true,
-          emailRedirectTo: appUrl,
-          data: { name: client.name },
-        },
-      });
-      if (error) {
-        setInviteState("error");
-        setInviteMsg(error.message);
-      } else {
+      // Send the branded client magic-link template through Resend.
+      const em = email || {};
+      const vars = { company: branding.companyName || "", name: client.name, first: firstName };
+      const subject = fillEmailVars(em.clientMagicSubject ?? DEFAULT_EMAIL.clientMagicSubject, vars);
+      const bodyTpl = fillEmailVars(em.clientMagicBody ?? DEFAULT_EMAIL.clientMagicBody, vars);
+      try {
+        await sendBrandedAuthEmail({ email: client.email.trim(), name: client.name, kind: "client", subject, body: bodyTpl, redirectTo: appUrl, company: branding.companyName });
         setInviteState("sent");
+      } catch (e) {
+        // Resend not configured / failed — fall back to Supabase's built-in email.
+        await sendInviteViaSupabase();
       }
     } catch (e) {
       setInviteState("error");
@@ -7966,7 +7994,7 @@ function PermissionGroups({ value, onChange }) {
   );
 }
 
-function TeamManager({ team, setTeam, currentUserId }) {
+function TeamManager({ team, setTeam, currentUserId, email, branding }) {
   const { T } = useApp();
   const [modal, setModal] = useState(null); // { mode, data }
   const [inviteState, setInviteState] = useState({}); // { [memberId]: "idle"|"sending"|"sent"|"error" }
@@ -7993,28 +8021,36 @@ function TeamManager({ team, setTeam, currentUserId }) {
     setModal(null);
   };
 
-  // Send a magic link invite to a staff member — creates their Supabase account automatically
+  // Send a magic link invite to a staff member — creates their Supabase account automatically.
+  // Prefers the branded Resend template; falls back to Supabase email until Resend env is set.
   const sendStaffInvite = async (member) => {
     if (!(member.email || "").trim()) return;
     const id = member.id;
     setInviteState(s => ({ ...s, [id]: "sending" }));
     setInviteMsg(s => ({ ...s, [id]: "" }));
-    try {
+    const markSent = () => {
+      setInviteState(s => ({ ...s, [id]: "sent" }));
+      setInviteMsg(s => ({ ...s, [id]: `Invite sent to ${member.email}` }));
+      setTimeout(() => setInviteState(s => ({ ...s, [id]: "idle" })), 6000);
+    };
+    const viaSupabase = async () => {
       const { error } = await supabase.auth.signInWithOtp({
         email: member.email.trim(),
-        options: {
-          shouldCreateUser: true,
-          emailRedirectTo: window.location.origin,
-          data: { name: member.name },
-        },
+        options: { shouldCreateUser: true, emailRedirectTo: PROD_URL, data: { name: member.name } },
       });
-      if (error) {
-        setInviteState(s => ({ ...s, [id]: "error" }));
-        setInviteMsg(s => ({ ...s, [id]: error.message }));
-      } else {
-        setInviteState(s => ({ ...s, [id]: "sent" }));
-        setInviteMsg(s => ({ ...s, [id]: `Invite sent to ${member.email}` }));
-        setTimeout(() => setInviteState(s => ({ ...s, [id]: "idle" })), 6000);
+      if (error) { setInviteState(s => ({ ...s, [id]: "error" })); setInviteMsg(s => ({ ...s, [id]: error.message })); }
+      else markSent();
+    };
+    try {
+      const em = email || {};
+      const vars = { company: (branding && branding.companyName) || "", name: member.name, first: (member.name || "").split(" ")[0] };
+      const subject = fillEmailVars(em.staffInviteSubject ?? DEFAULT_EMAIL.staffInviteSubject, vars);
+      const bodyTpl = fillEmailVars(em.staffInviteBody ?? DEFAULT_EMAIL.staffInviteBody, vars);
+      try {
+        await sendBrandedAuthEmail({ email: member.email.trim(), name: member.name, kind: "staff", subject, body: bodyTpl, redirectTo: PROD_URL, company: vars.company });
+        markSent();
+      } catch (e) {
+        await viaSupabase();
       }
     } catch (e) {
       setInviteState(s => ({ ...s, [id]: "error" }));
@@ -10910,7 +10946,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
           )}
         </div>
       )}
-      {activeTab === "team" && perms.isAdmin && <TeamManager team={team} setTeam={setTeam} currentUserId={currentUserId} />}
+      {activeTab === "team" && perms.isAdmin && <TeamManager team={team} setTeam={setTeam} currentUserId={currentUserId} email={email} branding={branding} />}
       {activeTab === "branding" && <>
 
       {/* ── LOGO & IDENTITY ── */}
@@ -16945,7 +16981,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} scheduleCfg={scheduleCfg} reminderLog={reminderLog} vp={vp} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
           {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
-          {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} />}
+          {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} />}
           {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
           {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
           {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin} T={T} />}
