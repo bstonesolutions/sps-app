@@ -8,6 +8,7 @@ const KIND_TO_ITEM = {
   treatment: "Materials",
   part:      "Materials",
   bundle:    "Materials",
+  lateFee:   "Late Fee",
 };
 const DEFAULT_ITEM_NAME = "Services";
 // Universal fallback so a push never fails on a missing item reference.

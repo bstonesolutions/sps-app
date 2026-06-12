@@ -48,19 +48,26 @@ export default async function handler(req, res) {
     };
     const isTaxableCode = (ref) => !!(ref?.value && ref.value !== 'NON' && ref.value !== '0');
 
+    const isLateFeeLine = (l, d) => /late\s*fee/i.test(l.Description || '') || /late\s*fee/i.test(d?.ItemRef?.name || '');
+    const todayISO = new Date().toISOString().slice(0, 10);
+
     const mappedInvoices = invoices.map(inv => {
       const salesLines = (inv.Line || []).filter(l => l.DetailType === 'SalesItemLineDetail');
+      let hasLateFee = false;
       // Editable line items so the invoice can be opened, changed, and re-synced.
       const lineItems = salesLines.map((l, i) => {
         const d = l.SalesItemLineDetail || {};
         const taxable = isTaxableCode(d.TaxCodeRef);
+        const lateFee = isLateFeeLine(l, d);
+        if (lateFee) hasLateFee = true;
         return {
           id:        `qbl_${inv.Id}_${i}`,
           desc:      l.Description || d.ItemRef?.name || 'Service',
           qty:       String(d.Qty != null ? d.Qty : 1),
           unitPrice: String(d.UnitPrice != null ? d.UnitPrice : (l.Amount || 0)),
           taxable,
-          kind:      itemNameToKind(d.ItemRef?.name),
+          kind:      lateFee ? 'lateFee' : itemNameToKind(d.ItemRef?.name),
+          isLateFee: lateFee,
         };
       });
       // Derive a tax rate from QB's tax detail so app-side totals match.
@@ -78,6 +85,8 @@ export default async function handler(req, res) {
         balance:      inv.Balance,
         taxRate,
         source:       'quickbooks',
+        // Flag so the app's auto-apply logic won't add a second late fee.
+        ...(hasLateFee ? { lateFeeAppliedAt: todayISO } : {}),
         status:       inv.Balance <= 0 ? 'Paid'
                       : new Date(inv.DueDate) < new Date() ? 'Overdue'
                       : 'Sent',

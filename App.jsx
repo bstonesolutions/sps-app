@@ -1381,6 +1381,14 @@ const DEFAULT_INVOICING = {
   // ── QuickBooks online payment methods offered on the pay link (default all on) ──
   qbAllowCard: true,       // AllowOnlineCreditCardPayment (credit/debit card)
   qbAllowACH: true,        // AllowOnlineACHPayment (bank transfer / ACH)
+  // ── Late fees — all empty/off until configured (no real defaults) ──
+  lateFee: {
+    enabled: false,        // master toggle (feature does nothing while off)
+    graceDays: "",         // apply the fee this many days past the due date
+    pct: "",               // fee = this % of the invoice subtotal
+    label: "",             // line-item description (defaults to "Late Fee" only when blank)
+    once: true,            // never add the fee more than once to the same invoice
+  },
 };
 
 // date helpers (MM/DD/YYYY)
@@ -1479,6 +1487,47 @@ const effectiveStatus = (inv) => {
   if (inv.status === "Sent") { const due = parseMDY(inv.dueDate); if (due && due < new Date(new Date().toDateString())) return "Overdue"; }
   return inv.status;
 };
+// Parse a due date in either MM/DD/YYYY (app) or YYYY-MM-DD (QuickBooks) format.
+const parseDueDate = (s) => {
+  if (!s || typeof s !== "string") return null;
+  if (s.includes("/")) return parseMDY(s);
+  if (s.includes("-")) { const d = new Date(s + "T00:00:00"); return isNaN(d.getTime()) ? null : d; }
+  return null;
+};
+// Detect whether an invoice already carries a late-fee line item.
+const hasLateFeeLine = (inv, labelLc) => (inv.lineItems || []).some(li =>
+  li.isLateFee || ((li.desc || li.description || "").toLowerCase().includes(labelLc)) || ((li.desc || li.description || "").toLowerCase().includes("late fee")));
+
+// Append a late-fee line to every newly-eligible overdue invoice. Pure — returns
+// { invoices, changed }. Reuses effectiveStatus() and invoiceTotals(); never doubles up.
+function applyLateFees(invoices, invoicing, todayISO) {
+  const lf = invoicing && invoicing.lateFee;
+  if (!lf || !lf.enabled) return { invoices, changed: false };
+  const graceDays = parseInt(lf.graceDays, 10);
+  const pct = parseFloat(lf.pct);
+  if (!(graceDays > 0) || !(pct > 0)) return { invoices, changed: false };
+  const label = (lf.label && lf.label.trim()) || "Late Fee";
+  const labelLc = label.toLowerCase();
+  const today = new Date(new Date().toDateString());
+  let changed = false;
+  const next = (invoices || []).map(inv => {
+    if (inv.lateFeeAppliedAt) return inv;                       // already applied (flag)
+    if (!Array.isArray(inv.lineItems) || inv.lineItems.length === 0) return inv;
+    if (hasLateFeeLine(inv, labelLc)) return inv;               // already applied (line item)
+    if (effectiveStatus(inv) !== "Overdue") return inv;        // also excludes Paid / Draft / Void
+    const due = parseDueDate(inv.dueDate);
+    if (!due) return inv;
+    const daysPast = Math.floor((today - new Date(due.toDateString())) / 86400000);
+    if (!(daysPast > graceDays)) return inv;                    // must be MORE than grace days past due
+    const subtotal = invoiceTotals(inv).subtotal;              // service subtotal, before the fee
+    const fee = Math.round(subtotal * (pct / 100) * 100) / 100;
+    if (!(fee > 0)) return inv;
+    const feeLine = { id: `lf_${inv.id}_${todayISO}`, desc: label, qty: "1", unitPrice: fee.toFixed(2), amount: fee, taxable: false, isLateFee: true, kind: "lateFee" };
+    changed = true;
+    return { ...inv, lineItems: [...inv.lineItems, feeLine], lateFeeAppliedAt: todayISO };
+  });
+  return { invoices: changed ? next : invoices, changed };
+}
 const nextInvoiceNumber = (invoices, cfg) => {
   const start = parseInt(cfg?.nextNumber) || 1001;
   const nums = (invoices || []).map(iv => parseInt(String(iv.number).replace(/\D/g, ""))).filter(x => !isNaN(x));
@@ -8674,8 +8723,10 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         qty: String(qty),
         unitPrice: String(qty > 0 ? (net / qty).toFixed(2) : net.toFixed(2)),
         // Carry the app's item kind + taxability so QB maps to the right item and tax.
-        kind: l.kind || "custom",
+        // Late-fee lines use kind "lateFee" → QB "Late Fee" service item.
+        kind: l.isLateFee ? "lateFee" : (l.kind || "custom"),
         taxable: !!l.taxable,
+        isLateFee: !!l.isLateFee,
       };
     }),
     invoiceDiscountType: inv.discountType || "",
@@ -9286,6 +9337,8 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyn
   const cfg = { ...DEFAULT_INVOICING, ...(invoicing || {}) };
   const set = (k, v) => setInvoicing({ ...cfg, [k]: v });
   const setB = (k, v) => setBranding(b => ({ ...b, [k]: v }));
+  const lf = { ...DEFAULT_INVOICING.lateFee, ...(cfg.lateFee || {}) };
+  const setLf = (k, v) => set("lateFee", { ...lf, [k]: v });
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 };
   const field = { width: "100%", padding: "10px 13px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
   const accent = cfg.accent || T.primary;
@@ -9334,6 +9387,44 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyn
           <div style={{ fontSize: 11.5, color: T.textMuted, background: hexA(T.primary, 0.06), borderRadius: 10, padding: "9px 11px", lineHeight: 1.5 }}>
             These only take effect if the method is also turned on in your <b>QuickBooks Payments</b> account. QuickBooks won't show a method a client can't actually use, even if it's enabled here. Card and Bank Transfer (ACH) are the methods QuickBooks exposes for invoices via the API.
           </div>
+        </div>
+      </Card>
+
+      <Card style={{ marginBottom: 14 }}>
+        <CardHeader title="Late Fees" />
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 16 }}>
+          {row("Enable late fees", "Automatically add a fee to overdue invoices when the app opens", lf.enabled === true, v => setLf("enabled", v))}
+          {lf.enabled && (
+            <>
+              <div>
+                <label style={labelStyle}>Grace Period</label>
+                <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 13, color: T.textMuted }}>Apply fee after</span>
+                  <input type="text" inputMode="numeric" style={{ ...field, width: 70, textAlign: "center" }} value={lf.graceDays ?? ""} placeholder=""
+                    onChange={e => setLf("graceDays", e.target.value.replace(/[^\d]/g, ""))} />
+                  <span style={{ fontSize: 13, color: T.textMuted }}>days past the due date</span>
+                </div>
+              </div>
+              <div>
+                <label style={labelStyle}>Fee Percentage</label>
+                <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+                  <input type="text" inputMode="decimal" style={{ ...field, width: 90, textAlign: "center" }} value={lf.pct ?? ""} placeholder=""
+                    onChange={e => setLf("pct", e.target.value.replace(/[^\d.]/g, ""))} />
+                  <span style={{ fontSize: 13, color: T.textMuted }}>% of the invoice subtotal</span>
+                </div>
+              </div>
+              <div>
+                <label style={labelStyle}>Fee Label</label>
+                <input type="text" style={field} value={lf.label ?? ""} placeholder="Late Fee"
+                  onChange={e => setLf("label", e.target.value)} />
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4 }}>Appears as the line-item description on the invoice. Defaults to "Late Fee" if left blank.</div>
+              </div>
+              {row("Apply once per invoice", "Never add the fee more than once to the same invoice", lf.once !== false, v => setLf("once", v))}
+              <div style={{ fontSize: 11.5, color: T.textMuted, background: hexA(T.primary, 0.06), borderRadius: 10, padding: "9px 11px", lineHeight: 1.5 }}>
+                The fee is added as a separate, non-taxable line item on each overdue invoice and syncs to QuickBooks as a "Late Fee" item. It's applied silently when the app loads — only to Sent/Overdue invoices, never to Paid, Draft, or Void.
+              </div>
+            </>
+          )}
         </div>
       </Card>
 
@@ -16274,12 +16365,19 @@ function CPInvoices({ client, invoices, branding, T }) {
                 <div style={{ borderTop:`1px solid ${T.border}`, padding:"14px 18px", display:"flex", flexDirection:"column", gap:10 }}>
                   {(iv.lineItems||iv.items||[]).length > 0 && (
                     <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-                      {(iv.lineItems||iv.items||[]).map((li,j) => (
-                        <div key={j} style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:10, fontSize:13 }}>
-                          <span style={{ color:T.text, flex:1 }}>{li.description||li.name||li.service}</span>
-                          <span style={{ color:T.text, fontWeight:700, flexShrink:0 }}>${parseFloat(li.amount||li.price||0).toFixed(2)}</span>
-                        </div>
-                      ))}
+                      {(iv.lineItems||iv.items||[]).map((li,j) => {
+                        // Support both the app shape (desc/qty/unitPrice) and the legacy QB shape (description/amount).
+                        const lbl = li.desc || li.description || li.name || li.service || "—";
+                        const amt = li.amount != null ? parseFloat(li.amount)
+                          : (li.unitPrice != null ? (parseFloat(li.qty || 1) || 1) * (parseFloat(li.unitPrice) || 0)
+                          : parseFloat(li.rate != null ? li.rate : li.price) || 0);
+                        return (
+                          <div key={j} style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:10, fontSize:13 }}>
+                            <span style={{ color:T.text, flex:1 }}>{lbl}</span>
+                            <span style={{ color:T.text, fontWeight:700, flexShrink:0 }}>${(amt || 0).toFixed(2)}</span>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                   {iv.dueDate && !isPaidSt && (
@@ -17041,6 +17139,18 @@ export default function App({ authEmail = "", onSignOut }) {
     autoSync();
   }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Late fees: auto-apply once after data is ready (silent, never blocks load) ──
+  const lateFeeRan = useRef(false);
+  useEffect(() => {
+    if (!hydrated || lateFeeRan.current) return;
+    lateFeeRan.current = true;
+    const todayISO = new Date().toISOString().slice(0, 10);
+    setInvoices(prev => {
+      const { invoices: nextInv, changed } = applyLateFees(prev, invoicing, todayISO);
+      return changed ? nextInv : prev; // no-op (no save) when nothing is eligible
+    });
+  }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // QuickBooks sync handler — merges QB invoices into app state and matches customers to clients
   const handleQBSync = (qbInvoices, qbCustomers) => {
     // Build client lookup maps from current clients snapshot
@@ -17099,6 +17209,8 @@ export default function App({ authEmail = "", onSignOut }) {
         // edited, and pushed back to QuickBooks without losing its lines.
         lineItems:  qi.lineItems || [],
         taxRate:    qi.taxRate || 0,
+        // If QB already carries a late-fee line, flag it so auto-apply won't add a second.
+        ...(qi.lateFeeAppliedAt ? { lateFeeAppliedAt: qi.lateFeeAppliedAt } : {}),
         total:      String(qi.total),
         balance:    qi.balance,
         source:     "quickbooks",
