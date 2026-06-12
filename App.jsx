@@ -9575,58 +9575,134 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
   );
 }
 
-// Build a clean, self-contained, branded HTML document of an invoice for printing.
-function invoicePrintDoc({ invoice, client, totals, branding, cfg, eff, accent }) {
+// Draw a clean, branded invoice into a jsPDF document (vector text, multi-page aware).
+async function buildInvoicePdf({ invoice, client, totals, branding, cfg, eff, accent }) {
+  const JsPDF = await loadJsPDF();
+  const doc = new JsPDF({ unit: "pt", format: "letter" });
+  const W = doc.internal.pageSize.getWidth();
+  const H = doc.internal.pageSize.getHeight();
+  const M = 40;
   const money = (n) => "$" + (Number(n) || 0).toFixed(2);
-  const esc = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const nn = (v) => parseFloat(v) || 0;
-  const contact = [branding.companyPhone, branding.companyEmail, branding.companyWebsite, branding.companyAddress].filter(Boolean).map(esc).join(" &nbsp;&middot;&nbsp; ");
-  const rows = (invoice.lineItems || []).map((l) => {
+  const accentHex = (accent && String(accent).trim()) || "#B81D24";
+
+  // Header band
+  doc.setFillColor(accentHex);
+  doc.rect(0, 0, W, 86, "F");
+  doc.setTextColor("#ffffff");
+  doc.setFont("helvetica", "bold"); doc.setFontSize(20);
+  doc.text(String(branding.companyName || ""), M, 36);
+  doc.setFont("helvetica", "normal"); doc.setFontSize(9);
+  let hy = 52;
+  if (branding.division) { doc.text(String(branding.division), M, hy); hy += 12; }
+  const contact = [branding.companyPhone, branding.companyEmail, branding.companyWebsite].filter(Boolean).join("   ·   ");
+  if (contact) { doc.text(contact, M, hy); hy += 12; }
+  if (branding.companyAddress) { doc.text(String(branding.companyAddress), M, hy); }
+  doc.setFont("helvetica", "bold"); doc.setFontSize(18);
+  doc.text(String(cfg.labelInvoice || "INVOICE"), W - M, 36, { align: "right" });
+  doc.setFont("helvetica", "normal"); doc.setFontSize(10);
+  doc.text(String(invoice.number || ""), W - M, 53, { align: "right" });
+
+  // Bill-to + meta
+  let y = 120;
+  doc.setTextColor("#9CA3AF"); doc.setFont("helvetica", "bold"); doc.setFontSize(9);
+  doc.text("BILL TO", M, y);
+  doc.setTextColor("#111827"); doc.setFontSize(12);
+  doc.text(String(invoice.clientName || client?.name || ""), M, y + 16);
+  doc.setFont("helvetica", "normal"); doc.setFontSize(10); doc.setTextColor("#6B7280");
+  let by = y + 32;
+  const addr = invoice.clientAddress || client?.address;
+  if (addr) { doc.text(String(addr), M, by); by += 14; }
+  const cem = invoice.clientEmail || client?.email;
+  if (cem) { doc.text(String(cem), M, by); by += 14; }
+  doc.setTextColor("#6B7280"); doc.setFontSize(10);
+  doc.text(`Issued: ${invoice.date || ""}`, W - M, y, { align: "right" });
+  doc.text(`Due: ${invoice.dueDate || ""}`, W - M, y + 14, { align: "right" });
+  doc.text(`Status: ${eff}`, W - M, y + 28, { align: "right" });
+  y = Math.max(by, y + 44) + 12;
+
+  // Column header
+  const ensure = (need) => { if (y + need > H - 70) { doc.addPage(); y = 50; } };
+  doc.setDrawColor("#E5E7EB"); doc.setLineWidth(1); doc.line(M, y, W - M, y); y += 15;
+  doc.setFont("helvetica", "bold"); doc.setFontSize(8.5); doc.setTextColor("#9CA3AF");
+  doc.text("DESCRIPTION", M, y);
+  doc.text("QTY", W - 215, y, { align: "right" });
+  doc.text("PRICE", W - 130, y, { align: "right" });
+  doc.text("AMOUNT", W - M, y, { align: "right" });
+  y += 8; doc.line(M, y, W - M, y); y += 16;
+
+  // Line items
+  doc.setFont("helvetica", "normal"); doc.setFontSize(10);
+  (invoice.lineItems || []).forEach((l) => {
     const gross = nn(l.qty) * nn(l.unitPrice);
     let disc = 0; if (l.discountType === "pct") disc = gross * (nn(l.discount) / 100); else if (l.discountType === "amt") disc = nn(l.discount);
     const net = Math.max(0, gross - disc);
-    return `<tr><td class="d"><div class="nm">${esc(l.desc || "—")}${l.taxable ? ' <span class="tx">*</span>' : ""}</div>${cfg.showQtyPrice !== false ? `<div class="sub">${esc(l.qty)} &times; ${money(l.unitPrice)}</div>` : ""}${l.bundleNote ? `<div class="sub i">Includes: ${esc(l.bundleNote)}</div>` : ""}</td><td class="amt">${money(net)}</td></tr>`;
-  }).join("");
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(invoice.number || "Invoice")}</title>
-<style>
-  * { box-sizing:border-box; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
-  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; color:#111827; background:#fff; }
-  .wrap { max-width:680px; margin:0 auto; padding:24px; }
-  .band { background:${accent}; color:#fff; border-radius:14px; padding:20px 22px; display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
-  .co { font-size:18px; font-weight:800; } .dv { font-size:12px; opacity:.85; margin-top:2px; } .contact { font-size:10.5px; opacity:.85; margin-top:6px; line-height:1.5; }
-  .invh { font-size:18px; font-weight:800; letter-spacing:.04em; text-align:right; } .invn { font-size:12px; opacity:.9; margin-top:2px; text-align:right; }
-  .meta { display:flex; justify-content:space-between; gap:12px; padding:16px 4px; border-bottom:1px solid #eef0f2; }
-  .lbl { font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:#9ca3af; } .v { font-weight:600; }
-  table { width:100%; border-collapse:collapse; margin-top:4px; }
-  td.d { padding:10px 0; border-bottom:1px solid #eef0f2; vertical-align:top; } td.amt { padding:10px 0; border-bottom:1px solid #eef0f2; text-align:right; font-weight:700; white-space:nowrap; vertical-align:top; }
-  .nm { font-size:14px; } .sub { font-size:12px; color:#6b7280; } .sub.i { font-style:italic; } .tx { color:#9ca3af; }
-  .tot { width:100%; margin-top:12px; } .tot td { padding:3px 0; font-size:13px; color:#6b7280; } .tot td.r { text-align:right; color:#374151; }
-  .grand td { font-size:18px; font-weight:800; color:${accent}; border-top:2px solid #e5e7eb; padding-top:8px; }
-  .note { font-size:12px; color:#6b7280; margin-top:16px; line-height:1.5; } .thanks { font-size:15px; font-weight:700; color:${accent}; margin-top:16px; }
-  @media print { body, .wrap { padding:0; } }
-</style></head>
-<body onload="setTimeout(function(){window.focus();window.print();},300)">
-  <div class="wrap">
-    <div class="band">
-      <div><div class="co">${esc(branding.companyName || "")}</div>${branding.division ? `<div class="dv">${esc(branding.division)}</div>` : ""}${contact ? `<div class="contact">${contact}</div>` : ""}</div>
-      <div><div class="invh">${esc(cfg.labelInvoice || "INVOICE")}</div><div class="invn">${esc(invoice.number || "")}</div></div>
-    </div>
-    <div class="meta">
-      <div><div class="lbl">Bill To</div><div class="v">${esc(invoice.clientName || client?.name || "")}</div>${(invoice.clientAddress || client?.address) ? `<div class="sub">${esc(invoice.clientAddress || client?.address)}</div>` : ""}${(invoice.clientEmail || client?.email) ? `<div class="sub">${esc(invoice.clientEmail || client?.email)}</div>` : ""}</div>
-      <div style="text-align:right"><div class="sub">Issued: <span class="v">${esc(invoice.date || "")}</span></div><div class="sub">Due: <span class="v">${esc(invoice.dueDate || "")}</span></div><div class="sub">Status: <span class="v">${esc(eff)}</span></div></div>
-    </div>
-    <table>${rows || '<tr><td class="d sub">No line items.</td><td></td></tr>'}</table>
-    <table class="tot">
-      ${totals.discountTotal > 0 ? `<tr><td>Subtotal</td><td class="r">${money(totals.grossSubtotal)}</td></tr><tr><td>Total savings</td><td class="r">&minus;${money(totals.discountTotal)}</td></tr>` : ""}
-      <tr><td>Subtotal</td><td class="r">${money(totals.subtotal)}</td></tr>
-      <tr><td>Tax (${esc(invoice.taxRate || 0)}%)</td><td class="r">${money(totals.tax)}</td></tr>
-      <tr class="grand"><td>Total Due</td><td class="r">${money(totals.total)}</td></tr>
-    </table>
-    ${(cfg.showThankYou && cfg.thankYou) ? `<div class="thanks">${esc(cfg.thankYou)}</div>` : ""}
-    ${invoice.notes ? `<div class="note">${esc(invoice.notes)}</div>` : ""}
-    ${cfg.footer ? `<div class="note">${esc(cfg.footer)}</div>` : ""}
-  </div>
-</body></html>`;
+    const unit = nn(l.qty) > 0 ? net / nn(l.qty) : net;
+    const descLines = doc.splitTextToSize(String((l.desc || "—") + (l.taxable ? "  *" : "")), W - M - 250);
+    ensure(descLines.length * 13 + (l.bundleNote ? 12 : 0) + 10);
+    doc.setTextColor("#111827"); doc.setFont("helvetica", "normal");
+    doc.text(descLines, M, y);
+    doc.setTextColor("#374151");
+    doc.text(String(l.qty || ""), W - 215, y, { align: "right" });
+    doc.text(money(unit), W - 130, y, { align: "right" });
+    doc.setFont("helvetica", "bold");
+    doc.text(money(net), W - M, y, { align: "right" });
+    doc.setFont("helvetica", "normal");
+    let ly = y + descLines.length * 13;
+    if (l.bundleNote) { doc.setTextColor("#9CA3AF"); doc.setFontSize(9); doc.text("Includes: " + String(l.bundleNote), M, ly); doc.setFontSize(10); ly += 12; }
+    y = ly + 6;
+    doc.setDrawColor("#EEF0F2"); doc.line(M, y - 3, W - M, y - 3);
+  });
+
+  // Totals
+  y += 12; ensure(90);
+  const totRow = (label, val, bold) => {
+    doc.setFont("helvetica", bold ? "bold" : "normal"); doc.setFontSize(bold ? 13 : 10);
+    doc.setTextColor(bold ? accentHex : "#6B7280"); doc.text(label, W - 200, y);
+    doc.setTextColor(bold ? accentHex : "#374151"); doc.text(val, W - M, y, { align: "right" });
+    y += bold ? 22 : 16;
+  };
+  if (totals.discountTotal > 0) { totRow("Subtotal", money(totals.grossSubtotal)); totRow("Total savings", "-" + money(totals.discountTotal)); }
+  totRow("Subtotal", money(totals.subtotal));
+  totRow(`Tax (${invoice.taxRate || 0}%)`, money(totals.tax));
+  doc.setDrawColor("#E5E7EB"); doc.line(W - 200, y - 6, W - M, y - 6); y += 4;
+  totRow("Total Due", money(totals.total), true);
+
+  if (cfg.showThankYou && cfg.thankYou) { ensure(26); doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.setTextColor(accentHex); doc.text(String(cfg.thankYou), M, y + 8); y += 26; }
+  if (invoice.notes) { ensure(30); doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor("#6B7280"); const nl = doc.splitTextToSize(String(invoice.notes), W - 2 * M); doc.text(nl, M, y + 8); y += nl.length * 12 + 12; }
+
+  // Footer
+  doc.setFont("helvetica", "normal"); doc.setFontSize(8); doc.setTextColor("#9CA3AF");
+  const footer = cfg.footer || [branding.companyName, branding.companyAddress].filter(Boolean).join("  ·  ");
+  if (footer) doc.text(String(footer), M, H - 30);
+
+  return doc;
+}
+
+// Export an invoice PDF via the native share sheet (AirPrint / Save to Files on iOS,
+// Print / Drive / share targets on Android); fall back to a direct download.
+// Returns "shared" | "cancelled" | "downloaded".
+async function exportInvoicePdf(args) {
+  const doc = await buildInvoicePdf(args);
+  const num = String(args.invoice.number || "invoice").replace(/[^\w.-]+/g, "-");
+  const filename = `invoice-${num}.pdf`;
+  const blob = doc.output("blob");
+  try {
+    const file = new File([blob], filename, { type: "application/pdf" });
+    if (typeof navigator !== "undefined" && navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: filename });
+      return "shared";
+    }
+  } catch (e) {
+    if (e && e.name === "AbortError") return "cancelled"; // user dismissed the sheet
+    // any other share error → fall through to download
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; a.rel = "noopener";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  return "downloaded";
 }
 
 function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose, onEdit, onDelete, canManage }) {
@@ -9644,24 +9720,27 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
   const clientEmail = (invoice.clientEmail || client?.email || "").trim();
   const [sendState, setSendState] = useState("idle"); // idle | sending | sent | error
   const [sendMsg, setSendMsg] = useState("");
+  const [printing, setPrinting] = useState(false);
 
-  // Print / Save-as-PDF: open a clean branded invoice in its own document and trigger
-  // the real print flow (works on mobile Safari). Surfaces a clear error if blocked.
-  const print = () => {
+  // Warm the jsPDF chunk so the share sheet opens within the user-gesture window.
+  useEffect(() => { loadJsPDF().catch(() => {}); }, []);
+
+  // Print / Export: generate a real PDF, then open the device's native share/print
+  // sheet (AirPrint / Save to Files on iOS, Print / Drive on Android); fall back to a
+  // direct download on desktop. Errors are surfaced, never silently swallowed.
+  const print = async () => {
+    if (printing) return;
+    setPrinting(true); setSendState("idle"); setSendMsg("");
     try {
-      const html = invoicePrintDoc({ invoice, client, totals, branding, cfg, eff, accent });
-      const w = window.open("", "_blank");
-      if (!w) {
-        setSendState("error");
-        setSendMsg("Couldn't open the print view — allow pop-ups for this site, then tap Print again.");
-        return;
+      const res = await exportInvoicePdf({ invoice, client, totals, branding, cfg, eff, accent });
+      if (res === "downloaded") {
+        setSendState("sent"); setSendMsg("Invoice PDF saved to your downloads.");
+        setTimeout(() => { setSendState("idle"); setSendMsg(""); }, 5000);
       }
-      w.document.open();
-      w.document.write(html);
-      w.document.close();
     } catch (e) {
-      setSendState("error");
-      setSendMsg("Couldn't print: " + (e.message || "unknown error"));
+      setSendState("error"); setSendMsg("Couldn't export the invoice PDF: " + (e.message || "unknown error"));
+    } finally {
+      setPrinting(false);
     }
   };
 
@@ -9749,7 +9828,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
             {invoice.status === "Draft" && <Btn variant="ghost" onClick={() => setStatus("Sent")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Mark Sent</Btn>}
             {eff === "Paid" && <Btn variant="ghost" onClick={() => setStatus("Sent")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Reopen</Btn>}
             <Btn variant="ghost" onClick={() => onEdit(invoice)} style={{ borderRadius: 12 }}>Edit</Btn>
-            <Btn variant="ghost" onClick={print} style={{ borderRadius: 12 }}>Print</Btn>
+            <Btn variant="ghost" onClick={print} disabled={printing} style={{ borderRadius: 12 }}>{printing ? "Preparing…" : "Print / Export PDF"}</Btn>
           </div>
         )}
       </div>
