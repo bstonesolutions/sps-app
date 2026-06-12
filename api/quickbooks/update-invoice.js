@@ -19,6 +19,9 @@ export default async function handler(req, res) {
     "Accept":        "application/json",
   };
   const webLink = (id) => `https://app.qbo.intuit.com/app/invoice?txnId=${id}`;
+  const todayISO = () => new Date().toISOString().slice(0, 10);
+  // QuickBooks "Object Not Found" / unmatched-invoice errors — recreate fresh instead of failing.
+  const isNotFound = (txt) => /object not found|"code"\s*:\s*"?610"?|could not be found|does not exist|not found/i.test(txt || "");
 
   try {
     // Step 1: read current invoice for SyncToken + CustomerRef
@@ -29,6 +32,10 @@ export default async function handler(req, res) {
     }
     if (!getRes.ok) {
       const err = await getRes.text();
+      // Invoice is gone or unmatched — recreate it fresh rather than failing.
+      if (isNotFound(err)) {
+        return res.status(200).json({ recreate: true });
+      }
       return res.status(500).json({ error: "Could not read invoice from QuickBooks.", details: err });
     }
     const got = await getRes.json();
@@ -64,7 +71,7 @@ export default async function handler(req, res) {
       sparse:       false,
       CustomerRef:  existing.CustomerRef,
       DocNumber:    invoice.number || existing.DocNumber,
-      TxnDate:      invoice.date || existing.TxnDate,
+      TxnDate:      invoice.date || existing.TxnDate || todayISO(),
       DueDate:      invoice.dueDate || existing.DueDate,
       Line:         lineItems,
       BillEmail:    invoice.clientEmail ? { Address: invoice.clientEmail } : existing.BillEmail,
@@ -81,6 +88,10 @@ export default async function handler(req, res) {
     if (!updRes.ok) {
       const err = await updRes.text();
       console.error("QB update invoice error:", err);
+      // If QB rejected because the invoice can't be found/matched, recreate it fresh.
+      if (updRes.status === 404 || isNotFound(err)) {
+        return res.status(200).json({ recreate: true });
+      }
       return res.status(500).json({ error: "QuickBooks rejected the update.", details: err });
     }
 

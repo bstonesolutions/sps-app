@@ -8290,7 +8290,8 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   // Build the QB payload from the current invoice
   const buildQbPayload = () => ({
     number: inv.number,
-    date: toISO(inv.date),
+    // QuickBooks rejects invoices with no TxnDate — default an empty issue date to today.
+    date: toISO(inv.date) || toISO(todayMDY()),
     dueDate: toISO(inv.dueDate),
     clientName: client?.name || "",
     clientEmail: client?.email || "",
@@ -9085,17 +9086,17 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
   const centered = cfg.headerStyle === "centered";
 
   const brandBlock = (light) => (
-    <div style={{ display: "flex", gap: 11, alignItems: centered ? "center" : "flex-start", flexDirection: centered ? "column" : "row", textAlign: centered ? "center" : "left", minWidth: 0, flex: centered ? "none" : 1 }}>
+    <div style={{ display: "flex", gap: 11, alignItems: centered ? "center" : "flex-start", justifyContent: centered ? "center" : "flex-start", flexDirection: centered ? "column" : "row", textAlign: centered ? "center" : "left", minWidth: 0, width: centered ? "100%" : "auto", flex: centered ? "none" : 1 }}>
       {cfg.showLogo !== false && (
         <div style={{ width: 40, height: 40, borderRadius: 11, background: light ? "rgba(255,255,255,0.22)" : hexA(accent, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
           {branding.logoType === "image" && branding.logoImage ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontSize: 21 }}>{branding.logoEmoji}</span>}
         </div>
       )}
-      <div style={{ minWidth: 0 }}>
+      <div style={{ minWidth: 0, flex: centered ? "none" : 1, width: "100%", textAlign: centered ? "center" : "left" }}>
         <div style={{ fontSize: 15, fontWeight: 800, color: light ? "#fff" : T.text, letterSpacing: "-0.02em", lineHeight: 1.2 }}>{branding.companyName}</div>
         <div style={{ fontSize: 11, color: light ? "rgba(255,255,255,0.82)" : T.textMuted, marginTop: 1 }}>{branding.division}</div>
-        {cfg.showContact !== false && contactBits.length > 0 && <div style={{ fontSize: 10.5, color: light ? "rgba(255,255,255,0.82)" : T.textMuted, marginTop: 5, lineHeight: 1.5, wordBreak: "break-word" }}>{contactBits.join("  ·  ")}</div>}
-        {cfg.showContact !== false && branding.companyAddress && <div style={{ fontSize: 10.5, color: light ? "rgba(255,255,255,0.82)" : T.textMuted, lineHeight: 1.5 }}>{branding.companyAddress}</div>}
+        {cfg.showContact !== false && contactBits.length > 0 && <div className="sps-contact" style={{ fontSize: 10.5, color: light ? "rgba(255,255,255,0.82)" : T.textMuted, marginTop: 5, lineHeight: 1.5 }}>{contactBits.join("  ·  ")}</div>}
+        {cfg.showContact !== false && branding.companyAddress && <div className="sps-contact" style={{ fontSize: 10.5, color: light ? "rgba(255,255,255,0.82)" : T.textMuted, lineHeight: 1.5 }}>{branding.companyAddress}</div>}
       </div>
     </div>
   );
@@ -9110,14 +9111,15 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
 
   return (
     <div className="sps-inv" style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: radius, overflow: "hidden", fontSize: `${scale}em` }}>
-      <style>{`.sps-inv a { color: inherit !important; text-decoration: none !important; }`}</style>
+      <style>{`.sps-inv a { color: inherit !important; text-decoration: none !important; -webkit-text-decoration: none !important; }
+        .sps-inv .sps-contact { overflow-wrap: normal; word-break: normal; -webkit-hyphens: none; hyphens: none; }`}</style>
       {cfg.headerStyle === "band" ? (
         <div style={{ background: accent, padding: `${pad}px`, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
           {brandBlock(true)}
           {headerRight(true)}
         </div>
       ) : centered ? (
-        <div style={{ padding: `${pad + 4}px ${pad}px`, borderBottom: `1px solid ${T.border}`, display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+        <div style={{ padding: `${pad + 4}px ${pad}px`, borderBottom: `1px solid ${T.border}`, display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", gap: 8 }}>
           {brandBlock(false)}
           {headerRight(false)}
         </div>
@@ -9729,13 +9731,14 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
 
   // ── QuickBooks sync from the Invoices tab ──
   const [qbSyncing, setQbSyncing] = useState(false);
+  const [qbSynced, setQbSynced]   = useState(false);
   const [qbSyncMsg, setQbSyncMsg] = useState("");
   const qbConnected = typeof window !== "undefined" && !!localStorage.getItem("qb_access_token");
   const syncQuickBooks = async () => {
     const access_token = localStorage.getItem("qb_access_token");
     const realm_id = localStorage.getItem("qb_realm_id");
     if (!access_token || !realm_id) { setQbSyncMsg("Connect QuickBooks under Customize first."); setTimeout(() => setQbSyncMsg(""), 4000); return; }
-    setQbSyncing(true); setQbSyncMsg("");
+    setQbSyncing(true); setQbSynced(false); setQbSyncMsg("");
 
     // Try a sync with the given token; on 401, refresh once and retry.
     const doSync = async (token) => {
@@ -9771,8 +9774,10 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       if (onSyncData && data.invoices) onSyncData(data.invoices, data.customers);
+      setQbSynced(true);
       setQbSyncMsg(`Synced ${data.invoices?.length || 0} invoices from QuickBooks.`);
-      setTimeout(() => setQbSyncMsg(""), 4000);
+      // Let the "done" confirmation linger before clearing.
+      setTimeout(() => { setQbSynced(false); setQbSyncMsg(""); }, 4500);
     } catch (err) {
       setQbSyncMsg("Sync failed: " + (err.message || "try again"));
       setTimeout(() => setQbSyncMsg(""), 5000);
@@ -9879,13 +9884,21 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <h2 style={{ margin: 0, fontSize: 26, fontWeight: 700, color: T.text, letterSpacing: "-0.03em" }}>Invoices</h2>
         <div style={{ display: "flex", gap: 8 }}>
-          {qbConnected && (
+          {qbConnected && (() => {
+            const QB_GREEN = "#2CA01C";
+            const active = qbSyncing || qbSynced;
+            return (
             <button onClick={syncQuickBooks} disabled={qbSyncing} title="Sync with QuickBooks"
-              style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 13px", borderRadius: 12, border: `1.5px solid ${T.border}`, background: T.surface, color: T.textMuted, fontWeight: 700, fontSize: 13, cursor: qbSyncing ? "default" : "pointer", fontFamily: "inherit" }}>
-              <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" style={{ animation: qbSyncing ? "spin 0.8s linear infinite" : "none" }}><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
-              Sync
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 13px", borderRadius: 12, border: `1.5px solid ${active ? hexA(QB_GREEN, 0.5) : T.border}`, background: active ? hexA(QB_GREEN, 0.12) : T.surface, color: active ? QB_GREEN : T.textMuted, fontWeight: 700, fontSize: 13, cursor: qbSyncing ? "default" : "pointer", fontFamily: "inherit", transition: "background 0.2s, color 0.2s, border-color 0.2s" }}>
+              {qbSynced ? (
+                <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2.6} strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+              ) : (
+                <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" style={{ animation: qbSyncing ? "spin 0.8s linear infinite" : "none" }}><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+              )}
+              {qbSyncing ? "Syncing" : qbSynced ? "Synced" : "Sync"}
             </button>
-          )}
+            );
+          })()}
           <button onClick={() => setShowFilters(f => !f)}
             style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 12, border: `1.5px solid ${activeFilterCount > 0 ? T.primary : T.border}`, background: activeFilterCount > 0 ? hexA(T.primary, 0.08) : T.surface, color: activeFilterCount > 0 ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
             <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M3 6h18M7 12h10M11 18h2"/></svg>
@@ -9896,7 +9909,10 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
       </div>
 
       {qbSyncMsg && (
-        <div style={{ marginBottom: 12, padding: "10px 14px", borderRadius: 12, background: hexA("#2CA01C", 0.08), border: `1px solid ${hexA("#2CA01C", 0.25)}`, fontSize: 13, fontWeight: 600, color: "#157a12" }}>{qbSyncMsg}</div>
+        <div style={{ marginBottom: 12, padding: "10px 14px", borderRadius: 12, background: hexA("#2CA01C", 0.08), border: `1px solid ${hexA("#2CA01C", 0.25)}`, fontSize: 13, fontWeight: 600, color: "#157a12", display: "flex", alignItems: "center", gap: 8 }}>
+          {qbSynced && <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={2.6} strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5"/></svg>}
+          {qbSyncMsg}
+        </div>
       )}
 
       {/* Summary tiles — tap to see Total Sales */}
