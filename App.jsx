@@ -3992,8 +3992,10 @@ function ClientPortal({ client, invoices, schedule, branding, email }) {
         await sendBrandedAuthEmail({ email: client.email.trim(), name: client.name, kind: "client", subject, body: bodyTpl, redirectTo: appUrl, company: branding.companyName });
         setInviteState("sent");
       } catch (e) {
-        // Resend not configured / failed — fall back to Supabase's built-in email.
-        await sendInviteViaSupabase();
+        // Only fall back to Supabase when the server isn't configured yet.
+        // Any other failure is surfaced so it isn't mistaken for a real send.
+        if (e && e.missingEnv) { await sendInviteViaSupabase(); }
+        else { setInviteState("error"); setInviteMsg("Resend send failed: " + (e.message || "unknown error")); }
       }
     } catch (e) {
       setInviteState("error");
@@ -7031,7 +7033,8 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
           </div>
 
           <div style={{ ...hint, background: hexA(T.primary, 0.06), borderRadius: 10, padding: "9px 11px" }}>
-            Note: these are saved with your settings now. Login emails are currently delivered through Supabase, so the wording here takes effect once custom email delivery is wired up.
+            These templates are delivered through Resend once <b>RESEND_API_KEY</b> and <b>SUPABASE_SERVICE_ROLE_KEY</b> are set in Vercel. To confirm the keys are detected, open
+            {" "}<b>/api/send-auth-email</b> in your browser — it shows <code>{`"resend": true`}</code> and <code>{`"supabaseServiceRole": true`}</code> when ready. If an invite still links to localhost, set the Supabase <b>Site URL</b> and <b>Redirect URLs</b> to {PROD_URL} in the Supabase dashboard.
           </div>
         </div>
       </Card>
@@ -8050,7 +8053,13 @@ function TeamManager({ team, setTeam, currentUserId, email, branding }) {
         await sendBrandedAuthEmail({ email: member.email.trim(), name: member.name, kind: "staff", subject, body: bodyTpl, redirectTo: PROD_URL, company: vars.company });
         markSent();
       } catch (e) {
-        await viaSupabase();
+        // Only fall back to Supabase when the server isn't configured yet.
+        // Any other failure is surfaced so it isn't mistaken for a real send.
+        if (e && e.missingEnv) { await viaSupabase(); }
+        else {
+          setInviteState(s => ({ ...s, [id]: "error" }));
+          setInviteMsg(s => ({ ...s, [id]: "Resend send failed: " + (e.message || "unknown error") }));
+        }
       }
     } catch (e) {
       setInviteState(s => ({ ...s, [id]: "error" }));

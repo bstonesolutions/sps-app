@@ -42,6 +42,20 @@ function buildHtml(body, link) {
 }
 
 export default async function handler(req, res) {
+  // Health check — GET (or ?check=1) reports whether the keys are detected,
+  // WITHOUT exposing any secret values. Visit /api/send-auth-email to confirm.
+  if (req.method === "GET" || (req.query && req.query.check)) {
+    return res.status(200).json({
+      ok: true,
+      endpoint: "send-auth-email",
+      configured: {
+        resend: !!process.env.RESEND_API_KEY,
+        supabaseServiceRole: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+      },
+      from: process.env.RESEND_FROM || "Stone Property Solutions <noreply@stonepropertysolutions.com>",
+      supabaseUrl: process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co",
+    });
+  }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   const { email, name, kind = "client", subject, body, redirectTo, company } = req.body || {};
