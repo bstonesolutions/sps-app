@@ -2281,8 +2281,8 @@ function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onI
   const doMarkActive   = () => { onBatchUpdate(selectedIds, { status: "Active" }); setModal(null); exitSelect(); };
 
   return (
-    <div style={{ display: "flex", justifyContent: "center", width: "100%" }}>
-    <div style={{ maxWidth: vp.isPhone ? "100%" : 820, width: "100%" }}>
+    <div style={{ width: "100%" }}>
+    <div style={{ maxWidth: 1040, margin: "0 auto", width: "100%", boxSizing: "border-box" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
         <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Clients</h2>
         {selectMode ? (
@@ -2411,7 +2411,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onI
         </div>
       )}
 
-      <div style={{ display: vp.isPhone ? "flex" : "grid", flexDirection: "column", gridTemplateColumns: vp.isDesktop ? "1fr 1fr" : vp.isTablet ? "1fr 1fr" : undefined, alignItems: vp.isPhone ? undefined : "start", gap: 12, width: "100%", paddingBottom: selectMode && selCount > 0 ? 90 : 0 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 300px), 1fr))", alignItems: "start", gap: 12, width: "100%", paddingBottom: selectMode && selCount > 0 ? 90 : 0 }}>
         {filtered.length === 0 && (
           <div style={{ gridColumn: "1 / -1", textAlign: "center", padding: "40px 20px", color: T.textMuted }}>
             <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="clients" size={26} /></div>
