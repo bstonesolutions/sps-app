@@ -16347,9 +16347,12 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
   const wide = vp.isTablet || vp.isDesktop;
 
   return (
-    <div style={{ fontFamily: fontStack, background: T.bg, minHeight: "100vh", display: "flex", flexDirection: "column", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em" }}>
+    <div style={{ fontFamily: fontStack, background: T.bg, display: "flex", flexDirection: "column", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ...(isStaffPreview ? { position: "relative", minHeight: "100%" } : { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, height: "100dvh", overflow: "hidden" }) }}>
       <style>{`
         * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+        ${isStaffPreview ? "" : `/* Lock the document so only <main> scrolls — prevents iOS overscroll drift of the header/nav. */
+        html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
+        #root { height: 100%; overflow: hidden; }`}
         input, select, textarea { -webkit-appearance: none; appearance: none; font-size: 16px !important; }
         input:focus, select:focus, textarea:focus { border-color: ${T.primary} !important; outline: none; box-shadow: 0 0 0 3px ${hexA(T.primary, 0.15)}; }
         button { transition: transform 0.08s ease, opacity 0.15s ease; }
@@ -16372,7 +16375,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
         backdropFilter: "saturate(200%) blur(28px)",
         WebkitBackdropFilter: "saturate(200%) blur(28px)",
         borderBottom: `1px solid ${T.border}`,
-        position: "sticky", top: 0, zIndex: 100,
+        position: "relative", zIndex: 100, flexShrink: 0,
       }}>
         {!isStaffPreview && <div style={{ height: "env(safe-area-inset-top)" }} />}
         <div style={{ height: 56, display: "flex", alignItems: "center", justifyContent: "space-between", paddingLeft: 16, paddingRight: 16 }}>
@@ -16405,8 +16408,8 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
         </div>
       </header>
 
-      {/* Main content */}
-      <main style={{ flex: 1, padding: "24px 18px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))", fontSize: `${textScale}em` }}>
+      {/* Main content — the only scrolling element (not in staff preview, which scrolls outside) */}
+      <main style={{ flex: 1, ...(isStaffPreview ? {} : { minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }), padding: "24px 18px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: 28, fontSize: `${textScale}em` }}>
         {settingsOpen && (
           <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
         )}
@@ -16418,9 +16421,9 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
         {!settingsOpen && page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
       </main>
 
-      {/* Bottom nav — 4 clean tabs */}
+      {/* Bottom nav — a non-scrolling flex child, frozen at the bottom */}
       <nav style={{
-        position: "fixed", bottom: 0, left: 0, right: 0,
+        position: "relative", flexShrink: 0,
         background: hexA(T.surface, 0.88),
         backdropFilter: "saturate(180%) blur(20px)",
         WebkitBackdropFilter: "saturate(180%) blur(20px)",
@@ -17295,13 +17298,19 @@ export default function App({ authEmail = "", onSignOut }) {
     <AppCtx.Provider value={{ T, branding, perms, tiers: serviceTiers || DEFAULT_TIERS }}>
       <div style={{
         fontFamily: fontStack,
-        background: T.bg, minHeight: "100dvh", display: "flex", flexDirection: "column", color: T.text,
+        // Pinned to the viewport so the header/nav can't drift on iOS overscroll.
+        background: T.bg, position: "fixed", top: 0, left: 0, right: 0, bottom: 0, height: "100dvh", overflow: "hidden",
+        display: "flex", flexDirection: "column", color: T.text,
         WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em",
         // CSS vars used by the global polish layer below
         ["--ring"]: hexA(T.primary, 0.22), ["--ringBorder"]: T.primary,
       }}>
         <style>{`
           *, *::before, *::after { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+          /* Lock the document so only the app's <main> scrolls — kills iOS rubber-band
+             drift of the fixed header/nav. Released when this shell unmounts (login etc.). */
+          html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
+          #root { height: 100%; overflow: hidden; }
           body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
           input, select, textarea {
             transition: border-color .15s ease, box-shadow .15s ease;
@@ -17329,8 +17338,8 @@ export default function App({ authEmail = "", onSignOut }) {
           img { -webkit-user-drag: none; }
         `}</style>
 
-        {/* Header — frosted, frozen in place */}
-        <header style={{ background: hexA(T.surface, 0.9), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, position: "fixed", top: 0, left: 0, right: 0, zIndex: 100, borderBottom: `1px solid ${T.border}` }}>
+        {/* Header — a non-scrolling flex child, frozen at the top */}
+        <header style={{ background: hexA(T.surface, 0.9), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, position: "relative", zIndex: 100, flexShrink: 0, borderBottom: `1px solid ${T.border}` }}>
           {/* Safe area spacer — grows to exactly the status bar height on any iPhone, zero on Android */}
           <div style={{ height: "env(safe-area-inset-top)", background: "transparent" }} />
           <div style={{ height: 56, display: "flex", alignItems: "center", justifyContent: "space-between", paddingLeft: 18, paddingRight: 18 }}>
@@ -17365,10 +17374,8 @@ export default function App({ authEmail = "", onSignOut }) {
 
 
 
-        {/* Sync indicator strip — fixed just under the header */}
-        {syncState !== "idle" && (
-          <div style={{ position: "fixed", top: "calc(env(safe-area-inset-top) + 56px)", left: 0, right: 0, height: 2, zIndex: 99, background: syncState === "syncing" ? T.primary : "#16a34a", transition: "background 0.3s", animation: syncState === "syncing" ? "syncPulse 0.8s ease-in-out" : "none" }} />
-        )}
+        {/* Sync indicator strip — a 2px flex child just under the header (no layout shift) */}
+        <div style={{ height: 2, flexShrink: 0, zIndex: 99, background: syncState === "syncing" ? T.primary : syncState === "saved" ? "#16a34a" : "transparent", transition: "background 0.3s", animation: syncState === "syncing" ? "syncPulse 0.8s ease-in-out" : "none" }} />
 
         {dbError && (
           <div style={{ background: hexA("#F59E0B", 0.1), borderBottom: `1px solid ${hexA("#F59E0B", 0.3)}`, padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: T.text }}>
@@ -17376,7 +17383,7 @@ export default function App({ authEmail = "", onSignOut }) {
             <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 10, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, display:"flex", alignItems:"center", gap:5 }}>Retry</button>
           </div>
         )}
-        <main style={{ flex: 1, alignSelf: "center", padding: vp.isPhone ? "22px 16px" : "28px 32px", paddingTop: `calc(env(safe-area-inset-top) + 56px + ${vp.isPhone ? "22px" : "28px"})`, maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
+        <main style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", alignSelf: "center", padding: vp.isPhone ? "22px 16px" : "28px 32px", maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: 28 }}>
           {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} scheduleCfg={scheduleCfg} reminderLog={reminderLog} vp={vp} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
           {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
@@ -17393,8 +17400,8 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "settings" && <AppSettings onNav={handleNav} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} />}
         </main>
 
-        {/* Bottom Nav — 4 customizable slots + a fixed Menu button */}
-        <nav style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: hexA(T.surface, 0.88), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", borderTop: `1px solid ${T.border}`, display: "flex", zIndex: 90, minHeight: 60, paddingTop: 4, paddingBottom: "calc(8px + env(safe-area-inset-bottom))" }}>
+        {/* Bottom Nav — a non-scrolling flex child, frozen at the bottom */}
+        <nav style={{ position: "relative", flexShrink: 0, background: hexA(T.surface, 0.88), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", borderTop: `1px solid ${T.border}`, display: "flex", zIndex: 90, minHeight: 60, paddingTop: 4, paddingBottom: "calc(8px + env(safe-area-inset-bottom))" }}>
           {dockIds.slice(0, 4).map(id => {
             const n = ALL_NAV.find(x => x.id === id);
             if (!n) return null;
