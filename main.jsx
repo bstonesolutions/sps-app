@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { supabase } from "./supabaseClient";
 import { PROD_URL } from "./config";
@@ -26,6 +26,16 @@ const AUTH_FLAGS = {
 
 function Login() {
   useEffect(() => { document.body.classList.add('auth-active'); return () => document.body.classList.remove('auth-active'); }, []);
+  // React's onTouchMove is passive, so its preventDefault is a no-op. Attach a
+  // non-passive native touchmove listener so the card truly can't be dragged.
+  const wrapRef = useRef(null);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const block = (e) => e.preventDefault();
+    el.addEventListener("touchmove", block, { passive: false });
+    return () => el.removeEventListener("touchmove", block);
+  }, []);
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
@@ -80,7 +90,7 @@ function Login() {
   const hasImg = brand && brand.type === "image" && brand.image;
 
   return (
-    <div style={{ ...wrap, position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+    <div ref={wrapRef} onTouchMove={(e) => e.preventDefault()} style={{ ...wrap, position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", touchAction: "none", overscrollBehavior: "none" }}>
       <div style={card}>
         <div style={{ display: "flex", justifyContent: "center", marginBottom: 8 }}>
           {hasImg
