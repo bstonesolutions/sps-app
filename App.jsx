@@ -6938,6 +6938,43 @@ function SkimmerImport({ onImport, onGoToClients }) {
 // ─────────────────────────────────────────────
 // EMAIL REPORT SETTINGS
 // ─────────────────────────────────────────────
+// Dedicated editor for the staff-invite and client magic-link emails (its own
+// Customize panel so it's easy to find, not buried inside other email settings).
+function InviteEmailSettings({ email, setEmail, branding }) {
+  const { T } = useApp();
+  const set = (k, v) => setEmail(e => ({ ...e, [k]: v }));
+  const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 };
+  const field = { width: "100%", padding: "10px 13px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const hint = { fontSize: 11, color: T.textMuted, marginTop: 6 };
+
+  return (
+    <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ fontSize: 12, color: T.textMuted, marginTop: -2 }}>
+        Customize the emails sent when you invite staff and when clients get their portal link. Tags: {"{company}"} = your company, {"{name}"} / {"{first}"} = recipient, {"{link}"} = the secure sign-in link.
+      </div>
+
+      {/* Staff invite */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: 14, borderBottom: `1px solid ${T.border}` }}>
+        <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>Staff Invite</div>
+        <div><label style={labelStyle}>Subject</label><input type="text" style={field} value={email.staffInviteSubject ?? ""} onChange={e => set("staffInviteSubject", e.target.value)} placeholder={DEFAULT_EMAIL.staffInviteSubject} /></div>
+        <div><label style={labelStyle}>Body</label><textarea style={{ ...field, resize: "vertical" }} rows={6} value={email.staffInviteBody ?? ""} onChange={e => set("staffInviteBody", e.target.value)} placeholder={DEFAULT_EMAIL.staffInviteBody} /></div>
+      </div>
+
+      {/* Client magic link */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>Client Magic Link</div>
+        <div><label style={labelStyle}>Subject</label><input type="text" style={field} value={email.clientMagicSubject ?? ""} onChange={e => set("clientMagicSubject", e.target.value)} placeholder={DEFAULT_EMAIL.clientMagicSubject} /></div>
+        <div><label style={labelStyle}>Body</label><textarea style={{ ...field, resize: "vertical" }} rows={6} value={email.clientMagicBody ?? ""} onChange={e => set("clientMagicBody", e.target.value)} placeholder={DEFAULT_EMAIL.clientMagicBody} /></div>
+      </div>
+
+      <div style={{ ...hint, background: hexA(T.primary, 0.06), borderRadius: 10, padding: "9px 11px" }}>
+        These templates are delivered through Resend once <b>RESEND_API_KEY</b> and <b>SUPABASE_SERVICE_ROLE_KEY</b> are set in Vercel. To confirm the keys are detected, open
+        {" "}<b>/api/send-auth-email</b> in your browser — it shows <code>{`"resend": true`}</code> and <code>{`"supabaseServiceRole": true`}</code> when ready. If an invite still links to localhost, set the Supabase <b>Site URL</b> and <b>Redirect URLs</b> to {PROD_URL} in the Supabase dashboard.
+      </div>
+    </div>
+  );
+}
+
 function EmailSettings({ email, setEmail, branding, setBranding }) {
   const { T } = useApp();
   const set = (k, v) => setEmail(e => ({ ...e, [k]: v }));
@@ -7006,35 +7043,6 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
                 <span style={{ fontSize: 13, color: T.text }}>{label}</span>
               </label>
             ))}
-          </div>
-        </div>
-      </Card>
-
-      {/* Invite & magic-link emails */}
-      <Card style={{ marginBottom: 14 }}>
-        <CardHeader title="Invite & Login Emails" />
-        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 16 }}>
-          <div style={{ fontSize: 12, color: T.textMuted, marginTop: -2 }}>
-            Customize the emails sent when you invite staff and when clients get their portal link. Tags: {"{company}"} = your company, {"{name}"} / {"{first}"} = recipient, {"{link}"} = the secure sign-in link.
-          </div>
-
-          {/* Staff invite */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: 14, borderBottom: `1px solid ${T.border}` }}>
-            <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>Staff Invite</div>
-            <div><label style={labelStyle}>Subject</label><input type="text" style={field} value={email.staffInviteSubject ?? ""} onChange={e => set("staffInviteSubject", e.target.value)} placeholder={DEFAULT_EMAIL.staffInviteSubject} /></div>
-            <div><label style={labelStyle}>Body</label><textarea style={{ ...field, resize: "vertical" }} rows={6} value={email.staffInviteBody ?? ""} onChange={e => set("staffInviteBody", e.target.value)} placeholder={DEFAULT_EMAIL.staffInviteBody} /></div>
-          </div>
-
-          {/* Client magic link */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>Client Magic Link</div>
-            <div><label style={labelStyle}>Subject</label><input type="text" style={field} value={email.clientMagicSubject ?? ""} onChange={e => set("clientMagicSubject", e.target.value)} placeholder={DEFAULT_EMAIL.clientMagicSubject} /></div>
-            <div><label style={labelStyle}>Body</label><textarea style={{ ...field, resize: "vertical" }} rows={6} value={email.clientMagicBody ?? ""} onChange={e => set("clientMagicBody", e.target.value)} placeholder={DEFAULT_EMAIL.clientMagicBody} /></div>
-          </div>
-
-          <div style={{ ...hint, background: hexA(T.primary, 0.06), borderRadius: 10, padding: "9px 11px" }}>
-            These templates are delivered through Resend once <b>RESEND_API_KEY</b> and <b>SUPABASE_SERVICE_ROLE_KEY</b> are set in Vercel. To confirm the keys are detected, open
-            {" "}<b>/api/send-auth-email</b> in your browser — it shows <code>{`"resend": true`}</code> and <code>{`"supabaseServiceRole": true`}</code> when ready. If an invite still links to localhost, set the Supabase <b>Site URL</b> and <b>Redirect URLs</b> to {PROD_URL} in the Supabase dashboard.
           </div>
         </div>
       </Card>
@@ -10929,6 +10937,11 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
           {(perms.editSettings || perms.canInvoice) && (
             <Collapsible title="Invoicing" subtitle="Invoice numbering, tax rate, payment terms, and QuickBooks link.">
               <InvoiceSettings invoicing={invoicing} setInvoicing={setInvoicing} branding={branding} setBranding={setBranding} onSyncData={onSyncData} />
+            </Collapsible>
+          )}
+          {(perms.editSettings || perms.canInvoice || perms.isAdmin) && (
+            <Collapsible title="Invite & Login Emails" subtitle="Customize the staff invite and client portal magic-link emails." defaultOpen>
+              <InviteEmailSettings email={email} setEmail={setEmail} branding={branding} />
             </Collapsible>
           )}
           {perms.editSettings && (
@@ -16958,12 +16971,12 @@ export default function App({ authEmail = "", onSignOut }) {
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             {/* Sync button */}
             <button onClick={manualSync} title="Sync"
-              style={{ background: T.surfaceAlt, border: "none", color: syncState === "saved" ? "#16a34a" : T.textMuted, cursor: "pointer", width: 36, height: 36, borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", transition: "color 0.3s" }}>
+              style={{ background: hexA(T.primary, 0.1), border: "none", color: syncState === "saved" ? "#16a34a" : T.primary, cursor: "pointer", width: 36, height: 36, borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", transition: "color 0.3s" }}>
               <Icon name="refresh" size={16} style={{ animation: syncState === "syncing" ? "spin 0.7s linear infinite" : "none" }} />
             </button>
             {/* Menu button */}
             <button onClick={() => setMenuOpen(true)}
-              style={{ background: menuOpen ? hexA(T.primary, 0.12) : T.surfaceAlt, border: "none", color: menuOpen ? T.primary : T.textMuted, cursor: "pointer", width: 36, height: 36, borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
+              style={{ background: hexA(T.primary, 0.12), border: "none", color: T.primary, cursor: "pointer", width: 36, height: 36, borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
               <Icon name="sliders" size={18} />
               {navUnread > 0 && !dockIds.includes("messages") && (
                 <span style={{ position: "absolute", top: 6, right: 6, width: 7, height: 7, borderRadius: "50%", background: T.primary, border: `1.5px solid ${T.surface}` }} />
