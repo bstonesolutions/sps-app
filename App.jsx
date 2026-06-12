@@ -10873,39 +10873,29 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
             </button>
           );
         })}
-        {/* None tab */}
+        {/* None tab — a fully editable base tier */}
         {(() => {
+          const noneTier = divTierData["__none__"] || NONE_TIER_DEFAULT;
           const noneCount = (clients || []).filter(c => {
             const p = (c.plans && c.plans[activeDivision]) || (c.division === activeDivision ? c.plan : null);
             return !p;
           }).length;
           const active = selected === "__none__";
+          const col = noneTier.color || T.textMuted;
           return (
-            <button onClick={() => setSelected("__none__")}
-              style={{ flex: 1, padding: "12px 8px", border: `2px solid ${active ? T.textMuted : T.border}`, borderRadius: 16, background: active ? hexA(T.textMuted, 0.06) : T.surface, cursor: "pointer", fontFamily: "inherit", textAlign: "center", transition: "all 0.15s" }}>
-              <div style={{ width: 10, height: 10, borderRadius: "50%", background: T.border, margin: "0 auto 6px" }} />
-              <div style={{ fontSize: 13, fontWeight: 800, color: active ? T.text : T.textMuted }}>None</div>
+            <button onClick={() => switchTier("__none__")}
+              style={{ flex: 1, padding: "12px 8px", border: `2px solid ${active ? col : T.border}`, borderRadius: 16, background: active ? hexA(col, 0.08) : T.surface, cursor: "pointer", fontFamily: "inherit", textAlign: "center", transition: "all 0.15s" }}>
+              <div style={{ width: 10, height: 10, borderRadius: "50%", background: col, margin: "0 auto 6px" }} />
+              <div style={{ fontSize: 13, fontWeight: 800, color: active ? col : T.textMuted }}>{noneTierLabel(noneTier)}</div>
               <div style={{ fontSize: 10, color: T.textMuted, marginTop: 2 }}>{noneCount} client{noneCount !== 1 ? "s" : ""}</div>
             </button>
           );
         })()}
       </div>
 
-      {/* None tab — just shows the client list below, no tier editor */}
-      {selected === "__none__" && (
-        <Card>
-          <CardHeader title="No Tier" />
-          <div style={{ padding: "14px 18px" }}>
-            <p style={{ margin: 0, fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>
-              Clients listed here are not assigned to any service tier. Use the bulk pricing section below to assign them to a tier, or set their rate to $0 to keep them here.
-            </p>
-          </div>
-        </Card>
-      )}
-
-      {/* Tier details editor — hidden when None tab is active */}
-      {selected !== "__none__" && <Card>
-        <CardHeader title={`${selected} Tier Settings`}
+      {/* Tier details editor — shown for every tier, including the editable None tier */}
+      {<Card>
+        <CardHeader title={`${selected === "__none__" ? noneTierLabel(draft) : selected} Tier Settings`}
           action={
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               {unsaved && <span style={{ fontSize: 12, color: T.textMuted }}>Unsaved changes</span>}
@@ -10917,12 +10907,20 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
               )}
               <button onClick={saveTierDraft}
                 style={{ background: unsaved ? T.primary : T.surfaceAlt, color: unsaved ? "#fff" : T.textMuted, border: "none", borderRadius: 10, padding: "7px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", transition: "all 0.2s", boxShadow: unsaved ? `0 2px 8px ${hexA(T.primary, 0.3)}` : "none" }}>
-                Save {selected}
+                Save {selected === "__none__" ? noneTierLabel(draft) : selected}
               </button>
             </div>
           }
         />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 16 }}>
+
+          {selected === "__none__" && (
+            <div>
+              <label style={lbl}>Tier Name</label>
+              <input type="text" style={field} value={tier.name || ""} onChange={e => setDraftField("name", e.target.value)} placeholder="None" />
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4 }}>Give this base tier a name (shown instead of "None").</div>
+            </div>
+          )}
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <div>
@@ -10948,14 +10946,21 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
 
           <div>
             <label style={lbl}>Upgrades To</label>
-            <div style={{ display: "flex", gap: 8 }}>
-              {["Signature", "Premium", "none"].map(opt => (
-                <button key={opt} onClick={() => setDraftField("upgradeTo", opt === "none" ? null : opt)}
-                  style={{ flex: 1, padding: "9px", border: `1.5px solid ${(tier.upgradeTo === opt || (opt === "none" && !tier.upgradeTo)) ? T.primary : T.border}`, borderRadius: 10, background: (tier.upgradeTo === opt || (opt === "none" && !tier.upgradeTo)) ? hexA(T.primary, 0.08) : T.surface, color: (tier.upgradeTo === opt || (opt === "none" && !tier.upgradeTo)) ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-                  {opt === "none" ? "None (top tier)" : opt}
-                </button>
-              ))}
+            <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 8 }}>Pick any tiers this one can upgrade to. Toggle independently; leave all off for no upgrades.</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {TIER_KEYS.filter(k => k !== selected).map(opt => {
+                const list = upgradeList(tier);
+                const on = list.includes(opt);
+                return (
+                  <button key={opt} onClick={() => setDraftField("upgradeTo", on ? list.filter(x => x !== opt) : [...list, opt])}
+                    style={{ flex: "1 1 30%", minWidth: 90, padding: "9px", border: `1.5px solid ${on ? T.primary : T.border}`, borderRadius: 10, background: on ? hexA(T.primary, 0.08) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                    {on ? "✓ " : ""}{opt}
+                  </button>
+                );
+              })}
+              {TIER_KEYS.filter(k => k !== selected).length === 0 && <div style={{ fontSize: 12, color: T.textMuted }}>No other tiers to upgrade to.</div>}
             </div>
+            {upgradeList(tier).length === 0 && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>No upgrades offered.</div>}
           </div>
 
           {/* What's included */}
@@ -14723,7 +14728,7 @@ const TIER_FREQ = {
 // Per-division tier defaults — each division has its own plan set
 const makeDivisionTiers = (div) => ({
   "Essential": {
-    color: "#6B7280", price: "", upgradeTo: "Signature",
+    color: "#6B7280", price: "", upgradeTo: ["Signature"],
     tagline: div === "Pond" ? "Reliable pond care" : div === "Pool" ? "Basic pool service" : "Core seasonal service",
     includes: div === "Pond"
       ? ["Monthly service visits","Basic water quality checks","Filter maintenance","Seasonal adjustments"]
@@ -14732,7 +14737,7 @@ const makeDivisionTiers = (div) => ({
       : ["One seasonal service","Debris removal","Basic cleanup"],
   },
   "Signature": {
-    color: "#B81D24", price: "", upgradeTo: "Premium",
+    color: "#B81D24", price: "", upgradeTo: ["Premium"],
     tagline: div === "Pond" ? "Our most popular plan" : div === "Pool" ? "Complete pool care" : "Full seasonal package",
     includes: div === "Pond"
       ? ["Bi-weekly service visits","Full water chemistry testing","Filter + skimmer cleaning","Algae & debris treatment","Priority scheduling","Photo documentation each visit"]
@@ -14741,13 +14746,19 @@ const makeDivisionTiers = (div) => ({
       : ["Multiple seasonal visits","Full property cleanup","Gutter cleaning","Priority scheduling"],
   },
   "Premium": {
-    color: "#AF011A", price: "", upgradeTo: null,
+    color: "#AF011A", price: "", upgradeTo: [],
     tagline: div === "Pond" ? "White-glove pond care" : div === "Pool" ? "Premium pool service" : "White-glove property care",
     includes: div === "Pond"
       ? ["Weekly service visits","Comprehensive water testing","Equipment health monitoring","Same-day emergency response","Seasonal startup & closing","Annual equipment inspection","Dedicated technician"]
       : div === "Pool"
       ? ["Weekly service","Comprehensive water testing","Equipment monitoring","Same-day emergency response","Opening & closing service","Dedicated technician"]
       : ["Unlimited seasonal visits","Full property maintenance","Snow removal included","Same-day emergency response","Dedicated crew"],
+  },
+  // The base "None" tier — fully editable like the others; clients with no plan map here.
+  "__none__": {
+    name: "", color: "#9CA3AF", price: "", upgradeTo: ["Essential", "Signature", "Premium"],
+    tagline: "Get started with a service plan",
+    includes: [],
   },
 });
 
@@ -14786,6 +14797,19 @@ const getTierNames = (tiers, div) => {
   const globalNames = t._meta?.tierNames || DEFAULT_TIERS._meta.tierNames;
   return divData._tierNames || globalNames;
 };
+
+// upgradeTo may be a legacy single string, null, or the new array — always
+// return an array of tier keys (backward-compatible migration on read).
+const upgradeList = (tier) => {
+  const u = tier && tier.upgradeTo;
+  if (Array.isArray(u)) return u;
+  if (typeof u === "string" && u) return [u];
+  return [];
+};
+// Default for the editable base "None" tier when stored data predates it.
+const NONE_TIER_DEFAULT = { name: "", color: "#9CA3AF", price: "", upgradeTo: [], tagline: "Get started with a service plan", includes: [] };
+// Display label for the None tier (its custom name, or "None").
+const noneTierLabel = (tier) => (tier && tier.name && tier.name.trim()) || "None";
 
 function clientNextVisit(schedule, clientId, clientName) {
   const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -15240,7 +15264,8 @@ function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T }) 
   const tierColor = tier?.color || T.primary;
   const TIER_ORDER = ["Essential", "Signature", "Premium"];
   const currentIdx = TIER_ORDER.indexOf(plan);
-  const upgradeOptions = plan ? TIER_ORDER.slice(currentIdx + 1).filter(p => divTierSet[p]) : [];
+  // Upgrade targets come from the tier's configured upgradeTo list (None tier's list when untiered).
+  const upgradeOptions = upgradeList(divTierSet[plan] || divTierSet["__none__"] || {}).filter(p => p !== plan && divTierSet[p]);
   const upgradePlan = upgradeOptions[0] || null;
   const upgradeTier = upgradePlan ? divTierSet[upgradePlan] : null;
   const pondLbl = pondLabel(client);
@@ -15535,7 +15560,8 @@ function CPService({ client, branding, onNav, onUpgradeRequest, T }) {
   // All tiers strictly above current — no downgrades
   const TIER_ORDER = ["Essential", "Signature", "Premium"];
   const currentIdx = TIER_ORDER.indexOf(plan);
-  const upgradeOptions = TIER_ORDER.slice(currentIdx + 1).filter(p => divTierSet[p]);
+  // Upgrade targets come from the tier's configured upgradeTo list (None tier's list when untiered).
+  const upgradeOptions = upgradeList(divTierSet[plan] || divTierSet["__none__"] || {}).filter(p => p !== plan && divTierSet[p]);
   const upgradePlan = upgradeOptions[0] || null;
   const upgradeTier = upgradePlan ? divTierSet[upgradePlan] : null;
 
