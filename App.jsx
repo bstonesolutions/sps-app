@@ -2280,13 +2280,14 @@ function Checkbox({ checked, onChange, accent }) {
 function Modal({ title, children, onClose }) {
   const { T } = useApp();
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", backdropFilter: "blur(4px)", WebkitBackdropFilter: "blur(4px)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={onClose}>
+    // Solid dimmed backdrop fully covers the content behind; stays put on content/keyboard changes.
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: "max(16px, env(safe-area-inset-top)) 14px max(16px, env(safe-area-inset-bottom))", overscrollBehavior: "contain" }}>
       <div onClick={e => e.stopPropagation()}
-        style={{ background: T.surface, borderRadius: "26px 26px 0 0", width: "100%", maxWidth: 600, maxHeight: "92vh", overflowY: "auto", padding: "14px 22px 34px", boxShadow: T.shadowLg, border: `1px solid ${T.border}`, borderBottom: "none", animation: "spsModalUp 0.28s cubic-bezier(0.16, 1, 0.3, 1)" }}>
-        <div style={{ width: 38, height: 5, background: T.border, borderRadius: 100, margin: "0 auto 18px" }} />
+        // dvh + internal scroll keeps it stationary when content grows or the keyboard opens.
+        style={{ background: T.surface, borderRadius: 24, width: "100%", maxWidth: 600, maxHeight: "90dvh", overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", padding: "20px 22px 24px", boxShadow: T.shadowLg, border: `1px solid ${T.border}`, animation: "spsModalIn 0.22s cubic-bezier(0.16, 1, 0.3, 1)" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
           <div style={{ fontWeight: 700, fontSize: 20, color: T.text, letterSpacing: "-0.02em" }}>{title}</div>
-          <button onClick={onClose} style={{ background: T.surfaceAlt, border: "none", borderRadius: "50%", width: 30, height: 30, cursor: "pointer", color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="close" size={14} /></button>
+          <button onClick={onClose} style={{ background: T.surfaceAlt, border: "none", borderRadius: "50%", width: 30, height: 30, cursor: "pointer", color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="close" size={14} /></button>
         </div>
         {children}
       </div>
@@ -9574,6 +9575,60 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
   );
 }
 
+// Build a clean, self-contained, branded HTML document of an invoice for printing.
+function invoicePrintDoc({ invoice, client, totals, branding, cfg, eff, accent }) {
+  const money = (n) => "$" + (Number(n) || 0).toFixed(2);
+  const esc = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const nn = (v) => parseFloat(v) || 0;
+  const contact = [branding.companyPhone, branding.companyEmail, branding.companyWebsite, branding.companyAddress].filter(Boolean).map(esc).join(" &nbsp;&middot;&nbsp; ");
+  const rows = (invoice.lineItems || []).map((l) => {
+    const gross = nn(l.qty) * nn(l.unitPrice);
+    let disc = 0; if (l.discountType === "pct") disc = gross * (nn(l.discount) / 100); else if (l.discountType === "amt") disc = nn(l.discount);
+    const net = Math.max(0, gross - disc);
+    return `<tr><td class="d"><div class="nm">${esc(l.desc || "—")}${l.taxable ? ' <span class="tx">*</span>' : ""}</div>${cfg.showQtyPrice !== false ? `<div class="sub">${esc(l.qty)} &times; ${money(l.unitPrice)}</div>` : ""}${l.bundleNote ? `<div class="sub i">Includes: ${esc(l.bundleNote)}</div>` : ""}</td><td class="amt">${money(net)}</td></tr>`;
+  }).join("");
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(invoice.number || "Invoice")}</title>
+<style>
+  * { box-sizing:border-box; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; color:#111827; background:#fff; }
+  .wrap { max-width:680px; margin:0 auto; padding:24px; }
+  .band { background:${accent}; color:#fff; border-radius:14px; padding:20px 22px; display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+  .co { font-size:18px; font-weight:800; } .dv { font-size:12px; opacity:.85; margin-top:2px; } .contact { font-size:10.5px; opacity:.85; margin-top:6px; line-height:1.5; }
+  .invh { font-size:18px; font-weight:800; letter-spacing:.04em; text-align:right; } .invn { font-size:12px; opacity:.9; margin-top:2px; text-align:right; }
+  .meta { display:flex; justify-content:space-between; gap:12px; padding:16px 4px; border-bottom:1px solid #eef0f2; }
+  .lbl { font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:#9ca3af; } .v { font-weight:600; }
+  table { width:100%; border-collapse:collapse; margin-top:4px; }
+  td.d { padding:10px 0; border-bottom:1px solid #eef0f2; vertical-align:top; } td.amt { padding:10px 0; border-bottom:1px solid #eef0f2; text-align:right; font-weight:700; white-space:nowrap; vertical-align:top; }
+  .nm { font-size:14px; } .sub { font-size:12px; color:#6b7280; } .sub.i { font-style:italic; } .tx { color:#9ca3af; }
+  .tot { width:100%; margin-top:12px; } .tot td { padding:3px 0; font-size:13px; color:#6b7280; } .tot td.r { text-align:right; color:#374151; }
+  .grand td { font-size:18px; font-weight:800; color:${accent}; border-top:2px solid #e5e7eb; padding-top:8px; }
+  .note { font-size:12px; color:#6b7280; margin-top:16px; line-height:1.5; } .thanks { font-size:15px; font-weight:700; color:${accent}; margin-top:16px; }
+  @media print { body, .wrap { padding:0; } }
+</style></head>
+<body onload="setTimeout(function(){window.focus();window.print();},300)">
+  <div class="wrap">
+    <div class="band">
+      <div><div class="co">${esc(branding.companyName || "")}</div>${branding.division ? `<div class="dv">${esc(branding.division)}</div>` : ""}${contact ? `<div class="contact">${contact}</div>` : ""}</div>
+      <div><div class="invh">${esc(cfg.labelInvoice || "INVOICE")}</div><div class="invn">${esc(invoice.number || "")}</div></div>
+    </div>
+    <div class="meta">
+      <div><div class="lbl">Bill To</div><div class="v">${esc(invoice.clientName || client?.name || "")}</div>${(invoice.clientAddress || client?.address) ? `<div class="sub">${esc(invoice.clientAddress || client?.address)}</div>` : ""}${(invoice.clientEmail || client?.email) ? `<div class="sub">${esc(invoice.clientEmail || client?.email)}</div>` : ""}</div>
+      <div style="text-align:right"><div class="sub">Issued: <span class="v">${esc(invoice.date || "")}</span></div><div class="sub">Due: <span class="v">${esc(invoice.dueDate || "")}</span></div><div class="sub">Status: <span class="v">${esc(eff)}</span></div></div>
+    </div>
+    <table>${rows || '<tr><td class="d sub">No line items.</td><td></td></tr>'}</table>
+    <table class="tot">
+      ${totals.discountTotal > 0 ? `<tr><td>Subtotal</td><td class="r">${money(totals.grossSubtotal)}</td></tr><tr><td>Total savings</td><td class="r">&minus;${money(totals.discountTotal)}</td></tr>` : ""}
+      <tr><td>Subtotal</td><td class="r">${money(totals.subtotal)}</td></tr>
+      <tr><td>Tax (${esc(invoice.taxRate || 0)}%)</td><td class="r">${money(totals.tax)}</td></tr>
+      <tr class="grand"><td>Total Due</td><td class="r">${money(totals.total)}</td></tr>
+    </table>
+    ${(cfg.showThankYou && cfg.thankYou) ? `<div class="thanks">${esc(cfg.thankYou)}</div>` : ""}
+    ${invoice.notes ? `<div class="note">${esc(invoice.notes)}</div>` : ""}
+    ${cfg.footer ? `<div class="note">${esc(cfg.footer)}</div>` : ""}
+  </div>
+</body></html>`;
+}
+
 function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose, onEdit, onDelete, canManage }) {
   const { T } = useApp();
   const money = (n) => `$${(n || 0).toFixed(2)}`;
@@ -9581,7 +9636,6 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
   const eff = effectiveStatus(invoice);
   const anyTaxable = (invoice.lineItems || []).some(l => l.taxable);
   const setStatus = (status) => { const upd = { ...invoice, status }; if (status === "Paid") upd.paidDate = todayMDY(); onSave(upd); };
-  const print = () => { try { window.print(); } catch (e) {} };
   const cfg = { ...DEFAULT_INVOICING, ...(invoicing || {}) };
   const accent = cfg.accent || T.primary;
   const contactBits = [branding.companyPhone, branding.companyEmail, branding.companyWebsite].filter(Boolean);
@@ -9590,6 +9644,27 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
   const clientEmail = (invoice.clientEmail || client?.email || "").trim();
   const [sendState, setSendState] = useState("idle"); // idle | sending | sent | error
   const [sendMsg, setSendMsg] = useState("");
+
+  // Print / Save-as-PDF: open a clean branded invoice in its own document and trigger
+  // the real print flow (works on mobile Safari). Surfaces a clear error if blocked.
+  const print = () => {
+    try {
+      const html = invoicePrintDoc({ invoice, client, totals, branding, cfg, eff, accent });
+      const w = window.open("", "_blank");
+      if (!w) {
+        setSendState("error");
+        setSendMsg("Couldn't open the print view — allow pop-ups for this site, then tap Print again.");
+        return;
+      }
+      w.document.open();
+      w.document.write(html);
+      w.document.close();
+    } catch (e) {
+      setSendState("error");
+      setSendMsg("Couldn't print: " + (e.message || "unknown error"));
+    }
+  };
+
   const sendToClient = async () => {
     if (!clientEmail || sendState === "sending") return;
     setSendState("sending"); setSendMsg("");
