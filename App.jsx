@@ -228,6 +228,88 @@ function useStoredState(key, initial) {
   }, [key, value, loaded]);
   return [value, setValue, loaded];
 }
+// Debounced auto-save for a Customize section. Edits update a local draft
+// immediately (responsive UI) and commit to the real setter ~500ms after the
+// last change — so the existing storage mechanism saves once, not per keystroke.
+// Keeps a per-section "undo" baseline (the state before the current edit burst)
+// and a brief "saved" flag. Does not touch useStoredState / the storage layer.
+function useSectionAutosave(value, setValue, delay = 500) {
+  const [draft, setDraft] = useState(value);
+  const [dirty, setDirty] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const committedRef = useRef(value);   // last value we committed / the live value
+  const baselineRef = useRef(value);    // value before the current edit burst (for undo)
+  const timer = useRef(null);
+  const savedTimer = useRef(null);
+  const selfCommit = useRef(false);
+  const pendingRef = useRef(undefined); // value waiting on the debounce, for flush-on-unmount
+
+  // Adopt external changes (hydration / cross-device sync) only when settled,
+  // and ignore the value change caused by our own commit.
+  useEffect(() => {
+    if (selfCommit.current) { selfCommit.current = false; committedRef.current = value; return; }
+    committedRef.current = value;
+    if (timer.current == null && !dirty) { baselineRef.current = value; setDraft(value); }
+  }, [value]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const commit = (next) => {
+    selfCommit.current = true;
+    committedRef.current = next;
+    pendingRef.current = undefined;
+    setValue(next);
+    timer.current = null;
+    setSaved(true);
+    clearTimeout(savedTimer.current);
+    savedTimer.current = setTimeout(() => setSaved(false), 1800);
+  };
+
+  const update = (updater) => {
+    if (timer.current == null) baselineRef.current = committedRef.current; // start of a new burst
+    setDirty(true);
+    setDraft(prev => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      pendingRef.current = next;
+      clearTimeout(timer.current);
+      timer.current = setTimeout(() => commit(next), delay);
+      return next;
+    });
+  };
+  const set = (k, v) => update(prev => ({ ...(prev || {}), [k]: v }));
+
+  const undo = () => {
+    clearTimeout(timer.current);
+    timer.current = null;
+    setDirty(false);
+    setDraft(baselineRef.current);
+    commit(baselineRef.current);
+  };
+
+  // On unmount (e.g. leaving Customize), flush any pending edit so it isn't lost.
+  useEffect(() => () => {
+    clearTimeout(savedTimer.current);
+    if (timer.current != null && pendingRef.current !== undefined) setValue(pendingRef.current);
+    clearTimeout(timer.current);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return { draft, update, set, saved, dirty, undo };
+}
+
+// Subtle per-section "Saved" indicator + "Undo changes" control.
+function SaveBar({ ctl, T }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, minHeight: 20, marginBottom: 8 }}>
+      {ctl.saved && (
+        <span style={{ fontSize: 12, fontWeight: 700, color: "#16a34a", display: "flex", alignItems: "center", gap: 4 }}>
+          <svg viewBox="0 0 24 24" width={13} height={13} fill="none" stroke="currentColor" strokeWidth={2.6} strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5"/></svg> Saved
+        </span>
+      )}
+      {ctl.dirty && (
+        <button onClick={ctl.undo} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>Undo changes</button>
+      )}
+    </div>
+  );
+}
+
 // ─────────────────────────────────────────────
 // AUTOCOMPLETE INPUT
 // Remembers previously entered values and shows
@@ -11098,13 +11180,19 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
   const { T, perms } = useApp();
   const fileRef = useRef();
   const [tab, setTab] = useState("branding");
-  const [localBranding, setLocalBranding] = useState({ ...branding });
+  // Debounced auto-save controllers — one per Customize settings slice.
+  const brandCtl = useSectionAutosave(branding, setBranding);
+  const emailCtl = useSectionAutosave(email, setEmail);
+  const invCtl   = useSectionAutosave(invoicing, setInvoicing);
+  const costCtl  = useSectionAutosave(costs, setCosts);
+  const schedCtl = useSectionAutosave(scheduleCfg, setScheduleCfg);
+  const localBranding = brandCtl.draft;
   const [confirmReset, setConfirmReset] = useState(false);
   const [palette, setPalette, lpal] = useStoredState("sps_palette", DEFAULT_PALETTE);
   const [editingPalette, setEditingPalette] = useState(false);
   const [newPaletteHex, setNewPaletteHex] = useState("#000000");
   const [newPaletteName, setNewPaletteName] = useState("");
-  const set = (k, v) => setLocalBranding(b => ({ ...b, [k]: v }));
+  const set = brandCtl.set;
 
   const sysDark = useSystemDark();
   const localMode = localBranding.appearance === "system" ? (sysDark ? "dark" : "light") : (localBranding.appearance || "light");
@@ -11121,8 +11209,6 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
     reader.readAsDataURL(file);
   };
 
-  const handleSave = () => setBranding(localBranding);
-
   const tabs = [];
   if (perms.editSettings) tabs.push(["branding", "Branding"]);
   if (perms.editCatalog || perms.editSettings || perms.isAdmin) tabs.push(["services", "Services"]);
@@ -11135,7 +11221,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <h2 style={{ margin: 0, fontSize: 26, fontWeight: 700, color: T.text, letterSpacing: "-0.03em" }}>Customize</h2>
-        {activeTab === "branding" && <Btn onClick={handleSave}>Apply</Btn>}
+        {activeTab === "branding" && <SaveBar ctl={brandCtl} T={T} />}
       </div>
 
       {tabs.length === 0 ? (
@@ -11172,7 +11258,8 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             </Collapsible>
           )}
           <Collapsible title="Schedule Settings" subtitle="Sort order, stop density, and what appears on each stop card.">
-            <ScheduleSettings cfg={scheduleCfg} setCfg={setScheduleCfg} />
+            <SaveBar ctl={schedCtl} T={T} />
+            <ScheduleSettings cfg={schedCtl.draft} setCfg={schedCtl.update} />
           </Collapsible>
         </div>
       )}
@@ -11180,22 +11267,26 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
         <div key="business-tab">
           {(perms.editSettings || perms.canInvoice) && (
             <Collapsible title="Invoicing" subtitle="Invoice numbering, tax rate, payment terms, and QuickBooks link.">
-              <InvoiceSettings invoicing={invoicing} setInvoicing={setInvoicing} branding={branding} setBranding={setBranding} onSyncData={onSyncData} />
+              <SaveBar ctl={invCtl} T={T} />
+              <InvoiceSettings invoicing={invCtl.draft} setInvoicing={invCtl.update} branding={brandCtl.draft} setBranding={brandCtl.update} onSyncData={onSyncData} />
             </Collapsible>
           )}
           {(perms.editSettings || perms.canInvoice || perms.isAdmin) && (
             <Collapsible title="Invite & Login Emails" subtitle="Customize the staff invite and client portal magic-link emails." defaultOpen>
-              <InviteEmailSettings email={email} setEmail={setEmail} branding={branding} />
+              <SaveBar ctl={emailCtl} T={T} />
+              <InviteEmailSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} />
             </Collapsible>
           )}
           {perms.editSettings && (
             <Collapsible title="Messaging & Notifications" subtitle="On My Way texts, email templates, and client notification messages.">
-              <EmailSettings email={email} setEmail={setEmail} branding={branding} setBranding={setBranding} />
+              <SaveBar ctl={emailCtl} T={T} />
+              <EmailSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} setBranding={brandCtl.update} />
             </Collapsible>
           )}
           {perms.seeCostsBudget && (
             <Collapsible title="Costs & Labor" subtitle="Hourly rate, overhead, gas, and per-stop cost assumptions.">
-              <CostSettings costs={costs} setCosts={setCosts} clients={clients} />
+              <SaveBar ctl={costCtl} T={T} />
+              <CostSettings costs={costCtl.draft} setCosts={costCtl.update} clients={clients} />
             </Collapsible>
           )}
           {perms.seeCostsBudget && (
@@ -11639,7 +11730,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
       {/* ── CUSTOM THEME EDITOR ── */}
       {localBranding.themeKey === "custom" && (() => {
         const cust = { ...DEFAULT_CUSTOM, ...(localBranding.custom || {}) };
-        const setCustom = (k, v) => setLocalBranding(b => ({ ...b, custom: { ...DEFAULT_CUSTOM, ...(b.custom || {}), [k]: v } }));
+        const setCustom = (k, v) => brandCtl.update(b => ({ ...b, custom: { ...DEFAULT_CUSTOM, ...(b.custom || {}), [k]: v } }));
         const preview = buildCustomTheme(cust, localMode);
         const savedPalette = palette || DEFAULT_PALETTE;
 
