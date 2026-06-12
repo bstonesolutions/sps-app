@@ -925,7 +925,11 @@ class SectionErrorBoundary extends Component {
     return this.props.children;
   }
 }
-const useApp = () => useContext(AppCtx);
+// Null-safe: the client portal renders OUTSIDE the AppCtx provider, so the raw
+// context value is null there. Returning {} lets components safely destructure
+// (e.g. `const { tiers } = useApp()`) and fall back to their own defaults instead
+// of crashing the whole portal to a blank/red screen.
+const useApp = () => useContext(AppCtx) || {};
 
 // ─────────────────────────────────────────────
 // DEMO DATA
@@ -16724,6 +16728,10 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
 
       {/* Main content — the only scrolling element (not in staff preview, which scrolls outside) */}
       <main style={{ flex: 1, ...(isStaffPreview ? {} : { minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }), padding: "24px 18px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: 28, fontSize: `${textScale}em` }}>
+        {/* Keyed so navigating to another tab remounts a fresh boundary, clearing
+            any prior error. A render crash here shows a friendly recoverable card
+            instead of unmounting the whole app to the crimson background. */}
+        <SectionErrorBoundary key={settingsOpen ? "cp_settings" : page}>
         {settingsOpen && (
           <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
         )}
@@ -16733,6 +16741,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
         {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} />}
         {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} onSubmit={onServiceRequest} T={T} />}
         {!settingsOpen && page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
+        </SectionErrorBoundary>
       </main>
 
       {/* Bottom nav — a non-scrolling flex child, frozen at the bottom */}

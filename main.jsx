@@ -57,7 +57,20 @@ function Login() {
   const sendMagicLink = async () => {
     if (!email.trim()) { setErr("Enter your email address."); return; }
     setBusy(true); setErr("");
-    const { error } = await supabase.auth.signInWithOtp({ email: email.trim(), options: { shouldCreateUser: false, emailRedirectTo: PROD_URL } });
+    const addr = email.trim();
+    // Prefer the branded SPS email delivered via Resend. The magic link itself is
+    // still minted by Supabase server-side — only the delivery switches to Resend.
+    // Fall back to Supabase's built-in email if the endpoint isn't configured (501)
+    // or is unreachable, so login never breaks.
+    try {
+      const r = await fetch("/api/send-magic-link", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: addr, redirectTo: PROD_URL }),
+      });
+      if (r.ok) { setMode("sent"); setBusy(false); return; }
+    } catch (_) { /* network error — fall through to Supabase */ }
+    const { error } = await supabase.auth.signInWithOtp({ email: addr, options: { shouldCreateUser: false, emailRedirectTo: PROD_URL } });
     if (error) { setErr(error.message); setBusy(false); return; }
     setMode("sent");
     setBusy(false);
