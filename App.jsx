@@ -464,6 +464,54 @@ const haversineMiles = (a, b) => {
   return 2 * R * Math.asin(Math.sqrt(h));
 };
 
+// ── Google Maps (live tracking, ETA, route optimization) ──
+// Requires VITE_GOOGLE_MAPS_API_KEY (set in Vercel). Enabled APIs needed:
+// Maps JavaScript API, Directions API, Geocoding API, Distance Matrix API.
+// The JS SDK is injected once and reused everywhere; absent a key the features
+// that depend on it degrade gracefully (no map shown; optimize falls back).
+const GOOGLE_MAPS_KEY = (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_GOOGLE_MAPS_API_KEY) || "";
+const hasGoogleMaps = () => !!GOOGLE_MAPS_KEY;
+let _gmapsPromise = null;
+const loadGoogleMaps = () => {
+  if (typeof window === "undefined") return Promise.reject(new Error("No window"));
+  if (window.google && window.google.maps) return Promise.resolve(window.google.maps);
+  if (!GOOGLE_MAPS_KEY) return Promise.reject(new Error("Google Maps API key not configured"));
+  if (_gmapsPromise) return _gmapsPromise;
+  _gmapsPromise = new Promise((resolve, reject) => {
+    const cbName = "__sps_gmaps_cb";
+    window[cbName] = () => { try { resolve(window.google.maps); } finally { try { delete window[cbName]; } catch (_) {} } };
+    const s = document.createElement("script");
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(GOOGLE_MAPS_KEY)}&libraries=geometry&callback=${cbName}`;
+    s.async = true; s.defer = true;
+    s.onerror = () => { _gmapsPromise = null; reject(new Error("Failed to load Google Maps")); };
+    document.head.appendChild(s);
+  });
+  return _gmapsPromise;
+};
+
+// True on iOS / iPadOS so we can prefer Apple Maps deep links.
+const isAppleDevice = () => {
+  if (typeof navigator === "undefined") return false;
+  const p = navigator.platform || "", ua = navigator.userAgent || "";
+  return /iP(hone|ad|od)/.test(p) || /iPhone|iPad|iPod/.test(ua) || (/Mac/.test(p) && (navigator.maxTouchPoints || 0) > 1);
+};
+// Deep link that drops a pin at a coordinate in the native maps app.
+const mapsPinUrl = (lat, lng) => isAppleDevice()
+  ? `https://maps.apple.com/?ll=${lat},${lng}&q=${encodeURIComponent("Technician")}`
+  : `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
+// Deep link for a full multi-stop driving route (origin → waypoints → last stop).
+const mapsRouteUrl = (origin, addresses) => {
+  const pts = (addresses || []).filter(Boolean).map(a => String(a));
+  if (!pts.length) return "";
+  if (isAppleDevice()) {
+    const daddr = pts.map(encodeURIComponent).join("+to:");
+    return `https://maps.apple.com/?daddr=${daddr}${origin ? `&saddr=${encodeURIComponent(origin)}` : ""}`;
+  }
+  const destination = encodeURIComponent(pts[pts.length - 1]);
+  const waypoints = pts.slice(0, -1).map(encodeURIComponent).join("|");
+  return `https://www.google.com/maps/dir/?api=1${origin ? `&origin=${encodeURIComponent(origin)}` : ""}&destination=${destination}${waypoints ? `&waypoints=${waypoints}` : ""}&travelmode=driving`;
+};
+
 // ── Appointment reminders ──
 // Build the reminder queue: upcoming stops within the lead window that haven't been reminded yet.
 // Each entry carries its scheduled send time and whether it's due now.
@@ -2053,7 +2101,283 @@ function UpgradeWorkflowModal({ alert: a, clients, T, onConfirm, onClose }) {
   );
 }
 
-function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onNav, catalog, onConfirmUpgrade, userName, scheduleCfg, reminderLog, vp = {} }) {
+// localStorage key holding the running shift so it survives a refresh / app close.
+const ACTIVE_SHIFT_KEY = "sps_active_shift";
+
+// ─────────────────────────────────────────────
+// STAFF LIVE LOCATION (broadcast while clocked in, so clients can track arrival)
+// ─────────────────────────────────────────────
+// Supabase table required — run once in the Supabase SQL editor:
+//   CREATE TABLE staff_locations (
+//     staff_id   text PRIMARY KEY,
+//     lat        float,
+//     lng        float,
+//     updated_at timestamptz DEFAULT now(),
+//     is_active  boolean DEFAULT false
+//   );
+//
+// This hook lives at the App level (always mounted while the staff app is open)
+// so location keeps updating as the tech navigates between tabs. It tracks ONLY
+// when an active shift exists in localStorage AND that shift opted into location
+// (shift.track). On clock-out (no shift) it flips is_active=false. Never tracks
+// clients — only the signed-in staff member's own shift.
+function useStaffLocationTracking() {
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let watchId = null;
+    let lastSent = 0;
+    let activeId = null;
+
+    const readShift = () => { try { return JSON.parse(localStorage.getItem(ACTIVE_SHIFT_KEY) || "null"); } catch { return null; } };
+
+    const stop = async (id) => {
+      if (watchId != null && navigator.geolocation) { try { navigator.geolocation.clearWatch(watchId); } catch (_) {} }
+      watchId = null;
+      if (id) { try { await supabase.from("staff_locations").update({ is_active: false, updated_at: new Date().toISOString() }).eq("staff_id", String(id)); } catch (_) {} }
+    };
+
+    const start = (id) => {
+      if (watchId != null || !navigator.geolocation || !id) return;
+      lastSent = 0;
+      watchId = navigator.geolocation.watchPosition(
+        (pos) => {
+          const t = Date.now();
+          if (t - lastSent < 30000) return;   // never hammer GPS — at most once / 30s
+          lastSent = t;
+          const { latitude, longitude } = pos.coords;
+          supabase.from("staff_locations").upsert(
+            { staff_id: String(id), lat: latitude, lng: longitude, updated_at: new Date().toISOString(), is_active: true },
+            { onConflict: "staff_id" }
+          ).then(() => {}, () => {});
+        },
+        () => { /* denied / unavailable — clock-in still works, just no broadcast */ },
+        { enableHighAccuracy: true, maximumAge: 30000, timeout: 27000 }
+      );
+    };
+
+    const sync = () => {
+      const shift = readShift();
+      const want = shift && shift.staffId && shift.track !== false ? String(shift.staffId) : null;
+      if (want) {
+        if (activeId !== want) { if (activeId) stop(activeId); activeId = want; start(want); }
+      } else if (activeId) {
+        stop(activeId); activeId = null;
+      }
+    };
+
+    sync();
+    window.addEventListener("sps-shift-changed", sync);
+    const iv = setInterval(sync, 20000); // safety re-sync (covers cross-tab changes)
+    return () => {
+      window.removeEventListener("sps-shift-changed", sync);
+      clearInterval(iv);
+      if (watchId != null && navigator.geolocation) { try { navigator.geolocation.clearWatch(watchId); } catch (_) {} }
+    };
+  }, []);
+}
+
+// Small inline clock glyph (no matching entry in the Icon set).
+const ClockGlyph = ({ size = 20, color = "currentColor" }) => (
+  <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" />
+  </svg>
+);
+
+// ─────────────────────────────────────────────
+// CLOCK IN / CLOCK OUT  (staff home — pushes completed shifts to Gusto)
+// ─────────────────────────────────────────────
+function ClockInOut({ me, T }) {
+  const staffId = me?.id != null ? String(me.id) : "";
+  const gustoUuid = (me?.gustoEmployeeId || "").trim();
+
+  // Restore an active shift that belongs to THIS staff member (ignore another
+  // user's shift if a different person signed in on the same device).
+  const [shift, setShift] = useState(() => {
+    try {
+      const raw = localStorage.getItem(ACTIVE_SHIFT_KEY);
+      if (!raw) return null;
+      const s = JSON.parse(raw);
+      if (s && s.startTime && String(s.staffId) === staffId) return s;
+    } catch (_) {}
+    return null;
+  });
+  const [now, setNow] = useState(() => Date.now());
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState(null); // { hours, ok, error, noGusto } after clock-out
+  const [askLoc, setAskLoc] = useState(false); // showing the location-consent message
+
+  // Tick every second while mounted so the live clock + elapsed time stay current.
+  useEffect(() => {
+    const iv = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(iv);
+  }, []);
+
+  const fmtClock = (d) => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const fmtElapsed = (ms) => {
+    const totalMin = Math.max(0, Math.floor(ms / 60000));
+    const h = Math.floor(totalMin / 60), m = totalMin % 60;
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  };
+
+  // Clock In tap: on a device with geolocation, show the one-time location
+  // explanation BEFORE the browser permission prompt; otherwise clock in directly.
+  const requestClockIn = () => {
+    let consented = false;
+    try { consented = localStorage.getItem("sps_loc_consent") === "1"; } catch (_) {}
+    if (typeof navigator !== "undefined" && navigator.geolocation && !consented) { setAskLoc(true); return; }
+    finishClockIn(typeof navigator !== "undefined" && !!navigator.geolocation && consented);
+  };
+
+  // track = whether to broadcast location during this shift. The App-level
+  // useStaffLocationTracking hook reacts to the "sps-shift-changed" event.
+  const finishClockIn = (track) => {
+    setAskLoc(false);
+    setResult(null);
+    const s = { startTime: new Date().toISOString(), employeeUuid: gustoUuid, staffId, track: !!track };
+    try { localStorage.setItem(ACTIVE_SHIFT_KEY, JSON.stringify(s)); } catch (_) {}
+    setShift(s);
+    try { window.dispatchEvent(new Event("sps-shift-changed")); } catch (_) {}
+  };
+
+  const clockOut = async () => {
+    if (!shift) return;
+    const end = new Date();
+    const start = new Date(shift.startTime);
+    const hoursWorked = Math.round(((end - start) / 3600000) * 100) / 100; // decimal hours, 2dp
+    // Clear the running shift immediately so it can never be double-counted.
+    // The shift-changed event tells the App-level tracker to stop broadcasting
+    // and flip staff_locations.is_active=false.
+    try { localStorage.removeItem(ACTIVE_SHIFT_KEY); } catch (_) {}
+    setShift(null);
+    try { window.dispatchEvent(new Event("sps-shift-changed")); } catch (_) {}
+
+    // No Gusto ID for this user → record the hours but do NOT attempt submission.
+    if (!shift.employeeUuid) {
+      setResult({ hours: hoursWorked, ok: false, noGusto: true, error: "Gusto ID not configured — contact your admin" });
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const r = await fetch("/api/gusto-timesheet", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          employeeUuid: shift.employeeUuid,
+          shiftStartedAt: shift.startTime,
+          shiftEndedAt: end.toISOString(),
+          hoursWorked,
+          jobUuid: "",
+        }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data && data.ok !== false) setResult({ hours: hoursWorked, ok: true });
+      else setResult({ hours: hoursWorked, ok: false, error: (data && (data.error || data.message)) || "Submission to Gusto failed." });
+    } catch (_) {
+      setResult({ hours: hoursWorked, ok: false, error: `Couldn't reach the server — your ${hoursWorked}h shift was not submitted.` });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const cardBase = { borderRadius: 18, padding: "16px 18px", marginBottom: 16 };
+  const GREEN = "#16a34a", RED = "#C0392B";
+
+  // ── Location consent (shown once before the first browser permission prompt) ──
+  if (askLoc) {
+    return (
+      <div style={{ ...cardBase, background: T.surface, border: `1px solid ${T.border}` }}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+          <div style={{ width: 42, height: 42, borderRadius: 12, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <Icon name="map" size={20} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 800, color: T.text, marginBottom: 4 }}>Share your location while on shift?</div>
+            <div style={{ fontSize: 12.5, color: T.textMuted, lineHeight: 1.5 }}>SPS needs your location while you are on shift so clients can track your arrival. This stops when you clock out.</div>
+          </div>
+        </div>
+        <button onClick={() => { try { localStorage.setItem("sps_loc_consent", "1"); } catch (_) {} finishClockIn(true); }}
+          style={{ marginTop: 14, width: "100%", background: GREEN, color: "#fff", border: "none", borderRadius: 13, padding: "14px", fontSize: 15, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+          <ClockGlyph size={17} color="#fff" /> Allow &amp; Clock In
+        </button>
+        <button onClick={() => finishClockIn(false)}
+          style={{ marginTop: 8, width: "100%", background: "transparent", color: T.textMuted, border: `1px solid ${T.border}`, borderRadius: 13, padding: "12px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+          Clock in without location
+        </button>
+      </div>
+    );
+  }
+
+  // ── Just clocked out: confirmation / error ──
+  if (result) {
+    const good = result.ok;
+    const tone = good ? GREEN : T.warning;
+    return (
+      <div style={{ ...cardBase, background: hexA(tone, 0.08), border: `1px solid ${hexA(tone, 0.3)}`, display: "flex", alignItems: "center", gap: 13 }}>
+        <div style={{ width: 42, height: 42, borderRadius: 12, background: tone, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <Icon name={good ? "check" : "warning"} size={20} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>Shift complete · {result.hours}h</div>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: tone, marginTop: 2 }}>{good ? "Submitted to Gusto ✓" : result.error}</div>
+        </div>
+        <button onClick={() => setResult(null)} style={{ background: T.surface, border: `1px solid ${T.border}`, color: T.text, borderRadius: 10, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Done</button>
+      </div>
+    );
+  }
+
+  // ── Clocked in: elapsed time + Clock Out ──
+  if (shift) {
+    const elapsed = now - new Date(shift.startTime).getTime();
+    return (
+      <div style={{ ...cardBase, background: hexA(GREEN, 0.07), border: `1px solid ${hexA(GREEN, 0.3)}` }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
+          <div style={{ width: 46, height: 46, borderRadius: 13, background: GREEN, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <ClockGlyph size={23} color="#fff" />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.08em", color: GREEN }}>On Shift</div>
+            <div style={{ fontSize: 24, fontWeight: 900, color: T.text, letterSpacing: "-0.02em", marginTop: 1 }}>{fmtElapsed(elapsed)}</div>
+            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>Clocked in at {fmtClock(new Date(shift.startTime))}</div>
+          </div>
+        </div>
+        <button onClick={clockOut} disabled={submitting}
+          style={{ marginTop: 14, width: "100%", background: RED, color: "#fff", border: "none", borderRadius: 13, padding: "14px", fontSize: 15, fontWeight: 800, cursor: submitting ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, opacity: submitting ? 0.7 : 1 }}>
+          {submitting
+            ? <><div style={{ width: 15, height: 15, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.7s linear infinite" }} /> Submitting to Gusto…</>
+            : <><ClockGlyph size={17} color="#fff" /> Clock Out</>}
+        </button>
+      </div>
+    );
+  }
+
+  // ── Clocked out (default): Clock In ──
+  const nowD = new Date(now);
+  return (
+    <div style={{ ...cardBase, background: T.surface, border: `1px solid ${T.border}` }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
+        <div style={{ width: 46, height: 46, borderRadius: 13, background: hexA(GREEN, 0.12), color: GREEN, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <ClockGlyph size={23} color={GREEN} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>Ready to start your day?</div>
+          <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 2 }}>{nowD.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })} · {fmtClock(nowD)}</div>
+        </div>
+      </div>
+      {!gustoUuid && (
+        <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 7, fontSize: 12, fontWeight: 600, color: T.warning, background: hexA(T.warning, 0.08), border: `1px solid ${hexA(T.warning, 0.25)}`, borderRadius: 10, padding: "9px 12px" }}>
+          <Icon name="warning" size={14} /> Gusto ID not configured — contact your admin
+        </div>
+      )}
+      <button onClick={requestClockIn}
+        style={{ marginTop: 14, width: "100%", background: GREEN, color: "#fff", border: "none", borderRadius: 13, padding: "14px", fontSize: 15, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+        <ClockGlyph size={17} color="#fff" /> Clock In
+      </button>
+    </div>
+  );
+}
+
+function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onNav, catalog, onConfirmUpgrade, userName, me, scheduleCfg, reminderLog, vp = {} }) {
   const { T, perms } = useApp();
   const [editing, setEditing] = useState(false);
 
@@ -2254,6 +2578,9 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
         </div>
         <Btn variant="ghost" sm onClick={() => setEditing(e => !e)}>{editing ? "Done" : "Edit"}</Btn>
       </div>
+
+      {/* Clock In / Clock Out — pushes completed shifts to Gusto */}
+      {me && <ClockInOut me={me} T={T} />}
 
       {/* Reminders due — in-app surfacing */}
       {!editing && dueReminders.length > 0 && (
@@ -6371,6 +6698,9 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   // When Google Maps API is connected, swap the distance function for real geodistance
   const [optimizing, setOptimizing] = useState(false);
   const [optimizeMsg, setOptimizeMsg] = useState("");
+  // Display-only optimized ordering — NOT persisted to the schedule. Resets on refresh.
+  // { key:`date|tech`, order:[sid], legs:{sid:"12 mins"}, totalDur, totalDist, addresses:[], origin }
+  const [routeOpt, setRouteOpt] = useState(null);
 
   const extractZip = (address) => {
     const m = (address || "").match(/\b(\d{5})\b/);
@@ -6404,63 +6734,92 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
     return ordered;
   };
 
+  // Display-only route optimization. Preferred path uses the Google Directions
+  // API (current location as origin, loop back, optimizeWaypoints:true). Falls
+  // back to geocode + nearest-neighbor when Maps/location is unavailable. NEVER
+  // writes back to the schedule — purely a view reorder that resets on refresh.
   const optimizeRoute = async (date, techKey, currentStops) => {
     if (!currentStops || currentStops.length <= 1) return;
     setOptimizing(true);
-    setOptimizeMsg("Finding best route…");
+    setOptimizeMsg("Optimizing…");
+    const key = `${date}|${techKey}`;
 
-    // Resolve each stop's address
     const getAddr = (s) => {
-      const c = clients.find(c => c.id === s.clientId);
+      const c = clients.find(c => c.id === s.clientId || c.id === s.id);
       return s.address || c?.address || "";
     };
+    const baseline = orderStops(currentStops);
+    const fmtSecs = (sec) => { const mins = Math.round(sec / 60); const h = Math.floor(mins / 60), m = mins % 60; return h ? `${h}h ${m}m` : `${m}m`; };
+    const fmtMiles = (meters) => `${(meters / 1609.34).toFixed(1)} mi`;
 
-    // Geocode any uncached addresses (sequential to respect the free service)
-    const cache = loadGeoCache();
-    let geocodedCount = 0;
-    for (const s of currentStops) {
-      const addr = getAddr(s);
-      if (addr && !cache[geoKey(addr)]) {
-        await geocodeAddress(addr, cache);
-        geocodedCount++;
-        // be polite to the free endpoint
-        if (geocodedCount > 0) await new Promise(r => setTimeout(r, 1100));
+    // ── Preferred: Google Directions with real driving order + times ──
+    try {
+      if (hasGoogleMaps() && typeof navigator !== "undefined" && navigator.geolocation) {
+        const maps = await loadGoogleMaps();
+        const pos = await new Promise((res, rej) => navigator.geolocation.getCurrentPosition(res, rej, { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }));
+        const origin = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        const withAddr = baseline.filter(s => getAddr(s));
+        if (withAddr.length >= 1) {
+          const svc = new maps.DirectionsService();
+          const result = await svc.route({
+            origin, destination: origin, // loop back to the starting point
+            waypoints: withAddr.map(s => ({ location: getAddr(s), stopover: true })),
+            optimizeWaypoints: true,
+            travelMode: maps.TravelMode.DRIVING,
+          });
+          const route = result.routes[0];
+          const order = route.waypoint_order || withAddr.map((_, i) => i);
+          const newOrder = order.map(i => withAddr[i]);
+          const usedSids = new Set(newOrder.map(s => s.sid));
+          const tail = baseline.filter(s => !usedSids.has(s.sid)); // un-geocodable stops keep order, appended
+          const finalOrdered = [...newOrder, ...tail];
+          // route.legs = [origin→stop1, stop1→stop2, …, stopN→origin]
+          const legs = {};
+          newOrder.forEach((s, idx) => {
+            if (idx < newOrder.length - 1 && route.legs[idx + 1]) legs[s.sid] = route.legs[idx + 1].duration?.text || "";
+          });
+          const totalSec = route.legs.reduce((a, l) => a + (l.duration?.value || 0), 0);
+          const totalM = route.legs.reduce((a, l) => a + (l.distance?.value || 0), 0);
+          setRouteOpt({ key, order: finalOrdered.map(s => s.sid), legs, totalDur: fmtSecs(totalSec), totalDist: fmtMiles(totalM), addresses: finalOrdered.map(getAddr).filter(Boolean), origin: `${origin.lat},${origin.lng}` });
+          setOptimizeMsg(`Optimized · ${fmtSecs(totalSec)} · ${fmtMiles(totalM)}`);
+          setOptimizing(false);
+          setTimeout(() => setOptimizeMsg(""), 4000);
+          return;
+        }
       }
+    } catch (_) { /* fall through to the offline fallback */ }
+
+    // ── Fallback: geocode + nearest-neighbor (no drive times available) ──
+    try {
+      const cache = loadGeoCache();
+      let n = 0;
+      for (const s of baseline) {
+        const a = getAddr(s);
+        if (a && !cache[geoKey(a)]) { await geocodeAddress(a, cache); n++; if (n > 0) await new Promise(r => setTimeout(r, 1100)); }
+      }
+      saveGeoCache(cache);
+      const coordOf = (s) => cache[geoKey(getAddr(s))] || null;
+      const remaining = [...baseline];
+      const ordered = [remaining.shift()];
+      while (remaining.length) {
+        const last = ordered[ordered.length - 1];
+        const lc = coordOf(last);
+        let bi = 0, bd = Infinity;
+        remaining.forEach((s, i) => {
+          const c = coordOf(s);
+          const d = (lc && c) ? haversineMiles(lc, c) : zipDistance(getAddr(last), getAddr(s)) * 5;
+          if (d < bd) { bd = d; bi = i; }
+        });
+        ordered.push(remaining.splice(bi, 1)[0]);
+      }
+      const anyGeo = baseline.some(s => coordOf(s));
+      setRouteOpt({ key, order: ordered.map(s => s.sid), legs: {}, totalDur: "", totalDist: "", addresses: ordered.map(getAddr).filter(Boolean), origin: null });
+      setOptimizeMsg(anyGeo ? "Route optimized by location (approx)" : "Route optimized (approx)");
+    } catch (_) {
+      setOptimizeMsg("Couldn't optimize the route");
     }
-    saveGeoCache(cache);
-
-    // Nearest-neighbor ordering using real coords where available, ZIP distance otherwise
-    const coordOf = (s) => cache[geoKey(getAddr(s))] || null;
-    const remaining = [...currentStops];
-    const ordered = [remaining.shift()];
-    while (remaining.length) {
-      const last = ordered[ordered.length - 1];
-      const lastCoord = coordOf(last);
-      let bestIdx = 0, bestDist = Infinity;
-      remaining.forEach((s, i) => {
-        const c = coordOf(s);
-        const d = (lastCoord && c)
-          ? haversineMiles(lastCoord, c)
-          : zipDistance(getAddr(last), getAddr(s)) * 5; // rough miles-per-zip-step fallback
-        if (d < bestDist) { bestDist = d; bestIdx = i; }
-      });
-      ordered.push(remaining.splice(bestIdx, 1)[0]);
-    }
-
-    setSchedule(prev => prev.map(d => {
-      if (d.date !== date) return d;
-      const otherStops = d.stops.filter(s => {
-        if (techKey === "__all") return false;
-        if (techKey === "__un") return (s.assignee || "__un") !== "__un";
-        return s.assignee !== techKey;
-      });
-      return { ...d, stops: [...otherStops, ...ordered] };
-    }));
-
-    const anyGeo = currentStops.some(s => coordOf(s));
-    setOptimizeMsg(anyGeo ? "Route optimized by location" : "Route optimized (approx)");
     setOptimizing(false);
-    setTimeout(() => setOptimizeMsg(""), 2500);
+    setTimeout(() => setOptimizeMsg(""), 3000);
   };
 
   // ── Route-dashboard state + helpers ──
@@ -6833,7 +7192,12 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
         const g = groupsForDate(selectedDate).find(x => x.key === viewTech);
         const techName = g ? g.name : "Route";
         const isToday = selectedDate === todayMDY();
-        const nextStop = m.ordered.find(s => !(completedSids && completedSids[s.sid]));
+        // Display-only optimized ordering for this exact date+tech (resets on refresh).
+        const optActive = routeOpt && routeOpt.key === `${selectedDate}|${viewTech}`;
+        const orderedStops = optActive
+          ? (() => { const bySid = Object.fromEntries(m.ordered.map(s => [s.sid, s])); return routeOpt.order.map(sid => bySid[sid]).filter(Boolean); })()
+          : m.ordered;
+        const nextStop = orderedStops.find(s => !(completedSids && completedSids[s.sid]));
         return (
           <div style={{ paddingBottom: nextStop ? 80 : 0 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 0 12px" }}>
@@ -6842,7 +7206,8 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
               </button>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <span style={{ fontSize: 12, color: T.textMuted, fontWeight: 600 }}>{stripDate(selectedDate)}{isToday ? " · Today" : ""}</span>
-                {perms.editSchedule && stops.length > 1 && (
+                {/* Both admin and staff can optimize their own route (display-only). */}
+                {stops.length > 1 && (
                   <button onClick={() => !optimizing && optimizeRoute(selectedDate, viewTech, stops)} disabled={optimizing}
                     style={{ background: hexA(T.primary, 0.1), border: `1px solid ${hexA(T.primary, 0.2)}`, color: T.primary, borderRadius: 10, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: optimizing ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5, opacity: optimizing ? 0.7 : 1 }}>
                     <Icon name="refresh" size={13} /> {optimizing ? "Optimizing…" : "Optimize Route"}
@@ -6864,8 +7229,34 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
               </div>
             </div>
 
+            {/* Optimized-route summary + full-route deep link (display-only) */}
+            {optActive && (routeOpt.totalDur || routeOpt.addresses.length > 0) && (
+              <div style={{ background: hexA(T.primary, 0.06), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 14, padding: "12px 14px", marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>
+                  {routeOpt.totalDur
+                    ? <>Optimized route · {routeOpt.totalDur} drive · {routeOpt.totalDist}</>
+                    : <>Optimized order (estimated)</>}
+                </div>
+                {routeOpt.addresses.length > 0 && (
+                  <a href={mapsRouteUrl(routeOpt.origin, routeOpt.addresses)} target="_blank" rel="noreferrer"
+                    style={{ fontSize: 12.5, fontWeight: 800, color: T.primary, textDecoration: "none", display: "flex", alignItems: "center", gap: 5, whiteSpace: "nowrap" }}>
+                    <Icon name="map" size={13} /> Open Full Route in Maps
+                  </a>
+                )}
+              </div>
+            )}
+
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {m.ordered.map((s, i) => renderStopCard(s, selectedDate, i + 1, isToday))}
+              {orderedStops.map((s, i) => (
+                <div key={s.sid} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {renderStopCard(s, selectedDate, i + 1, isToday)}
+                  {optActive && i < orderedStops.length - 1 && routeOpt.legs[s.sid] && (
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 5, fontSize: 11, fontWeight: 700, color: T.textMuted }}>
+                      <Icon name="map" size={11} /> {routeOpt.legs[s.sid]} drive to next
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
 
             {nextStop && (
@@ -8517,6 +8908,15 @@ function TeamManager({ team, setTeam, currentUserId, email, branding }) {
                 <input style={{ ...field, paddingLeft: 28 }} value={modal.data.rate} onChange={e => setD({ rate: e.target.value.replace(/[^\d.]/g, "") })} placeholder="0.00" />
               </div>
               <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>Used to calculate job profitability on assigned stops.</div>
+            </div>
+
+            {/* Gusto Employee ID — maps this person to their Gusto record for timesheets */}
+            <div>
+              <label style={labelStyle}>Gusto Employee ID <span style={{ textTransform: "none", fontWeight: 400 }}>(optional)</span></label>
+              <input type="text" style={field} value={modal.data.gustoEmployeeId || ""} onChange={e => setD({ gustoEmployeeId: e.target.value.trim() })} placeholder="paste the UUID from Gusto" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6, lineHeight: 1.5 }}>
+                Found in Gusto under People → the employee → the UUID in the page URL. When this person taps Clock Out, their shift is submitted to Gusto under this ID.
+              </div>
             </div>
 
             {/* Permissions */}
@@ -15198,7 +15598,143 @@ function CIcon({ name, size = 22 }) {
 }
 
 // ── CP HOME ──
-function CPHome({ client, schedule, invoices, branding, onNav, T, vp = {} }) {
+// ─────────────────────────────────────────────
+// CLIENT LIVE TRACKING (portal) — live map + ETA while the assigned tech is en route
+// ─────────────────────────────────────────────
+// Shows only when: there's a stop scheduled TODAY for this client, AND the
+// assigned tech is currently clocked in with a fresh location (staff_locations
+// is_active=true, updated within 5 min). Otherwise renders nothing.
+function ClientLiveTracking({ client, schedule, team, branding, T }) {
+  const todayStop = useMemo(() => {
+    const todayKey = fmtMDY(new Date());
+    const day = (schedule || []).find(d => d.date === todayKey);
+    if (!day) return null;
+    return (day.stops || []).find(s => String(s.clientId) === String(client.id) || s.client === client.name) || null;
+  }, [schedule, client && client.id, client && client.name]);
+
+  const tech = useMemo(() => (todayStop && todayStop.assigneeId)
+    ? (team || []).find(m => String(m.id) === String(todayStop.assigneeId)) || null
+    : null, [todayStop, team]);
+
+  const [loc, setLoc] = useState(null);
+  const [nowTs, setNowTs] = useState(() => Date.now());
+
+  // Poll the assigned tech's live location every 60s.
+  useEffect(() => {
+    if (!tech) { setLoc(null); return; }
+    let alive = true;
+    const load = async () => {
+      try {
+        const { data } = await supabase.from("staff_locations").select("*").eq("staff_id", String(tech.id)).maybeSingle();
+        if (alive) setLoc(data || null);
+      } catch (_) { if (alive) setLoc(null); }
+    };
+    load();
+    const iv = setInterval(load, 60000);
+    return () => { alive = false; clearInterval(iv); };
+  }, [tech && tech.id]);
+
+  // Refresh freshness / "last updated" every 30s.
+  useEffect(() => { const iv = setInterval(() => setNowTs(Date.now()), 30000); return () => clearInterval(iv); }, []);
+
+  const updatedMs = loc && loc.updated_at ? new Date(loc.updated_at).getTime() : 0;
+  const fresh = loc && loc.is_active && updatedMs && (nowTs - updatedMs < 5 * 60 * 1000);
+
+  if (!todayStop || !tech || !fresh) return null;
+  return <ClientTrackingCard client={client} todayStop={todayStop} tech={tech} loc={loc} schedule={schedule} branding={branding} T={T} nowTs={nowTs} />;
+}
+
+function ClientTrackingCard({ client, todayStop, tech, loc, schedule, branding, T, nowTs }) {
+  const mapRef = useRef(null);
+  const mapObj = useRef(null);
+  const techMarker = useRef(null);
+  const destMarker = useRef(null);
+  const renderer = useRef(null);
+  const [eta, setEta] = useState(null);       // { arrivalText, durText }
+  const [mapFailed, setMapFailed] = useState(false);
+  const [mapReady, setMapReady] = useState(false);
+
+  const techFirst = (tech.name || "Your technician").split(" ")[0];
+  const destAddr = todayStop.address || client.address || "";
+  const lat = Number(loc.lat), lng = Number(loc.lng);
+
+  // Tech's other stops today scheduled before this client's (by time).
+  const stopsAhead = useMemo(() => {
+    const todayKey = fmtMDY(new Date());
+    const day = (schedule || []).find(d => d.date === todayKey);
+    if (!day) return 0;
+    const mine = to24(todayStop.time);
+    return (day.stops || []).filter(s => String(s.assigneeId) === String(tech.id) && s.sid !== todayStop.sid && to24(s.time) < mine).length;
+  }, [schedule, tech.id, todayStop]);
+
+  // Build the (non-interactive) map once.
+  useEffect(() => {
+    let cancelled = false;
+    loadGoogleMaps().then(maps => {
+      if (cancelled || !mapRef.current) return;
+      const center = { lat, lng };
+      const map = new maps.Map(mapRef.current, {
+        center, zoom: 12, disableDefaultUI: true, gestureHandling: "none",
+        keyboardShortcuts: false, clickableIcons: false, styles: [{ featureType: "poi", stylers: [{ visibility: "off" }] }],
+      });
+      mapObj.current = map;
+      renderer.current = new maps.DirectionsRenderer({ map, suppressMarkers: true, polylineOptions: { strokeColor: "#1a73e8", strokeWeight: 5, strokeOpacity: 0.85 } });
+      techMarker.current = new maps.Marker({ map, position: center, title: techFirst, zIndex: 999,
+        icon: { path: maps.SymbolPath.CIRCLE, scale: 8, fillColor: T.primary, fillOpacity: 1, strokeColor: "#fff", strokeWeight: 3 } });
+      destMarker.current = new maps.Marker({ map, position: center, title: client.name });
+      setMapReady(true);
+    }).catch(() => { if (!cancelled) setMapFailed(true); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Re-draw route + ETA and move the tech marker whenever the location updates.
+  useEffect(() => {
+    if (!mapReady || !mapObj.current || !window.google) return;
+    const maps = window.google.maps;
+    const here = { lat, lng };
+    if (techMarker.current) techMarker.current.setPosition(here);
+    if (!destAddr) { mapObj.current.setCenter(here); return; }
+    const svc = new maps.DirectionsService();
+    svc.route({ origin: here, destination: destAddr, travelMode: maps.TravelMode.DRIVING }, (res, status) => {
+      if (status === "OK" && res.routes && res.routes[0]) {
+        if (renderer.current) renderer.current.setDirections(res);
+        const leg = res.routes[0].legs && res.routes[0].legs[0];
+        if (leg) {
+          if (destMarker.current && leg.end_location) destMarker.current.setPosition(leg.end_location);
+          const durText = leg.duration && leg.duration.text ? leg.duration.text : "";
+          const secs = leg.duration && leg.duration.value ? leg.duration.value : 0;
+          const arr = new Date(Date.now() + secs * 1000);
+          setEta({ arrivalText: arr.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }), durText });
+        }
+      }
+    });
+  }, [mapReady, lat, lng, destAddr]);
+
+  const lastMin = Math.max(0, Math.round((nowTs - new Date(loc.updated_at).getTime()) / 60000));
+
+  return (
+    <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 20, overflow: "hidden", boxShadow: "0 2px 12px rgba(0,0,0,0.06)" }}>
+      <div style={{ padding: "14px 16px 10px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#16a34a", boxShadow: "0 0 0 4px rgba(22,163,74,0.18)", flexShrink: 0 }} />
+          <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.01em" }}>{techFirst} is on the way</div>
+        </div>
+        {eta && <div style={{ fontSize: 13, color: T.textMuted, marginTop: 5 }}>Estimated arrival: <b style={{ color: T.text }}>{eta.arrivalText}</b>{eta.durText ? ` (approx. ${eta.durText})` : ""}</div>}
+        {stopsAhead > 0 && <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 3 }}>{stopsAhead} stop{stopsAhead !== 1 ? "s" : ""} ahead of you</div>}
+      </div>
+      {!mapFailed && <div ref={mapRef} style={{ width: "100%", height: 200, background: T.surfaceAlt }} />}
+      <div style={{ padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+        <div style={{ fontSize: 11, color: T.textMuted }}>Last updated {lastMin <= 0 ? "just now" : `${lastMin} min ago`}</div>
+        <a href={mapsPinUrl(lat, lng)} target="_blank" rel="noreferrer"
+          style={{ fontSize: 12.5, fontWeight: 700, color: T.primary, textDecoration: "none", display: "flex", alignItems: "center", gap: 5 }}>
+          <Icon name="map" size={13} /> Open in Maps
+        </a>
+      </div>
+    </div>
+  );
+}
+
+function CPHome({ client, schedule, invoices, branding, team, onNav, T, vp = {} }) {
   const wide = vp.isTablet || vp.isDesktop;
   const next = clientNextVisit(schedule, client.id, client.name);
   const myInvoices = sortInvoices((invoices || []).filter(iv => invoiceMatchesClient(iv, client)));
@@ -15337,6 +15873,7 @@ function CPHome({ client, schedule, invoices, branding, onNav, T, vp = {} }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
       {greetingBlock}
+      <ClientLiveTracking client={client} schedule={schedule} team={team} branding={branding} T={T} />
       {heroBlock}
       {balanceBlock}
       {statsBlock}
@@ -16616,7 +17153,7 @@ function CPSettings({ client, branding, prefs, setPrefs, T, onSignOut, isStaffPr
   );
 }
 
-function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: globalT, fontStack, onSignOut, onServiceRequest, onApproveEstimate, onUpgradeRequest, isStaffPreview = false }) {
+function SPSClientPortal({ client, schedule, invoices, estimates, branding, team = [], T: globalT, fontStack, onSignOut, onServiceRequest, onApproveEstimate, onUpgradeRequest, isStaffPreview = false }) {
   // Client prefs stored in localStorage — personal per-device settings
   const prefsKey = `sps_client_prefs_${client.id}`;
   const [prefs, setPrefs] = useState(() => {
@@ -16735,7 +17272,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
         {settingsOpen && (
           <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
         )}
-        {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} onNav={setPage} T={T} vp={vp} />}
+        {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} team={team} onNav={setPage} T={T} vp={vp} />}
         {!settingsOpen && page === "cp_property" && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
         {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
         {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} />}
@@ -16965,6 +17502,8 @@ export default function App({ authEmail = "", onSignOut }) {
   const teamHasOwner = (team || []).some(m => m.role === "owner");
   const effRole = (m) => m ? (m.role || ((!teamHasOwner && team[0] && team[0].id === m.id) ? "owner" : "field")) : null;
   const perms = memberPerms(currentUser ? { ...currentUser, role: effRole(currentUser) } : null);
+  // Broadcast staff location while clocked in (no-op until a shift opts in).
+  useStaffLocationTracking();
   // Smart reopen on a warm resume (the app wasn't killed):
   //  • backgrounded ~30 min or more  → land on Home with the full splash (fresh start)
   //  • backgrounded under ~30 min     → stay exactly where I left off (no disruption)
@@ -17636,6 +18175,7 @@ export default function App({ authEmail = "", onSignOut }) {
         schedule={schedule}
         invoices={invoices}
         branding={branding}
+        team={team}
         T={T}
         fontStack={fontStack}
         onSignOut={handleSignOut}
@@ -17745,7 +18285,7 @@ export default function App({ authEmail = "", onSignOut }) {
           </div>
         )}
         <main style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", alignSelf: "center", padding: vp.isPhone ? "22px 16px" : "28px 32px", maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: 28 }}>
-          {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} scheduleCfg={scheduleCfg} reminderLog={reminderLog} vp={vp} />}
+          {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} vp={vp} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
           {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
           {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} />}
