@@ -2,6 +2,17 @@ import { useState, useRef, useEffect, useContext, createContext, useMemo, Compon
 import { store, supabase } from "./supabaseClient";
 import { PROD_URL } from "./config";
 
+// True only on a genuine fresh launch of the app shell (hard close / first open).
+// sessionStorage is wiped when the PWA is killed/swiped away, but survives reloads
+// and background→foreground resumes — so its absence marks a cold start.
+const APP_COLD_START = (() => {
+  try {
+    if (sessionStorage.getItem("sps_session")) return false;
+    sessionStorage.setItem("sps_session", "1");
+    return true;
+  } catch (_) { return true; }
+})();
+
 // Render an email template's text vars (everything except {link}, which the
 // server injects when it mints the sign-in link).
 const fillEmailVars = (str, vars) => String(str || "")
@@ -16704,9 +16715,10 @@ export default function App({ authEmail = "", onSignOut }) {
   // Persistent data — survives reloads and app updates
   const [clients, setClients, lc] = useStoredState("sps_clients", []);
   const [branding, setBranding, lb] = useStoredState("sps_branding", DEFAULT_BRANDING);
-  // Persist the current page so a reload / resync / reboot lands me back where I was,
-  // instead of snapping to the default landing page every time.
+  // Persist the current page so a quick reopen lands me back where I was. On a hard
+  // close (cold start), always start on Home for a definitive fresh start.
   const [page, setPage] = useState(() => {
+    if (APP_COLD_START) return "dashboard";
     try { const p = localStorage.getItem("sps_page"); if (p) return p; } catch (_) {}
     return DEFAULT_BRANDING.staffDefaultPage || "dashboard";
   });
@@ -16815,9 +16827,29 @@ export default function App({ authEmail = "", onSignOut }) {
   const teamHasOwner = (team || []).some(m => m.role === "owner");
   const effRole = (m) => m ? (m.role || ((!teamHasOwner && team[0] && team[0].id === m.id) ? "owner" : "field")) : null;
   const perms = memberPerms(currentUser ? { ...currentUser, role: effRole(currentUser) } : null);
+  // Smart reopen on a warm resume (the app wasn't killed):
+  //  • backgrounded ~30 min or more  → land on Home with the full splash (fresh start)
+  //  • backgrounded under ~30 min     → stay exactly where I left off (no disruption)
+  // (A hard close is a fresh document load and is handled by APP_COLD_START instead.)
   useEffect(() => {
-    let hiddenAt = null;
-    const onVis = () => { if (document.hidden) { hiddenAt = Date.now(); } else if (hiddenAt && Date.now() - hiddenAt > 30000) { window.location.reload(); } };
+    const IDLE_MS = 30 * 60 * 1000; // ~30 minutes
+    let lastActive = Date.now();
+    const markActive = () => {
+      lastActive = Date.now();
+      try { localStorage.setItem("sps_last_active", String(lastActive)); } catch (_) {}
+    };
+    const onVis = () => {
+      if (document.hidden) { markActive(); return; }
+      if (Date.now() - lastActive < IDLE_MS) return; // quick return → leave everything as-is
+      // Long idle → reset to Home + full splash for every user, with freshly loaded data.
+      try {
+        localStorage.removeItem("sps_page");
+        sessionStorage.removeItem("sps_splashed");
+        Object.keys(sessionStorage).forEach(k => { if (k.indexOf("sps_cp_page_") === 0) sessionStorage.removeItem(k); });
+      } catch (_) {}
+      window.location.reload();
+    };
+    markActive();
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
   }, []);
@@ -16895,6 +16927,14 @@ export default function App({ authEmail = "", onSignOut }) {
     let flag = null;
     try { flag = sessionStorage.getItem("sps_resyncing"); } catch (_) {}
     if (flag) { try { sessionStorage.removeItem("sps_resyncing"); } catch (_) {} triggerSync(); }
+  }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Hard close / fresh launch → full resync. On a cold start every stored slice is
+  // already reloaded fresh from the store and the QB auto-sync runs (below); surface
+  // the sync indicator so it reads as a definitive fresh start.
+  useEffect(() => {
+    if (!APP_COLD_START || !hydrated) return;
+    triggerSync();
   }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Ensure dock only contains pages the user has permission to see
