@@ -136,6 +136,7 @@ function Login() {
 // First-login / password-reset screen — staff set a password so they can sign in
 // with email + password from then on (instead of a fresh magic link each time).
 function SetPassword({ email, recovery, onDone }) {
+  useEffect(() => { document.body.classList.add('auth-active'); return () => document.body.classList.remove('auth-active'); }, []);
   const [pw, setPw] = useState("");
   const [pw2, setPw2] = useState("");
   const [err, setErr] = useState("");
@@ -156,7 +157,7 @@ function SetPassword({ email, recovery, onDone }) {
   };
 
   return (
-    <div style={wrap}>
+    <div style={{ ...wrap, position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
       <div style={card}>
         <div style={{ display: "flex", justifyContent: "center", marginBottom: 8 }}>
           {hasImg

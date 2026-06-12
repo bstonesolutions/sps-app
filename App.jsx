@@ -17654,8 +17654,12 @@ export default function App({ authEmail = "", onSignOut }) {
     const brandColor = (branding.accentColor && branding.accentColor.trim()) ? branding.accentColor : T.primary;
     const splashColor = (branding.splashBgColor && branding.splashBgColor.trim()) ? branding.splashBgColor : brandColor;
     const activeColor = (!hydrated || showSplash) ? splashColor : T.bg;
+    // Keep html, body AND #root in sync so the safe-area strip behind the splash
+    // always matches the splash color — even if Brandon customizes splashBgColor.
     document.body.style.background = activeColor;
     document.documentElement.style.background = activeColor;
+    const rootEl = document.getElementById("root");
+    if (rootEl) rootEl.style.background = activeColor;
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) meta.setAttribute("content", activeColor);
   }, [hydrated, showSplash, branding.splashBgColor, branding.accentColor, T.bg, T.primary]);
@@ -18088,7 +18092,7 @@ export default function App({ authEmail = "", onSignOut }) {
         fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif',
         background: splashBgCss,
         position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
-        width: "100vw", height: "100dvh", minHeight: "100vh",
+        width: "100vw", height: "100%",
         marginTop: "calc(-1 * env(safe-area-inset-top))",
         marginBottom: "calc(-1 * env(safe-area-inset-bottom))",
         paddingTop: "env(safe-area-inset-top)",
