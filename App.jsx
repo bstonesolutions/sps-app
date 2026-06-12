@@ -18077,11 +18077,12 @@ export default function App({ authEmail = "", onSignOut }) {
   if (showSplash) {
     const brandColor   = (branding.accentColor && branding.accentColor.trim()) ? branding.accentColor : T.primary;
     const splashBg1    = (branding.splashBgColor && branding.splashBgColor.trim()) ? branding.splashBgColor : brandColor;
-    const splashBg2    = (branding.splashBgColor2 && branding.splashBgColor2.trim()) ? branding.splashBgColor2 : mix(splashBg1, "#000", 0.32);
     const splashStyle  = branding.splashBgStyle || "gradient";
-    const splashBgCss  = splashStyle === "solid" ? splashBg1
-      : splashStyle === "image" && branding.splashBgImage ? `url(${branding.splashBgImage}) center/cover no-repeat`
-      : `linear-gradient(150deg, ${splashBg1} 0%, ${splashBg2} 100%)`;
+    // Solid fill (one flat color) so the splash background is IDENTICAL to the
+    // html/body/#root background — no lighter strip can show at the bottom.
+    const splashBgCss  = splashStyle === "image" && branding.splashBgImage
+      ? `url(${branding.splashBgImage}) center/cover no-repeat`
+      : splashBg1;
     const splashFgColor = branding.splashTextColor === "dark" ? "rgba(0,0,0,0.85)" : "#fff";
     const splashLogoSrc = branding.splashLogoOverride || (branding.logoType === "image" ? branding.logoImage : null);
     const showGreeting  = branding.splashShowGreeting !== "false";
