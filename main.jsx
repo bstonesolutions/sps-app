@@ -25,6 +25,7 @@ const AUTH_FLAGS = {
 };
 
 function Login() {
+  useEffect(() => { document.body.classList.add('auth-active'); return () => document.body.classList.remove('auth-active'); }, []);
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
@@ -79,7 +80,7 @@ function Login() {
   const hasImg = brand && brand.type === "image" && brand.image;
 
   return (
-    <div style={wrap}>
+    <div style={{ ...wrap, position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
       <div style={card}>
         <div style={{ display: "flex", justifyContent: "center", marginBottom: 8 }}>
           {hasImg

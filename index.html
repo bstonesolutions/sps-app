@@ -26,6 +26,9 @@
         background: #B81D24;
         min-height: 100dvh;
       }
+      /* Hard-lock the document while an auth screen (login) is shown so the
+         card can't scroll or rubber-band on iOS. Toggled by the login component. */
+      body.auth-active { position: fixed; width: 100%; height: 100%; overflow: hidden; top: 0; left: 0; }
       /* Global animations used across the app (sync strip, spinners) so they work
          even when the splash screen — which also declares them — is not mounted. */
       @keyframes spin { to { transform: rotate(360deg); } }
