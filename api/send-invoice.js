@@ -1,0 +1,121 @@
+// api/send-invoice.js
+// Emails a client a full invoice (line items, totals, due date, terms, pay link)
+// through Resend, using the business's branding.
+//
+// Required env (set in Vercel): RESEND_API_KEY
+// Optional env: RESEND_FROM (defaults to the verified SPS domain address)
+
+const escapeHtml = (s) => String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const money = (n) => "$" + (Number(n) || 0).toFixed(2);
+
+function buildInvoiceHtml({ clientName, branding, invoice, payLink }) {
+  const accent = /^#?[0-9a-fA-F]{3,8}$/.test(branding.accent || "") ? branding.accent : "#B81D24";
+  const company = escapeHtml(branding.companyName || "");
+  const rows = (invoice.lineItems || []).map((li) => {
+    const qty = Number(li.qty) || 0;
+    const price = Number(li.unitPrice) || 0;
+    const amount = qty * price;
+    const note = li.bundleNote ? `<div style="font-size:12px;color:#6b7280">Includes: ${escapeHtml(li.bundleNote)}</div>` : "";
+    const taxStar = li.taxable ? ' <span style="color:#9ca3af">*</span>' : "";
+    return `<tr>
+      <td style="padding:9px 0;border-bottom:1px solid #eef0f2;vertical-align:top">
+        <div style="font-size:14px;color:#111827">${escapeHtml(li.desc || "—")}${taxStar}</div>
+        <div style="font-size:12px;color:#6b7280">${qty} × ${money(price)}</div>${note}
+      </td>
+      <td style="padding:9px 0;border-bottom:1px solid #eef0f2;text-align:right;font-size:14px;color:#111827;white-space:nowrap;vertical-align:top">${money(amount)}</td>
+    </tr>`;
+  }).join("");
+
+  const totalRow = (label, value, opts = {}) => `<tr>
+    <td style="padding:3px 0;font-size:${opts.big ? 17 : 13}px;${opts.big ? "font-weight:800;color:#111827" : "color:#6b7280"}">${escapeHtml(label)}</td>
+    <td style="padding:3px 0;text-align:right;font-size:${opts.big ? 17 : 13}px;${opts.big ? "font-weight:800;color:" + accent : "color:#374151"};white-space:nowrap">${value}</td>
+  </tr>`;
+
+  const contactBits = [branding.companyPhone, branding.companyEmail, branding.companyAddress].filter(Boolean).map(escapeHtml).join(" &middot; ");
+
+  return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:8px;color:#111827">
+    <div style="background:${accent};border-radius:14px 14px 0 0;padding:18px 20px;color:#fff">
+      <div style="font-size:17px;font-weight:800">${company}</div>
+      ${contactBits ? `<div style="font-size:11px;opacity:0.85;margin-top:3px">${contactBits}</div>` : ""}
+    </div>
+    <div style="border:1px solid #eef0f2;border-top:none;border-radius:0 0 14px 14px;padding:20px">
+      <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px">
+        <div>
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#9ca3af">Invoice</div>
+          <div style="font-size:18px;font-weight:800">${escapeHtml(invoice.number || "")}</div>
+        </div>
+        <div style="text-align:right;font-size:12px;color:#6b7280">
+          <div>Issued: <b style="color:#111827">${escapeHtml(invoice.date || "")}</b></div>
+          <div>Due: <b style="color:#111827">${escapeHtml(invoice.dueDate || "")}</b></div>
+        </div>
+      </div>
+      <div style="font-size:13px;color:#374151;margin-top:12px">Hi ${escapeHtml((clientName || "").split(" ")[0] || clientName || "there")},</div>
+      <div style="font-size:13px;color:#374151;margin:6px 0 14px">Here's your invoice from ${company}.</div>
+      <table style="width:100%;border-collapse:collapse">${rows || `<tr><td style="font-size:13px;color:#6b7280;padding:8px 0">No line items.</td></tr>`}</table>
+      <table style="width:100%;border-collapse:collapse;margin-top:12px">
+        ${Number(invoice.discountTotal) > 0 ? totalRow("Discount", "−" + money(invoice.discountTotal)) : ""}
+        ${totalRow("Subtotal", money(invoice.subtotal))}
+        ${totalRow(`Tax${invoice.taxRate ? ` (${invoice.taxRate}%)` : ""}`, money(invoice.tax))}
+        ${totalRow("Total Due", money(invoice.total), { big: true })}
+      </table>
+      ${payLink ? `<div style="text-align:center;margin-top:20px">
+        <a href="${escapeHtml(payLink)}" style="display:inline-block;background:${accent};color:#fff;text-decoration:none;font-weight:800;padding:14px 30px;border-radius:12px;font-size:15px">View &amp; Pay Invoice</a>
+      </div>` : ""}
+      ${invoice.terms ? `<div style="font-size:12px;color:#6b7280;margin-top:18px;line-height:1.5;border-top:1px solid #eef0f2;padding-top:12px">${escapeHtml(invoice.terms)}</div>` : ""}
+    </div>
+  </div>`;
+}
+
+function buildInvoiceText({ clientName, branding, invoice, payLink }) {
+  const lines = [];
+  lines.push(`Invoice ${invoice.number || ""} from ${branding.companyName || ""}`);
+  lines.push("");
+  (invoice.lineItems || []).forEach((li) => {
+    const qty = Number(li.qty) || 0, price = Number(li.unitPrice) || 0;
+    lines.push(`- ${li.desc || "—"}  (${qty} x ${money(price)})  ${money(qty * price)}`);
+  });
+  lines.push("");
+  if (Number(invoice.discountTotal) > 0) lines.push(`Discount: -${money(invoice.discountTotal)}`);
+  lines.push(`Subtotal: ${money(invoice.subtotal)}`);
+  lines.push(`Tax${invoice.taxRate ? ` (${invoice.taxRate}%)` : ""}: ${money(invoice.tax)}`);
+  lines.push(`Total Due: ${money(invoice.total)}`);
+  lines.push(`Due date: ${invoice.dueDate || ""}`);
+  if (payLink) { lines.push(""); lines.push(`View & pay: ${payLink}`); }
+  if (invoice.terms) { lines.push(""); lines.push(invoice.terms); }
+  return lines.join("\n");
+}
+
+export default async function handler(req, res) {
+  if (req.method === "GET" || (req.query && req.query.check)) {
+    return res.status(200).json({ ok: true, endpoint: "send-invoice", configured: { resend: !!process.env.RESEND_API_KEY } });
+  }
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+  const { to, clientName, branding = {}, invoice = {}, payLink } = req.body || {};
+  if (!to || !/.+@.+\..+/.test(to)) return res.status(400).json({ error: "A valid client email is required" });
+
+  const RESEND_KEY = process.env.RESEND_API_KEY;
+  const FROM = process.env.RESEND_FROM || "Stone Property Solutions <noreply@stonepropertysolutions.com>";
+  if (!RESEND_KEY) return res.status(501).json({ error: "Email delivery is not configured on the server.", missingEnv: true });
+
+  try {
+    const subject = `Invoice ${invoice.number || ""} from ${branding.companyName || "your service provider"}`.trim();
+    const html = buildInvoiceHtml({ clientName, branding, invoice, payLink });
+    const text = buildInvoiceText({ clientName, branding, invoice, payLink });
+
+    const sendRes = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${RESEND_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ from: FROM, to: [to], subject, html, text }),
+    });
+    const sendData = await sendRes.json().catch(() => ({}));
+    if (!sendRes.ok) {
+      const reason = sendData?.message || sendData?.error || `Resend error ${sendRes.status}`;
+      return res.status(502).json({ error: reason, details: sendData });
+    }
+    return res.status(200).json({ sent: true, id: sendData.id || null });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Failed to send invoice" });
+  }
+}

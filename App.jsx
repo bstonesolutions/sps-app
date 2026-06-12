@@ -9484,6 +9484,58 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
   const accent = cfg.accent || T.primary;
   const contactBits = [branding.companyPhone, branding.companyEmail, branding.companyWebsite].filter(Boolean);
 
+  // ── Send the invoice to the client (Resend email + in-app portal notification) ──
+  const clientEmail = (invoice.clientEmail || client?.email || "").trim();
+  const [sendState, setSendState] = useState("idle"); // idle | sending | sent | error
+  const [sendMsg, setSendMsg] = useState("");
+  const sendToClient = async () => {
+    if (!clientEmail || sendState === "sending") return;
+    setSendState("sending"); setSendMsg("");
+    const payLink = invoice.paymentLink || PROD_URL;
+    try {
+      // 1) Branded invoice email via Resend
+      const r = await fetch("/api/send-invoice", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          to: clientEmail,
+          clientName: invoice.clientName || client?.name || "",
+          branding: {
+            companyName: branding.companyName || "",
+            companyEmail: branding.companyEmail || "",
+            companyPhone: branding.companyPhone || "",
+            companyAddress: branding.companyAddress || "",
+            accent,
+          },
+          invoice: {
+            number: invoice.number, date: invoice.date, dueDate: invoice.dueDate,
+            terms: invoice.notes || cfg.terms || "",
+            taxRate: invoice.taxRate || 0,
+            lineItems: (invoice.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, bundleNote: l.bundleNote, taxable: l.taxable })),
+            subtotal: totals.subtotal, tax: totals.tax, total: totals.total, discountTotal: totals.discountTotal,
+          },
+          payLink,
+        }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || "Email send failed");
+
+      // 2) In-app notification in the client's portal (drives the Messages badge on login)
+      if (client?.id) {
+        const note = `New invoice ${invoice.number} — ${money(totals.total)} due ${invoice.dueDate || "soon"}. View & pay it in your portal.`;
+        const { error: msgErr } = await supabase.from("sps_messages").insert({
+          client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: note,
+        });
+        if (msgErr) { setSendState("error"); setSendMsg(`Emailed, but the portal notification failed: ${msgErr.message}`); return; }
+      }
+
+      setSendState("sent"); setSendMsg(`Invoice sent to ${clientEmail}.`);
+      setTimeout(() => { setSendState("idle"); setSendMsg(""); }, 6000);
+    } catch (e) {
+      setSendState("error"); setSendMsg("Couldn't send: " + (e.message || "unknown error"));
+    }
+  };
+
   return (
     <Modal title={invoice.number} onClose={onClose}>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -9496,6 +9548,23 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
             <svg viewBox="0 0 24 24" width={18} height={18} fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>
             Pay via QuickBooks
           </a>
+        )}
+        {canManage && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <Btn onClick={sendToClient} disabled={!clientEmail || sendState === "sending"}
+              style={{ borderRadius: 12, gap: 8, justifyContent: "center", opacity: clientEmail ? 1 : 0.55 }}>
+              <Icon name="mail" size={15} />
+              {sendState === "sending" ? "Sending…" : sendState === "sent" ? "Sent ✓" : "Send to Client"}
+            </Btn>
+            {!clientEmail && (
+              <div style={{ fontSize: 12, color: T.textMuted, textAlign: "center" }}>No email on file for this client — add one to send the invoice.</div>
+            )}
+            {sendMsg && (
+              <div style={{ fontSize: 13, fontWeight: 600, textAlign: "center", padding: "9px 12px", borderRadius: 10,
+                background: sendState === "error" ? hexA("#C0392B", 0.08) : hexA("#2CA01C", 0.1),
+                color: sendState === "error" ? "#C0392B" : "#157a12" }}>{sendMsg}</div>
+            )}
+          </div>
         )}
         {canManage && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
