@@ -942,6 +942,12 @@ const DEFAULT_EMAIL = {
   trackLink: "",
   smsOnMyWay: "Hi {first}, this is {sender} with {company}. I'm on my way and should arrive in about {eta} minutes (around {arrival}). {track}See you soon!",
   smsReminder: "Hi {first}, a friendly reminder from {company} that your service is scheduled for {date}. Reply here with any questions!",
+  // Staff invite email ({name} = staff member, {company} = your company, {link} = secure sign-in link)
+  staffInviteSubject: "You're invited to the {company} team app",
+  staffInviteBody: "Hi {name},\n\nYou've been added to the {company} team app. Tap the secure link below to sign in — no password needed.\n\n{link}\n\nSee you inside,\nThe {company} Team",
+  // Client magic-link email ({first}/{name} = client, {company} = your company, {link} = portal link)
+  clientMagicSubject: "Your {company} client portal link",
+  clientMagicBody: "Hi {first},\n\nHere's your secure link to your {company} client portal. Tap below to view your service history, invoices, and photos — no password required.\n\n{link}\n\nThank you for being a valued client,\nThe {company} Team",
 };
 
 // Build the report text from the template + a completed-visit record
@@ -6974,6 +6980,34 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
         </div>
       </Card>
 
+      {/* Invite & magic-link emails */}
+      <Card style={{ marginBottom: 14 }}>
+        <CardHeader title="Invite & Login Emails" />
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: -2 }}>
+            Customize the emails sent when you invite staff and when clients get their portal link. Tags: {"{company}"} = your company, {"{name}"} / {"{first}"} = recipient, {"{link}"} = the secure sign-in link.
+          </div>
+
+          {/* Staff invite */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: 14, borderBottom: `1px solid ${T.border}` }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>Staff Invite</div>
+            <div><label style={labelStyle}>Subject</label><input type="text" style={field} value={email.staffInviteSubject ?? ""} onChange={e => set("staffInviteSubject", e.target.value)} placeholder={DEFAULT_EMAIL.staffInviteSubject} /></div>
+            <div><label style={labelStyle}>Body</label><textarea style={{ ...field, resize: "vertical" }} rows={6} value={email.staffInviteBody ?? ""} onChange={e => set("staffInviteBody", e.target.value)} placeholder={DEFAULT_EMAIL.staffInviteBody} /></div>
+          </div>
+
+          {/* Client magic link */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>Client Magic Link</div>
+            <div><label style={labelStyle}>Subject</label><input type="text" style={field} value={email.clientMagicSubject ?? ""} onChange={e => set("clientMagicSubject", e.target.value)} placeholder={DEFAULT_EMAIL.clientMagicSubject} /></div>
+            <div><label style={labelStyle}>Body</label><textarea style={{ ...field, resize: "vertical" }} rows={6} value={email.clientMagicBody ?? ""} onChange={e => set("clientMagicBody", e.target.value)} placeholder={DEFAULT_EMAIL.clientMagicBody} /></div>
+          </div>
+
+          <div style={{ ...hint, background: hexA(T.primary, 0.06), borderRadius: 10, padding: "9px 11px" }}>
+            Note: these are saved with your settings now. Login emails are currently delivered through Supabase, so the wording here takes effect once custom email delivery is wired up.
+          </div>
+        </div>
+      </Card>
+
       {/* Text messages */}
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Text Messages" />
@@ -8189,12 +8223,12 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
 
   const fresh = () => ({
     id: `iv${Date.now()}`,
-    number: `${(invoicing && invoicing.numberPrefix) || "INV-"}${nextInvoiceNumber(invoices, invoicing)}`,
+    number: `${(invoicing && invoicing.numberPrefix != null) ? invoicing.numberPrefix : "INV-"}${nextInvoiceNumber(invoices, invoicing)}`,
     clientId: presetClientId ?? (clients[0]?.id ?? null),
     date: todayMDY(),
     dueDate: addDaysMDY(todayMDY(), invoicing.dueDays),
     status: "Draft",
-    lineItems: [{ id: `l${Date.now()}`, desc: "", qty: "1", unitPrice: "", taxable: false }],
+    lineItems: [],
     taxRate: invoicing.taxRate,
     notes: invoicing.terms,
     createdAt: Date.now(),
@@ -8298,6 +8332,8 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     clientPhone: client?.phone || "",
     qbCustomerId: client?.qbCustomerId || null,
     qbId: inv.qbId || null,
+    // Tax rate so QuickBooks can apply sales tax to the taxable lines.
+    taxRate: parseFloat(inv.taxRate) || 0,
     lineItems: (inv.lineItems || []).map(l => {
       const gross = (parseFloat(l.qty) || 0) * (parseFloat(l.unitPrice) || 0);
       let disc = 0;
@@ -8309,6 +8345,9 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         description: l.bundleNote ? `${l.desc} (${l.bundleNote})` : l.desc,
         qty: String(qty),
         unitPrice: String(qty > 0 ? (net / qty).toFixed(2) : net.toFixed(2)),
+        // Carry the app's item kind + taxability so QB maps to the right item and tax.
+        kind: l.kind || "custom",
+        taxable: !!l.taxable,
       };
     }),
     invoiceDiscountType: inv.discountType || "",
@@ -8319,10 +8358,11 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const save = async () => {
     const baseInv = { ...inv, clientName: client?.name || "", clientAddress: client?.address || "", clientEmail: client?.email || "" };
 
-    // Not connected to QB, or no client selected — just save locally and close.
+    // Not connected to QB, no client selected, or no line items — just save locally
+    // and close. (QuickBooks requires at least one line, so an empty invoice can't sync.)
     const access_token = localStorage.getItem("qb_access_token");
     const realm_id = localStorage.getItem("qb_realm_id");
-    if (!access_token || !realm_id || !client) {
+    if (!access_token || !realm_id || !client || !(inv.lineItems || []).length) {
       onSave(baseInv);
       onClose();
       return;
@@ -8448,6 +8488,11 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
             </div>
           )}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {inv.lineItems.length === 0 && (
+              <div style={{ textAlign: "center", padding: "18px 12px", border: `1.5px dashed ${T.border}`, borderRadius: 12, color: T.textMuted, fontSize: 13 }}>
+                No line items yet. Add one with <b>Add from Catalog</b> or <b>Custom line</b> below.
+              </div>
+            )}
             {inv.lineItems.map(l => {
               const lineGross = n(l.qty) * n(l.unitPrice);
               let lineDisc = 0;
@@ -8987,7 +9032,7 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyn
             <div style={{ background: T.bg, borderRadius: 14, padding: 14 }}>
               <InvoiceDocument
                 invoice={{
-                  number: (cfg.numberPrefix || "INV-") + (cfg.nextNumber || 1001),
+                  number: (cfg.numberPrefix != null ? cfg.numberPrefix : "INV-") + (cfg.nextNumber || 1001),
                   date: todayMDY(), dueDate: addDaysMDY(todayMDY(), cfg.dueDays),
                   status: "Sent", taxRate: cfg.taxRate,
                   clientName: "Sample Client", clientAddress: "123 Pond Lane, Honey Brook PA", clientEmail: "client@email.com",
@@ -15845,7 +15890,13 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
   // Text size scaling
   const textScale = prefs.textSize === "large" ? 1.1 : prefs.textSize === "small" ? 0.9 : 1;
 
-  const [page, setPage] = useState(prefs.defaultPage || branding.portalDefaultPage || "cp_home");
+  // Persist the portal page so a reload / resync keeps clients on the screen they were on.
+  const cpPageKey = `sps_cp_page_${client.id}`;
+  const [page, setPage] = useState(() => {
+    try { const p = sessionStorage.getItem(cpPageKey); if (p) return p; } catch (_) {}
+    return prefs.defaultPage || branding.portalDefaultPage || "cp_home";
+  });
+  useEffect(() => { try { sessionStorage.setItem(cpPageKey, page); } catch (_) {} }, [page, cpPageKey]);
 
   // Poll for unread staff replies — shows dot on Messages tab
   const [portalUnread, setPortalUnread] = useState(0);
@@ -16043,7 +16094,13 @@ export default function App({ authEmail = "", onSignOut }) {
   // Persistent data — survives reloads and app updates
   const [clients, setClients, lc] = useStoredState("sps_clients", []);
   const [branding, setBranding, lb] = useStoredState("sps_branding", DEFAULT_BRANDING);
-  const [page, setPage] = useState(DEFAULT_BRANDING.staffDefaultPage || "dashboard");
+  // Persist the current page so a reload / resync / reboot lands me back where I was,
+  // instead of snapping to the default landing page every time.
+  const [page, setPage] = useState(() => {
+    try { const p = localStorage.getItem("sps_page"); if (p) return p; } catch (_) {}
+    return DEFAULT_BRANDING.staffDefaultPage || "dashboard";
+  });
+  useEffect(() => { try { localStorage.setItem("sps_page", page); } catch (_) {} }, [page]);
   const [invoiceFilter, setInvoiceFilter] = useState("All"); // deep-link from dashboard tiles
   const [schedule, setSchedule, ls] = useStoredState("sps_schedule", DEFAULT_SCHEDULE);
   const [catalog, setCatalog, lcat] = useStoredState("sps_catalog", DEFAULT_CATALOG);
@@ -16183,7 +16240,11 @@ export default function App({ authEmail = "", onSignOut }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [syncState, setSyncState] = useState("idle");
   const syncTimer = useRef(null);
-  const [showSplash, setShowSplash] = useState(true);
+  // Full splash only on a true cold start (first load of this browser session).
+  // Reloads / resyncs / wake-from-background within the session skip it.
+  const [showSplash, setShowSplash] = useState(() => {
+    try { return !sessionStorage.getItem("sps_splashed"); } catch (_) { return true; }
+  });
   const splashShown = useRef(false);
 
   // Trigger a visible sync pulse whenever any stored state saves
@@ -16196,6 +16257,8 @@ export default function App({ authEmail = "", onSignOut }) {
 
   const manualSync = () => {
     triggerSync();
+    // Flag so the sync strip reappears after the reload instead of a splash.
+    try { sessionStorage.setItem("sps_resyncing", "1"); } catch (_) {}
     setTimeout(() => window.location.reload(), 300);
   };
 
@@ -16210,10 +16273,19 @@ export default function App({ authEmail = "", onSignOut }) {
     if (!hydrated) return;
     if (splashShown.current) return;
     splashShown.current = true;
-    setShowSplash(true);
+    if (!showSplash) return; // warm reload/resync — never re-show the full splash
+    try { sessionStorage.setItem("sps_splashed", "1"); } catch (_) {}
     const t = setTimeout(() => setShowSplash(false), 1800);
     return () => clearTimeout(t);
-  }, [hydrated]);
+  }, [hydrated, showSplash]);
+
+  // After a manual sync (which reloads), show the subtle sync strip rather than a splash.
+  useEffect(() => {
+    if (!hydrated) return;
+    let flag = null;
+    try { flag = sessionStorage.getItem("sps_resyncing"); } catch (_) {}
+    if (flag) { try { sessionStorage.removeItem("sps_resyncing"); } catch (_) {} triggerSync(); }
+  }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Ensure dock only contains pages the user has permission to see
   const dockIds = (navDock || DEFAULT_DOCK).filter(id => {
@@ -16371,6 +16443,10 @@ export default function App({ authEmail = "", onSignOut }) {
           rate:        l.rate,
           amount:      l.amount,
         })),
+        // Editable line items + tax rate so a synced invoice can be opened,
+        // edited, and pushed back to QuickBooks without losing its lines.
+        lineItems:  qi.lineItems || [],
+        taxRate:    qi.taxRate || 0,
         total:      String(qi.total),
         balance:    qi.balance,
         source:     "quickbooks",
@@ -16639,7 +16715,19 @@ export default function App({ authEmail = "", onSignOut }) {
   const splashHour = new Date().getHours();
   const splashGreeting = splashHour < 12 ? "Good morning" : splashHour < 17 ? "Good afternoon" : "Good evening";
 
-  if (!hydrated || showSplash) {
+  // Warm reload/resync: still hydrating but the splash already showed this session.
+  // Show a subtle "Syncing…" loader instead of throwing up the full splash, then
+  // land on the saved page.
+  if (!hydrated && !showSplash) {
+    return (
+      <div style={{ position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 10, background: T.bg, color: T.textMuted, zIndex: 9998, fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif' }}>
+        <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" style={{ animation: "spin 0.8s linear infinite" }}><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+        <span style={{ fontSize: 14, fontWeight: 600 }}>Syncing…</span>
+      </div>
+    );
+  }
+
+  if (showSplash) {
     const brandColor   = (branding.accentColor && branding.accentColor.trim()) ? branding.accentColor : T.primary;
     const splashBg1    = (branding.splashBgColor && branding.splashBgColor.trim()) ? branding.splashBgColor : brandColor;
     const splashBg2    = (branding.splashBgColor2 && branding.splashBgColor2.trim()) ? branding.splashBgColor2 : mix(splashBg1, "#000", 0.32);

@@ -39,27 +39,58 @@ export default async function handler(req, res) {
     const invoices  = invoiceData?.QueryResponse?.Invoice   || [];
     const customers = customerData?.QueryResponse?.Customer || [];
 
-    const mappedInvoices = invoices.map(inv => ({
-      qbId:         inv.Id,
-      number:       inv.DocNumber || inv.Id,
-      clientName:   inv.CustomerRef?.name  || '',
-      qbCustomerId: inv.CustomerRef?.value || '',
-      date:         inv.TxnDate,
-      dueDate:      inv.DueDate,
-      total:        inv.TotalAmt,
-      balance:      inv.Balance,
-      status:       inv.Balance <= 0 ? 'Paid'
-                    : new Date(inv.DueDate) < new Date() ? 'Overdue'
-                    : 'Sent',
-      lines: (inv.Line || [])
-        .filter(l => l.DetailType === 'SalesItemLineDetail')
-        .map(l => ({
+    // Reverse-map a QuickBooks item name back to the app's line "kind".
+    const itemNameToKind = (name) => {
+      if (name === 'Product Sales') return 'product';
+      if (name === 'Materials')     return 'part';
+      if (name === 'Services')      return 'service';
+      return 'custom';
+    };
+    const isTaxableCode = (ref) => !!(ref?.value && ref.value !== 'NON' && ref.value !== '0');
+
+    const mappedInvoices = invoices.map(inv => {
+      const salesLines = (inv.Line || []).filter(l => l.DetailType === 'SalesItemLineDetail');
+      // Editable line items so the invoice can be opened, changed, and re-synced.
+      const lineItems = salesLines.map((l, i) => {
+        const d = l.SalesItemLineDetail || {};
+        const taxable = isTaxableCode(d.TaxCodeRef);
+        return {
+          id:        `qbl_${inv.Id}_${i}`,
+          desc:      l.Description || d.ItemRef?.name || 'Service',
+          qty:       String(d.Qty != null ? d.Qty : 1),
+          unitPrice: String(d.UnitPrice != null ? d.UnitPrice : (l.Amount || 0)),
+          taxable,
+          kind:      itemNameToKind(d.ItemRef?.name),
+        };
+      });
+      // Derive a tax rate from QB's tax detail so app-side totals match.
+      const totalTax    = parseFloat(inv.TxnTaxDetail?.TotalTax) || 0;
+      const taxableBase = salesLines.reduce((s, l) => s + (isTaxableCode(l.SalesItemLineDetail?.TaxCodeRef) ? (parseFloat(l.Amount) || 0) : 0), 0);
+      const taxRate     = (taxableBase > 0 && totalTax > 0) ? Number(((totalTax / taxableBase) * 100).toFixed(4)) : 0;
+      return {
+        qbId:         inv.Id,
+        number:       inv.DocNumber || inv.Id,
+        clientName:   inv.CustomerRef?.name  || '',
+        qbCustomerId: inv.CustomerRef?.value || '',
+        date:         inv.TxnDate,
+        dueDate:      inv.DueDate,
+        total:        inv.TotalAmt,
+        balance:      inv.Balance,
+        taxRate,
+        source:       'quickbooks',
+        status:       inv.Balance <= 0 ? 'Paid'
+                      : new Date(inv.DueDate) < new Date() ? 'Overdue'
+                      : 'Sent',
+        lineItems,
+        // Keep the legacy read-only shape too, for any display that used it.
+        lines: salesLines.map(l => ({
           description: l.Description || l.SalesItemLineDetail?.ItemRef?.name || 'Service',
           qty:         l.SalesItemLineDetail?.Qty       || 1,
           rate:        l.SalesItemLineDetail?.UnitPrice || 0,
           amount:      l.Amount || 0,
         })),
-    }));
+      };
+    });
 
     const mappedCustomers = customers.map(c => ({
       qbId:    c.Id,

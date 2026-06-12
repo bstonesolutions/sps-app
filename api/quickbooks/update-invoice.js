@@ -1,6 +1,8 @@
 // api/quickbooks/update-invoice.js
 // Updates an existing QuickBooks invoice's content (line items, dates, discount).
 // Requires the invoice's current SyncToken, which we fetch first.
+import { makeItemResolver, lineTaxCodeRef } from "./qb-helpers.js";
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
@@ -55,17 +57,27 @@ export default async function handler(req, res) {
     // by Id, and reused/guessed Ids that don't exist on the invoice (e.g. after the
     // user added or removed an item) make QB reject the whole update. Omitting the
     // Id tells QB to replace the line set cleanly.
-    const lineItems = (invoice.lineItems || []).map((li, i) => {
+    const resolveItemRef = makeItemResolver(base, headers);
+    const taxRate = parseFloat(invoice.taxRate) || 0;
+    const srcLines = invoice.lineItems || [];
+    const lineItems = [];
+    for (let i = 0; i < srcLines.length; i++) {
+      const li = srcLines[i];
       const qty = parseFloat(li.qty) || 1;
       const unitPrice = parseFloat(li.unitPrice) || 0;
-      return {
+      // Map each line to its real QuickBooks item based on the app's "kind".
+      const itemRef = await resolveItemRef(li.kind);
+      const detail = { ItemRef: itemRef, Qty: qty, UnitPrice: unitPrice };
+      // Mark taxability so QuickBooks applies sales tax to the right lines.
+      if (taxRate > 0) detail.TaxCodeRef = lineTaxCodeRef(!!li.taxable);
+      lineItems.push({
         LineNum:     i + 1,
         Amount:      qty * unitPrice,
         DetailType:  "SalesItemLineDetail",
         Description: li.description || "Service",
-        SalesItemLineDetail: { ItemRef: { value: "1", name: "Services" }, Qty: qty, UnitPrice: unitPrice },
-      };
-    });
+        SalesItemLineDetail: detail,
+      });
+    }
 
     if (invoice.invoiceDiscount && parseFloat(invoice.invoiceDiscount) > 0) {
       const isPct = invoice.invoiceDiscountType === "pct";

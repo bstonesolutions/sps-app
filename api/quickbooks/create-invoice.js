@@ -2,6 +2,8 @@
 // Creates an invoice in QuickBooks and returns a shareable payment link.
 // Key principle: once the invoice is created in QB, that is a SUCCESS even if
 // fetching the payment link later fails. We never report failure after creation.
+import { makeItemResolver, lineTaxCodeRef } from "./qb-helpers.js";
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
@@ -65,23 +67,28 @@ export default async function handler(req, res) {
     }
 
     // ── Step 2: Build the invoice payload ──
-    const lineItems = (invoice.lineItems || invoice.items || []).map((li, i) => {
+    const resolveItemRef = makeItemResolver(base, headers);
+    const taxRate = parseFloat(invoice.taxRate) || 0;
+    const srcLines = invoice.lineItems || invoice.items || [];
+    const lineItems = [];
+    for (let i = 0; i < srcLines.length; i++) {
+      const li = srcLines[i];
       const qty = parseFloat(li.qty) || 1;
       const unitPrice = parseFloat(li.unitPrice || li.rate) || 0;
       const amount = parseFloat(li.amount) || (qty * unitPrice);
-      return {
-        Id:          String(i + 1),
+      // Map each line to its real QuickBooks item based on the app's "kind".
+      const itemRef = await resolveItemRef(li.kind);
+      const detail = { ItemRef: itemRef, Qty: qty, UnitPrice: unitPrice };
+      // Mark taxability so QuickBooks applies sales tax to the right lines.
+      if (taxRate > 0) detail.TaxCodeRef = lineTaxCodeRef(!!li.taxable);
+      lineItems.push({
         LineNum:     i + 1,
         Amount:      amount,
         DetailType:  "SalesItemLineDetail",
         Description: li.description || li.name || "Service",
-        SalesItemLineDetail: {
-          ItemRef:   { value: "1", name: "Services" },
-          Qty:       qty,
-          UnitPrice: unitPrice,
-        },
-      };
-    });
+        SalesItemLineDetail: detail,
+      });
+    }
 
     const qbInvoice = {
       CustomerRef:  { value: qbCustomerId },
