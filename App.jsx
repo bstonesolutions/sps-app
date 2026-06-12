@@ -625,14 +625,101 @@ const MEMBER_ROLES = [
   { key: "custom", label: "Custom…" },
 ];
 const roleLabel = (key) => (MEMBER_ROLES.find(r => r.key === key) || {}).label || "Field Crew";
+// ─────────────────────────────────────────────
+// PER-TAB STAFF PERMISSIONS
+// Preset roles set a baseline; per-person overrides fine-tune each tab to
+// hidden / view-only / editable. Access maps onto the permission flags the app
+// already reads everywhere, so the existing edit-gates enforce view-only.
+// ─────────────────────────────────────────────
+const PERMISSION_TABS = [
+  { id: "dashboard", label: "Home",      editable: false, view: [],            edit: [] },
+  { id: "clients",   label: "Clients",   editable: true,  view: ["seeBalances"], edit: ["seeBalances", "editClients", "editHistory", "canImport"] },
+  { id: "schedule",  label: "Schedule",  editable: true,  view: [],            edit: ["editSchedule", "completeStops", "sendTexts"] },
+  { id: "invoices",  label: "Invoices",  editable: true,  view: ["viewInvoices"], edit: ["viewInvoices", "canInvoice"] },
+  { id: "inventory", label: "Inventory", editable: true,  view: ["seeInventory"], edit: ["seeInventory", "editInventory"] },
+  { id: "estimates", label: "Estimates", editable: true,  view: ["canInvoice"], edit: ["canInvoice"] },
+  { id: "messages",  label: "Messages",  editable: false, view: [],            edit: ["sendTexts"] },
+  { id: "reminders", label: "Reminders", editable: false, view: ["editSchedule"], edit: ["editSchedule"] },
+  { id: "reports",   label: "Reports",   editable: false, view: ["seeReportsPnl", "seeProfit", "seeTotalSales"], edit: ["seeReportsPnl", "seeProfit", "seeTotalSales"] },
+  { id: "budget",    label: "Budget",    editable: false, view: ["seeCostsBudget"], edit: ["seeCostsBudget"] },
+  { id: "settings",  label: "Customize", editable: true,  view: [],            edit: ["editSettings", "editCatalog"] },
+];
+const ALL_PERM_FLAGS = ["seeProfit", "seeReportsPnl", "seeTotalSales", "seeCostsBudget", "seeBalances", "seeInventory", "viewInvoices", "editClients", "editSchedule", "editHistory", "editCatalog", "editSettings", "editInventory", "canImport", "completeStops", "sendTexts", "canInvoice"];
+
+// Preset roles — a baseline a per-person override builds on top of.
+const PERM_PRESETS = {
+  admin: {
+    label: "Admin",
+    desc: "Full access to every tab.",
+    build: () => Object.fromEntries(PERMISSION_TABS.map(t => [t.id, "edit"])),
+  },
+  technician: {
+    label: "Technician",
+    desc: "Run the schedule; view clients and inventory.",
+    build: () => ({
+      dashboard: "edit", clients: "view", schedule: "edit", invoices: "hidden",
+      inventory: "view", estimates: "hidden", messages: "edit", reminders: "hidden",
+      reports: "hidden", budget: "hidden", settings: "hidden",
+    }),
+  },
+};
+
+// Fill any missing tabs (e.g. ones added in a later release) as hidden.
+function normalizeTabAccess(ta) {
+  const out = {};
+  PERMISSION_TABS.forEach(t => { out[t.id] = (ta && ta[t.id]) ? ta[t.id] : "hidden"; });
+  return out;
+}
+
+// Resolve a per-tab access map into the flat perms object the app reads.
+function tabAccessToPerms(tabAccess) {
+  const ta = normalizeTabAccess(tabAccess);
+  const on = new Set();
+  PERMISSION_TABS.forEach(t => {
+    const mode = ta[t.id];
+    if (mode === "hidden") return;
+    t.view.forEach(f => on.add(f));
+    if (mode === "edit") t.edit.forEach(f => on.add(f));
+  });
+  const perms = { isAdmin: false, tabAccess: ta };
+  ALL_PERM_FLAGS.forEach(f => { perms[f] = on.has(f); });
+  return perms;
+}
+
+// Starting per-tab map derived from a member's current (legacy) permissions, so
+// opening an existing member in the new editor reflects what they already have.
+function deriveTabAccess(member) {
+  if (member?.tabAccess) return normalizeTabAccess(member.tabAccess);
+  const p = memberPerms(member);
+  const ta = {};
+  PERMISSION_TABS.forEach(t => {
+    if (p.isAdmin) { ta[t.id] = "edit"; return; }
+    const visible = t.view.length ? t.view.some(f => p[f]) : true;
+    if (!visible) { ta[t.id] = "hidden"; return; }
+    if (!t.editable) { ta[t.id] = "edit"; return; }
+    const canEdit = t.edit.length ? t.edit.every(f => p[f]) : true;
+    ta[t.id] = canEdit ? "edit" : "view";
+  });
+  return ta;
+}
+
 // resolve a member's permission set into the same shape the app reads everywhere
 function memberPerms(member) {
   const role = member?.role || "field";
   const isAdmin = role === "owner";
+  if (isAdmin) {
+    const all = { isAdmin: true, tabAccess: null, editInventory: true };
+    ALL_PERM_FLAGS.forEach(f => { all[f] = true; });
+    return all;
+  }
+  // New per-tab model takes precedence when present.
+  if (member?.tabAccess) return tabAccessToPerms(member.tabAccess);
+  // Legacy role / custom flags.
   const src = role === "custom" ? (member?.perms || {}) : (ROLE_PRESETS[role] || ROLE_PRESETS.field);
-  const P = (k, dflt) => isAdmin || (src[k] !== undefined ? !!src[k] : dflt);
-  return {
-    isAdmin,
+  const P = (k, dflt) => (src[k] !== undefined ? !!src[k] : dflt);
+  const out = {
+    isAdmin: false,
+    tabAccess: null,
     seeProfit: P("canSeeProfit", false),
     seeReportsPnl: P("canSeeReportsPnl", false),
     seeTotalSales: P("canSeeTotalSales", false),
@@ -650,6 +737,32 @@ function memberPerms(member) {
     sendTexts: P("canSendTexts", true),
     canInvoice: P("canInvoice", false),
   };
+  out.editInventory = out.seeInventory; // legacy parity: viewing inventory allowed editing
+  return out;
+}
+
+// Is a nav tab visible to this permission set?
+function isTabVisible(n, perms) {
+  if (!n) return false;
+  if (n.ownerOnly && !perms.isAdmin) return false;
+  if (perms.tabAccess) return perms.tabAccess[n.id] !== "hidden"; // per-tab model is authoritative
+  if (n.perm && !perms[n.perm]) return false;
+  if (n.permAny && !perms.isAdmin && !n.permAny.some(k => perms[k])) return false;
+  return true;
+}
+// Human label for a member's access level (handles owner, presets, and custom).
+function memberRoleLabel(member) {
+  if (!member) return "Staff";
+  if (member.role === "owner") return "Owner / Admin";
+  if (member.tabAccess) {
+    const ta = normalizeTabAccess(member.tabAccess);
+    for (const p of Object.values(PERM_PRESETS)) {
+      const built = normalizeTabAccess(p.build());
+      if (PERMISSION_TABS.every(t => built[t.id] === ta[t.id])) return p.label;
+    }
+    return "Custom";
+  }
+  return roleLabel(member.role);
 }
 // initials for an avatar chip
 const initials = (name) => (name || "?").trim().split(/\s+/).map(w => w[0]).slice(0, 2).join("").toUpperCase();
@@ -8005,6 +8118,61 @@ function PermissionGroups({ value, onChange }) {
   );
 }
 
+// Per-tab access editor for a staff member: preset roles + per-tab hidden/view/edit.
+function TabAccessEditor({ value, onChange }) {
+  const { T } = useApp();
+  const ta = normalizeTabAccess(value);
+  const setTab = (id, mode) => onChange({ ...ta, [id]: mode });
+
+  const segBtn = (active, label, color, onClick) => (
+    <button onClick={onClick} style={{
+      flex: 1, padding: "7px 4px", border: "none", borderRadius: 8, cursor: "pointer", fontFamily: "inherit",
+      fontSize: 12, fontWeight: 700, background: active ? color : "transparent",
+      color: active ? "#fff" : T.textMuted, transition: "all 0.12s",
+    }}>{label}</button>
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {/* Presets */}
+      <div>
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Start from a preset</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          {Object.entries(PERM_PRESETS).map(([key, p]) => (
+            <button key={key} onClick={() => onChange(p.build())}
+              style={{ flex: 1, padding: "10px 8px", borderRadius: 11, border: `1.5px solid ${T.border}`, background: T.surface, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{p.label}</div>
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2, lineHeight: 1.3 }}>{p.desc}</div>
+            </button>
+          ))}
+        </div>
+        <div style={{ fontSize: 11, color: T.textMuted, marginTop: 8 }}>Then fine-tune any tab below. Changes override the preset.</div>
+      </div>
+
+      {/* Per-tab controls */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {PERMISSION_TABS.map(t => {
+          const mode = ta[t.id];
+          return (
+            <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ width: 92, fontSize: 13, fontWeight: 600, color: T.text, flexShrink: 0 }}>{t.label}</div>
+              <div style={{ flex: 1, display: "flex", gap: 3, background: T.surfaceAlt, borderRadius: 10, padding: 3 }}>
+                {segBtn(mode === "hidden", "Hidden", T.textMuted, () => setTab(t.id, "hidden"))}
+                {t.editable
+                  ? <>
+                      {segBtn(mode === "view", "View", "#2563EB", () => setTab(t.id, "view"))}
+                      {segBtn(mode === "edit", "Edit", T.primary, () => setTab(t.id, "edit"))}
+                    </>
+                  : segBtn(mode !== "hidden", "Visible", T.primary, () => setTab(t.id, "edit"))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function TeamManager({ team, setTeam, currentUserId, email, branding }) {
   const { T } = useApp();
   const [modal, setModal] = useState(null); // { mode, data }
@@ -8012,7 +8180,7 @@ function TeamManager({ team, setTeam, currentUserId, email, branding }) {
   const [inviteMsg, setInviteMsg] = useState({});
   const list = team || [];
 
-  const blankMember = () => ({ id: `e${Date.now()}`, name: "", rate: "", role: "field", pin: "", email: "", perms: { ...ROLE_PRESETS.field } });
+  const blankMember = () => ({ id: `e${Date.now()}`, name: "", rate: "", role: "staff", pin: "", email: "", tabAccess: PERM_PRESETS.technician.build() });
   const openAdd  = () => setModal({ mode: "add",  data: blankMember() });
   const openEdit = (e) => setModal({ mode: "edit", data: { perms: { ...(ROLE_PRESETS[e.role] || ROLE_PRESETS.field) }, ...e } });
   const setD = (patch) => setModal(m => ({ ...m, data: { ...m.data, ...patch } }));
@@ -8109,7 +8277,7 @@ function TeamManager({ team, setTeam, currentUserId, email, branding }) {
                       {e.name} {e.id === currentUserId && <span style={{ fontSize: 11, color: T.textMuted, fontWeight: 500 }}>· you</span>}
                     </div>
                     <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>
-                      {roleLabel(e.role)}
+                      {memberRoleLabel(e)}
                       {hasEmail ? ` · ${e.email}` : " · No email set"}
                       {e.rate ? ` · $${e.rate}/hr` : ""}
                     </div>
@@ -8171,16 +8339,23 @@ function TeamManager({ team, setTeam, currentUserId, email, branding }) {
               </div>
             </div>
 
-            {/* Role */}
+            {/* Access level */}
             <div>
-              <label style={labelStyle}>Role</label>
-              <select value={modal.data.role || "field"} onChange={e => { const role = e.target.value; setD({ role, ...(role === "custom" && !modal.data.perms ? { perms: { ...ROLE_PRESETS.field } } : {}) }); }}
-                style={{ ...field, appearance: "none", WebkitAppearance: "none" }}>
-                {MEMBER_ROLES.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
-              </select>
+              <label style={labelStyle}>Access Level</label>
+              <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 12, padding: 4, gap: 4 }}>
+                {[["owner", "Owner / Admin"], ["staff", "Staff"]].map(([val, lab]) => {
+                  const active = (val === "owner") === (modal.data.role === "owner");
+                  return (
+                    <button key={val} onClick={() => {
+                      if (val === "owner") setD({ role: "owner" });
+                      else setD({ role: "staff", tabAccess: modal.data.tabAccess || deriveTabAccess(modal.data) });
+                    }} style={{ flex: 1, padding: "9px 6px", border: "none", borderRadius: 9, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 700, background: active ? T.surface : "transparent", color: active ? T.primary : T.textMuted, boxShadow: active ? T.shadow : "none" }}>{lab}</button>
+                  );
+                })}
+              </div>
               <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>
-                {modal.data.role === "owner" ? "Full control — including team and login management."
-                  : "Pick a role, then fine-tune permissions below if needed."}
+                {modal.data.role === "owner" ? "Full control — including team and login management. Only owners can change permissions."
+                  : "Set what this person can see and do, per tab, below."}
               </div>
             </div>
 
@@ -8201,10 +8376,10 @@ function TeamManager({ team, setTeam, currentUserId, email, branding }) {
               </div>
             ) : (
               <div>
-                <label style={{ ...labelStyle, marginBottom: 10 }}>Permissions</label>
-                <PermissionGroups
-                  value={modal.data.role === "custom" ? (modal.data.perms || {}) : (ROLE_PRESETS[modal.data.role] || ROLE_PRESETS.field)}
-                  onChange={p => setD({ role: "custom", perms: p })}
+                <label style={{ ...labelStyle, marginBottom: 10 }}>Tab Access</label>
+                <TabAccessEditor
+                  value={deriveTabAccess(modal.data)}
+                  onChange={ta => setD({ tabAccess: ta, role: modal.data.role === "owner" ? "staff" : (modal.data.role || "staff") })}
                 />
               </div>
             )}
@@ -12219,7 +12394,7 @@ function RemindersScreen({ schedule, clients, scheduleCfg, setScheduleCfg, email
   );
 }
 
-function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, T }) {
+function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canEdit = true, T }) {
   const locations = catalog.locations || [];
   const treatments = catalog.treatments || [];
   const parts = catalog.parts || [];
@@ -12291,6 +12466,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, T })
 
   // ── Adjust / restock at a location ──
   const openAdjust = (item, mode, locId) => {
+    if (!canEdit) return;
     setAdjustModal({ item, kind, mode });
     setAdjustAmt("");
     setAdjustNote("");
@@ -12314,6 +12490,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, T })
   const [transferTo, setTransferTo] = useState("");
   const [transferAmt, setTransferAmt] = useState("");
   const openTransfer = (item) => {
+    if (!canEdit) return;
     setTransferModal({ item });
     setTransferFrom(locations[0]?.id ?? "");
     setTransferTo(locations[1]?.id ?? "");
@@ -12339,8 +12516,8 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, T })
   const blankItem = () => kind === "part"
     ? { id: "pt" + Date.now(), name: "", unit: "pieces", costPer: "", lowAt: "", stockByLoc: {} }
     : { id: "t" + Date.now(), name: "", unit: "oz", costPerOz: "", inventoryOz: "0", stockByLoc: {} };
-  const openAddItem = () => setItemModal({ mode: "add", kind, data: blankItem() });
-  const openEditItem = (item) => setItemModal({ mode: "edit", kind, data: { ...item, stockByLoc: { ...(item.stockByLoc || {}) } } });
+  const openAddItem = () => { if (!canEdit) return; setItemModal({ mode: "add", kind, data: blankItem() }); };
+  const openEditItem = (item) => { if (!canEdit) return; setItemModal({ mode: "edit", kind, data: { ...item, stockByLoc: { ...(item.stockByLoc || {}) } } }); };
   const saveItem = () => {
     const d = itemModal.data;
     if (!d.name.trim()) return;
@@ -12360,8 +12537,8 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, T })
   };
 
   // ── Location add / edit / delete ──
-  const openAddLoc = () => setLocModal({ mode: "add", data: { id: "loc_" + Date.now(), name: "", type: "vehicle" } });
-  const openEditLoc = (loc) => setLocModal({ mode: "edit", data: { ...loc } });
+  const openAddLoc = () => { if (!canEdit) return; setLocModal({ mode: "add", data: { id: "loc_" + Date.now(), name: "", type: "vehicle" } }); };
+  const openEditLoc = (loc) => { if (!canEdit) return; setLocModal({ mode: "edit", data: { ...loc } }); };
   const saveLoc = () => {
     const d = locModal.data;
     if (!d.name.trim()) return;
@@ -12413,6 +12590,11 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, T })
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      {!canEdit && (
+        <div style={{ background: hexA(T.textMuted, 0.08), border: `1px solid ${T.border}`, borderRadius: 12, padding: "9px 13px", fontSize: 12.5, color: T.textMuted, display: "flex", alignItems: "center", gap: 7 }}>
+          <Icon name="lock" size={14} /> View-only access — you can see stock levels but can't make changes.
+        </div>
+      )}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
         <div>
           <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Inventory</div>
@@ -12512,8 +12694,8 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, T })
                     </div>
                     <div style={{ textAlign: "right" }}>
                       <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>${it.estCost.toFixed(2)}</div>
-                      <button onClick={() => openAdjust(it, "restock", locFilter !== "all" ? locFilter : locations[0]?.id)}
-                        style={{ marginTop: 3, background: hexA(T.primary, 0.1), color: T.primary, border: "none", borderRadius: 7, padding: "4px 11px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Restock</button>
+                      {canEdit && <button onClick={() => openAdjust(it, "restock", locFilter !== "all" ? locFilter : locations[0]?.id)}
+                        style={{ marginTop: 3, background: hexA(T.primary, 0.1), color: T.primary, border: "none", borderRadius: 7, padding: "4px 11px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Restock</button>}
                     </div>
                   </div>
                 ))}
@@ -12530,7 +12712,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, T })
       {/* Locations manager */}
       {showLocs && (
         <Card>
-          <CardHeader title="Storage Locations" action={<button onClick={openAddLoc} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 9, padding: "6px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>+ Add</button>} />
+          <CardHeader title="Storage Locations" action={canEdit ? <button onClick={openAddLoc} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 9, padding: "6px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>+ Add</button> : null} />
           <div style={{ padding: "8px 6px" }}>
             {locations.length === 0 && <div style={{ padding: "14px 14px", fontSize: 13, color: T.textMuted }}>No locations yet. Add a shed or truck to start tracking where stock lives.</div>}
             {locations.map((loc, i) => (
@@ -12542,7 +12724,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, T })
                   <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{loc.name}</div>
                   <div style={{ fontSize: 11, color: T.textMuted, textTransform: "capitalize" }}>{loc.type}</div>
                 </div>
-                <button onClick={() => openEditLoc(loc)} style={{ background: T.surfaceAlt, border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 600, color: T.text, cursor: "pointer", fontFamily: "inherit" }}>Edit</button>
+                {canEdit && <button onClick={() => openEditLoc(loc)} style={{ background: T.surfaceAlt, border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 600, color: T.text, cursor: "pointer", fontFamily: "inherit" }}>Edit</button>}
               </div>
             ))}
           </div>
@@ -12591,10 +12773,10 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, T })
                     <span style={{ fontSize: 12, color: total <= 0 ? "#E5484D" : "#F59E0B", fontWeight: 700 }}>
                       {total <= 0 ? "OUT" : `${total} ${unitOf(it)} left`}
                     </span>
-                    <button onClick={() => openAdjust(it, "restock", locFilter !== "all" ? locFilter : locations[0]?.id)}
+                    {canEdit && <button onClick={() => openAdjust(it, "restock", locFilter !== "all" ? locFilter : locations[0]?.id)}
                       style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 8, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
                       Restock
-                    </button>
+                    </button>}
                   </div>
                 </div>
               );
@@ -12604,10 +12786,12 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, T })
       )}
 
       {/* Add item button */}
-      <button onClick={openAddItem}
-        style={{ background: hexA(T.primary, 0.08), color: T.primary, border: `1.5px dashed ${hexA(T.primary, 0.3)}`, borderRadius: 14, padding: "12px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
-        + Add {tab === "treatments" ? "Treatment" : "Part"}
-      </button>
+      {canEdit && (
+        <button onClick={openAddItem}
+          style={{ background: hexA(T.primary, 0.08), color: T.primary, border: `1.5px dashed ${hexA(T.primary, 0.3)}`, borderRadius: 14, padding: "12px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+          + Add {tab === "treatments" ? "Treatment" : "Part"}
+        </button>
+      )}
 
       {/* Item cards */}
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -12677,6 +12861,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, T })
 
                 {/* Actions */}
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {canEdit && (<>
                   <button onClick={() => openAdjust(it, "restock", locFilter !== "all" ? locFilter : undefined)}
                     style={{ flex: 1, minWidth: 80, background: hexA(T.primary, 0.08), color: T.primary, border: "none", borderRadius: 11, padding: "9px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
                     + Restock
@@ -12695,6 +12880,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, T })
                     style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 11, padding: "9px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
                     Edit
                   </button>
+                  </>)}
                   {(usageHistory[histKey(it, kind)] || []).length > 0 && (
                     <button onClick={() => setHistoryModal({ item: it, kind })}
                       style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 11, padding: "9px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
@@ -14135,12 +14321,7 @@ const DEFAULT_DOCK = ["dashboard", "clients", "schedule", "messages", "settings"
 // ─────────────────────────────────────────────
 
 function OverflowMenu({ page, perms, navUnread, reminderDue, dockIds, setDockIds, onNav, onSignOut, currentUser, T, branding, onClose }) {
-  const availableNav = ALL_NAV.filter(n => {
-    if (n.ownerOnly && !perms.isAdmin) return false;
-    if (n.perm && !perms[n.perm]) return false;
-    if (n.permAny && !perms.isAdmin && !n.permAny.some(k => perms[k])) return false;
-    return true;
-  });
+  const availableNav = ALL_NAV.filter(n => isTabVisible(n, perms));
 
   const overflow = availableNav.filter(n => !dockIds.includes(n.id));
 
@@ -14217,7 +14398,7 @@ function OverflowMenu({ page, perms, navUnread, reminderDue, dockIds, setDockIds
             </div>
             <div>
               <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{currentUser.name}</div>
-              <div style={{ fontSize: 11, color: T.textMuted }}>{roleLabel(currentUser.role)}</div>
+              <div style={{ fontSize: 11, color: T.textMuted }}>{memberRoleLabel(currentUser)}</div>
             </div>
           </div>
           <button onClick={onClose} style={{ background: T.surfaceAlt, border: "none", borderRadius: "50%", width: 30, height: 30, cursor: "pointer", color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -16115,7 +16296,7 @@ function LoginScreen({ team, branding, T, fontStack, onSignIn }) {
                 <span style={{ width: 44, height: 44, borderRadius: "50%", background: m.role === "owner" ? T.primary : hexA(T.primary, 0.14), color: m.role === "owner" ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 15, flexShrink: 0 }}>{initials(m.name)}</span>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 16, fontWeight: 700, color: T.text }}>{m.name}</div>
-                  <div style={{ fontSize: 12.5, color: T.textMuted }}>{roleLabel(m.role)}{m.pin ? " · PIN" : ""}</div>
+                  <div style={{ fontSize: 12.5, color: T.textMuted }}>{memberRoleLabel(m)}{m.pin ? " · PIN" : ""}</div>
                 </div>
                 <span style={{ color: T.textMuted, fontSize: 18 }}>›</span>
               </button>
@@ -16346,14 +16527,16 @@ export default function App({ authEmail = "", onSignOut }) {
   }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Ensure dock only contains pages the user has permission to see
-  const dockIds = (navDock || DEFAULT_DOCK).filter(id => {
-    const n = ALL_NAV.find(x => x.id === id);
-    if (!n) return false;
-    if (n.ownerOnly && !perms.isAdmin) return false;
-    if (n.perm && !perms[n.perm]) return false;
-    if (n.permAny && !perms.isAdmin && !n.permAny.some(k => perms[k])) return false;
-    return true;
-  });
+  const dockIds = (navDock || DEFAULT_DOCK).filter(id => isTabVisible(ALL_NAV.find(x => x.id === id), perms));
+
+  // If the current page becomes hidden for this user, fall back to a visible tab.
+  useEffect(() => {
+    if (!perms.tabAccess) return;
+    if (perms.tabAccess[page] === "hidden") {
+      const firstVisible = ALL_NAV.find(n => isTabVisible(n, perms));
+      setPage(firstVisible ? firstVisible.id : "dashboard");
+    }
+  }, [page, perms]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const load = async () => {
       const { data } = await supabase.from("sps_messages").select("id").eq("sender", "client").is("read_at", null);
@@ -17006,7 +17189,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} />}
           {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
           {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
-          {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin} T={T} />}
+          {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin} canEdit={perms.isAdmin || perms.editInventory} T={T} />}
           {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
           {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
           {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetScreen budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} />}
