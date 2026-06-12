@@ -11581,6 +11581,11 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
               <EmailSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} setBranding={brandCtl.update} />
             </Collapsible>
           )}
+          {(perms.editSettings || perms.editSchedule) && (
+            <Collapsible title="Reminders & Messaging" subtitle="Appointment reminders, lead time, send time, and the reminder message.">
+              <ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />
+            </Collapsible>
+          )}
           {perms.seeCostsBudget && (
             <Collapsible title="Costs & Labor" subtitle="Hourly rate, overhead, gas, and per-stop cost assumptions.">
               <SaveBar ctl={costCtl} T={T} />
@@ -12684,6 +12689,70 @@ function CPMessages({ client, branding, onSubmit, T }) {
 // and lets you adjust inventory manually.
 // ─────────────────────────────────────────────
 
+// Reminder & messaging settings — moved into the Customize > Business tab. Same
+// settings, labels, and (immediate) save behavior as before; only relocated.
+function ReminderSettings({ scheduleCfg, setScheduleCfg, email, setEmail, branding, T }) {
+  const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
+  const setCfg = (k, v) => setScheduleCfg({ ...cfg, [k]: v });
+  const tpl = (email && email.smsReminder) || DEFAULT_EMAIL.smsReminder;
+  const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Appointment Reminders</div>
+          <div style={{ fontSize: 12, color: T.textMuted }}>Remind clients before their visit</div>
+        </div>
+        <Toggle on={cfg.remindersOn} onChange={v => setCfg("remindersOn", v)} />
+      </div>
+
+      {cfg.remindersOn && (<>
+        <div>
+          <label style={lbl}>Default Lead Time</label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+            {[[2, "2 hours"], [12, "12 hours"], [24, "1 day"], [48, "2 days"], [72, "3 days"]].map(([h, label]) => (
+              <button key={h} onClick={() => setCfg("reminderLeadHours", h)}
+                style={{ padding: "8px 14px", borderRadius: 10, border: `1.5px solid ${cfg.reminderLeadHours === h ? T.primary : T.border}`, background: cfg.reminderLeadHours === h ? hexA(T.primary, 0.08) : T.surface, color: cfg.reminderLeadHours === h ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        {cfg.reminderLeadHours >= 12 && (
+          <div>
+            <label style={lbl}>Preferred Send Time</label>
+            <input type="time" value={cfg.reminderSendAt || "17:00"} onChange={e => setCfg("reminderSendAt", e.target.value)} style={{ ...field, width: 140 }} />
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>For day-ahead reminders, send around this time.</div>
+          </div>
+        )}
+        <div>
+          <label style={lbl}>Reminder Message</label>
+          <textarea rows={3} value={email?.smsReminder ?? tpl}
+            onChange={e => setEmail && setEmail(em => ({ ...em, smsReminder: e.target.value }))}
+            style={{ ...field, resize: "vertical" }} />
+          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>Tags: {"{first}"} name, {"{company}"}, {"{date}"}. This is the same message you can edit in Customize.</div>
+          {(() => {
+            const preview = (email?.smsReminder ?? tpl)
+              .replace(/{first}/g, "Sarah")
+              .replace(/{company}/g, branding?.companyName || "Stone Property Solutions")
+              .replace(/{date}/g, "Fri, Jun 13");
+            return (
+              <div style={{ marginTop: 10 }}>
+                <label style={lbl}>Preview</label>
+                <div style={{ background: hexA(T.primary, 0.1), borderRadius: 14, borderTopLeftRadius: 4, padding: "11px 14px", fontSize: 13, color: T.text, lineHeight: 1.5 }}>{preview}</div>
+              </div>
+            );
+          })()}
+        </div>
+        <div style={{ background: hexA(T.primary, 0.06), borderRadius: 12, padding: "12px 14px", fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>
+          Automatic sending isn't active yet — reminders show up here when due, and you tap Send to fire off the text. When automated SMS is connected later, flip this to fully hands-off.
+        </div>
+      </>)}
+    </div>
+  );
+}
+
 function RemindersScreen({ schedule, clients, scheduleCfg, setScheduleCfg, email, setEmail, branding, reminderLog, setReminderLog, T }) {
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
   const setCfg = (k, v) => setScheduleCfg({ ...cfg, [k]: v });
@@ -12742,64 +12811,7 @@ function RemindersScreen({ schedule, clients, scheduleCfg, setScheduleCfg, email
         </div>
       </div>
 
-      {/* Settings */}
-      <Card>
-        <CardHeader title="Reminder Settings" />
-        <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 16 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Appointment Reminders</div>
-              <div style={{ fontSize: 12, color: T.textMuted }}>Remind clients before their visit</div>
-            </div>
-            <Toggle on={cfg.remindersOn} onChange={v => setCfg("remindersOn", v)} />
-          </div>
-
-          {cfg.remindersOn && (<>
-            <div>
-              <label style={lbl}>Default Lead Time</label>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-                {[[2, "2 hours"], [12, "12 hours"], [24, "1 day"], [48, "2 days"], [72, "3 days"]].map(([h, label]) => (
-                  <button key={h} onClick={() => setCfg("reminderLeadHours", h)}
-                    style={{ padding: "8px 14px", borderRadius: 10, border: `1.5px solid ${cfg.reminderLeadHours === h ? T.primary : T.border}`, background: cfg.reminderLeadHours === h ? hexA(T.primary, 0.08) : T.surface, color: cfg.reminderLeadHours === h ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            {cfg.reminderLeadHours >= 12 && (
-              <div>
-                <label style={lbl}>Preferred Send Time</label>
-                <input type="time" value={cfg.reminderSendAt || "17:00"} onChange={e => setCfg("reminderSendAt", e.target.value)} style={{ ...field, width: 140 }} />
-                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>For day-ahead reminders, send around this time.</div>
-              </div>
-            )}
-            <div>
-              <label style={lbl}>Reminder Message</label>
-              <textarea rows={3} value={email?.smsReminder ?? tpl}
-                onChange={e => setEmail && setEmail(em => ({ ...em, smsReminder: e.target.value }))}
-                style={{ ...field, resize: "vertical" }} />
-              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>Tags: {"{first}"} name, {"{company}"}, {"{date}"}. This is the same message you can edit in Customize.</div>
-              {/* Live preview */}
-              {(() => {
-                const sample = queue.due[0] || queue.upcoming[0];
-                const preview = (email?.smsReminder ?? tpl)
-                  .replace(/{first}/g, sample ? (sample.client?.name || "there").split(" ")[0] : "Sarah")
-                  .replace(/{company}/g, branding?.companyName || "Stone Property Solutions")
-                  .replace(/{date}/g, sample ? sample.date : "Fri, Jun 13");
-                return (
-                  <div style={{ marginTop: 10 }}>
-                    <label style={lbl}>Preview</label>
-                    <div style={{ background: hexA(T.primary, 0.1), borderRadius: 14, borderTopLeftRadius: 4, padding: "11px 14px", fontSize: 13, color: T.text, lineHeight: 1.5 }}>{preview}</div>
-                  </div>
-                );
-              })()}
-            </div>
-            <div style={{ background: hexA(T.primary, 0.06), borderRadius: 12, padding: "12px 14px", fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>
-              Automatic sending isn't active yet — reminders show up here when due, and you tap Send to fire off the text. When automated SMS is connected later, flip this to fully hands-off.
-            </div>
-          </>)}
-        </div>
-      </Card>
+      {/* Reminder settings now live in Customize → Business → "Reminders & Messaging". */}
 
       {cfg.remindersOn && (<>
         {/* Due now */}
