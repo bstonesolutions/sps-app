@@ -17355,18 +17355,10 @@ export default function App({ authEmail = "", onSignOut }) {
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            {/* Sync button */}
+            {/* Sync button — now the far-right header action (Menu moved to the bottom nav) */}
             <button onClick={manualSync} title="Sync"
               style={{ background: hexA(T.primary, 0.1), border: "none", color: syncState === "saved" ? "#16a34a" : T.primary, cursor: "pointer", width: 36, height: 36, borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", transition: "color 0.3s" }}>
               <Icon name="refresh" size={16} style={{ animation: syncState === "syncing" ? "spin 0.7s linear infinite" : "none" }} />
-            </button>
-            {/* Menu button */}
-            <button onClick={() => setMenuOpen(true)}
-              style={{ background: hexA(T.primary, 0.12), border: "none", color: T.primary, cursor: "pointer", width: 36, height: 36, borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
-              <Icon name="sliders" size={18} />
-              {navUnread > 0 && !dockIds.includes("messages") && (
-                <span style={{ position: "absolute", top: 6, right: 6, width: 7, height: 7, borderRadius: "50%", background: T.primary, border: `1.5px solid ${T.surface}` }} />
-              )}
             </button>
           </div>
           </div>
