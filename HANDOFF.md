@@ -6,7 +6,7 @@ before commit; run `npm run build` after editing `App.jsx`).
 
 ## Current state
 
-- **Latest commit:** `0bdeb32` — "Move reminder settings into Customize > Business 'Reminders & Messaging'" (Fri Jun 12 2026)
+- **Latest commit:** `006dbaf` — "Add Gusto clock-in/out and Google Maps tracking, ETA & route optimization"
 - **Branch:** `main`, in sync with `origin/main`. Working tree clean (only `package.json`/`package-lock.json` show as modified — pre-existing, untouched by recent work).
 - **Build:** `npm run build` (Vite) passes. Deploy: **Vercel**, auto-deploys from GitHub `main`. **No service worker**; `dist/` is not committed (Vercel builds fresh). iOS users may need to fully close/reopen the home-screen PWA to pick up a new bundle.
 
@@ -19,14 +19,22 @@ before commit; run `npm run build` after editing `App.jsx`).
 - **`supabaseClient.js`** — DO NOT MODIFY. Exports `store` (app_state table) + `supabase`. App state persists via the `useStoredState` hook (slices: `sps_clients`, `sps_branding`, `sps_invoicing`, `sps_email`, `sps_invoices`, `sps_service_tiers`, `sps_schedule_cfg`, `sps_team`, `sps_nav_dock`, `sps_estimates`, etc.).
 - **`api/quickbooks/*.js`** — serverless: `create-invoice`, `update-invoice`, `sync`, `refresh`, `auth`, `callback`, `delete-invoice`, `qb-helpers` (item find-or-create + tax-code helpers).
 - **`api/send-auth-email.js`** — Resend delivery for staff invites / client magic links (Supabase admin `generate_link` → Resend).
+- **`api/send-magic-link.js`** — Resend delivery of the branded **client login** magic link (login-screen "Sign in with email link"). Falls back to Supabase email if unconfigured.
 - **`api/send-invoice.js`** — Resend delivery of a branded invoice email.
+- **`api/gusto-timesheet.js`** — server-side Gusto timesheet submission for clock-out. Defaults to the **demo** host; GET health check.
 
-### Env vars (set in Vercel)
-- `RESEND_API_KEY` + `SUPABASE_SERVICE_ROLE_KEY` — required for branded invite/magic-link/invoice emails (otherwise invites fall back to Supabase's built-in email). Optional: `RESEND_FROM`, `SUPABASE_URL`.
+### Env vars (set in Vercel) — full list lives in `CLAUDE.md`
+- `RESEND_API_KEY` + `SUPABASE_SERVICE_ROLE_KEY` — branded invite/magic-link/invoice emails (else fall back to Supabase's built-in email). Optional: `RESEND_FROM`, `SUPABASE_URL`.
 - `QB_CLIENT_ID` + `QB_CLIENT_SECRET` — QuickBooks OAuth/refresh.
+- `GUSTO_API_KEY` + `GUSTO_COMPANY_UUID` — Gusto clock-out timesheets. `GUSTO_API_BASE` *(optional)* defaults to the demo host `https://api.gusto-demo.com`; set to `https://api.gusto.com` for production.
+- `VITE_GOOGLE_MAPS_API_KEY` — **client-side** key for staff tracking, client live map/ETA, route optimization (enable Maps JavaScript + Directions + Geocoding + Distance Matrix; restrict by referrer).
 
-### Supabase dashboard (must be set, else links point at localhost)
-- Authentication → URL Configuration → **Site URL** = `https://sps-app-azure.vercel.app`, and add it (+`/**`) to **Redirect URLs**.
+### Supabase setup
+- **Dashboard:** Authentication → URL Configuration → **Site URL** = `https://sps-app-azure.vercel.app`, and add it (+`/**`) to **Redirect URLs** (else auth links point at localhost).
+- **Table to create** (SQL editor; used via the existing client, `supabaseClient.js` untouched):
+  ```sql
+  CREATE TABLE staff_locations (staff_id text PRIMARY KEY, lat float, lng float, updated_at timestamptz DEFAULT now(), is_active boolean DEFAULT false);
+  ```
 
 ## What's been built (this session, in order)
 
@@ -56,6 +64,9 @@ before commit; run `npm run build` after editing `App.jsx`).
 | `4116cee` | **Late fee system** — settings, auto-apply on load, QB read/write, display |
 | `e41503c` | Strengthen iOS PWA lock (`position:fixed` body); desktop Print download; invoice-detail layout cleanup |
 | `0bdeb32` | Move reminder settings → Customize > Business "Reminders & Messaging" |
+| `2a105e6` | Add `HANDOFF.md` session snapshot |
+| `8e5246a` | **Branded client magic-link email** via Resend (`api/send-magic-link.js`); **fix "My Property" red-screen crash** (null-safe `useApp()` + portal `SectionErrorBoundary`) |
+| `006dbaf` | **Gusto Clock In/Out** (`ClockInOut` card + `api/gusto-timesheet.js` + per-member Gusto ID); **Google Maps**: staff location tracking, client live map + ETA, route optimization |
 
 ## Open / incomplete items (verify or follow up)
 
@@ -64,11 +75,17 @@ before commit; run `npm run build` after editing `App.jsx`).
 2. **Print/Export PDF** (`5df3f7b`, `e41503c`). Mobile → native share sheet; desktop (no touch / `navigator.maxTouchPoints === 0`) → direct download. Verify on iPhone, Android, and desktop Mac.
 3. **Smart reopen** (`df76c05`). Kill-vs-resume detection via `sessionStorage`. Verify: swipe-away→reopen = Home+resync; 30+min background = Home+splash; <30min = stay put. Threshold = `IDLE_MS = 30*60*1000`.
 4. **Late fee system** (`4116cee`). Verify on a genuinely overdue (Sent, >grace-days past due, not Paid/Draft) invoice that the fee line appears in staff detail, PDF, and client portal, and totals update. Configure under Customize → Business → **Late Fees** (all blank/off by default).
+5. **Gusto Clock In/Out** (`006dbaf`). Needs `GUSTO_API_KEY` + `GUSTO_COMPANY_UUID` in Vercel. The timesheet payload shape (`employee_uuid/start_time/end_time/hours/job_uuid`) is a best guess — **confirm against the Gusto sandbox** and adjust `api/gusto-timesheet.js` if rejected. Set each tech's **Gusto Employee ID** in Customize → Team. `GUSTO_API_BASE` stays on the demo host until production is confirmed.
+6. **Google Maps features** (`006dbaf`). Needs `VITE_GOOGLE_MAPS_API_KEY` + the `staff_locations` table (SQL above). Verify: (a) tech clocks in → location consent → `staff_locations` row upserts every ~30s with `is_active=true`, flips false on clock-out; (b) client with a stop **today** whose assigned tech is clocked-in sees the live map + ETA on the portal home; (c) Schedule → a tech route → **Optimize Route** reorders display-only with per-leg drive times + "Open Full Route in Maps".
 
 ### Known design notes / possible follow-ups
 - **Late fee "Apply once" toggle** is a safety affirmation — the fee never compounds on load (guarded by `lateFeeAppliedAt` + line scan). OFF state has no special "re-apply each period" behavior. Invoices with **no editable line items** (e.g. QB stored-total-only) are skipped. QB write needs/creates a **"Late Fee"** service item (requires an Income account in QB).
 - **Service tiers** (`2203ec4`): the client portal now **respects each tier's configured `upgradeTo` list** (previously it showed all higher tiers regardless) — review each tier's toggles. The custom "None" tier name shows in the tier manager; it is **not** propagated to every portal display (untiered clients store `plan: ""`).
-- **Resend / login emails**: the **login-screen self-service magic link** (`main.jsx`) still uses Supabase's built-in email (not Resend) — only the staff-invite and staff-sent client portal-link flows route through Resend. Could be wired to Resend if desired.
+- **Resend / login emails**: the login-screen client magic link now routes through Resend (`api/send-magic-link.js`, branded) and falls back to Supabase email only if unconfigured. All four flows (staff invite, staff-sent portal link, client login link, invoice email) are branded.
+- **"My Property" crash fix** (`8e5246a`): root cause was `useApp()` returning `null` outside the `AppCtx` provider (the portal renders before it). `useApp()` is now null-safe (`|| {}`) and portal pages are wrapped in `SectionErrorBoundary` (keyed per tab) — a recoverable card now shows instead of the whole app unmounting to the crimson background.
+- **Route optimization is now display-only** (`006dbaf`): the old `optimizeRoute` persisted the reorder via `setSchedule`; it now sets local state only and **resets on refresh** (per spec). Per-leg drive times + total only appear on the Google path; the offline geocode/nearest-neighbor fallback gives order only.
+- **Staff location tracking** (`006dbaf`): runs at the App level (`useStaffLocationTracking`) keyed off the `sps_active_shift` localStorage entry + a `sps-shift-changed` event, so it survives tab navigation. Consent is remembered in `sps_loc_consent`. Client map gates on `is_active` **and** freshness (`updated_at` < 5 min), so a stale row from an abrupt app-close won't show "on the way" indefinitely. Without `VITE_GOOGLE_MAPS_API_KEY` the map/ETA/optimize degrade gracefully (no crash).
+- **`team` passed to the portal** (`006dbaf`): the client portal now receives `team` (to resolve the assigned tech's first name for live tracking). The app already loads `team` into the browser regardless of who logs in; only the tech's name/id are read in the portal UI.
 - **QB payment methods** (`be00444`): Card/ACH toggles only surface if the method is also enabled in the user's **QuickBooks Payments account**.
 - **Customize auto-save** (`cea7fc5`): applies to form-style sections. Complex sub-managers — **Service Catalog editor, Service Tiers, Bulk Pricing** — kept their own existing save flows.
 - **Reminders move** (`0bdeb32`): only the **settings** moved to Customize → Business. The standalone **Reminders page still exists** for the operational send-queue. Offered to fold the whole page in + remove the nav entry — not yet done.
