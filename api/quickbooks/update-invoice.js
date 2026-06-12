@@ -22,6 +22,14 @@ export default async function handler(req, res) {
   const todayISO = () => new Date().toISOString().slice(0, 10);
   // QuickBooks "Object Not Found" / unmatched-invoice errors — recreate fresh instead of failing.
   const isNotFound = (txt) => /object not found|"code"\s*:\s*"?610"?|could not be found|does not exist|not found/i.test(txt || "");
+  // Pull a human-readable reason out of a QuickBooks fault response.
+  const readableQbError = (txt) => {
+    try {
+      const e = JSON.parse(txt)?.Fault?.Error?.[0];
+      if (e) return [e.Message, e.Detail].filter(Boolean).join(" — ");
+    } catch (_) {}
+    return txt ? String(txt).slice(0, 300) : "unknown error";
+  };
 
   try {
     // Step 1: read current invoice for SyncToken + CustomerRef
@@ -43,11 +51,14 @@ export default async function handler(req, res) {
     if (!existing) return res.status(404).json({ error: "Invoice not found in QuickBooks." });
 
     // Step 2: build updated line items
+    // Note: do NOT set a line Id here. On a full update QuickBooks matches lines
+    // by Id, and reused/guessed Ids that don't exist on the invoice (e.g. after the
+    // user added or removed an item) make QB reject the whole update. Omitting the
+    // Id tells QB to replace the line set cleanly.
     const lineItems = (invoice.lineItems || []).map((li, i) => {
       const qty = parseFloat(li.qty) || 1;
       const unitPrice = parseFloat(li.unitPrice) || 0;
       return {
-        Id:          String(i + 1),
         LineNum:     i + 1,
         Amount:      qty * unitPrice,
         DetailType:  "SalesItemLineDetail",
@@ -92,7 +103,7 @@ export default async function handler(req, res) {
       if (updRes.status === 404 || isNotFound(err)) {
         return res.status(200).json({ recreate: true });
       }
-      return res.status(500).json({ error: "QuickBooks rejected the update.", details: err });
+      return res.status(500).json({ error: "QuickBooks rejected the update: " + readableQbError(err), details: err });
     }
 
     const result = await updRes.json();

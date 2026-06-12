@@ -22,6 +22,14 @@ export default async function handler(req, res) {
 
   // Helper: build the QBO web link for an invoice (always works as a fallback)
   const webLink = (qbId) => `https://app.qbo.intuit.com/app/invoice?txnId=${qbId}`;
+  // Pull a human-readable reason out of a QuickBooks fault response.
+  const readableQbError = (txt) => {
+    try {
+      const e = JSON.parse(txt)?.Fault?.Error?.[0];
+      if (e) return [e.Message, e.Detail].filter(Boolean).join(" — ");
+    } catch (_) {}
+    return txt ? String(txt).slice(0, 300) : "unknown error";
+  };
 
   let qbId = null;
 
@@ -110,7 +118,7 @@ export default async function handler(req, res) {
       const err = await createRes.text();
       console.error("QB create invoice error:", err);
       // Nothing was created — safe to report failure
-      return res.status(500).json({ error: "QuickBooks rejected the invoice.", details: err });
+      return res.status(500).json({ error: "QuickBooks rejected the invoice: " + readableQbError(err), details: err });
     }
 
     const created = await createRes.json();
