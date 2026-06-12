@@ -97,9 +97,9 @@ export default async function handler(req, res) {
       DueDate:      invoice.dueDate || undefined,
       Line:         lineItems,
       BillEmail:    invoice.clientEmail ? { Address: invoice.clientEmail } : undefined,
-      // Turn ON online payment options so a real Pay-Now link is generated
-      AllowOnlineCreditCardPayment: true,
-      AllowOnlineACHPayment: true,
+      // Online payment methods offered on the pay link — controlled in app settings (default on).
+      AllowOnlineCreditCardPayment: invoice.allowCard !== false,
+      AllowOnlineACHPayment: invoice.allowACH !== false,
     };
 
     // Invoice-level discount

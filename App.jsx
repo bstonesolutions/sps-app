@@ -1367,6 +1367,9 @@ const DEFAULT_INVOICING = {
   showThankYou: true,
   showDueBanner: true,     // a colored "Amount Due / Due date" banner near the top
   labelInvoice: "INVOICE", // the big heading word (e.g. INVOICE, RECEIPT, BILL)
+  // ── QuickBooks online payment methods offered on the pay link (default all on) ──
+  qbAllowCard: true,       // AllowOnlineCreditCardPayment (credit/debit card)
+  qbAllowACH: true,        // AllowOnlineACHPayment (bank transfer / ACH)
 };
 
 // date helpers (MM/DD/YYYY)
@@ -8644,6 +8647,9 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     qbId: inv.qbId || null,
     // Tax rate so QuickBooks can apply sales tax to the taxable lines.
     taxRate: parseFloat(inv.taxRate) || 0,
+    // Which online payment methods to offer on the QB pay link (default on).
+    allowCard: invoicing?.qbAllowCard !== false,
+    allowACH: invoicing?.qbAllowACH !== false,
     lineItems: (inv.lineItems || []).map(l => {
       const gross = (parseFloat(l.qty) || 0) * (parseFloat(l.unitPrice) || 0);
       let disc = 0;
@@ -9302,6 +9308,20 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyn
             </div>
           </div>
           <div><label style={labelStyle}>Default Terms / Notes</label><textarea style={{ ...field, resize: "vertical" }} rows={2} value={cfg.terms} onChange={e => set("terms", e.target.value)} /></div>
+        </div>
+      </Card>
+
+      <Card style={{ marginBottom: 14 }}>
+        <CardHeader title="Online Payment Methods" />
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: -2, lineHeight: 1.5 }}>
+            Choose which online payment options appear on the QuickBooks pay link when you send an invoice.
+          </div>
+          {row("Credit / Debit Card", "AllowOnlineCreditCardPayment", cfg.qbAllowCard !== false, v => set("qbAllowCard", v))}
+          {row("Bank Transfer (ACH)", "AllowOnlineACHPayment", cfg.qbAllowACH !== false, v => set("qbAllowACH", v))}
+          <div style={{ fontSize: 11.5, color: T.textMuted, background: hexA(T.primary, 0.06), borderRadius: 10, padding: "9px 11px", lineHeight: 1.5 }}>
+            These only take effect if the method is also turned on in your <b>QuickBooks Payments</b> account. QuickBooks won't show a method a client can't actually use, even if it's enabled here. Card and Bank Transfer (ACH) are the methods QuickBooks exposes for invoices via the API.
+          </div>
         </div>
       </Card>
 

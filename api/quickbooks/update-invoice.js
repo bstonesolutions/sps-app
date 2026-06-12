@@ -98,8 +98,9 @@ export default async function handler(req, res) {
       DueDate:      invoice.dueDate || existing.DueDate,
       Line:         lineItems,
       BillEmail:    invoice.clientEmail ? { Address: invoice.clientEmail } : existing.BillEmail,
-      AllowOnlineCreditCardPayment: true,
-      AllowOnlineACHPayment: true,
+      // Online payment methods offered on the pay link — controlled in app settings (default on).
+      AllowOnlineCreditCardPayment: invoice.allowCard !== false,
+      AllowOnlineACHPayment: invoice.allowACH !== false,
     };
 
     const updRes = await fetch(`${base}/invoice?minorversion=65`, {
