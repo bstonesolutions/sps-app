@@ -14381,7 +14381,7 @@ const ALL_NAV = [
   { id: "settings",   label: "Customize", icon: "sliders" },
 ];
 
-const DEFAULT_DOCK = ["dashboard", "clients", "schedule", "messages", "settings"];
+const DEFAULT_DOCK = ["dashboard", "clients", "schedule", "messages"];
 
 // ─────────────────────────────────────────────
 // OVERFLOW MENU + DOCK EDITOR
@@ -14392,7 +14392,9 @@ const DEFAULT_DOCK = ["dashboard", "clients", "schedule", "messages", "settings"
 function OverflowMenu({ page, perms, navUnread, reminderDue, dockIds, setDockIds, onNav, onSignOut, currentUser, T, branding, onClose }) {
   const availableNav = ALL_NAV.filter(n => isTabVisible(n, perms));
 
-  const overflow = availableNav.filter(n => !dockIds.includes(n.id));
+  // The bar shows the first 4 dock slots; everything else lives in this menu sheet.
+  const barIds = dockIds.slice(0, 4);
+  const overflow = availableNav.filter(n => !barIds.includes(n.id));
 
   // ── Drag state ──
   const dragIdx = useRef(null);    // index being dragged in dockIds
@@ -14403,7 +14405,7 @@ function OverflowMenu({ page, perms, navUnread, reminderDue, dockIds, setDockIds
   const toggleDock = (id) => {
     setDockIds(prev => {
       if (prev.includes(id)) return prev.filter(x => x !== id);
-      if (prev.length >= 5) return prev;
+      if (prev.length >= 4) return prev;
       return [...prev, id];
     });
   };
@@ -14453,11 +14455,17 @@ function OverflowMenu({ page, perms, navUnread, reminderDue, dockIds, setDockIds
 
   return (
     <>
+      <style>{`@keyframes sheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }`}</style>
       {/* Backdrop */}
       <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 200, background: "rgba(0,0,0,0.3)", backdropFilter: "blur(4px)", WebkitBackdropFilter: "blur(4px)" }} />
 
-      {/* Sheet */}
-      <div style={{ position: "fixed", top: 0, right: 0, bottom: 0, zIndex: 201, width: "min(320px, 88vw)", background: T.surface, boxShadow: "-8px 0 40px rgba(0,0,0,0.18)", display: "flex", flexDirection: "column", paddingTop: "env(safe-area-inset-top)" }}>
+      {/* Bottom sheet — slides up from the bottom */}
+      <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 201, maxHeight: "85vh", background: T.surface, borderRadius: "22px 22px 0 0", boxShadow: "0 -8px 40px rgba(0,0,0,0.22)", display: "flex", flexDirection: "column", paddingBottom: "env(safe-area-inset-bottom)", animation: "sheetUp 0.28s cubic-bezier(.22,1,.36,1)" }}>
+
+        {/* Grab handle */}
+        <div style={{ display: "flex", justifyContent: "center", paddingTop: 8, flexShrink: 0 }}>
+          <div style={{ width: 38, height: 5, borderRadius: 100, background: T.border }} />
+        </div>
 
         {/* Header */}
         <div style={{ padding: "18px 20px 14px", borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -14509,8 +14517,8 @@ function OverflowMenu({ page, perms, navUnread, reminderDue, dockIds, setDockIds
           {/* Dock editor — drag to reorder */}
           <div style={{ padding: "12px 20px 0" }}>
             <div style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: T.textMuted, marginBottom: 4 }}>Bottom Bar ({dockIds.length}/5)</div>
-              <div style={{ fontSize: 11, color: T.textMuted }}>Drag to reorder. Tap Remove to free up a slot.</div>
+              <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: T.textMuted, marginBottom: 4 }}>Bottom Bar ({Math.min(dockIds.length, 4)}/4 + Menu)</div>
+              <div style={{ fontSize: 11, color: T.textMuted }}>Your first 4 slots. Drag to reorder, tap Remove to free a slot. The Menu button is always last.</div>
             </div>
 
             {/* Dock items — draggable */}
@@ -17268,9 +17276,9 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "settings" && <AppSettings onNav={handleNav} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} />}
         </main>
 
-        {/* Bottom Nav — shows only the user's chosen dock items */}
+        {/* Bottom Nav — 4 customizable slots + a fixed Menu button */}
         <nav style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: hexA(T.surface, 0.88), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", borderTop: `1px solid ${T.border}`, display: "flex", zIndex: 90, minHeight: 60, paddingTop: 4, paddingBottom: "calc(8px + env(safe-area-inset-bottom))" }}>
-          {dockIds.map(id => {
+          {dockIds.slice(0, 4).map(id => {
             const n = ALL_NAV.find(x => x.id === id);
             if (!n) return null;
             const active = page === n.id;
@@ -17287,6 +17295,17 @@ export default function App({ authEmail = "", onSignOut }) {
               </button>
             );
           })}
+          {/* Fixed Menu button — always the far-right slot, not replaceable */}
+          <button onClick={() => setMenuOpen(true)}
+            style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, color: menuOpen ? T.primary : T.textMuted, fontFamily: "inherit", position: "relative" }}>
+            <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: menuOpen ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s", position: "relative" }}>
+              <Icon name="sliders" size={22} />
+              {(navUnread > 0 || reminderDueCount > 0) && !dockIds.slice(0, 4).includes("messages") && (
+                <span style={{ position: "absolute", top: 2, right: 4, width: 8, height: 8, borderRadius: "50%", background: T.primary, border: `2px solid ${T.bg}` }} />
+              )}
+            </span>
+            <span style={{ fontSize: 10.5, fontWeight: menuOpen ? 700 : 500, letterSpacing: "-0.01em" }}>Menu</span>
+          </button>
         </nav>
 
         {/* Overflow menu — slides in from top right */}
