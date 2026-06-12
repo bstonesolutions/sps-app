@@ -9552,6 +9552,17 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyn
 // Used by both the client-facing preview and the live designer preview.
 function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
   const money = (n) => `$${(parseFloat(n) || 0).toFixed(2)}`;
+  // Readable dates ("May 21, 2026") from either MM/DD/YYYY or YYYY-MM-DD.
+  const fmtNice = (s) => {
+    if (!s || typeof s !== "string") return s || "";
+    let d = null;
+    if (s.includes("/")) { const [m, da, y] = s.split("/").map(Number); d = (m && da && y) ? new Date(y, m - 1, da) : null; }
+    else if (s.includes("-")) { const dt = new Date(s + "T00:00:00"); d = isNaN(dt.getTime()) ? null : dt; }
+    if (!d || isNaN(d.getTime())) return s;
+    return d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+  };
+  // Consistent right-aligned column so the dollar amounts line up vertically.
+  const amtStyle = { minWidth: 96, textAlign: "right", whiteSpace: "nowrap" };
   const totals = invoiceTotals(invoice);
   const eff = effectiveStatus(invoice);
   const accent = cfg.accent || T.primary;
@@ -9571,7 +9582,7 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
         </div>
       )}
       <div style={{ minWidth: 0, flex: centered ? "none" : 1, width: "100%", textAlign: centered ? "center" : "left" }}>
-        <div style={{ fontSize: 15, fontWeight: 800, color: light ? "#fff" : T.text, letterSpacing: "-0.02em", lineHeight: 1.2 }}>{branding.companyName}</div>
+        <div style={{ fontSize: 14, fontWeight: 800, color: light ? "#fff" : T.text, letterSpacing: "-0.02em", lineHeight: 1.2, textWrap: "balance" }}>{branding.companyName}</div>
         <div style={{ fontSize: 11, color: light ? "rgba(255,255,255,0.82)" : T.textMuted, marginTop: 1 }}>{branding.division}</div>
         {cfg.showContact !== false && contactBits.length > 0 && <div className="sps-contact" style={{ fontSize: 10.5, color: light ? "rgba(255,255,255,0.82)" : T.textMuted, marginTop: 5, lineHeight: 1.5 }}>{contactBits.join("  ·  ")}</div>}
         {cfg.showContact !== false && branding.companyAddress && <div className="sps-contact" style={{ fontSize: 10.5, color: light ? "rgba(255,255,255,0.82)" : T.textMuted, lineHeight: 1.5 }}>{branding.companyAddress}</div>}
@@ -9615,21 +9626,21 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
         </div>
       )}
 
-      <div style={{ padding: `14px ${pad}px`, display: "flex", justifyContent: "space-between", gap: 12, borderBottom: `1px solid ${T.border}` }}>
+      <div style={{ padding: `18px ${pad}px`, display: "flex", justifyContent: "space-between", gap: 12, borderBottom: `1px solid ${T.border}` }}>
         <div>
           <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 4 }}>Bill To</div>
           <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{invoice.clientName || client?.name}</div>
           {(invoice.clientAddress || client?.address) && <div style={{ fontSize: 12, color: T.textMuted }}>{invoice.clientAddress || client?.address}</div>}
           {(invoice.clientEmail || client?.email) && <div style={{ fontSize: 12, color: T.textMuted }}>{invoice.clientEmail || client?.email}</div>}
         </div>
-        <div style={{ textAlign: "right", fontSize: 12, color: T.textMuted }}>
-          <div>Issued: <span style={{ color: T.text, fontWeight: 600 }}>{invoice.date}</span></div>
-          <div style={{ marginTop: 3 }}>Due: <span style={{ color: T.text, fontWeight: 600 }}>{invoice.dueDate}</span></div>
+        <div style={{ textAlign: "right", fontSize: 12, color: T.textMuted, flexShrink: 0 }}>
+          <div style={{ whiteSpace: "nowrap" }}>Issued: <span style={{ color: T.text, fontWeight: 600 }}>{fmtNice(invoice.date)}</span></div>
+          <div style={{ marginTop: 3, whiteSpace: "nowrap" }}>Due: <span style={{ color: T.text, fontWeight: 600 }}>{fmtNice(invoice.dueDate)}</span></div>
         </div>
       </div>
 
       <div style={{ padding: `4px ${pad}px` }}>
-        {(invoice.lineItems || []).map((l, idx) => {
+        {(invoice.lineItems || []).map((l, idx, arr) => {
           const nn = (v) => parseFloat(v) || 0;
           const gross = nn(l.qty) * nn(l.unitPrice);
           let disc = 0;
@@ -9637,7 +9648,7 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
           else if (l.discountType === "amt") disc = nn(l.discount);
           const net = Math.max(0, gross - disc);
           return (
-            <div key={l.id || idx} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: rowPad, borderBottom: `1px solid ${T.border}`, background: cfg.zebraRows && idx % 2 === 1 ? hexA(T.textMuted, 0.04) : "transparent" }}>
+            <div key={l.id || idx} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: rowPad, borderBottom: idx < arr.length - 1 ? `1px solid ${T.border}` : "none", background: cfg.zebraRows && idx % 2 === 1 ? hexA(T.textMuted, 0.04) : "transparent" }}>
               <div style={{ flex: 1, paddingRight: 10 }}>
                 <div style={{ fontSize: 13, color: T.text }}>{l.desc || "—"}{l.taxable && cfg.showItemTax !== false && <span style={{ color: T.textMuted }}> *</span>}</div>
                 {cfg.showQtyPrice !== false && <div style={{ fontSize: 11, color: T.textMuted }}>{l.qty} × {money(nn(l.unitPrice))}</div>}
@@ -9656,15 +9667,15 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
       <div style={{ padding: `10px ${pad}px 16px` }}>
         {totals.discountTotal > 0 ? (
           <>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted }}><span>Subtotal</span><span>{money(totals.grossSubtotal)}</span></div>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.accent, fontWeight: 700, marginTop: 4 }}><span>Total savings</span><span>−{money(totals.discountTotal)}</span></div>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted, marginTop: 4 }}><span>After discount</span><span>{money(totals.subtotal)}</span></div>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13, color: T.textMuted }}><span>Subtotal</span><span style={amtStyle}>{money(totals.grossSubtotal)}</span></div>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13, color: T.accent, fontWeight: 700, marginTop: 4 }}><span>Total savings</span><span style={amtStyle}>−{money(totals.discountTotal)}</span></div>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13, color: T.textMuted, marginTop: 4 }}><span>After discount</span><span style={amtStyle}>{money(totals.subtotal)}</span></div>
           </>
         ) : (
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted }}><span>Subtotal</span><span>{money(totals.subtotal)}</span></div>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13, color: T.textMuted }}><span>Subtotal</span><span style={amtStyle}>{money(totals.subtotal)}</span></div>
         )}
-        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted, marginTop: 4 }}><span>Tax ({invoice.taxRate || 0}%{totals.taxableBase > 0 ? " on taxable" : ""})</span><span>{money(totals.tax)}</span></div>
-        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 18, fontWeight: 800, color: accent, marginTop: 8, borderTop: `2px solid ${T.border}`, paddingTop: 8 }}><span>Total Due</span><span>{money(totals.total)}</span></div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13, color: T.textMuted, marginTop: 4 }}><span>Tax ({invoice.taxRate || 0}%{totals.taxableBase > 0 ? " on taxable" : ""})</span><span style={amtStyle}>{money(totals.tax)}</span></div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 18, fontWeight: 800, color: accent, marginTop: 8, borderTop: `2px solid ${T.border}`, paddingTop: 8 }}><span>Total Due</span><span style={amtStyle}>{money(totals.total)}</span></div>
         {anyTaxable && cfg.showItemTax !== false && <div style={{ fontSize: 10, color: T.textMuted, marginTop: 6 }}>* taxable item</div>}
       </div>
 
@@ -9789,15 +9800,21 @@ async function exportInvoicePdf(args) {
   const num = String(args.invoice.number || "invoice").replace(/[^\w.-]+/g, "-");
   const filename = `invoice-${num}.pdf`;
   const blob = doc.output("blob");
-  try {
-    const file = new File([blob], filename, { type: "application/pdf" });
-    if (typeof navigator !== "undefined" && navigator.canShare && navigator.canShare({ files: [file] })) {
-      await navigator.share({ files: [file], title: filename });
-      return "shared";
+  // Use the native share sheet only on touch devices (phones/tablets), where it surfaces
+  // AirPrint / Save to Files / share targets. On desktop (no touch) — incl. macOS, where
+  // canShare files is also true — skip it and download the PDF directly.
+  const isTouchDevice = typeof navigator !== "undefined" && (navigator.maxTouchPoints || 0) > 0;
+  if (isTouchDevice) {
+    try {
+      const file = new File([blob], filename, { type: "application/pdf" });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: filename });
+        return "shared";
+      }
+    } catch (e) {
+      if (e && e.name === "AbortError") return "cancelled"; // user dismissed the sheet
+      // any other share error → fall through to download
     }
-  } catch (e) {
-    if (e && e.name === "AbortError") return "cancelled"; // user dismissed the sheet
-    // any other share error → fall through to download
   }
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -9896,7 +9913,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
 
   return (
     <Modal title={invoice.number} onClose={onClose}>
-      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14, paddingBottom: "max(16px, env(safe-area-inset-bottom))" }}>
         <InvoiceDocument invoice={invoice} client={client} branding={branding} cfg={cfg} T={T} />
 
         {/* QB Payment link */}
@@ -16633,8 +16650,10 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, T: g
     <div style={{ fontFamily: fontStack, background: T.bg, display: "flex", flexDirection: "column", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ...(isStaffPreview ? { position: "relative", minHeight: "100%" } : { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, height: "100dvh", overflow: "hidden" }) }}>
       <style>{`
         * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
-        ${isStaffPreview ? "" : `/* Lock the document so only <main> scrolls — prevents iOS overscroll drift of the header/nav. */
-        html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
+        ${isStaffPreview ? "" : `/* Lock the document so only <main> scrolls — position:fixed on <body>
+           is what actually stops the iOS standalone rubber-band that drifts the header/nav. */
+        html { height: 100%; overflow: hidden; }
+        body { position: fixed; top: 0; left: 0; right: 0; bottom: 0; overflow: hidden; overscroll-behavior: none; }
         #root { height: 100%; overflow: hidden; }`}
         input, select, textarea { -webkit-appearance: none; appearance: none; font-size: 16px !important; }
         input:focus, select:focus, textarea:focus { border-color: ${T.primary} !important; outline: none; box-shadow: 0 0 0 3px ${hexA(T.primary, 0.15)}; }
@@ -17634,8 +17653,11 @@ export default function App({ authEmail = "", onSignOut }) {
         <style>{`
           *, *::before, *::after { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
           /* Lock the document so only the app's <main> scrolls — kills iOS rubber-band
-             drift of the fixed header/nav. Released when this shell unmounts (login etc.). */
-          html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
+             drift of the header/nav. position:fixed on <body> is the part that actually
+             stops the standalone-PWA bounce (overflow:hidden alone isn't enough on iOS).
+             Released when this shell unmounts (login etc.). */
+          html { height: 100%; overflow: hidden; }
+          body { position: fixed; top: 0; left: 0; right: 0; bottom: 0; overflow: hidden; overscroll-behavior: none; }
           #root { height: 100%; overflow: hidden; }
           body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
           input, select, textarea {
