@@ -5788,6 +5788,255 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
 }
 
 // ─────────────────────────────────────────────
+// BULK ADD STOPS
+// A multi-select wrapper around the single add-stop pieces: pick up to 20 clients,
+// assign a service + date/time to each (with "Set all" defaults), then add them all
+// at once. Reuses the client list, the service-type options (catalog.stopTypes — the
+// same list the single flow's Category uses), the stop shape, and the schedule save.
+// ─────────────────────────────────────────────
+const BULK_MAX_STOPS = 20;
+
+function BulkAddStops({ clients, catalog, onAdd, onClose, T }) {
+  const [step, setStep] = useState(1);       // 1 select · 2 assign · 3 confirm · 4 done
+  const [search, setSearch] = useState("");
+  const [sel, setSel] = useState({});         // { [clientId]: true }
+  const [cards, setCards] = useState({});     // { [clientId]: { service, dateISO, timeISO } }
+  const [defDate, setDefDate] = useState("");
+  const [defTime, setDefTime] = useState("");
+  const [defService, setDefService] = useState("");
+  const [showErrors, setShowErrors] = useState(false);
+  const [addedCount, setAddedCount] = useState(0);
+
+  // Service options come straight from the catalog — the same list the single
+  // add-stop flow offers. Never hardcoded; if empty, the dropdowns are simply empty.
+  const serviceOptions = catalog.stopTypes || [];
+  const q = search.trim().toLowerCase();
+  const activeClients = (clients || []).filter(c => c.status !== "Inactive");
+  const filtered = q ? activeClients.filter(c => (c.name || "").toLowerCase().includes(q) || (c.address || "").toLowerCase().includes(q)) : activeClients;
+  const selIds = Object.keys(sel).filter(k => sel[k]);
+  const selCount = selIds.length;
+  const atCap = selCount >= BULK_MAX_STOPS;
+
+  // Same conversions the single add-stop flow uses (native picker -> app formats).
+  const toMMDDYYYY = (iso) => { if (!iso) return ""; const [y, m, d] = iso.split("-"); return `${m}/${d}/${y}`; };
+  const to12h = (t) => { if (!t) return ""; let [h, m] = t.split(":").map(Number); const ap = h >= 12 ? "PM" : "AM"; h = h % 12; if (h === 0) h = 12; return `${h}:${String(m).padStart(2, "0")} ${ap}`; };
+
+  const toggle = (id) => setSel(s => {
+    if (s[id]) { const n = { ...s }; delete n[id]; return n; }
+    if (Object.keys(s).filter(k => s[k]).length >= BULK_MAX_STOPS) return s; // soft cap
+    return { ...s, [id]: true };
+  });
+  const updateCard = (id, patch) => setCards(c => ({ ...c, [id]: { ...c[id], ...patch } }));
+
+  const goAssign = () => {
+    setCards(prev => { const next = {}; selIds.forEach(id => { next[id] = prev[id] || { service: "", dateISO: "", timeISO: "" }; }); return next; });
+    setStep(2);
+  };
+  const applyToAll = () => setCards(prev => {
+    const next = { ...prev };
+    selIds.forEach(id => {
+      const cur = next[id] || { service: "", dateISO: "", timeISO: "" };
+      next[id] = {
+        service: defService || cur.service || "",
+        dateISO: defDate || cur.dateISO || "",
+        timeISO: defTime || cur.timeISO || "",
+      };
+    });
+    return next;
+  });
+
+  const invalidIds = selIds.filter(id => { const c = cards[id] || {}; return !c.service || !c.dateISO || !c.timeISO; });
+  const allValid = selIds.length > 0 && invalidIds.length === 0;
+
+  const goConfirm = () => { if (!allValid) { setShowErrors(true); return; } setShowErrors(false); setStep(3); };
+
+  const handleAddAll = () => {
+    const items = selIds.map((id, i) => {
+      const c = clients.find(x => String(x.id) === String(id));
+      const card = cards[id] || {};
+      return {
+        date: toMMDDYYYY(card.dateISO),
+        stop: {
+          sid: `bulk-${Date.now()}-${i}`,
+          id: c ? c.id : id,
+          client: c ? c.name : "Client",
+          address: c ? c.address || "" : "",
+          type: card.service,
+          time: to12h(card.timeISO),
+          duration: "60 min",
+          services: [],
+          products: [],
+          assigneeId: "",
+        },
+      };
+    });
+    onAdd(items);
+    setAddedCount(items.length);
+    setStep(4);
+  };
+
+  const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
+  const field = { width: "100%", padding: "11px 14px", border: `1px solid ${T.border}`, borderRadius: 11, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const selBox = { ...field, appearance: "none", WebkitAppearance: "none", cursor: "pointer" };
+  const RED = "#C0392B";
+
+  return (
+    <Modal title="Bulk Add Stops" onClose={onClose}>
+      {/* Step indicator */}
+      {step < 4 && (
+        <div style={{ display: "flex", gap: 6, marginBottom: 18 }}>
+          {["Select", "Assign", "Confirm"].map((lbl, i) => {
+            const n = i + 1; const on = step >= n;
+            return (
+              <div key={lbl} style={{ flex: 1, textAlign: "center" }}>
+                <div style={{ height: 4, borderRadius: 2, background: on ? T.primary : T.border, marginBottom: 6 }} />
+                <div style={{ fontSize: 11, fontWeight: 700, color: on ? T.primary : T.textMuted }}>{lbl}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* STEP 1 — select clients */}
+      {step === 1 && (
+        <>
+          <div style={{ position: "relative", marginBottom: 10 }}>
+            <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>🔍</span>
+            <input type="search" placeholder="Search clients..." value={search} onChange={e => setSearch(e.target.value)} style={{ ...field, paddingLeft: 34 }} />
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{selCount} of {BULK_MAX_STOPS} selected</span>
+            {atCap && <span style={{ fontSize: 11, color: T.warning, fontWeight: 600 }}>Maximum 20 stops per batch</span>}
+          </div>
+          <div style={{ maxHeight: 320, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, border: `1px solid ${T.border}`, borderRadius: 12, padding: 6 }}>
+            {filtered.length === 0 && <div style={{ textAlign: "center", color: T.textMuted, fontSize: 13, padding: 16 }}>No active clients match.</div>}
+            {filtered.map(c => {
+              const on = !!sel[c.id];
+              const disabled = !on && atCap;
+              return (
+                <div key={c.id} onClick={() => !disabled && toggle(c.id)}
+                  style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 10px", borderRadius: 10, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.45 : 1, background: on ? T.navActiveBg : "transparent" }}>
+                  <Checkbox checked={on} onChange={() => !disabled && toggle(c.id)} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{c.name}</div>
+                    <div style={{ fontSize: 11, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.address || "No address"}</div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <Btn onClick={goAssign} block lg style={{ marginTop: 16, opacity: selCount ? 1 : 0.5, pointerEvents: selCount ? "auto" : "none" }}>Next · Assign Services →</Btn>
+        </>
+      )}
+
+      {/* STEP 2 — assign service + date/time per client */}
+      {step === 2 && (
+        <>
+          <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: "14px 14px 16px", marginBottom: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: T.text, marginBottom: 12, textTransform: "uppercase", letterSpacing: "0.05em" }}>Set all</div>
+            <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Date</label>
+                <input type="date" value={defDate} onChange={e => setDefDate(e.target.value)} style={{ ...field, cursor: "pointer" }} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Time</label>
+                <input type="time" step={300} value={defTime} onChange={e => setDefTime(e.target.value)} style={{ ...field, cursor: "pointer" }} />
+              </div>
+            </div>
+            <label style={labelStyle}>Default service <span style={{ textTransform: "none", fontWeight: 400 }}>(optional)</span></label>
+            <select value={defService} onChange={e => setDefService(e.target.value)} style={selBox}>
+              <option value="">Choose a service…</option>
+              {serviceOptions.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+            <Btn variant="ghost" sm block onClick={applyToAll} style={{ marginTop: 12 }}>Apply to all {selCount} stop{selCount !== 1 ? "s" : ""}</Btn>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {selIds.map(id => {
+              const c = clients.find(x => String(x.id) === String(id));
+              const card = cards[id] || {};
+              const missingService = showErrors && !card.service;
+              return (
+                <div key={id} style={{ border: `1px solid ${missingService ? RED : T.border}`, borderRadius: 14, padding: "12px 14px", background: T.surface }}>
+                  <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>{c ? c.name : "Client"}</div>
+                  <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{(c && c.address) || "No address"}</div>
+                  <label style={labelStyle}>Service</label>
+                  <select value={card.service || ""} onChange={e => updateCard(id, { service: e.target.value })}
+                    style={{ ...selBox, borderColor: missingService ? RED : T.border, marginBottom: 10 }}>
+                    <option value="">Select a service…</option>
+                    {serviceOptions.map(o => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <div style={{ flex: 1 }}>
+                      <label style={labelStyle}>Date</label>
+                      <input type="date" value={card.dateISO || ""} onChange={e => updateCard(id, { dateISO: e.target.value })} style={{ ...field, cursor: "pointer", borderColor: (showErrors && !card.dateISO) ? RED : T.border }} />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <label style={labelStyle}>Time</label>
+                      <input type="time" step={300} value={card.timeISO || ""} onChange={e => updateCard(id, { timeISO: e.target.value })} style={{ ...field, cursor: "pointer", borderColor: (showErrors && !card.timeISO) ? RED : T.border }} />
+                    </div>
+                  </div>
+                  {missingService && <div style={{ fontSize: 11, color: RED, fontWeight: 600, marginTop: 8 }}>Pick a service for this stop.</div>}
+                </div>
+              );
+            })}
+          </div>
+
+          {showErrors && !allValid && <div style={{ fontSize: 12, color: RED, fontWeight: 600, marginTop: 12, textAlign: "center" }}>Every stop needs a service, date, and time.</div>}
+
+          <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+            <Btn variant="ghost" onClick={() => setStep(1)} style={{ flex: 1 }}>← Back</Btn>
+            <Btn onClick={goConfirm} style={{ flex: 2 }}>Review →</Btn>
+          </div>
+        </>
+      )}
+
+      {/* STEP 3 — confirm + add */}
+      {step === 3 && (
+        <>
+          <div style={{ textAlign: "center", padding: "6px 0 18px" }}>
+            <div style={{ fontSize: 17, fontWeight: 800, color: T.text }}>Adding {selCount} stop{selCount !== 1 ? "s" : ""} to your schedule</div>
+            <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 4 }}>Each with its assigned service, date, and time.</div>
+          </div>
+          <div style={{ border: `1px solid ${T.border}`, borderRadius: 12, overflow: "hidden", marginBottom: 16 }}>
+            {selIds.map((id, i) => {
+              const c = clients.find(x => String(x.id) === String(id));
+              const card = cards[id] || {};
+              return (
+                <div key={id} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "10px 14px", borderBottom: i < selIds.length - 1 ? `1px solid ${T.border}` : "none" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c ? c.name : "Client"}</div>
+                    <div style={{ fontSize: 11, color: T.textMuted }}>{card.service}</div>
+                  </div>
+                  <div style={{ fontSize: 11, color: T.textMuted, textAlign: "right", flexShrink: 0, lineHeight: 1.5 }}>{toMMDDYYYY(card.dateISO)}<br />{to12h(card.timeISO)}</div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <Btn variant="ghost" onClick={() => setStep(2)} style={{ flex: 1 }}>← Back</Btn>
+            <Btn onClick={handleAddAll} style={{ flex: 2 }}>Add All Stops</Btn>
+          </div>
+        </>
+      )}
+
+      {/* STEP 4 — success */}
+      {step === 4 && (
+        <div style={{ textAlign: "center", padding: "16px 0 4px" }}>
+          <div style={{ width: 60, height: 60, borderRadius: "50%", background: hexA(T.accent, 0.12), color: T.accent, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px" }}>
+            <Icon name="check" size={30} />
+          </div>
+          <div style={{ fontSize: 18, fontWeight: 800, color: T.text, marginBottom: 4 }}>{addedCount} stop{addedCount !== 1 ? "s" : ""} added</div>
+          <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 20 }}>They're on your schedule now.</div>
+          <Btn onClick={onClose} block lg>Done</Btn>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+// ─────────────────────────────────────────────
 // SCHEDULE
 // ─────────────────────────────────────────────
 function RouteRing({ done, total, size = 58, label = "stops" }) {
@@ -6593,6 +6842,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   const [editStopModal, setEditStopModal] = useState(null); // { stop, dayDate }
   const [sentStops, setSentStops] = useState({});
   const [showAdd, setShowAdd] = useState(false);
+  const [showBulkAdd, setShowBulkAdd] = useState(false);
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState({}); // { sid: true }
   const [assignFilter, setAssignFilter] = useState(""); // "" all | id | "__un" unassigned
@@ -6825,6 +7075,17 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   // ── Route-dashboard state + helpers ──
   const [selectedDate, setSelectedDate] = useState(() => todayMDY());
   const [viewTech, setViewTech] = useState(null); // null = dashboard; else assignee key / "__un" / "__all"
+
+  // Bulk add: group the batch by date and reuse the EXISTING addStops/setSchedule
+  // save for each date (no new Supabase call). Existing sorting handles order.
+  const handleBulkAdd = (items) => {
+    const byDate = {};
+    (items || []).forEach(({ date, stop }) => { if (!date) return; (byDate[date] = byDate[date] || []).push(stop); });
+    Object.entries(byDate).forEach(([date, stops]) => addStops(date, stops));
+    const firstDate = items && items[0] && items[0].date;
+    if (firstDate) { setSelectedDate(firstDate); setViewTech(null); }
+  };
+
   const LEG_MIN = 15; // assumed drive time between stops (estimate until GPS/maps is connected)
   const AVG_MPH = 28;
 
@@ -7038,6 +7299,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
         ) : perms.editSchedule ? (
           <div style={{ display: "flex", gap: 8 }}>
             {allStops.length > 0 && <Btn variant="ghost" sm onClick={() => setSelectMode(true)}>Select</Btn>}
+            <Btn variant="ghost" sm onClick={() => setShowBulkAdd(true)}>Bulk Add</Btn>
             <Btn sm onClick={() => setShowAdd(true)}>+ Add Stop</Btn>
           </div>
         ) : null)}
@@ -7291,6 +7553,16 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           seedClientIds={seedClientIds}
           onSave={addStops}
           onClose={closeAdd}
+        />
+      )}
+
+      {showBulkAdd && (
+        <BulkAddStops
+          clients={clients}
+          catalog={catalog}
+          onAdd={handleBulkAdd}
+          onClose={() => setShowBulkAdd(false)}
+          T={T}
         />
       )}
 
