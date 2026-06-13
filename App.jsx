@@ -3569,6 +3569,25 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
   // keep local view in sync if the stored record changes (e.g. a completed stop adds history)
   useEffect(() => { setClient(init); }, [init]);
 
+  // Always open the detail view scrolled to the top. The real scroll container is
+  // the app shell's <main> (contained scroll), not the window — so find the nearest
+  // scrollable ancestor and reset it. Re-runs when a different client is opened.
+  const rootRef = useRef(null);
+  useEffect(() => {
+    const toTop = () => {
+      let el = rootRef.current && rootRef.current.parentElement;
+      while (el) {
+        const oy = getComputedStyle(el).overflowY;
+        if ((oy === "auto" || oy === "scroll") && el.scrollHeight > el.clientHeight) { el.scrollTop = 0; return; }
+        el = el.parentElement;
+      }
+      if (rootRef.current) rootRef.current.scrollIntoView({ block: "start" });
+    };
+    toTop();
+    const raf = requestAnimationFrame(toTop); // catch any post-layout shift (e.g. a video loading)
+    return () => cancelAnimationFrame(raf);
+  }, [client.id]);
+
   // apply a change locally and push it up so it saves to the client list + storage
   const update = (changes) => {
     const next = { ...client, ...changes };
@@ -3579,7 +3598,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
   if (editing) return <ClientEditForm client={client} onSave={u => { update(u); setEditing(false); }} onCancel={() => setEditing(false)} onDelete={onDelete} />;
 
   return (
-    <div>
+    <div ref={rootRef}>
       {client.status === "Inactive" && (
         <div style={{ background: hexA(T.textMuted, 0.08), border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 14px", marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span style={{ fontSize: 13, color: T.textMuted, fontWeight: 600 }}>This client is inactive and hidden from the main list.</span>
