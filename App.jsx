@@ -6286,6 +6286,27 @@ function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, o
   // Match the app's filter-pill styling (SPS crimson for active).
   const pillStyle = (active) => ({ padding: "6px 13px", borderRadius: 10, border: `1.5px solid ${active ? T.primary : T.border}`, background: active ? hexA(T.primary, 0.08) : T.surface, color: active ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 });
 
+  // When exactly ONE client is selected, mirror the single-client convenience:
+  // auto-fill frequency from their tier and day from their preferred day. Fires
+  // only once per distinct single selection, so it never overrides manual edits
+  // (and stays out of the way when 0 or 2+ clients are selected).
+  const lastAutoFillRef = useRef(null);
+  useEffect(() => {
+    if (selIds.length !== 1) return;
+    const id = selIds[0];
+    if (lastAutoFillRef.current === id) return;
+    const c = (clients || []).find(cl => String(cl.id) === String(id));
+    if (!c) return;
+    lastAutoFillRef.current = id;
+    const tierFreqMap = { "Weekly": "weekly", "Bi-Weekly": "biweekly", "Monthly": "monthly" };
+    const tf = TIER_FREQ[c.plan];
+    setForm(f => ({
+      ...f,
+      ...(tf && tierFreqMap[tf] ? { frequency: tierFreqMap[tf] } : {}),
+      ...(c.preferredDay ? { dayOfWeek: c.preferredDay } : {}),
+    }));
+  }, [selClients]);
+
   const doSave = () => {
     if (isAdd) {
       const arr = selIds.map((cid, i) => ({ ...form, id: `ra-${Date.now()}-${i}`, clientId: cid }));
