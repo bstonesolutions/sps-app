@@ -6243,7 +6243,7 @@ function computeMissingStops(assignments, schedule, clients, catalog, windowWeek
   return missing;
 }
 
-function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, onClose }) {
+function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, onSaveBulk, onClose }) {
   const blank = {
     id: `ra-${Date.now()}`,
     clientId: "", techId: "", dayOfWeek: "Monday", frequency: "biweekly",
@@ -6259,6 +6259,42 @@ function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, o
 
   const clientObj = (clients||[]).find(c => String(c.id) === String(form.clientId));
   const techObj   = (team||[]).find(t => t.id === form.techId);
+
+  // ── Add mode: tier-filtered, tier-grouped, multi-select client list ──
+  // (Edit mode keeps the existing single-client dropdown unchanged.)
+  const isAdd = !assignment;
+  const [selClients, setSelClients] = useState({});   // { [String(clientId)]: true }
+  const [tierFilter, setTierFilter] = useState("all"); // "all" | tier name | "__none__"
+  // Tiers come straight from each client's existing plan — never hardcoded/invented.
+  const TIER_ORDER = ["Essential", "Signature", "Premium"];
+  const clientTier = (c) => (c && c.plan && String(c.plan).trim()) ? c.plan : ""; // "" = no tier
+  const presentTiers = [...new Set((clients || []).map(clientTier))];
+  const orderedTiers = [
+    ...TIER_ORDER.filter(t => presentTiers.includes(t)),
+    ...presentTiers.filter(t => t && !TIER_ORDER.includes(t)).sort(),
+  ];
+  const hasUntiered = presentTiers.includes("");
+  const selIds = Object.keys(selClients).filter(k => selClients[k]);
+  const toggleClient = (id) => setSelClients(s => ({ ...s, [id]: !s[id] }));
+  const clientsInTier = (tier) => (clients || []).filter(c => clientTier(c) === tier).sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  const tierAllSelected = (tier) => { const ids = clientsInTier(tier).map(c => String(c.id)); return ids.length > 0 && ids.every(id => selClients[id]); };
+  const toggleTier = (tier) => {
+    const ids = clientsInTier(tier).map(c => String(c.id));
+    const allOn = ids.length > 0 && ids.every(id => selClients[id]);
+    setSelClients(s => { const n = { ...s }; ids.forEach(id => { if (allOn) delete n[id]; else n[id] = true; }); return n; });
+  };
+  // Match the app's filter-pill styling (SPS crimson for active).
+  const pillStyle = (active) => ({ padding: "6px 13px", borderRadius: 10, border: `1.5px solid ${active ? T.primary : T.border}`, background: active ? hexA(T.primary, 0.08) : T.surface, color: active ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 });
+
+  const doSave = () => {
+    if (isAdd) {
+      const arr = selIds.map((cid, i) => ({ ...form, id: `ra-${Date.now()}-${i}`, clientId: cid }));
+      if (!arr.length) return;
+      if (onSaveBulk) onSaveBulk(arr); else arr.forEach(a => onSave(a));
+    } else {
+      onSave(form);
+    }
+  };
 
   // When client changes, auto-fill frequency from their tier and preferred day
   const handleClientChange = (clientId) => {
@@ -6277,29 +6313,81 @@ function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, o
     form.serviceIds.includes(id) ? form.serviceIds.filter(x => x !== id) : [...form.serviceIds, id]
   );
 
-  const canSave = form.clientId && form.dayOfWeek && form.frequency && form.startDate;
+  const canSave = (isAdd ? selIds.length > 0 : !!form.clientId) && form.dayOfWeek && form.frequency && form.startDate;
 
   return (
     <Modal title={assignment ? "Edit Assignment" : "Add Assignment"} onClose={onClose}>
       <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
 
-        {/* Client */}
-        <div>
-          <label style={lbl}>Client</label>
-          <select style={field} value={form.clientId} onChange={e => handleClientChange(e.target.value)}>
-            <option value="">Select a client...</option>
-            {(clients||[]).sort((a,b) => (a.name||"").localeCompare(b.name||"")).map(c => (
-              <option key={c.id} value={c.id}>{c.name} — {c.plan || c.division}</option>
-            ))}
-          </select>
-          {clientObj && (
-            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5, display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <span>{clientObj.division}</span>
-              {clientObj.plan && <span>· {clientObj.plan} ({TIER_FREQ[clientObj.plan] || clientObj.planFreq})</span>}
-              {clientObj.preferredDay && <span style={{ color: clientObj.preferredDayOverride ? T.primary : T.textMuted }}>· Preferred: {clientObj.preferredDay}{clientObj.preferredDayOverride ? " (client request)" : " (route default)"}</span>}
+        {/* Client — Edit: single dropdown (unchanged). Add: tier-grouped multi-select. */}
+        {!isAdd ? (
+          <div>
+            <label style={lbl}>Client</label>
+            <select style={field} value={form.clientId} onChange={e => handleClientChange(e.target.value)}>
+              <option value="">Select a client...</option>
+              {(clients||[]).sort((a,b) => (a.name||"").localeCompare(b.name||"")).map(c => (
+                <option key={c.id} value={c.id}>{c.name} — {c.plan || c.division}</option>
+              ))}
+            </select>
+            {clientObj && (
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <span>{clientObj.division}</span>
+                {clientObj.plan && <span>· {clientObj.plan} ({TIER_FREQ[clientObj.plan] || clientObj.planFreq})</span>}
+                {clientObj.preferredDay && <span style={{ color: clientObj.preferredDayOverride ? T.primary : T.textMuted }}>· Preferred: {clientObj.preferredDay}{clientObj.preferredDayOverride ? " (client request)" : " (route default)"}</span>}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div>
+            <label style={lbl}>Clients — {selIds.length} selected</label>
+            {/* Tier filter pills */}
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+              <button onClick={() => setTierFilter("all")} style={pillStyle(tierFilter === "all")}>All</button>
+              {orderedTiers.map(t => <button key={t} onClick={() => setTierFilter(t)} style={pillStyle(tierFilter === t)}>{t}</button>)}
+              {hasUntiered && <button onClick={() => setTierFilter("__none__")} style={pillStyle(tierFilter === "__none__")}>No Tier</button>}
             </div>
-          )}
-        </div>
+            {/* Tier-grouped, scrollable, multi-select list */}
+            <div style={{ maxHeight: 300, overflowY: "auto", border: `1px solid ${T.border}`, borderRadius: 12, padding: 6, display: "flex", flexDirection: "column", gap: 12 }}>
+              {(() => {
+                const showTier = (t) => tierFilter === "all" ? true : (tierFilter === "__none__" ? t === "" : tierFilter === t);
+                const groups = [...orderedTiers, ...(hasUntiered ? [""] : [])].filter(showTier);
+                if (!groups.length) return <div style={{ textAlign: "center", color: T.textMuted, fontSize: 13, padding: 14 }}>No clients.</div>;
+                return groups.map(tier => {
+                  const list = clientsInTier(tier);
+                  if (!list.length) return null;
+                  const label = tier || "No Tier";
+                  const allOn = tierAllSelected(tier);
+                  return (
+                    <div key={tier || "__none__"}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "2px 6px 6px" }}>
+                        <span style={{ fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.07em", color: T.textMuted }}>{label} · {list.length}</span>
+                        <button onClick={() => toggleTier(tier)} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 11.5, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>
+                          {allOn ? `Deselect ${label}` : `Select all ${label}`}
+                        </button>
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        {list.map(c => {
+                          const id = String(c.id);
+                          const on = !!selClients[id];
+                          return (
+                            <div key={id} onClick={() => toggleClient(id)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 10, cursor: "pointer", background: on ? T.navActiveBg : "transparent" }}>
+                              <Checkbox checked={on} onChange={() => toggleClient(id)} />
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{c.name}</div>
+                                <div style={{ fontSize: 11, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.division}{c.plan ? ` · ${c.plan}` : ""}</div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>The day, frequency, and tech below apply to every selected client.</div>
+          </div>
+        )}
 
         {/* Tech */}
         <div>
@@ -6396,9 +6484,9 @@ function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, o
           </div>
         </div>
 
-        <Btn onClick={() => canSave && onSave(form)} block lg disabled={!canSave}
+        <Btn onClick={() => canSave && doSave()} block lg disabled={!canSave}
           style={{ opacity: canSave ? 1 : 0.4 }}>
-          {assignment ? "Save Changes" : "Add Assignment"}
+          {assignment ? "Save Changes" : (selIds.length > 1 ? `Add ${selIds.length} Assignments` : "Add Assignment")}
         </Btn>
         {assignment && (
           <button onClick={() => onSave(null)} style={{ background: "none", border: "none", color: "#C0392B", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", textAlign: "center", padding: 6 }}>
@@ -6443,6 +6531,21 @@ function RouteAssignmentsTab({ clients, catalog, team, schedule, setSchedule, as
           routeDay, // always track what the route says
           routeFreq,
         };
+      }));
+    }
+    setModal(null);
+  };
+
+  // Bulk add: append one assignment per selected client and mirror saveAssignment's
+  // client write-back for each. Reuses the same setAssignments/setClients save path.
+  const saveAssignmentsBulk = (arr) => {
+    if (!arr || !arr.length) { setModal(null); return; }
+    setAssignments(prev => [...(prev || []), ...arr]);
+    if (setClients) {
+      setClients(prev => prev.map(c => {
+        const a = arr.find(x => String(x.clientId) === String(c.id) && x.dayOfWeek);
+        if (!a) return c;
+        return { ...c, preferredDay: c.preferredDayOverride ? c.preferredDay : a.dayOfWeek, preferredFreq: a.frequency, routeDay: a.dayOfWeek, routeFreq: a.frequency };
       }));
     }
     setModal(null);
@@ -6767,6 +6870,7 @@ function RouteAssignmentsTab({ clients, catalog, team, schedule, setSchedule, as
           assignment={modal === "add" ? null : modal}
           clients={clients} catalog={catalog} team={team} T={T}
           onSave={saveAssignment}
+          onSaveBulk={saveAssignmentsBulk}
           onClose={() => setModal(null)}
         />
       )}
