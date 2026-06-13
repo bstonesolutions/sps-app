@@ -38,6 +38,23 @@ async function sendBrandedAuthEmail(payload) {
 // Loaded lazily so it doesn't block initial render
 const loadJsPDF = () => import("jspdf").then(m => m.jsPDF || m.default);
 
+// Open a URL INSIDE the app on native (Capacitor in-app browser — no logout, with
+// a Done button to return cleanly), or a normal new tab on the web PWA. Used for
+// the QuickBooks payment link so paying clients stay in-app. Dynamic imports keep
+// the web bundle working and only load the native plugin when actually native.
+const openInAppBrowser = async (url) => {
+  if (!url) return;
+  try {
+    const { Capacitor } = await import("@capacitor/core");
+    if (Capacitor && Capacitor.isNativePlatform && Capacitor.isNativePlatform()) {
+      const { Browser } = await import("@capacitor/browser");
+      await Browser.open({ url, presentationStyle: "popover" });
+      return;
+    }
+  } catch (_) { /* fall through to the standard web behavior */ }
+  window.open(url, "_blank", "noopener,noreferrer");
+};
+
 function generateEstimatePDF(estimate, branding, invoicing) {
   return loadJsPDF().then(JsPDF => {
     const doc = new JsPDF({ unit: "pt", format: "letter" });
@@ -1324,6 +1341,51 @@ const statusColor = (s, T) => ({
   Monitor:       T.warning,
   "Replace Soon": T.primary,
 }[s] || T.textMuted);
+
+// Parse the loose date strings used on equipment (MM/YYYY, MM/DD/YYYY, YYYY-MM-DD).
+// Returns { date, hasDay } or null. hasDay=false when only month/year is known.
+const parseEqDate = (s) => {
+  if (!s) return null;
+  const v = String(s).trim();
+  let m;
+  if ((m = v.match(/^(\d{1,2})\/(\d{4})$/)))            return { date: new Date(+m[2], +m[1] - 1, 1), hasDay: false };
+  if ((m = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/))) return { date: new Date(+m[3], +m[1] - 1, +m[2]), hasDay: true };
+  if ((m = v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)))   return { date: new Date(+m[1], +m[2] - 1, +m[3]), hasDay: true };
+  const d = new Date(v);
+  return isNaN(d) ? null : { date: d, hasDay: true };
+};
+
+// Equipment warranty: expiration = (purchase or install date) + length. Returns null
+// until both a base date and a positive warranty length are present (never invented).
+const warrantyInfo = (eq) => {
+  if (!eq) return null;
+  const len = parseFloat(eq.warrantyLength);
+  if (!len || len <= 0) return null;
+  const base = parseEqDate(eq.purchaseDate || eq.installed);
+  if (!base) return null;
+  const months = (eq.warrantyUnit || "years") === "months" ? Math.round(len) : Math.round(len * 12);
+  const expiry = new Date(base.date);
+  expiry.setMonth(expiry.getMonth() + months);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const exp0 = new Date(expiry); exp0.setHours(0, 0, 0, 0);
+  const active = exp0 >= today;
+  const monthsLeft = active ? Math.max(0, Math.round((exp0 - today) / (1000 * 60 * 60 * 24 * 30.44))) : 0;
+  const label = base.hasDay
+    ? exp0.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+    : exp0.toLocaleDateString("en-US", { month: "short", year: "numeric" });
+  return { active, monthsLeft, label };
+};
+
+// Shared client-name comparator + the canonical list for ANY client picker:
+// active clients only (inactive excluded), sorted A–Z by name. Status/name come
+// straight from existing client data — nothing hardcoded. Use this everywhere a
+// client is chosen (schedule, route, add-stop, invoice, estimate, message…) so
+// every picker stays consistent and future pickers inherit the same behavior.
+const byClientName = (a, b) => (a?.name || "").localeCompare(b?.name || "");
+const selectableClients = (clients) => (clients || [])
+  .filter(c => c && (c.status || "Active") !== "Inactive")
+  .slice()
+  .sort(byClientName);
 
 // Sum revenue/cost/profit from completed jobs in a given month (default: current)
 function monthActuals(clients, when = new Date(), invoices = []) {
@@ -4042,6 +4104,7 @@ function ClientEquipment({ client, invoices, onChange }) {
     name: "", installed: "", purchaseDate: "", purchasePrice: "",
     serialNumber: "", origin: "Installed by SPS", linkedInvoiceId: "",
     status: "Good", notes: "", photos: [],
+    warrantyLength: "", warrantyUnit: "years",
   });
   const openAdd  = () => setModal({ mode: "add",  data: blankEq() });
   const openEdit = (eq, i) => { if (perms.editClients) setModal({ mode: "edit", index: i, data: { ...blankEq(), ...eq } }); };
@@ -4095,6 +4158,11 @@ function ClientEquipment({ client, invoices, onChange }) {
                   {eq.serialNumber && <span>S/N: {eq.serialNumber}</span>}
                   {photos.length > 0 && <span style={{ color: T.primary }}>{photos.length} photo{photos.length > 1 ? "s" : ""}</span>}
                   {eq.origin === "Pre-existing (before SPS)" && <span style={{ color: T.textMuted, fontSize: 10, fontWeight: 700, background: T.surfaceAlt, padding: "2px 7px", borderRadius: 100 }}>Pre-SPS</span>}
+                  {(() => { const w = warrantyInfo(eq); return w ? (
+                    <span title={`Warranty expires ${w.label}`} style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 100, background: w.active ? hexA(T.accent, 0.12) : hexA("#C0392B", 0.1), color: w.active ? T.accent : "#C0392B" }}>
+                      {w.active ? `Under warranty · ${w.monthsLeft} mo left` : "Warranty expired"}
+                    </span>
+                  ) : null; })()}
                 </div>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -4138,13 +4206,14 @@ function ClientEquipment({ client, invoices, onChange }) {
                 </div>
 
                 {/* Detail fields — read view */}
-                {!perms.editClients && (eq.purchaseDate || eq.purchasePrice || eq.serialNumber || eq.origin || linkedInv) && (
+                {!perms.editClients && (eq.purchaseDate || eq.purchasePrice || eq.serialNumber || eq.origin || linkedInv || warrantyInfo(eq)) && (
                   <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
                     {[
                       eq.origin && ["Origin", eq.origin],
                       eq.purchaseDate && ["Purchase Date", eq.purchaseDate],
                       eq.purchasePrice && ["Purchase Price", `$${eq.purchasePrice}`],
                       eq.serialNumber && ["Serial Number", eq.serialNumber],
+                      (() => { const w = warrantyInfo(eq); return w ? ["Warranty", `${w.label}${w.active ? ` · ${w.monthsLeft} mo left` : " · expired"}`] : null; })(),
                       linkedInv && ["Linked Invoice", `${linkedInv.number || linkedInv.id} — ${linkedInv.total || ""}`],
                     ].filter(Boolean).map(([k, v]) => (
                       <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
@@ -4230,6 +4299,30 @@ function ClientEquipment({ client, invoices, onChange }) {
                 <label style={lbl}>Serial Number</label>
                 <input type="text" style={field} value={modal.data.serialNumber || ""} onChange={e => setD("serialNumber", e.target.value)} placeholder="SN-XXXXXX" />
               </div>
+            </div>
+
+            {/* Warranty length — expiration auto-calculates from install/purchase date */}
+            <div>
+              <label style={lbl}>Warranty <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <input type="text" inputMode="numeric" style={field} value={modal.data.warrantyLength || ""} onChange={e => setD("warrantyLength", e.target.value.replace(/[^0-9.]/g, ""))} placeholder="e.g. 2" />
+                <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 12, padding: 4, gap: 4 }}>
+                  {["years", "months"].map(u => {
+                    const on = (modal.data.warrantyUnit || "years") === u;
+                    return (
+                      <button key={u} onClick={() => setD("warrantyUnit", u)}
+                        style={{ flex: 1, padding: "8px 6px", border: "none", borderRadius: 9, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 700, background: on ? T.surface : "transparent", color: on ? T.primary : T.textMuted, boxShadow: on ? T.shadow : "none" }}>{u}</button>
+                    );
+                  })}
+                </div>
+              </div>
+              {(() => { const w = warrantyInfo(modal.data); return w ? (
+                <div style={{ fontSize: 11.5, color: w.active ? T.accent : T.textMuted, marginTop: 7, fontWeight: 600 }}>
+                  Warranty expires: {w.label}{w.active ? ` · ${w.monthsLeft} mo remaining` : " · expired"}
+                </div>
+              ) : (
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 7 }}>Enter a length + an install or purchase date to calculate the expiration.</div>
+              ); })()}
             </div>
 
             {/* Notes */}
@@ -5626,7 +5719,7 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
   const [assigneeId, setAssigneeId] = useState("");   // "" = unassigned
 
   const q = clientSearch.toLowerCase();
-  const filteredClients = clients.filter(c => c.status !== "Inactive" && (c.name || "").toLowerCase().includes(q));
+  const filteredClients = selectableClients(clients).filter(c => (c.name || "").toLowerCase().includes(q));
   const selClientIds = Object.keys(selClients).filter(k => selClients[k]).map(Number);
 
   const toggleClient = (id) => setSelClients(s => ({ ...s, [id]: !s[id] }));
@@ -5830,7 +5923,7 @@ function BulkAddStops({ clients, catalog, onAdd, onClose, T }) {
   // add-stop flow offers. Never hardcoded; if empty, the dropdowns are simply empty.
   const serviceOptions = catalog.stopTypes || [];
   const q = search.trim().toLowerCase();
-  const activeClients = (clients || []).filter(c => c.status !== "Inactive");
+  const activeClients = selectableClients(clients);
   const filtered = q ? activeClients.filter(c => (c.name || "").toLowerCase().includes(q) || (c.address || "").toLowerCase().includes(q)) : activeClients;
   const selIds = Object.keys(sel).filter(k => sel[k]);
   const selCount = selIds.length;
@@ -6268,7 +6361,7 @@ function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, o
   // Tiers come straight from each client's existing plan — never hardcoded/invented.
   const TIER_ORDER = ["Essential", "Signature", "Premium"];
   const clientTier = (c) => (c && c.plan && String(c.plan).trim()) ? c.plan : ""; // "" = no tier
-  const presentTiers = [...new Set((clients || []).map(clientTier))];
+  const presentTiers = [...new Set(selectableClients(clients).map(clientTier))];
   const orderedTiers = [
     ...TIER_ORDER.filter(t => presentTiers.includes(t)),
     ...presentTiers.filter(t => t && !TIER_ORDER.includes(t)).sort(),
@@ -6276,7 +6369,7 @@ function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, o
   const hasUntiered = presentTiers.includes("");
   const selIds = Object.keys(selClients).filter(k => selClients[k]);
   const toggleClient = (id) => setSelClients(s => ({ ...s, [id]: !s[id] }));
-  const clientsInTier = (tier) => (clients || []).filter(c => clientTier(c) === tier).sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  const clientsInTier = (tier) => selectableClients(clients).filter(c => clientTier(c) === tier);
   const tierAllSelected = (tier) => { const ids = clientsInTier(tier).map(c => String(c.id)); return ids.length > 0 && ids.every(id => selClients[id]); };
   const toggleTier = (tier) => {
     const ids = clientsInTier(tier).map(c => String(c.id));
@@ -6346,7 +6439,7 @@ function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, o
             <label style={lbl}>Client</label>
             <select style={field} value={form.clientId} onChange={e => handleClientChange(e.target.value)}>
               <option value="">Select a client...</option>
-              {(clients||[]).sort((a,b) => (a.name||"").localeCompare(b.name||"")).map(c => (
+              {selectableClients(clients).map(c => (
                 <option key={c.id} value={c.id}>{c.name} — {c.plan || c.division}</option>
               ))}
             </select>
@@ -9626,7 +9719,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           <div style={{ flex: 2 }}>
             <label style={label}>Client</label>
             <select value={inv.clientId ?? ""} onChange={e => set("clientId", Number(e.target.value))} style={{ ...field, appearance: "none", WebkitAppearance: "none" }}>
-              {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              {selectableClients(clients).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </div>
           <div style={{ flex: 1 }}>
@@ -10984,7 +11077,7 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
           <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 6 }}>Client</label>
           <select value={form.clientId} onChange={e => selectClient(e.target.value)} style={field}>
             <option value="">Select a client...</option>
-            {(clients||[]).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            {selectableClients(clients).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
         </div>
         <div>
@@ -13246,7 +13339,7 @@ function MessagesScreen({ clients, currentUser, T }) {
   const totalUnread = threads.reduce((s, t) => s + (t.unread || 0), 0);
 
   // New message picker
-  const activeClients = (clients || []).filter(c => c.status !== "Inactive");
+  const activeClients = selectableClients(clients);
   const filteredNew = activeClients.filter(c =>
     (c.name || "").toLowerCase().includes(newSearch.toLowerCase()) ||
     (c.address || "").toLowerCase().includes(newSearch.toLowerCase())
@@ -15955,6 +16048,57 @@ function clientNextVisit(schedule, clientId, clientName) {
   return best;
 }
 
+// All upcoming visits for a client: every future concrete stop in the schedule,
+// plus — when on a recurring plan — projected dates through the end of the calendar
+// year. Projection uses the client's stored recurrence (routeFreq, or the plan
+// tier's frequency, landing on routeDay/preferredDay). Never invents data when none
+// exists: no recurrence + no concrete stops → empty list.
+function clientUpcomingVisits(schedule, client) {
+  if (!client) return [];
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const out = [];
+  const seen = new Set();
+  const keyOf = (d) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+
+  // 1) Concrete future stops from the schedule.
+  (schedule || []).forEach(day => {
+    const [m, dd, y] = (day.date || "").split("/").map(Number);
+    if (!m || !dd || !y) return;
+    const d = new Date(y, m - 1, dd); d.setHours(0, 0, 0, 0);
+    if (isNaN(d) || d < today) return;
+    (day.stops || []).forEach(stop => {
+      const matches = String(stop.clientId) === String(client.id) || String(stop.id) === String(client.id) || (client.name && stop.client === client.name);
+      if (!matches) return;
+      out.push({ date: d, type: stop.type || "Service Visit", projected: false });
+      seen.add(keyOf(d));
+    });
+  });
+
+  // 2) Projected recurring dates through Dec 31 of the current year.
+  const FREQ_WEEKS = { weekly: 1, biweekly: 2, monthly: 4, "6week": 6 };
+  const tierFreqId = { "Weekly": "weekly", "Bi-Weekly": "biweekly", "Monthly": "monthly" };
+  const freqId = client.routeFreq || tierFreqId[TIER_FREQ[client.plan]] || null;
+  const stepWeeks = freqId && FREQ_WEEKS[freqId];
+  if (stepWeeks) {
+    const DOW = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const targetDow = DOW.indexOf(client.routeDay || client.preferredDay || "");
+    const yearEnd = new Date(today.getFullYear(), 11, 31); yearEnd.setHours(0, 0, 0, 0);
+    const start = out.length ? new Date(Math.max(...out.map(v => v.date.getTime()))) : new Date(today);
+    let cursor = new Date(start); cursor.setDate(cursor.getDate() + stepWeeks * 7);
+    if (targetDow >= 0) cursor.setDate(cursor.getDate() + ((targetDow - cursor.getDay() + 7) % 7));
+    const projType = client.plan ? `${TIER_FREQ[client.plan] || "Recurring"} Service` : "Service Visit";
+    let guard = 0;
+    while (cursor <= yearEnd && guard++ < 120) {
+      const k = keyOf(cursor);
+      if (cursor >= today && !seen.has(k)) { seen.add(k); out.push({ date: new Date(cursor), type: projType, projected: true }); }
+      cursor = new Date(cursor); cursor.setDate(cursor.getDate() + stepWeeks * 7);
+    }
+  }
+
+  out.sort((a, b) => a.date - b.date);
+  return out;
+}
+
 function fmtDate(dateStr) {
   if (!dateStr) return "";
   const d = new Date(dateStr);
@@ -16608,6 +16752,29 @@ function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T }) 
         );
       })()}
 
+      {/* Upcoming Visits — every future scheduled stop, plus projected recurring dates */}
+      {(() => {
+        const visits = clientUpcomingVisits(schedule, client);
+        if (visits.length === 0) return null;
+        return (
+          <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+            <div style={{ padding: "14px 18px", borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span style={{ fontSize: 13, fontWeight: 800, color: T.text }}>Upcoming Visits</span>
+              <span style={{ fontSize: 11, color: T.textMuted, fontWeight: 600 }}>{visits.length} through year-end</span>
+            </div>
+            {visits.map((v, i) => (
+              <div key={i} style={{ padding: "12px 18px", borderBottom: i < visits.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{v.date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</div>
+                  <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 1 }}>{v.type}{v.projected ? " · projected" : ""}</div>
+                </div>
+                <span style={{ fontSize: 10.5, fontWeight: 700, color: tierColor, background: hexA(tierColor, 0.1), borderRadius: 100, padding: "3px 10px", flexShrink: 0 }}>Scheduled</span>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+
       {/* Stats row */}
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:10 }}>
         {[
@@ -16768,6 +16935,12 @@ function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T }) 
                     <span style={{ fontSize:11, color:T.textMuted, fontWeight:600 }}>{eq.status || "Good"}</span>
                   </div>
                 </div>
+                {(() => { const w = warrantyInfo(eq); return w ? (
+                  <div style={{ marginTop:8, display:"inline-flex", alignItems:"center", gap:6, fontSize:11.5, fontWeight:700, color: w.active ? "#16a34a" : "#C0392B", background: w.active ? "rgba(22,163,74,0.1)" : "rgba(192,57,43,0.08)", borderRadius:100, padding:"4px 11px" }}>
+                    <span style={{ width:7, height:7, borderRadius:"50%", background: w.active ? "#16a34a" : "#C0392B" }} />
+                    {w.active ? `Under warranty · expires ${w.label} · ${w.monthsLeft} mo left` : `Warranty expired ${w.label}`}
+                  </div>
+                ) : null; })()}
                 {eq.notes && <div style={{ fontSize:12, color:T.textMuted, marginTop:6, lineHeight:1.5 }}>{eq.notes}</div>}
                 {photos.length > 0 && (
                   <div style={{ display:"flex", gap:8, marginTop:10, overflowX:"auto", WebkitOverflowScrolling:"touch", paddingBottom:2 }}>
@@ -16792,8 +16965,42 @@ function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T }) 
         </div>
       )}
 
+      {/* Documents — client-facing hub list (labels Brandon set; filename fallback) */}
+      {(client.documents || []).length > 0 && (
+        <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+          <div style={{ padding: "14px 18px", borderBottom: `1px solid ${T.border}`, fontSize: 13, fontWeight: 800, color: T.text }}>Documents</div>
+          {(client.documents || []).map((doc, i, arr) => {
+            const isImg = (doc.type || "").startsWith("image");
+            const isPdf = (doc.type || "").includes("pdf");
+            const title = doc.label || doc.name || "Document";
+            const date = doc.uploadedAt ? new Date(doc.uploadedAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "";
+            const meta = [doc.category, date].filter(Boolean).join(" · ");
+            return (
+              <div key={doc.id || i} style={{ padding: "13px 18px", borderBottom: i < arr.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 13 }}>
+                <div style={{ width: 42, height: 42, borderRadius: 12, background: isPdf ? "rgba(229,72,77,0.1)" : isImg ? hexA(tierColor, 0.1) : T.surfaceAlt, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <svg viewBox="0 0 24 24" width={20} height={20} fill="none" stroke={isPdf ? "#E5484D" : isImg ? tierColor : T.textMuted} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+                    {isImg ? <><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></> : <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></>}
+                  </svg>
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</div>
+                  {meta && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{meta}</div>}
+                </div>
+                {isImg ? (
+                  <button onClick={() => setLightbox({ photos: [doc.src], index: 0 })}
+                    style={{ background: hexA(tierColor, 0.1), color: tierColor, border: "none", borderRadius: 9, padding: "8px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>View</button>
+                ) : (
+                  <a href={doc.src} download={doc.name || title}
+                    style={{ background: hexA(tierColor, 0.1), color: tierColor, borderRadius: 9, padding: "8px 15px", fontSize: 12.5, fontWeight: 700, textDecoration: "none", flexShrink: 0 }}>Download</a>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* Welcoming empty state for brand-new clients */}
-      {history.length === 0 && equipment.length === 0 && sitePhotos.length === 0 && (
+      {history.length === 0 && equipment.length === 0 && sitePhotos.length === 0 && (client.documents || []).length === 0 && (
         <div style={{ background: T.surface, border: `1px dashed ${T.border}`, borderRadius: 18, padding: "28px 20px", textAlign: "center" }}>
           <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(tierColor, 0.1), color: tierColor, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 12px" }}>
             <svg viewBox="0 0 24 24" width={26} height={26} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
@@ -17374,6 +17581,7 @@ function CPInvoices({ client, invoices, branding, T }) {
                   {iv.notes && <div style={{ fontSize:12, color:T.textMuted, fontStyle:"italic" }}>{iv.notes}</div>}
                   {iv.paymentLink && !isPaidSt && (
                     <a href={iv.paymentLink} target="_blank" rel="noopener noreferrer"
+                      onClick={(e) => { e.preventDefault(); openInAppBrowser(iv.paymentLink); }}
                       style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:8, background:"#2CA01C", color:"#fff", borderRadius:12, padding:"12px 18px", fontWeight:800, fontSize:14, textDecoration:"none", boxShadow:"0 4px 14px rgba(44,160,28,0.3)" }}>
                       Pay Now via QuickBooks
                     </a>
