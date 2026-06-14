@@ -8072,7 +8072,7 @@ function SkimmerImport({ onImport, onGoToClients }) {
 
       <div style={{ background: T.surfaceAlt, borderRadius: 10, padding: "12px 14px", fontSize: 12, color: T.textMuted, display: "flex", gap: 8, marginBottom: 20 }}>
         <Icon name="link" size={14} />
-        <span>Live two-way QuickBooks Online sync is coming in Phase 2 (needs a secure account connection). For now, CSV import works right away.</span>
+        <span>QuickBooks Online two-way sync is live — connect your account under Customize to automatically sync invoices and customers. This CSV import is for adding clients in bulk.</span>
       </div>
 
       {stage === "idle" && (
