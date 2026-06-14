@@ -2802,7 +2802,7 @@ function Modal({ title, children, onClose }) {
   );
 }
 
-function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onImport, onImportHistory, onFindDuplicates, onBatchUpdate, onBatchDelete, onBatchSchedule }) {
+function ClientList({ clients, invoices, schedule, vp = {}, selectedId, onSelect, onAdd, onImport, onImportHistory, onFindDuplicates, onBatchUpdate, onBatchDelete, onBatchSchedule }) {
   const { T, perms, tiers } = useApp();
   const [search,       setSearch]       = useState("");
   const [showInactive, setShowInactive] = useState(false);
@@ -3010,10 +3010,11 @@ function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onI
         {filtered.map(c => {
           const pm = planMeta(c.plan, T, tiers);
           const isSel = !!selected[c.id];
+          const isActive = selectedId != null && String(c.id) === String(selectedId);
           return (
             <div key={c.id}
               onClick={() => selectMode ? toggle(c.id) : onSelect(c)}
-              style={{ background: T.surface, border: `1px solid ${isSel ? T.primary : T.border}`, borderRadius: 16, padding: "15px 16px", cursor: "pointer", display: "flex", gap: 14, alignItems: "flex-start", transition: "box-shadow 0.15s, border-color 0.15s", boxShadow: "0 1px 4px rgba(0,0,0,0.04)" }}
+              style={{ background: isActive ? hexA(T.primary, 0.05) : T.surface, border: `1px solid ${(isSel || isActive) ? T.primary : T.border}`, borderRadius: 16, padding: "15px 16px", cursor: "pointer", display: "flex", gap: 14, alignItems: "flex-start", transition: "box-shadow 0.15s, border-color 0.15s", boxShadow: isActive ? `0 2px 10px ${hexA(T.primary, 0.12)}` : "0 1px 4px rgba(0,0,0,0.04)" }}
               onMouseEnter={e => e.currentTarget.style.boxShadow = "0 4px 16px rgba(0,0,0,0.09)"}
               onMouseLeave={e => e.currentTarget.style.boxShadow = "0 1px 4px rgba(0,0,0,0.04)"}
             >
@@ -3755,7 +3756,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
           <Btn sm variant="ghost" onClick={() => update({ status: "Active" })}>Reactivate</Btn>
         </div>
       )}
-      <button onClick={() => { onBack(); window.scrollTo({ top: 0, behavior: "instant" }); }} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", padding: "0 0 16px", display: "flex", alignItems: "center", gap: 4 }}>← Back to Clients</button>
+      {onBack && <button onClick={() => { onBack(); window.scrollTo({ top: 0, behavior: "instant" }); }} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", padding: "0 0 16px", display: "flex", alignItems: "center", gap: 4 }}>← Back to Clients</button>}
 
       <Card style={{ marginBottom: 14, overflow: "hidden" }}>
         {/* Color accent bar at top */}
@@ -19714,8 +19715,30 @@ export default function App({ authEmail = "", onSignOut }) {
     <>
       {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} vp={vp} />}
       {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
-      {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
-      {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} />}
+      {page === "clients" && !adding && (vp.isDesktop ? (
+        /* Desktop master-detail: client list (left) + selected client's record (right) */
+        <div style={{ flex: 1, minWidth: 0, display: "flex", height: "100%", overflow: "hidden" }}>
+          <div style={{ width: 404, flexShrink: 0, borderRight: `1px solid ${T.border}`, overflowY: "auto", padding: "22px 20px" }}>
+            <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} selectedId={selectedClient?.id} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: "24px 30px" }}>
+            {selectedClient
+              ? <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} />
+              : (
+                <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: T.textMuted, gap: 12, padding: 40, textAlign: "center" }}>
+                  <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.06), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="clients" size={30} /></div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: T.text }}>Select a client</div>
+                  <div style={{ fontSize: 13.5, maxWidth: 260, lineHeight: 1.5 }}>Choose a client from the list to view their full record here.</div>
+                </div>
+              )}
+          </div>
+        </div>
+      ) : (
+        <>
+          {!selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
+          {selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} />}
+        </>
+      ))}
       {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
       {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin} canEdit={perms.isAdmin || perms.editInventory} T={T} />}
@@ -19733,6 +19756,9 @@ export default function App({ authEmail = "", onSignOut }) {
 
   // ── Desktop (>=1024px): left sidebar + content. Mobile (below) is unchanged. ──
   if (vp.isDesktop) {
+    // Master-detail pages fill the whole content area (each column scrolls on its own);
+    // every other page keeps the centered, single-scroll column.
+    const dtMasterDetail = page === "clients" && !adding;
     return (
       <AppCtx.Provider value={{ T, branding, perms, tiers: serviceTiers || DEFAULT_TIERS }}>
         <div style={{ fontFamily: fontStack, background: T.bg, position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden", display: "flex", flexDirection: "row", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ["--ring"]: hexA(T.primary, 0.22), ["--ringBorder"]: T.primary }}>
@@ -19746,7 +19772,9 @@ export default function App({ authEmail = "", onSignOut }) {
                 <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 10, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Retry</button>
               </div>
             )}
-            <main style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "28px 36px", maxWidth: 1180, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: 40 }}>
+            <main style={{ flex: 1, minHeight: 0, ...(dtMasterDetail
+              ? { display: "flex", overflow: "hidden" }
+              : { overflowY: "auto", padding: "28px 36px", maxWidth: 1180, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: 40 }) }}>
               {pageBody}
             </main>
           </div>
