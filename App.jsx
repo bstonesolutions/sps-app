@@ -16367,6 +16367,46 @@ const ALL_NAV = [
 
 const DEFAULT_DOCK = ["dashboard", "clients", "schedule", "messages"];
 
+// Full-navigation bottom sheet, opened by the floating menu button. Lists every
+// destination the user can see (no bottom tab bar), plus account + sign out.
+function NavSheet({ page, perms, navUnread, reminderDue, onNav, onSignOut, currentUser, T, onClose }) {
+  const items = ALL_NAV.filter(n => isTabVisible(n, perms));
+  return (
+    <>
+      <style>{`@keyframes sheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }`}</style>
+      <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 200, background: "rgba(0,0,0,0.45)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)" }} />
+      <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 201, background: T.surface, borderRadius: "22px 22px 0 0", boxShadow: "0 -8px 40px rgba(0,0,0,0.22)", maxHeight: "82dvh", display: "flex", flexDirection: "column", paddingBottom: "max(16px, env(safe-area-inset-bottom))", animation: "sheetUp 0.28s cubic-bezier(.22,1,.36,1)" }}>
+        <div style={{ padding: "10px 0 2px", display: "flex", justifyContent: "center", flexShrink: 0 }}><div style={{ width: 38, height: 5, borderRadius: 100, background: T.border }} /></div>
+        <div style={{ padding: "6px 20px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
+          <div style={{ fontWeight: 800, fontSize: 19, color: T.text, letterSpacing: "-0.02em" }}>Menu</div>
+          <button onClick={onClose} aria-label="Close" style={{ width: 32, height: 32, borderRadius: "50%", border: "none", background: T.surfaceAlt, color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}><Icon name="close" size={16} /></button>
+        </div>
+        <div style={{ overflowY: "auto", WebkitOverflowScrolling: "touch", padding: "0 14px 6px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+          {items.map(n => {
+            const active = page === n.id;
+            const badge = n.id === "messages" ? navUnread : (n.id === "reminders" ? reminderDue : 0);
+            return (
+              <button key={n.id} onClick={() => { onNav(n.id); onClose(); }}
+                style={{ display: "flex", alignItems: "center", gap: 11, padding: "15px 14px", border: `1.5px solid ${active ? T.primary : T.border}`, borderRadius: 14, background: active ? hexA(T.primary, 0.08) : T.surface, color: active ? T.primary : T.text, cursor: "pointer", fontFamily: "inherit", textAlign: "left", position: "relative" }}>
+                <Icon name={n.icon} size={20} />
+                <span style={{ fontWeight: 700, fontSize: 14 }}>{n.label}</span>
+                {badge > 0 && <span style={{ position: "absolute", top: 8, right: 10, minWidth: 18, height: 18, borderRadius: 9, background: T.primary, color: "#fff", fontSize: 11, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 5px" }}>{badge}</span>}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 8, padding: "12px 18px 0", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexShrink: 0 }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{(currentUser && currentUser.name) || "Signed in"}</div>
+            {currentUser && currentUser.email && <div style={{ fontSize: 11, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{currentUser.email}</div>}
+          </div>
+          <button onClick={onSignOut} style={{ background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 10, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Sign out</button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 // ─────────────────────────────────────────────
 // OVERFLOW MENU + DOCK EDITOR
 // Top-right menu showing all pages not in the dock,
@@ -19693,51 +19733,28 @@ export default function App({ authEmail = "", onSignOut }) {
         </main>
 
         {/* Bottom Nav — a non-scrolling flex child, frozen at the bottom */}
-        <nav style={{ position: "relative", flexShrink: 0, background: T.surface, borderTop: `1px solid ${T.border}`, display: "flex", zIndex: 90, minHeight: 54, paddingTop: 4, paddingBottom: "max(8px, calc(env(safe-area-inset-bottom) - 10px))" }}>
-          {dockIds.slice(0, 4).map(id => {
-            const n = ALL_NAV.find(x => x.id === id);
-            if (!n) return null;
-            const active = page === n.id;
-            return (
-              <button key={n.id} onClick={() => handleNav(n.id)}
-                style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, color: active ? T.primary : T.textMuted, fontFamily: "inherit", position: "relative" }}>
-                <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s", position: "relative" }}>
-                  <Icon name={n.icon} size={22} />
-                  {n.id === "messages" && navUnread > 0 && (
-                    <span style={{ position: "absolute", top: 2, right: 4, width: 8, height: 8, borderRadius: "50%", background: T.primary, border: `2px solid ${T.bg}` }} />
-                  )}
-                </span>
-                <span style={{ fontSize: 10.5, fontWeight: active ? 700 : 500, letterSpacing: "-0.01em" }}>{n.label}</span>
-              </button>
-            );
-          })}
-          {/* Fixed Menu button — always the far-right slot, not replaceable */}
-          <button onClick={() => setMenuOpen(true)}
-            style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, color: menuOpen ? T.primary : T.textMuted, fontFamily: "inherit", position: "relative" }}>
-            <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: menuOpen ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s", position: "relative" }}>
-              <Icon name="sliders" size={22} />
-              {(navUnread > 0 || reminderDueCount > 0) && !dockIds.slice(0, 4).includes("messages") && (
-                <span style={{ position: "absolute", top: 2, right: 4, width: 8, height: 8, borderRadius: "50%", background: T.primary, border: `2px solid ${T.bg}` }} />
-              )}
-            </span>
-            <span style={{ fontSize: 10.5, fontWeight: menuOpen ? 700 : 500, letterSpacing: "-0.01em" }}>Menu</span>
-          </button>
-        </nav>
+        {/* Floating menu button (replaces the bottom tab bar) — opens the full nav sheet.
+            Bottom-left so it stays clear of the right-side action buttons, and high
+            enough to sit above the iOS home-indicator area. */}
+        <button onClick={() => setMenuOpen(true)} aria-label="Open menu"
+          style={{ position: "fixed", left: "max(16px, env(safe-area-inset-left))", bottom: "max(20px, calc(env(safe-area-inset-bottom) + 4px))", zIndex: 95, width: 58, height: 58, borderRadius: "50%", background: T.primary, color: "#fff", border: "none", boxShadow: `0 8px 24px ${hexA(T.primary, 0.4)}, 0 2px 8px rgba(0,0,0,0.2)`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
+          <svg viewBox="0 0 24 24" width={26} height={26} fill="none" stroke="currentColor" strokeWidth={2.3} strokeLinecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+          {(navUnread > 0 || reminderDueCount > 0) && (
+            <span style={{ position: "absolute", top: 4, right: 4, minWidth: 18, height: 18, borderRadius: 9, background: "#fff", color: T.primary, fontSize: 11, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 4px", border: `2px solid ${T.primary}` }}>{navUnread || reminderDueCount}</span>
+          )}
+        </button>
 
         {/* Overflow menu — slides in from top right */}
         {menuOpen && (
-          <OverflowMenu
+          <NavSheet
             page={page}
             perms={perms}
             navUnread={navUnread}
             reminderDue={reminderDueCount}
-            dockIds={dockIds}
-            setDockIds={setNavDock}
             onNav={handleNav}
             onSignOut={handleSignOut}
             currentUser={currentUser}
             T={T}
-            branding={branding}
             onClose={() => setMenuOpen(false)}
           />
         )}
