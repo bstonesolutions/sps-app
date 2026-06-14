@@ -2778,16 +2778,23 @@ function Checkbox({ checked, onChange, accent }) {
 function Modal({ title, children, onClose }) {
   const { T } = useApp();
   return (
-    // Solid dimmed backdrop fully covers the content behind; stays put on content/keyboard changes.
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: "max(16px, env(safe-area-inset-top)) 14px max(16px, env(safe-area-inset-bottom))", overscrollBehavior: "contain" }}>
+    // Backdrop. box-sizing:border-box + safe-area padding bounds the card to the
+    // visible area between the notch and home indicator on every device size.
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", boxSizing: "border-box", padding: "max(16px, env(safe-area-inset-top)) 14px max(16px, env(safe-area-inset-bottom))", overscrollBehavior: "contain" }}>
       <div onClick={e => e.stopPropagation()}
-        // dvh + internal scroll keeps it stationary when content grows or the keyboard opens.
-        style={{ background: T.surface, borderRadius: 24, width: "100%", maxWidth: 600, maxHeight: "90dvh", overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", padding: "20px 22px 24px", boxShadow: T.shadowLg, border: `1px solid ${T.border}`, animation: "spsModalIn 0.22s cubic-bezier(0.16, 1, 0.3, 1)" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-          <div style={{ fontWeight: 700, fontSize: 20, color: T.text, letterSpacing: "-0.02em" }}>{title}</div>
+        // Column layout: a fixed header (close button always reachable) + a
+        // scrollable body. maxHeight:100% keeps the whole card inside the padded
+        // (safe) area — the top is never clipped above the screen.
+        style={{ background: T.surface, borderRadius: 24, width: "100%", maxWidth: 600, maxHeight: "100%", display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: T.shadowLg, border: `1px solid ${T.border}`, animation: "spsModalIn 0.22s cubic-bezier(0.16, 1, 0.3, 1)" }}>
+        {/* Fixed header — pinned to the top of the modal, never scrolls away */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "18px 22px 14px", flexShrink: 0 }}>
+          <div style={{ fontWeight: 700, fontSize: 20, color: T.text, letterSpacing: "-0.02em", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{title}</div>
           <button onClick={onClose} style={{ background: T.surfaceAlt, border: "none", borderRadius: "50%", width: 30, height: 30, cursor: "pointer", color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="close" size={14} /></button>
         </div>
-        {children}
+        {/* Scrollable body — content taller than the screen scrolls here */}
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", padding: "0 22px 24px" }}>
+          {children}
+        </div>
       </div>
     </div>
   );
