@@ -18759,6 +18759,57 @@ function LoginScreen({ team, branding, T, fontStack, onSignIn }) {
   );
 }
 
+// TEMP DIAGNOSTIC — measures the real viewport / safe-area / nav numbers on-device
+// so the bottom-nav gap can be diagnosed precisely. Remove once fixed.
+function NavDiag() {
+  const [info, setInfo] = useState(null);
+  useEffect(() => {
+    const probe = (css) => {
+      const el = document.createElement("div");
+      el.style.cssText = `position:fixed;visibility:hidden;width:1px;height:${css};`;
+      document.body.appendChild(el);
+      const h = el.getBoundingClientRect().height;
+      el.remove();
+      return Math.round(h);
+    };
+    const measure = () => {
+      const nav = document.querySelector("nav");
+      const navRect = nav ? nav.getBoundingClientRect() : null;
+      const shellRect = nav && nav.parentElement ? nav.parentElement.getBoundingClientRect() : null;
+      setInfo({
+        screen: window.screen ? window.screen.height : "-",
+        inner: window.innerHeight,
+        visual: window.visualViewport ? Math.round(window.visualViewport.height) : "-",
+        client: document.documentElement.clientHeight,
+        dvh: probe("100dvh"), svh: probe("100svh"), lvh: probe("100lvh"), vh: probe("100vh"),
+        safeT: probe("env(safe-area-inset-top)"), safeB: probe("env(safe-area-inset-bottom)"),
+        shellH: shellRect ? Math.round(shellRect.height) : "-",
+        navH: navRect ? Math.round(navRect.height) : "-",
+        navBottom: navRect ? Math.round(navRect.bottom) : "-",
+        gap: navRect ? Math.round(window.innerHeight - navRect.bottom) : "-",
+        mode: window.navigator.standalone === true ? "ios-pwa"
+          : (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches ? "standalone" : "browser"),
+        cap: !!window.Capacitor,
+        dpr: window.devicePixelRatio,
+      });
+    };
+    measure();
+    const t = setTimeout(measure, 600);
+    window.addEventListener("resize", measure);
+    return () => { clearTimeout(t); window.removeEventListener("resize", measure); };
+  }, []);
+  if (!info) return null;
+  const txt = `NAV DIAG · screenshot & send
+screen ${info.screen}  inner ${info.inner}  visual ${info.visual}  client ${info.client}
+dvh ${info.dvh}  svh ${info.svh}  lvh ${info.lvh}  vh ${info.vh}
+safe top ${info.safeT}  bottom ${info.safeB}  dpr ${info.dpr}
+shellH ${info.shellH}  navH ${info.navH}  navBottom ${info.navBottom}
+GAP ${info.gap}   mode ${info.mode}  cap ${String(info.cap)}`;
+  return (
+    <div style={{ position: "fixed", top: "env(safe-area-inset-top)", left: 0, right: 0, zIndex: 99999, background: "rgba(0,0,0,0.92)", color: "#3DF53D", fontFamily: "ui-monospace, Menlo, monospace", fontSize: 11, lineHeight: 1.45, padding: "6px 10px", whiteSpace: "pre-wrap", pointerEvents: "none" }}>{txt}</div>
+  );
+}
+
 export default function App({ authEmail = "", onSignOut }) {
   const [selectedClient, setSelectedClient] = useState(null);
   const [adding, setAdding] = useState(false);
@@ -19756,6 +19807,8 @@ export default function App({ authEmail = "", onSignOut }) {
           onClose={() => setPreviewClient(null)}
         />
       )}
+
+      <NavDiag />
     </AppCtx.Provider>
   );
 }
