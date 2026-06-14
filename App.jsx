@@ -8026,13 +8026,32 @@ function buildClients(records, mapping) {
   });
 }
 
-function SkimmerImport({ onImport, onGoToClients }) {
+// Fields the CSV import is allowed to overwrite on a MATCHED existing client.
+// Name is deliberately excluded — it's the match key and is never overwritten.
+// "address" carries its split parts along so they stay consistent.
+const IMPORT_UPDATABLE = [
+  { key: "address",     label: "Address", group: ["address", "street", "city", "state", "zip"] },
+  { key: "phone",       label: "Phone" },
+  { key: "email",       label: "Email" },
+  { key: "division",    label: "Division" },
+  { key: "plan",        label: "Plan" },
+  { key: "planFreq",    label: "Frequency" },
+  { key: "pondType",    label: "Pond Type" },
+  { key: "pondSize",    label: "Pond Size" },
+  { key: "nextService", label: "Next Service" },
+  { key: "balance",     label: "Balance" },
+];
+
+function SkimmerImport({ clients = [], onImport, onApply, onGoToClients }) {
   const { T } = useApp();
-  const [stage, setStage] = useState("idle"); // idle | mapping | done
+  const [stage, setStage] = useState("idle"); // idle | mapping | review | done
   const [headers, setHeaders] = useState([]);
   const [records, setRecords] = useState([]);
   const [mapping, setMapping] = useState({});
-  const [importedCount, setImportedCount] = useState(0);
+  const [mode, setMode] = useState("add"); // add | update | both
+  const [updateFields, setUpdateFields] = useState(() => Object.fromEntries(IMPORT_UPDATABLE.map(f => [f.key, !["nextService", "balance"].includes(f.key)])));
+  const [overrides, setOverrides] = useState({}); // { [clientId]: { [fieldKey]: bool } } — per-client field toggles
+  const [summary, setSummary] = useState(null);   // { added, updated, skipped }
 
   const handleFile = (e) => {
     const file = e.target.files[0];
@@ -8050,14 +8069,67 @@ function SkimmerImport({ onImport, onGoToClients }) {
 
   const setField = (key, header) => setMapping(m => ({ ...m, [key]: header }));
 
-  const handleImportAll = () => {
-    const clients = buildClients(records, mapping);
-    onImport(clients);
-    setImportedCount(clients.length);
-    setStage("done");
+  const reset = () => { setHeaders([]); setRecords([]); setMapping({}); setMode("add"); setOverrides({}); setSummary(null); setStage("idle"); };
+
+  // ── Build CSV clients, then match each to an existing client by normalized name ──
+  const csvClients = useMemo(() => buildClients(records, mapping), [records, mapping]);
+  const existingByName = useMemo(() => {
+    const m = new Map();
+    (clients || []).forEach(c => { const k = normName(c.name); if (k && !m.has(k)) m.set(k, c); });
+    return m;
+  }, [clients]);
+  // For each CSV row: its matched existing client (or null) + the fields that would change.
+  // Only non-blank CSV values that actually differ from the current value are candidates,
+  // so a blank cell never wipes existing data.
+  const matches = useMemo(() => csvClients.map(cc => {
+    const k = normName(cc.name);
+    const existing = k ? existingByName.get(k) : null;
+    const changes = existing
+      ? IMPORT_UPDATABLE.filter(f => updateFields[f.key]).map(f => ({
+          key: f.key, label: f.label,
+          from: String(existing[f.key] ?? "").trim(),
+          to:   String(cc[f.key] ?? "").trim(),
+        })).filter(ch => ch.to && ch.to !== ch.from)
+      : [];
+    return { cc, existing, changes };
+  }), [csvClients, existingByName, updateFields]);
+
+  const matchedRows   = matches.filter(m => m.existing);
+  const unmatchedRows = matches.filter(m => !m.existing);
+  const fieldOn = (cid, key) => { const o = overrides[cid]; return o && key in o ? o[key] : true; };
+  const toggleOverride = (cid, key) => setOverrides(o => ({ ...o, [cid]: { ...(o[cid] || {}), [key]: !fieldOn(cid, key) } }));
+  const willUpdateRows = matchedRows.filter(m => m.changes.some(ch => fieldOn(m.existing.id, ch.key)));
+  const counts = {
+    update: willUpdateRows.length,
+    add:    mode === "both" ? unmatchedRows.length : 0,
+    skip:   (mode === "update" ? unmatchedRows.length : 0) + (matchedRows.length - willUpdateRows.length),
   };
 
-  const reset = () => { setHeaders([]); setRecords([]); setMapping({}); setImportedCount(0); setStage("idle"); };
+  // Commit — add every row as a new client (the original behavior).
+  const handleAddAll = () => {
+    if (onApply) onApply({ updates: [], adds: csvClients });
+    setSummary({ added: csvClients.length, updated: 0, skipped: 0 });
+    setStage("done");
+  };
+  // Commit — write only the approved field changes onto matched clients, and (in "both"
+  // mode) add the unmatched rows as new. Unchecked fields are never touched.
+  const applyUpdate = () => {
+    const updates = [];
+    willUpdateRows.forEach(m => {
+      const changes = {};
+      m.changes.forEach(ch => {
+        if (!fieldOn(m.existing.id, ch.key)) return;
+        const fdef = IMPORT_UPDATABLE.find(f => f.key === ch.key);
+        if (fdef.group) fdef.group.forEach(g => { changes[g] = m.cc[g]; });
+        else changes[ch.key] = m.cc[ch.key];
+      });
+      if (Object.keys(changes).length) updates.push({ id: m.existing.id, changes });
+    });
+    const adds = mode === "both" ? unmatchedRows.map(m => m.cc) : [];
+    if (onApply) onApply({ updates, adds });
+    setSummary({ added: adds.length, updated: updates.length, skipped: counts.skip });
+    setStage("done");
+  };
 
   // live preview of the first record using current mapping
   const preview = records.length ? buildClients([records[0]], mapping)[0] : null;
@@ -8102,14 +8174,34 @@ function SkimmerImport({ onImport, onGoToClients }) {
       {stage === "mapping" && (
         <div>
           <Card style={{ marginBottom: 14 }}>
-            <div style={{ padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div>
-                <div style={{ fontWeight: 700, fontSize: 15, color: T.text }}>{records.length} {records.length === 1 ? "record" : "records"} found</div>
-                <div style={{ fontSize: 12, color: T.textMuted }}>{detected} of {IMPORT_FIELDS.length} fields auto-matched</div>
+            <div style={{ padding: "14px 18px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 15, color: T.text }}>{records.length} {records.length === 1 ? "record" : "records"} found</div>
+                  <div style={{ fontSize: 12, color: T.textMuted }}>{detected} of {IMPORT_FIELDS.length} fields auto-matched</div>
+                </div>
+                {records.length > 0
+                  ? (mode === "add"
+                      ? <Btn onClick={handleAddAll}>Import {records.length}</Btn>
+                      : <Btn onClick={() => setStage("review")} disabled={counts.update + counts.add === 0}>Review →</Btn>)
+                  : <Btn variant="ghost" onClick={reset}>Try Again</Btn>}
               </div>
-              {records.length > 0
-                ? <Btn onClick={handleImportAll}>Import {records.length}</Btn>
-                : <Btn variant="ghost" onClick={reset}>Try Again</Btn>}
+              {records.length > 0 && (
+                <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${T.border}` }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 6 }}>Import mode</div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {[["add", "Add as new"], ["update", "Update existing"], ["both", "Add new + update"]].map(([v, l]) => (
+                      <button key={v} onClick={() => setMode(v)}
+                        style={{ flex: 1, padding: "9px 6px", border: `1.5px solid ${mode === v ? T.primary : T.border}`, borderRadius: 10, background: mode === v ? hexA(T.primary, 0.08) : T.surface, color: mode === v ? T.primary : T.textMuted, fontWeight: 700, fontSize: 11.5, cursor: "pointer", fontFamily: "inherit" }}>{l}</button>
+                    ))}
+                  </div>
+                  {mode !== "add" && (
+                    <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>
+                      {matchedRows.length} of {csvClients.length} {csvClients.length === 1 ? "row matches" : "rows match"} an existing client by name. Map the <b>Name</b> column for matching to work.
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </Card>
 
@@ -8151,11 +8243,102 @@ function SkimmerImport({ onImport, onGoToClients }) {
         </div>
       )}
 
+      {stage === "review" && (
+        <div>
+          {/* Fields to update — defaults applied to every matched client */}
+          <Card style={{ marginBottom: 14 }}>
+            <CardHeader title="Fields to Update" />
+            <div style={{ padding: 16 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 12, lineHeight: 1.5 }}>
+                Pick which fields the import may change on matched clients. <b>Name</b> is never overwritten, and blank cells in your file are ignored so they can't wipe existing data.
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {IMPORT_UPDATABLE.map(f => {
+                  const on = updateFields[f.key];
+                  return (
+                    <button key={f.key} onClick={() => setUpdateFields(u => ({ ...u, [f.key]: !u[f.key] }))}
+                      style={{ padding: "8px 12px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.08) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>
+                      {on ? "✓ " : ""}{f.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </Card>
+
+          {/* Summary + apply */}
+          <Card style={{ marginBottom: 14 }}>
+            <div style={{ padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+              <div style={{ fontSize: 13, color: T.text }}>
+                <b>{counts.update}</b> to update{mode === "both" ? <> · <b>{counts.add}</b> new</> : null} · <b>{counts.skip}</b> skipped
+              </div>
+              <Btn onClick={applyUpdate} disabled={counts.update + counts.add === 0}>Apply</Btn>
+            </div>
+          </Card>
+
+          {/* Per-client review of every change, with per-field override */}
+          {matchedRows.some(m => m.changes.length) ? (
+            <Card style={{ marginBottom: 14 }}>
+              <CardHeader title="Review Changes" />
+              <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+                {matchedRows.filter(m => m.changes.length).map(m => (
+                  <div key={m.existing.id} style={{ border: `1px solid ${T.border}`, borderRadius: 12, padding: "12px 14px" }}>
+                    <div style={{ fontWeight: 700, fontSize: 14, color: T.text, marginBottom: 8 }}>{m.existing.name}</div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      {m.changes.map(ch => {
+                        const on = fieldOn(m.existing.id, ch.key);
+                        return (
+                          <label key={ch.key} style={{ display: "flex", alignItems: "flex-start", gap: 10, cursor: "pointer" }}>
+                            <input type="checkbox" checked={on} onChange={() => toggleOverride(m.existing.id, ch.key)} style={{ marginTop: 3, accentColor: T.primary, flexShrink: 0 }} />
+                            <div style={{ flex: 1, minWidth: 0, opacity: on ? 1 : 0.5 }}>
+                              <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>{ch.label}</div>
+                              <div style={{ fontSize: 13, color: T.text, wordBreak: "break-word" }}>
+                                <span style={{ color: T.textMuted, textDecoration: "line-through" }}>{ch.from || "—"}</span>
+                                <span style={{ color: T.textMuted }}> → </span>
+                                <span style={{ fontWeight: 600 }}>{ch.to}</span>
+                              </div>
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          ) : (
+            <Card style={{ marginBottom: 14 }}>
+              <div style={{ padding: 18, fontSize: 13, color: T.textMuted, textAlign: "center", lineHeight: 1.5 }}>
+                No matched clients have changes with the current field selection.
+                {mode === "update" && unmatchedRows.length > 0 ? ` ${unmatchedRows.length} unmatched ${unmatchedRows.length === 1 ? "row" : "rows"} will be skipped.` : ""}
+              </div>
+            </Card>
+          )}
+
+          {/* Unmatched rows added as new (both mode only) */}
+          {mode === "both" && unmatchedRows.length > 0 && (
+            <Card style={{ marginBottom: 14 }}>
+              <CardHeader title={`Add as New (${unmatchedRows.length})`} />
+              <div style={{ padding: "12px 16px", fontSize: 13, color: T.text, display: "flex", flexDirection: "column", gap: 3 }}>
+                {unmatchedRows.slice(0, 40).map((m, i) => <div key={i}>{m.cc.name}</div>)}
+                {unmatchedRows.length > 40 && <div style={{ color: T.textMuted }}>+{unmatchedRows.length - 40} more</div>}
+              </div>
+            </Card>
+          )}
+
+          <Btn variant="ghost" onClick={() => setStage("mapping")}>← Back to mapping</Btn>
+        </div>
+      )}
+
       {stage === "done" && (
         <div style={{ textAlign: "center", padding: 48 }}>
           <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA("#16a34a", 0.1), color: "#16a34a", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 16px" }}><Icon name="check" size={32} /></div>
           <div style={{ fontWeight: 800, fontSize: 20, color: T.text, marginBottom: 8 }}>Import Complete</div>
-          <div style={{ fontSize: 14, color: T.textMuted, marginBottom: 24 }}>{importedCount} {importedCount === 1 ? "client" : "clients"} added to your list.</div>
+          <div style={{ fontSize: 14, color: T.textMuted, marginBottom: 24 }}>
+            {[summary && summary.added ? `${summary.added} added` : null,
+              summary && summary.updated ? `${summary.updated} updated` : null,
+              summary && summary.skipped ? `${summary.skipped} skipped` : null].filter(Boolean).join(" · ") || "Nothing changed."}
+          </div>
           <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
             <Btn onClick={onGoToClients}>View Clients</Btn>
             <Btn variant="ghost" onClick={reset}>Import Another</Btn>
@@ -18841,6 +19024,18 @@ export default function App({ authEmail = "", onSignOut }) {
 
   const handleImportClients = (imported) => setClients(cs => [...cs, ...imported]);
 
+  // CSV import commit: apply approved field changes to matched clients (by id), then
+  // append any new ones — in one atomic setClients pass. Only the fields in each
+  // `changes` object are written; everything else on the client is left untouched.
+  const handleImportApply = ({ updates = [], adds = [] }) => {
+    setClients(cs => {
+      const changesById = new Map((updates || []).map(u => [String(u.id), u.changes]));
+      let next = (cs || []).map(c => changesById.has(String(c.id)) ? { ...c, ...changesById.get(String(c.id)) } : c);
+      if (adds && adds.length) next = [...next, ...adds];
+      return next;
+    });
+  };
+
   // Additive service-history import: append entries to matched clients only.
   // Idempotent — skips any entry whose client already has the same date + type.
   // Never alters other client fields.
@@ -19210,7 +19405,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetScreen budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} />}
           {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
           {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} />}
-          {page === "import"   && perms.canImport && <SkimmerImport onImport={handleImportClients} onGoToClients={() => handleNav("clients")} />}
+          {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
           {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
           {page === "settings" && <AppSettings onNav={handleNav} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} />}
         </main>
