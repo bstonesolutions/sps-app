@@ -3682,7 +3682,7 @@ function ClientDocuments({ client, onChange }) {
   );
 }
 
-function ClientDetail({ client: init, invoices, invoicing, branding, catalog, setCatalog, team, schedule, email, onBack, onUpdate, onSaveInvoice, onDeleteInvoice, onDelete }) {
+function ClientDetail({ client: init, invoices, invoicing, branding, catalog, setCatalog, team, schedule, email, onBack, onUpdate, onSaveInvoice, onDeleteInvoice, onDelete, onPreviewClient }) {
   const { T, perms, tiers } = useApp();
   const [client, setClient] = useState(init);
   const [tab, setTab] = useState("overview");
@@ -3800,7 +3800,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
       {tab === "history" && <ClientHistory client={client} catalog={catalog} team={team} onChange={hist => update({ history: hist })} />}
       {tab === "invoices" && (perms.canInvoice || perms.viewInvoices) && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={onSaveInvoice} onDelete={onDeleteInvoice} />}
       {tab === "docs"    && <ClientDocuments client={client} onChange={docs => update({ documents: docs })} />}
-      {tab === "portal" && <ClientPortal client={client} invoices={invoices} schedule={schedule} branding={branding} email={email} />}
+      {tab === "portal" && <ClientPortal client={client} invoices={invoices} schedule={schedule} branding={branding} email={email} onPreviewClient={onPreviewClient} />}
     </div>
   );
 }
@@ -4717,9 +4717,8 @@ function ClientHistory({ client, catalog, team, onChange }) {
   );
 }
 
-function ClientPortal({ client, invoices, schedule, branding, email }) {
+function ClientPortal({ client, invoices, schedule, branding, email, onPreviewClient }) {
   const { T } = useApp();
-  const [preview, setPreview] = useState(false);
   const [inviteState, setInviteState] = useState("idle"); // idle | sending | sent | error
   const [inviteMsg, setInviteMsg] = useState("");
   const [copied, setCopied] = useState(false);
@@ -4774,8 +4773,9 @@ function ClientPortal({ client, invoices, schedule, branding, email }) {
     <>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
 
-        {/* Preview button — top so it's easy to find */}
-        <button onClick={() => setPreview(true)}
+        {/* Preview button — top so it's easy to find. Opens the staff preview at the
+            App top level (outside <main>) so the overlay isn't clipped on iOS. */}
+        <button onClick={() => onPreviewClient && onPreviewClient(client)}
           style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: T.primary, color: "#fff", border: "none", borderRadius: 14, padding: "14px", fontWeight: 800, fontSize: 15, cursor: "pointer", fontFamily: "inherit", boxShadow: `0 4px 16px ${hexA(T.primary, 0.3)}`, letterSpacing: "-0.01em" }}>
           <Icon name="eye" size={18} /> Preview Portal as {firstName}
         </button>
@@ -4885,16 +4885,6 @@ function ClientPortal({ client, invoices, schedule, branding, email }) {
         </Card>
 
         </div>
-
-      {preview && (
-        <StaffClientPreview
-          client={client}
-          invoices={invoices}
-          schedule={schedule}
-          branding={branding}
-          onClose={() => setPreview(false)}
-        />
-      )}
     </>
   );
 }
@@ -4926,7 +4916,7 @@ function StaffClientPreview({ client, invoices, schedule, branding, onClose }) {
             borderRadius: 10, padding: "8px 16px", fontSize: 12, fontWeight: 700,
             cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5,
             WebkitTapHighlightColor: "transparent",
-          }}>← Back to my view</button>
+          }}>← Back to Staff View</button>
         </div>
       </div>
 
@@ -18319,6 +18309,9 @@ export default function App({ authEmail = "", onSignOut }) {
   const [selectedClient, setSelectedClient] = useState(null);
   const [adding, setAdding] = useState(false);
   const [scheduleSeed, setScheduleSeed] = useState(null);
+  // Staff "Preview Portal as X" lives at the App top level (rendered OUTSIDE the shell's
+  // <main> scroll container) so iOS doesn't clip this position:fixed overlay.
+  const [previewClient, setPreviewClient] = useState(null);
 
   // Persistent data — survives reloads and app updates
   const [clients, setClients, lc] = useStoredState("sps_clients", []);
@@ -19193,7 +19186,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} vp={vp} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
           {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
-          {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} />}
+          {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} />}
           {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
           {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
           {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin} canEdit={perms.isAdmin || perms.editInventory} T={T} />}
@@ -19257,6 +19250,20 @@ export default function App({ authEmail = "", onSignOut }) {
           />
         )}
       </div>
+
+      {/* Staff "Preview Portal as X" — rendered as a sibling of the shell (OUTSIDE its
+          <main> scroll container) so iOS doesn't clip this position:fixed overlay. It
+          shows the black "Back to Staff View" bar at the top and the client portal with
+          the CLIENT nav at the bottom, fully covering the staff view. */}
+      {previewClient && (
+        <StaffClientPreview
+          client={previewClient}
+          invoices={invoices}
+          schedule={schedule}
+          branding={branding}
+          onClose={() => setPreviewClient(null)}
+        />
+      )}
     </AppCtx.Provider>
   );
 }
