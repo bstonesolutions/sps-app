@@ -55,6 +55,15 @@ const openInAppBrowser = async (url) => {
   window.open(url, "_blank", "noopener,noreferrer");
 };
 
+// Open a URL in the device's DEFAULT/EXTERNAL browser (not the in-app browser) —
+// intentionally the opposite of openInAppBrowser. Used for Google reviews, where
+// the client's signed-in browser session makes leaving a review frictionless. On
+// web this is a new tab; on native, http(s) links route to the system browser.
+const openExternalBrowser = (url) => {
+  if (!url) return;
+  window.open(url, "_blank", "noopener,noreferrer");
+};
+
 function generateEstimatePDF(estimate, branding, invoicing) {
   return loadJsPDF().then(JsPDF => {
     const doc = new JsPDF({ unit: "pt", format: "letter" });
@@ -572,6 +581,38 @@ function buildReminderQueue(schedule, clients, cfg, reminderLog, now = new Date(
   return { due, upcoming, sent };
 }
 
+// Seasonal reminders that are coming due: for each configured reminder whose
+// trigger date (this year) is within the lead window, emit one entry per ELIGIBLE
+// active client (matching its division). Reuses the same reminderLog so each
+// client is only nudged once per reminder per year. Triggers/divisions/messages
+// all come from Brandon's config — nothing hardcoded.
+function buildSeasonalQueue(cfg, clients, reminderLog, now = new Date()) {
+  const list = (cfg && cfg.seasonalReminders) || [];
+  if (!list.length) return { due: [], sent: [] };
+  const year = now.getFullYear();
+  const LEAD_DAYS = 14, GRACE_DAYS = 3;
+  const today = new Date(now); today.setHours(0, 0, 0, 0);
+  const due = [], sent = [];
+  list.forEach(r => {
+    const m = parseInt(r.month), d = parseInt(r.day) || 1;
+    if (!m || m < 1 || m > 12) return;
+    const trigger = new Date(year, m - 1, d); trigger.setHours(0, 0, 0, 0);
+    const daysUntil = Math.round((trigger - today) / 86400000);
+    if (daysUntil > LEAD_DAYS || daysUntil < -GRACE_DAYS) return; // not in the send window
+    const div = r.division || "All";
+    const label = trigger.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    (clients || []).forEach(c => {
+      if ((c.status || "Active") === "Inactive") return;
+      if (div !== "All" && c.division !== div) return;
+      const sid = `seas_${r.id}_${c.id}_${year}`;
+      const entry = { sid, client: c, phone: (c.phone || "").replace(/\D/g, ""), date: label, stop: { type: r.name || "Seasonal Reminder" }, message: r.message || "", isSeasonal: true };
+      if (reminderLog && reminderLog[sid]) sent.push({ ...entry, sentAt: reminderLog[sid].sentAt });
+      else due.push(entry);
+    });
+  });
+  return { due, sent };
+}
+
 // Total stock of an item across all locations (falls back to legacy inventoryOz)
 const invTotal = (item) => {
   if (item && item.stockByLoc && typeof item.stockByLoc === "object") {
@@ -694,6 +735,7 @@ const THEMES = {
 };
 const DEFAULT_BRANDING = {
   companyName: "Stone Property Solutions",
+  googleReviewLink: "",   // g.page/r/.../review link — opens in the EXTERNAL browser (signed-in session)
   division: "All Divisions",
   logoType: "image",
   logoEmoji: "💧",
@@ -736,6 +778,9 @@ const DEFAULT_SCHEDULE_CFG = {
   reminderLeadHours: 24,      // default: how far ahead to send (24 = day before)
   reminderSendAt: "17:00",    // preferred send time for day-before reminders (24h)
   reminderAutoSend: false,    // when true + backend wired, sends automatically; else surfaces a queue
+  // Seasonal reminders — Brandon-defined nudges to schedule seasonal services.
+  // Each: { id, name, month (1-12), day, division ("All"|Pond|Pool|Seasonal), message }.
+  seasonalReminders: [],      // starts empty — nothing hardcoded
 };
 
 // Roles & access — admin configures exactly what employees can see, change, and do
@@ -12499,6 +12544,20 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
               <ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />
             </Collapsible>
           )}
+          {perms.editSettings && (
+            <Collapsible title="Reviews & Feedback" subtitle="Your Google review link for happy clients. Lower ratings route privately to you.">
+              <SaveBar ctl={brandCtl} T={T} />
+              <div style={{ padding: 18 }}>
+                <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 }}>Google Review Link</label>
+                <input type="url" value={brandCtl.draft.googleReviewLink || ""} onChange={e => { const v = e.target.value; brandCtl.update(prev => ({ ...prev, googleReviewLink: v })); }}
+                  placeholder="https://g.page/r/…/review" autoCapitalize="none" autoCorrect="off" spellCheck={false}
+                  style={{ width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 8, lineHeight: 1.5 }}>
+                  From business.google.com — your "g.page/r/…/review" shortcut. After a completed visit, clients who rate 4–5★ see a "Leave us a Google review" button that opens this in their browser; lower ratings go privately to your office instead. Leave blank to hide the review button.
+                </div>
+              </div>
+            </Collapsible>
+          )}
           {perms.seeCostsBudget && (
             <Collapsible title="Costs & Labor" subtitle="Hourly rate, overhead, gas, and per-stop cost assumptions.">
               <SaveBar ctl={costCtl} T={T} />
@@ -13662,6 +13721,43 @@ function ReminderSettings({ scheduleCfg, setScheduleCfg, email, setEmail, brandi
           Automatic sending isn't active yet — reminders show up here when due, and you tap Send to fire off the text. When automated SMS is connected later, flip this to fully hands-off.
         </div>
       </>)}
+
+      {/* Seasonal Reminders — Brandon-defined nudges tied to a division + trigger date */}
+      <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 16 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Seasonal Reminders</div>
+        <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 4 }}>Nudge clients to schedule seasonal services (pond closing, pool opening…).</div>
+        {(cfg.seasonalReminders || []).map((r, i) => {
+          const upd = (patch) => setCfg("seasonalReminders", (cfg.seasonalReminders || []).map((x, j) => j === i ? { ...x, ...patch } : x));
+          const del = () => setCfg("seasonalReminders", (cfg.seasonalReminders || []).filter((_, j) => j !== i));
+          return (
+            <div key={r.id || i} style={{ background: T.surfaceAlt, borderRadius: 14, padding: 14, marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input value={r.name || ""} onChange={e => upd({ name: e.target.value })} placeholder="Name (e.g. Pond Closing)" style={{ ...field, flex: 1 }} />
+                <button onClick={del} style={{ background: "none", border: `1px solid ${T.border}`, color: "#C0392B", borderRadius: 10, padding: "0 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Remove</button>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1.4fr 0.7fr 1.1fr", gap: 8 }}>
+                <select value={r.month || ""} onChange={e => upd({ month: e.target.value })} style={{ ...field, appearance: "none", WebkitAppearance: "none" }}>
+                  <option value="">Month…</option>
+                  {["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"].map((mn, mi) => <option key={mn} value={mi + 1}>{mn}</option>)}
+                </select>
+                <input type="text" inputMode="numeric" value={r.day || ""} onChange={e => upd({ day: e.target.value.replace(/\D/g, "").slice(0, 2) })} placeholder="Day" style={field} />
+                <select value={r.division || "All"} onChange={e => upd({ division: e.target.value })} style={{ ...field, appearance: "none", WebkitAppearance: "none" }}>
+                  <option value="All">All Divisions</option>
+                  {DIVISIONS.map(d => <option key={d} value={d}>{d}</option>)}
+                </select>
+              </div>
+              <textarea rows={2} value={r.message || ""} onChange={e => upd({ message: e.target.value })} placeholder="Message — e.g. Hi {first}, time to schedule your pond closing! — {company}" style={{ ...field, resize: "vertical" }} />
+            </div>
+          );
+        })}
+        <button onClick={() => setCfg("seasonalReminders", [...(cfg.seasonalReminders || []), { id: `seas-${Date.now()}`, name: "", month: "", day: "", division: "All", message: "" }])}
+          style={{ marginTop: 12, width: "100%", padding: 11, border: `2px dashed ${T.border}`, borderRadius: 12, background: "none", color: T.textMuted, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 700 }}>
+          + Add Seasonal Reminder
+        </button>
+        <div style={{ fontSize: 11, color: T.textMuted, marginTop: 8, lineHeight: 1.5 }}>
+          Tags: {"{first}"}, {"{company}"}, {"{date}"}. When a reminder's date is ~2 weeks out, eligible clients appear in your Reminders queue to send. Fields start empty.
+        </div>
+      </div>
     </div>
   );
 }
@@ -13671,11 +13767,14 @@ function RemindersScreen({ schedule, clients, scheduleCfg, setScheduleCfg, email
   const setCfg = (k, v) => setScheduleCfg({ ...cfg, [k]: v });
   const now = new Date();
   const queue = buildReminderQueue(schedule, clients, cfg, reminderLog, now);
+  const seasonal = buildSeasonalQueue(cfg, clients, reminderLog, now);
 
   const tpl = (email && email.smsReminder) || DEFAULT_EMAIL.smsReminder;
   const buildMsg = (entry) => {
     const first = (entry.client?.name || "there").split(" ")[0];
-    return tpl
+    // Seasonal entries carry their own message template; appointment ones use the shared one.
+    const raw = (entry.message != null && entry.message !== "") ? entry.message : tpl;
+    return raw
       .replace(/{first}/g, first)
       .replace(/{company}/g, branding?.companyName || "Stone Property Solutions")
       .replace(/{date}/g, entry.date || "");
@@ -13773,6 +13872,34 @@ function RemindersScreen({ schedule, clients, scheduleCfg, setScheduleCfg, email
           </div>
         )}
       </>)}
+
+      {/* Seasonal reminders coming due — independent of the appointment-reminders toggle */}
+      {seasonal.due.length > 0 && (
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 10, display: "flex", alignItems: "center", gap: 7 }}>
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#F59E0B" }} /> Seasonal Reminders Due ({seasonal.due.length})
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {seasonal.due.map(e => card(e, true))}
+          </div>
+        </div>
+      )}
+      {seasonal.sent.length > 0 && (
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 800, color: T.textMuted, marginBottom: 10 }}>Seasonal Sent ({seasonal.sent.length})</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {seasonal.sent.slice(0, 10).map(e => (
+              <div key={e.sid} style={{ background: T.surfaceAlt, borderRadius: 14, padding: "12px 16px", display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{e.client?.name || "Client"}</div>
+                  <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{e.stop.type} · sent</div>
+                </div>
+                <button onClick={() => undoSent(e.sid)} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>Undo</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -16294,7 +16421,89 @@ function ClientTrackingCard({ client, todayStop, tech, loc, schedule, branding, 
   );
 }
 
-function CPHome({ client, schedule, invoices, branding, team, onNav, T, vp = {} }) {
+// ─────────────────────────────────────────────
+// CLIENT RATING PROMPT (portal) — after a completed visit, route happy clients to
+// Google reviews (EXTERNAL browser) and unhappy clients privately to the office.
+// ─────────────────────────────────────────────
+function CPRatingPrompt({ client, branding, onRateVisit, T }) {
+  const visit = (client.history || [])[0]; // most recent completed visit
+  const [stars, setStars] = useState(0);
+  const [stage, setStage] = useState("ask"); // ask | positive | negative | done
+  const [feedback, setFeedback] = useState("");
+
+  // Nothing to rate, or it's already been rated → don't show.
+  if (!onRateVisit || !visit || visit.clientRating) return null;
+
+  const reviewUrl = (branding.googleReviewLink || "").trim();
+  const pick = (n) => {
+    setStars(n);
+    if (n >= 4) { onRateVisit({ clientId: client.id, visitDate: visit.date, rating: n }); setStage("positive"); }
+    else setStage("negative");
+  };
+  const sendNegative = () => {
+    onRateVisit({ clientId: client.id, visitDate: visit.date, rating: stars || 2, feedback: feedback.trim() });
+    setStage("done");
+  };
+
+  const card = { background: T.surface, border: `1px solid ${T.border}`, borderRadius: 20, padding: "18px 20px", boxShadow: "0 2px 12px rgba(0,0,0,0.06)" };
+
+  if (stage === "positive") {
+    return (
+      <div style={card}>
+        <div style={{ fontSize: 16, fontWeight: 800, color: T.text }}>So glad to hear it! 🎉</div>
+        {reviewUrl ? (
+          <>
+            <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4, lineHeight: 1.5 }}>A quick Google review would mean a lot to us.</div>
+            <button onClick={() => openExternalBrowser(reviewUrl)}
+              style={{ marginTop: 14, width: "100%", background: "#4285F4", color: "#fff", border: "none", borderRadius: 13, padding: "13px", fontSize: 14.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}>
+              Leave us a Google review →
+            </button>
+          </>
+        ) : (
+          <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>Thanks for the great rating!</div>
+        )}
+      </div>
+    );
+  }
+  if (stage === "negative") {
+    return (
+      <div style={card}>
+        <div style={{ fontSize: 16, fontWeight: 800, color: T.text }}>Thanks — we'd love to make this right.</div>
+        <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4, lineHeight: 1.5 }}>Tell us what happened and we'll follow up directly.</div>
+        <textarea value={feedback} onChange={e => setFeedback(e.target.value)} placeholder="What could we have done better?"
+          style={{ width: "100%", marginTop: 12, padding: "11px 13px", border: `1px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical", minHeight: 80, lineHeight: 1.5 }} />
+        <button onClick={sendNegative} disabled={!feedback.trim()}
+          style={{ marginTop: 10, width: "100%", background: T.primary, color: "#fff", border: "none", borderRadius: 13, padding: "13px", fontSize: 14.5, fontWeight: 800, cursor: feedback.trim() ? "pointer" : "default", fontFamily: "inherit", opacity: feedback.trim() ? 1 : 0.5 }}>
+          Send to {branding.companyName ? branding.companyName.split(" ")[0] : "the team"}
+        </button>
+      </div>
+    );
+  }
+  if (stage === "done") {
+    return (
+      <div style={card}>
+        <div style={{ fontSize: 16, fontWeight: 800, color: T.text }}>Thank you — we hear you.</div>
+        <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4, lineHeight: 1.5 }}>Your feedback went straight to our team and we'll be in touch.</div>
+      </div>
+    );
+  }
+
+  // stage === "ask"
+  return (
+    <div style={card}>
+      <div style={{ fontSize: 16, fontWeight: 800, color: T.text }}>How was your service?</div>
+      <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 3 }}>{visit.type || "Service Visit"} · {visit.date}</div>
+      <div style={{ display: "flex", gap: 6, marginTop: 14, justifyContent: "center" }}>
+        {[1, 2, 3, 4, 5].map(n => (
+          <button key={n} onClick={() => pick(n)} aria-label={`${n} star${n > 1 ? "s" : ""}`}
+            style={{ background: "none", border: "none", cursor: "pointer", padding: 4, fontSize: 34, lineHeight: 1, color: n <= stars ? "#F5A623" : T.border, fontFamily: "inherit" }}>★</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CPHome({ client, schedule, invoices, branding, team, onNav, onRateVisit, T, vp = {} }) {
   const wide = vp.isTablet || vp.isDesktop;
   const next = clientNextVisit(schedule, client.id, client.name);
   const myInvoices = sortInvoices((invoices || []).filter(iv => invoiceMatchesClient(iv, client)));
@@ -16434,6 +16643,7 @@ function CPHome({ client, schedule, invoices, branding, team, onNav, T, vp = {} 
     <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
       {greetingBlock}
       <ClientLiveTracking client={client} schedule={schedule} team={team} branding={branding} T={T} />
+      <CPRatingPrompt client={client} branding={branding} onRateVisit={onRateVisit} T={T} />
       {heroBlock}
       {balanceBlock}
       {statsBlock}
@@ -17777,7 +17987,7 @@ function CPSettings({ client, branding, prefs, setPrefs, T, onSignOut, isStaffPr
   );
 }
 
-function SPSClientPortal({ client, schedule, invoices, estimates, branding, team = [], T: globalT, fontStack, onSignOut, onServiceRequest, onApproveEstimate, onUpgradeRequest, isStaffPreview = false }) {
+function SPSClientPortal({ client, schedule, invoices, estimates, branding, team = [], T: globalT, fontStack, onSignOut, onServiceRequest, onApproveEstimate, onUpgradeRequest, onRateVisit, isStaffPreview = false }) {
   // Client prefs stored in localStorage — personal per-device settings
   const prefsKey = `sps_client_prefs_${client.id}`;
   const [prefs, setPrefs] = useState(() => {
@@ -17896,7 +18106,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, team
         {settingsOpen && (
           <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
         )}
-        {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} team={team} onNav={setPage} T={T} vp={vp} />}
+        {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} team={team} onNav={setPage} onRateVisit={onRateVisit} T={T} vp={vp} />}
         {!settingsOpen && page === "cp_property" && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
         {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
         {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} />}
@@ -18546,6 +18756,23 @@ export default function App({ authEmail = "", onSignOut }) {
   // client service requests land as office alerts so staff see them on the dashboard
   const handleServiceRequest = (req) => handleOfficeAlert({ title: `Service Request: ${req.clientName}`, body: `${req.type}${req.dates ? " · " + req.dates : ""}${req.notes ? " — " + req.notes : ""}`, type: "request", clientId: req.clientId });
 
+  // Store a client's service rating on their most recent visit, and route low
+  // ratings (private feedback) straight to the office so Brandon can make it right.
+  const handleRateVisit = ({ clientId, visitDate, rating, feedback }) => {
+    setClients(prev => (prev || []).map(c => {
+      if (String(c.id) !== String(clientId)) return c;
+      const hist = (c.history || []).slice();
+      const idx = visitDate ? hist.findIndex(h => h.date === visitDate) : 0;
+      const at = idx >= 0 ? idx : 0;
+      if (hist[at]) hist[at] = { ...hist[at], clientRating: rating, clientFeedback: feedback || "", ratedAt: Date.now() };
+      return { ...c, history: hist };
+    }));
+    if (rating && rating <= 3) {
+      const c = (clients || []).find(x => String(x.id) === String(clientId));
+      handleOfficeAlert({ title: `Service Feedback: ${c?.name || "Client"}`, body: `${rating}★${feedback ? ` — ${feedback}` : ""}`, type: "feedback", clientId });
+    }
+  };
+
   const handleConfirmUpgrade = (updatedAlert, updatedClient) => {
     // Save progress state back to the alert (persists steps across modal opens)
     setOfficeAlerts(list => list.map(a => a.id === updatedAlert.id ? { ...a, ...updatedAlert } : a));
@@ -18809,6 +19036,7 @@ export default function App({ authEmail = "", onSignOut }) {
         fontStack={fontStack}
         onSignOut={handleSignOut}
         onServiceRequest={handleServiceRequest}
+        onRateVisit={handleRateVisit}
         onUpgradeRequest={handleUpgradeRequest}
       />
     );
