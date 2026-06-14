@@ -19109,18 +19109,15 @@ export default function App({ authEmail = "", onSignOut }) {
     const brandColor = (branding.accentColor && branding.accentColor.trim()) ? branding.accentColor : T.primary;
     const splashColor = (branding.splashBgColor && branding.splashBgColor.trim()) ? branding.splashBgColor : brandColor;
     const activeColor = !hydrated ? splashColor : T.bg;
-    // <html> is what shows through in the iOS home-indicator safe area BELOW the shell.
-    // While loading it matches the splash; once loaded, match it to the bottom nav's
-    // surface color so that strip reads as part of the nav instead of a gray gap.
-    // body / #root / theme-color stay the page bg so the content area is unaffected.
-    const htmlColor = !hydrated ? splashColor : T.surface;
+    // Keep html, body AND #root in sync so the safe-area strip behind the splash
+    // always matches the splash color — even if Brandon customizes splashBgColor.
     document.body.style.background = activeColor;
-    document.documentElement.style.background = htmlColor;
+    document.documentElement.style.background = activeColor;
     const rootEl = document.getElementById("root");
     if (rootEl) rootEl.style.background = activeColor;
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) meta.setAttribute("content", activeColor);
-  }, [hydrated, branding.splashBgColor, branding.accentColor, T.bg, T.primary, T.surface]);
+  }, [hydrated, branding.splashBgColor, branding.accentColor, T.bg, T.primary]);
 
   // ── Auto-update: check if Vercel deployed a new version and reload if so ──
   useEffect(() => {
@@ -19631,10 +19628,7 @@ export default function App({ authEmail = "", onSignOut }) {
       <div style={{
         fontFamily: fontStack,
         // Pinned to the viewport so the header/nav can't drift on iOS overscroll.
-        // Sized by 100dvh (the *visible* viewport) so the nav sits flush at the real
-        // bottom on iOS standalone/Capacitor — top:0+bottom:0 stops short of the home
-        // indicator there, which both floats the nav and squishes the content.
-        background: T.bg, position: "fixed", top: 0, left: 0, right: 0, height: "100dvh", overflow: "hidden",
+        background: T.bg, position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden",
         display: "flex", flexDirection: "column", color: T.text,
         WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em",
         // CSS vars used by the global polish layer below
@@ -19646,9 +19640,9 @@ export default function App({ authEmail = "", onSignOut }) {
              drift of the header/nav. position:fixed on <body> is the part that actually
              stops the standalone-PWA bounce (overflow:hidden alone isn't enough on iOS).
              Released when this shell unmounts (login etc.). */
-          html { height: 100dvh; overflow: hidden; }
-          body { position: fixed; top: 0; left: 0; right: 0; height: 100dvh; min-height: 0; overflow: hidden; overscroll-behavior: none; }
-          #root { height: 100dvh; min-height: 0; overflow: hidden; }
+          html { height: 100%; overflow: hidden; }
+          body { position: fixed; top: 0; left: 0; right: 0; bottom: 0; overflow: hidden; overscroll-behavior: none; }
+          #root { height: 100%; overflow: hidden; }
           body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
           input, select, textarea {
             transition: border-color .15s ease, box-shadow .15s ease;
