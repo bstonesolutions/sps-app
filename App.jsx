@@ -2778,14 +2778,16 @@ function Checkbox({ checked, onChange, accent }) {
 function Modal({ title, children, onClose }) {
   const { T } = useApp();
   return (
-    // Backdrop. box-sizing:border-box + safe-area padding bounds the card to the
-    // visible area between the notch and home indicator on every device size.
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", boxSizing: "border-box", padding: "max(16px, env(safe-area-inset-top)) 14px max(16px, env(safe-area-inset-bottom))", overscrollBehavior: "contain" }}>
+    // Backdrop is a COLUMN flex box sized by inset:0 (always definite — no % or
+    // viewport-unit cap needed, which is what iOS WKWebView can mis-resolve). The
+    // card flex-shrinks to fit between the safe-area paddings, so its top is never
+    // clipped above the screen, on any device size.
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)", zIndex: 200, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "max(16px, env(safe-area-inset-top)) 14px max(16px, env(safe-area-inset-bottom))", overscrollBehavior: "contain" }}>
       <div onClick={e => e.stopPropagation()}
-        // Column layout: a fixed header (close button always reachable) + a
-        // scrollable body. maxHeight:100% keeps the whole card inside the padded
-        // (safe) area — the top is never clipped above the screen.
-        style={{ background: T.surface, borderRadius: 24, width: "100%", maxWidth: 600, maxHeight: "100%", display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: T.shadowLg, border: `1px solid ${T.border}`, animation: "spsModalIn 0.22s cubic-bezier(0.16, 1, 0.3, 1)" }}>
+        // Column card: fixed header (close button always reachable) + scrollable
+        // body. flex:0 1 auto + minHeight:0 lets it shrink to the backdrop's
+        // available height (overflow goes to the inner scroll), never overflowing.
+        style={{ background: T.surface, borderRadius: 24, width: "100%", maxWidth: 600, flex: "0 1 auto", minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: T.shadowLg, border: `1px solid ${T.border}`, animation: "spsModalIn 0.22s cubic-bezier(0.16, 1, 0.3, 1)" }}>
         {/* Fixed header — pinned to the top of the modal, never scrolls away */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "18px 22px 14px", flexShrink: 0 }}>
           <div style={{ fontWeight: 700, fontSize: 20, color: T.text, letterSpacing: "-0.02em", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{title}</div>
