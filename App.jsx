@@ -18810,6 +18810,59 @@ function LoginScreen({ team, branding, T, fontStack, onSignIn }) {
   );
 }
 
+// Desktop (>=1024px) left sidebar — replaces the mobile floating menu button.
+// Same destinations as the mobile nav sheet, shown vertically with the SPS logo on
+// top, active item in crimson, and sync/account/sign-out pinned at the bottom.
+function DesktopSidebar({ page, perms, navUnread, reminderDue, onNav, onSignOut, currentUser, branding, syncState, onSync, T }) {
+  const items = ALL_NAV.filter(n => isTabVisible(n, perms));
+  return (
+    <aside style={{ width: 244, flexShrink: 0, height: "100%", background: T.surface, borderRight: `1px solid ${T.border}`, display: "flex", flexDirection: "column" }}>
+      {/* Logo + company */}
+      <div style={{ padding: "20px 18px 16px", display: "flex", alignItems: "center", gap: 11, borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
+        <div style={{ width: 38, height: 38, borderRadius: 11, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+          {branding.logoType === "image" && branding.logoImage
+            ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            : <span style={{ fontSize: 20 }}>{branding.logoEmoji}</span>}
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", lineHeight: 1.15, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.companyName}</div>
+          <div style={{ fontSize: 11, color: T.textMuted, lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.division}</div>
+        </div>
+      </div>
+      {/* Nav items */}
+      <nav style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 3 }}>
+        {items.map(n => {
+          const active = page === n.id;
+          const badge = n.id === "messages" ? navUnread : (n.id === "reminders" ? reminderDue : 0);
+          return (
+            <button key={n.id} onClick={() => onNav(n.id)}
+              style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 13px", border: "none", borderRadius: 11, background: active ? T.primary : "transparent", color: active ? "#fff" : T.text, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%", fontWeight: active ? 700 : 600, fontSize: 14, letterSpacing: "-0.01em" }}>
+              <Icon name={n.icon} size={19} />
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n.label}</span>
+              {badge > 0 && <span style={{ minWidth: 18, height: 18, borderRadius: 9, background: active ? "rgba(255,255,255,0.25)" : T.primary, color: "#fff", fontSize: 11, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 5px", flexShrink: 0 }}>{badge}</span>}
+            </button>
+          );
+        })}
+      </nav>
+      {/* Footer: sync + account */}
+      <div style={{ padding: 12, borderTop: `1px solid ${T.border}`, display: "flex", flexDirection: "column", gap: 8, flexShrink: 0 }}>
+        <button onClick={onSync} title="Sync"
+          style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 13px", border: "none", borderRadius: 10, background: T.surfaceAlt, color: syncState === "saved" ? "#16a34a" : T.text, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600, width: "100%" }}>
+          <Icon name="refresh" size={15} style={{ animation: syncState === "syncing" ? "spin 0.7s linear infinite" : "none" }} />
+          {syncState === "syncing" ? "Syncing…" : syncState === "saved" ? "Saved" : "Sync"}
+        </button>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "2px 4px" }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{(currentUser && currentUser.name) || "Signed in"}</div>
+            {currentUser && currentUser.email && <div style={{ fontSize: 10.5, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{currentUser.email}</div>}
+          </div>
+          <button onClick={onSignOut} style={{ flexShrink: 0, background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
 export default function App({ authEmail = "", onSignOut }) {
   const [selectedClient, setSelectedClient] = useState(null);
   const [adding, setAdding] = useState(false);
@@ -19634,6 +19687,77 @@ export default function App({ authEmail = "", onSignOut }) {
     );
   }
 
+  // ── Shared shell pieces, rendered by BOTH the mobile and desktop layouts ──
+  const shellCss = (
+    <style>{`
+          *, *::before, *::after { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+          html { height: 100%; overflow: hidden; }
+          body { position: fixed; top: 0; left: 0; right: 0; bottom: 0; overflow: hidden; overscroll-behavior: none; }
+          #root { height: 100%; overflow: hidden; }
+          body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+          input, select, textarea { transition: border-color .15s ease, box-shadow .15s ease; -webkit-appearance: none; appearance: none; border-radius: 12px; font-size: 16px !important; line-height: 1.4; }
+          input:focus, select:focus, textarea:focus { border-color: var(--ringBorder) !important; box-shadow: 0 0 0 3.5px var(--ring); outline: none; }
+          button { -webkit-tap-highlight-color: transparent; }
+          button, a { transition: transform .1s cubic-bezier(.34,1.56,.64,1), opacity .15s ease, background .15s ease; }
+          button:active:not(:disabled) { transform: scale(0.95); opacity: 0.85; }
+          @media (hover: hover) { button:hover:not(:disabled) { filter: brightness(1.05); } }
+          ::selection { background: var(--ring); }
+          ::-webkit-scrollbar { width: 5px; height: 5px; }
+          ::-webkit-scrollbar-thumb { background: ${hexA(T.textMuted, 0.2)}; border-radius: 100px; }
+          ::-webkit-scrollbar-track { background: transparent; }
+          select { background-image: none; cursor: pointer; }
+          textarea { line-height: 1.6; }
+          img { -webkit-user-drag: none; }
+    `}</style>
+  );
+  const pageBody = (
+    <>
+      {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} vp={vp} />}
+      {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
+      {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
+      {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} />}
+      {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
+      {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
+      {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin} canEdit={perms.isAdmin || perms.editInventory} T={T} />}
+      {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
+      {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
+      {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetScreen budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} />}
+      {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
+      {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} />}
+      {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
+      {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
+      {page === "duplicates" && perms.canImport && <DuplicatesScreen clients={clients} invoices={invoices} schedule={schedule} onMerge={handleMergeClients} onGoToClients={() => handleNav("clients")} />}
+      {page === "settings" && <AppSettings onNav={handleNav} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} />}
+    </>
+  );
+
+  // ── Desktop (>=1024px): left sidebar + content. Mobile (below) is unchanged. ──
+  if (vp.isDesktop) {
+    return (
+      <AppCtx.Provider value={{ T, branding, perms, tiers: serviceTiers || DEFAULT_TIERS }}>
+        <div style={{ fontFamily: fontStack, background: T.bg, position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden", display: "flex", flexDirection: "row", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ["--ring"]: hexA(T.primary, 0.22), ["--ringBorder"]: T.primary }}>
+          {shellCss}
+          <DesktopSidebar page={page} perms={perms} navUnread={navUnread} reminderDue={reminderDueCount} onNav={handleNav} onSignOut={handleSignOut} currentUser={currentUser} branding={branding} syncState={syncState} onSync={manualSync} T={T} />
+          <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+            <div style={{ height: 2, flexShrink: 0, zIndex: 99, background: syncState === "syncing" ? T.primary : syncState === "saved" ? "#16a34a" : "transparent", transition: "background 0.3s", animation: syncState === "syncing" ? "syncPulse 0.8s ease-in-out" : "none" }} />
+            {dbError && (
+              <div style={{ background: hexA("#F59E0B", 0.1), borderBottom: `1px solid ${hexA("#F59E0B", 0.3)}`, padding: "10px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: T.text }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Icon name="warning" size={15} />{dbError}</span>
+                <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 10, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Retry</button>
+              </div>
+            )}
+            <main style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "28px 36px", maxWidth: 1180, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: 40 }}>
+              {pageBody}
+            </main>
+          </div>
+        </div>
+        {previewClient && (
+          <StaffClientPreview client={previewClient} invoices={invoices} schedule={schedule} branding={branding} onClose={() => setPreviewClient(null)} />
+        )}
+      </AppCtx.Provider>
+    );
+  }
+
   return (
     <AppCtx.Provider value={{ T, branding, perms, tiers: serviceTiers || DEFAULT_TIERS }}>
       <div style={{
@@ -19719,22 +19843,7 @@ export default function App({ authEmail = "", onSignOut }) {
           </div>
         )}
         <main style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", alignSelf: "center", padding: vp.isPhone ? "22px 16px" : "28px 32px", maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: 28 }}>
-          {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} vp={vp} />}
-          {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
-          {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
-          {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} />}
-          {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
-          {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
-          {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin} canEdit={perms.isAdmin || perms.editInventory} T={T} />}
-          {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
-          {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
-          {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetScreen budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} />}
-          {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
-          {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} />}
-          {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
-          {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
-          {page === "duplicates" && perms.canImport && <DuplicatesScreen clients={clients} invoices={invoices} schedule={schedule} onMerge={handleMergeClients} onGoToClients={() => handleNav("clients")} />}
-          {page === "settings" && <AppSettings onNav={handleNav} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} />}
+          {pageBody}
         </main>
 
         {/* Bottom Nav — a non-scrolling flex child, frozen at the bottom */}
