@@ -19588,7 +19588,10 @@ export default function App({ authEmail = "", onSignOut }) {
       <div style={{
         fontFamily: fontStack,
         // Pinned to the viewport so the header/nav can't drift on iOS overscroll.
-        background: T.bg, position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden",
+        // Sized by 100dvh (the *visible* viewport) so the nav sits flush at the real
+        // bottom on iOS standalone/Capacitor — top:0+bottom:0 stops short of the home
+        // indicator there, which both floats the nav and squishes the content.
+        background: T.bg, position: "fixed", top: 0, left: 0, right: 0, height: "100dvh", overflow: "hidden",
         display: "flex", flexDirection: "column", color: T.text,
         WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em",
         // CSS vars used by the global polish layer below
@@ -19600,9 +19603,9 @@ export default function App({ authEmail = "", onSignOut }) {
              drift of the header/nav. position:fixed on <body> is the part that actually
              stops the standalone-PWA bounce (overflow:hidden alone isn't enough on iOS).
              Released when this shell unmounts (login etc.). */
-          html { height: 100%; overflow: hidden; }
-          body { position: fixed; top: 0; left: 0; right: 0; bottom: 0; overflow: hidden; overscroll-behavior: none; }
-          #root { height: 100%; overflow: hidden; }
+          html { height: 100dvh; overflow: hidden; }
+          body { position: fixed; top: 0; left: 0; right: 0; height: 100dvh; min-height: 0; overflow: hidden; overscroll-behavior: none; }
+          #root { height: 100dvh; min-height: 0; overflow: hidden; }
           body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
           input, select, textarea {
             transition: border-color .15s ease, box-shadow .15s ease;
