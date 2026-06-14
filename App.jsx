@@ -19208,7 +19208,7 @@ export default function App({ authEmail = "", onSignOut }) {
         </main>
 
         {/* Bottom Nav — a non-scrolling flex child, frozen at the bottom */}
-        <nav style={{ position: "relative", flexShrink: 0, background: hexA(T.surface, 0.88), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", borderTop: `1px solid ${T.border}`, display: "flex", zIndex: 90, minHeight: 60, paddingTop: 4, paddingBottom: "max(8px, env(safe-area-inset-bottom))" }}>
+        <nav style={{ position: "relative", flexShrink: 0, background: T.surface, borderTop: `1px solid ${T.border}`, display: "flex", zIndex: 90, minHeight: 60, paddingTop: 4, paddingBottom: "calc(8px + env(safe-area-inset-bottom))" }}>
           {dockIds.slice(0, 4).map(id => {
             const n = ALL_NAV.find(x => x.id === id);
             if (!n) return null;
