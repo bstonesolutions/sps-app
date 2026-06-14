@@ -17341,15 +17341,19 @@ function CPUpgradeRequest({ client, currentPlan, currentTier, upgradePlan, upgra
                 </div>
               )}
 
-              {/* Everything you keep */}
-              <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>
-                Plus everything in {currentPlan}
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {(currentTier?.includes || []).map((item, i) => (
-                  <span key={i} style={{ fontSize: 12, background: T.surfaceAlt, color: T.textMuted, borderRadius: 100, padding: "4px 12px", fontWeight: 500 }}>{item}</span>
-                ))}
-              </div>
+              {/* Everything you keep — only when the client is already on a tier */}
+              {currentPlan && (currentTier?.includes || []).length > 0 && (
+                <>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>
+                    Plus everything in {currentPlan}
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {(currentTier?.includes || []).map((item, i) => (
+                      <span key={i} style={{ fontSize: 12, background: T.surfaceAlt, color: T.textMuted, borderRadius: 100, padding: "4px 12px", fontWeight: 500 }}>{item}</span>
+                    ))}
+                  </div>
+                </>
+              )}
             </div>
 
             <div style={{ padding: "0 20px 20px" }}>
@@ -17376,8 +17380,8 @@ function CPUpgradeRequest({ client, currentPlan, currentTier, upgradePlan, upgra
           </div>
 
           <div style={{ background: hexA(chosen?.color || T.primary, 0.06), borderRadius: 14, padding: "12px 16px" }}>
-            <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 2 }}>Upgrading from → to</div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{currentPlan} → {selectedPlan}</div>
+            <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 2 }}>{currentPlan ? "Upgrading from → to" : "Selected plan"}</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{currentPlan ? `${currentPlan} → ${selectedPlan}` : selectedPlan}</div>
           </div>
 
           <div>
@@ -17813,17 +17817,20 @@ function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T }) 
 // ── CP SERVICE (My Service Plan) ──
 function CPService({ client, branding, onNav, onUpgradeRequest, T }) {
   const { tiers } = useApp();
-  const plan = client.plan || "Signature";
+  // Read the client's REAL tier — same source of truth as the dashboard (client.plan).
+  // Missing/empty means NO tier; never default to Signature (or any tier).
+  const plan = client.plan || null;
   const clientDiv = client.division || "Pond";
   const allTiers = tiers || CP_TIERS;
   const divTierSet = (allTiers[clientDiv] || allTiers["Pond"] || DEFAULT_TIERS["Pond"]);
-  const tier = divTierSet[plan] || divTierSet["Essential"] || {};
+  const tier = plan ? (divTierSet[plan] || null) : null;   // null when untiered — no fallback tier
   const tierColor = tier?.color || T.primary;
-  // All tiers strictly above current — no downgrades
+  // Available upgrades = every tier ABOVE the client's current one, in order. A client with
+  // NO tier is offered ALL tiers; Essential → Signature + Premium; Signature → Premium; etc.
   const TIER_ORDER = ["Essential", "Signature", "Premium"];
-  const currentIdx = TIER_ORDER.indexOf(plan);
-  // Upgrade targets come from the tier's configured upgradeTo list (None tier's list when untiered).
-  const upgradeOptions = upgradeList(divTierSet[plan] || divTierSet["__none__"] || {}).filter(p => p !== plan && divTierSet[p]);
+  const orderedTiers = TIER_ORDER.filter(p => divTierSet[p]);
+  const currentIdx = plan ? orderedTiers.indexOf(plan) : -1;
+  const upgradeOptions = orderedTiers.slice(currentIdx + 1);
   const upgradePlan = upgradeOptions[0] || null;
   const upgradeTier = upgradePlan ? divTierSet[upgradePlan] : null;
 
@@ -17859,8 +17866,8 @@ function CPService({ client, branding, onNav, onUpgradeRequest, T }) {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.12em", opacity: 0.7, marginBottom: 8 }}>Current Plan</div>
-              <div style={{ fontSize: 36, fontWeight: 900, letterSpacing: "-0.03em", lineHeight: 1 }}>{plan}</div>
-              <div style={{ fontSize: 14, opacity: 0.8, marginTop: 8, fontWeight: 500 }}>{tier?.tagline}</div>
+              <div style={{ fontSize: plan ? 36 : 26, fontWeight: 900, letterSpacing: "-0.03em", lineHeight: 1.05 }}>{plan || "No tier assigned"}</div>
+              <div style={{ fontSize: 14, opacity: 0.8, marginTop: 8, fontWeight: 500 }}>{tier?.tagline || (plan ? "" : "Choose a plan below to get started")}</div>
             </div>
             {/* Logo or branded icon */}
             {(branding.logoImage || branding.logoEmoji) && (
@@ -17879,28 +17886,32 @@ function CPService({ client, branding, onNav, onUpgradeRequest, T }) {
                 <span style={{ fontSize: 13, fontWeight: 800 }}>{client.monthlyRate ? `$${parseFloat(client.monthlyRate).toLocaleString()}/mo` : tier?.price}</span>
               </div>
             )}
-            <div style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.15)", borderRadius: 100, padding: "7px 16px", backdropFilter: "blur(8px)" }}>
-              <svg viewBox="0 0 24 24" width={13} height={13} fill="none" stroke="#fff" strokeWidth={2} strokeLinecap="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
-              <span style={{ fontSize: 13, fontWeight: 700 }}>{TIER_FREQ[plan] || client.planFreq || "—"}</span>
-            </div>
+            {plan && (
+              <div style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.15)", borderRadius: 100, padding: "7px 16px", backdropFilter: "blur(8px)" }}>
+                <svg viewBox="0 0 24 24" width={13} height={13} fill="none" stroke="#fff" strokeWidth={2} strokeLinecap="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+                <span style={{ fontSize: 13, fontWeight: 700 }}>{TIER_FREQ[plan] || client.planFreq || "—"}</span>
+              </div>
+            )}
           </div>
         </div>
       </div>
 
-      {/* What's included */}
-      <div style={{ background: T.surface, borderRadius: 22, border: `1px solid ${T.border}`, overflow: "hidden" }}>
-        <div style={{ padding: "18px 20px", borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 32, height: 32, borderRadius: 10, background: hexA(tierColor, 0.1), display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={tierColor} strokeWidth={2} strokeLinecap="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+      {/* What's included — only when the client is on a tier */}
+      {tier && (tier.includes || []).length > 0 && (
+        <div style={{ background: T.surface, borderRadius: 22, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+          <div style={{ padding: "18px 20px", borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 32, height: 32, borderRadius: 10, background: hexA(tierColor, 0.1), display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={tierColor} strokeWidth={2} strokeLinecap="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+            </div>
+            <span style={{ fontSize: 15, fontWeight: 800, color: T.text, letterSpacing: "-0.01em" }}>What's Included</span>
           </div>
-          <span style={{ fontSize: 15, fontWeight: 800, color: T.text, letterSpacing: "-0.01em" }}>What's Included</span>
+          <div style={{ padding: "4px 20px 14px" }}>
+            {(tier?.includes || []).map((item, i) => (
+              <CheckRow key={i} text={item} highlighted={i === 0} />
+            ))}
+          </div>
         </div>
-        <div style={{ padding: "4px 20px 14px" }}>
-          {(tier?.includes || []).map((item, i) => (
-            <CheckRow key={i} text={item} highlighted={i === 0} />
-          ))}
-        </div>
-      </div>
+      )}
 
       {/* Next service */}
       {client.nextService && (
@@ -19674,23 +19685,23 @@ export default function App({ authEmail = "", onSignOut }) {
         <header style={{ background: hexA(T.surface, 0.9), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, position: "relative", zIndex: 100, flexShrink: 0, borderBottom: `1px solid ${T.border}` }}>
           {/* Safe area spacer — grows to exactly the status bar height on any iPhone, zero on Android */}
           <div style={{ height: "env(safe-area-inset-top)", background: "transparent" }} />
-          <div style={{ height: 56, display: "flex", alignItems: "center", justifyContent: "space-between", paddingLeft: 18, paddingRight: 18 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
-            <div style={{ width: 36, height: 36, borderRadius: 11, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+          <div style={{ height: 46, display: "flex", alignItems: "center", justifyContent: "space-between", paddingLeft: 16, paddingRight: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+            <div style={{ width: 30, height: 30, borderRadius: 9, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
               {branding.logoType === "image" && branding.logoImage
                 ? <img src={branding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                : <span style={{ fontSize: 19 }}>{branding.logoEmoji}</span>}
+                : <span style={{ fontSize: 16 }}>{branding.logoEmoji}</span>}
             </div>
             <div>
-              <div style={{ fontSize: 15, fontWeight: 600, letterSpacing: "-0.02em", lineHeight: 1.2, color: T.text }}>{branding.companyName}</div>
-              <div style={{ fontSize: 11, color: T.textMuted, letterSpacing: "0.01em" }}>{branding.division}</div>
+              <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: "-0.02em", lineHeight: 1.15, color: T.text }}>{branding.companyName}</div>
+              <div style={{ fontSize: 10.5, color: T.textMuted, letterSpacing: "0.01em", lineHeight: 1.2 }}>{branding.division}</div>
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            {/* Sync button — now the far-right header action (Menu moved to the bottom nav) */}
+            {/* Sync button — far-right header action */}
             <button onClick={manualSync} title="Sync"
-              style={{ background: hexA(T.primary, 0.1), border: "none", color: syncState === "saved" ? "#16a34a" : T.primary, cursor: "pointer", width: 36, height: 36, borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", transition: "color 0.3s" }}>
-              <Icon name="refresh" size={16} style={{ animation: syncState === "syncing" ? "spin 0.7s linear infinite" : "none" }} />
+              style={{ background: hexA(T.primary, 0.1), border: "none", color: syncState === "saved" ? "#16a34a" : T.primary, cursor: "pointer", width: 32, height: 32, borderRadius: 9, display: "flex", alignItems: "center", justifyContent: "center", transition: "color 0.3s" }}>
+              <Icon name="refresh" size={15} style={{ animation: syncState === "syncing" ? "spin 0.7s linear infinite" : "none" }} />
             </button>
           </div>
           </div>
