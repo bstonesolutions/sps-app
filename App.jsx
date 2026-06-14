@@ -2778,25 +2778,22 @@ function Checkbox({ checked, onChange, accent }) {
 function Modal({ title, children, onClose }) {
   const { T } = useApp();
   return (
-    // Backdrop is a COLUMN flex box sized by inset:0 (always definite — no % or
-    // viewport-unit cap needed, which is what iOS WKWebView can mis-resolve). The
-    // card flex-shrinks to fit between the safe-area paddings, so its top is never
-    // clipped above the screen, on any device size.
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)", zIndex: 200, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "max(16px, env(safe-area-inset-top)) 14px max(16px, env(safe-area-inset-bottom))", overscrollBehavior: "contain" }}>
+    // The BACKDROP itself scrolls (overflow-y:auto) and is sized by top/bottom:0
+    // (the real web-view frame — no dvh/%/flex caps that WKWebView can mis-resolve).
+    // So however tall the card is, you can always scroll to it — it can never trap
+    // you. Tapping the backdrop closes; the close button below is a separate,
+    // viewport-pinned control that can never be clipped off-screen.
+    <div onClick={onClose} style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 200, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)", overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", display: "flex", flexDirection: "column", alignItems: "center", padding: "calc(env(safe-area-inset-top) + 58px) 14px calc(env(safe-area-inset-bottom) + 16px)", boxSizing: "border-box" }}>
+      {/* Always-reachable close: fixed to the viewport corner, never clipped, never scrolls away. */}
+      <button onClick={onClose} aria-label="Close" style={{ position: "fixed", top: "calc(env(safe-area-inset-top) + 12px)", right: 14, zIndex: 202, width: 38, height: 38, borderRadius: "50%", border: "none", cursor: "pointer", background: "rgba(20,20,22,0.62)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", backdropFilter: "blur(6px)", WebkitBackdropFilter: "blur(6px)", boxShadow: "0 2px 10px rgba(0,0,0,0.3)" }}>
+        <Icon name="close" size={17} />
+      </button>
       <div onClick={e => e.stopPropagation()}
-        // Column card: fixed header (close button always reachable) + scrollable
-        // body. flex:0 1 auto + minHeight:0 lets it shrink to the backdrop's
-        // available height (overflow goes to the inner scroll), never overflowing.
-        style={{ background: T.surface, borderRadius: 24, width: "100%", maxWidth: 600, flex: "0 1 auto", minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: T.shadowLg, border: `1px solid ${T.border}`, animation: "spsModalIn 0.22s cubic-bezier(0.16, 1, 0.3, 1)" }}>
-        {/* Fixed header — pinned to the top of the modal, never scrolls away */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "18px 22px 14px", flexShrink: 0 }}>
-          <div style={{ fontWeight: 700, fontSize: 20, color: T.text, letterSpacing: "-0.02em", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{title}</div>
-          <button onClick={onClose} style={{ background: T.surfaceAlt, border: "none", borderRadius: "50%", width: 30, height: 30, cursor: "pointer", color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="close" size={14} /></button>
-        </div>
-        {/* Scrollable body — content taller than the screen scrolls here */}
-        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", padding: "0 22px 24px" }}>
-          {children}
-        </div>
+        // Content-sized card, centered with margin:auto. When it's taller than the
+        // screen the backdrop scrolls to reveal all of it — no height cap needed.
+        style={{ background: T.surface, borderRadius: 24, width: "100%", maxWidth: 600, margin: "auto", padding: "20px 22px 24px", boxShadow: T.shadowLg, border: `1px solid ${T.border}`, animation: "spsModalIn 0.22s cubic-bezier(0.16, 1, 0.3, 1)" }}>
+        {title && <div style={{ fontWeight: 700, fontSize: 20, color: T.text, letterSpacing: "-0.02em", marginBottom: 18, paddingRight: 40 }}>{title}</div>}
+        {children}
       </div>
     </div>
   );
@@ -18296,7 +18293,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, team
   const wide = vp.isTablet || vp.isDesktop;
 
   return (
-    <div style={{ fontFamily: fontStack, background: T.bg, display: "flex", flexDirection: "column", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ...(isStaffPreview ? { position: "relative", minHeight: "100%" } : { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, height: "100dvh", overflow: "hidden" }) }}>
+    <div style={{ fontFamily: fontStack, background: T.bg, display: "flex", flexDirection: "column", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ...(isStaffPreview ? { position: "relative", minHeight: "100%" } : { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden" }) }}>
       <style>{`
         * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
         ${isStaffPreview ? "" : `/* Lock the document so only <main> scrolls — position:fixed on <body>
@@ -19340,7 +19337,7 @@ export default function App({ authEmail = "", onSignOut }) {
       <div style={{
         fontFamily: fontStack,
         // Pinned to the viewport so the header/nav can't drift on iOS overscroll.
-        background: T.bg, position: "fixed", top: 0, left: 0, right: 0, bottom: 0, height: "100dvh", overflow: "hidden",
+        background: T.bg, position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden",
         display: "flex", flexDirection: "column", color: T.text,
         WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em",
         // CSS vars used by the global polish layer below
