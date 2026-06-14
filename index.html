@@ -39,6 +39,21 @@
   </head>
   <body style="margin:0; background:#B81D24">
     <div id="root"></div>
+    <!-- BOOT SPLASH: the very first paint already IS the SPS splash (crimson + centered
+         logo + name), so no grey/blank/other screen is ever seen before React loads.
+         It's a sibling of #root (React doesn't wipe it) and mirrors the React splash's
+         logo size/position, so when React removes it the handoff is invisible.
+         #AF011A is the native config color; the WEB splash is T.primary #B81D24 — use that. -->
+    <div id="boot-splash" style="position:fixed; inset:0; width:100%; height:100%; background:#B81D24; display:flex; flex-direction:column; align-items:center; justify-content:center; z-index:99999; font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter',system-ui,sans-serif; -webkit-font-smoothing:antialiased;">
+      <img src="/icon-512.png" alt="SPS" style="width:92px; height:92px; border-radius:26px; object-fit:cover; box-shadow:0 16px 48px rgba(0,0,0,0.35),0 2px 8px rgba(0,0,0,0.2); margin-bottom:24px;" />
+      <div style="font-size:26px; font-weight:900; letter-spacing:-0.04em; color:#fff; line-height:1;">Stone Property Solutions</div>
+    </div>
+    <script>
+      // Safety net: never let the boot splash get permanently stuck if React's
+      // removal doesn't fire (e.g. the session never resolves). React removes it
+      // the instant the real screen is up; this is only a last-resort fallback.
+      setTimeout(function () { var b = document.getElementById('boot-splash'); if (b) b.remove(); }, 8000);
+    </script>
     <script type="module" src="/main.jsx"></script>
   </body>
 </html>

@@ -2778,22 +2778,25 @@ function Checkbox({ checked, onChange, accent }) {
 function Modal({ title, children, onClose }) {
   const { T } = useApp();
   return (
-    // The BACKDROP itself scrolls (overflow-y:auto) and is sized by top/bottom:0
-    // (the real web-view frame — no dvh/%/flex caps that WKWebView can mis-resolve).
-    // So however tall the card is, you can always scroll to it — it can never trap
-    // you. Tapping the backdrop closes; the close button below is a separate,
-    // viewport-pinned control that can never be clipped off-screen.
-    <div onClick={onClose} style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 200, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)", overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", display: "flex", flexDirection: "column", alignItems: "center", padding: "calc(env(safe-area-inset-top) + 58px) 14px calc(env(safe-area-inset-bottom) + 16px)", boxSizing: "border-box" }}>
-      {/* Always-reachable close: fixed to the viewport corner, never clipped, never scrolls away. */}
-      <button onClick={onClose} aria-label="Close" style={{ position: "fixed", top: "calc(env(safe-area-inset-top) + 12px)", right: 14, zIndex: 202, width: 38, height: 38, borderRadius: "50%", border: "none", cursor: "pointer", background: "rgba(20,20,22,0.62)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", backdropFilter: "blur(6px)", WebkitBackdropFilter: "blur(6px)", boxShadow: "0 2px 10px rgba(0,0,0,0.3)" }}>
-        <Icon name="close" size={17} />
-      </button>
-      <div onClick={e => e.stopPropagation()}
-        // Content-sized card, centered with margin:auto. When it's taller than the
-        // screen the backdrop scrolls to reveal all of it — no height cap needed.
-        style={{ background: T.surface, borderRadius: 24, width: "100%", maxWidth: 600, margin: "auto", padding: "20px 22px 24px", boxShadow: T.shadowLg, border: `1px solid ${T.border}`, animation: "spsModalIn 0.22s cubic-bezier(0.16, 1, 0.3, 1)" }}>
-        {title && <div style={{ fontWeight: 700, fontSize: 20, color: T.text, letterSpacing: "-0.02em", marginBottom: 18, paddingRight: 40 }}>{title}</div>}
-        {children}
+    // Backdrop centers the card and keeps it below the safe area (padding-top uses
+    // env(safe-area-inset-top)). The card is bounded by flex-shrink (flex:0 1 auto +
+    // minHeight:0 — reliable in WKWebView, no % to mis-resolve), with a dvh max-height
+    // as a backup. The CLOSE BUTTON lives in the card's own fixed header, so it's
+    // always inside the white card and never clipped by the app header or notch.
+    <div onClick={onClose} style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 200, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "max(14px, env(safe-area-inset-top)) 14px max(14px, env(safe-area-inset-bottom))", overscrollBehavior: "contain" }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: T.surface, borderRadius: 24, width: "100%", maxWidth: 600, flex: "0 1 auto", minHeight: 0, maxHeight: "calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 28px)", display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: T.shadowLg, border: `1px solid ${T.border}`, animation: "spsModalIn 0.22s cubic-bezier(0.16, 1, 0.3, 1)" }}>
+        {/* Fixed header INSIDE the card: title + close X. flexShrink:0 keeps it pinned
+            to the card's top-right while the body scrolls. */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "15px 14px 13px 22px", flexShrink: 0, borderBottom: `1px solid ${T.border}` }}>
+          <div style={{ fontWeight: 700, fontSize: 20, color: T.text, letterSpacing: "-0.02em", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</div>
+          <button onClick={onClose} aria-label="Close" style={{ flexShrink: 0, width: 32, height: 32, borderRadius: "50%", border: "none", cursor: "pointer", background: T.surfaceAlt, color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Icon name="close" size={16} />
+          </button>
+        </div>
+        {/* Scrollable body — content taller than the card scrolls here; header stays put. */}
+        <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", padding: "16px 22px 22px" }}>
+          {children}
+        </div>
       </div>
     </div>
   );
@@ -18595,6 +18598,9 @@ export default function App({ authEmail = "", onSignOut }) {
   const teamHasOwner = (team || []).some(m => m.role === "owner");
   const effRole = (m) => m ? (m.role || ((!teamHasOwner && team[0] && team[0].id === m.id) ? "owner" : "field")) : null;
   const perms = memberPerms(currentUser ? { ...currentUser, role: effRole(currentUser) } : null);
+  // Remove the static boot splash (index.html) now that the app (and its identical
+  // crimson splash) is mounted — the handoff is invisible.
+  useEffect(() => { const b = document.getElementById("boot-splash"); if (b) b.remove(); }, []);
   // Broadcast staff location while clocked in (no-op until a shift opts in).
   useStaffLocationTracking();
   // Smart reopen on a warm resume (the app wasn't killed):
@@ -18658,6 +18664,9 @@ export default function App({ authEmail = "", onSignOut }) {
     try { return !sessionStorage.getItem("sps_splashed"); } catch (_) { return true; }
   });
   const splashShown = useRef(false);
+  const splashStart = useRef(Date.now()); // when the splash first became visible
+  const [splashOut, setSplashOut] = useState(false); // triggers the fade-out
+  const SPLASH_MIN_MS = 1300; // never hide before this — even if the app loads faster
 
   // Trigger a visible sync pulse whenever any stored state saves
   const triggerSync = () => {
@@ -18680,14 +18689,20 @@ export default function App({ authEmail = "", onSignOut }) {
     return () => { window.__onSpsSync = null; };
   }, []);
 
-  // Branded splash — shows briefly after hydration, then fades into the app
+  // Branded splash — hide at max(1.3s, app-ready): always visible for at least
+  // SPLASH_MIN_MS, and if data is still loading past that, keep showing it until
+  // hydrated, then fade out. Never disappears before 1.3s even on a fast load.
   useEffect(() => {
-    if (!hydrated) return;
+    if (!hydrated) return;            // not ready yet — keep the splash up
     if (splashShown.current) return;
     splashShown.current = true;
-    if (!showSplash) return; // warm reload/resync — never re-show the full splash
+    if (!showSplash) return;          // warm reload/resync — never re-show the full splash
     try { sessionStorage.setItem("sps_splashed", "1"); } catch (_) {}
-    const t = setTimeout(() => setShowSplash(false), 1800);
+    const wait = Math.max(0, SPLASH_MIN_MS - (Date.now() - splashStart.current));
+    const t = setTimeout(() => {
+      setSplashOut(true);                                       // begin the fade
+      setTimeout(() => setShowSplash(false), 480);              // remove after it
+    }, wait);
     return () => clearTimeout(t);
   }, [hydrated, showSplash]);
 
@@ -19215,7 +19230,7 @@ export default function App({ authEmail = "", onSignOut }) {
     const greetPrefix   = (branding.splashGreetingPrefix || "").trim();
 
     return (
-      <div className={hydrated ? "splash-veil" : ""} style={{
+      <div className={splashOut ? "splash-veil" : ""} style={{
         fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif',
         background: splashBgCss,
         position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
@@ -19240,8 +19255,8 @@ export default function App({ authEmail = "", onSignOut }) {
           .si1 { animation: sIn 0.42s cubic-bezier(.22,1,.36,1) 0.12s both; }
           .si2 { animation: sIn 0.42s cubic-bezier(.22,1,.36,1) 0.20s both; }
           .si3 { animation: sIn 0.42s cubic-bezier(.22,1,.36,1) 0.30s both; }
-          .s-out { animation: sOut 0.45s cubic-bezier(.4,0,.6,1) 1.15s both; }
-          .splash-veil { animation: splashVeil 0.4s ease 1.4s both; }
+          .s-out { animation: sOut 0.42s cubic-bezier(.4,0,.6,1) 0s both; }
+          .splash-veil { animation: splashVeil 0.42s ease 0.06s both; }
         `}</style>
 
         {splashStyle === "image" && branding.splashBgImage && (
@@ -19254,7 +19269,7 @@ export default function App({ authEmail = "", onSignOut }) {
           </>
         )}
 
-        <div className={hydrated ? "s-out" : ""} style={{ position:"relative", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", padding:"0 36px", gap: 0 }}>
+        <div className={splashOut ? "s-out" : ""} style={{ position:"relative", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", padding:"0 36px", gap: 0 }}>
           {/* Logo */}
           <div className="si0" style={{ marginBottom: 24 }}>
             {splashLogoSrc ? (

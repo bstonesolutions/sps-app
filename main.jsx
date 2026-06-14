@@ -4,6 +4,10 @@ import { supabase } from "./supabaseClient";
 import { PROD_URL } from "./config";
 import App from "./App.jsx";
 
+// Remove the static boot splash (in index.html) once a real React screen is up.
+// The React content rendered underneath it is identical, so the handoff is invisible.
+const removeBootSplash = () => { const b = document.getElementById("boot-splash"); if (b) b.remove(); };
+
 const wrap = { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom)) 24px", background: "#F5F5F7", fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif" };
 const card = { width: "100%", maxWidth: 360, background: "#fff", borderRadius: 22, boxShadow: "0 10px 40px rgba(0,0,0,0.08)", padding: 28 };
 const inp = { width: "100%", padding: "13px 14px", border: "1px solid #e5e7eb", borderRadius: 12, fontSize: 15, marginBottom: 10, boxSizing: "border-box", outline: "none", fontFamily: "inherit" };
@@ -25,7 +29,7 @@ const AUTH_FLAGS = {
 };
 
 function Login() {
-  useEffect(() => { document.body.classList.add('auth-active'); return () => document.body.classList.remove('auth-active'); }, []);
+  useEffect(() => { removeBootSplash(); document.body.classList.add('auth-active'); return () => document.body.classList.remove('auth-active'); }, []);
   // React's onTouchMove is passive, so its preventDefault is a no-op. Attach a
   // non-passive native touchmove listener so the card truly can't be dragged.
   const wrapRef = useRef(null);
@@ -146,7 +150,7 @@ function Login() {
 // First-login / password-reset screen — staff set a password so they can sign in
 // with email + password from then on (instead of a fresh magic link each time).
 function SetPassword({ email, recovery, onDone }) {
-  useEffect(() => { document.body.classList.add('auth-active'); return () => document.body.classList.remove('auth-active'); }, []);
+  useEffect(() => { removeBootSplash(); document.body.classList.add('auth-active'); return () => document.body.classList.remove('auth-active'); }, []);
   const [pw, setPw] = useState("");
   const [pw2, setPw2] = useState("");
   const [err, setErr] = useState("");
@@ -213,3 +217,12 @@ function Root() {
 }
 
 createRoot(document.getElementById("root")).render(<Root />);
+
+// Native (Capacitor): the iOS launch screen stays up (launchAutoHide:false) until
+// the web is painted, then hands off to the boot/React splash — no white flash.
+// No-op on the web. Runs on the next frame so the web content has painted first.
+requestAnimationFrame(() => {
+  import("@capacitor/splash-screen")
+    .then(({ SplashScreen }) => SplashScreen.hide())
+    .catch(() => {});
+});
