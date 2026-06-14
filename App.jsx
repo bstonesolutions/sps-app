@@ -12889,169 +12889,6 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             </div>
             <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>The page staff land on after the splash screen.</div>
           </FieldRow>
-          {/* ── LOADING SCREEN CUSTOMIZER ── */}
-          <div style={{ background: T.surfaceAlt, borderRadius: 16, overflow: "hidden", border: `1px solid ${T.border}` }}>
-            <div style={{ padding: "12px 16px 10px", borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>Loading Screen</div>
-              <div style={{ fontSize: 11, color: T.textMuted }}>Live preview below</div>
-            </div>
-
-            {/* LIVE PREVIEW */}
-            {(() => {
-              const bg1 = localBranding.splashBgColor || T.primary;
-              const bg2 = localBranding.splashBgColor2 || mix(bg1, "#000", 0.3);
-              const style = localBranding.splashBgStyle || "gradient";
-              const textColor = localBranding.splashTextColor === "dark" ? "rgba(0,0,0,0.85)" : "#fff";
-              const tagline = (localBranding.splashTagline || "").trim() || (localBranding.division || "").trim() || "Field Operations";
-              const logoSrc = localBranding.splashLogoOverride || (localBranding.logoType === "image" ? localBranding.logoImage : null);
-              return (
-                <div style={{ margin: "14px 16px", borderRadius: 16, overflow: "hidden", height: 180, position: "relative", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6,
-                  background: style === "gradient" ? `linear-gradient(160deg, ${bg1} 0%, ${bg2} 100%)`
-                    : style === "solid" ? bg1
-                    : style === "image" && localBranding.splashBgImage ? `url(${localBranding.splashBgImage}) center/cover` : `linear-gradient(160deg, ${bg1} 0%, ${bg2} 100%)`,
-                }}>
-                  {style === "image" && localBranding.splashBgImage && <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.35)" }} />}
-                  <div style={{ position: "relative", display: "flex", flexDirection: "column", alignItems: "center", gap: 5 }}>
-                    {logoSrc ? <img src={logoSrc} style={{ width: 44, height: 44, borderRadius: 12, objectFit: "cover" }} alt="logo" />
-                      : <div style={{ width: 44, height: 44, borderRadius: 12, background: "rgba(255,255,255,0.2)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 }}>{localBranding.logoEmoji || "💧"}</div>}
-                    <div style={{ fontSize: 14, fontWeight: 900, color: textColor, letterSpacing: "-0.02em" }}>{localBranding.companyName || "Company Name"}</div>
-                    <div style={{ fontSize: 10, color: textColor, opacity: 0.7 }}>{tagline}</div>
-                    {(localBranding.splashShowGreeting !== "false") && (
-                      <div style={{ marginTop: 8, background: "rgba(255,255,255,0.15)", borderRadius: 100, padding: "5px 14px", backdropFilter: "blur(8px)" }}>
-                        <span style={{ fontSize: 11, fontWeight: 800, color: textColor }}>
-                          {(localBranding.splashGreetingPrefix && localBranding.splashGreetingPrefix.trim()) ? localBranding.splashGreetingPrefix.trim() : "Good morning"}, Brandon.
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })()}
-
-            <div style={{ padding: "12px 16px", display: "flex", flexDirection: "column", gap: 12 }}>
-              {/* Tagline */}
-              <div>
-                <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 }}>Tagline</label>
-                <Input value={localBranding.splashTagline || ""} onChange={e => set("splashTagline", e.target.value)} placeholder={localBranding.division || "e.g. The SPS Way"} />
-                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4 }}>If blank, uses Division / Tagline above.</div>
-              </div>
-
-              {/* Background style */}
-              <div>
-                <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 }}>Background Style</label>
-                <div style={{ display: "flex", gap: 6 }}>
-                  {[["gradient","Gradient"],["solid","Solid"],["image","Image"]].map(([v,l]) => (
-                    <button key={v} onClick={() => set("splashBgStyle", v)}
-                      style={{ flex: 1, padding: "8px 6px", border: `1.5px solid ${(localBranding.splashBgStyle||"gradient")===v ? T.primary : T.border}`, borderRadius: 10, background: (localBranding.splashBgStyle||"gradient")===v ? hexA(T.primary,0.08) : T.surface, color: (localBranding.splashBgStyle||"gradient")===v ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-                      {l}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Colors */}
-              {(localBranding.splashBgStyle || "gradient") !== "image" && (
-                <div style={{ display: "grid", gridTemplateColumns: (localBranding.splashBgStyle||"gradient") === "gradient" ? "1fr 1fr" : "1fr", gap: 10 }}>
-                  <div>
-                    <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 }}>
-                      {(localBranding.splashBgStyle||"gradient") === "gradient" ? "Color 1" : "Background Color"}
-                    </label>
-                    <label style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", background: T.surface, borderRadius: 10, border: `1px solid ${T.border}`, cursor: "pointer" }}>
-                      <span style={{ width: 28, height: 28, borderRadius: 8, background: localBranding.splashBgColor || T.primary, display: "block", flexShrink: 0, border: `1px solid ${T.border}`, position: "relative", overflow: "hidden" }}>
-                        <input type="color" value={localBranding.splashBgColor || T.primary} onChange={e => set("splashBgColor", e.target.value)} style={{ position: "absolute", inset: -4, width: 40, height: 40, border: "none", cursor: "pointer" }} />
-                      </span>
-                      <span style={{ fontSize: 12, color: T.text, fontFamily: "monospace" }}>{(localBranding.splashBgColor || T.primary).toUpperCase()}</span>
-                      {localBranding.splashBgColor && <button onClick={() => set("splashBgColor", "")} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 10, cursor: "pointer", marginLeft: "auto", fontFamily: "inherit" }}>Reset</button>}
-                    </label>
-                  </div>
-                  {(localBranding.splashBgStyle||"gradient") === "gradient" && (
-                    <div>
-                      <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 }}>Color 2</label>
-                      <label style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", background: T.surface, borderRadius: 10, border: `1px solid ${T.border}`, cursor: "pointer" }}>
-                        <span style={{ width: 28, height: 28, borderRadius: 8, background: localBranding.splashBgColor2 || mix(localBranding.splashBgColor || T.primary, "#000", 0.3), display: "block", flexShrink: 0, border: `1px solid ${T.border}`, position: "relative", overflow: "hidden" }}>
-                          <input type="color" value={localBranding.splashBgColor2 || mix(localBranding.splashBgColor || T.primary, "#000", 0.3)} onChange={e => set("splashBgColor2", e.target.value)} style={{ position: "absolute", inset: -4, width: 40, height: 40, border: "none", cursor: "pointer" }} />
-                        </span>
-                        <span style={{ fontSize: 12, color: T.text, fontFamily: "monospace" }}>{(localBranding.splashBgColor2 || mix(localBranding.splashBgColor || T.primary, "#000", 0.3)).toUpperCase()}</span>
-                        {localBranding.splashBgColor2 && <button onClick={() => set("splashBgColor2", "")} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 10, cursor: "pointer", marginLeft: "auto", fontFamily: "inherit" }}>Reset</button>}
-                      </label>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Background image upload */}
-              {(localBranding.splashBgStyle||"gradient") === "image" && (
-                <div>
-                  <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 }}>Background Image</label>
-                  {localBranding.splashBgImage ? (
-                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                      <img src={localBranding.splashBgImage} style={{ width: 56, height: 40, objectFit: "cover", borderRadius: 8, border: `1px solid ${T.border}` }} alt="bg" />
-                      <div style={{ flex: 1, fontSize: 12, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Background set</div>
-                      <button onClick={() => set("splashBgImage", "")} style={{ background: "none", border: "none", color: "#E5484D", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Remove</button>
-                    </div>
-                  ) : (
-                    <label style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 14px", border: `1.5px dashed ${T.border}`, borderRadius: 10, cursor: "pointer" }}>
-                      <Icon name="plus" size={15} /><span style={{ fontSize: 13, color: T.textMuted }}>Upload background image</span>
-                      <input type="file" accept="image/*" style={{ display: "none" }} onChange={e => { const f = e.target.files[0]; if (!f) return; const r = new FileReader(); r.onload = ev => set("splashBgImage", ev.target.result); r.readAsDataURL(f); e.target.value = ""; }} />
-                    </label>
-                  )}
-                </div>
-              )}
-
-              {/* Splash logo override */}
-              <div>
-                <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 }}>Splash Logo <span style={{ textTransform: "none", fontWeight: 400 }}>(optional — defaults to main logo)</span></label>
-                {localBranding.splashLogoOverride ? (
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <img src={localBranding.splashLogoOverride} style={{ width: 44, height: 44, objectFit: "cover", borderRadius: 10, border: `1px solid ${T.border}` }} alt="splash logo" />
-                    <button onClick={() => set("splashLogoOverride", "")} style={{ background: "none", border: "none", color: "#E5484D", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Remove override</button>
-                  </div>
-                ) : (
-                  <label style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 14px", border: `1.5px dashed ${T.border}`, borderRadius: 10, cursor: "pointer" }}>
-                    <Icon name="plus" size={15} /><span style={{ fontSize: 13, color: T.textMuted }}>Upload a different logo for splash</span>
-                    <input type="file" accept="image/*" style={{ display: "none" }} onChange={e => { const f = e.target.files[0]; if (!f) return; const r = new FileReader(); r.onload = ev => set("splashLogoOverride", ev.target.result); r.readAsDataURL(f); e.target.value = ""; }} />
-                  </label>
-                )}
-              </div>
-
-              {/* Text color + greeting toggle */}
-              {/* Greeting prefix */}
-              <div>
-                <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 }}>Greeting Text</label>
-                <Input
-                  value={localBranding.splashGreetingPrefix || ""}
-                  onChange={e => set("splashGreetingPrefix", e.target.value)}
-                  placeholder="Good morning / Good afternoon / Good evening"
-                />
-                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4 }}>Replaces the time-based greeting. Leave blank to keep "Good morning/afternoon/evening".</div>
-              </div>
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                <div>
-                  <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 }}>Text Color</label>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    {[["light","Light"],["dark","Dark"]].map(([v,l]) => (
-                      <button key={v} onClick={() => set("splashTextColor", v)}
-                        style={{ flex: 1, padding: "8px", border: `1.5px solid ${(localBranding.splashTextColor||"light")===v ? T.primary : T.border}`, borderRadius: 10, background: (localBranding.splashTextColor||"light")===v ? hexA(T.primary,0.08) : T.surface, color: (localBranding.splashTextColor||"light")===v ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-                        {l}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div>
-                  <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 }}>Greeting</label>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    {[["true","On"],["false","Off"]].map(([v,l]) => (
-                      <button key={v} onClick={() => set("splashShowGreeting", v)}
-                        style={{ flex: 1, padding: "8px", border: `1.5px solid ${(localBranding.splashShowGreeting||"true")===v ? T.primary : T.border}`, borderRadius: 10, background: (localBranding.splashShowGreeting||"true")===v ? hexA(T.primary,0.08) : T.surface, color: (localBranding.splashShowGreeting||"true")===v ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-                        {l}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
 
           {/* Logo type */}
           <FieldRow label="Logo">
@@ -18687,33 +18524,28 @@ export default function App({ authEmail = "", onSignOut }) {
     return () => { window.__onSpsSync = null; };
   }, []);
 
-  // Personalize the single load screen (the boot splash from index.html) so it matches
-  // the branded preview: sync the company name + tagline to live branding, and show a
-  // welcome to whoever is signed in — staff (currentUser) or client (clientUser). Runs
-  // as soon as we know who it is; the welcome fades in. No-op once the splash is gone.
+  // Personalize the single load screen (the boot splash from index.html): sync ONLY the
+  // company name to live branding and show a welcome to whoever is signed in — staff
+  // (currentUser) or client (clientUser). The tagline stays fixed as The "SPS" Way (set
+  // in index.html) — never the division, so "All Divisions" can't appear. The welcome
+  // fades in once we know who it is; no-op once the splash is gone.
   useEffect(() => {
     const nameEl = document.getElementById("boot-name");
-    if (nameEl && branding.companyName) nameEl.textContent = branding.companyName;
-    const tagEl = document.getElementById("boot-tagline");
-    if (tagEl) {
-      const tagline = (branding.splashTagline && branding.splashTagline.trim())
-        || (branding.division && branding.division.trim()) || "";
-      tagEl.textContent = tagline;
-      tagEl.style.display = tagline ? "" : "none";
+    if (nameEl && branding.companyName) {
+      // Load screen drops a trailing "LLC" (header/invoices keep the full legal name).
+      nameEl.textContent = branding.companyName.replace(/[,\s]*\bllc\.?\s*$/i, "").trim() || branding.companyName;
     }
     const greetEl = document.getElementById("boot-greeting");
     if (!greetEl) return;
     const u = currentUser || clientUser;
     const first = u ? (((u.name || u.email || "").trim().split(" ")[0] || "").split("@")[0]) : "";
-    const showGreeting = branding.splashShowGreeting !== "false";
-    if (showGreeting && first) {
+    if (first) {
       const hr = new Date().getHours();
-      const timed = hr < 12 ? "Good morning" : hr < 17 ? "Good afternoon" : "Good evening";
-      const prefix = (branding.splashGreetingPrefix && branding.splashGreetingPrefix.trim()) || timed;
+      const prefix = hr < 12 ? "Good morning" : hr < 17 ? "Good afternoon" : "Good evening";
       greetEl.textContent = `${prefix}, ${first}.`;
       requestAnimationFrame(() => { greetEl.style.opacity = "1"; });
     }
-  }, [branding.companyName, branding.splashTagline, branding.division, branding.splashShowGreeting, branding.splashGreetingPrefix, currentUser, clientUser]);
+  }, [branding.companyName, currentUser, clientUser]);
 
   // One continuous load screen: keep the boot splash up until the app is ready
   // (hydrated) — but never less than SPLASH_MIN_MS so it doesn't flash — then fade
