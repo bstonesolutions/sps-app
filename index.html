@@ -45,8 +45,14 @@
          logo size/position, so when React removes it the handoff is invisible.
          #AF011A is the native config color; the WEB splash is T.primary #B81D24 — use that. -->
     <div id="boot-splash" style="position:fixed; inset:0; width:100%; height:100%; background:#B81D24; display:flex; flex-direction:column; align-items:center; justify-content:center; z-index:99999; font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter',system-ui,sans-serif; -webkit-font-smoothing:antialiased;">
-      <img src="/icon-512.png" alt="SPS" style="width:92px; height:92px; border-radius:26px; object-fit:cover; box-shadow:0 16px 48px rgba(0,0,0,0.35),0 2px 8px rgba(0,0,0,0.2); margin-bottom:24px;" />
-      <div style="font-size:26px; font-weight:900; letter-spacing:-0.04em; color:#fff; line-height:1;">Stone Property Solutions</div>
+      <img src="/icon-512.png" alt="SPS" style="width:92px; height:92px; border-radius:26px; object-fit:cover; box-shadow:0 16px 48px rgba(0,0,0,0.35),0 2px 8px rgba(0,0,0,0.2); margin-bottom:22px;" />
+      <div id="boot-name" style="font-size:26px; font-weight:900; letter-spacing:-0.04em; color:#fff; line-height:1.08; text-align:center; padding:0 28px;">Stone Property Solutions LLC</div>
+      <div id="boot-tagline" style="margin-top:9px; font-size:15px; font-weight:500; color:rgba(255,255,255,0.62);">The &quot;SPS&quot; Way</div>
+      <!-- React fills the welcome pill in #boot-greeting once it knows who's signed in
+           (staff or client). The slot reserves space so nothing shifts when it appears. -->
+      <div id="boot-greeting-slot" style="margin-top:26px; height:46px; display:flex; align-items:center; justify-content:center;">
+        <div id="boot-greeting" style="opacity:0; transition:opacity 0.4s ease; background:rgba(255,255,255,0.15); border-radius:100px; padding:11px 26px; font-size:18px; font-weight:800; color:#fff; -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px); white-space:nowrap;"></div>
+      </div>
     </div>
     <script>
       // Safety net: never let the boot splash get permanently stuck if React's

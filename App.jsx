@@ -18598,9 +18598,8 @@ export default function App({ authEmail = "", onSignOut }) {
   const teamHasOwner = (team || []).some(m => m.role === "owner");
   const effRole = (m) => m ? (m.role || ((!teamHasOwner && team[0] && team[0].id === m.id) ? "owner" : "field")) : null;
   const perms = memberPerms(currentUser ? { ...currentUser, role: effRole(currentUser) } : null);
-  // Remove the static boot splash (index.html) now that the app (and its identical
-  // crimson splash) is mounted — the handoff is invisible.
-  useEffect(() => { const b = document.getElementById("boot-splash"); if (b) b.remove(); }, []);
+  // (The boot splash from index.html is removed once the app is ready — see the
+  // boot-splash removal effect below, keyed on `hydrated`.)
   // Broadcast staff location while clocked in (no-op until a shift opts in).
   useStaffLocationTracking();
   // Smart reopen on a warm resume (the app wasn't killed):
@@ -18658,15 +18657,14 @@ export default function App({ authEmail = "", onSignOut }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [syncState, setSyncState] = useState("idle");
   const syncTimer = useRef(null);
-  // Full splash only on a true cold start (first load of this browser session).
-  // Reloads / resyncs / wake-from-background within the session skip it.
-  const [showSplash, setShowSplash] = useState(() => {
-    try { return !sessionStorage.getItem("sps_splashed"); } catch (_) { return true; }
-  });
-  const splashShown = useRef(false);
-  const splashStart = useRef(Date.now()); // when the splash first became visible
-  const [splashOut, setSplashOut] = useState(false); // triggers the fade-out
-  const SPLASH_MIN_MS = 1300; // never hide before this — even if the app loads faster
+  // The boot splash (index.html: crimson + logo + company name + tagline + a personal
+  // welcome) is the ONE and only load screen. There's no separate React splash — we
+  // personalize it (below) and keep it up until the app is ready, then remove it, so
+  // the user never sees two screens on load.
+  const splashRemoved = useRef(false);
+  const splashStart = useRef(Date.now()); // when the boot splash first became visible
+  const SPLASH_MIN_MS = 1300;   // keep the load screen up at least this long (no flash)
+  const GREETING_HOLD_MS = 850; // once ready, linger this long so the welcome is seen
 
   // Trigger a visible sync pulse whenever any stored state saves
   const triggerSync = () => {
@@ -18689,22 +18687,52 @@ export default function App({ authEmail = "", onSignOut }) {
     return () => { window.__onSpsSync = null; };
   }, []);
 
-  // Branded splash — hide at max(1.3s, app-ready): always visible for at least
-  // SPLASH_MIN_MS, and if data is still loading past that, keep showing it until
-  // hydrated, then fade out. Never disappears before 1.3s even on a fast load.
+  // Personalize the single load screen (the boot splash from index.html) so it matches
+  // the branded preview: sync the company name + tagline to live branding, and show a
+  // welcome to whoever is signed in — staff (currentUser) or client (clientUser). Runs
+  // as soon as we know who it is; the welcome fades in. No-op once the splash is gone.
   useEffect(() => {
-    if (!hydrated) return;            // not ready yet — keep the splash up
-    if (splashShown.current) return;
-    splashShown.current = true;
-    if (!showSplash) return;          // warm reload/resync — never re-show the full splash
-    try { sessionStorage.setItem("sps_splashed", "1"); } catch (_) {}
-    const wait = Math.max(0, SPLASH_MIN_MS - (Date.now() - splashStart.current));
+    const nameEl = document.getElementById("boot-name");
+    if (nameEl && branding.companyName) nameEl.textContent = branding.companyName;
+    const tagEl = document.getElementById("boot-tagline");
+    if (tagEl) {
+      const tagline = (branding.splashTagline && branding.splashTagline.trim())
+        || (branding.division && branding.division.trim()) || "";
+      tagEl.textContent = tagline;
+      tagEl.style.display = tagline ? "" : "none";
+    }
+    const greetEl = document.getElementById("boot-greeting");
+    if (!greetEl) return;
+    const u = currentUser || clientUser;
+    const first = u ? (((u.name || u.email || "").trim().split(" ")[0] || "").split("@")[0]) : "";
+    const showGreeting = branding.splashShowGreeting !== "false";
+    if (showGreeting && first) {
+      const hr = new Date().getHours();
+      const timed = hr < 12 ? "Good morning" : hr < 17 ? "Good afternoon" : "Good evening";
+      const prefix = (branding.splashGreetingPrefix && branding.splashGreetingPrefix.trim()) || timed;
+      greetEl.textContent = `${prefix}, ${first}.`;
+      requestAnimationFrame(() => { greetEl.style.opacity = "1"; });
+    }
+  }, [branding.companyName, branding.splashTagline, branding.division, branding.splashShowGreeting, branding.splashGreetingPrefix, currentUser, clientUser]);
+
+  // One continuous load screen: keep the boot splash up until the app is ready
+  // (hydrated) — but never less than SPLASH_MIN_MS so it doesn't flash — then fade
+  // it out and remove it, landing straight on the app. This is max(1.3s, app-ready).
+  useEffect(() => {
+    if (!hydrated) return;            // not ready yet — keep the boot splash up
+    if (splashRemoved.current) return;
+    splashRemoved.current = true;
+    // max(1.3s total, ready + 0.85s) — never flashes AND the welcome stays readable.
+    const wait = Math.max(GREETING_HOLD_MS, SPLASH_MIN_MS - (Date.now() - splashStart.current));
     const t = setTimeout(() => {
-      setSplashOut(true);                                       // begin the fade
-      setTimeout(() => setShowSplash(false), 480);              // remove after it
+      const b = document.getElementById("boot-splash");
+      if (!b) return;
+      b.style.transition = "opacity 0.42s ease";
+      b.style.opacity = "0";
+      setTimeout(() => { const el = document.getElementById("boot-splash"); if (el) el.remove(); }, 460);
     }, wait);
     return () => clearTimeout(t);
-  }, [hydrated, showSplash]);
+  }, [hydrated]);
 
   // After a manual sync (which reloads), show the subtle sync strip rather than a splash.
   useEffect(() => {
@@ -18761,7 +18789,7 @@ export default function App({ authEmail = "", onSignOut }) {
   useEffect(() => {
     const brandColor = (branding.accentColor && branding.accentColor.trim()) ? branding.accentColor : T.primary;
     const splashColor = (branding.splashBgColor && branding.splashBgColor.trim()) ? branding.splashBgColor : brandColor;
-    const activeColor = (!hydrated || showSplash) ? splashColor : T.bg;
+    const activeColor = !hydrated ? splashColor : T.bg;
     // Keep html, body AND #root in sync so the safe-area strip behind the splash
     // always matches the splash color — even if Brandon customizes splashBgColor.
     document.body.style.background = activeColor;
@@ -18770,7 +18798,7 @@ export default function App({ authEmail = "", onSignOut }) {
     if (rootEl) rootEl.style.background = activeColor;
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) meta.setAttribute("content", activeColor);
-  }, [hydrated, showSplash, branding.splashBgColor, branding.accentColor, T.bg, T.primary]);
+  }, [hydrated, branding.splashBgColor, branding.accentColor, T.bg, T.primary]);
 
   // ── Auto-update: check if Vercel deployed a new version and reload if so ──
   useEffect(() => {
@@ -19193,120 +19221,18 @@ export default function App({ authEmail = "", onSignOut }) {
     }));
   };
 
-  // Branded splash — shows while loading OR for minimum 2.2s after hydration
-  const splashTagline = (branding.splashTagline && branding.splashTagline.trim())
-    ? branding.splashTagline.trim()
-    : "";
-
-  const splashUser = currentUser || clientUser;
-  const splashFirstName = splashUser ? ((splashUser.name || splashUser.email || "").split(" ")[0] || "").split("@")[0] : "";
-  const splashHour = new Date().getHours();
-  const splashGreeting = splashHour < 12 ? "Good morning" : splashHour < 17 ? "Good afternoon" : "Good evening";
-
-  // Warm reload/resync: still hydrating but the splash already showed this session.
-  // Show a subtle "Syncing…" loader instead of throwing up the full splash, then
-  // land on the saved page.
-  if (!hydrated && !showSplash) {
+  // Still loading the app's data. The boot splash (index.html: crimson + logo +
+  // "The SPS Way") stays up and covers the screen until we're hydrated, then it
+  // fades out (see the boot-splash effect above) and we land straight on the app —
+  // one continuous load screen, no second splash. This crimson fallback only shows
+  // in the rare case the boot splash was already removed while data is still loading,
+  // so it's never a grey/blank screen.
+  if (!hydrated) {
+    const brandColor  = (branding.accentColor && branding.accentColor.trim()) ? branding.accentColor : T.primary;
+    const splashColor = (branding.splashBgColor && branding.splashBgColor.trim()) ? branding.splashBgColor : brandColor;
     return (
-      <div style={{ position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 10, background: T.bg, color: T.textMuted, zIndex: 9998, fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif' }}>
-        <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" style={{ animation: "spin 0.8s linear infinite" }}><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
-        <span style={{ fontSize: 14, fontWeight: 600 }}>Syncing…</span>
-      </div>
-    );
-  }
-
-  if (showSplash) {
-    const brandColor   = (branding.accentColor && branding.accentColor.trim()) ? branding.accentColor : T.primary;
-    const splashBg1    = (branding.splashBgColor && branding.splashBgColor.trim()) ? branding.splashBgColor : brandColor;
-    const splashStyle  = branding.splashBgStyle || "gradient";
-    // Solid fill (one flat color) so the splash background is IDENTICAL to the
-    // html/body/#root background — no lighter strip can show at the bottom.
-    const splashBgCss  = splashStyle === "image" && branding.splashBgImage
-      ? `url(${branding.splashBgImage}) center/cover no-repeat`
-      : splashBg1;
-    const splashFgColor = branding.splashTextColor === "dark" ? "rgba(0,0,0,0.85)" : "#fff";
-    const splashLogoSrc = branding.splashLogoOverride || (branding.logoType === "image" ? branding.logoImage : null);
-    const showGreeting  = branding.splashShowGreeting !== "false";
-    const greetPrefix   = (branding.splashGreetingPrefix || "").trim();
-
-    return (
-      <div className={splashOut ? "splash-veil" : ""} style={{
-        fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif',
-        background: splashBgCss,
-        position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
-        width: "100vw", height: "100%",
-        marginTop: "calc(-1 * env(safe-area-inset-top))",
-        marginBottom: "calc(-1 * env(safe-area-inset-bottom))",
-        paddingTop: "env(safe-area-inset-top)",
-        paddingBottom: "env(safe-area-inset-bottom)",
-        boxSizing: "border-box",
-        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-        color: splashFgColor, WebkitFontSmoothing: "antialiased", overflow: "hidden",
-        zIndex: 9999,
-      }}>
-        <style>{`
-          @keyframes sIn  { from { opacity:0; transform:translateY(16px) scale(0.97); } to { opacity:1; transform:translateY(0) scale(1); } }
-          @keyframes sOut { from { opacity:1; transform:scale(1); } to { opacity:0; transform:scale(1.04); } }
-          @keyframes splashVeil { from { opacity:1; } to { opacity:0; } }
-          @keyframes spin { to { transform:rotate(360deg); } }
-          @keyframes spsModalUp { from { opacity:0; transform:translateY(40px); } to { opacity:1; transform:translateY(0); } }
-          @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
-          .si0 { animation: sIn 0.42s cubic-bezier(.22,1,.36,1) 0.02s both; }
-          .si1 { animation: sIn 0.42s cubic-bezier(.22,1,.36,1) 0.12s both; }
-          .si2 { animation: sIn 0.42s cubic-bezier(.22,1,.36,1) 0.20s both; }
-          .si3 { animation: sIn 0.42s cubic-bezier(.22,1,.36,1) 0.30s both; }
-          .s-out { animation: sOut 0.42s cubic-bezier(.4,0,.6,1) 0s both; }
-          .splash-veil { animation: splashVeil 0.42s ease 0.06s both; }
-        `}</style>
-
-        {splashStyle === "image" && branding.splashBgImage && (
-          <div style={{ position:"absolute", inset:0, background:"rgba(0,0,0,0.38)", pointerEvents:"none" }} />
-        )}
-        {splashStyle !== "image" && (
-          <>
-            <div style={{ position:"absolute", right:-100, top:-100, width:340, height:340, borderRadius:"50%", background:"rgba(255,255,255,0.06)", pointerEvents:"none" }} />
-            <div style={{ position:"absolute", left:-70, bottom:-70, width:220, height:220, borderRadius:"50%", background:"rgba(255,255,255,0.04)", pointerEvents:"none" }} />
-          </>
-        )}
-
-        <div className={splashOut ? "s-out" : ""} style={{ position:"relative", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", padding:"0 36px", gap: 0 }}>
-          {/* Logo */}
-          <div className="si0" style={{ marginBottom: 24 }}>
-            {splashLogoSrc ? (
-              <img src={splashLogoSrc} alt="" style={{ width:92, height:92, borderRadius:26, objectFit:"cover", boxShadow:"0 16px 48px rgba(0,0,0,0.35), 0 2px 8px rgba(0,0,0,0.2)" }} />
-            ) : (
-              <div style={{ width:92, height:92, borderRadius:26, background:"rgba(255,255,255,0.18)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:44, boxShadow:"0 16px 48px rgba(0,0,0,0.25)" }}>
-                {branding.logoEmoji || "💧"}
-              </div>
-            )}
-          </div>
-
-          {/* Company name */}
-          <div className="si1" style={{ fontSize:26, fontWeight:900, letterSpacing:"-0.04em", color:splashFgColor, lineHeight:1, marginBottom:8 }}>
-            {branding.companyName}
-          </div>
-
-          {/* Tagline */}
-          {splashTagline && (
-            <div className="si2" style={{ fontSize:14, fontWeight:500, letterSpacing:"0.04em", textTransform:"uppercase", opacity:0.6, color:splashFgColor, marginBottom: splashFirstName && showGreeting ? 28 : 0 }}>
-              {splashTagline}
-            </div>
-          )}
-
-          {/* Greeting pill */}
-          {splashFirstName && showGreeting && (
-            <div className="si3" style={{ background:"rgba(255,255,255,0.14)", borderRadius:100, padding:"11px 28px", backdropFilter:"blur(20px)", WebkitBackdropFilter:"blur(20px)", border:"1px solid rgba(255,255,255,0.18)" }}>
-              <span style={{ fontSize:20, fontWeight:800, color:splashFgColor, letterSpacing:"-0.02em" }}>
-                {greetPrefix || splashGreeting}, {splashFirstName}.
-              </span>
-            </div>
-          )}
-
-          {/* Loading spinner */}
-          {!hydrated && (
-            <div className="splash-dot" style={{ marginTop: 48, width: 22, height: 22, border: `2.5px solid rgba(255,255,255,0.3)`, borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.9s linear infinite" }} />
-          )}
-        </div>
+      <div style={{ position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: splashColor, zIndex: 9998 }}>
+        <div style={{ width: 22, height: 22, border: "2.5px solid rgba(255,255,255,0.3)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.9s linear infinite" }} />
       </div>
     );
   }
