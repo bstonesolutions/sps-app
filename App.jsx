@@ -19069,15 +19069,18 @@ export default function App({ authEmail = "", onSignOut }) {
     const brandColor = (branding.accentColor && branding.accentColor.trim()) ? branding.accentColor : T.primary;
     const splashColor = (branding.splashBgColor && branding.splashBgColor.trim()) ? branding.splashBgColor : brandColor;
     const activeColor = !hydrated ? splashColor : T.bg;
-    // Keep html, body AND #root in sync so the safe-area strip behind the splash
-    // always matches the splash color — even if Brandon customizes splashBgColor.
+    // <html> is what shows through in the iOS home-indicator safe area BELOW the shell.
+    // While loading it matches the splash; once loaded, match it to the bottom nav's
+    // surface color so that strip reads as part of the nav instead of a gray gap.
+    // body / #root / theme-color stay the page bg so the content area is unaffected.
+    const htmlColor = !hydrated ? splashColor : T.surface;
     document.body.style.background = activeColor;
-    document.documentElement.style.background = activeColor;
+    document.documentElement.style.background = htmlColor;
     const rootEl = document.getElementById("root");
     if (rootEl) rootEl.style.background = activeColor;
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) meta.setAttribute("content", activeColor);
-  }, [hydrated, branding.splashBgColor, branding.accentColor, T.bg, T.primary]);
+  }, [hydrated, branding.splashBgColor, branding.accentColor, T.bg, T.primary, T.surface]);
 
   // ── Auto-update: check if Vercel deployed a new version and reload if so ──
   useEffect(() => {
