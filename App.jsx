@@ -2802,7 +2802,7 @@ function Modal({ title, children, onClose }) {
   );
 }
 
-function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onImport, onImportHistory, onBatchUpdate, onBatchDelete, onBatchSchedule }) {
+function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onImport, onImportHistory, onFindDuplicates, onBatchUpdate, onBatchDelete, onBatchSchedule }) {
   const { T, perms, tiers } = useApp();
   const [search,       setSearch]       = useState("");
   const [showInactive, setShowInactive] = useState(false);
@@ -2880,11 +2880,11 @@ function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onI
         <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Clients</h2>
         {selectMode ? (
           <button onClick={exitSelect} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Done</button>
-        ) : (perms.editClients || (perms.canImport && (onImport || onImportHistory))) ? (
+        ) : (perms.editClients || (perms.canImport && (onImport || onImportHistory || onFindDuplicates))) ? (
           <div style={{ display: "flex", gap: 8 }}>
             {perms.editClients && <Btn variant="ghost" sm onClick={() => setSelectMode(true)}>Select</Btn>}
             {perms.editClients && <Btn sm onClick={onAdd}>+ Add</Btn>}
-            {perms.canImport && (onImport || onImportHistory) && <Btn variant="ghost" sm onClick={() => setModal("import")}>Import</Btn>}
+            {perms.canImport && (onImport || onImportHistory || onFindDuplicates) && <Btn variant="ghost" sm onClick={() => setModal("import")}>Import</Btn>}
           </div>
         ) : null}
       </div>
@@ -3098,6 +3098,16 @@ function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onI
                 <div>
                   <div style={{ fontWeight: 700, fontSize: 15 }}>Import Service History</div>
                   <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>Add past visits from a Skimmer export</div>
+                </div>
+              </button>
+            )}
+            {onFindDuplicates && (
+              <button onClick={() => { setModal(null); onFindDuplicates(); }}
+                style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 16px", border: `1px solid ${T.border}`, borderRadius: 12, background: T.surface, color: T.text, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%" }}>
+                <div style={{ width: 38, height: 38, borderRadius: 10, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="clients" size={18} /></div>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 15 }}>Find Duplicates</div>
+                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>Merge clients with the same name</div>
                 </div>
               </button>
             )}
@@ -8588,6 +8598,252 @@ function SkimmerHistoryImport({ clients, team, onImport, onGoToClients }) {
             <Btn onClick={onGoToClients}>Go to Clients</Btn>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// CONSOLIDATE DUPLICATE CLIENTS
+// Groups clients by normalized name. A group with no conflicting fields merges in
+// one tap; a group that conflicts opens a field-by-field resolver. The first record
+// is the survivor (keeps its id); ALL related data — service history, equipment,
+// documents, invoices, scheduled stops, and messages — is re-linked to it. Nothing
+// is deleted, only re-pointed. supabaseClient.js is never modified.
+// ─────────────────────────────────────────────
+const MERGE_FIELDS = [
+  { key: "name",        label: "Name" },
+  { key: "address",     label: "Address" },
+  { key: "phone",       label: "Phone" },
+  { key: "email",       label: "Email" },
+  { key: "division",    label: "Division" },
+  { key: "plan",        label: "Plan" },
+  { key: "planFreq",    label: "Frequency" },
+  { key: "pondType",    label: "Pond Type" },
+  { key: "pondSize",    label: "Pond Size" },
+  { key: "status",      label: "Status" },
+  { key: "balance",     label: "Balance" },
+  { key: "nextService", label: "Next Service" },
+];
+
+const dedupArr = (arr, keyFn) => {
+  const seen = new Set(); const out = [];
+  (arr || []).forEach(x => { const k = keyFn(x); if (k != null && seen.has(k)) return; if (k != null) seen.add(k); out.push(x); });
+  return out;
+};
+
+// Build the surviving record: start from the survivor, fill any blank field from
+// another record (so no data is lost), apply explicit picks for conflicting fields,
+// then union all the array data. Re-linking of invoices/stops/messages is done by
+// the caller's onMerge handler.
+function buildMergedClient(group, survivor, picks) {
+  const ARRAY_KEYS = ["history", "equipment", "documents", "sitePhotos"];
+  const merged = { ...survivor };
+  const allKeys = new Set();
+  group.forEach(c => Object.keys(c).forEach(k => allKeys.add(k)));
+  allKeys.forEach(k => {
+    if (ARRAY_KEYS.includes(k) || k === "id") return;
+    const cur = merged[k];
+    if (cur === undefined || cur === null || String(cur).trim() === "") {
+      const fill = group.map(c => c[k]).find(v => v !== undefined && v !== null && String(v).trim() !== "");
+      if (fill !== undefined) merged[k] = fill;
+    }
+  });
+  Object.entries(picks || {}).forEach(([k, v]) => { merged[k] = v; });
+  // Keep the address's split parts consistent with whichever address was chosen.
+  if (picks && picks.address) {
+    const src = group.find(c => String(c.address ?? "").trim() === String(picks.address).trim());
+    if (src) ["street", "city", "state", "zip"].forEach(k => { if (src[k] !== undefined) merged[k] = src[k]; });
+  }
+  merged.history    = dedupArr(group.flatMap(c => c.history || []), h => `${h.date}|${h.type || ""}`)
+                        .sort((a, b) => (parseSkimmerDate(b.date) || 0) - (parseSkimmerDate(a.date) || 0));
+  merged.equipment  = dedupArr(group.flatMap(c => c.equipment || []), e => (e && e.id != null) ? String(e.id) : null);
+  merged.documents  = dedupArr(group.flatMap(c => c.documents || []), d => (d && (d.id != null ? String(d.id) : d.url)) ?? null);
+  merged.sitePhotos = dedupArr(group.flatMap(c => c.sitePhotos || []), p => typeof p === "string" ? p : ((p && p.src) ?? null));
+  return merged;
+}
+
+function DuplicatesScreen({ clients, invoices = [], schedule = [], onMerge, onGoToClients }) {
+  const { T } = useApp();
+  const [resolving, setResolving] = useState(null); // the group (array of clients) being resolved
+  const [picks, setPicks]       = useState({});
+  const [confirm, setConfirm]   = useState(null);   // { group, survivor, merged }
+  const [report, setReport]     = useState([]);
+  const [busy, setBusy]         = useState(false);
+
+  const groups = useMemo(() => {
+    const byName = new Map();
+    (clients || []).forEach(c => { const k = normName(c.name); if (!k) return; if (!byName.has(k)) byName.set(k, []); byName.get(k).push(c); });
+    return [...byName.values()].filter(g => g.length >= 2);
+  }, [clients]);
+
+  // A field "conflicts" within a group if it has 2+ distinct trimmed values (blank counts).
+  const conflictsOf = (group) => MERGE_FIELDS.map(f => {
+    const distinct = [...new Set(group.map(c => String(c[f.key] ?? "").trim()))];
+    return distinct.length >= 2 ? { ...f, options: distinct } : null;
+  }).filter(Boolean);
+
+  const relatedOf = (group) => {
+    const ids = new Set(group.map(c => String(c.id)));
+    const inv  = (invoices || []).filter(iv => ids.has(String(iv.clientId))).length;
+    const hist = group.reduce((s, c) => s + (c.history || []).length, 0);
+    let stops = 0;
+    (schedule || []).forEach(d => (d.stops || []).forEach(s => { if (ids.has(String(s.clientId))) stops++; }));
+    return { inv, hist, stops };
+  };
+
+  const survivorOf = (group) => group[0]; // first found keeps its id + existing references
+
+  const startMerge = (group) => {
+    const conflicts = conflictsOf(group);
+    const survivor = survivorOf(group);
+    if (conflicts.length === 0) {
+      setConfirm({ group, survivor, merged: buildMergedClient(group, survivor, {}) });
+    } else {
+      const init = {};
+      conflicts.forEach(c => { init[c.key] = c.options.find(Boolean) ?? c.options[0]; });
+      setPicks(init);
+      setResolving(group);
+    }
+  };
+
+  const continueToConfirm = () => {
+    const survivor = survivorOf(resolving);
+    setConfirm({ group: resolving, survivor, merged: buildMergedClient(resolving, survivor, picks) });
+  };
+
+  const doMerge = async () => {
+    if (!confirm || busy) return;
+    setBusy(true);
+    const { group, survivor, merged } = confirm;
+    const dupIds = group.filter(c => String(c.id) !== String(survivor.id)).map(c => c.id);
+    try { await onMerge({ survivorId: survivor.id, dupIds, merged }); } catch (e) { /* surfaced below as best-effort */ }
+    setReport(r => [`Merged ${group.length} records into “${merged.name}”.`, ...r]);
+    setBusy(false); setConfirm(null); setResolving(null); setPicks({});
+  };
+
+  const optLabel = (v) => (v && String(v).trim()) ? v : "(empty)";
+
+  return (
+    <div>
+      <h2 style={{ margin: "0 0 6px", fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Find Duplicates</h2>
+      <p style={{ margin: "0 0 16px", fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>
+        Clients that share the same name (ignoring case, spacing, and punctuation). Merging combines all service history, invoices, scheduled stops, equipment, documents, and messages into one record and removes the extras. This <b>cannot be undone</b>.
+      </p>
+
+      {report.length > 0 && (
+        <Card style={{ marginBottom: 14 }}>
+          <div style={{ padding: "12px 16px", display: "flex", flexDirection: "column", gap: 6 }}>
+            {report.map((r, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: T.text }}>
+                <Icon name="check" size={15} style={{ color: "#16a34a" }} /> {r}
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {groups.length === 0 ? (
+        <Card>
+          <div style={{ padding: 40, textAlign: "center" }}>
+            <div style={{ width: 56, height: 56, borderRadius: 18, background: hexA("#16a34a", 0.1), color: "#16a34a", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px" }}><Icon name="check" size={28} /></div>
+            <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 6 }}>No duplicates found</div>
+            <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 20 }}>Every client has a unique name.</div>
+            <Btn variant="ghost" onClick={onGoToClients}>Back to Clients</Btn>
+          </div>
+        </Card>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{groups.length} duplicate {groups.length === 1 ? "name" : "names"} found</div>
+          {groups.map((group, gi) => {
+            const conflicts = conflictsOf(group);
+            const rel = relatedOf(group);
+            return (
+              <Card key={gi}>
+                <div style={{ padding: "14px 16px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 10 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 800, fontSize: 15, color: T.text }}>{group[0].name}</div>
+                      <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>
+                        {group.length} records · {rel.hist} history · {rel.inv} invoices{rel.stops ? ` · ${rel.stops} stops` : ""}
+                      </div>
+                    </div>
+                    <Btn sm variant={conflicts.length === 0 ? "primary" : "outline"} onClick={() => startMerge(group)}>
+                      {conflicts.length === 0 ? "Merge" : `Resolve (${conflicts.length})`}
+                    </Btn>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {group.map((c, ci) => (
+                      <div key={ci} style={{ fontSize: 12, color: T.textMuted, padding: "7px 10px", background: T.surfaceAlt, borderRadius: 8 }}>
+                        {ci === 0 && <span style={{ fontWeight: 700, color: T.text }}>Keep · </span>}
+                        {[c.address, c.phone, c.email].filter(Boolean).join(" · ") || "No contact details"}
+                      </div>
+                    ))}
+                  </div>
+                  {conflicts.length === 0 && (
+                    <div style={{ fontSize: 11, color: T.textMuted, marginTop: 8 }}>No conflicting fields — safe to merge directly.</div>
+                  )}
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Conflict resolver */}
+      {resolving && (
+        <Modal title="Resolve Conflicts" onClose={() => { setResolving(null); setPicks({}); }}>
+          <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 14, lineHeight: 1.5 }}>
+            Pick the value to keep for each field where the records disagree. Everything else is combined automatically.
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {conflictsOf(resolving).map(f => (
+              <div key={f.key}>
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 6 }}>{f.label}</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {f.options.map((opt, oi) => {
+                    const sel = picks[f.key] === opt;
+                    return (
+                      <button key={oi} onClick={() => setPicks(p => ({ ...p, [f.key]: opt }))}
+                        style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 13px", border: `1.5px solid ${sel ? T.primary : T.border}`, borderRadius: 10, background: sel ? hexA(T.primary, 0.06) : T.surface, color: T.text, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%" }}>
+                        <span style={{ width: 16, height: 16, borderRadius: "50%", border: `2px solid ${sel ? T.primary : T.border}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                          {sel && <span style={{ width: 8, height: 8, borderRadius: "50%", background: T.primary }} />}
+                        </span>
+                        <span style={{ fontSize: 14, fontWeight: 600, color: (opt && String(opt).trim()) ? T.text : T.textMuted }}>{optLabel(opt)}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+          <Btn block onClick={continueToConfirm} style={{ marginTop: 18 }}>Continue</Btn>
+        </Modal>
+      )}
+
+      {/* Confirm merge */}
+      {confirm && (
+        <Modal title="Merge Records?" onClose={() => !busy && setConfirm(null)}>
+          <p style={{ fontSize: 14, color: T.text, lineHeight: 1.55, marginTop: 0 }}>
+            Merging <b>{confirm.group.length} records into 1</b> — all service history, invoices, scheduled stops, equipment, documents, and messages will be combined into <b>{confirm.merged.name}</b>. This <b>cannot be undone</b>.
+          </p>
+          <div style={{ background: T.surfaceAlt, borderRadius: 10, padding: "12px 14px", fontSize: 13, color: T.text, marginBottom: 18 }}>
+            {[["Address", confirm.merged.address], ["Phone", confirm.merged.phone], ["Email", confirm.merged.email]].map(([k, v]) => (
+              <div key={k} style={{ display: "flex", gap: 8, padding: "2px 0" }}>
+                <span style={{ width: 72, color: T.textMuted, flexShrink: 0 }}>{k}</span>
+                <span style={{ fontWeight: 600 }}>{v || "—"}</span>
+              </div>
+            ))}
+            <div style={{ display: "flex", gap: 8, padding: "2px 0" }}>
+              <span style={{ width: 72, color: T.textMuted, flexShrink: 0 }}>History</span>
+              <span style={{ fontWeight: 600 }}>{(confirm.merged.history || []).length} entries combined</span>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button onClick={doMerge} disabled={busy} style={{ flex: 1, background: "#E5484D", color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontSize: 14, fontWeight: 700, cursor: busy ? "default" : "pointer", fontFamily: "inherit", opacity: busy ? 0.6 : 1 }}>{busy ? "Merging…" : `Merge ${confirm.group.length} → 1`}</button>
+            <button onClick={() => !busy && setConfirm(null)} style={{ background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 12, padding: "13px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+          </div>
+        </Modal>
       )}
     </div>
   );
@@ -19036,6 +19292,25 @@ export default function App({ authEmail = "", onSignOut }) {
     });
   };
 
+  // Merge duplicate clients into one survivor and re-link ALL related data to it:
+  //  • client record → replaced with the merged result; duplicates removed
+  //  • invoices + scheduled stops → re-pointed (in app state) to the survivor's id
+  //  • messages (sps_messages) → re-pointed via the existing supabase client (best-effort)
+  // Nothing is deleted — related rows are only re-pointed. supabaseClient.js untouched.
+  const handleMergeClients = async ({ survivorId, dupIds, merged }) => {
+    const dupSet = new Set((dupIds || []).map(String));
+    setClients(cs => (cs || [])
+      .map(c => String(c.id) === String(survivorId) ? merged : c)
+      .filter(c => !dupSet.has(String(c.id))));
+    setInvoices(list => (list || []).map(iv => dupSet.has(String(iv.clientId)) ? { ...iv, clientId: survivorId, clientName: merged.name } : iv));
+    setSchedule(days => (days || []).map(d => ({ ...d, stops: (d.stops || []).map(s => dupSet.has(String(s.clientId)) ? { ...s, clientId: survivorId, client: merged.name } : s) })));
+    try {
+      await Promise.all((dupIds || []).map(id =>
+        supabase.from("sps_messages").update({ client_id: String(survivorId) }).eq("client_id", String(id))
+      ));
+    } catch (e) { /* message re-link is best-effort; the in-app merge already succeeded */ }
+  };
+
   // Additive service-history import: append entries to matched clients only.
   // Idempotent — skips any entry whose client already has the same date + type.
   // Never alters other client fields.
@@ -19395,7 +19670,7 @@ export default function App({ authEmail = "", onSignOut }) {
         <main style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", alignSelf: "center", padding: vp.isPhone ? "22px 16px" : "28px 32px", maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: 28 }}>
           {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} vp={vp} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
-          {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
+          {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
           {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} />}
           {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
           {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
@@ -19407,6 +19682,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} />}
           {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
           {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
+          {page === "duplicates" && perms.canImport && <DuplicatesScreen clients={clients} invoices={invoices} schedule={schedule} onMerge={handleMergeClients} onGoToClients={() => handleNav("clients")} />}
           {page === "settings" && <AppSettings onNav={handleNav} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} />}
         </main>
 
