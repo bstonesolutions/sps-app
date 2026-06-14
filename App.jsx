@@ -2802,7 +2802,7 @@ function Modal({ title, children, onClose }) {
   );
 }
 
-function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onImport, onBatchUpdate, onBatchDelete, onBatchSchedule }) {
+function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onImport, onImportHistory, onBatchUpdate, onBatchDelete, onBatchSchedule }) {
   const { T, perms, tiers } = useApp();
   const [search,       setSearch]       = useState("");
   const [showInactive, setShowInactive] = useState(false);
@@ -2988,10 +2988,19 @@ function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onI
         </button>
       )}
 
-      {!selectMode && perms.canImport && onImport && (
-        <button onClick={onImport} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 7, width: "100%", marginBottom: 14, padding: "10px", borderRadius: 10, border: `1.5px dashed ${T.border}`, background: "none", color: T.primary, fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
-          <Icon name="download" size={16} /> Import clients from CSV
-        </button>
+      {!selectMode && perms.canImport && (onImport || onImportHistory) && (
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          {onImport && (
+            <button onClick={onImport} style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "10px", borderRadius: 10, border: `1.5px dashed ${T.border}`, background: "none", color: T.primary, fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+              <Icon name="download" size={16} /> Import clients from CSV
+            </button>
+          )}
+          {onImportHistory && (
+            <button onClick={onImportHistory} style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "10px", borderRadius: 10, border: `1.5px dashed ${T.border}`, background: "none", color: T.primary, fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+              <Icon name="download" size={16} /> Import service history
+            </button>
+          )}
+        </div>
       )}
 
       {selectMode && (
@@ -8145,6 +8154,250 @@ function SkimmerImport({ onImport, onGoToClients }) {
           <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
             <Btn onClick={onGoToClients}>View Clients</Btn>
             <Btn variant="ghost" onClick={reset}>Import Another</Btn>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// SKIMMER SERVICE-HISTORY IMPORT (one-time, additive — only ADDS history)
+// ─────────────────────────────────────────────
+// Normalized comparison so minor differences (Rd vs Road, casing, punctuation,
+// extra spaces) still match. Nothing is hardcoded — all read from the upload.
+const STREET_ABBR = { rd:"road", st:"street", ave:"avenue", av:"avenue", blvd:"boulevard", dr:"drive", ln:"lane", ct:"court", pl:"place", cir:"circle", ter:"terrace", hwy:"highway", pkwy:"parkway", sq:"square", trl:"trail", rte:"route", n:"north", s:"south", e:"east", w:"west", ne:"northeast", nw:"northwest", se:"southeast", sw:"southwest" };
+const normName = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+const normAddr = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim()
+  .split(" ").map(w => STREET_ABBR[w] || w).join(" ").trim();
+
+// Parse a Skimmer date string like "5/10/2025 12:35:46 AM" into a Date (or null).
+const parseSkimmerDate = (s) => {
+  if (!s) return null;
+  const d = new Date(String(s).trim());
+  if (!isNaN(d)) return d;
+  const m = String(s).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) { const dd = new Date(+m[3], +m[1] - 1, +m[2]); return isNaN(dd) ? null : dd; }
+  return null;
+};
+const fmtMDYfromDate = (d) => `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}/${d.getFullYear()}`;
+
+// Skimmer chemistry / treatment columns -> [header, display label, unit].
+const SKIMMER_CHEM = [
+  ["Ammonia (ppm)", "Ammonia", "ppm"], ["pH", "pH", ""], ["Copper (ppm)", "Copper", "ppm"],
+  ["Filter Pressure (psi)", "Filter Pressure", "psi"], ["Total Chlorine (ppm)", "Total Chlorine", "ppm"],
+  ["Beneficial Bacteria (Liquid) (ounce)", "Beneficial Bacteria (Liquid)", "oz"],
+  ["Clarifying Mineral (oz)", "Clarifying Mineral", "oz"], ["Barley Straw (oz)", "Barley Straw", "oz"],
+  ["Flocculant (ounce)", "Flocculant", "oz"], ["Dry Dechlorinator", "Dry Dechlorinator", ""],
+  ["Beneficial Bacteria (Dry) (scoop)", "Beneficial Bacteria (Dry)", "scoop"],
+  ["Phosphates Remover (fl oz)", "Phosphates Remover", "fl oz"],
+];
+
+// Read a column from a record by trying exact then normalized header names.
+const recGet = (rec, names) => {
+  for (const n of names) if (n in rec) return rec[n];
+  const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, "");
+  const map = {}; Object.keys(rec).forEach(k => { map[norm(k)] = rec[k]; });
+  for (const n of names) { const k = norm(n); if (k in map) return map[k]; }
+  return "";
+};
+const clientStreetOf = (c) => (c.street && c.street.trim()) ? c.street : splitAddress(c.address || "").street;
+const mapSkimmerTech = (name, team) => {
+  const n = normName(name);
+  const m = (team || []).find(t => normName(t.name) === n);
+  return m ? { name: m.name, assigneeId: m.id } : { name: String(name || "").trim(), assigneeId: "" };
+};
+
+// Read an uploaded spreadsheet (CSV or XLSX) into { records }. XLSX is lazy-loaded.
+const readSpreadsheet = async (file) => {
+  const name = (file.name || "").toLowerCase();
+  if (name.endsWith(".csv") || file.type === "text/csv") {
+    return parseCSV(await file.text());
+  }
+  const XLSX = await import("xlsx");
+  const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: "" });
+  const nonEmpty = rows.filter(r => r.some(c => String(c).trim() !== ""));
+  if (!nonEmpty.length) return { headers: [], records: [] };
+  const headers = nonEmpty[0].map(h => String(h).trim());
+  const records = nonEmpty.slice(1).map(r => Object.fromEntries(headers.map((h, i) => [h, String(r[i] ?? "").trim()])));
+  return { headers, records };
+};
+
+// Turn raw Skimmer rows into classified rows (matched to a client, or needs review).
+const processSkimmerRows = (records, clients) => records.map(rec => {
+  const customer = recGet(rec, ["Customer", "Customer Name"]).trim();
+  const address  = recGet(rec, ["Address", "Street", "Service Address"]).trim();
+  const pool     = recGet(rec, ["Pool"]).trim();
+  const tech     = recGet(rec, ["Tech", "Technician"]).trim();
+  const startTime    = recGet(rec, ["Start Time", "Start"]).trim();
+  const completeTime = recGet(rec, ["Complete Time", "Completed", "End Time"]).trim();
+  const notes    = recGet(rec, ["Service Notes", "Notes"]).trim();
+  const gallons  = recGet(rec, ["Gallons"]).trim();
+  const rate     = recGet(rec, ["Rate"]).trim();
+  const rateType = recGet(rec, ["Rate Type"]).trim();
+  const laborCost = recGet(rec, ["Labor Cost"]).trim();
+  const readings = {}; const chemParts = [];
+  SKIMMER_CHEM.forEach(([header, label, unit]) => {
+    const v = String(recGet(rec, [header]) || "").trim();
+    if (v) { const val = unit ? `${v} ${unit}` : v; readings[label] = val; chemParts.push(`${label} ${val}`); }
+  });
+  const chemBlock = chemParts.length ? `Chemistry: ${chemParts.join(", ")}` : "";
+  const dateObj = parseSkimmerDate(startTime);
+  const row = { customer, address, pool, tech, startTime, completeTime, notes, gallons, rate, rateType, laborCost, readings, chemBlock, dateObj };
+  if (!customer || !startTime) { row.status = "review"; row.reason = "Missing customer name or date"; return row; }
+  if (!dateObj) { row.status = "review"; row.reason = "Unreadable date"; return row; }
+  const nC = normName(customer), nA = normAddr(address);
+  // Confident match requires BOTH name and street to match (normalized). Never guess.
+  const hit = (clients || []).find(c => normName(c.name) === nC && normAddr(clientStreetOf(c)) === nA);
+  if (hit) { row.status = "matched"; row.clientId = hit.id; }
+  else { row.status = "review"; row.reason = "No confident client match"; }
+  return row;
+});
+
+// Build a completed-visit history entry from a row (chemistry in the structured
+// `readings` field AND appended as a readable block in the notes).
+const buildSkimmerEntry = (row, team) => {
+  const t = mapSkimmerTech(row.tech, team);
+  const notes = [row.notes, row.chemBlock].filter(Boolean).join("\n\n");
+  return {
+    date: fmtMDYfromDate(row.dateObj),
+    type: row.pool ? `${row.pool} Service` : "Service Visit",
+    tech: t.name, assigneeId: t.assigneeId,
+    notes: notes || "Imported from Skimmer.",
+    readings: row.readings,
+    ph: row.readings["pH"] || "—", ammonia: row.readings["Ammonia"] || "—",
+    gallons: row.gallons, rate: row.rate, rateType: row.rateType, laborCost: row.laborCost,
+    completeTime: row.completeTime, invoice: "$0",
+    imported: true, importSource: "skimmer",
+  };
+};
+
+function SkimmerHistoryImport({ clients, team, onImport, onGoToClients }) {
+  const { T } = useApp();
+  const [stage, setStage] = useState("idle");   // idle | review | done
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [rows, setRows] = useState([]);
+  const [resolve, setResolve] = useState({});   // rowIndex -> clientId | "skip"
+  const [summary, setSummary] = useState(null);
+
+  const clientOpts = [...(clients || [])].sort(byClientName);
+  const clientById = (id) => (clients || []).find(c => String(c.id) === String(id));
+
+  const handleFile = async (e) => {
+    const file = e.target.files[0]; e.target.value = "";
+    if (!file) return;
+    setError(""); setBusy(true);
+    try {
+      const { records } = await readSpreadsheet(file);
+      if (!records || !records.length) { setError("No data rows found in that file."); setBusy(false); return; }
+      setRows(processSkimmerRows(records, clients));
+      setStage("review");
+    } catch (err) { setError("Couldn't read that file: " + (err.message || "unknown error")); }
+    setBusy(false);
+  };
+
+  const matchedCount = rows.filter(r => r.status === "matched").length;
+  const reviewRows = rows.map((r, i) => ({ r, i })).filter(x => x.r.status === "review");
+
+  const runImport = () => {
+    const byClient = {};
+    let imported = 0, flagged = 0, duplicates = 0;
+    rows.forEach((r, idx) => {
+      let clientId = r.clientId;
+      if (r.status === "review") {
+        const res = resolve[idx];
+        if (!res || res === "skip") { flagged++; return; }
+        clientId = res;
+      }
+      if (!clientId) { flagged++; return; }
+      const c = clientById(clientId);
+      const entry = buildSkimmerEntry(r, team);
+      const isDup = c && (c.history || []).some(h => h.date === entry.date && (h.type || "") === (entry.type || ""));
+      const pending = (byClient[clientId] || []).some(h => h.date === entry.date && h.type === entry.type);
+      if (isDup || pending) { duplicates++; return; }
+      (byClient[clientId] = byClient[clientId] || []).push(entry);
+      imported++;
+    });
+    onImport(byClient);
+    setSummary({ imported, flagged, duplicates });
+    setStage("done");
+  };
+
+  const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 };
+  const selStyle = { width: "100%", padding: "9px 11px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", appearance: "none", WebkitAppearance: "none" };
+
+  return (
+    <div>
+      <h2 style={{ margin: "0 0 6px", fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Import Service History</h2>
+      <p style={{ margin: "0 0 16px", fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>One-time import of a Skimmer service-history export (CSV or XLSX). Records are matched to existing clients by name + address; unmatched ones are flagged for you to resolve. This only <b>adds</b> history — it never changes client records, and re-running won't create duplicates.</p>
+
+      {error && <div style={{ background: hexA("#C0392B", 0.08), border: `1px solid ${hexA("#C0392B", 0.3)}`, color: "#C0392B", borderRadius: 12, padding: "11px 14px", fontSize: 13, marginBottom: 14 }}>{error}</div>}
+
+      {stage === "idle" && (
+        <div style={{ border: `2px dashed ${T.border}`, borderRadius: 14, padding: "40px 24px", textAlign: "center", background: T.surface }}>
+          <div style={{ width: 56, height: 56, borderRadius: 18, background: hexA(T.primary, 0.08), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px" }}><Icon name="download" size={28} /></div>
+          <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 6 }}>Upload Skimmer Export</div>
+          <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 18 }}>60 service records with water chemistry — .csv or .xlsx</div>
+          <label style={{ background: busy ? T.surfaceAlt : T.primary, color: busy ? T.textMuted : "#fff", borderRadius: 10, padding: "10px 22px", fontSize: 13, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
+            {busy ? "Reading…" : "Choose File"}
+            <input type="file" accept=".csv,.xlsx,.xls,text/csv" onChange={handleFile} style={{ display: "none" }} disabled={busy} />
+          </label>
+        </div>
+      )}
+
+      {stage === "review" && (
+        <>
+          <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+            <div style={{ flex: 1, background: hexA(T.accent, 0.08), border: `1px solid ${hexA(T.accent, 0.3)}`, borderRadius: 12, padding: "12px 14px" }}>
+              <div style={{ fontSize: 22, fontWeight: 900, color: T.accent }}>{matchedCount}</div>
+              <div style={{ fontSize: 12, color: T.textMuted, fontWeight: 600 }}>matched · ready</div>
+            </div>
+            <div style={{ flex: 1, background: hexA(T.warning, 0.08), border: `1px solid ${hexA(T.warning, 0.3)}`, borderRadius: 12, padding: "12px 14px" }}>
+              <div style={{ fontSize: 22, fontWeight: 900, color: T.warning }}>{reviewRows.length}</div>
+              <div style={{ fontSize: 12, color: T.textMuted, fontWeight: 600 }}>need review</div>
+            </div>
+          </div>
+
+          {reviewRows.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 8 }}>Needs Review — match each to a client, or skip</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {reviewRows.map(({ r, i }) => (
+                  <div key={i} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "12px 14px" }}>
+                    <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text }}>{r.customer || "(no name)"}</div>
+                    <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 1 }}>{r.address || "(no address)"}{r.startTime ? ` · ${r.startTime}` : ""}{r.pool ? ` · ${r.pool}` : ""}</div>
+                    <div style={{ fontSize: 11, color: T.warning, marginTop: 2, fontWeight: 600 }}>{r.reason}</div>
+                    <select value={resolve[i] || ""} onChange={e => setResolve(m => ({ ...m, [i]: e.target.value }))} style={{ ...selStyle, marginTop: 8 }}>
+                      <option value="">— Choose a client or skip —</option>
+                      <option value="skip">Skip this record</option>
+                      {clientOpts.map(c => <option key={c.id} value={c.id}>{c.name}{(c.status || "Active") === "Inactive" ? " (inactive)" : ""} — {clientStreetOf(c) || "no address"}</option>)}
+                    </select>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 10 }}>
+            <Btn variant="ghost" onClick={() => { setStage("idle"); setRows([]); setResolve({}); }} style={{ flex: 1 }}>← Choose a different file</Btn>
+            <Btn onClick={runImport} style={{ flex: 2 }}>Import {matchedCount + Object.values(resolve).filter(v => v && v !== "skip").length} Records</Btn>
+          </div>
+        </>
+      )}
+
+      {stage === "done" && summary && (
+        <div style={{ textAlign: "center", padding: "8px 0" }}>
+          <div style={{ width: 60, height: 60, borderRadius: "50%", background: hexA(T.accent, 0.12), color: T.accent, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px" }}><Icon name="check" size={30} /></div>
+          <div style={{ fontSize: 19, fontWeight: 800, color: T.text, marginBottom: 4 }}>{summary.imported} record{summary.imported !== 1 ? "s" : ""} imported</div>
+          <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.6, marginBottom: 20 }}>
+            {summary.flagged} flagged for review{summary.flagged ? " (skipped or unmatched)" : ""}{summary.duplicates ? ` · ${summary.duplicates} duplicate${summary.duplicates !== 1 ? "s" : ""} skipped` : ""}.
+          </div>
+          <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
+            <Btn variant="ghost" onClick={() => { setStage("idle"); setRows([]); setResolve({}); setSummary(null); }}>Import another file</Btn>
+            <Btn onClick={onGoToClients}>Go to Clients</Btn>
           </div>
         </div>
       )}
@@ -18708,6 +18961,22 @@ export default function App({ authEmail = "", onSignOut }) {
 
   const handleImportClients = (imported) => setClients(cs => [...cs, ...imported]);
 
+  // Additive service-history import: append entries to matched clients only.
+  // Idempotent — skips any entry whose client already has the same date + type.
+  // Never alters other client fields.
+  const handleImportHistory = (byClient) => {
+    if (!byClient || !Object.keys(byClient).length) return;
+    setClients(cs => (cs || []).map(c => {
+      const adds = byClient[c.id] || byClient[String(c.id)];
+      if (!adds || !adds.length) return c;
+      const existing = c.history || [];
+      const fresh = adds.filter(e => !existing.some(h => h.date === e.date && (h.type || "") === (e.type || "")));
+      if (!fresh.length) return c;
+      const merged = [...fresh, ...existing].sort((a, b) => (parseSkimmerDate(b.date) || 0) - (parseSkimmerDate(a.date) || 0));
+      return { ...c, history: merged };
+    }));
+  };
+
   // update a single client (edits, equipment) and keep the open detail in sync
   const handleUpdateClient = (updated) => {
     setClients(cs => cs.map(c => c.id === updated.id ? updated : c));
@@ -19153,7 +19422,7 @@ export default function App({ authEmail = "", onSignOut }) {
         <main style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", alignSelf: "center", padding: vp.isPhone ? "22px 16px" : "28px 32px", maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: 28 }}>
           {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} vp={vp} />}
           {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
-          {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
+          {page === "clients" && !adding && !selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
           {page === "clients" && !adding && selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} />}
           {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
           {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
@@ -19164,6 +19433,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
           {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} />}
           {page === "import"   && perms.canImport && <SkimmerImport onImport={handleImportClients} onGoToClients={() => handleNav("clients")} />}
+          {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
           {page === "settings" && <AppSettings onNav={handleNav} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} />}
         </main>
 
