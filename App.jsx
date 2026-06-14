@@ -2880,10 +2880,11 @@ function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onI
         <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Clients</h2>
         {selectMode ? (
           <button onClick={exitSelect} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Done</button>
-        ) : perms.editClients ? (
+        ) : (perms.editClients || (perms.canImport && (onImport || onImportHistory))) ? (
           <div style={{ display: "flex", gap: 8 }}>
-            <Btn variant="ghost" sm onClick={() => setSelectMode(true)}>Select</Btn>
-            <Btn sm onClick={onAdd}>+ Add Client</Btn>
+            {perms.editClients && <Btn variant="ghost" sm onClick={() => setSelectMode(true)}>Select</Btn>}
+            {perms.editClients && <Btn sm onClick={onAdd}>+ Add</Btn>}
+            {perms.canImport && (onImport || onImportHistory) && <Btn variant="ghost" sm onClick={() => setModal("import")}>Import</Btn>}
           </div>
         ) : null}
       </div>
@@ -2988,21 +2989,6 @@ function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onI
         </button>
       )}
 
-      {!selectMode && perms.canImport && (onImport || onImportHistory) && (
-        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
-          {onImport && (
-            <button onClick={onImport} style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "10px", borderRadius: 10, border: `1.5px dashed ${T.border}`, background: "none", color: T.primary, fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
-              <Icon name="download" size={16} /> Import clients from CSV
-            </button>
-          )}
-          {onImportHistory && (
-            <button onClick={onImportHistory} style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "10px", borderRadius: 10, border: `1.5px dashed ${T.border}`, background: "none", color: T.primary, fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
-              <Icon name="download" size={16} /> Import service history
-            </button>
-          )}
-        </div>
-      )}
-
       {selectMode && (
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, padding: "8px 14px", background: T.surfaceAlt, borderRadius: 10 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }} onClick={toggleAll}>
@@ -3088,6 +3074,35 @@ function ClientList({ clients, invoices, schedule, vp = {}, onSelect, onAdd, onI
             ))}
           </div>
         </div>
+      )}
+
+      {/* Import picker — one entry point for both flows (replaces the old dashed
+          buttons). Each option routes to its existing import flow unchanged. */}
+      {modal === "import" && (
+        <Modal title="Import" onClose={() => setModal(null)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {onImport && (
+              <button onClick={() => { setModal(null); onImport(); }}
+                style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 16px", border: `1px solid ${T.border}`, borderRadius: 12, background: T.surface, color: T.text, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%" }}>
+                <div style={{ width: 38, height: 38, borderRadius: 10, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="download" size={18} /></div>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 15 }}>Import Clients from CSV</div>
+                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>Add client records from a spreadsheet</div>
+                </div>
+              </button>
+            )}
+            {onImportHistory && (
+              <button onClick={() => { setModal(null); onImportHistory(); }}
+                style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 16px", border: `1px solid ${T.border}`, borderRadius: 12, background: T.surface, color: T.text, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%" }}>
+                <div style={{ width: 38, height: 38, borderRadius: 10, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="history" size={18} /></div>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 15 }}>Import Service History</div>
+                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>Add past visits from a Skimmer export</div>
+                </div>
+              </button>
+            )}
+          </div>
+        </Modal>
       )}
 
       {/* Division modal */}
@@ -8330,7 +8345,7 @@ function SkimmerHistoryImport({ clients, team, onImport, onGoToClients }) {
         <div style={{ border: `2px dashed ${T.border}`, borderRadius: 14, padding: "40px 24px", textAlign: "center", background: T.surface }}>
           <div style={{ width: 56, height: 56, borderRadius: 18, background: hexA(T.primary, 0.08), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px" }}><Icon name="download" size={28} /></div>
           <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 6 }}>Upload Skimmer Export</div>
-          <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 18 }}>60 service records with water chemistry — .csv or .xlsx</div>
+          <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 18 }}>Service records with water chemistry — .csv or .xlsx</div>
           <label style={{ background: busy ? T.surfaceAlt : T.primary, color: busy ? T.textMuted : "#fff", borderRadius: 10, padding: "10px 22px", fontSize: 13, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
             {busy ? "Reading…" : "Choose File"}
             <input type="file" accept=".csv,.xlsx,.xls,text/csv" onChange={handleFile} style={{ display: "none" }} disabled={busy} />
