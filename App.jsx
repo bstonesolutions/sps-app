@@ -20400,21 +20400,42 @@ export default function App({ authEmail = "", onSignOut }) {
             <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 10, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, display:"flex", alignItems:"center", gap:5 }}>Retry</button>
           </div>
         )}
-        <main style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", alignSelf: "center", padding: vp.isPhone ? "22px 16px" : "28px 32px", maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: 28 }}>
+        <main style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", alignSelf: "center", padding: vp.isPhone ? "22px 16px" : "28px 32px", maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(env(safe-area-inset-bottom) + 96px)" }}>
           {pageBody}
         </main>
 
-        {/* Bottom Nav — a non-scrolling flex child, frozen at the bottom */}
-        {/* Floating menu button (replaces the bottom tab bar) — opens the full nav sheet.
-            Bottom-left so it stays clear of the right-side action buttons, and high
-            enough to sit above the iOS home-indicator area. */}
-        <button onClick={() => setMenuOpen(true)} aria-label="Open menu"
-          style={{ position: "fixed", left: "max(16px, env(safe-area-inset-left))", bottom: "max(20px, calc(env(safe-area-inset-bottom) + 4px))", zIndex: 95, width: 58, height: 58, borderRadius: "50%", background: T.primary, color: "#fff", border: "none", boxShadow: `0 8px 24px ${hexA(T.primary, 0.4)}, 0 2px 8px rgba(0,0,0,0.2)`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
-          <svg viewBox="0 0 24 24" width={26} height={26} fill="none" stroke="currentColor" strokeWidth={2.3} strokeLinecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
-          {(navUnread > 0 || reminderDueCount > 0) && (
-            <span style={{ position: "absolute", top: 4, right: 4, minWidth: 18, height: 18, borderRadius: 9, background: "#fff", color: T.primary, fontSize: 11, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 4px", border: `2px solid ${T.primary}` }}>{navUnread || reminderDueCount}</span>
-          )}
-        </button>
+        {/* Floating capsule bottom nav (MOBILE ONLY) — Home · Clients · Schedule · Invoices · Menu.
+            A rounded pill that floats above the safe area with a gap on every side; desktop/iPad
+            uses the sidebar instead. */}
+        {(() => {
+          const primary = [
+            { id: "dashboard", label: "Home",     icon: "home",     onClick: () => handleNav("dashboard") },
+            { id: "clients",   label: "Clients",  icon: "clients",  onClick: () => handleNav("clients") },
+            { id: "schedule",  label: "Schedule", icon: "calendar", onClick: () => handleNav("schedule") },
+            { id: "invoices",  label: "Invoices", icon: "invoice",  onClick: () => handleNav("invoices") },
+          ].filter(t => isTabVisible(ALL_NAV.find(n => n.id === t.id), perms));
+          const menuBadge = navUnread || reminderDueCount;
+          const tabs = [
+            ...primary.map(t => ({ ...t, active: page === t.id })),
+            { id: "__menu", label: "Menu", icon: "menu", onClick: () => setMenuOpen(true), active: menuOpen, badge: menuBadge },
+          ];
+          return (
+            <nav style={{ position: "fixed", left: "max(14px, env(safe-area-inset-left))", right: "max(14px, env(safe-area-inset-right))", bottom: "calc(env(safe-area-inset-bottom) + 12px)", zIndex: 95, height: 64, borderRadius: 32, background: hexA(T.surface, 0.94), backdropFilter: "saturate(180%) blur(22px)", WebkitBackdropFilter: "saturate(180%) blur(22px)", border: `1px solid ${T.border}`, boxShadow: "0 12px 32px rgba(0,0,0,0.20), 0 3px 10px rgba(0,0,0,0.08)", display: "flex", alignItems: "stretch", padding: "0 8px", WebkitTapHighlightColor: "transparent" }}>
+              {tabs.map(t => (
+                <button key={t.id} onClick={t.onClick} aria-label={t.label}
+                  style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, color: t.active ? T.primary : T.textMuted, fontFamily: "inherit", position: "relative", WebkitTapHighlightColor: "transparent" }}>
+                  <span style={{ width: 40, height: 28, borderRadius: 100, display: "flex", alignItems: "center", justifyContent: "center", background: t.active ? hexA(T.primary, 0.12) : "transparent", transition: "background 0.15s", position: "relative" }}>
+                    {t.id === "__menu"
+                      ? <svg viewBox="0 0 24 24" width={21} height={21} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+                      : <Icon name={t.icon} size={21} />}
+                    {t.badge > 0 && <span style={{ position: "absolute", top: -1, right: 1, minWidth: 15, height: 15, borderRadius: 8, background: "#E5484D", color: "#fff", fontSize: 9.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px", border: `2px solid ${T.surface}` }}>{t.badge}</span>}
+                  </span>
+                  <span style={{ fontSize: 10, fontWeight: t.active ? 700 : 500, letterSpacing: "-0.01em" }}>{t.label}</span>
+                </button>
+              ))}
+            </nav>
+          );
+        })()}
 
         {/* Overflow menu — slides in from top right */}
         {menuOpen && (
