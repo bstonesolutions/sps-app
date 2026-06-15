@@ -1304,6 +1304,7 @@ const DEFAULT_EMAIL = {
   senderName: "Brandon",
   trackLink: "",
   smsOnMyWay: "Hi {first}, this is {sender} with {company}. I'm on my way and should arrive in about {eta} minutes (around {arrival}). {track}See you soon!",
+  smsArrived: "Hi {first}, {sender} with {company} has arrived and is getting started on your service. We'll send a full report when we're done!",
   smsReminder: "Hi {first}, a friendly reminder from {company} that your service is scheduled for {date}. Reply here with any questions!",
   // Staff invite email ({name} = staff member, {company} = your company, {link} = secure sign-in link)
   staffInviteSubject: "You're invited to the {company} team app",
@@ -5224,6 +5225,61 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
 }
 
 // ─────────────────────────────────────────────
+// "I'M HERE" (ARRIVED) MODAL — Feature 3B
+// Records arrival (starts the job clock), notifies the client in-app + by text that the
+// tech has arrived, using the customizable arrival message. Portaled like the shared
+// Modal so it always sits above the floating bottom nav.
+// ─────────────────────────────────────────────
+function ArrivedModal({ stop, client, email, onClose, onArrived }) {
+  const { T, branding } = useApp();
+  const firstName = client?.name?.split(" ")[0] || "there";
+  const phone = client?.phone?.replace(/\D/g, "") || "";
+  const message = (() => {
+    const tpl = (email && email.smsArrived) || DEFAULT_EMAIL.smsArrived;
+    return tpl
+      .replace(/\{first\}/g, firstName)
+      .replace(/\{sender\}/g, (email && email.senderName) || (email && email.fromName) || branding.companyName)
+      .replace(/\{company\}/g, branding.companyName)
+      .replace(/\{service\}/g, stop?.type || "service");
+  })();
+  const send = () => {
+    onArrived();                       // start the job clock (record arrival time)
+    if (client?.id) {                  // in-app portal notification (best-effort)
+      supabase.from("sps_messages").insert({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: message }).then(() => {}, () => {});
+    }
+    if (phone) {                       // open the SMS composer within the user gesture
+      const smsUrl = `sms:${phone}${/iPhone|iPad|iPod/i.test(navigator.userAgent) ? "&" : "?"}body=${encodeURIComponent(message)}`;
+      window.open(smsUrl, "_blank");
+    }
+    onClose();
+  };
+  return createPortal(
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 250, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ background: T.surface, borderRadius: "22px 22px 0 0", width: "100%", maxWidth: 600, padding: "20px 20px calc(28px + env(safe-area-inset-bottom))", boxShadow: "0 -8px 40px rgba(0,0,0,0.2)" }}>
+        <div style={{ width: 36, height: 4, background: T.border, borderRadius: 2, margin: "0 auto 20px" }} />
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 17, color: T.text, letterSpacing: "-0.02em" }}>I'm Here</div>
+            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{client?.name}{client?.phone ? ` · ${client.phone}` : ""}</div>
+          </div>
+          <button onClick={onClose} style={{ background: T.surfaceAlt, border: "none", borderRadius: "50%", width: 32, height: 32, cursor: "pointer", color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="close" size={16} /></button>
+        </div>
+        <div style={{ background: hexA("#16a34a", 0.08), border: `1px solid ${hexA("#16a34a", 0.2)}`, borderRadius: 14, padding: "12px 14px", marginBottom: 14, fontSize: 13, color: T.text, display: "flex", alignItems: "center", gap: 8 }}>
+          <Icon name="check" size={16} /> Starts the job clock and lets {firstName} know you've arrived.
+        </div>
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 6 }}>Message to client</div>
+        <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: "12px 14px", fontSize: 13.5, color: T.text, lineHeight: 1.5, marginBottom: 16 }}>{message}</div>
+        <Btn onClick={send} style={{ width: "100%", padding: "13px", borderRadius: 12, gap: 7, justifyContent: "center" }}>
+          <Icon name="check" size={15} /> {phone ? "Mark Arrived & Text Client" : "Mark Arrived"}
+        </Btn>
+        <div style={{ fontSize: 11, color: T.textMuted, textAlign: "center", marginTop: 8 }}>Edit this message in Customize → Messaging.</div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+// ─────────────────────────────────────────────
 // PHOTO VIEWER (lightbox)
 // ─────────────────────────────────────────────
 function PhotoViewer({ photos, index, onClose }) {
@@ -7301,11 +7357,12 @@ function StopEditModal({ stop, dayDate, catalog, team, T, onSave, onClose }) {
   );
 }
 
-function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, onClientSelect, seedClientIds, clearSeed, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {} }) {
+function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, onClientSelect, seedClientIds, clearSeed, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {}, arrivals = {}, onArrived }) {
   const { T, perms } = useApp();
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
   const compact = cfg.density === "compact";
   const [omwModal, setOmwModal] = useState(null);
+  const [arrivedModal, setArrivedModal] = useState(null);
   const [headHereModal, setHeadHereModal] = useState(null);
   const [completeModal, setCompleteModal] = useState(null);
   const [editStopModal, setEditStopModal] = useState(null); // { stop, dayDate }
@@ -7633,6 +7690,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   const renderStopCard = (s, dayDate, displayNum, isToday) => {
     const c = clients.find(x => x.id === s.id);
     const sent = sentStops[s.sid];
+    const arrived = arrivals[s.sid];
     const isSel = !!selected[s.sid];
     const isComplete = completedSids && completedSids[s.sid];
     const emp = (team || []).find(e => e.id === s.assigneeId);
@@ -7738,6 +7796,14 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                     <button onClick={e => { e.stopPropagation(); setOmwModal({ stop: s, client: c, key: s.sid }); }}
                       style={{ flex: 1, background: "transparent", color: T.primary, border: `1.5px solid ${hexA(T.primary, 0.4)}`, borderRadius: 11, padding: "10px 6px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
                       <Icon name="message" size={14} /> {sent ? "Resend" : "On My Way"}
+                    </button>
+                  )}
+                  {!isComplete && (
+                    <button onClick={e => { e.stopPropagation(); if (!arrived) setArrivedModal({ stop: s, client: c, key: s.sid }); }}
+                      style={{ flex: 1, background: arrived ? hexA("#16a34a", 0.1) : "transparent", color: arrived ? "#16a34a" : T.primary, border: `1.5px solid ${arrived ? hexA("#16a34a", 0.4) : hexA(T.primary, 0.4)}`, borderRadius: 11, padding: "10px 6px", fontSize: 12.5, fontWeight: 700, cursor: arrived ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
+                      {arrived
+                        ? <><Icon name="check" size={14} /> Arrived</>
+                        : <><svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 21s7-5.5 7-11a7 7 0 0 0-14 0c0 5.5 7 11 7 11z"/><circle cx="12" cy="10" r="2.5"/></svg> I'm Here</>}
                     </button>
                   )}
                   {perms.editSchedule && (
@@ -8067,6 +8133,9 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
 
       {omwModal && (
         <OnMyWayModal stop={omwModal.stop} client={omwModal.client} email={email} onClose={() => setOmwModal(null)} onSent={() => handleOmwSent(omwModal.key)} />
+      )}
+      {arrivedModal && (
+        <ArrivedModal stop={arrivedModal.stop} client={arrivedModal.client} email={email} onClose={() => setArrivedModal(null)} onArrived={() => { onArrived && onArrived(arrivedModal.key); }} />
       )}
       {headHereModal && <HeadHereModal stop={headHereModal.stop} client={headHereModal.client} email={email} onClose={() => setHeadHereModal(null)} />}
 
@@ -9221,6 +9290,11 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
             {smsPreview ? (
               <div style={{ marginTop: 8, background: T.surfaceAlt, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.text, lineHeight: 1.5, borderTopLeftRadius: 4 }}>{smsPreview}</div>
             ) : null}
+          </div>
+          <div>
+            <label style={labelStyle}>"I'm Here" (Arrived) Text</label>
+            <textarea style={{ ...field, resize: "vertical" }} rows={3} value={email.smsArrived || ""} onChange={e => set("smsArrived", e.target.value)} placeholder={DEFAULT_EMAIL.smsArrived} />
+            <div style={hint}>Sent in-app and by text when you tap "I'm Here" on a stop (which also starts the job clock). Extra tag: {"{service}"} = the service type.</div>
           </div>
           <div>
             <label style={labelStyle}>Invoice Sent Text <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
@@ -19584,13 +19658,16 @@ export default function App({ authEmail = "", onSignOut }) {
   const [invoices, setInvoices, linv] = useStoredState("sps_invoices", DEMO_INVOICES);
   const [invoicing, setInvoicing, linvc] = useStoredState("sps_invoicing", DEFAULT_INVOICING);
   const [completedSids, setCompletedSids, lcomp] = useStoredState("sps_completed", {});
+  // Feature 3B: arrival timestamps per stop ({ [sid]: ISO }). Set when the tech taps
+  // "I'm here"; the job clock runs from here until the stop is completed.
+  const [arrivals, setArrivals, larr] = useStoredState("sps_arrivals", {});
   const vp = useViewport();
   // Tweak 6: desktop WEB only — the native iPad app reports getPlatform()==='ios' even at
   // 1366px landscape, so we gate on platform 'web' AND a wide min-width (not width alone) to
   // let the desktop browser fill the window. iPad (native) and mobile are unaffected.
   const isDesktopWeb = vp.width >= 1200 && ((typeof window !== "undefined" && window.Capacitor && typeof window.Capacitor.getPlatform === "function") ? window.Capacitor.getPlatform() === "web" : true);
   const [reminderLog, setReminderLog, lrem] = useStoredState("sps_reminders", {}); // { [sid]: { sentAt, method } }
-  const hydrated = lc && lb && ls && lcat && lem && lco && lh && lbud && loa && lscfg && lrol && ltm && lsesh && linv && linvc && lcomp && lrem;
+  const hydrated = lc && lb && ls && lcat && lem && lco && lh && lbud && loa && lscfg && lrol && ltm && lsesh && linv && linvc && lcomp && lrem && larr;
 
   // Backfill newer catalog/cost fields for anyone with older saved data
   useEffect(() => {
@@ -20269,6 +20346,10 @@ export default function App({ authEmail = "", onSignOut }) {
     setInvoices(list => (list || []).filter(iv => iv.id !== id));
   };
 
+  // Feature 3B: record arrival (tech tapped "I'm here") — starts the job clock. Keeps the
+  // first timestamp if tapped again, so the running clock isn't reset.
+  const handleArrived = (sid) => setArrivals(a => ({ ...a, [sid]: a[sid] || new Date().toISOString() }));
+
   // mark a stop complete: prepend the visit to the client's history (with photos)
   const handleCompleteStop = (clientId, entry, sid) => {
     setClients(cs => cs.map(c => {
@@ -20464,7 +20545,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} />}
         </>
       ))}
-      {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} />}
+      {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} />}
       {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin} canEdit={perms.isAdmin || perms.editInventory} T={T} />}
       {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
