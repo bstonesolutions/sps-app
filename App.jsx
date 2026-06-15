@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useContext, createContext, useMemo, Component } from "react";
+import { createPortal } from "react-dom";
 import { store, supabase } from "./supabaseClient";
 import { PROD_URL } from "./config";
 
@@ -2838,7 +2839,11 @@ function Modal({ title, children, onClose }) {
       setTimeout(() => { try { t.scrollIntoView({ block: "center", behavior: "smooth" }); } catch (_) {} }, 60);
     }
   };
-  return (
+  // Bug 7: render through a portal at document.body so the overlay is ALWAYS above the
+  // floating bottom nav — even on iOS, where the nav's backdrop-filter forces a compositing
+  // layer that can otherwise paint over a higher z-index sibling inside the app shell. The
+  // full-screen dim backdrop then covers (and dims) the nav, which is no longer tappable.
+  return createPortal(
     // Backdrop centers the card and keeps it below the safe area (padding-top uses
     // env(safe-area-inset-top)). The card is bounded by flex-shrink (flex:0 1 auto +
     // minHeight:0 — reliable in WKWebView, no % to mis-resolve), with a dvh max-height
@@ -2860,7 +2865,8 @@ function Modal({ title, children, onClose }) {
           {children}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
