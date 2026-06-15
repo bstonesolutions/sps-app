@@ -12173,6 +12173,69 @@ function TotalSalesScreen({ invoices, clients, onBack, T }) {
   );
 }
 
+// Dense, sortable, full-width invoices table — desktop "Table" view (Phase 3).
+function InvoicesTable({ items, onRowClick, T }) {
+  const [sort, setSort] = useState({ key: "number", dir: "desc" });
+  const money = (n) => `$${parseFloat(n || 0).toFixed(2)}`;
+  const fmtD = (d) => (d instanceof Date && !isNaN(d)) ? d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "—";
+  const dueVal = (iv) => { const d = iv.dueDate ? new Date(iv.dueDate) : null; return d && !isNaN(d) ? d.getTime() : 0; };
+  const sc = (s) => s === "Paid" ? "#16a34a" : s === "Overdue" ? "#E5484D" : s === "Draft" ? T.textMuted : "#d97706";
+  const cols = [
+    { key: "number", label: "Number", align: "left" },
+    { key: "client", label: "Client", align: "left" },
+    { key: "issued", label: "Issued", align: "left" },
+    { key: "due",    label: "Due",    align: "left" },
+    { key: "amount", label: "Amount", align: "right" },
+    { key: "status", label: "Status", align: "left" },
+  ];
+  const sorted = [...items].sort((a, b) => {
+    const dir = sort.dir === "asc" ? 1 : -1;
+    switch (sort.key) {
+      case "number": return ((a._num || 0) - (b._num || 0)) * dir;
+      case "client": return ((a._client?.name || a.clientName || "").localeCompare(b._client?.name || b.clientName || "")) * dir;
+      case "issued": return (((a._date || 0) - (b._date || 0))) * dir;
+      case "due":    return (dueVal(a) - dueVal(b)) * dir;
+      case "amount": return ((a._total || 0) - (b._total || 0)) * dir;
+      case "status": return ((a._status || "").localeCompare(b._status || "")) * dir;
+      default: return 0;
+    }
+  });
+  const click = (key) => setSort(s => s.key === key
+    ? { key, dir: s.dir === "asc" ? "desc" : "asc" }
+    : { key, dir: (key === "client" || key === "status") ? "asc" : "desc" });
+  return (
+    <div style={{ flex: 1, minHeight: 0, overflowY: "auto", marginTop: 4 }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}>
+        <thead>
+          <tr>
+            {cols.map(c => (
+              <th key={c.key} onClick={() => click(c.key)}
+                style={{ position: "sticky", top: 0, background: T.bg, textAlign: c.align, padding: "10px 14px", borderBottom: `1.5px solid ${T.border}`, color: sort.key === c.key ? T.primary : T.textMuted, fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", cursor: "pointer", whiteSpace: "nowrap", userSelect: "none", zIndex: 1 }}>
+                {c.label}{sort.key === c.key ? (sort.dir === "asc" ? " ↑" : " ↓") : ""}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map(iv => (
+            <tr key={iv.id} onClick={() => onRowClick(iv)}
+              style={{ cursor: "pointer", borderBottom: `1px solid ${T.border}` }}
+              onMouseEnter={e => e.currentTarget.style.background = hexA(T.primary, 0.04)}
+              onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+              <td style={{ padding: "11px 14px", fontWeight: 700, color: T.text, whiteSpace: "nowrap" }}>{iv.number}</td>
+              <td style={{ padding: "11px 14px", color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 0 }}>{iv._client?.name || iv.clientName || "—"}</td>
+              <td style={{ padding: "11px 14px", color: T.textMuted, whiteSpace: "nowrap" }}>{fmtD(iv._date)}</td>
+              <td style={{ padding: "11px 14px", color: T.textMuted, whiteSpace: "nowrap" }}>{iv.dueDate ? fmtD(new Date(iv.dueDate)) : "—"}</td>
+              <td style={{ padding: "11px 14px", textAlign: "right", fontWeight: 700, color: T.text, whiteSpace: "nowrap" }}>{money(iv._total)}</td>
+              <td style={{ padding: "11px 14px", whiteSpace: "nowrap" }}><span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 100, background: hexA(sc(iv._status), 0.12), color: sc(iv._status) }}>{iv._status}</span></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCatalog, onSave, onDelete, onSyncData, initialFilter = "All", vp = {} }) {
   const { T, perms } = useApp();
   const moneyFmt = (n) => `$${Math.round(n).toLocaleString()}`;
@@ -12191,6 +12254,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
 
   // ── Editor state ──
   const [creating,   setCreating]   = useState(false);
+  const [view,       setView]       = useState("split"); // desktop only: "split" (master-detail) | "table"
 
   // ── QuickBooks sync from the Invoices tab ──
   const [qbSyncing, setQbSyncing] = useState(false);
@@ -12362,6 +12426,14 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
             </button>
             );
           })()}
+          {vp.isDesktop && (
+            <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 11, padding: 3, gap: 2 }}>
+              {[["split", "Split"], ["table", "Table"]].map(([id, lbl]) => (
+                <button key={id} onClick={() => setView(id)}
+                  style={{ padding: "6px 13px", border: "none", borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer", background: view === id ? T.surface : "transparent", color: view === id ? T.primary : T.textMuted, fontFamily: "inherit", boxShadow: view === id ? "0 1px 3px rgba(0,0,0,0.12)" : "none" }}>{lbl}</button>
+              ))}
+            </div>
+          )}
           <button onClick={() => setShowFilters(f => !f)}
             style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 12, border: `1.5px solid ${activeFilterCount > 0 ? T.primary : T.border}`, background: activeFilterCount > 0 ? hexA(T.primary, 0.08) : T.surface, color: activeFilterCount > 0 ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
             <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M3 6h18M7 12h10M11 18h2"/></svg>
@@ -12541,6 +12613,8 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
           </>
         );
         if (!vp.isDesktop) return listContent;
+        /* Desktop "Table" view: full-width dense sortable table (row → modal preview) */
+        if (view === "table") return <InvoicesTable items={sorted} onRowClick={(iv) => setPreview(iv)} T={T} />;
         /* Desktop master-detail: invoice list (left) + selected invoice (right) */
         return (
           <div style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden", marginTop: 4 }}>
@@ -12564,7 +12638,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
 
       {creating && <InvoiceEditor clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onClose={() => setCreating(false)} />}
       {editing  && <InvoiceEditor invoice={editing} clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onDelete={onDelete} onClose={() => setEditing(null)} />}
-      {!vp.isDesktop && livePreview && <InvoicePreview invoice={livePreview} client={clients.find(c => invoiceMatchesClient(livePreview, c))} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
+      {(!vp.isDesktop || view === "table") && livePreview && <InvoicePreview invoice={livePreview} client={clients.find(c => invoiceMatchesClient(livePreview, c))} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
     </div>
   );
 }
