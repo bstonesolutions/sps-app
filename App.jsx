@@ -19557,6 +19557,10 @@ export default function App({ authEmail = "", onSignOut }) {
   const [invoicing, setInvoicing, linvc] = useStoredState("sps_invoicing", DEFAULT_INVOICING);
   const [completedSids, setCompletedSids, lcomp] = useStoredState("sps_completed", {});
   const vp = useViewport();
+  // Tweak 6: desktop WEB only — the native iPad app reports getPlatform()==='ios' even at
+  // 1366px landscape, so we gate on platform 'web' AND a wide min-width (not width alone) to
+  // let the desktop browser fill the window. iPad (native) and mobile are unaffected.
+  const isDesktopWeb = vp.width >= 1200 && ((typeof window !== "undefined" && window.Capacitor && typeof window.Capacitor.getPlatform === "function") ? window.Capacitor.getPlatform() === "web" : true);
   const [reminderLog, setReminderLog, lrem] = useStoredState("sps_reminders", {}); // { [sid]: { sentAt, method } }
   const hydrated = lc && lb && ls && lcat && lem && lco && lh && lbud && loa && lscfg && lrol && ltm && lsesh && linv && linvc && lcomp && lrem;
 
@@ -20467,7 +20471,7 @@ export default function App({ authEmail = "", onSignOut }) {
             )}
             <main style={{ flex: 1, minHeight: 0, ...(dtMasterDetail
               ? { display: "flex", overflow: "hidden" }
-              : { overflowY: "auto", padding: vp.isTablet ? "22px 22px" : "28px 36px", maxWidth: 1180, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: 40 }) }}>
+              : { overflowY: "auto", padding: vp.isTablet ? "22px 22px" : (isDesktopWeb ? "30px 48px" : "28px 36px"), maxWidth: isDesktopWeb ? "none" : 1180, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: 40 }) }}>
               {pageBody}
             </main>
           </div>
