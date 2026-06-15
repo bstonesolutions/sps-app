@@ -21,6 +21,10 @@
         min-height: 100dvh;
         background: #B81D24;
         overscroll-behavior: none;
+        /* Base app font (Rounded) so the very first paint and any body-portaled
+           popups never fall back to the browser serif. The app keeps document.body's
+           font in sync with the user's chosen App Font at runtime. */
+        font-family: ui-rounded, "SF Pro Rounded", "Hiragino Maru Gothic Pro", "Nunito", system-ui, sans-serif;
       }
       #root {
         background: #B81D24;

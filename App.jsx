@@ -760,6 +760,7 @@ const DEFAULT_BRANDING = {
   logoImage: "/icon-192.png",
   themeKey: "sps",
   appearance: "system",
+  appFont: "rounded",       // app-wide font (FONTS key) — applies to staff app, client portal, and popups
   custom: DEFAULT_CUSTOM,
   companyPhone: "",
   companyEmail: "",
@@ -14170,6 +14171,21 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
               {(localBranding.appearance || "system") === "system" ? "Follows your device's light or dark setting." : `Always ${localBranding.appearance} mode.`}
             </div>
           </div>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>App Font</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+              {Object.entries(FONTS).map(([key, f]) => {
+                const active = (localBranding.appFont || "rounded") === key;
+                return (
+                  <button key={key} onClick={() => set("appFont", key)}
+                    style={{ padding: "9px 16px", borderRadius: 100, border: `1.5px solid ${active ? T.primary : T.border}`, background: active ? hexA(T.primary, 0.08) : T.surface, color: active ? T.primary : T.text, fontWeight: 600, fontSize: 14, cursor: "pointer", fontFamily: f.stack }}>
+                    {f.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 8 }}>Applies everywhere — staff app, client portal, and popups. Each button is shown in its own font.</div>
+          </div>
         </div>
       </Collapsible>
 
@@ -14374,12 +14390,15 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
               <div>
                 <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Font</div>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-                  {Object.entries(FONTS).map(([key, f]) => (
-                    <button key={key} onClick={() => setCustom("fontFamily", key)}
-                      style={{ padding: "8px 14px", borderRadius: 100, border: `1.5px solid ${cust.fontFamily === key ? T.primary : T.border}`, background: cust.fontFamily === key ? hexA(T.primary, 0.08) : T.surface, color: cust.fontFamily === key ? T.primary : T.text, fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: f.stack }}>
-                      {f.label}
-                    </button>
-                  ))}
+                  {Object.entries(FONTS).map(([key, f]) => {
+                    const on = (localBranding.appFont || "rounded") === key;
+                    return (
+                      <button key={key} onClick={() => set("appFont", key)}
+                        style={{ padding: "8px 14px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.08) : T.surface, color: on ? T.primary : T.text, fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: f.stack }}>
+                        {f.label}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -14398,7 +14417,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
               {/* Live preview */}
               <div>
                 <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Live Preview</div>
-                <div style={{ background: preview.bg, borderRadius: 16, padding: 16, border: `1px solid ${preview.border}`, fontFamily: FONTS[cust.fontFamily]?.stack }}>
+                <div style={{ background: preview.bg, borderRadius: 16, padding: 16, border: `1px solid ${preview.border}`, fontFamily: FONTS[localBranding.appFont || "rounded"]?.stack }}>
                   <div style={{ background: preview.surface, borderRadius: 14, padding: 16, boxShadow: "0 2px 12px rgba(0,0,0,0.06)", marginBottom: 10, border: `1px solid ${preview.border}` }}>
                     <div style={{ fontSize: 16, fontWeight: 800, color: preview.text, letterSpacing: "-0.02em", marginBottom: 4 }}>Sample Client Card</div>
                     <div style={{ fontSize: 13, color: preview.textMuted, marginBottom: 12 }}>This is how your app will look.</div>
@@ -20099,7 +20118,10 @@ export default function App({ authEmail = "", onSignOut }) {
   const T = branding.themeKey === "custom"
     ? buildCustomTheme(branding.custom, mode)
     : (themeDef ? (themeDef[mode] || themeDef.light) : THEMES.sps.light);
-  const fontStack = (branding.themeKey === "custom" && FONTS[branding.custom?.fontFamily]) ? FONTS[branding.custom.fontFamily].stack : DEFAULT_FONT_STACK;
+  // App-wide font: a dedicated branding.appFont (set in Customize > Appearance),
+  // defaulting to Rounded. Drives the staff app, the client portal, and — via the
+  // body-font effect below — popups portaled to document.body.
+  const fontStack = FONTS[branding.appFont || "rounded"]?.stack || DEFAULT_FONT_STACK;
 
   // who is signed in, and the permissions that flow from their role
   const emailKey = (authEmail || "").trim().toLowerCase();
@@ -20307,6 +20329,13 @@ export default function App({ authEmail = "", onSignOut }) {
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) meta.setAttribute("content", activeColor);
   }, [hydrated, branding.splashBgColor, branding.accentColor, T.bg, T.primary]);
+
+  // Popups (Modal/ArrivedModal) portal to document.body, OUTSIDE the app's font
+  // container, so they'd otherwise fall back to the browser default. Mirror the
+  // chosen app font onto body so every popup matches the rest of the UI.
+  useEffect(() => {
+    document.body.style.fontFamily = fontStack;
+  }, [fontStack]);
 
   // ── Auto-update: check if Vercel deployed a new version and reload if so ──
   useEffect(() => {
