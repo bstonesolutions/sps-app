@@ -28,6 +28,27 @@ const AUTH_FLAGS = {
   recovery: INITIAL_HASH.includes("type=recovery"),
 };
 
+// Bug 4: lift the auth card above the iOS keyboard. Mirrors the App-side useKeyboardInset
+// (same visual-viewport math); kept local so main.jsx stays decoupled from App.jsx.
+function useKeyboardInset() {
+  const [inset, setInset] = useState(0);
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const update = () => setInset(Math.max(0, window.innerHeight - (vv.height + vv.offsetTop)));
+    vv.addEventListener("resize", update);
+    vv.addEventListener("scroll", update);
+    update();
+    return () => { vv.removeEventListener("resize", update); vv.removeEventListener("scroll", update); };
+  }, []);
+  return inset;
+}
+// When the keyboard is up, pin the centered card to the top and reserve the keyboard's
+// height at the bottom, so the active field + primary button stay visible above it.
+const kbLift = (kb) => kb > 0
+  ? { justifyContent: "flex-start", paddingTop: "max(16px, env(safe-area-inset-top))", paddingBottom: kb + 12 }
+  : null;
+
 function Login() {
   useEffect(() => { removeBootSplash(); document.body.classList.add('auth-active'); return () => document.body.classList.remove('auth-active'); }, []);
   // React's onTouchMove is passive, so its preventDefault is a no-op. Attach a
@@ -92,9 +113,10 @@ function Login() {
   };
 
   const hasImg = brand && brand.type === "image" && brand.image;
+  const kb = useKeyboardInset();
 
   return (
-    <div ref={wrapRef} onTouchMove={(e) => e.preventDefault()} style={{ ...wrap, position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", touchAction: "none", overscrollBehavior: "none" }}>
+    <div ref={wrapRef} onTouchMove={(e) => e.preventDefault()} style={{ ...wrap, position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", touchAction: "none", overscrollBehavior: "none", transition: "padding 0.18s ease", ...kbLift(kb) }}>
       <div style={card}>
         <div style={{ display: "flex", justifyContent: "center", marginBottom: 8 }}>
           {hasImg
@@ -160,6 +182,7 @@ function SetPassword({ email, recovery, onDone }) {
     try { const raw = localStorage.getItem("sps_brand_logo"); if (raw) setBrand(JSON.parse(raw)); } catch (e) {}
   }, []);
   const hasImg = brand && brand.type === "image" && brand.image;
+  const kb = useKeyboardInset();
 
   const submit = async () => {
     if (pw.length < 8) { setErr("Use at least 8 characters."); return; }
@@ -171,7 +194,7 @@ function SetPassword({ email, recovery, onDone }) {
   };
 
   return (
-    <div style={{ ...wrap, position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+    <div style={{ ...wrap, position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", transition: "padding 0.18s ease", ...kbLift(kb) }}>
       <div style={card}>
         <div style={{ display: "flex", justifyContent: "center", marginBottom: 8 }}>
           {hasImg
