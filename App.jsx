@@ -19361,7 +19361,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, team
 
       {/* Floating capsule bottom nav (mobile only) — matches the staff floating pill. */}
       {!isDesktopShell && (
-      <nav style={{ position: "fixed", left: "max(14px, env(safe-area-inset-left))", right: "max(14px, env(safe-area-inset-right))", bottom: "calc(env(safe-area-inset-bottom) + 12px)", zIndex: 90, height: 64, borderRadius: 32, background: hexA(T.surface, 0.94), backdropFilter: "saturate(180%) blur(22px)", WebkitBackdropFilter: "saturate(180%) blur(22px)", border: `1px solid ${T.border}`, boxShadow: "0 12px 32px rgba(0,0,0,0.20), 0 3px 10px rgba(0,0,0,0.08)", display: "flex", alignItems: "stretch", padding: "0 8px", WebkitTapHighlightColor: "transparent" }}>
+      <nav style={{ position: "fixed", left: "max(14px, env(safe-area-inset-left))", right: "max(14px, env(safe-area-inset-right))", bottom: "calc(env(safe-area-inset-bottom) + 4px)", zIndex: 90, height: 64, borderRadius: 32, background: hexA(T.surface, 0.94), backdropFilter: "saturate(180%) blur(22px)", WebkitBackdropFilter: "saturate(180%) blur(22px)", border: `1px solid ${T.border}`, boxShadow: "0 12px 32px rgba(0,0,0,0.20), 0 3px 10px rgba(0,0,0,0.08)", display: "flex", alignItems: "stretch", padding: "0 8px", WebkitTapHighlightColor: "transparent" }}>
         {CLIENT_NAV.map(n => {
           const active = (page === n.id || (n.id === "cp_property" && (page === "cp_pond" || page === "cp_service"))) && !settingsOpen;
           const badge = n.id === "cp_messages" ? portalUnread : 0;
@@ -20578,7 +20578,7 @@ export default function App({ authEmail = "", onSignOut }) {
             { id: "__menu", label: "Menu", icon: "menu", onClick: () => setMenuOpen(true), active: menuOpen, badge: menuBadge },
           ];
           return (
-            <nav style={{ position: "fixed", left: "max(14px, env(safe-area-inset-left))", right: "max(14px, env(safe-area-inset-right))", bottom: "calc(env(safe-area-inset-bottom) + 12px)", zIndex: 95, height: 64, borderRadius: 32, background: hexA(T.surface, 0.94), backdropFilter: "saturate(180%) blur(22px)", WebkitBackdropFilter: "saturate(180%) blur(22px)", border: `1px solid ${T.border}`, boxShadow: "0 12px 32px rgba(0,0,0,0.20), 0 3px 10px rgba(0,0,0,0.08)", display: "flex", alignItems: "stretch", padding: "0 8px", WebkitTapHighlightColor: "transparent" }}>
+            <nav style={{ position: "fixed", left: "max(14px, env(safe-area-inset-left))", right: "max(14px, env(safe-area-inset-right))", bottom: "calc(env(safe-area-inset-bottom) + 4px)", zIndex: 95, height: 64, borderRadius: 32, background: hexA(T.surface, 0.94), backdropFilter: "saturate(180%) blur(22px)", WebkitBackdropFilter: "saturate(180%) blur(22px)", border: `1px solid ${T.border}`, boxShadow: "0 12px 32px rgba(0,0,0,0.20), 0 3px 10px rgba(0,0,0,0.08)", display: "flex", alignItems: "stretch", padding: "0 8px", WebkitTapHighlightColor: "transparent" }}>
               {tabs.map(t => (
                 <button key={t.id} onClick={t.onClick} aria-label={t.label}
                   style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, color: t.active ? T.primary : T.textMuted, fontFamily: "inherit", position: "relative", WebkitTapHighlightColor: "transparent" }}>
