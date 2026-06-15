@@ -1555,7 +1555,8 @@ const parseMDY = (s) => { const [m, d, y] = (s || "").split("/").map(Number); re
 const fmtMDY = (dt) => `${String(dt.getMonth() + 1).padStart(2, "0")}/${String(dt.getDate()).padStart(2, "0")}/${dt.getFullYear()}`;
 
 // Responsive viewport hook — the foundation for adapting layout to phone / tablet / desktop.
-// Returns { width, isPhone, isTablet, isDesktop }. Breakpoints: phone <700, tablet 700-1024, desktop >1024.
+// Returns { width, isPhone, isTablet, isDesktop }. Breakpoints: phone <700, tablet (narrow
+// desktop) 700-1023, desktop >=1024. isDesktop is true at >=700 so iPad gets the desktop layout.
 function useViewport() {
   const [width, setWidth] = useState(typeof window !== "undefined" ? window.innerWidth : 390);
   useEffect(() => {
@@ -1568,7 +1569,11 @@ function useViewport() {
     width,
     isPhone: width < 700,
     isTablet: width >= 700 && width < 1024,
-    isDesktop: width >= 1024,
+    // The desktop layout (sidebar nav, master-detail, tables, full-detail views) activates
+    // at tablet width and up so iPad — portrait (≥744pt) and landscape — gets the rich
+    // layout, never the phone layout. isTablet (700–1023) is the "narrow desktop" range used
+    // to shrink column widths so the multi-column panes still fit on a portrait iPad.
+    isDesktop: width >= 700,
   };
 }
 
@@ -7949,8 +7954,8 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
         // Mobile: dashboard OR detail (drill-down). Desktop: dashboard left + detail right.
         if (!vp.isDesktop) return viewTech === null ? dashboard : detailFor();
         return (
-          <div style={{ display: "flex", gap: 26, alignItems: "flex-start" }}>
-            <div style={{ width: 372, flexShrink: 0 }}>{dashboard}</div>
+          <div style={{ display: "flex", gap: vp.isTablet ? 16 : 26, alignItems: "flex-start" }}>
+            <div style={{ width: vp.isTablet ? 280 : 372, flexShrink: 0 }}>{dashboard}</div>
             <div style={{ flex: 1, minWidth: 0 }}>
               {viewTech !== null ? detailFor() : (
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: T.textMuted, gap: 12, padding: "60px 40px", textAlign: "center", background: T.surface, borderRadius: 20, boxShadow: T.shadow }}>
@@ -12703,10 +12708,10 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
         /* Desktop master-detail: invoice list (left) + selected invoice (right) */
         return (
           <div style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden", marginTop: 4 }}>
-            <div style={{ width: 440, flexShrink: 0, overflowY: "auto", borderRight: `1px solid ${T.border}`, paddingRight: 18 }}>
+            <div style={{ width: vp.isTablet ? 286 : 440, flexShrink: 0, overflowY: "auto", borderRight: `1px solid ${T.border}`, paddingRight: vp.isTablet ? 14 : 18 }}>
               {listContent}
             </div>
-            <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden", paddingLeft: 26 }}>
+            <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden", paddingLeft: vp.isTablet ? 16 : 26 }}>
               {livePreview
                 ? <InvoicePreview invoice={livePreview} client={clients.find(c => invoiceMatchesClient(livePreview, c))} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} embedded />
                 : (
@@ -18792,8 +18797,8 @@ function CPInvoices({ client, invoices, branding, T, vp = {} }) {
 
       {vp.isDesktop ? (
         /* Desktop master-detail: list left, full invoice detail docked right */
-        <div style={{ display:"flex", gap:24, alignItems:"flex-start" }}>
-          <div style={{ width:360, flexShrink:0 }}>{rows}</div>
+        <div style={{ display:"flex", gap: vp.isTablet ? 16 : 24, alignItems:"flex-start" }}>
+          <div style={{ width: vp.isTablet ? 260 : 360, flexShrink:0 }}>{rows}</div>
           <div style={{ flex:1, minWidth:0, position:"sticky", top:0 }}>
             {selInv ? (
               <div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:20, padding:"20px 22px" }}>{detail(selInv)}</div>
@@ -19012,9 +19017,9 @@ function CPSettings({ client, branding, prefs, setPrefs, T, onSignOut, isStaffPr
 
 // Desktop-only left sidebar for the client portal — mirrors the staff DesktopSidebar
 // so a client on a computer gets the same upgraded navigation experience.
-function CPDesktopSidebar({ page, settingsOpen, portalUnread, branding, client, isStaffPreview, T, onNav, onOpenSettings, onRefresh, onSignOut }) {
+function CPDesktopSidebar({ page, settingsOpen, portalUnread, branding, client, isStaffPreview, T, vp = {}, onNav, onOpenSettings, onRefresh, onSignOut }) {
   return (
-    <aside style={{ width: 244, flexShrink: 0, height: "100%", background: T.surface, borderRight: `1px solid ${T.border}`, display: "flex", flexDirection: "column" }}>
+    <aside style={{ width: vp?.isTablet ? 208 : 244, flexShrink: 0, height: "100%", background: T.surface, borderRight: `1px solid ${T.border}`, display: "flex", flexDirection: "column" }}>
       {/* Logo + portal name */}
       <div style={{ padding: "20px 18px 16px", display: "flex", alignItems: "center", gap: 11, borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
         <div style={{ width: 38, height: 38, borderRadius: 11, background: T.primary, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, boxShadow: `0 2px 8px ${hexA(T.primary, 0.35)}` }}>
@@ -19155,7 +19160,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, team
       `}</style>
 
       {isDesktopShell && (
-        <CPDesktopSidebar page={page} settingsOpen={settingsOpen} portalUnread={portalUnread} branding={branding} client={client} isStaffPreview={isStaffPreview} T={T}
+        <CPDesktopSidebar page={page} settingsOpen={settingsOpen} portalUnread={portalUnread} branding={branding} client={client} isStaffPreview={isStaffPreview} T={T} vp={vp}
           onNav={(id) => { setPage(id); setSettingsOpen(false); }} onOpenSettings={() => setSettingsOpen(s => !s)} onRefresh={() => window.location.reload()} onSignOut={onSignOut} />
       )}
 
@@ -19203,7 +19208,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, team
       {/* Main content — desktop docks beside the sidebar; on mobile <main> is the only scroller */}
       {isDesktopShell ? (
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-          <main style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "32px 40px", fontSize: `${textScale}em` }}>
+          <main style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: vp.isTablet ? "24px 22px" : "32px 40px", fontSize: `${textScale}em` }}>
             <div style={{ maxWidth: 1080, margin: "0 auto", width: "100%" }}>{screens}</div>
           </main>
         </div>
@@ -19319,10 +19324,10 @@ function LoginScreen({ team, branding, T, fontStack, onSignIn }) {
 // Desktop (>=1024px) left sidebar — replaces the mobile floating menu button.
 // Same destinations as the mobile nav sheet, shown vertically with the SPS logo on
 // top, active item in crimson, and sync/account/sign-out pinned at the bottom.
-function DesktopSidebar({ page, perms, navUnread, reminderDue, onNav, onSignOut, currentUser, branding, syncState, onSync, T }) {
+function DesktopSidebar({ page, perms, navUnread, reminderDue, onNav, onSignOut, currentUser, branding, syncState, onSync, T, vp = {} }) {
   const items = ALL_NAV.filter(n => isTabVisible(n, perms));
   return (
-    <aside style={{ width: 244, flexShrink: 0, height: "100%", background: T.surface, borderRight: `1px solid ${T.border}`, display: "flex", flexDirection: "column" }}>
+    <aside style={{ width: vp?.isTablet ? 208 : 244, flexShrink: 0, height: "100%", background: T.surface, borderRight: `1px solid ${T.border}`, display: "flex", flexDirection: "column" }}>
       {/* Logo + company */}
       <div style={{ padding: "20px 18px 16px", display: "flex", alignItems: "center", gap: 11, borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
         <div style={{ width: 38, height: 38, borderRadius: 11, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
@@ -20230,10 +20235,10 @@ export default function App({ authEmail = "", onSignOut }) {
         ) : (
         /* Desktop master-detail: client list (left) + selected client's record (right) */
         <div style={{ flex: 1, minWidth: 0, display: "flex", height: "100%", overflow: "hidden" }}>
-          <div style={{ width: 404, flexShrink: 0, borderRight: `1px solid ${T.border}`, overflowY: "auto", padding: "22px 20px" }}>
+          <div style={{ width: vp.isTablet ? 280 : 404, boxSizing: "border-box", flexShrink: 0, borderRight: `1px solid ${T.border}`, overflowY: "auto", padding: vp.isTablet ? "18px 14px" : "22px 20px" }}>
             <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} view="split" onSetView={setClientsView} selectedId={selectedClient?.id} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />
           </div>
-          <div style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: "24px 30px" }}>
+          <div style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: vp.isTablet ? "20px 16px" : "24px 30px" }}>
             {selectedClient
               ? <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} />
               : (
@@ -20276,7 +20281,7 @@ export default function App({ authEmail = "", onSignOut }) {
       <AppCtx.Provider value={{ T, branding, perms, tiers: serviceTiers || DEFAULT_TIERS }}>
         <div style={{ fontFamily: fontStack, background: T.bg, position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden", display: "flex", flexDirection: "row", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ["--ring"]: hexA(T.primary, 0.22), ["--ringBorder"]: T.primary }}>
           {shellCss}
-          <DesktopSidebar page={page} perms={perms} navUnread={navUnread} reminderDue={reminderDueCount} onNav={handleNav} onSignOut={handleSignOut} currentUser={currentUser} branding={branding} syncState={syncState} onSync={manualSync} T={T} />
+          <DesktopSidebar page={page} perms={perms} navUnread={navUnread} reminderDue={reminderDueCount} onNav={handleNav} onSignOut={handleSignOut} currentUser={currentUser} branding={branding} syncState={syncState} onSync={manualSync} T={T} vp={vp} />
           <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
             <div style={{ height: 2, flexShrink: 0, zIndex: 99, background: syncState === "syncing" ? T.primary : syncState === "saved" ? "#16a34a" : "transparent", transition: "background 0.3s", animation: syncState === "syncing" ? "syncPulse 0.8s ease-in-out" : "none" }} />
             {dbError && (
@@ -20287,7 +20292,7 @@ export default function App({ authEmail = "", onSignOut }) {
             )}
             <main style={{ flex: 1, minHeight: 0, ...(dtMasterDetail
               ? { display: "flex", overflow: "hidden" }
-              : { overflowY: "auto", padding: "28px 36px", maxWidth: 1180, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: 40 }) }}>
+              : { overflowY: "auto", padding: vp.isTablet ? "22px 22px" : "28px 36px", maxWidth: 1180, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: 40 }) }}>
               {pageBody}
             </main>
           </div>
