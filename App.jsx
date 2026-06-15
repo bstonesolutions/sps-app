@@ -4789,6 +4789,19 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
   );
 }
 
+// Feature 3B — per-stop profitability derived from the snapshotted fields on a completed
+// visit (quoted_price / actual_hours / target_hourly_rate). Returns null when a job has no
+// hours logged. status: good (>= target) | low (< target) | neutral (no target set).
+function stopProfitability(h) {
+  const qp = parseFloat(h && h.quoted_price);
+  const ah = parseFloat(h && h.actual_hours);
+  if (!(qp >= 0) || !(ah > 0)) return null;
+  const rate = qp / ah;
+  const target = parseFloat(h && h.target_hourly_rate);
+  const hasTarget = target > 0;
+  return { revenue: qp, hours: ah, rate, target: hasTarget ? target : null, status: !hasTarget ? "neutral" : (rate >= target ? "good" : "low") };
+}
+
 function ClientHistory({ client, catalog, team, onChange }) {
   const { T, perms } = useApp();
   const [editIdx, setEditIdx] = useState(null);
@@ -4865,6 +4878,20 @@ function ClientHistory({ client, catalog, team, onChange }) {
               {h.photos && h.photos.length > 0 && (
                 <div style={{ marginTop: 12 }}><PhotoStrip photos={h.photos} /></div>
               )}
+
+              {perms.seeProfit && (() => {
+                const p = stopProfitability(h);
+                if (!p) return null;
+                const col = p.status === "good" ? "#16a34a" : p.status === "low" ? "#E5484D" : T.textMuted;
+                return (
+                  <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 11, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em" }}>Effective</span>
+                    <span style={{ fontSize: 15, fontWeight: 800, color: col }}>{money(p.rate)}<span style={{ fontSize: 11, color: T.textMuted, fontWeight: 600 }}>/hr</span></span>
+                    <span style={{ fontSize: 12, color: T.textMuted }}>· {p.hours}h</span>
+                    {p.target != null && <span style={{ fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 100, background: hexA(col, 0.12), color: col }}>{p.status === "good" ? "On target" : "Undercharged"} · target {money(p.target)}/hr</span>}
+                  </div>
+                );
+              })()}
 
               {b && perms.seeProfit && (
                 <details style={{ marginTop: 14, background: T.surfaceAlt, borderRadius: 10, padding: "10px 12px" }}>
@@ -16387,6 +16414,14 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
   });
   const treatmentRows = Object.values(treatmentStats).sort((a, b) => b.cost - a.cost);
   const jobsWithTreatment = periodJobs.filter(h => (h.treatmentsUsed || []).length > 0).length;
+
+  // ── Feature 3B — job profitability roll-up (from snapshotted stop values, this period) ──
+  const profJobs    = periodJobs.map(stopProfitability).filter(Boolean);
+  const profCount   = profJobs.length;
+  const profRevenue = profJobs.reduce((s, p) => s + p.revenue, 0);
+  const profHours   = profJobs.reduce((s, p) => s + p.hours, 0);
+  const avgEffRate  = profCount ? profJobs.reduce((s, p) => s + p.rate, 0) / profCount : 0;
+  const underCount  = profJobs.filter(p => p.status === "low").length;
   const avgTreatmentPerStop = jobsWithTreatment > 0 ? totalTreatmentCost / jobsWithTreatment : 0;
 
   // ── Consolidated P&L (owner oversight) ──
@@ -16651,6 +16686,34 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
           </div>
         </Section>
       )}
+
+      {/* Feature 3B — job profitability roll-up (selected period) */}
+      <Section title="Job Profitability">
+        {profCount === 0 ? (
+          <div style={{ fontSize: 13, color: T.textMuted, padding: "2px 2px 4px" }}>No completed jobs with hours logged this period. Tap "I'm Here" on a stop (or enter actual hours when completing) to track profitability.</div>
+        ) : (
+          <>
+            <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+              <div style={{ flex: 1, minWidth: 120, background: T.surface, borderRadius: 14, border: `1px solid ${T.border}`, padding: "12px 14px" }}>
+                <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: T.textMuted }}>Revenue</div>
+                <div style={{ fontSize: 19, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginTop: 2 }}>{money(profRevenue)}</div>
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{profCount} job{profCount !== 1 ? "s" : ""} · {profHours.toFixed(1)}h</div>
+              </div>
+              <div style={{ flex: 1, minWidth: 120, background: T.surface, borderRadius: 14, border: `1px solid ${T.border}`, padding: "12px 14px" }}>
+                <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: T.textMuted }}>Avg Effective</div>
+                <div style={{ fontSize: 19, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginTop: 2 }}>{money(avgEffRate)}<span style={{ fontSize: 11, color: T.textMuted, fontWeight: 600 }}>/hr</span></div>
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>across logged jobs</div>
+              </div>
+              <div style={{ flex: 1, minWidth: 120, background: T.surface, borderRadius: 14, border: `1px solid ${underCount > 0 ? hexA("#E5484D", 0.4) : T.border}`, padding: "12px 14px" }}>
+                <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: T.textMuted }}>Undercharged</div>
+                <div style={{ fontSize: 19, fontWeight: 800, color: underCount > 0 ? "#E5484D" : "#16a34a", letterSpacing: "-0.02em", marginTop: 2 }}>{underCount}</div>
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>below target rate</div>
+              </div>
+            </div>
+            <div style={{ fontSize: 11, color: T.textMuted, lineHeight: 1.5 }}>From completed jobs with hours logged, in the selected period. Effective rate = revenue ÷ hours, vs each job's snapshotted target.</div>
+          </>
+        )}
+      </Section>
 
       {/* Treatment / Material Usage */}
       {treatmentRows.length > 0 && (
