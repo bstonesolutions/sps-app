@@ -2812,16 +2812,40 @@ function Checkbox({ checked, onChange, accent }) {
   );
 }
 
+// Bug 2/4: track how much the on-screen keyboard overlaps the layout viewport, using the
+// visual viewport so modals/forms can lift their footer above the iOS keyboard.
+function useKeyboardInset() {
+  const [inset, setInset] = useState(0);
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const update = () => setInset(Math.max(0, window.innerHeight - (vv.height + vv.offsetTop)));
+    vv.addEventListener("resize", update);
+    vv.addEventListener("scroll", update);
+    update();
+    return () => { vv.removeEventListener("resize", update); vv.removeEventListener("scroll", update); };
+  }, []);
+  return inset;
+}
+
 function Modal({ title, children, onClose }) {
   const { T } = useApp();
+  const kb = useKeyboardInset();
+  // When a field is focused, bring it into the visible (above-keyboard) area.
+  const onBodyFocus = (e) => {
+    const t = e.target;
+    if (t && t.scrollIntoView && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) {
+      setTimeout(() => { try { t.scrollIntoView({ block: "center", behavior: "smooth" }); } catch (_) {} }, 60);
+    }
+  };
   return (
     // Backdrop centers the card and keeps it below the safe area (padding-top uses
     // env(safe-area-inset-top)). The card is bounded by flex-shrink (flex:0 1 auto +
     // minHeight:0 — reliable in WKWebView, no % to mis-resolve), with a dvh max-height
     // as a backup. The CLOSE BUTTON lives in the card's own fixed header, so it's
     // always inside the white card and never clipped by the app header or notch.
-    <div onClick={onClose} style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 200, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "max(14px, env(safe-area-inset-top)) 14px max(14px, env(safe-area-inset-bottom))", overscrollBehavior: "contain" }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: T.surface, borderRadius: 24, width: "100%", maxWidth: 600, flex: "0 1 auto", minHeight: 0, maxHeight: "calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 28px)", display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: T.shadowLg, border: `1px solid ${T.border}`, animation: "spsModalIn 0.22s cubic-bezier(0.16, 1, 0.3, 1)" }}>
+    <div onClick={onClose} style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 200, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", paddingTop: "max(14px, env(safe-area-inset-top))", paddingLeft: 14, paddingRight: 14, paddingBottom: kb > 0 ? kb + 14 : "max(14px, env(safe-area-inset-bottom))", transition: "padding-bottom 0.18s ease", overscrollBehavior: "contain" }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: T.surface, borderRadius: 24, width: "100%", maxWidth: 600, flex: "0 1 auto", minHeight: 0, maxHeight: `calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 28px - ${kb}px)`, display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: T.shadowLg, border: `1px solid ${T.border}`, animation: "spsModalIn 0.22s cubic-bezier(0.16, 1, 0.3, 1)" }}>
         {/* Fixed header INSIDE the card: title + close X. flexShrink:0 keeps it pinned
             to the card's top-right while the body scrolls. */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "15px 14px 13px 22px", flexShrink: 0, borderBottom: `1px solid ${T.border}` }}>
@@ -2830,8 +2854,9 @@ function Modal({ title, children, onClose }) {
             <Icon name="close" size={16} />
           </button>
         </div>
-        {/* Scrollable body — content taller than the card scrolls here; header stays put. */}
-        <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", padding: "16px 22px 22px" }}>
+        {/* Scrollable body — content taller than the card scrolls here; header stays put.
+            On field focus we scroll it into the visible area above the keyboard (Bug 2). */}
+        <div onFocus={onBodyFocus} style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", padding: "16px 22px 22px" }}>
           {children}
         </div>
       </div>
