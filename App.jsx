@@ -56,6 +56,22 @@ const openInAppBrowser = async (url) => {
   window.open(url, "_blank", "noopener,noreferrer");
 };
 
+// QuickBooks connection state now lives SERVER-SIDE (tokens in the qb_tokens table,
+// read by the /api/quickbooks endpoints). The app keeps only a lightweight boolean
+// flag, refreshed from /status, and always hits the endpoints at the absolute
+// PROD_URL so it works on the native app (capacitor://localhost) too.
+const QB_API = `${PROD_URL}/api/quickbooks`;
+const qbIsConnected = () => { try { return localStorage.getItem("qb_connected") === "1"; } catch { return false; } };
+const qbSetConnected = (v) => { try { v ? localStorage.setItem("qb_connected", "1") : localStorage.removeItem("qb_connected"); } catch {} };
+const qbCheckStatus = async () => {
+  try {
+    const r = await fetch(`${QB_API}/status`);
+    const d = await r.json().catch(() => ({}));
+    qbSetConnected(!!d.connected);
+    return !!d.connected;
+  } catch { return qbIsConnected(); }
+};
+
 // Open a URL in the device's DEFAULT/EXTERNAL browser (not the in-app browser) —
 // intentionally the opposite of openInAppBrowser. Used for Google reviews, where
 // the client's signed-in browser session makes leaving a review frictionless. On
@@ -10844,7 +10860,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   };
   const [qbState, setQbState] = useState("idle"); // idle | sending | done | error
   const [qbMsg, setQbMsg] = useState("");
-  const qbConnected = !!localStorage.getItem("qb_access_token");
+  const qbConnected = qbIsConnected();
 
   // Build the QB payload from the current invoice
   const buildQbPayload = () => ({
@@ -10890,9 +10906,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
 
     // Not connected to QB, no client selected, or no line items — just save locally
     // and close. (QuickBooks requires at least one line, so an empty invoice can't sync.)
-    const access_token = localStorage.getItem("qb_access_token");
-    const realm_id = localStorage.getItem("qb_realm_id");
-    if (!access_token || !realm_id || !client || !(inv.lineItems || []).length) {
+    if (!qbIsConnected() || !client || !(inv.lineItems || []).length) {
       onSave(baseInv);
       onClose();
       return;
@@ -10900,11 +10914,11 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
 
     setQbState("sending"); setQbMsg("");
     try {
-      const endpoint = inv.qbId ? "/api/quickbooks/update-invoice" : "/api/quickbooks/create-invoice";
+      const endpoint = inv.qbId ? `${QB_API}/update-invoice` : `${QB_API}/create-invoice`;
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ access_token, realm_id, invoice: buildQbPayload() }),
+        body: JSON.stringify({ invoice: buildQbPayload() }),
       });
       if (res.status === 401) {
         // Session expired — still save locally so work isn't lost
@@ -10915,9 +10929,9 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
       const data = await res.json();
       // If updating and QB says the invoice is gone, recreate it fresh
       if (data.recreate) {
-        const createRes = await fetch("/api/quickbooks/create-invoice", {
+        const createRes = await fetch(`${QB_API}/create-invoice`, {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ access_token, realm_id, invoice: { ...buildQbPayload(), qbId: null } }),
+          body: JSON.stringify({ invoice: { ...buildQbPayload(), qbId: null } }),
         });
         const createData = await createRes.json();
         if (createData.error) { onSave(baseInv); setQbState("error"); setQbMsg("Saved locally. QuickBooks sync failed: " + createData.error); return; }
@@ -11331,40 +11345,35 @@ function QBConnect({ onSyncData }) {
   const { T } = useApp();
   const [status, setStatus]   = useState("idle");
   const [result, setResult]   = useState(null);
-  const [connected, setConnected] = useState(() => !!localStorage.getItem("qb_access_token"));
+  const [connected, setConnected] = useState(qbIsConnected());
+  const pollRef = useRef(null);
 
-  // Check if we just returned from QB OAuth callback
+  // Confirm the connection state from the server on mount (tokens live server-side).
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("qb") === "connected") {
-      const accessToken  = params.get("access_token");
-      const refreshToken = params.get("refresh_token");
-      const realmId      = params.get("realmId");
-      const expiresIn    = params.get("expires_in");
-      if (accessToken && realmId) {
-        localStorage.setItem("qb_access_token",  accessToken);
-        localStorage.setItem("qb_refresh_token", refreshToken);
-        localStorage.setItem("qb_realm_id",      realmId);
-        localStorage.setItem("qb_expires_at",    String(Date.now() + Number(expiresIn) * 1000));
-        setConnected(true);
-      }
-      window.history.replaceState({}, "", window.location.pathname);
-    } else if (params.get("qb") === "error") {
-      setStatus("error");
-      setResult({ error: "QuickBooks authorization failed. Please try again." });
-      window.history.replaceState({}, "", window.location.pathname);
-    }
+    qbCheckStatus().then(setConnected);
+    return () => clearInterval(pollRef.current);
   }, []);
 
-  const handleConnect = () => {
-    window.location.href = "/api/quickbooks/auth";
+  const handleConnect = async () => {
+    setStatus("idle"); setResult(null);
+    // Open Intuit's OAuth in the system browser (new tab on web), then poll the
+    // server until it has tokens — works on web AND native without a deep link.
+    await openInAppBrowser(`${QB_API}/auth`);
+    clearInterval(pollRef.current);
+    let tries = 0;
+    pollRef.current = setInterval(async () => {
+      tries++;
+      const ok = await qbCheckStatus();
+      if (ok || tries > 45) {           // ~90s window
+        clearInterval(pollRef.current);
+        if (ok) setConnected(true);
+      }
+    }, 2000);
   };
 
-  const handleDisconnect = () => {
-    localStorage.removeItem("qb_access_token");
-    localStorage.removeItem("qb_refresh_token");
-    localStorage.removeItem("qb_realm_id");
-    localStorage.removeItem("qb_expires_at");
+  const handleDisconnect = async () => {
+    try { await fetch(`${QB_API}/disconnect`, { method: "POST" }); } catch (_) {}
+    qbSetConnected(false);
     setConnected(false);
     setStatus("idle");
     setResult(null);
@@ -11373,49 +11382,19 @@ function QBConnect({ onSyncData }) {
   const handleSync = async () => {
     setStatus("syncing");
     setResult(null);
-    const accessToken = localStorage.getItem("qb_access_token");
-    const realmId     = localStorage.getItem("qb_realm_id");
-    if (!accessToken || !realmId) {
-      setStatus("error");
-      setResult({ error: "Not connected. Please connect QuickBooks first." });
-      setConnected(false);
-      return;
-    }
     try {
-      const doSync = (token) => fetch(`/api/quickbooks/sync?access_token=${encodeURIComponent(token)}&realm_id=${encodeURIComponent(realmId)}`);
-      let res = await doSync(accessToken);
+      // Tokens (and refresh) are handled server-side; the app sends none.
+      const res = await fetch(`${QB_API}/sync`);
       if (res.status === 401) {
-        // Try refreshing the token before giving up
-        const refresh_token = localStorage.getItem("qb_refresh_token");
-        let refreshed = null;
-        if (refresh_token) {
-          const rr = await fetch("/api/quickbooks/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refresh_token }) });
-          if (rr.ok) {
-            const rd = await rr.json();
-            if (rd.access_token) {
-              localStorage.setItem("qb_access_token", rd.access_token);
-              if (rd.refresh_token) localStorage.setItem("qb_refresh_token", rd.refresh_token);
-              if (rd.expires_in) localStorage.setItem("qb_expires_at", String(Date.now() + Number(rd.expires_in) * 1000));
-              refreshed = rd.access_token;
-            }
-          }
-        }
-        if (!refreshed) {
-          setStatus("error");
-          setResult({ error: "Session expired. Please reconnect." });
-          handleDisconnect();
-          return;
-        }
-        res = await doSync(refreshed);
+        qbSetConnected(false);
+        setConnected(false);
+        setStatus("error");
+        setResult({ error: "Not connected. Please reconnect QuickBooks." });
+        return;
       }
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-
-      // ── Save invoices into the app ──
-      if (onSyncData && data.invoices) {
-        onSyncData(data.invoices, data.customers);
-      }
-
+      if (onSyncData && data.invoices) onSyncData(data.invoices, data.customers);
       setResult(data);
       setStatus("done");
     } catch (err) {
@@ -12716,44 +12695,15 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
   const [qbSyncing, setQbSyncing] = useState(false);
   const [qbSynced, setQbSynced]   = useState(false);
   const [qbSyncMsg, setQbSyncMsg] = useState("");
-  const qbConnected = typeof window !== "undefined" && !!localStorage.getItem("qb_access_token");
+  const qbConnected = qbIsConnected();
   const syncQuickBooks = async () => {
-    const access_token = localStorage.getItem("qb_access_token");
-    const realm_id = localStorage.getItem("qb_realm_id");
-    if (!access_token || !realm_id) { setQbSyncMsg("Connect QuickBooks under Customize first."); setTimeout(() => setQbSyncMsg(""), 4000); return; }
+    if (!qbIsConnected()) { setQbSyncMsg("Connect QuickBooks under Customize first."); setTimeout(() => setQbSyncMsg(""), 4000); return; }
     setQbSyncing(true); setQbSynced(false); setQbSyncMsg("");
 
-    // Try a sync with the given token; on 401, refresh once and retry.
-    const doSync = async (token) => {
-      const r = await fetch(`/api/quickbooks/sync?access_token=${encodeURIComponent(token)}&realm_id=${encodeURIComponent(realm_id)}`);
-      return r;
-    };
-    const refreshToken = async () => {
-      const refresh_token = localStorage.getItem("qb_refresh_token");
-      if (!refresh_token) return null;
-      const rr = await fetch("/api/quickbooks/refresh", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refresh_token }),
-      });
-      if (!rr.ok) return null;
-      const rd = await rr.json();
-      if (rd.access_token) {
-        localStorage.setItem("qb_access_token", rd.access_token);
-        if (rd.refresh_token) localStorage.setItem("qb_refresh_token", rd.refresh_token);
-        if (rd.expires_in) localStorage.setItem("qb_expires_at", String(Date.now() + Number(rd.expires_in) * 1000));
-        return rd.access_token;
-      }
-      return null;
-    };
-
     try {
-      let res = await doSync(access_token);
-      if (res.status === 401) {
-        // Token expired — silently refresh and retry once
-        const fresh = await refreshToken();
-        if (!fresh) { setQbSyncMsg("QuickBooks session expired. Reconnect under Customize."); return; }
-        res = await doSync(fresh);
-      }
+      // Tokens + refresh are handled server-side; the app sends none.
+      const res = await fetch(`${QB_API}/sync`);
+      if (res.status === 401) { qbSetConnected(false); setQbSyncMsg("QuickBooks session expired. Reconnect under Customize."); return; }
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       if (onSyncData && data.invoices) onSyncData(data.invoices, data.customers);
@@ -20370,29 +20320,24 @@ export default function App({ authEmail = "", onSignOut }) {
     return () => clearInterval(interval);
   }, []);
 
-  // ── QB auto-sync on app open — runs once per session if connected ──
+  // ── QB status refresh + auto-sync on app open ──
+  // Refreshes the server-side connection flag every open (so the whole app knows
+  // whether QB is connected), and auto-syncs once per session when connected.
   useEffect(() => {
     if (!hydrated) return; // wait for stored data to load first
-    const accessToken = localStorage.getItem("qb_access_token");
-    const realmId     = localStorage.getItem("qb_realm_id");
-    if (!accessToken || !realmId) return;
-    // Only sync once per session (not on every re-render)
-    const lastSync = sessionStorage.getItem("qb_auto_synced");
-    if (lastSync) return;
-    sessionStorage.setItem("qb_auto_synced", "1");
-
-    const autoSync = async () => {
+    const run = async () => {
+      const ok = await qbCheckStatus();
+      if (!ok) return;
+      if (sessionStorage.getItem("qb_auto_synced")) return; // sync once per session
+      sessionStorage.setItem("qb_auto_synced", "1");
       try {
-        const url = `/api/quickbooks/sync?access_token=${encodeURIComponent(accessToken)}&realm_id=${encodeURIComponent(realmId)}`;
-        const res = await fetch(url);
-        if (!res.ok) return; // silently fail — user can manually sync
+        const res = await fetch(`${QB_API}/sync`); // tokens handled server-side
+        if (!res.ok) { if (res.status === 401) qbSetConnected(false); return; }
         const data = await res.json();
         if (data.invoices) handleQBSync(data.invoices, data.customers);
-      } catch (e) {
-        // Network error — silently ignore
-      }
+      } catch (e) { /* network error — silently ignore */ }
     };
-    autoSync();
+    run();
   }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Late fees: auto-apply once after data is ready (silent, never blocks load) ──
@@ -20487,16 +20432,12 @@ export default function App({ authEmail = "", onSignOut }) {
 
   // Push a new invoice to QuickBooks and get back payment link
   const pushInvoiceToQB = async (invoice, client) => {
-    const accessToken = localStorage.getItem("qb_access_token");
-    const realmId     = localStorage.getItem("qb_realm_id");
-    if (!accessToken || !realmId) return null;
+    if (!qbIsConnected()) return null;
     try {
-      const res = await fetch("/api/quickbooks/create-invoice", {
+      const res = await fetch(`${QB_API}/create-invoice`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          access_token: accessToken,
-          realm_id:     realmId,
           invoice: {
             ...invoice,
             qbCustomerId: client?.qbId || null,
@@ -20798,18 +20739,14 @@ export default function App({ authEmail = "", onSignOut }) {
   const handleDeleteInvoice = (id) => {
     const target = (invoices || []).find(iv => iv.id === id);
     // If this invoice was pushed to QuickBooks, delete it there too
-    if (target && target.qbId) {
-      const access_token = localStorage.getItem("qb_access_token");
-      const realm_id = localStorage.getItem("qb_realm_id");
-      if (access_token && realm_id) {
-        fetch("/api/quickbooks/delete-invoice", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ access_token, realm_id, qb_id: target.qbId }),
-        }).then(r => r.json()).then(d => {
-          if (d.error) console.error("QB delete failed:", d.error);
-        }).catch(e => console.error("QB delete error:", e.message));
-      }
+    if (target && target.qbId && qbIsConnected()) {
+      fetch(`${QB_API}/delete-invoice`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ qb_id: target.qbId }), // tokens handled server-side
+      }).then(r => r.json()).then(d => {
+        if (d.error) console.error("QB delete failed:", d.error);
+      }).catch(e => console.error("QB delete error:", e.message));
     }
     setInvoices(list => (list || []).filter(iv => iv.id !== id));
   };
