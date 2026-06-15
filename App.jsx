@@ -1308,6 +1308,28 @@ const DEFAULT_SCHEDULE = [
 ];
 
 // Editable service-report email/text template
+// Owner-alert routing. Every client event always shows in the in-app Alerts widget;
+// these toggles decide which ones ALSO email (and, later, text) the owner, and where.
+// Stored inside the email object (sps_email) so it persists with messaging settings.
+const NOTIFY_EVENTS = [
+  { key: "upgrade_request",  label: "Upgrade request",     hint: "A client asks to move up a tier" },
+  { key: "service_request",  label: "Service request",     hint: "A client requests extra service" },
+  { key: "low_rating",       label: "Low visit rating",    hint: "A client rates a visit 3 stars or lower" },
+  { key: "client_message",   label: "New client message",  hint: "A client sends a message from the portal" },
+  { key: "payment_received", label: "Payment received",    hint: "An invoice is marked paid" },
+];
+const DEFAULT_NOTIFY = {
+  ownerEmail: "",   // empty → falls back to the configured company email at send time
+  ownerPhone: "",
+  events: {
+    upgrade_request:  { inApp: true, email: true },
+    service_request:  { inApp: true, email: true },
+    low_rating:       { inApp: true, email: true },
+    client_message:   { inApp: true, email: false },
+    payment_received: { inApp: true, email: false },
+  },
+};
+
 const DEFAULT_EMAIL = {
   fromName: "Stone Property Solutions",
   fromAddress: "service@stonepropertysolutions.com",
@@ -1333,6 +1355,7 @@ const DEFAULT_EMAIL = {
   // Client magic-link email ({first}/{name} = client, {company} = your company, {link} = portal link)
   clientMagicSubject: "Your {company} client portal link",
   clientMagicBody: "Hi {first},\n\nHere's your secure link to your {company} client portal. Tap below to view your service history, invoices, and photos — no password required.\n\n{link}\n\nThank you for being a valued client,\nThe {company} Team",
+  notify: DEFAULT_NOTIFY,
 };
 
 // Build the report text from the template + a completed-visit record
@@ -13801,6 +13824,68 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
   );
 }
 
+// Owner Alerts — choose which client events notify the owner and through which
+// channels, plus the destination email/phone. Reads/writes email.notify so it
+// persists with the rest of the messaging settings (via the same autosave draft).
+function NotificationSettings({ email, setEmail, branding }) {
+  const { T } = useApp();
+  const base = { ...DEFAULT_NOTIFY, ...(email.notify || {}) };
+  const events = { ...DEFAULT_NOTIFY.events, ...(base.events || {}) };
+  const companyEmail = (branding && branding.companyEmail) || email.fromAddress || "";
+  const setField = (k, v) => setEmail(prev => {
+    const pn = { ...DEFAULT_NOTIFY, ...(prev.notify || {}) };
+    return { ...prev, notify: { ...pn, events: { ...DEFAULT_NOTIFY.events, ...(pn.events || {}) }, [k]: v } };
+  });
+  const setEvent = (key, chan, val) => setEmail(prev => {
+    const pn = { ...DEFAULT_NOTIFY, ...(prev.notify || {}) };
+    const ev = { ...DEFAULT_NOTIFY.events, ...(pn.events || {}) };
+    ev[key] = { ...ev[key], [chan]: val };
+    return { ...prev, notify: { ...pn, events: ev } };
+  });
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
+  return (
+    <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 18 }}>
+      <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>
+        Client events always appear in your in-app Alerts. Use the toggles below to also get an email, and set where those emails go. (Text alerts are coming soon.)
+      </div>
+      <div>
+        <label style={lbl}>Owner email — where alert emails are sent</label>
+        <input type="email" inputMode="email" value={base.ownerEmail || ""} placeholder={companyEmail || "you@yourcompany.com"}
+          onChange={e => setField("ownerEmail", e.target.value)} style={field} />
+        {!base.ownerEmail && companyEmail && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>Defaults to your company email ({companyEmail}) until you set one here.</div>}
+      </div>
+      <div>
+        <label style={lbl}>Owner phone — for text alerts (coming soon)</label>
+        <input type="tel" inputMode="tel" value={base.ownerPhone || ""} placeholder="(555) 555-5555"
+          onChange={e => setField("ownerPhone", e.target.value)} style={field} />
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <label style={lbl}>Notify me when…</label>
+        {NOTIFY_EVENTS.map(ev => {
+          const cfg = events[ev.key] || {};
+          return (
+            <div key={ev.key} style={{ border: `1px solid ${T.border}`, borderRadius: 14, padding: "13px 15px", background: T.surface }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{ev.label}</div>
+              <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2, marginBottom: 12 }}>{ev.hint}</div>
+              <div style={{ display: "flex", gap: 22, flexWrap: "wrap" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                  <Toggle on={cfg.inApp !== false} onChange={v => setEvent(ev.key, "inApp", v)} />
+                  <span style={{ fontSize: 13, fontWeight: 600, color: T.text }}>In-app</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                  <Toggle on={!!cfg.email} onChange={v => setEvent(ev.key, "email", v)} />
+                  <span style={{ fontSize: 13, fontWeight: 600, color: T.text }}>Email</span>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEmail, costs, setCosts, budget, setBudget, clients, setClients, invoices, scheduleCfg, setScheduleCfg, team, setTeam, invoicing, setInvoicing, currentUserId, onResetData, serviceTiers, setServiceTiers, onSyncData, onNav, navDock, setNavDock }) {
   const { T, perms } = useApp();
   const fileRef = useRef();
@@ -13906,6 +13991,12 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             <Collapsible title="Messaging & Notifications" subtitle="On My Way texts, email templates, and client notification messages.">
               <SaveBar ctl={emailCtl} T={T} />
               <EmailSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} setBranding={brandCtl.update} />
+            </Collapsible>
+          )}
+          {perms.editSettings && (
+            <Collapsible title="Owner Alerts" subtitle="Which client events notify you, and where alert emails are sent.">
+              <SaveBar ctl={emailCtl} T={T} />
+              <NotificationSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} />
             </Collapsible>
           )}
           {(perms.editSettings || perms.editSchedule) && (
