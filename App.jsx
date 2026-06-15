@@ -9313,7 +9313,7 @@ function CatalogManager({ catalog, setCatalog }) {
   const addInvAmount = () => setTxModal(m => ({ ...m, data: { ...m.data, inventoryOz: String(Math.max(0, num(m.data.inventoryOz) + num(m.addOz))) }, addOz: "" }));
 
   // ---- services: add / edit / delete ----
-  const openAddSvc = () => setSvcModal({ mode: "add", data: { id: `s${Date.now()}`, name: "", price: "", products: [], tests: [] } });
+  const openAddSvc = () => setSvcModal({ mode: "add", data: { id: `s${Date.now()}`, name: "", price: "", price_type: "flat", target_hourly_rate: "", products: [], tests: [] } });
   const openEditSvc = (s) => setSvcModal({ mode: "edit", data: { ...s, products: s.products || [], tests: s.tests || [] } });
   const saveSvc = () => {
     const d = svcModal.data;
@@ -9544,26 +9544,54 @@ function CatalogManager({ catalog, setCatalog }) {
       {svcModal && (
         <Modal title={svcModal.mode === "add" ? "Add Service" : "Edit Service"} onClose={() => setSvcModal(null)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-            <div style={{ display: "flex", gap: 10 }}>
-              <div style={{ flex: 2 }}>
-                <label style={labelStyle}>Service Name</label>
-                <AutocompleteInput
-                  value={svcModal.data.name}
-                  onChange={v => setSvc("name", v)}
-                  historyKey="sps_service_name_history"
-                  placeholder="e.g. Algae Treatment"
-                  style={chipInput}
-                  autoFocus
-                />
-              </div>
-              <div style={{ flex: 1 }}>
-                <label style={labelStyle}>Price</label>
-                <div style={{ position: "relative" }}>
-                  <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>$</span>
-                  <input style={{ ...chipInput, paddingLeft: 22 }} value={svcModal.data.price} onChange={e => setSvc("price", e.target.value.replace(/[^\d.]/g, ""))} placeholder="0" />
-                </div>
-              </div>
+            <div>
+              <label style={labelStyle}>Service Name</label>
+              <AutocompleteInput
+                value={svcModal.data.name}
+                onChange={v => setSvc("name", v)}
+                historyKey="sps_service_name_history"
+                placeholder="e.g. Algae Treatment"
+                style={chipInput}
+                autoFocus
+              />
             </div>
+
+            {/* Feature 3A — pricing model: flat price vs hourly rate, + per-service target $/hr */}
+            {(() => {
+              const ptype = svcModal.data.price_type || "flat";
+              return (
+                <>
+                  <div>
+                    <label style={labelStyle}>Pricing Model</label>
+                    <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 11, padding: 3, gap: 3 }}>
+                      {[["flat", "Flat price"], ["hourly", "Hourly rate"]].map(([val, lbl]) => (
+                        <button key={val} type="button" onClick={() => setSvc("price_type", val)}
+                          style={{ flex: 1, padding: "9px", border: "none", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer", background: ptype === val ? T.surface : "transparent", color: ptype === val ? T.primary : T.textMuted, fontFamily: "inherit", boxShadow: ptype === val ? "0 1px 4px rgba(0,0,0,0.1)" : "none" }}>{lbl}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <div style={{ flex: 1 }}>
+                      <label style={labelStyle}>{ptype === "hourly" ? "Hourly Rate" : "Price"}</label>
+                      <div style={{ position: "relative" }}>
+                        <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>$</span>
+                        <input style={{ ...chipInput, paddingLeft: 22, paddingRight: ptype === "hourly" ? 36 : 12 }} inputMode="decimal" value={svcModal.data.price} onChange={e => setSvc("price", e.target.value.replace(/[^\d.]/g, ""))} placeholder="0" />
+                        {ptype === "hourly" && <span style={{ position: "absolute", right: 11, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>/hr</span>}
+                      </div>
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <label style={labelStyle}>Target $/hr</label>
+                      <div style={{ position: "relative" }}>
+                        <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>$</span>
+                        <input style={{ ...chipInput, paddingLeft: 22, paddingRight: 36 }} inputMode="decimal" value={svcModal.data.target_hourly_rate || ""} onChange={e => setSvc("target_hourly_rate", e.target.value.replace(/[^\d.]/g, ""))} placeholder="0" />
+                        <span style={{ position: "absolute", right: 11, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>/hr</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 11, color: T.textMuted, marginTop: -10 }}>Target hourly rate is this service's profitability benchmark — used to flag undercharged jobs (Feature 3B). Optional.</div>
+                </>
+              );
+            })()}
 
             <div>
               <label style={labelStyle}>Description</label>
