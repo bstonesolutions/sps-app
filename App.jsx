@@ -17569,10 +17569,10 @@ function CPLightbox({ photos, index, onClose, T }) {
   );
 }
 
-function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T }) {
+function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T, vp = {} }) {
   const { tiers } = useApp();
   const [section, setSection] = useState("property"); // "property" | "plan"
-  const [expandedVisit, setExpandedVisit] = useState(null); // index of expanded recent visit
+  const [detailItem, setDetailItem] = useState(null); // { kind:"visit"|"equipment", data } — full-detail overlay
   const [lightbox, setLightbox] = useState(null); // { photos, index }
   const plan = client.plan || "";
   const clientDiv = client.division || "Pond";
@@ -17629,6 +17629,157 @@ function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T }) 
   const history   = client.history   || [];
   const equipment = client.equipment || [];
   const sitePhotos = client.sitePhotos || [];
+  const siteVideos = client.siteVideos || [];
+
+  // ── Full-detail builders (CLIENT-SAFE) — used by the visit / equipment detail
+  //    overlay. They surface only the client's own service info + media; never any
+  //    breakdown, office notes, cost, profit, margin, labor, or technician pay. ──
+  const visitDetail = (h) => {
+    const readings = (h.readings && Object.keys(h.readings).length)
+      ? h.readings
+      : Object.fromEntries([["pH", h.ph],["NH₃", h.ammonia],["NO₂", h.nitrite],["Temp", h.temp]].filter(([,v]) => v && v !== "—"));
+    const hasReadings = Object.keys(readings).length > 0;
+    const photos = h.photos || [];
+    const services = h.services || [];
+    const products = h.products || [];
+    return (
+      <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+        <div>
+          <div style={{ fontSize:20, fontWeight:800, color:T.text, letterSpacing:"-0.02em", display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+            {h.type || "Service Visit"}
+            {h.satisfaction > 0 && <span style={{ fontSize:13, color:"#F59E0B" }}>{"★".repeat(h.satisfaction)}</span>}
+          </div>
+          <div style={{ fontSize:12.5, color:T.textMuted, marginTop:3 }}>{fmtDate(h.date)}{h.tech ? ` · ${h.tech}` : ""}{h.invoice && h.invoice !== "$0" ? ` · ${h.invoice}` : ""}</div>
+        </div>
+        {h.notes && <div style={{ fontSize:13.5, color:T.text, lineHeight:1.6, background:T.surfaceAlt, borderRadius:12, padding:"12px 14px" }}>{h.notes}</div>}
+        {hasReadings && (
+          <div>
+            <div style={{ fontSize:10, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.06em", color:T.textMuted, marginBottom:8 }}>Water Quality</div>
+            <div style={{ display:"grid", gridTemplateColumns:`repeat(${Math.min(Object.keys(readings).length,4)}, 1fr)`, gap:8 }}>
+              {Object.entries(readings).map(([k,v]) => (
+                <div key={k} style={{ background:T.surfaceAlt, borderRadius:12, padding:"12px 6px", textAlign:"center" }}>
+                  <div style={{ fontSize:9, color:T.textMuted, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.04em" }}>{k}</div>
+                  <div style={{ fontSize:19, fontWeight:800, color:T.text, marginTop:2 }}>{v}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {(services.length > 0 || products.length > 0) && (
+          <div>
+            <div style={{ fontSize:10, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.06em", color:T.textMuted, marginBottom:8 }}>Work Done</div>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+              {services.map((s,j) => <span key={`s${j}`} style={{ fontSize:11.5, fontWeight:600, background:hexA(tierColor,0.1), color:tierColor, borderRadius:100, padding:"5px 12px" }}>{typeof s === "string" ? s : s.name}</span>)}
+              {products.map((p,j) => <span key={`p${j}`} style={{ fontSize:11.5, fontWeight:600, background:T.surfaceAlt, color:T.textMuted, borderRadius:100, padding:"5px 12px" }}>{typeof p === "string" ? p : p.name}</span>)}
+            </div>
+          </div>
+        )}
+        {photos.length > 0 && (
+          <div>
+            <div style={{ fontSize:10, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.06em", color:T.textMuted, marginBottom:8 }}>Photos</div>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(120px, 1fr))", gap:8 }}>
+              {photos.map((ph,j) => {
+                const src = typeof ph === "string" ? ph : ph.src;
+                const label = typeof ph === "string" ? "" : ph.label;
+                const lc = label === "Before" ? "#F59E0B" : label === "After" ? "#16a34a" : T.textMuted;
+                return (
+                  <div key={j} onClick={() => setLightbox({ photos, index: j })} style={{ position:"relative", cursor:"pointer", borderRadius:12, overflow:"hidden", border:`1px solid ${T.border}`, aspectRatio:"1" }}>
+                    <img src={src} alt="" style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
+                    {label && <div style={{ position:"absolute", bottom:6, left:6, fontSize:9, fontWeight:800, color:"#fff", background:lc, borderRadius:5, padding:"2px 7px" }}>{label}</div>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const equipmentDetail = (eq) => {
+    const photos = eq.photos || [];
+    const w = warrantyInfo(eq);
+    // CLIENT-SAFE fields only — purchasePrice / linked invoice / any cost are excluded.
+    const facts = [
+      ["Status", eq.status || "Good"],
+      ["Installed", eq.installed],
+      ["Purchased", eq.purchaseDate],
+      ["Serial #", eq.serialNumber],
+      ["Source", eq.origin],
+    ].filter(([,v]) => v);
+    return (
+      <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+        <div style={{ fontSize:20, fontWeight:800, color:T.text, letterSpacing:"-0.02em" }}>{eq.name}</div>
+        {w && (
+          <div style={{ display:"inline-flex", alignSelf:"flex-start", alignItems:"center", gap:6, fontSize:11.5, fontWeight:700, color: w.active ? "#16a34a" : "#C0392B", background: w.active ? "rgba(22,163,74,0.1)" : "rgba(192,57,43,0.08)", borderRadius:100, padding:"5px 12px" }}>
+            <span style={{ width:7, height:7, borderRadius:"50%", background: w.active ? "#16a34a" : "#C0392B" }} />
+            {w.active ? `Under warranty · expires ${w.label} · ${w.monthsLeft} mo left` : `Warranty expired ${w.label}`}
+          </div>
+        )}
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+          {facts.map(([k,v]) => (
+            <div key={k}>
+              <div style={{ fontSize:10, color:T.textMuted, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:3 }}>{k}</div>
+              <div style={{ fontSize:14, fontWeight:600, color:T.text }}>{v}</div>
+            </div>
+          ))}
+        </div>
+        {eq.notes && <div style={{ fontSize:13, color:T.text, lineHeight:1.6, background:T.surfaceAlt, borderRadius:12, padding:"12px 14px" }}>{eq.notes}</div>}
+        {photos.length > 0 && (
+          <div>
+            <div style={{ fontSize:10, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.06em", color:T.textMuted, marginBottom:8 }}>Photos</div>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(120px, 1fr))", gap:8 }}>
+              {photos.map((p,j) => {
+                const src = typeof p === "string" ? p : p.src;
+                const cap = typeof p === "string" ? "" : p.caption;
+                return (
+                  <div key={j} onClick={() => setLightbox({ photos, index: j })} style={{ cursor:"pointer" }}>
+                    <div style={{ position:"relative", borderRadius:12, overflow:"hidden", border:`1px solid ${T.border}`, aspectRatio:"1" }}>
+                      <img src={src} alt="" style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
+                    </div>
+                    {cap && <div style={{ fontSize:10.5, color:T.textMuted, marginTop:4, textAlign:"center", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{cap}</div>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // The detail overlay — full-screen on mobile, centered modal on desktop.
+  const detailOverlay = detailItem && (() => {
+    const isVisit = detailItem.kind === "visit";
+    const content = isVisit ? visitDetail(detailItem.data) : equipmentDetail(detailItem.data);
+    const close = () => setDetailItem(null);
+    if (vp.isDesktop) return (
+      <div onClick={close} style={{ position:"fixed", inset:0, zIndex:450, background:"rgba(0,0,0,0.45)", display:"flex", alignItems:"center", justifyContent:"center", padding:24 }}>
+        <div onClick={e => e.stopPropagation()} style={{ background:T.bg, borderRadius:20, maxWidth:720, width:"100%", maxHeight:"88vh", overflowY:"auto", padding:"18px 24px 24px", boxShadow:"0 24px 64px rgba(0,0,0,0.3)" }}>
+          <div style={{ display:"flex", justifyContent:"flex-end", marginBottom:4 }}>
+            <button onClick={close} aria-label="Close" style={{ width:32, height:32, borderRadius:"50%", border:"none", background:T.surfaceAlt, color:T.textMuted, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
+              <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+          {content}
+        </div>
+      </div>
+    );
+    return (
+      <div style={{ position:"fixed", inset:0, zIndex:450, background:T.bg, display:"flex", flexDirection:"column" }}>
+        <div style={{ height:"env(safe-area-inset-top)" }} />
+        <div style={{ display:"flex", alignItems:"center", gap:8, padding:"12px 16px", borderBottom:`1px solid ${T.border}`, flexShrink:0 }}>
+          <button onClick={close} style={{ background:"none", border:"none", color:T.primary, fontWeight:700, fontSize:14, cursor:"pointer", fontFamily:"inherit", display:"flex", alignItems:"center", gap:4, padding:0 }}>
+            <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+            {pondLbl}
+          </button>
+        </div>
+        <div style={{ flex:1, minHeight:0, overflowY:"auto", WebkitOverflowScrolling:"touch", padding:"18px 18px calc(24px + env(safe-area-inset-bottom))" }}>
+          {content}
+        </div>
+      </div>
+    );
+  })();
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
@@ -17739,139 +17890,77 @@ function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T }) 
         </div>
       )}
 
-      {/* Recent service — tap to expand full detail */}
+      {/* Site videos — the client's own property videos */}
+      {siteVideos.length > 0 && (
+        <div style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, padding:"16px 18px" }}>
+          <div style={{ fontSize:13, fontWeight:800, color:T.text, marginBottom:12 }}>Videos</div>
+          <div style={{ display:"flex", gap:10, overflowX:"auto", WebkitOverflowScrolling:"touch", paddingBottom:2 }}>
+            {siteVideos.map((v,i) => {
+              const src = typeof v === "string" ? v : v.src;
+              return (
+                <video key={i} src={src} controls preload="metadata" playsInline
+                  style={{ flexShrink:0, width:200, height:140, borderRadius:12, objectFit:"cover", background:"#000", border:`1px solid ${T.border}` }} />
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Recent service — tap to open the full visit detail */}
       {history.length > 0 && (
         <div style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, overflow:"hidden" }}>
           <div style={{ padding:"14px 18px", borderBottom:`1px solid ${T.border}`, fontSize:13, fontWeight:800, color:T.text }}>Recent Visits</div>
           {history.slice(0,5).map((h,i) => {
-            const isOpen = expandedVisit === i;
-            const readings = (h.readings && Object.keys(h.readings).length)
-              ? h.readings
-              : Object.fromEntries([["pH", h.ph],["NH₃", h.ammonia],["NO₂", h.nitrite],["Temp", h.temp]].filter(([,v]) => v && v !== "—"));
-            const hasReadings = Object.keys(readings).length > 0;
             const photos = h.photos || [];
-            const services = h.services || [];
-            const products = h.products || [];
-            const hasDetail = hasReadings || photos.length || services.length || products.length || h.notes;
+            const last = i < Math.min(history.length,5)-1;
             return (
-              <div key={i} style={{ borderBottom: i<Math.min(history.length,5)-1 ? `1px solid ${T.border}` : "none" }}>
-                {/* Header row — tappable */}
-                <div onClick={() => hasDetail && setExpandedVisit(isOpen ? null : i)}
-                  style={{ padding:"14px 18px", display:"flex", justifyContent:"space-between", alignItems:"center", gap:10, cursor: hasDetail ? "pointer" : "default" }}>
-                  <div style={{ flex:1, minWidth:0 }}>
-                    <div style={{ fontSize:14, fontWeight:700, color:T.text, display:"flex", alignItems:"center", gap:8 }}>
-                      {h.type || "Service Visit"}
-                      {h.satisfaction > 0 && <span style={{ fontSize:11, color:"#F59E0B" }}>{"★".repeat(h.satisfaction)}</span>}
-                    </div>
-                    <div style={{ fontSize:11.5, color:T.textMuted, marginTop:2 }}>{fmtDate(h.date)}{h.tech ? ` · ${h.tech}` : ""}</div>
+              <button key={i} onClick={() => setDetailItem({ kind:"visit", data:h })}
+                style={{ width:"100%", textAlign:"left", fontFamily:"inherit", cursor:"pointer", background:"none", border:"none", borderBottom: last ? `1px solid ${T.border}` : "none", padding:"14px 18px", display:"flex", alignItems:"center", gap:12 }}>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:14, fontWeight:700, color:T.text, display:"flex", alignItems:"center", gap:8 }}>
+                    {h.type || "Service Visit"}
+                    {h.satisfaction > 0 && <span style={{ fontSize:11, color:"#F59E0B" }}>{"★".repeat(h.satisfaction)}</span>}
                   </div>
-                  <div style={{ display:"flex", alignItems:"center", gap:10, flexShrink:0 }}>
-                    {h.invoice && h.invoice !== "$0" && <div style={{ fontSize:13, fontWeight:700, color:T.text }}>{h.invoice}</div>}
-                    {hasDetail && <div style={{ color:T.textMuted, transform: isOpen ? "rotate(180deg)" : "none", transition:"transform 0.2s" }}><svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M6 9l6 6 6-6"/></svg></div>}
-                  </div>
+                  <div style={{ fontSize:11.5, color:T.textMuted, marginTop:2 }}>{fmtDate(h.date)}{h.tech ? ` · ${h.tech}` : ""}{h.invoice && h.invoice !== "$0" ? ` · ${h.invoice}` : ""}</div>
                 </div>
-
-                {/* Expanded detail */}
-                {isOpen && (
-                  <div style={{ padding:"0 18px 16px", display:"flex", flexDirection:"column", gap:14 }}>
-                    {h.notes && <div style={{ fontSize:13, color:T.text, lineHeight:1.6, background:T.surfaceAlt, borderRadius:12, padding:"11px 14px" }}>{h.notes}</div>}
-
-                    {hasReadings && (
-                      <div>
-                        <div style={{ fontSize:10, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.06em", color:T.textMuted, marginBottom:8 }}>Water Quality</div>
-                        <div style={{ display:"grid", gridTemplateColumns:`repeat(${Math.min(Object.keys(readings).length,4)}, 1fr)`, gap:8 }}>
-                          {Object.entries(readings).map(([k,v]) => (
-                            <div key={k} style={{ background:T.surfaceAlt, borderRadius:12, padding:"10px 6px", textAlign:"center" }}>
-                              <div style={{ fontSize:9, color:T.textMuted, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.04em" }}>{k}</div>
-                              <div style={{ fontSize:18, fontWeight:800, color:T.text, marginTop:2 }}>{v}</div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {(services.length > 0 || products.length > 0) && (
-                      <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
-                        {services.map((s,j) => <span key={`s${j}`} style={{ fontSize:11.5, fontWeight:600, background:hexA(tierColor,0.1), color:tierColor, borderRadius:100, padding:"5px 12px" }}>{typeof s === "string" ? s : s.name}</span>)}
-                        {products.map((p,j) => <span key={`p${j}`} style={{ fontSize:11.5, fontWeight:600, background:T.surfaceAlt, color:T.textMuted, borderRadius:100, padding:"5px 12px" }}>{typeof p === "string" ? p : p.name}</span>)}
-                      </div>
-                    )}
-
-                    {photos.length > 0 && (
-                      <div>
-                        <div style={{ fontSize:10, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.06em", color:T.textMuted, marginBottom:8 }}>Photos</div>
-                        <div style={{ display:"flex", gap:8, overflowX:"auto", WebkitOverflowScrolling:"touch", paddingBottom:2 }}>
-                          {photos.map((ph,j) => {
-                            const src = typeof ph === "string" ? ph : ph.src;
-                            const label = typeof ph === "string" ? "" : ph.label;
-                            const lc = label === "Before" ? "#F59E0B" : label === "After" ? "#16a34a" : T.textMuted;
-                            return (
-                              <div key={j} onClick={() => setLightbox({ photos, index: j })} style={{ flexShrink:0, position:"relative", cursor:"pointer" }}>
-                                <img src={src} alt="" style={{ width:110, height:110, borderRadius:12, objectFit:"cover", display:"block", border:`1px solid ${T.border}` }} />
-                                {label && <div style={{ position:"absolute", bottom:6, left:6, fontSize:9, fontWeight:800, color:"#fff", background:lc, borderRadius:5, padding:"2px 7px" }}>{label}</div>}
-                                <div style={{ position:"absolute", top:6, right:6, width:22, height:22, borderRadius:"50%", background:"rgba(0,0,0,0.45)", display:"flex", alignItems:"center", justifyContent:"center" }}>
-                                  <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="#fff" strokeWidth={2.4} strokeLinecap="round"><path d="M15 3h6v6M14 10l7-7M9 21H3v-6M10 14l-7 7"/></svg>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
+                {photos.length > 0 && (
+                  <div style={{ display:"flex", gap:4, flexShrink:0 }}>
+                    {photos.slice(0,2).map((ph,j) => {
+                      const src = typeof ph === "string" ? ph : ph.src;
+                      return <img key={j} src={src} alt="" style={{ width:38, height:38, borderRadius:8, objectFit:"cover", border:`1px solid ${T.border}` }} />;
+                    })}
+                    {photos.length > 2 && <div style={{ width:38, height:38, borderRadius:8, background:T.surfaceAlt, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, color:T.textMuted }}>+{photos.length-2}</div>}
                   </div>
                 )}
-              </div>
+                <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{ opacity:0.45, flexShrink:0 }}><path d="M9 6l6 6-6 6"/></svg>
+              </button>
             );
           })}
         </div>
       )}
 
-      {/* Equipment */}
+      {/* Equipment — tap to open the full equipment detail */}
       {equipment.length > 0 && (
         <div style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, overflow:"hidden" }}>
           <div style={{ padding:"14px 18px", borderBottom:`1px solid ${T.border}`, fontSize:13, fontWeight:800, color:T.text }}>Equipment</div>
           {equipment.map((eq,i) => {
             const photos = eq.photos || [];
+            const thumb = photos.length ? (typeof photos[0] === "string" ? photos[0] : photos[0].src) : null;
+            const last = i < equipment.length-1;
             return (
-              <div key={i} style={{ padding:"14px 18px", borderBottom: i<equipment.length-1 ? `1px solid ${T.border}` : "none" }}>
-                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:10 }}>
-                  <div style={{ flex:1, minWidth:0 }}>
-                    <div style={{ fontSize:14, fontWeight:700, color:T.text }}>{eq.name}</div>
-                    <div style={{ fontSize:11, color:T.textMuted, marginTop:2, display:"flex", flexWrap:"wrap", gap:"2px 10px" }}>
-                      {eq.installed && <span>Installed {eq.installed}</span>}
-                      {eq.serialNumber && <span>S/N {eq.serialNumber}</span>}
-                    </div>
-                  </div>
-                  <div style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
-                    <div style={{ width:7, height:7, borderRadius:"50%", background: eq.status==="Good" ? "#16a34a" : eq.status==="Monitor" ? "#F59E0B" : T.primary }} />
-                    <span style={{ fontSize:11, color:T.textMuted, fontWeight:600 }}>{eq.status || "Good"}</span>
-                  </div>
+              <button key={i} onClick={() => setDetailItem({ kind:"equipment", data:eq })}
+                style={{ width:"100%", textAlign:"left", fontFamily:"inherit", cursor:"pointer", background:"none", border:"none", borderBottom: last ? `1px solid ${T.border}` : "none", padding:"14px 18px", display:"flex", alignItems:"center", gap:12 }}>
+                {thumb && <img src={thumb} alt="" style={{ width:42, height:42, borderRadius:10, objectFit:"cover", border:`1px solid ${T.border}`, flexShrink:0 }} />}
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:14, fontWeight:700, color:T.text, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{eq.name}</div>
+                  <div style={{ fontSize:11, color:T.textMuted, marginTop:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{eq.installed ? `Installed ${eq.installed}` : (eq.serialNumber ? `S/N ${eq.serialNumber}` : (photos.length ? `${photos.length} photo${photos.length!==1?"s":""}` : "Tap for details"))}</div>
                 </div>
-                {(() => { const w = warrantyInfo(eq); return w ? (
-                  <div style={{ marginTop:8, display:"inline-flex", alignItems:"center", gap:6, fontSize:11.5, fontWeight:700, color: w.active ? "#16a34a" : "#C0392B", background: w.active ? "rgba(22,163,74,0.1)" : "rgba(192,57,43,0.08)", borderRadius:100, padding:"4px 11px" }}>
-                    <span style={{ width:7, height:7, borderRadius:"50%", background: w.active ? "#16a34a" : "#C0392B" }} />
-                    {w.active ? `Under warranty · expires ${w.label} · ${w.monthsLeft} mo left` : `Warranty expired ${w.label}`}
-                  </div>
-                ) : null; })()}
-                {eq.notes && <div style={{ fontSize:12, color:T.textMuted, marginTop:6, lineHeight:1.5 }}>{eq.notes}</div>}
-                {photos.length > 0 && (
-                  <div style={{ display:"flex", gap:8, marginTop:10, overflowX:"auto", WebkitOverflowScrolling:"touch", paddingBottom:2 }}>
-                    {photos.map((p, j) => {
-                      const src = typeof p === "string" ? p : p.src;
-                      const cap = typeof p === "string" ? "" : p.caption;
-                      return (
-                        <div key={j} onClick={() => setLightbox({ photos, index: j })} style={{ flexShrink:0, cursor:"pointer", position:"relative" }}>
-                          <img src={src} alt="" style={{ width:92, height:92, borderRadius:12, objectFit:"cover", display:"block", border:`1px solid ${T.border}` }} />
-                          <div style={{ position:"absolute", top:5, right:5, width:20, height:20, borderRadius:"50%", background:"rgba(0,0,0,0.45)", display:"flex", alignItems:"center", justifyContent:"center" }}>
-                            <svg viewBox="0 0 24 24" width={11} height={11} fill="none" stroke="#fff" strokeWidth={2.4} strokeLinecap="round"><path d="M15 3h6v6M14 10l7-7M9 21H3v-6M10 14l-7 7"/></svg>
-                          </div>
-                          {cap && <div style={{ fontSize:10, color:T.textMuted, marginTop:3, textAlign:"center", maxWidth:92, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{cap}</div>}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
+                <div style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
+                  <div style={{ width:7, height:7, borderRadius:"50%", background: eq.status==="Good" ? "#16a34a" : eq.status==="Monitor" ? "#F59E0B" : T.primary }} />
+                  <span style={{ fontSize:11, color:T.textMuted, fontWeight:600 }}>{eq.status || "Good"}</span>
+                </div>
+                <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{ opacity:0.45, flexShrink:0 }}><path d="M9 6l6 6-6 6"/></svg>
+              </button>
             );
           })}
         </div>
@@ -17912,7 +18001,7 @@ function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T }) 
       )}
 
       {/* Welcoming empty state for brand-new clients */}
-      {history.length === 0 && equipment.length === 0 && sitePhotos.length === 0 && (client.documents || []).length === 0 && (
+      {history.length === 0 && equipment.length === 0 && sitePhotos.length === 0 && siteVideos.length === 0 && (client.documents || []).length === 0 && (
         <div style={{ background: T.surface, border: `1px dashed ${T.border}`, borderRadius: 18, padding: "28px 20px", textAlign: "center" }}>
           <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(tierColor, 0.1), color: tierColor, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 12px" }}>
             <svg viewBox="0 0 24 24" width={26} height={26} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
@@ -17924,6 +18013,7 @@ function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T }) 
         </div>
       )}
 
+      {detailOverlay}
       {lightbox && <CPLightbox photos={lightbox.photos} index={lightbox.index} onClose={() => setLightbox(null)} T={T} />}
     </div>
   );
@@ -18872,8 +18962,8 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, team
         <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
       )}
       {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} team={team} onNav={setPage} onRateVisit={onRateVisit} T={T} vp={vp} />}
-      {!settingsOpen && page === "cp_property" && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
-      {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
+      {!settingsOpen && page === "cp_property" && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
+      {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
       {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} vp={vp} />}
       {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} onSubmit={onServiceRequest} T={T} vp={vp} />}
       {!settingsOpen && page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
