@@ -2875,6 +2875,18 @@ function Modal({ title, children, onClose }) {
   );
 }
 
+// The tier shown in the Client Hub must match the (division-aware) Service Tiers
+// screen. Service Tiers reads a client's plan for a division from c.plans[division];
+// the legacy c.plan field is only kept in sync "when primary", so restored/sparse
+// records can have the two disagree. Derive the Hub's tier the same way: prefer the
+// client's plan for their own division, fall back to the legacy c.plan.
+const effectiveTier = (c) => {
+  if (c && c.division && c.plans && Object.prototype.hasOwnProperty.call(c.plans, c.division)) {
+    return c.plans[c.division] || "";
+  }
+  return (c && c.plan) || "";
+};
+
 // Dense, sortable, full-width clients table — desktop "Table" view (Phase 3).
 function ClientsTable({ items, clientSpend, tiers, onSelect, T }) {
   const [sort, setSort] = useState({ key: "name", dir: "asc" });
@@ -2894,7 +2906,7 @@ function ClientsTable({ items, clientSpend, tiers, onSelect, T }) {
       case "name":     return ((a.name || "").localeCompare(b.name || "")) * dir;
       case "address":  return ((a.address || "").localeCompare(b.address || "")) * dir;
       case "division": return (divOf(a).localeCompare(divOf(b))) * dir;
-      case "tier":     return ((a.plan || "").localeCompare(b.plan || "")) * dir;
+      case "tier":     return (effectiveTier(a).localeCompare(effectiveTier(b))) * dir;
       case "status":   return ((a.status || "Active").localeCompare(b.status || "Active")) * dir;
       case "spend":    return (clientSpend(a) - clientSpend(b)) * dir;
       default: return 0;
@@ -2918,7 +2930,8 @@ function ClientsTable({ items, clientSpend, tiers, onSelect, T }) {
         </thead>
         <tbody>
           {sorted.map(c => {
-            const pm = planMeta(c.plan, T, tiers);
+            const tier = effectiveTier(c);
+            const pm = planMeta(tier, T, tiers);
             const inactive = c.status === "Inactive";
             return (
               <tr key={c.id} onClick={() => onSelect(c)}
@@ -2928,7 +2941,7 @@ function ClientsTable({ items, clientSpend, tiers, onSelect, T }) {
                 <td style={{ padding: "11px 14px", fontWeight: 700, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.name}</td>
                 <td style={{ padding: "11px 14px", color: T.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.address || "—"}</td>
                 <td style={{ padding: "11px 14px", color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{divOf(c)}</td>
-                <td style={{ padding: "11px 14px", whiteSpace: "nowrap" }}>{c.plan ? <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 100, background: pm.bg, color: pm.color || pm.text }}>{c.plan}</span> : <span style={{ fontSize: 11, color: T.textMuted }}>No tier</span>}</td>
+                <td style={{ padding: "11px 14px", whiteSpace: "nowrap" }}>{tier ? <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 100, background: pm.bg, color: pm.color || pm.text }}>{tier}</span> : <span style={{ fontSize: 11, color: T.textMuted }}>No tier</span>}</td>
                 <td style={{ padding: "11px 14px", whiteSpace: "nowrap", color: inactive ? T.textMuted : "#16a34a", fontWeight: 600, fontSize: 12.5 }}>{c.status || "Active"}</td>
                 <td style={{ padding: "11px 14px", textAlign: "right", fontWeight: 700, color: T.text, whiteSpace: "nowrap" }}>{money(clientSpend(c))}</td>
               </tr>
@@ -2964,7 +2977,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
   const inactiveCount = clients.filter(c => c.status === "Inactive").length;
 
   // Determine available tiers and divisions for filter pills
-  const availableTiers = [...new Set(clients.map(c => c.plan || "").filter(Boolean))].sort();
+  const availableTiers = [...new Set(clients.map(c => effectiveTier(c)).filter(Boolean))].sort();
   const availableDivs  = [...new Set(clients.map(c => c.division || "").filter(Boolean))].sort();
 
   const filtered = clients
@@ -2974,10 +2987,11 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
       if (!matchesSearch) return false;
       // Active/inactive
       if (!q && !showInactive && c.status === "Inactive") return false;
-      // Tier filter
+      // Tier filter (division-aware, matches Service Tiers)
       if (filterTier !== "all") {
-        if (filterTier === "__none__" && c.plan) return false;
-        if (filterTier !== "__none__" && c.plan !== filterTier) return false;
+        const tier = effectiveTier(c);
+        if (filterTier === "__none__" && tier) return false;
+        if (filterTier !== "__none__" && tier !== filterTier) return false;
       }
       // Division filter
       if (filterDiv !== "all" && c.division !== filterDiv) return false;
@@ -3165,7 +3179,8 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
           </div>
         )}
         {filtered.map(c => {
-          const pm = planMeta(c.plan, T, tiers);
+          const tier = effectiveTier(c);
+          const pm = planMeta(tier, T, tiers);
           const isSel = !!selected[c.id];
           const isActive = selectedId != null && String(c.id) === String(selectedId);
           return (
@@ -3198,8 +3213,8 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
                 </div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 5, alignItems: "flex-end", flexShrink: 0 }}>
-                {c.plan
-                  ? <Badge label={c.plan} bg={pm.bg} color={pm.color || pm.text} sm />
+                {tier
+                  ? <Badge label={tier} bg={pm.bg} color={pm.color || pm.text} sm />
                   : <span style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, border: `1px solid ${T.border}`, borderRadius: 8, padding: "2px 7px" }}>No tier</span>
                 }
                 {(() => { const ns = nextServiceFor(c, schedule); return ns && <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 600 }}>{ns}</div>; })()}
@@ -20396,8 +20411,10 @@ export default function App({ authEmail = "", onSignOut }) {
   };
 
   // batch client operations
-  const handleBatchUpdate = (ids, changes) =>
+  const handleBatchUpdate = (ids, changes) => {
     setClients(cs => cs.map(c => ids.includes(c.id) ? { ...c, ...changes } : c));
+    setSelectedClient(sc => sc && ids.includes(sc.id) ? { ...sc, ...changes } : sc);
+  };
   const handleBatchDelete = (ids) =>
     setClients(cs => cs.filter(c => !ids.includes(c.id)));
   const handleBatchSchedule = (ids) => {
