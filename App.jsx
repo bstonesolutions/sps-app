@@ -14259,7 +14259,7 @@ function StaffChat({ client, currentUser, T, onBack }) {
 }
 
 // ── Client messages tab ──
-function CPMessages({ client, branding, onSubmit, T }) {
+function CPMessages({ client, branding, onSubmit, T, vp = {} }) {
   const [view, setView] = useState("messages"); // "messages" | "request"
 
   if (view === "request") {
@@ -14274,22 +14274,31 @@ function CPMessages({ client, branding, onSubmit, T }) {
     );
   }
 
+  const inner = (
+    <div style={{ display:"flex", flexDirection:"column", flex:1, ...(vp.isDesktop ? {} : { padding:"0 18px" }), overflow:"hidden", pointerEvents:"all" }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", paddingTop:12, paddingBottom:10, flexShrink:0 }}>
+        <div>
+          <div style={{ fontSize:22, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>Messages</div>
+          <div style={{ fontSize:14, color:T.textMuted, marginTop:3 }}>Chat with {branding?.companyName || "us"}</div>
+        </div>
+        <button onClick={() => setView("request")}
+          style={{ display:"flex", alignItems:"center", gap:7, background:T.primary, color:"#fff", border:"none", borderRadius:12, padding:"9px 16px", fontWeight:700, fontSize:13, cursor:"pointer", fontFamily:"inherit", flexShrink:0, boxShadow:`0 3px 12px ${hexA(T.primary,0.3)}` }}>
+          <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          Request Service
+        </button>
+      </div>
+      <ChatThread clientId={client.id} sender="client" senderName={client.name} T={T} />
+    </div>
+  );
+
+  // Desktop: in-flow inside the portal's main column (sized to the viewport so the
+  // thread scrolls internally). Mobile: a fixed overlay between the header and bottom nav.
+  if (vp.isDesktop) return (
+    <div style={{ display:"flex", flexDirection:"column", height:"calc(100vh - 116px)" }}>{inner}</div>
+  );
   return (
     <div style={{ display:"flex", flexDirection:"column", position:"fixed", top:0, left:0, right:0, bottom:0, paddingTop:"calc(56px + env(safe-area-inset-top))", paddingBottom:"calc(70px + env(safe-area-inset-bottom))", background:"transparent", zIndex:1, pointerEvents:"none" }}>
-      <div style={{ display:"flex", flexDirection:"column", flex:1, padding:"0 18px", overflow:"hidden", pointerEvents:"all" }}>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", paddingTop:12, paddingBottom:10, flexShrink:0 }}>
-          <div>
-            <div style={{ fontSize:22, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>Messages</div>
-            <div style={{ fontSize:14, color:T.textMuted, marginTop:3 }}>Chat with {branding?.companyName || "us"}</div>
-          </div>
-          <button onClick={() => setView("request")}
-            style={{ display:"flex", alignItems:"center", gap:7, background:T.primary, color:"#fff", border:"none", borderRadius:12, padding:"9px 16px", fontWeight:700, fontSize:13, cursor:"pointer", fontFamily:"inherit", flexShrink:0, boxShadow:`0 3px 12px ${hexA(T.primary,0.3)}` }}>
-            <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"><path d="M12 5v14M5 12h14"/></svg>
-            Request Service
-          </button>
-        </div>
-        <ChatThread clientId={client.id} sender="client" senderName={client.name} T={T} />
-      </div>
+      {inner}
     </div>
   );
 }
@@ -18687,6 +18696,59 @@ function CPSettings({ client, branding, prefs, setPrefs, T, onSignOut, isStaffPr
   );
 }
 
+// Desktop-only left sidebar for the client portal — mirrors the staff DesktopSidebar
+// so a client on a computer gets the same upgraded navigation experience.
+function CPDesktopSidebar({ page, settingsOpen, portalUnread, branding, client, isStaffPreview, T, onNav, onOpenSettings, onRefresh, onSignOut }) {
+  return (
+    <aside style={{ width: 244, flexShrink: 0, height: "100%", background: T.surface, borderRight: `1px solid ${T.border}`, display: "flex", flexDirection: "column" }}>
+      {/* Logo + portal name */}
+      <div style={{ padding: "20px 18px 16px", display: "flex", alignItems: "center", gap: 11, borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
+        <div style={{ width: 38, height: 38, borderRadius: 11, background: T.primary, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, boxShadow: `0 2px 8px ${hexA(T.primary, 0.35)}` }}>
+          {branding.logoType === "image" && branding.logoImage
+            ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            : <span style={{ fontSize: 19 }}>{branding.logoEmoji || "💧"}</span>}
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", lineHeight: 1.15, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.portalAppName || branding.companyName}</div>
+          <div style={{ fontSize: 11, color: T.textMuted, lineHeight: 1.2 }}>Client Portal</div>
+        </div>
+      </div>
+      {/* Nav items */}
+      <nav style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 3 }}>
+        {CLIENT_NAV.map(n => {
+          const active = (page === n.id || (n.id === "cp_property" && (page === "cp_pond" || page === "cp_service" || page === "cp_history"))) && !settingsOpen;
+          return (
+            <button key={n.id} onClick={() => onNav(n.id)}
+              style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 13px", border: "none", borderRadius: 11, background: active ? T.primary : "transparent", color: active ? "#fff" : T.text, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%", fontWeight: active ? 700 : 600, fontSize: 14, letterSpacing: "-0.01em" }}>
+              <CIcon name={n.icon} size={19} />
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n.label}</span>
+              {n.id === "cp_messages" && portalUnread > 0 && <span style={{ minWidth: 18, height: 18, borderRadius: 9, background: active ? "rgba(255,255,255,0.25)" : T.primary, color: "#fff", fontSize: 11, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 5px", flexShrink: 0 }}>{portalUnread}</span>}
+            </button>
+          );
+        })}
+      </nav>
+      {/* Footer: refresh + settings + account + sign out */}
+      <div style={{ padding: 12, borderTop: `1px solid ${T.border}`, display: "flex", flexDirection: "column", gap: 8, flexShrink: 0 }}>
+        <button onClick={onRefresh}
+          style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 13px", border: "none", borderRadius: 10, background: T.surfaceAlt, color: T.text, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600, width: "100%" }}>
+          <Icon name="refresh" size={15} /> Refresh
+        </button>
+        <button onClick={onOpenSettings}
+          style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 13px", border: "none", borderRadius: 10, background: settingsOpen ? hexA(T.primary, 0.12) : "transparent", color: settingsOpen ? T.primary : T.text, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600, width: "100%" }}>
+          <Icon name="settings" size={15} /> Settings
+        </button>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "2px 4px" }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{client.name}</div>
+            {client.email && <div style={{ fontSize: 10.5, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{client.email}</div>}
+          </div>
+          {!isStaffPreview && <button onClick={onSignOut} style={{ flexShrink: 0, background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button>}
+        </div>
+      </div>
+    </aside>
+  );
+}
+
 function SPSClientPortal({ client, schedule, invoices, estimates, branding, team = [], T: globalT, fontStack, onSignOut, onServiceRequest, onApproveEstimate, onUpgradeRequest, onRateVisit, isStaffPreview = false }) {
   // Client prefs stored in localStorage — personal per-device settings
   const prefsKey = `sps_client_prefs_${client.id}`;
@@ -18732,9 +18794,29 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, team
   }, [client.id]);
   const vp = useViewport();
   const wide = vp.isTablet || vp.isDesktop;
+  // On a real client's desktop browser, render the upgraded sidebar shell (same as the
+  // staff side). Staff "Preview Portal as X" stays in the phone layout so its fixed
+  // overlay isn't disturbed.
+  const isDesktopShell = vp.isDesktop && !isStaffPreview;
+
+  // The portal screens — extracted so both the mobile (header + bottom nav) and the
+  // desktop (sidebar) shells render them without duplication.
+  const screens = (
+    <SectionErrorBoundary key={settingsOpen ? "cp_settings" : page}>
+      {settingsOpen && (
+        <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
+      )}
+      {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} team={team} onNav={setPage} onRateVisit={onRateVisit} T={T} vp={vp} />}
+      {!settingsOpen && page === "cp_property" && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
+      {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
+      {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} />}
+      {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} onSubmit={onServiceRequest} T={T} vp={vp} />}
+      {!settingsOpen && page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
+    </SectionErrorBoundary>
+  );
 
   return (
-    <div style={{ fontFamily: fontStack, background: T.bg, display: "flex", flexDirection: "column", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ...(isStaffPreview ? { position: "relative", minHeight: "100%" } : { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden" }) }}>
+    <div style={{ fontFamily: fontStack, background: T.bg, display: "flex", flexDirection: isDesktopShell ? "row" : "column", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ...(isStaffPreview ? { position: "relative", minHeight: "100%" } : { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden" }) }}>
       <style>{`
         * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
         ${isStaffPreview ? "" : `/* Lock the document so only <main> scrolls — position:fixed on <body>
@@ -18758,7 +18840,13 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, team
         input[type="time"]::-webkit-calendar-picker-indicator:hover { background: ${hexA(T.primary, 0.1)}; }
       `}</style>
 
-      {/* Header */}
+      {isDesktopShell && (
+        <CPDesktopSidebar page={page} settingsOpen={settingsOpen} portalUnread={portalUnread} branding={branding} client={client} isStaffPreview={isStaffPreview} T={T}
+          onNav={(id) => { setPage(id); setSettingsOpen(false); }} onOpenSettings={() => setSettingsOpen(s => !s)} onRefresh={() => window.location.reload()} onSignOut={onSignOut} />
+      )}
+
+      {/* Header (mobile only — desktop uses the sidebar) */}
+      {!isDesktopShell && (
       <header style={{
         background: hexA(T.surface, 0.88),
         backdropFilter: "saturate(200%) blur(28px)",
@@ -18796,26 +18884,23 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, team
           </div>
         </div>
       </header>
+      )}
 
-      {/* Main content — the only scrolling element (not in staff preview, which scrolls outside) */}
-      <main style={{ flex: 1, ...(isStaffPreview ? {} : { minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }), padding: "24px 18px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: 28, fontSize: `${textScale}em` }}>
-        {/* Keyed so navigating to another tab remounts a fresh boundary, clearing
-            any prior error. A render crash here shows a friendly recoverable card
-            instead of unmounting the whole app to the crimson background. */}
-        <SectionErrorBoundary key={settingsOpen ? "cp_settings" : page}>
-        {settingsOpen && (
-          <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
-        )}
-        {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} team={team} onNav={setPage} onRateVisit={onRateVisit} T={T} vp={vp} />}
-        {!settingsOpen && page === "cp_property" && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
-        {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
-        {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} />}
-        {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} onSubmit={onServiceRequest} T={T} />}
-        {!settingsOpen && page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
-        </SectionErrorBoundary>
-      </main>
+      {/* Main content — desktop docks beside the sidebar; on mobile <main> is the only scroller */}
+      {isDesktopShell ? (
+        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+          <main style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "32px 40px", fontSize: `${textScale}em` }}>
+            <div style={{ maxWidth: 1080, margin: "0 auto", width: "100%" }}>{screens}</div>
+          </main>
+        </div>
+      ) : (
+        <main style={{ flex: 1, ...(isStaffPreview ? {} : { minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }), padding: "24px 18px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: 28, fontSize: `${textScale}em` }}>
+          {screens}
+        </main>
+      )}
 
-      {/* Bottom nav — a non-scrolling flex child, frozen at the bottom */}
+      {/* Bottom nav — mobile only; a non-scrolling flex child frozen at the bottom */}
+      {!isDesktopShell && (
       <nav style={{
         position: "relative", flexShrink: 0,
         background: hexA(T.surface, 0.88),
@@ -18843,6 +18928,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, team
           );
         })}
       </nav>
+      )}
     </div>
   );
 }
