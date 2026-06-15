@@ -7989,7 +7989,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
 
                 {/* Secondary row */}
                 <div style={{ display: "flex", gap: 7 }}>
-                  {perms.editSchedule && (
+                  {perms.scheduleAddRemove && (
                     <button onClick={e => { e.stopPropagation(); setEditStopModal({ stop: s, dayDate }); }}
                       style={{ flex: 1, background: "transparent", color: T.textMuted, border: `1.5px solid ${T.border}`, borderRadius: 11, padding: "10px 6px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
                       <Icon name="edit" size={14} /> Edit
@@ -8015,7 +8015,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                         : <><svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 21s7-5.5 7-11a7 7 0 0 0-14 0c0 5.5 7 11 7 11z"/><circle cx="12" cy="10" r="2.5"/></svg> I'm Here</>}
                     </button>
                   )}
-                  {perms.editSchedule && (
+                  {perms.scheduleAddRemove && (
                     <button onClick={e => { e.stopPropagation(); if (confirm(`Delete this stop for ${c?.name || "this client"}? This can't be undone.`)) deleteStop(dayDate, s.sid); }}
                       style={{ width: 44, flexShrink: 0, background: "transparent", color: "#C0392B", border: `1.5px solid ${hexA("#C0392B", 0.3)}`, borderRadius: 11, padding: "10px 0", cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center" }}
                       title="Delete stop">
@@ -8040,7 +8040,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
         <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Schedule</h2>
         {schedTab === "schedule" && (selectMode ? (
           <button onClick={exitSelect} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Done</button>
-        ) : perms.editSchedule ? (
+        ) : perms.scheduleAddRemove ? (
           <div style={{ display: "flex", gap: 8 }}>
             {allStops.length > 0 && <Btn variant="ghost" sm onClick={() => setSelectMode(true)}>Select</Btn>}
             <Btn variant="ghost" sm onClick={() => setShowBulkAdd(true)}>Bulk Add</Btn>
@@ -8051,14 +8051,14 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
 
       {/* Tab switcher */}
       <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 11, padding: 3, gap: 3, marginBottom: 18 }}>
-        {[["schedule", "Schedule"], ["routes", "Route Assignments"]].map(([id, label]) => (
+        {[["schedule", "Schedule"], ...(perms.scheduleReorder ? [["routes", "Route Assignments"]] : [])].map(([id, label]) => (
           <button key={id} onClick={() => setSchedTab(id)} style={{ flex: 1, padding: "8px", border: "none", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer", background: schedTab === id ? T.surface : "transparent", color: schedTab === id ? T.primary : T.textMuted, fontFamily: "inherit", boxShadow: schedTab === id ? "0 1px 4px rgba(0,0,0,0.1)" : "none", transition: "all 0.15s" }}>
             {label}
           </button>
         ))}
       </div>
 
-      {schedTab === "routes" && (
+      {schedTab === "routes" && perms.scheduleReorder && (
         <SectionErrorBoundary>
           <RouteAssignmentsTab
             clients={clients}
@@ -8090,8 +8090,8 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
         <div style={{ textAlign: "center", padding: "50px 20px", color: T.textMuted }}>
           <div style={{ width: 56, height: 56, borderRadius: 18, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 14px" }}><Icon name="calendar" size={28} /></div>
           <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 6 }}>No stops scheduled</div>
-          <div style={{ fontSize: 13, marginBottom: 18 }}>{perms.editSchedule ? "Add your first service stop to build the route." : "No stops have been scheduled yet."}</div>
-          {perms.editSchedule && <Btn onClick={() => setShowAdd(true)}>+ Add Stop</Btn>}
+          <div style={{ fontSize: 13, marginBottom: 18 }}>{perms.scheduleAddRemove ? "Add your first service stop to build the route." : "No stops have been scheduled yet."}</div>
+          {perms.scheduleAddRemove && <Btn onClick={() => setShowAdd(true)}>+ Add Stop</Btn>}
         </div>
       )}
 
@@ -8158,8 +8158,8 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                 <div style={{ textAlign: "center", padding: "44px 20px", color: T.textMuted }}>
                   <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="calendar" size={26} /></div>
                   <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 6 }}>No stops this day</div>
-                  {perms.editSchedule && <div style={{ fontSize: 13, marginBottom: 16 }}>Add a stop to start building this route.</div>}
-                  {perms.editSchedule && <Btn onClick={() => setShowAdd(true)}>+ Add Stop</Btn>}
+                  {perms.scheduleAddRemove && <div style={{ fontSize: 13, marginBottom: 16 }}>Add a stop to start building this route.</div>}
+                  {perms.scheduleAddRemove && <Btn onClick={() => setShowAdd(true)}>+ Add Stop</Btn>}
                 </div>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -10552,6 +10552,10 @@ function AdvancedPermsEditor({ member, onChange }) {
             {eff.editSettings && row("editBranding", "Branding & appearance", "Logo, colors, fonts, portal")}
             {eff.seeCostsBudget && row("editCosts", "Costs & labor", "Cost assumptions and rates")}
             {eff.editSettings && row("editNotifications", "Messaging & alerts", "Templates, Owner Alerts, reminders")}
+          </>)}
+          {eff.editSchedule && group("Schedule", <>
+            {row("scheduleAddRemove", "Add / remove stops", "Add, edit, and delete stops")}
+            {row("scheduleReorder", "Reorder & assign routes", "The Route Assignments tab")}
           </>)}
         </div>
       )}
