@@ -5471,7 +5471,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
 
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
   const smallInput = { width: "100%", padding: "9px 10px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "center" };
-  const sectionGap = { marginBottom: 20 };
+  const sectionGap = { marginBottom: 18 };
 
   if (done) {
     return (
@@ -6081,7 +6081,7 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
       )}
 
       {/* Services — tap to add; price is editable per stop */}
-      <div style={{ marginBottom: 16 }}>
+      <div style={{ marginBottom: 18 }}>
         <label style={labelStyle}>Services</label>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginBottom: selClientIds.length || true ? 0 : 0 }}>
           {catalog.services.map(s => (
@@ -6111,7 +6111,7 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
       </div>
 
       {/* Products */}
-      <div style={{ marginBottom: 22 }}>
+      <div style={{ marginBottom: 18 }}>
         <label style={labelStyle}>Products</label>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
           {catalog.products.map(p => (
@@ -9543,7 +9543,7 @@ function CatalogManager({ catalog, setCatalog }) {
       {/* Service editor modal */}
       {svcModal && (
         <Modal title={svcModal.mode === "add" ? "Add Service" : "Edit Service"} onClose={() => setSvcModal(null)}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
             <div style={{ display: "flex", gap: 10 }}>
               <div style={{ flex: 2 }}>
                 <label style={labelStyle}>Service Name</label>
@@ -10649,7 +10649,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
 
   return (
     <Modal title={invoice ? `Edit ${inv.number}` : "New Invoice"} onClose={onClose}>
-      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
         <div style={{ display: "flex", gap: 10 }}>
           <div style={{ flex: 2 }}>
             <label style={label}>Client</label>
