@@ -2802,7 +2802,72 @@ function Modal({ title, children, onClose }) {
   );
 }
 
-function ClientList({ clients, invoices, schedule, vp = {}, selectedId, onSelect, onAdd, onImport, onImportHistory, onFindDuplicates, onBatchUpdate, onBatchDelete, onBatchSchedule }) {
+// Dense, sortable, full-width clients table — desktop "Table" view (Phase 3).
+function ClientsTable({ items, clientSpend, tiers, onSelect, T }) {
+  const [sort, setSort] = useState({ key: "name", dir: "asc" });
+  const money = (n) => `$${Math.round(n || 0).toLocaleString()}`;
+  const divOf = (c) => c.division || (clientServices(c, tiers)[0]?.div) || "—";
+  const cols = [
+    { key: "name",     label: "Name",     align: "left",  w: "22%" },
+    { key: "address",  label: "Address",  align: "left",  w: "30%" },
+    { key: "division", label: "Division", align: "left",  w: "14%" },
+    { key: "tier",     label: "Tier",     align: "left",  w: "13%" },
+    { key: "status",   label: "Status",   align: "left",  w: "10%" },
+    { key: "spend",    label: "Spend",    align: "right", w: "11%" },
+  ];
+  const sorted = [...items].sort((a, b) => {
+    const dir = sort.dir === "asc" ? 1 : -1;
+    switch (sort.key) {
+      case "name":     return ((a.name || "").localeCompare(b.name || "")) * dir;
+      case "address":  return ((a.address || "").localeCompare(b.address || "")) * dir;
+      case "division": return (divOf(a).localeCompare(divOf(b))) * dir;
+      case "tier":     return ((a.plan || "").localeCompare(b.plan || "")) * dir;
+      case "status":   return ((a.status || "Active").localeCompare(b.status || "Active")) * dir;
+      case "spend":    return (clientSpend(a) - clientSpend(b)) * dir;
+      default: return 0;
+    }
+  });
+  const click = (key) => setSort(s => s.key === key
+    ? { key, dir: s.dir === "asc" ? "desc" : "asc" }
+    : { key, dir: key === "spend" ? "desc" : "asc" });
+  return (
+    <div style={{ marginTop: 4 }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: 13.5 }}>
+        <thead>
+          <tr>
+            {cols.map(c => (
+              <th key={c.key} onClick={() => click(c.key)}
+                style={{ position: "sticky", top: 0, background: T.bg, width: c.w, textAlign: c.align, padding: "10px 14px", borderBottom: `1.5px solid ${T.border}`, color: sort.key === c.key ? T.primary : T.textMuted, fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", cursor: "pointer", whiteSpace: "nowrap", userSelect: "none", zIndex: 1 }}>
+                {c.label}{sort.key === c.key ? (sort.dir === "asc" ? " ↑" : " ↓") : ""}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map(c => {
+            const pm = planMeta(c.plan, T, tiers);
+            const inactive = c.status === "Inactive";
+            return (
+              <tr key={c.id} onClick={() => onSelect(c)}
+                style={{ cursor: "pointer", borderBottom: `1px solid ${T.border}`, opacity: inactive ? 0.6 : 1 }}
+                onMouseEnter={e => e.currentTarget.style.background = hexA(T.primary, 0.04)}
+                onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                <td style={{ padding: "11px 14px", fontWeight: 700, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.name}</td>
+                <td style={{ padding: "11px 14px", color: T.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.address || "—"}</td>
+                <td style={{ padding: "11px 14px", color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{divOf(c)}</td>
+                <td style={{ padding: "11px 14px", whiteSpace: "nowrap" }}>{c.plan ? <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 100, background: pm.bg, color: pm.color || pm.text }}>{c.plan}</span> : <span style={{ fontSize: 11, color: T.textMuted }}>No tier</span>}</td>
+                <td style={{ padding: "11px 14px", whiteSpace: "nowrap", color: inactive ? T.textMuted : "#16a34a", fontWeight: 600, fontSize: 12.5 }}>{c.status || "Active"}</td>
+                <td style={{ padding: "11px 14px", textAlign: "right", fontWeight: 700, color: T.text, whiteSpace: "nowrap" }}>{money(clientSpend(c))}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSetView, selectedId, onSelect, onAdd, onImport, onImportHistory, onFindDuplicates, onBatchUpdate, onBatchDelete, onBatchSchedule }) {
   const { T, perms, tiers } = useApp();
   const [search,       setSearch]       = useState("");
   const [showInactive, setShowInactive] = useState(false);
@@ -2900,6 +2965,14 @@ function ClientList({ clients, invoices, schedule, vp = {}, selectedId, onSelect
 
       {/* Filter + Sort bar */}
       <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "center" }}>
+        {vp.isDesktop && onSetView && (
+          <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 11, padding: 3, gap: 2, flexShrink: 0 }}>
+            {[["split", "Split"], ["table", "Table"]].map(([id, lbl]) => (
+              <button key={id} onClick={() => onSetView(id)}
+                style={{ padding: "6px 13px", border: "none", borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer", background: view === id ? T.surface : "transparent", color: view === id ? T.primary : T.textMuted, fontFamily: "inherit", boxShadow: view === id ? "0 1px 3px rgba(0,0,0,0.12)" : "none" }}>{lbl}</button>
+            ))}
+          </div>
+        )}
         <button onClick={() => setShowFilters(f => !f)}
           style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 12, border: `1.5px solid ${activeFilterCount > 0 ? T.primary : T.border}`, background: activeFilterCount > 0 ? hexA(T.primary, 0.07) : T.surface, color: activeFilterCount > 0 ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>
           <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M3 6h18M7 12h10M11 18h2"/></svg>
@@ -2999,6 +3072,17 @@ function ClientList({ clients, invoices, schedule, vp = {}, selectedId, onSelect
         </div>
       )}
 
+      {view === "table" && vp.isDesktop ? (
+        filtered.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "44px 20px", color: T.textMuted }}>
+            <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="clients" size={26} /></div>
+            <div style={{ fontWeight: 700, fontSize: 14, color: T.text, marginBottom: 4 }}>No clients found</div>
+            <div style={{ fontSize: 13 }}>{search ? `Nothing matches "${search}"` : "Add your first client to get started"}</div>
+          </div>
+        ) : (
+          <ClientsTable items={filtered} clientSpend={clientSpend} tiers={tiers} onSelect={onSelect} T={T} />
+        )
+      ) : (
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 300px), 1fr))", alignItems: "start", gap: 12, width: "100%", paddingBottom: selectMode && selCount > 0 ? 90 : 0 }}>
         {filtered.length === 0 && (
           <div style={{ gridColumn: "1 / -1", textAlign: "center", padding: "40px 20px", color: T.textMuted }}>
@@ -3054,6 +3138,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, selectedId, onSelect
           );
         })}
       </div>
+      )}
 
       {/* Bulk action bar */}
       {selectMode && selCount > 0 && (
@@ -19287,6 +19372,7 @@ function DesktopSidebar({ page, perms, navUnread, reminderDue, onNav, onSignOut,
 export default function App({ authEmail = "", onSignOut }) {
   const [selectedClient, setSelectedClient] = useState(null);
   const [adding, setAdding] = useState(false);
+  const [clientsView, setClientsView] = useState("split"); // desktop only: "split" (master-detail) | "table"
   const [scheduleSeed, setScheduleSeed] = useState(null);
   // Staff "Preview Portal as X" lives at the App top level (rendered OUTSIDE the shell's
   // <main> scroll container) so iOS doesn't clip this position:fixed overlay.
@@ -20136,10 +20222,16 @@ export default function App({ authEmail = "", onSignOut }) {
       {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} vp={vp} />}
       {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
       {page === "clients" && !adding && (vp.isDesktop ? (
+        clientsView === "table" ? (
+          /* Desktop Table view: full-width dense, sortable clients table (row → split + detail) */
+          <div style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: "22px 24px" }}>
+            <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} view="table" onSetView={setClientsView} selectedId={selectedClient?.id} onSelect={(c) => { handleClientSelect(c); setClientsView("split"); }} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />
+          </div>
+        ) : (
         /* Desktop master-detail: client list (left) + selected client's record (right) */
         <div style={{ flex: 1, minWidth: 0, display: "flex", height: "100%", overflow: "hidden" }}>
           <div style={{ width: 404, flexShrink: 0, borderRight: `1px solid ${T.border}`, overflowY: "auto", padding: "22px 20px" }}>
-            <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} selectedId={selectedClient?.id} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />
+            <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} view="split" onSetView={setClientsView} selectedId={selectedClient?.id} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />
           </div>
           <div style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: "24px 30px" }}>
             {selectedClient
@@ -20153,6 +20245,7 @@ export default function App({ authEmail = "", onSignOut }) {
               )}
           </div>
         </div>
+        )
       ) : (
         <>
           {!selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
