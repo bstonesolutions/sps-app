@@ -1303,6 +1303,10 @@ const DEFAULT_EMAIL = {
   // text-message templates ({first}, {sender}, {company}, {eta}, {arrival}, {track})
   senderName: "Brandon",
   trackLink: "",
+  // Feature 8 — live tracking + On My Way behavior
+  liveTrackingEnabled: true,   // master switch for sharing the live map / tracking link
+  trackingLinkMinutes: 60,     // how long a live-tracking session stays viewable
+  onMyWaySync: "linked",       // "linked" = text + live map together · "independent" = pick each at send time
   smsOnMyWay: "Hi {first}, this is {sender} with {company}. I'm on my way and should arrive in about {eta} minutes (around {arrival}). {track}See you soon!",
   smsArrived: "Hi {first}, {sender} with {company} has arrived and is getting started on your service. We'll send a full report when we're done!",
   smsReminder: "Hi {first}, a friendly reminder from {company} that your service is scheduled for {date}. Reply here with any questions!",
@@ -5158,6 +5162,13 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
   const firstName = client?.name?.split(" ")[0] || "there";
   const phone = client?.phone?.replace(/\D/g, "") || "";
 
+  // Feature 8 — live-tracking behavior. Off (or no link set) → text only, map hidden.
+  // Linked → text + live map together. Independent → the tech chooses here per send.
+  const trackingOn = (email && email.liveTrackingEnabled !== false) && !!(email && email.trackLink);
+  const sync = (email && email.onMyWaySync) || "linked";
+  const [shareMap, setShareMap] = useState(sync === "linked");
+  const includeTrack = trackingOn && (sync === "linked" || shareMap);
+
   const arrival = new Date(Date.now() + eta * 60000);
   const arrivalStr = arrival.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 
@@ -5169,7 +5180,7 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
       .replace(/\{company\}/g, branding.companyName)
       .replace(/\{eta\}/g, String(eta))
       .replace(/\{arrival\}/g, arrivalStr)
-      .replace(/\{track\}/g, "");
+      .replace(/\{track\}/g, includeTrack && email.trackLink ? `Track my live location here: ${email.trackLink} — ` : "");
   })();
 
   const handleSend = () => {
@@ -5221,6 +5232,23 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
               ))}
           </div>
         </div>
+
+        {/* Feature 8 — live map sharing (linked = auto, independent = tech chooses) */}
+        {trackingOn && (sync === "independent" ? (
+          <div onClick={() => setShareMap(v => !v)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, background: T.surfaceAlt, borderRadius: 14, padding: "12px 16px", marginBottom: 16, cursor: "pointer" }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text }}>Share live map</div>
+              <div style={{ fontSize: 11.5, color: T.textMuted }}>Include your live location link in this text.</div>
+            </div>
+            <div style={{ flexShrink: 0, width: 48, height: 28, borderRadius: 100, background: shareMap ? T.primary : T.border, position: "relative", transition: "background 0.2s" }}>
+              <div style={{ width: 22, height: 22, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: shareMap ? 23 : 3, transition: "left 0.2s", boxShadow: "0 1px 4px rgba(0,0,0,0.2)" }} />
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, background: hexA(T.primary, 0.08), borderRadius: 14, padding: "10px 14px", marginBottom: 16, fontSize: 12.5, color: T.text }}>
+            <Icon name="map" size={15} /> Live map shared automatically with this text.
+          </div>
+        ))}
 
         {/* Message preview */}
         <div style={{ marginBottom: 16 }}>
@@ -9307,6 +9335,41 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
             <div style={{ flex: 1 }}><label style={labelStyle}>Sender Name</label><input type="text" style={field} value={email.senderName || ""} onChange={e => set("senderName", e.target.value)} placeholder="Brandon" /></div>
           </div>
           <div><label style={labelStyle}>Live Tracking Link <span style={{ textTransform: "none", color: T.textMuted, fontWeight: 400 }}>(optional)</span></label><input type="url" style={field} value={email.trackLink || ""} onChange={e => set("trackLink", e.target.value)} placeholder="Leave blank until Maps API is connected" /></div>
+
+          {/* Feature 8 — live tracking + On My Way behavior */}
+          <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 14, display: "flex", flexDirection: "column", gap: 13 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+              <div style={{ minWidth: 0 }}>
+                <label style={{ ...labelStyle, marginBottom: 2 }}>Live Tracking</label>
+                <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.4 }}>Let clients watch your live location + ETA while you're en route.</div>
+              </div>
+              <button onClick={() => set("liveTrackingEnabled", !(email.liveTrackingEnabled !== false))} aria-label="Toggle live tracking"
+                style={{ flexShrink: 0, width: 48, height: 28, borderRadius: 100, background: (email.liveTrackingEnabled !== false) ? T.primary : T.surfaceAlt, border: "none", cursor: "pointer", position: "relative", transition: "background 0.2s" }}>
+                <div style={{ width: 22, height: 22, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: (email.liveTrackingEnabled !== false) ? 23 : 3, transition: "left 0.2s", boxShadow: "0 1px 4px rgba(0,0,0,0.2)" }} />
+              </button>
+            </div>
+            {(email.liveTrackingEnabled !== false) && (
+              <>
+                <div>
+                  <label style={labelStyle}>Tracking link stays viewable for</label>
+                  <div style={{ position: "relative", maxWidth: 170 }}>
+                    <input type="text" inputMode="numeric" style={{ ...field, paddingRight: 46 }} value={email.trackingLinkMinutes ?? 60} onChange={e => set("trackingLinkMinutes", e.target.value.replace(/\D/g, ""))} placeholder="60" />
+                    <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>min</span>
+                  </div>
+                </div>
+                <div>
+                  <label style={labelStyle}>"On My Way" + Live Map</label>
+                  <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 11, padding: 3, gap: 3 }}>
+                    {[["linked", "Linked"], ["independent", "Independent"]].map(([val, lbl]) => {
+                      const on = (email.onMyWaySync || "linked") === val;
+                      return <button key={val} type="button" onClick={() => set("onMyWaySync", val)} style={{ flex: 1, padding: "9px", border: "none", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer", background: on ? T.surface : "transparent", color: on ? T.primary : T.textMuted, fontFamily: "inherit", boxShadow: on ? "0 1px 4px rgba(0,0,0,0.1)" : "none" }}>{lbl}</button>;
+                    })}
+                  </div>
+                  <div style={hint}>{(email.onMyWaySync || "linked") === "linked" ? "One tap sends the “On My Way” text and starts live tracking together." : "When you tap “On My Way,” you choose whether to also share the live map."}</div>
+                </div>
+              </>
+            )}
+          </div>
           <div><label style={labelStyle}>Reminder Text</label><textarea style={{ ...field, resize: "vertical" }} rows={2} value={email.smsReminder || ""} onChange={e => set("smsReminder", e.target.value)} /></div>
           <div>
             <label style={labelStyle}>Text Preview</label>
