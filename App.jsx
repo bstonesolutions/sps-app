@@ -11489,7 +11489,7 @@ async function exportInvoicePdf(args) {
   return "downloaded";
 }
 
-function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose, onEdit, onDelete, canManage }) {
+function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose, onEdit, onDelete, canManage, embedded }) {
   const { T } = useApp();
   const money = (n) => `$${(n || 0).toFixed(2)}`;
   const totals = invoiceTotals(invoice);
@@ -11576,9 +11576,8 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
     }
   };
 
-  return (
-    <Modal title={invoice.number} onClose={onClose}>
-      <div style={{ display: "flex", flexDirection: "column", gap: 14, paddingBottom: "max(16px, env(safe-area-inset-bottom))" }}>
+  const body = (
+      <div style={{ display: "flex", flexDirection: "column", gap: 14, paddingBottom: embedded ? 0 : "max(16px, env(safe-area-inset-bottom))" }}>
         <InvoiceDocument invoice={invoice} client={client} branding={branding} cfg={cfg} T={T} />
 
         {/* QB Payment link */}
@@ -11616,8 +11615,19 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
           </div>
         )}
       </div>
-    </Modal>
   );
+
+  // Desktop master-detail: render the same content inline in the right pane (no modal).
+  if (embedded) return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 16 }}>
+        <div style={{ fontWeight: 800, fontSize: 21, color: T.text, letterSpacing: "-0.02em" }}>{invoice.number}</div>
+        {onClose && <button onClick={onClose} aria-label="Close" style={{ width: 32, height: 32, borderRadius: "50%", border: "none", background: T.surfaceAlt, color: T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="close" size={16} /></button>}
+      </div>
+      {body}
+    </div>
+  );
+  return <Modal title={invoice.number} onClose={onClose}>{body}</Modal>;
 }
 
 // ─────────────────────────────────────────────
@@ -12092,7 +12102,7 @@ function TotalSalesScreen({ invoices, clients, onBack, T }) {
   );
 }
 
-function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCatalog, onSave, onDelete, onSyncData, initialFilter = "All" }) {
+function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCatalog, onSave, onDelete, onSyncData, initialFilter = "All", vp = {} }) {
   const { T, perms } = useApp();
   const moneyFmt = (n) => `$${Math.round(n).toLocaleString()}`;
   const moneyExact = (n) => `$${parseFloat(n||0).toFixed(2)}`;
@@ -12261,7 +12271,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
   if (showSales && (perms.seeTotalSales || perms.isAdmin)) return <TotalSalesScreen invoices={invoices} clients={clients} onBack={() => setShowSales(false)} T={T} />;
 
   return (
-    <div>
+    <div style={vp.isDesktop ? { flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" } : undefined}>
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <h2 style={{ margin: 0, fontSize: 26, fontWeight: 700, color: T.text, letterSpacing: "-0.03em" }}>Invoices</h2>
@@ -12425,41 +12435,65 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
       )}
 
       {/* Results summary */}
-      {sorted.length > 0 && (
-        <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 10, display: "flex", justifyContent: "space-between" }}>
-          <span>{sorted.length} invoice{sorted.length !== 1 ? "s" : ""}</span>
-          <span style={{ fontWeight: 700, color: T.text }}>{moneyExact(sorted.reduce((s,iv) => s + iv._total, 0))} total</span>
-        </div>
-      )}
-
-      {/* Invoice list */}
-      {sorted.length === 0 ? (
-        <div style={{ textAlign: "center", padding: "50px 20px", color: T.textMuted }}>
-          <div style={{ width: 56, height: 56, borderRadius: 18, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 14px" }}><Icon name="invoice" size={28} /></div>
-          <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 6 }}>No invoices{filter !== "All" ? ` marked ${filter}` : ""}</div>
-          {perms.canInvoice && filter === "All" && <><div style={{ fontSize: 13, marginBottom: 18 }}>Create one, or generate it from a completed visit.</div><Btn onClick={() => setCreating(true)}>+ New Invoice</Btn></>}
-        </div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: groupBy !== "none" ? 20 : 8 }}>
-          {grouped.map(({ label, items }) => (
-            <div key={label || "all"}>
-              {label && (
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{label}</div>
-                  <div style={{ fontSize: 12, color: T.textMuted }}>{moneyExact(items.reduce((s,iv) => s + iv._total, 0))}</div>
-                </div>
-              )}
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {items.map(iv => <InvoiceRow key={iv.id} iv={iv} onClick={() => setPreview(iv)} />)}
+      {(() => {
+        const listContent = (
+          <>
+            {sorted.length > 0 && (
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 10, display: "flex", justifyContent: "space-between" }}>
+                <span>{sorted.length} invoice{sorted.length !== 1 ? "s" : ""}</span>
+                <span style={{ fontWeight: 700, color: T.text }}>{moneyExact(sorted.reduce((s,iv) => s + iv._total, 0))} total</span>
               </div>
+            )}
+            {sorted.length === 0 ? (
+              <div style={{ textAlign: "center", padding: "50px 20px", color: T.textMuted }}>
+                <div style={{ width: 56, height: 56, borderRadius: 18, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 14px" }}><Icon name="invoice" size={28} /></div>
+                <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 6 }}>No invoices{filter !== "All" ? ` marked ${filter}` : ""}</div>
+                {perms.canInvoice && filter === "All" && <><div style={{ fontSize: 13, marginBottom: 18 }}>Create one, or generate it from a completed visit.</div><Btn onClick={() => setCreating(true)}>+ New Invoice</Btn></>}
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: groupBy !== "none" ? 20 : 8 }}>
+                {grouped.map(({ label, items }) => (
+                  <div key={label || "all"}>
+                    {label && (
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                        <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{label}</div>
+                        <div style={{ fontSize: 12, color: T.textMuted }}>{moneyExact(items.reduce((s,iv) => s + iv._total, 0))}</div>
+                      </div>
+                    )}
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {items.map(iv => <InvoiceRow key={iv.id} iv={iv} onClick={() => setPreview(iv)} />)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        );
+        if (!vp.isDesktop) return listContent;
+        /* Desktop master-detail: invoice list (left) + selected invoice (right) */
+        return (
+          <div style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden", marginTop: 4 }}>
+            <div style={{ width: 440, flexShrink: 0, overflowY: "auto", borderRight: `1px solid ${T.border}`, paddingRight: 18 }}>
+              {listContent}
             </div>
-          ))}
-        </div>
-      )}
+            <div style={{ flex: 1, minWidth: 0, overflowY: "auto", paddingLeft: 26 }}>
+              {livePreview
+                ? <InvoicePreview invoice={livePreview} client={clients.find(c => invoiceMatchesClient(livePreview, c))} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} embedded />
+                : (
+                  <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: T.textMuted, gap: 12, padding: 40, textAlign: "center" }}>
+                    <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.06), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="invoice" size={30} /></div>
+                    <div style={{ fontSize: 16, fontWeight: 700, color: T.text }}>Select an invoice</div>
+                    <div style={{ fontSize: 13.5, maxWidth: 260, lineHeight: 1.5 }}>Choose an invoice from the list to view it here.</div>
+                  </div>
+                )}
+            </div>
+          </div>
+        );
+      })()}
 
       {creating && <InvoiceEditor clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onClose={() => setCreating(false)} />}
       {editing  && <InvoiceEditor invoice={editing} clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onDelete={onDelete} onClose={() => setEditing(null)} />}
-      {livePreview && <InvoicePreview invoice={livePreview} client={clients.find(c => invoiceMatchesClient(livePreview, c))} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
+      {!vp.isDesktop && livePreview && <InvoicePreview invoice={livePreview} client={clients.find(c => invoiceMatchesClient(livePreview, c))} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
     </div>
   );
 }
@@ -19746,7 +19780,7 @@ export default function App({ authEmail = "", onSignOut }) {
       {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetScreen budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} />}
       {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
-      {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} />}
+      {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
       {page === "duplicates" && perms.canImport && <DuplicatesScreen clients={clients} invoices={invoices} schedule={schedule} onMerge={handleMergeClients} onGoToClients={() => handleNav("clients")} />}
@@ -19758,7 +19792,7 @@ export default function App({ authEmail = "", onSignOut }) {
   if (vp.isDesktop) {
     // Master-detail pages fill the whole content area (each column scrolls on its own);
     // every other page keeps the centered, single-scroll column.
-    const dtMasterDetail = page === "clients" && !adding;
+    const dtMasterDetail = (page === "clients" && !adding) || (page === "invoices" && (perms.canInvoice || perms.viewInvoices));
     return (
       <AppCtx.Provider value={{ T, branding, perms, tiers: serviceTiers || DEFAULT_TIERS }}>
         <div style={{ fontFamily: fontStack, background: T.bg, position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden", display: "flex", flexDirection: "row", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ["--ring"]: hexA(T.primary, 0.22), ["--ringBorder"]: T.primary }}>
