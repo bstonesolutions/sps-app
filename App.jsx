@@ -968,10 +968,10 @@ function memberPerms(member) {
   if (isAdmin) {
     const all = { isAdmin: true, tabAccess: null, editInventory: true };
     ALL_PERM_FLAGS.forEach(f => { all[f] = true; });
-    return all;
+    return applyFinePerms(all, member);
   }
   // New per-tab model takes precedence when present.
-  if (member?.tabAccess) return tabAccessToPerms(member.tabAccess);
+  if (member?.tabAccess) return applyFinePerms(tabAccessToPerms(member.tabAccess), member);
   // Legacy role / custom flags.
   const src = role === "custom" ? (member?.perms || {}) : (ROLE_PRESETS[role] || ROLE_PRESETS.field);
   const P = (k, dflt) => (src[k] !== undefined ? !!src[k] : dflt);
@@ -996,6 +996,33 @@ function memberPerms(member) {
     canInvoice: P("canInvoice", false),
   };
   out.editInventory = out.seeInventory; // legacy parity: viewing inventory allowed editing
+  return applyFinePerms(out, member);
+}
+
+// Fine-grained permission overlay. Each granular flag DEFAULTS to its coarse parent
+// (so existing members keep the same effective access), and the owner can override
+// individual ones in the staff editor's "Advanced permissions" section. Stored on
+// member.fine = { <flag>: bool }. Owners (isAdmin) always get everything.
+function applyFinePerms(out, member) {
+  const fine = (member && member.fine) || {};
+  const adm = !!out.isAdmin;
+  const g = (key, base) => adm ? true : (fine[key] !== undefined ? !!fine[key] : !!base);
+  // Inventory cost/pricing — sensitive, so OFF by default for staff (opt-in).
+  out.seeInventoryCost  = g("seeInventoryCost", false);
+  // Invoice actions — default to the coarse "Manage Invoices" capability.
+  out.invoiceCreate     = g("invoiceCreate",     out.canInvoice);
+  out.invoiceSend       = g("invoiceSend",       out.canInvoice);
+  out.invoiceMarkPaid   = g("invoiceMarkPaid",   out.canInvoice);
+  out.invoiceDelete     = g("invoiceDelete",     out.canInvoice);
+  // Client deletion — default to the coarse "edit clients" capability.
+  out.deleteClients     = g("deleteClients",     out.editClients);
+  // Settings by section — default to the coarse "App Settings" capability.
+  out.editBranding      = g("editBranding",      out.editSettings);
+  out.editCosts         = g("editCosts",         out.editSettings);
+  out.editNotifications = g("editNotifications", out.editSettings);
+  // Schedule actions — default to the coarse "edit schedule" capability.
+  out.scheduleAddRemove = g("scheduleAddRemove", out.editSchedule);
+  out.scheduleReorder   = g("scheduleReorder",   out.editSchedule);
   return out;
 }
 
@@ -3296,7 +3323,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
               { label: "Pref Day",   icon: "calendar",  fn: () => setModal("prefDay") },
               { label: "Deactivate", icon: "warning",   fn: () => setModal("inactive") },
               { label: "Activate",   icon: "clients",   fn: doMarkActive },
-              { label: "Delete",     icon: "trash",     fn: () => setModal("delete"), danger: true },
+              ...(perms.deleteClients ? [{ label: "Delete", icon: "trash", fn: () => setModal("delete"), danger: true }] : []),
             ].map(a => (
               <button key={a.label} onClick={a.fn}
                 style={{ flexShrink: 0, background: a.danger ? "rgba(255,255,255,0.15)" : "rgba(255,255,255,0.18)", color: a.danger ? "#ffaaaa" : "#fff", border: a.danger ? "1px solid rgba(255,120,120,0.4)" : "1px solid rgba(255,255,255,0.25)", borderRadius: 10, padding: "9px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap", display:"flex", alignItems:"center", justifyContent:"center", gap:4 }}>
@@ -3432,7 +3459,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
 // CLIENT EDIT FORM
 // ─────────────────────────────────────────────
 function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Client" }) {
-  const { T, tiers } = useApp();
+  const { T, tiers, perms } = useApp();
   const [form, setForm] = useState(() => {
     const base = { ...client };
     // backfill address parts: use stored components if present, else parse the address string
@@ -3663,7 +3690,7 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
         ))}
 
         {/* Danger zone — delete client */}
-        {onDelete && title !== "Add Client" && (
+        {onDelete && title !== "Add Client" && perms.deleteClients && (
           <div style={{ marginTop: 8, padding: "16px 18px", background: "rgba(192,57,43,0.05)", borderRadius: 16, border: "1px solid rgba(192,57,43,0.2)" }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: "#C0392B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>Danger Zone</div>
             <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 12, lineHeight: 1.5 }}>Permanently delete this client and all their data. This cannot be undone.</div>
@@ -10477,6 +10504,49 @@ function TabAccessEditor({ value, onChange }) {
   );
 }
 
+// Advanced (fine-grained) permission overlay editor — collapsed by default. Each
+// toggle starts matching the member's coarse tab access and lets the owner restrict
+// a single action. Writes member.fine; only the groups whose parent tab is granted
+// are shown.
+function AdvancedPermsEditor({ member, onChange }) {
+  const { T } = useApp();
+  const [open, setOpen] = useState(() => !!(member && member.fine && Object.keys(member.fine).length));
+  const eff = memberPerms(member);
+  const setFine = (k, v) => onChange({ ...((member && member.fine) || {}), [k]: v });
+  const row = (key, label, help) => (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "2px 0" }}>
+      <div>
+        <div style={{ fontSize: 13.5, fontWeight: 600, color: T.text }}>{label}</div>
+        {help && <div style={{ fontSize: 11.5, color: T.textMuted }}>{help}</div>}
+      </div>
+      <Toggle on={!!eff[key]} onChange={v => setFine(key, v)} />
+    </div>
+  );
+  const group = (title, rows) => (
+    <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted }}>{title}</div>
+      {rows}
+    </div>
+  );
+  const anyParent = eff.seeInventory || eff.canInvoice || eff.editClients || eff.editSettings || eff.editSchedule;
+  return (
+    <div style={{ border: `1px solid ${T.border}`, borderRadius: 12, overflow: "hidden", marginTop: 10 }}>
+      <button onClick={() => setOpen(o => !o)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", background: T.surfaceAlt, border: "none", cursor: "pointer", fontFamily: "inherit" }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Advanced permissions</span>
+        <span style={{ fontSize: 12, color: T.textMuted }}>{open ? "Hide" : "Show"}</span>
+      </button>
+      {open && (
+        <div style={{ padding: 14, display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>Fine-tune individual actions. Each starts matching the tab access above — turn one off to restrict just that action.</div>
+          {!anyParent && <div style={{ fontSize: 12, color: T.textMuted }}>Grant View/Edit on a tab above to fine-tune its actions.</div>}
+          {eff.seeInventory && group("Inventory", <>{row("seeInventoryCost", "See cost & unit pricing", "Otherwise stock levels only — cost/pricing stays hidden")}</>)}
+          {eff.editClients && group("Clients", <>{row("deleteClients", "Delete clients", "Remove client records (editing stays on)")}</>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TeamManager({ team, setTeam, currentUserId, email, branding }) {
   const { T } = useApp();
   const [modal, setModal] = useState(null); // { mode, data }
@@ -10631,7 +10701,7 @@ function TeamManager({ team, setTeam, currentUserId, email, branding }) {
             {/* Name */}
             <div>
               <label style={labelStyle}>Full Name</label>
-              <input type="text" style={field} value={modal.data.name} onChange={e => setD({ name: e.target.value })} placeholder="e.g. David Smith" autoFocus />
+              <input type="text" style={field} value={modal.data.name} onChange={e => setD({ name: e.target.value })} placeholder="e.g. David Smith" autoFocus={modal.mode === "add"} />
             </div>
 
             {/* Email */}
@@ -10694,6 +10764,7 @@ function TeamManager({ team, setTeam, currentUserId, email, branding }) {
                   value={deriveTabAccess(modal.data)}
                   onChange={ta => setD({ tabAccess: ta, role: modal.data.role === "owner" ? "staff" : (modal.data.role || "staff") })}
                 />
+                <AdvancedPermsEditor member={modal.data} onChange={fine => setD({ fine })} />
               </div>
             )}
 
@@ -20958,7 +21029,7 @@ export default function App({ authEmail = "", onSignOut }) {
       ))}
       {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} />}
       {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
-      {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin} canEdit={perms.isAdmin || perms.editInventory} T={T} />}
+      {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} />}
       {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
       {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetScreen budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} />}
