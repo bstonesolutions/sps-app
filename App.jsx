@@ -13420,7 +13420,7 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
   );
 }
 
-function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEmail, costs, setCosts, budget, setBudget, clients, setClients, invoices, scheduleCfg, setScheduleCfg, team, setTeam, invoicing, setInvoicing, currentUserId, onResetData, serviceTiers, setServiceTiers, onSyncData, onNav }) {
+function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEmail, costs, setCosts, budget, setBudget, clients, setClients, invoices, scheduleCfg, setScheduleCfg, team, setTeam, invoicing, setInvoicing, currentUserId, onResetData, serviceTiers, setServiceTiers, onSyncData, onNav, navDock, setNavDock }) {
   const { T, perms } = useApp();
   const fileRef = useRef();
   const [tab, setTab] = useState("branding");
@@ -13552,18 +13552,6 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
               <CostSettings costs={costCtl.draft} setCosts={costCtl.update} clients={clients} />
             </Collapsible>
           )}
-          {perms.seeCostsBudget && (
-            <Collapsible title="Budget & Targets" subtitle="Now its own page. Set monthly revenue goals and track profitability there.">
-              <div style={{ padding: 18 }}>
-                <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.6, marginBottom: 14 }}>
-                  Budget moved to its own page so it's easier to get to and ties together your targets, live actuals, profit, and after-tax take-home. The cost assumptions and tax rates that feed it stay here under Costs &amp; Labor.
-                </div>
-                <Btn onClick={() => onNav && onNav("budget")} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <Icon name="chart" size={15} /> Open Budget Page
-                </Btn>
-              </div>
-            </Collapsible>
-          )}
         </div>
       )}
       {activeTab === "team" && perms.isAdmin && <TeamManager team={team} setTeam={setTeam} currentUserId={currentUserId} email={email} branding={branding} />}
@@ -13660,6 +13648,16 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
           </div>
         </div>
       </Collapsible>
+
+      {/* ── BOTTOM NAVIGATION (mobile) ── */}
+      {setNavDock && (
+        <Collapsible title="Bottom Navigation" subtitle="Customize the mobile bottom-bar buttons and their order.">
+          <div style={{ padding: 18 }}>
+            <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 14, lineHeight: 1.5 }}>This sets the floating bottom bar on phones. Desktop and iPad use the side menu instead. You can also edit this from the Menu button on your phone.</div>
+            <DockEditor navDock={navDock} setNavDock={setNavDock} perms={perms} T={T} />
+          </div>
+        </Collapsible>
+      )}
 
       {/* ── CONTACT INFO ── */}
       <Collapsible title="Contact Info" subtitle="Phone, email, address, and company website.">
@@ -14473,7 +14471,7 @@ function CPMessages({ client, branding, onSubmit, T, vp = {} }) {
     <div style={{ display:"flex", flexDirection:"column", height:"calc(100vh - 116px)" }}>{inner}</div>
   );
   return (
-    <div style={{ display:"flex", flexDirection:"column", position:"fixed", top:0, left:0, right:0, bottom:0, paddingTop:"calc(56px + env(safe-area-inset-top))", paddingBottom:"calc(70px + env(safe-area-inset-bottom))", background:"transparent", zIndex:1, pointerEvents:"none" }}>
+    <div style={{ display:"flex", flexDirection:"column", position:"fixed", top:0, left:0, right:0, bottom:0, paddingTop:"calc(56px + env(safe-area-inset-top))", paddingBottom:"calc(96px + env(safe-area-inset-bottom))", background:"transparent", zIndex:1, pointerEvents:"none" }}>
       {inner}
     </div>
   );
@@ -16656,12 +16654,87 @@ const ALL_NAV = [
   { id: "settings",   label: "Customize", icon: "sliders" },
 ];
 
-const DEFAULT_DOCK = ["dashboard", "clients", "schedule", "messages"];
+const DEFAULT_DOCK = ["dashboard", "clients", "schedule", "invoices"];
 
 // Full-navigation bottom sheet, opened by the floating menu button. Lists every
 // destination the user can see (no bottom tab bar), plus account + sign out.
-function NavSheet({ page, perms, navUnread, reminderDue, onNav, onSignOut, currentUser, T, onClose }) {
+// Reusable editor for the staff mobile bottom-bar dock — pick which nav items appear in
+// the floating capsule and their order (first 4 slots + the always-present Menu). Used in
+// the Menu sheet and in Customize → Logo & Identity. Applies immediately (no save bar).
+function DockEditor({ navDock, setNavDock, perms, T }) {
+  const MAX = 4;
+  const dock = (navDock || DEFAULT_DOCK).filter(id => isTabVisible(ALL_NAV.find(x => x.id === id), perms));
+  const available = ALL_NAV.filter(n => isTabVisible(n, perms) && !dock.includes(n.id));
+  // ── Drag-to-reorder (pointer events → works on touch + mouse) ──
+  const dragId = useRef(null);
+  const [dragging, setDragging] = useState(null);
+  const rowRefs = useRef({});
+  const reorder = (fromId, toId) => {
+    const cur = (navDock || DEFAULT_DOCK).filter(id => isTabVisible(ALL_NAV.find(x => x.id === id), perms));
+    const from = cur.indexOf(fromId), to = cur.indexOf(toId);
+    if (from === -1 || to === -1 || from === to) return;
+    const next = [...cur];
+    const [item] = next.splice(from, 1);
+    next.splice(to, 0, item);
+    setNavDock(next);
+  };
+  const onDown = (e, id) => { dragId.current = id; setDragging(id); try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {} };
+  const onMove = (e) => {
+    if (dragId.current == null) return;
+    const y = e.clientY;
+    let overId = null;
+    for (const [id, el] of Object.entries(rowRefs.current)) {
+      if (!el) continue;
+      const r = el.getBoundingClientRect();
+      if (y >= r.top && y <= r.bottom) { overId = id; break; }
+    }
+    if (overId && overId !== dragId.current) reorder(dragId.current, overId);
+  };
+  const onUp = () => { dragId.current = null; setDragging(null); };
+  const remove = (id) => setNavDock(dock.filter(x => x !== id));
+  const add = (id) => { if (dock.length >= MAX) return; setNavDock([...dock, id]); };
+  return (
+    <div>
+      <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: T.textMuted, marginBottom: 3 }}>Bottom Bar ({dock.length}/{MAX} + Menu)</div>
+      <div style={{ fontSize: 11.5, color: T.textMuted, marginBottom: 12, lineHeight: 1.45 }}>Drag a row by its handle (⠿) to reorder. Menu is always last.</div>
+      {dock.map((id) => {
+        const n = ALL_NAV.find(x => x.id === id);
+        if (!n) return null;
+        const isDrag = dragging === id;
+        return (
+          <div key={id} ref={el => { rowRefs.current[id] = el; }}
+            style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 8px", marginBottom: 6, borderRadius: 12, border: `1px solid ${isDrag ? T.primary : T.border}`, background: isDrag ? hexA(T.primary, 0.06) : T.surface, boxShadow: isDrag ? "0 8px 22px rgba(0,0,0,0.16)" : "none", transform: isDrag ? "scale(1.02)" : "scale(1)", transition: "box-shadow 0.12s, transform 0.12s, border-color 0.12s" }}>
+            <div onPointerDown={(e) => onDown(e, id)} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp} aria-label="Drag to reorder"
+              style={{ touchAction: "none", cursor: isDrag ? "grabbing" : "grab", padding: "8px 6px", color: T.textMuted, display: "flex", flexDirection: "column", gap: 3.5, flexShrink: 0 }}>
+              {[0, 1, 2].map(r => <div key={r} style={{ display: "flex", gap: 3.5 }}>{[0, 1].map(c => <div key={c} style={{ width: 3.5, height: 3.5, borderRadius: "50%", background: "currentColor", opacity: 0.55 }} />)}</div>)}
+            </div>
+            <div style={{ width: 32, height: 32, borderRadius: 9, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name={n.icon} size={16} /></div>
+            <div style={{ flex: 1, fontSize: 13.5, fontWeight: 600, color: T.text }}>{n.label}</div>
+            <button onClick={() => remove(id)} disabled={dock.length <= 1}
+              style={{ background: hexA("#E5484D", 0.1), color: "#E5484D", border: "none", borderRadius: 10, padding: "5px 11px", fontSize: 11.5, fontWeight: 700, cursor: dock.length <= 1 ? "default" : "pointer", fontFamily: "inherit", flexShrink: 0, opacity: dock.length <= 1 ? 0.45 : 1 }}>Remove</button>
+          </div>
+        );
+      })}
+      {available.length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: T.textMuted, marginBottom: 8 }}>Add to bottom bar</div>
+          {available.map(n => (
+            <div key={n.id} style={{ display: "flex", alignItems: "center", gap: 11, padding: "9px 0", borderBottom: `1px solid ${T.border}` }}>
+              <div style={{ width: 32, height: 32, borderRadius: 9, background: T.surfaceAlt, color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name={n.icon} size={16} /></div>
+              <div style={{ flex: 1, fontSize: 13.5, fontWeight: 600, color: T.text }}>{n.label}</div>
+              <button onClick={() => add(n.id)} disabled={dock.length >= MAX}
+                style={{ background: dock.length >= MAX ? T.surfaceAlt : hexA(T.primary, 0.1), color: dock.length >= MAX ? T.textMuted : T.primary, border: "none", borderRadius: 10, padding: "5px 11px", fontSize: 11.5, fontWeight: 700, cursor: dock.length >= MAX ? "default" : "pointer", fontFamily: "inherit", flexShrink: 0 }}>{dock.length >= MAX ? "Full" : "Add"}</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NavSheet({ page, perms, navUnread, reminderDue, navDock, setNavDock, onNav, onSignOut, currentUser, T, onClose }) {
   const items = ALL_NAV.filter(n => isTabVisible(n, perms));
+  const [editDock, setEditDock] = useState(false);
   return (
     <>
       <style>{`@keyframes sheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }`}</style>
@@ -16672,7 +16745,8 @@ function NavSheet({ page, perms, navUnread, reminderDue, onNav, onSignOut, curre
           <div style={{ fontWeight: 800, fontSize: 19, color: T.text, letterSpacing: "-0.02em" }}>Menu</div>
           <button onClick={onClose} aria-label="Close" style={{ width: 32, height: 32, borderRadius: "50%", border: "none", background: T.surfaceAlt, color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}><Icon name="close" size={16} /></button>
         </div>
-        <div style={{ overflowY: "auto", WebkitOverflowScrolling: "touch", padding: "0 14px 6px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <div style={{ overflowY: "auto", WebkitOverflowScrolling: "touch", padding: "0 14px 6px", flex: 1, minHeight: 0 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
           {items.map(n => {
             const active = page === n.id;
             const badge = n.id === "messages" ? navUnread : (n.id === "reminders" ? reminderDue : 0);
@@ -16685,6 +16759,16 @@ function NavSheet({ page, perms, navUnread, reminderDue, onNav, onSignOut, curre
               </button>
             );
           })}
+          </div>
+          {setNavDock && (
+            <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 14, paddingTop: 12 }}>
+              <button onClick={() => setEditDock(e => !e)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", padding: "2px 0 10px" }}>
+                <span style={{ fontSize: 13, fontWeight: 800, color: T.text }}>Customize bottom bar</span>
+                <Icon name="chevronD" size={16} style={{ transform: editDock ? "rotate(180deg)" : "none", color: T.textMuted, transition: "transform 0.2s" }} />
+              </button>
+              {editDock && <DockEditor navDock={navDock} setNavDock={setNavDock} perms={perms} T={T} />}
+            </div>
+          )}
         </div>
         <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 8, padding: "12px 18px 0", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexShrink: 0 }}>
           <div style={{ minWidth: 0 }}>
@@ -19225,36 +19309,29 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, team
           </main>
         </div>
       ) : (
-        <main style={{ flex: 1, ...(isStaffPreview ? {} : { minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }), padding: "24px 18px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: 28, fontSize: `${textScale}em` }}>
+        <main style={{ flex: 1, ...(isStaffPreview ? {} : { minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }), padding: "24px 18px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(env(safe-area-inset-bottom) + 96px)", fontSize: `${textScale}em` }}>
           {screens}
         </main>
       )}
 
-      {/* Bottom nav — mobile only; a non-scrolling flex child frozen at the bottom */}
+      {/* Floating capsule bottom nav (mobile only) — matches the staff floating pill. */}
       {!isDesktopShell && (
-      <nav style={{
-        position: "relative", flexShrink: 0,
-        background: hexA(T.surface, 0.88),
-        backdropFilter: "saturate(180%) blur(20px)",
-        WebkitBackdropFilter: "saturate(180%) blur(20px)",
-        borderTop: `1px solid ${T.border}`,
-        display: "flex", zIndex: 90,
-        minHeight: 60, paddingTop: 4,
-        paddingBottom: "calc(8px + env(safe-area-inset-bottom))",
-      }}>
+      <nav style={{ position: "fixed", left: "max(14px, env(safe-area-inset-left))", right: "max(14px, env(safe-area-inset-right))", bottom: "calc(env(safe-area-inset-bottom) + 12px)", zIndex: 90, height: 64, borderRadius: 32, background: hexA(T.surface, 0.94), backdropFilter: "saturate(180%) blur(22px)", WebkitBackdropFilter: "saturate(180%) blur(22px)", border: `1px solid ${T.border}`, boxShadow: "0 12px 32px rgba(0,0,0,0.20), 0 3px 10px rgba(0,0,0,0.08)", display: "flex", alignItems: "stretch", padding: "0 8px", WebkitTapHighlightColor: "transparent" }}>
         {CLIENT_NAV.map(n => {
           const active = (page === n.id || (n.id === "cp_property" && (page === "cp_pond" || page === "cp_service"))) && !settingsOpen;
-          const label  = n.label; // nav always says "My Property"; inside the tab pondLabel() is used
+          const badge = n.id === "cp_messages" ? portalUnread : 0;
           return (
-            <button key={n.id} onClick={() => { setPage(n.id); setSettingsOpen(false); }}
-              style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, color: active ? T.primary : T.textMuted, fontFamily: "inherit", position: "relative", WebkitTapHighlightColor: "transparent" }}>
-              <span style={{ width: 46, height: 30, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s", position: "relative" }}>
-                <CIcon name={n.icon} size={22} />
-                {n.id === "cp_messages" && portalUnread > 0 && !active && (
-                  <span style={{ position: "absolute", top: 2, right: 4, width: 9, height: 9, borderRadius: "50%", background: "#E5484D", border: `2px solid ${T.bg}` }} />
+            <button key={n.id} onClick={() => { setPage(n.id); setSettingsOpen(false); }} aria-label={n.label}
+              style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, color: active ? T.primary : T.textMuted, fontFamily: "inherit", position: "relative", WebkitTapHighlightColor: "transparent" }}>
+              <span style={{ width: 40, height: 28, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: active ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s", position: "relative" }}>
+                {n.id === "cp_property"
+                  ? <svg viewBox="0 0 24 24" width={21} height={21} fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round"><path d="M12 21s7-5.5 7-11a7 7 0 0 0-14 0c0 5.5 7 11 7 11z" /><path d="M9 11l3-2.4 3 2.4" /><path d="M10.2 10.4V13h3.6v-2.6" /></svg>
+                  : <CIcon name={n.icon} size={21} />}
+                {badge > 0 && !active && (
+                  <span style={{ position: "absolute", top: -1, right: 1, minWidth: 15, height: 15, borderRadius: 8, background: "#E5484D", color: "#fff", fontSize: 9.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px", border: `2px solid ${T.surface}` }}>{badge}</span>
                 )}
               </span>
-              <span style={{ fontSize: 10.5, fontWeight: active ? 700 : 500, letterSpacing: "-0.01em" }}>{label}</span>
+              <span style={{ fontSize: 10, fontWeight: active ? 700 : 500, letterSpacing: "-0.01em" }}>{n.label}</span>
             </button>
           );
         })}
@@ -20280,7 +20357,7 @@ export default function App({ authEmail = "", onSignOut }) {
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
       {page === "duplicates" && perms.canImport && <DuplicatesScreen clients={clients} invoices={invoices} schedule={schedule} onMerge={handleMergeClients} onGoToClients={() => handleNav("clients")} />}
-      {page === "settings" && <AppSettings onNav={handleNav} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} />}
+      {page === "settings" && <AppSettings onNav={handleNav} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} navDock={navDock} setNavDock={setNavDock} />}
     </>
   );
 
@@ -20404,19 +20481,20 @@ export default function App({ authEmail = "", onSignOut }) {
           {pageBody}
         </main>
 
-        {/* Floating capsule bottom nav (MOBILE ONLY) — Home · Clients · Schedule · Invoices · Menu.
+        {/* Floating capsule bottom nav (MOBILE ONLY) — customizable dock + Menu.
             A rounded pill that floats above the safe area with a gap on every side; desktop/iPad
-            uses the sidebar instead. */}
+            uses the sidebar instead. The first 4 dock slots (set in Menu or Customize → Logo &
+            Identity) show here; Menu is always last. */}
         {(() => {
-          const primary = [
-            { id: "dashboard", label: "Home",     icon: "home",     onClick: () => handleNav("dashboard") },
-            { id: "clients",   label: "Clients",  icon: "clients",  onClick: () => handleNav("clients") },
-            { id: "schedule",  label: "Schedule", icon: "calendar", onClick: () => handleNav("schedule") },
-            { id: "invoices",  label: "Invoices", icon: "invoice",  onClick: () => handleNav("invoices") },
-          ].filter(t => isTabVisible(ALL_NAV.find(n => n.id === t.id), perms));
-          const menuBadge = navUnread || reminderDueCount;
+          const docked = dockIds.slice(0, 4);
+          const primary = docked.map(id => {
+            const n = ALL_NAV.find(x => x.id === id);
+            return n ? { id: n.id, label: n.label, icon: n.icon, onClick: () => handleNav(n.id) } : null;
+          }).filter(Boolean);
+          const dockedSet = new Set(docked);
+          const menuBadge = (dockedSet.has("messages") ? 0 : navUnread) + (dockedSet.has("reminders") ? 0 : reminderDueCount);
           const tabs = [
-            ...primary.map(t => ({ ...t, active: page === t.id })),
+            ...primary.map(t => ({ ...t, active: page === t.id, badge: t.id === "messages" ? navUnread : t.id === "reminders" ? reminderDueCount : 0 })),
             { id: "__menu", label: "Menu", icon: "menu", onClick: () => setMenuOpen(true), active: menuOpen, badge: menuBadge },
           ];
           return (
@@ -20444,6 +20522,8 @@ export default function App({ authEmail = "", onSignOut }) {
             perms={perms}
             navUnread={navUnread}
             reminderDue={reminderDueCount}
+            navDock={navDock}
+            setNavDock={setNavDock}
             onNav={handleNav}
             onSignOut={handleSignOut}
             currentUser={currentUser}
