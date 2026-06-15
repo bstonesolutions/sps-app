@@ -5337,7 +5337,7 @@ function PhotoStrip({ photos, size = 56 }) {
 // ─────────────────────────────────────────────
 // SERVICE WORKSPACE (perform & log a stop, with profitability)
 // ─────────────────────────────────────────────
-function CompleteStopModal({ stop, client, email, catalog, costs, team, onComplete, onClose, onViewClient, onOfficeAlert }) {
+function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedAt, onComplete, onClose, onViewClient, onOfficeAlert }) {
   const { T, branding, perms } = useApp();
   const todayStr = new Date().toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" });
   const firstName = client?.name?.split(" ")[0] || "there";
@@ -5347,6 +5347,13 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
   const [minutes, setMinutes] = useState(parseInt(stop.duration) || 60);
   const [timerOn, setTimerOn] = useState(false);
   const [elapsed, setElapsed] = useState(0); // seconds
+  // Feature 3B: actual hours worked, for profitability. Seeded from the "I'm Here" arrival
+  // clock (arrival → now) when the tech tapped it; otherwise a manual fallback they fill in.
+  const [actualHours, setActualHours] = useState(() => {
+    if (!arrivedAt) return "";
+    const h = Math.max(0, (Date.now() - new Date(arrivedAt).getTime()) / 3600000);
+    return String(Math.round(h * 100) / 100);
+  });
   const [readings, setReadings] = useState({});
   const [tx, setTx] = useState({});       // treatmentId -> oz
   const [partsUsed, setPartsUsedState] = useState({}); // partId -> qty
@@ -5478,6 +5485,17 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
   const reportText = renderReport(email, ctx);
 
   const assignedMember = (team || []).find(e => e.id === assigneeId);
+
+  // Feature 3B — profitability. quoted_price = the total revenue; target = the highest
+  // per-service Target $/hr among this stop's services (snapshotted so later service edits
+  // don't rewrite history); effective rate = revenue ÷ actual hours.
+  const stopTargets = svcList.map(s => { const cs = (catalog.services || []).find(x => x.name === s.name); return cs ? num(cs.target_hourly_rate) : 0; }).filter(t => t > 0);
+  const snapshotTarget = stopTargets.length ? Math.max(...stopTargets) : null;
+  const effHours = num(actualHours);
+  const effRate = effHours > 0 ? num(revenue) / effHours : null;
+  const profState = effRate == null ? "none" : (snapshotTarget == null ? "neutral" : (effRate >= snapshotTarget ? "good" : "low"));
+  const profColor = profState === "good" ? "#16a34a" : profState === "low" ? "#E5484D" : T.textMuted;
+
   const buildEntry = () => ({
     sid: stop.sid,
     date: todayStr, tech: assignedMember ? assignedMember.name : "Unassigned", type: stop.type,
@@ -5496,6 +5514,11 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
     treatmentsUsed, productsUsed,
     partsUsed: partsUsedArr,
     usageLoc,
+    // Feature 3B snapshots — frozen at completion so later service/price edits never rewrite history
+    quoted_price: num(revenue),
+    actual_hours: effHours > 0 ? effHours : null,
+    target_hourly_rate: snapshotTarget,
+    arrivedAt: arrivedAt || null,
     breakdown: {
       revenue: num(revenue), minutes: num(minutes), hourlyRate: num(hourlyRate),
       labor: laborCost, treatment: treatmentCost, treatmentRetail, parts: partsCost, partsBilledRetail, product: productCost,
@@ -5653,6 +5676,37 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, onComple
               ⏸ {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, "0")}
             </button>
           )}
+        </div>
+      </div>
+
+      {/* Feature 3B — actual hours worked + live effective hourly rate vs target */}
+      <div style={sectionGap}>
+        <label style={labelStyle}>Actual Hours Worked</label>
+        <div style={{ display: "flex", gap: 10, alignItems: "stretch" }}>
+          <div style={{ position: "relative", flex: 1 }}>
+            <input type="text" inputMode="decimal" value={actualHours} onChange={e => setActualHours(e.target.value.replace(/[^\d.]/g, ""))} placeholder="0" style={{ ...smallInput, textAlign: "left", paddingRight: 40 }} />
+            <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>hrs</span>
+          </div>
+          <div style={{ flex: 1.5, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, background: T.surfaceAlt, borderRadius: 10, padding: "8px 14px" }}>
+            {effRate == null ? (
+              <span style={{ fontSize: 12, color: T.textMuted }}>Enter hours for $/hr</span>
+            ) : (
+              <>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em" }}>Effective</div>
+                  <div style={{ fontSize: 16, fontWeight: 800, color: profColor, lineHeight: 1.1 }}>{money(effRate)}<span style={{ fontSize: 11, fontWeight: 600, color: T.textMuted }}>/hr</span></div>
+                </div>
+                {snapshotTarget != null && (
+                  <span style={{ fontSize: 10.5, fontWeight: 800, padding: "4px 9px", borderRadius: 100, background: hexA(profColor, 0.13), color: profColor, whiteSpace: "nowrap", textAlign: "right" }}>
+                    {profState === "good" ? "On target" : "Undercharged"}<br />target {money(snapshotTarget)}
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+        <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>
+          {arrivedAt ? "Auto-filled from your “I'm Here” clock — adjust if needed." : "No arrival clock for this stop — enter hours worked. Revenue ÷ hours = your effective rate."}
         </div>
       </div>
 
@@ -8159,6 +8213,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           catalog={catalog}
           costs={costs}
           team={team}
+          arrivedAt={arrivals[completeModal.stop.sid]}
           onComplete={onComplete}
           onClose={() => setCompleteModal(null)}
           onViewClient={onClientSelect}
