@@ -20672,6 +20672,17 @@ export default function App({ authEmail = "", onSignOut }) {
         .catch(err => console.warn("Owner email error:", err?.message || err));
     } catch (e) { console.warn("notifyOwnerEmail error:", e?.message || e); }
   };
+
+  // Drop a line into a client's shared chat thread (sps_messages) — the same thread
+  // invoices post to, so client actions and receipts live in one conversation you
+  // can reply to. Best-effort: a failure is logged, never blocks the action.
+  const postClientMessage = (clientId, sender, senderName, body) => {
+    if (!clientId || !body) return;
+    supabase.from("sps_messages")
+      .insert({ client_id: String(clientId), sender, sender_name: senderName || "", body })
+      .then(({ error }) => { if (error) console.warn("Chat message insert failed:", error.message); }, () => {});
+  };
+
   // client service requests land as office alerts so staff see them on the dashboard
   const handleServiceRequest = (req) => {
     handleOfficeAlert({ title: `Service Request: ${req.clientName}`, body: `${req.type}${req.dates ? " · " + req.dates : ""}${req.notes ? " — " + req.notes : ""}`, type: "request", clientId: req.clientId });
@@ -20681,6 +20692,7 @@ export default function App({ authEmail = "", onSignOut }) {
       message: req.notes ? `Their note:\n"${req.notes}"\n\nOpen the app to schedule it: ${PROD_URL}` : `Open the app to schedule it: ${PROD_URL}`,
       rows: [["Client", req.clientName], ["Service", req.type || "—"], req.dates ? ["Preferred dates", req.dates] : null],
     });
+    postClientMessage(req.clientId, "client", req.clientName, `I'd like to request ${req.type || "service"}${req.dates ? ` (${req.dates})` : ""}.${req.notes ? ` ${req.notes}` : ""}`);
   };
 
   // Store a client's service rating on their most recent visit, and route low
@@ -20753,6 +20765,7 @@ export default function App({ authEmail = "", onSignOut }) {
         ["Requested plan", req.requestedPlan],
       ],
     });
+    postClientMessage(req.clientId, "client", req.clientName, `I'd like to upgrade to ${req.requestedPlan}${req.currentPlan ? ` (from ${req.currentPlan})` : ""}.${req.message ? ` ${req.message}` : ""}`);
   };
 
   const handleSaveInvoice = (inv) => {
@@ -20778,6 +20791,8 @@ export default function App({ authEmail = "", onSignOut }) {
           inv.paidDate ? ["Paid date", inv.paidDate] : null,
         ],
       });
+      // Client-facing receipt in their chat thread (like the invoice-sent message).
+      postClientMessage(inv.clientId, "staff", branding.companyName || "", `Payment received for invoice ${inv.number || ""} — ${amount}. Thank you!`);
     }
   };
   const handleDeleteInvoice = (id) => {
