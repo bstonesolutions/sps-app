@@ -828,6 +828,26 @@ const MEMBER_ROLES = [
   { key: "custom", label: "Custom…" },
 ];
 const roleLabel = (key) => (MEMBER_ROLES.find(r => r.key === key) || {}).label || "Field Crew";
+
+// Guard a team write before it is saved (Bug 0, Part C). Rejects malformed structures,
+// never drops the last owner, and never blanks an owner email that was previously set.
+// Returns the validated `next`, or the previous array unchanged when the write is rejected.
+// (The on-disk format lives in the storage layer, which we never touch — this validates
+// the value in app code BEFORE it reaches the setter.)
+function validateTeamWrite(next, prev) {
+  const prevArr = Array.isArray(prev) ? prev : [];
+  // Must be an array of member objects, each with a stable id.
+  if (!Array.isArray(next) || next.some(m => !m || typeof m !== "object" || m.id == null)) return prevArr;
+  const owners = next.filter(m => m.role === "owner");
+  const prevOwners = prevArr.filter(m => m.role === "owner");
+  // Never drop the last owner.
+  if (owners.length < 1 && prevOwners.length >= 1) return prevArr;
+  // Never blank an owner email that was previously set.
+  const prevOwnerHadEmail = prevOwners.some(m => (m.email || "").trim());
+  const nextOwnerHasEmail = owners.some(m => (m.email || "").trim());
+  if (prevOwnerHadEmail && !nextOwnerHasEmail) return prevArr;
+  return next;
+}
 // ─────────────────────────────────────────────
 // PER-TAB STAFF PERMISSIONS
 // Preset roles set a baseline; per-person overrides fine-tune each tab to
@@ -19494,6 +19514,13 @@ export default function App({ authEmail = "", onSignOut }) {
   const [scheduleCfg, setScheduleCfg, lscfg] = useStoredState("sps_schedule_cfg", DEFAULT_SCHEDULE_CFG);
   const [roles, setRoles, lrol] = useStoredState("sps_roles", DEFAULT_ROLES);
   const [team, setTeam, ltm] = useStoredState("sps_team", DEFAULT_TEAM);
+  // Guarded team setter (Bug 0, Part C) — validates structure, keeps one owner, never
+  // blanks the owner email. Used by every user/auth-driven team write (TeamManager edits,
+  // owner auto-claim). Reset-to-default intentionally bypasses this (raw setTeam).
+  const setTeamSafe = (updater) => setTeam(prev => {
+    const next = typeof updater === "function" ? updater(prev) : updater;
+    return validateTeamWrite(next, prev);
+  });
   const [session, setSession, lsesh] = useStoredState("sps_session", { userId: DEFAULT_OWNER_ID });
   const [invoices, setInvoices, linv] = useStoredState("sps_invoices", DEMO_INVOICES);
   const [invoicing, setInvoicing, linvc] = useStoredState("sps_invoicing", DEFAULT_INVOICING);
@@ -19759,7 +19786,7 @@ export default function App({ authEmail = "", onSignOut }) {
   // first real sign-in (no emails assigned yet) claims the owner account automatically
   useEffect(() => {
     if (!ltm || !emailKey || currentUser || anyEmail) return;
-    setTeam(list => {
+    setTeamSafe(list => {
       const arr = Array.isArray(list) ? list.slice() : [];
       let idx = arr.findIndex(m => m.role === "owner"); if (idx < 0) idx = 0;
       if (arr[idx]) arr[idx] = { ...arr[idx], email: authEmail };
@@ -20003,6 +20030,15 @@ export default function App({ authEmail = "", onSignOut }) {
   //  • messages (sps_messages) → re-pointed via the existing supabase client (best-effort)
   // Nothing is deleted — related rows are only re-pointed. supabaseClient.js untouched.
   const handleMergeClients = async ({ survivorId, dupIds, merged }) => {
+    // Guardrail (Bug 0, Part B): the merge operates on CLIENT contacts only, matched by
+    // stable id. Abort if any id in scope is a team/owner record, or isn't a known client —
+    // so a merge can never read, write, or fold into the team list or move an email between
+    // records. (Matching never uses name or email — only ids passed from the confirmed UI.)
+    const ids = [survivorId, ...(dupIds || [])].map(String);
+    const teamIds = new Set((team || []).map(m => String(m.id)));
+    const clientIds = new Set((clients || []).map(c => String(c.id)));
+    if (ids.some(id => teamIds.has(id))) { console.warn("Merge blocked: a team/owner record was in scope."); return; }
+    if (!ids.every(id => clientIds.has(id))) { console.warn("Merge blocked: a non-client record was in scope."); return; }
     const dupSet = new Set((dupIds || []).map(String));
     setClients(cs => (cs || [])
       .map(c => String(c.id) === String(survivorId) ? merged : c)
@@ -20273,16 +20309,35 @@ export default function App({ authEmail = "", onSignOut }) {
     );
   }
 
-  // Not signed in → show the account picker
+  // Access gate (Bug 0, Part A) — three clearly separated states, and never a Sign-out-only
+  // dead-end for an authenticated owner. An empty/failed/slow team read fails toward RETRY,
+  // not toward lockout.
   if (!currentUser) {
-    if (!anyEmail) return <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: fontStack, background: T.bg, color: T.textMuted, fontSize: 14 }}>Setting up your account…</div>;
-    return (
+    // 1) Team not loaded yet — still loading OR the read failed (ltm stays false on a thrown
+    //    read). Retry, never deny.
+    if (!ltm) return (
       <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: fontStack, background: T.bg, color: T.text }}>
         <div style={{ textAlign: "center", maxWidth: 340 }}>
+          <div style={{ width: 40, height: 40, border: `3px solid ${hexA(T.primary, 0.25)}`, borderTopColor: T.primary, borderRadius: "50%", margin: "0 auto 16px", animation: "spin 0.8s linear infinite" }} />
+          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 6 }}>Loading your account…</div>
+          <div style={{ fontSize: 13.5, color: T.textMuted, marginBottom: 18, lineHeight: 1.5 }}>Taking longer than usual? Tap retry — we'll re-check, never lock you out.</div>
+          <button onClick={() => window.location.reload()} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "12px 20px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Retry</button>
+        </div>
+      </div>
+    );
+    // 2) Loaded but no emails assigned yet → the first sign-in claims the owner (effect above).
+    if (!anyEmail) return <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: fontStack, background: T.bg, color: T.textMuted, fontSize: 14 }}>Setting up your account…</div>;
+    // 3) Loaded, emails exist, but this email isn't on the team. Show the message — but never
+    //    a Sign-out-only dead-end: Retry (re-read) is the primary action so an owner whose
+    //    record is mid-sync is never stranded.
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: fontStack, background: T.bg, color: T.text }}>
+        <div style={{ textAlign: "center", maxWidth: 360 }}>
           <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 14px" }}><Icon name="lock" size={32} /></div>
-          <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 8 }}>No access yet</div>
-          <div style={{ fontSize: 14, color: T.textMuted, marginBottom: 20, lineHeight: 1.5 }}>This app isn't set up for <b>{authEmail}</b>. Ask the owner to add this email under Team &amp; Logins.</div>
-          <button onClick={onSignOut} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "12px 20px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button>
+          <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 8 }}>We couldn't find your account</div>
+          <div style={{ fontSize: 14, color: T.textMuted, marginBottom: 20, lineHeight: 1.5 }}>We couldn't match <b>{authEmail}</b> to a team member. This can happen if your account is still syncing — tap retry. If it keeps happening, ask the owner to add this email under Team &amp; Logins.</div>
+          <button onClick={() => window.location.reload()} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "12px 20px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit", width: "100%", marginBottom: 10 }}>Retry</button>
+          <button onClick={onSignOut} style={{ background: "none", color: T.textMuted, border: "none", borderRadius: 12, padding: "8px 20px", fontWeight: 700, fontSize: 13.5, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button>
         </div>
       </div>
     );
@@ -20357,7 +20412,7 @@ export default function App({ authEmail = "", onSignOut }) {
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
       {page === "duplicates" && perms.canImport && <DuplicatesScreen clients={clients} invoices={invoices} schedule={schedule} onMerge={handleMergeClients} onGoToClients={() => handleNav("clients")} />}
-      {page === "settings" && <AppSettings onNav={handleNav} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeam} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} navDock={navDock} setNavDock={setNavDock} />}
+      {page === "settings" && <AppSettings onNav={handleNav} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeamSafe} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} navDock={navDock} setNavDock={setNavDock} />}
     </>
   );
 
