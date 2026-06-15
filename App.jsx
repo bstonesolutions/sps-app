@@ -7148,7 +7148,7 @@ function StopEditModal({ stop, dayDate, catalog, team, T, onSave, onClose }) {
   );
 }
 
-function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, onClientSelect, seedClientIds, clearSeed, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments }) {
+function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, onClientSelect, seedClientIds, clearSeed, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {} }) {
   const { T, perms } = useApp();
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
   const compact = cfg.density === "compact";
@@ -7718,133 +7718,163 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
         </div>
       )}
 
-      {/* ROUTE DASHBOARD — per-tech summary cards for the selected day */}
-      {!selectMode && viewTech === null && schedule.length > 0 && (() => {
-        const groups = groupsForDate(selectedDate);
-        return (
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 700, color: T.textMuted, marginBottom: 12 }}>{stripDate(selectedDate)}{selectedDate === todayMDY() ? " · Today" : ""}</div>
-            {groups.length === 0 ? (
-              <div style={{ textAlign: "center", padding: "44px 20px", color: T.textMuted }}>
-                <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="calendar" size={26} /></div>
-                <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 6 }}>No stops this day</div>
-                {perms.editSchedule && <div style={{ fontSize: 13, marginBottom: 16 }}>Add a stop to start building this route.</div>}
-                {perms.editSchedule && <Btn onClick={() => setShowAdd(true)}>+ Add Stop</Btn>}
-              </div>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                {groups.map(g => {
-                  const m = routeMetrics(g.stops);
-                  const pct = m.total ? Math.round((m.done / m.total) * 100) : 0;
-                  return (
-                    <button key={g.key} onClick={() => setViewTech(g.key)}
-                      style={{ display: "flex", alignItems: "center", gap: 16, background: T.surface, border: "none", borderRadius: 20, boxShadow: T.shadow, padding: "16px 18px", cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%" }}>
-                      <RouteRing done={m.done} total={m.total} size={68} label="stops" />
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                          <div style={{ fontSize: 18, fontWeight: 700, color: T.text, letterSpacing: "-0.02em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.name}</div>
-                          <span style={{ color: T.textMuted, fontSize: 20, flexShrink: 0 }}>›</span>
+      {/* ROUTE DASHBOARD (per-tech cards) + TECH ROUTE DETAIL — drill-down on mobile, side by side on desktop */}
+      {!selectMode && schedule.length > 0 && (() => {
+        // Per-tech summary cards for the selected day.
+        const dashboard = (() => {
+          const groups = groupsForDate(selectedDate);
+          return (
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.textMuted, marginBottom: 12 }}>{stripDate(selectedDate)}{selectedDate === todayMDY() ? " · Today" : ""}</div>
+              {groups.length === 0 ? (
+                <div style={{ textAlign: "center", padding: "44px 20px", color: T.textMuted }}>
+                  <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="calendar" size={26} /></div>
+                  <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 6 }}>No stops this day</div>
+                  {perms.editSchedule && <div style={{ fontSize: 13, marginBottom: 16 }}>Add a stop to start building this route.</div>}
+                  {perms.editSchedule && <Btn onClick={() => setShowAdd(true)}>+ Add Stop</Btn>}
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  {groups.map(g => {
+                    const m = routeMetrics(g.stops);
+                    const pct = m.total ? Math.round((m.done / m.total) * 100) : 0;
+                    const sel = vp.isDesktop && g.key === viewTech;
+                    return (
+                      <button key={g.key} onClick={() => setViewTech(g.key)}
+                        style={{ display: "flex", alignItems: "center", gap: 16, background: T.surface, border: vp.isDesktop ? `2px solid ${sel ? T.primary : "transparent"}` : "none", borderRadius: 20, boxShadow: T.shadow, padding: "16px 18px", cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%" }}>
+                        <RouteRing done={m.done} total={m.total} size={68} label="stops" />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                            <div style={{ fontSize: 18, fontWeight: 700, color: T.text, letterSpacing: "-0.02em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.name}</div>
+                            <span style={{ color: T.textMuted, fontSize: 20, flexShrink: 0 }}>›</span>
+                          </div>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: T.textMuted, margin: "6px 0 5px" }}>
+                            <span>{fmtMin(m.startMin)}</span><span>{fmtMin(m.endMin)}</span>
+                          </div>
+                          <div style={{ height: 6, background: T.surfaceAlt, borderRadius: 100, overflow: "hidden" }}>
+                            <div style={{ width: `${pct}%`, height: "100%", background: m.done >= m.total ? T.accent : T.primary, borderRadius: 100 }} />
+                          </div>
+                          <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 6 }}>{m.done}/{m.total} done · ~{m.milesEst} mi · {fmtDur(Math.max(0, m.endMin - m.startMin))} est</div>
                         </div>
-                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: T.textMuted, margin: "6px 0 5px" }}>
-                          <span>{fmtMin(m.startMin)}</span><span>{fmtMin(m.endMin)}</span>
-                        </div>
-                        <div style={{ height: 6, background: T.surfaceAlt, borderRadius: 100, overflow: "hidden" }}>
-                          <div style={{ width: `${pct}%`, height: "100%", background: m.done >= m.total ? T.accent : T.primary, borderRadius: 100 }} />
-                        </div>
-                        <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 6 }}>{m.done}/{m.total} done · ~{m.milesEst} mi · {fmtDur(Math.max(0, m.endMin - m.startMin))} est</div>
-                      </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })();
+
+        // Expanded stops list for the selected tech/route.
+        const detailFor = () => {
+          const stops = stopsForKey(selectedDate, viewTech);
+          const m = routeMetrics(stops);
+          const pct = m.total ? Math.round((m.done / m.total) * 100) : 0;
+          const g = groupsForDate(selectedDate).find(x => x.key === viewTech);
+          const techName = g ? g.name : "Route";
+          const isToday = selectedDate === todayMDY();
+          // Display-only optimized ordering for this exact date+tech (resets on refresh).
+          const optActive = routeOpt && routeOpt.key === `${selectedDate}|${viewTech}`;
+          const orderedStops = optActive
+            ? (() => { const bySid = Object.fromEntries(m.ordered.map(s => [s.sid, s])); return routeOpt.order.map(sid => bySid[sid]).filter(Boolean); })()
+            : m.ordered;
+          const nextStop = orderedStops.find(s => !(completedSids && completedSids[s.sid]));
+          return (
+            <div style={{ paddingBottom: vp.isDesktop ? 0 : (nextStop ? 80 : 0) }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 0 12px" }}>
+                {vp.isDesktop
+                  ? <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{techName}</div>
+                  : <button onClick={() => setViewTech(null)} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
+                      <Icon name="back" size={14} /> All routes
+                    </button>}
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 12, color: T.textMuted, fontWeight: 600 }}>{stripDate(selectedDate)}{isToday ? " · Today" : ""}</span>
+                  {/* Both admin and staff can optimize their own route (display-only). */}
+                  {stops.length > 1 && (
+                    <button onClick={() => !optimizing && optimizeRoute(selectedDate, viewTech, stops)} disabled={optimizing}
+                      style={{ background: hexA(T.primary, 0.1), border: `1px solid ${hexA(T.primary, 0.2)}`, color: T.primary, borderRadius: 10, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: optimizing ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5, opacity: optimizing ? 0.7 : 1 }}>
+                      <Icon name="refresh" size={13} /> {optimizing ? "Optimizing…" : "Optimize Route"}
                     </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        );
-      })()}
-
-      {/* TECH ROUTE DETAIL */}
-      {!selectMode && viewTech !== null && (() => {
-        const stops = stopsForKey(selectedDate, viewTech);
-        const m = routeMetrics(stops);
-        const pct = m.total ? Math.round((m.done / m.total) * 100) : 0;
-        const g = groupsForDate(selectedDate).find(x => x.key === viewTech);
-        const techName = g ? g.name : "Route";
-        const isToday = selectedDate === todayMDY();
-        // Display-only optimized ordering for this exact date+tech (resets on refresh).
-        const optActive = routeOpt && routeOpt.key === `${selectedDate}|${viewTech}`;
-        const orderedStops = optActive
-          ? (() => { const bySid = Object.fromEntries(m.ordered.map(s => [s.sid, s])); return routeOpt.order.map(sid => bySid[sid]).filter(Boolean); })()
-          : m.ordered;
-        const nextStop = orderedStops.find(s => !(completedSids && completedSids[s.sid]));
-        return (
-          <div style={{ paddingBottom: nextStop ? 80 : 0 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 0 12px" }}>
-              <button onClick={() => setViewTech(null)} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
-                <Icon name="back" size={14} /> All routes
-              </button>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <span style={{ fontSize: 12, color: T.textMuted, fontWeight: 600 }}>{stripDate(selectedDate)}{isToday ? " · Today" : ""}</span>
-                {/* Both admin and staff can optimize their own route (display-only). */}
-                {stops.length > 1 && (
-                  <button onClick={() => !optimizing && optimizeRoute(selectedDate, viewTech, stops)} disabled={optimizing}
-                    style={{ background: hexA(T.primary, 0.1), border: `1px solid ${hexA(T.primary, 0.2)}`, color: T.primary, borderRadius: 10, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: optimizing ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5, opacity: optimizing ? 0.7 : 1 }}>
-                    <Icon name="refresh" size={13} /> {optimizing ? "Optimizing…" : "Optimize Route"}
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div style={{ background: T.surface, borderRadius: 18, boxShadow: T.shadow, padding: "16px 18px", marginBottom: 16, display: "flex", alignItems: "center", gap: 16 }}>
-              <RouteRing done={m.done} total={m.total} size={64} label="stops" />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 17, fontWeight: 700, color: T.text, letterSpacing: "-0.02em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{techName}</div>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: T.textMuted, margin: "7px 0 5px" }}>
-                  <span>{fmtMin(m.startMin)}</span><span>~{m.milesEst} mi est</span><span>{fmtMin(m.endMin)}</span>
-                </div>
-                <div style={{ height: 6, background: T.surfaceAlt, borderRadius: 100, overflow: "hidden" }}>
-                  <div style={{ width: `${pct}%`, height: "100%", background: m.done >= m.total ? T.accent : T.primary, borderRadius: 100 }} />
-                </div>
-              </div>
-            </div>
-
-            {/* Optimized-route summary + full-route deep link (display-only) */}
-            {optActive && (routeOpt.totalDur || routeOpt.addresses.length > 0) && (
-              <div style={{ background: hexA(T.primary, 0.06), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 14, padding: "12px 14px", marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-                <div style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>
-                  {routeOpt.totalDur
-                    ? <>Optimized route · {routeOpt.totalDur} drive · {routeOpt.totalDist}</>
-                    : <>Optimized order (estimated)</>}
-                </div>
-                {routeOpt.addresses.length > 0 && (
-                  <a href={mapsRouteUrl(routeOpt.origin, routeOpt.addresses)} target="_blank" rel="noreferrer"
-                    style={{ fontSize: 12.5, fontWeight: 800, color: T.primary, textDecoration: "none", display: "flex", alignItems: "center", gap: 5, whiteSpace: "nowrap" }}>
-                    <Icon name="map" size={13} /> Open Full Route in Maps
-                  </a>
-                )}
-              </div>
-            )}
-
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {orderedStops.map((s, i) => (
-                <div key={s.sid} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {renderStopCard(s, selectedDate, i + 1, isToday)}
-                  {optActive && i < orderedStops.length - 1 && routeOpt.legs[s.sid] && (
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 5, fontSize: 11, fontWeight: 700, color: T.textMuted }}>
-                      <Icon name="map" size={11} /> {routeOpt.legs[s.sid]} drive to next
-                    </div>
                   )}
                 </div>
+              </div>
+
+              <div style={{ background: T.surface, borderRadius: 18, boxShadow: T.shadow, padding: "16px 18px", marginBottom: 16, display: "flex", alignItems: "center", gap: 16 }}>
+                <RouteRing done={m.done} total={m.total} size={64} label="stops" />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 17, fontWeight: 700, color: T.text, letterSpacing: "-0.02em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{techName}</div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: T.textMuted, margin: "7px 0 5px" }}>
+                    <span>{fmtMin(m.startMin)}</span><span>~{m.milesEst} mi est</span><span>{fmtMin(m.endMin)}</span>
+                  </div>
+                  <div style={{ height: 6, background: T.surfaceAlt, borderRadius: 100, overflow: "hidden" }}>
+                    <div style={{ width: `${pct}%`, height: "100%", background: m.done >= m.total ? T.accent : T.primary, borderRadius: 100 }} />
+                  </div>
+                </div>
+              </div>
+
+              {/* Optimized-route summary + full-route deep link (display-only) */}
+              {optActive && (routeOpt.totalDur || routeOpt.addresses.length > 0) && (
+                <div style={{ background: hexA(T.primary, 0.06), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 14, padding: "12px 14px", marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                  <div style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>
+                    {routeOpt.totalDur
+                      ? <>Optimized route · {routeOpt.totalDur} drive · {routeOpt.totalDist}</>
+                      : <>Optimized order (estimated)</>}
+                  </div>
+                  {routeOpt.addresses.length > 0 && (
+                    <a href={mapsRouteUrl(routeOpt.origin, routeOpt.addresses)} target="_blank" rel="noreferrer"
+                      style={{ fontSize: 12.5, fontWeight: 800, color: T.primary, textDecoration: "none", display: "flex", alignItems: "center", gap: 5, whiteSpace: "nowrap" }}>
+                      <Icon name="map" size={13} /> Open Full Route in Maps
+                    </a>
+                  )}
+                </div>
+              )}
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {orderedStops.map((s, i) => (
+                  <div key={s.sid} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {renderStopCard(s, selectedDate, i + 1, isToday)}
+                    {optActive && i < orderedStops.length - 1 && routeOpt.legs[s.sid] && (
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 5, fontSize: 11, fontWeight: 700, color: T.textMuted }}>
+                        <Icon name="map" size={11} /> {routeOpt.legs[s.sid]} drive to next
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {nextStop && (vp.isDesktop ? (
+                <a href={goDirections(nextStop.address)} target="_blank" rel="noreferrer" style={{ display: "block", textDecoration: "none", marginTop: 14 }}>
+                  <div style={{ background: T.primary, color: "#fff", borderRadius: 14, padding: "13px 16px", textAlign: "center", boxShadow: "0 6px 24px rgba(0,0,0,0.2)" }}>
+                    <div style={{ fontSize: 14, fontWeight: 800 }}>Directions to {nextStop.client} ›</div>
+                    <div style={{ fontSize: 11.5, opacity: 0.9, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nextStop.address}</div>
+                  </div>
+                </a>
+              ) : (
+                <a href={goDirections(nextStop.address)} target="_blank" rel="noreferrer" style={{ position: "fixed", bottom: "calc(74px + env(safe-area-inset-bottom))", left: 0, right: 0, zIndex: 95, maxWidth: 740, margin: "0 auto", textDecoration: "none" }}>
+                  <div style={{ margin: "0 16px", background: T.primary, color: "#fff", borderRadius: 14, padding: "13px 16px", textAlign: "center", boxShadow: "0 6px 24px rgba(0,0,0,0.25)" }}>
+                    <div style={{ fontSize: 14, fontWeight: 800 }}>Directions to {nextStop.client} ›</div>
+                    <div style={{ fontSize: 11.5, opacity: 0.9, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nextStop.address}</div>
+                  </div>
+                </a>
               ))}
             </div>
+          );
+        };
 
-            {nextStop && (
-              <a href={goDirections(nextStop.address)} target="_blank" rel="noreferrer" style={{ position: "fixed", bottom: "calc(74px + env(safe-area-inset-bottom))", left: 0, right: 0, zIndex: 95, maxWidth: 740, margin: "0 auto", textDecoration: "none" }}>
-                <div style={{ margin: "0 16px", background: T.primary, color: "#fff", borderRadius: 14, padding: "13px 16px", textAlign: "center", boxShadow: "0 6px 24px rgba(0,0,0,0.25)" }}>
-                  <div style={{ fontSize: 14, fontWeight: 800 }}>Directions to {nextStop.client} ›</div>
-                  <div style={{ fontSize: 11.5, opacity: 0.9, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nextStop.address}</div>
+        // Mobile: dashboard OR detail (drill-down). Desktop: dashboard left + detail right.
+        if (!vp.isDesktop) return viewTech === null ? dashboard : detailFor();
+        return (
+          <div style={{ display: "flex", gap: 26, alignItems: "flex-start" }}>
+            <div style={{ width: 372, flexShrink: 0 }}>{dashboard}</div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              {viewTech !== null ? detailFor() : (
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: T.textMuted, gap: 12, padding: "60px 40px", textAlign: "center", background: T.surface, borderRadius: 20, boxShadow: T.shadow }}>
+                  <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.06), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="map" size={30} /></div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: T.text }}>Select a route</div>
+                  <div style={{ fontSize: 13.5, maxWidth: 260, lineHeight: 1.5 }}>Choose a route on the left to see its stops, timing, and directions.</div>
                 </div>
-              </a>
-            )}
+              )}
+            </div>
           </div>
         );
       })()}
@@ -19814,7 +19844,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {selectedClient && <ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} />}
         </>
       ))}
-      {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} />}
+      {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} />}
       {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin} canEdit={perms.isAdmin || perms.editInventory} T={T} />}
       {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
