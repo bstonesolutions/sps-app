@@ -2742,6 +2742,18 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
             <div style={{ fontSize: 11, color: T.textMuted, padding: "12px 8px 4px" }}>Add or remove widgets and use the arrows to reorder your home screen.</div>
           </div>
         </Card>
+      ) : vp.isDesktop ? (
+        /* Phase 4 — desktop admin dashboard: Key Stats span full width, the rest of the
+           widgets flow into a balanced 2-column grid (each deep-links to its screen). */
+        <>
+          {items.some(it => it.id === "stats") && widget("stats")}
+          <div style={{ columnCount: 2, columnGap: 16 }}>
+            {items.filter(it => it.id !== "stats").map(it => {
+              const w = widget(it.id);
+              return w ? <div key={it.id} style={{ breakInside: "avoid" }}>{w}</div> : null;
+            })}
+          </div>
+        </>
       ) : (
         items.map(it => widget(it.id))
       )}
