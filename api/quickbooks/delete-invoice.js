@@ -1,18 +1,29 @@
 // api/quickbooks/delete-invoice.js
 // Deletes an invoice in QuickBooks. QB requires the invoice Id AND its current
 // SyncToken, so we first read the invoice to get the token, then delete.
+import { getValidAccessToken, QB_API_BASE, setCors } from "./qb-store.js";
+
 export default async function handler(req, res) {
+  setCors(res);
+  if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { access_token, realm_id, qb_id } = req.body;
-
-  if (!access_token || !realm_id || !qb_id) {
-    return res.status(400).json({ error: "Missing required fields" });
+  const { qb_id } = req.body;
+  if (!qb_id) {
+    return res.status(400).json({ error: "Missing qb_id" });
   }
 
-  const base = `https://quickbooks.api.intuit.com/v3/company/${realm_id}`;
+  // Tokens are read server-side from the store (never passed by the client).
+  let access_token, realm_id;
+  try {
+    ({ access_token, realm_id } = await getValidAccessToken());
+  } catch (e) {
+    return res.status(401).json({ error: "Not connected to QuickBooks", reconnect: true });
+  }
+
+  const base = `${QB_API_BASE}/v3/company/${realm_id}`;
   const headers = {
     "Authorization": `Bearer ${access_token}`,
     "Content-Type":  "application/json",

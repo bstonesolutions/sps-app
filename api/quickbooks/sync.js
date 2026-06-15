@@ -1,13 +1,19 @@
 // api/quickbooks/sync.js
-export default async function handler(req, res) {
-  // Read tokens passed as query params from the frontend
-  const { access_token, realm_id } = req.query;
+import { getValidAccessToken, QB_API_BASE, setCors } from "./qb-store.js";
 
-  if (!access_token || !realm_id) {
-    return res.status(401).json({ error: 'Not connected to QuickBooks' });
+export default async function handler(req, res) {
+  setCors(res);
+  if (req.method === "OPTIONS") return res.status(204).end();
+
+  // Tokens are read server-side from the store (never passed by the client).
+  let access_token, realm_id;
+  try {
+    ({ access_token, realm_id } = await getValidAccessToken());
+  } catch (e) {
+    return res.status(401).json({ error: 'Not connected to QuickBooks', reconnect: true });
   }
 
-  const base = `https://quickbooks.api.intuit.com/v3/company/${realm_id}`;
+  const base = `${QB_API_BASE}/v3/company/${realm_id}`;
   const headers = {
     'Authorization': `Bearer ${access_token}`,
     'Accept':        'application/json',
