@@ -14793,7 +14793,7 @@ function MessagesScreen({ clients, currentUser, T }) {
 }
 
 // ── Shared chat thread UI (used by both staff and client) ──
-function ChatThread({ clientId, sender, senderName, T, accentSide = "right" }) {
+function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onSent }) {
   const { messages, loading, send, markRead } = useMessages(clientId);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
@@ -14812,10 +14812,12 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right" }) {
 
   const handleSend = async () => {
     if (!draft.trim() || sending) return;
+    const body = draft.trim();
     setSending(true);
-    await send(draft, sender, senderName);
+    const ok = await send(draft, sender, senderName);
     setDraft("");
     setSending(false);
+    if (ok && onSent) onSent(body);
   };
 
   if (loading) {
@@ -14905,7 +14907,7 @@ function StaffChat({ client, currentUser, T, onBack }) {
 }
 
 // ── Client messages tab ──
-function CPMessages({ client, branding, onSubmit, T, vp = {} }) {
+function CPMessages({ client, branding, onSubmit, onClientMessage, T, vp = {} }) {
   const [view, setView] = useState("messages"); // "messages" | "request"
 
   if (view === "request") {
@@ -14933,7 +14935,7 @@ function CPMessages({ client, branding, onSubmit, T, vp = {} }) {
           Request Service
         </button>
       </div>
-      <ChatThread clientId={client.id} sender="client" senderName={client.name} T={T} />
+      <ChatThread clientId={client.id} sender="client" senderName={client.name} T={T} onSent={onClientMessage} />
     </div>
   );
 
@@ -19672,7 +19674,7 @@ function CPDesktopSidebar({ page, settingsOpen, portalUnread, branding, client, 
   );
 }
 
-function SPSClientPortal({ client, schedule, invoices, estimates, branding, team = [], T: globalT, fontStack, onSignOut, onServiceRequest, onApproveEstimate, onUpgradeRequest, onRateVisit, isStaffPreview = false }) {
+function SPSClientPortal({ client, schedule, invoices, estimates, branding, team = [], T: globalT, fontStack, onSignOut, onServiceRequest, onApproveEstimate, onUpgradeRequest, onRateVisit, onClientMessage, isStaffPreview = false }) {
   // Client prefs stored in localStorage — personal per-device settings
   const prefsKey = `sps_client_prefs_${client.id}`;
   const [prefs, setPrefs] = useState(() => {
@@ -19733,7 +19735,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, team
       {!settingsOpen && page === "cp_property" && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
       {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
       {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} vp={vp} />}
-      {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} onSubmit={onServiceRequest} T={T} vp={vp} />}
+      {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} onSubmit={onServiceRequest} onClientMessage={isStaffPreview ? undefined : onClientMessage} T={T} vp={vp} />}
       {!settingsOpen && page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
     </SectionErrorBoundary>
   );
@@ -20619,8 +20621,38 @@ export default function App({ authEmail = "", onSignOut }) {
 
   const handleOfficeAlert = (a) => setOfficeAlerts(list => [{ id: Date.now(), resolved: false, ...a }, ...list]);
   const handleResolveAlert = (id) => setOfficeAlerts(list => list.filter(a => a.id !== id));
+
+  // Email the owner for an Owner-Alerts event, if that event's email channel is on
+  // (Settings > Business > Owner Alerts). The in-app alert is the durable record,
+  // so this is fire-and-forget: a failed/blocked send is logged, never blocks the
+  // request. Uses the absolute PROD_URL so it works on the native app
+  // (capacitor://localhost) as well as the web build.
+  const notifyOwnerEmail = (eventKey, { subject, heading, message, rows }) => {
+    try {
+      const notify = (email && email.notify) || {};
+      const cfg = (notify.events || {})[eventKey];
+      if (!cfg || !cfg.email) return;                      // owner turned this channel off
+      const to = notify.ownerEmail || (branding && branding.companyEmail) || "";
+      if (!to) return;                                     // no destination configured
+      fetch(`${PROD_URL}/api/send-notification`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to, subject, heading, message, rows, branding }),
+      })
+        .then(r => { if (!r.ok) r.json().catch(() => ({})).then(d => console.warn("Owner email failed:", d?.error || r.status)); })
+        .catch(err => console.warn("Owner email error:", err?.message || err));
+    } catch (e) { console.warn("notifyOwnerEmail error:", e?.message || e); }
+  };
   // client service requests land as office alerts so staff see them on the dashboard
-  const handleServiceRequest = (req) => handleOfficeAlert({ title: `Service Request: ${req.clientName}`, body: `${req.type}${req.dates ? " · " + req.dates : ""}${req.notes ? " — " + req.notes : ""}`, type: "request", clientId: req.clientId });
+  const handleServiceRequest = (req) => {
+    handleOfficeAlert({ title: `Service Request: ${req.clientName}`, body: `${req.type}${req.dates ? " · " + req.dates : ""}${req.notes ? " — " + req.notes : ""}`, type: "request", clientId: req.clientId });
+    notifyOwnerEmail("service_request", {
+      subject: `Service request: ${req.clientName}`,
+      heading: `${req.clientName} requested service`,
+      message: req.notes ? `Their note:\n"${req.notes}"\n\nOpen the app to schedule it: ${PROD_URL}` : `Open the app to schedule it: ${PROD_URL}`,
+      rows: [["Client", req.clientName], ["Service", req.type || "—"], req.dates ? ["Preferred dates", req.dates] : null],
+    });
+  };
 
   // Store a client's service rating on their most recent visit, and route low
   // ratings (private feedback) straight to the office so Brandon can make it right.
@@ -20636,6 +20668,12 @@ export default function App({ authEmail = "", onSignOut }) {
     if (rating && rating <= 3) {
       const c = (clients || []).find(x => String(x.id) === String(clientId));
       handleOfficeAlert({ title: `Service Feedback: ${c?.name || "Client"}`, body: `${rating}★${feedback ? ` — ${feedback}` : ""}`, type: "feedback", clientId });
+      notifyOwnerEmail("low_rating", {
+        subject: `Low rating (${rating}★): ${c?.name || "Client"}`,
+        heading: `${c?.name || "A client"} left a ${rating}★ rating`,
+        message: feedback ? `Their feedback:\n"${feedback}"\n\nReach out to make it right.` : "No written feedback was left. Consider reaching out.",
+        rows: [["Client", c?.name || "Client"], ["Rating", `${rating} of 5`]],
+      });
     }
   };
 
@@ -20663,26 +20701,55 @@ export default function App({ authEmail = "", onSignOut }) {
     }
   };
 
-  const handleUpgradeRequest = (req) => handleOfficeAlert({
-    title: `Upgrade Request: ${req.clientName}`,
-    body: req.message || "No additional message.",
-    type: "upgrade_request",
-    clientId: req.clientId,
-    clientName: req.clientName,
-    currentPlan: req.currentPlan,
-    requestedPlan: req.requestedPlan,
-    submittedAt: req.submittedAt,
-    upgradeStep: 0,
-    date: new Date().toLocaleDateString("en-US"),
-  });
+  const handleUpgradeRequest = (req) => {
+    handleOfficeAlert({
+      title: `Upgrade Request: ${req.clientName}`,
+      body: req.message || "No additional message.",
+      type: "upgrade_request",
+      clientId: req.clientId,
+      clientName: req.clientName,
+      currentPlan: req.currentPlan,
+      requestedPlan: req.requestedPlan,
+      submittedAt: req.submittedAt,
+      upgradeStep: 0,
+      date: new Date().toLocaleDateString("en-US"),
+    });
+    notifyOwnerEmail("upgrade_request", {
+      subject: `Upgrade request: ${req.clientName} → ${req.requestedPlan}`,
+      heading: `${req.clientName} wants to upgrade`,
+      message: (req.message ? `Their note:\n"${req.message}"\n\n` : "") + `Open the app to review and process this request: ${PROD_URL}`,
+      rows: [
+        ["Client", req.clientName],
+        ["Current plan", req.currentPlan || "None"],
+        ["Requested plan", req.requestedPlan],
+      ],
+    });
+  };
 
   const handleSaveInvoice = (inv) => {
     // QuickBooks sync is handled inside the invoice editor's Save (create or update),
     // so here we only persist locally. This avoids double-pushing / duplicates.
+    const prevInv = (invoices || []).find(iv => iv.id === inv.id);
+    const becamePaid = inv.status === "Paid" && (!prevInv || prevInv.status !== "Paid");
     setInvoices(list => {
       const exists = (list || []).some(iv => iv.id === inv.id);
       return exists ? list.map(iv => iv.id === inv.id ? inv : iv) : [inv, ...(list || [])];
     });
+    if (becamePaid) {
+      const cl = (clients || []).find(c => String(c.id) === String(inv.clientId));
+      const amount = "$" + (Number(invoiceTotals(inv).total) || 0).toFixed(2);
+      notifyOwnerEmail("payment_received", {
+        subject: `Payment received: ${cl?.name || "Client"} — ${amount}`,
+        heading: `Invoice ${inv.number || ""} marked paid`,
+        message: `${cl?.name || "A client"}'s invoice ${inv.number || ""} was marked paid.`,
+        rows: [
+          ["Client", cl?.name || "—"],
+          ["Invoice", inv.number || "—"],
+          ["Amount", amount],
+          inv.paidDate ? ["Paid date", inv.paidDate] : null,
+        ],
+      });
+    }
   };
   const handleDeleteInvoice = (id) => {
     const target = (invoices || []).find(iv => iv.id === id);
@@ -20806,6 +20873,12 @@ export default function App({ authEmail = "", onSignOut }) {
         onServiceRequest={handleServiceRequest}
         onRateVisit={handleRateVisit}
         onUpgradeRequest={handleUpgradeRequest}
+        onClientMessage={(body) => notifyOwnerEmail("client_message", {
+          subject: `New message from ${clientUser.name}`,
+          heading: `${clientUser.name} sent you a message`,
+          message: (body ? `"${body}"\n\n` : "") + `Open the app to reply: ${PROD_URL}`,
+          rows: [["Client", clientUser.name]],
+        })}
       />
     );
   }
