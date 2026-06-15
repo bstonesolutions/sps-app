@@ -13271,9 +13271,15 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
     setTimeout(() => setTierSaved(false), 2500);
   };
 
+  // A client's plan for the division currently being viewed. Multi-division clients
+  // keep per-division plans in c.plans; single-division falls back to the flat c.plan.
+  // Every count below uses this one resolver so the tier buckets + None always sum
+  // to the full client list (no Essential-counts-one-way / None-counts-another drift).
+  const planForDiv = (c) => (c.plans && c.plans[activeDivision]) || (c.division === activeDivision ? c.plan : null);
+
   // Clients on this tier (or no tier when __none__ is selected)
   const tierClients = (clients || []).filter(c => {
-    const clientPlan = (c.plans && c.plans[activeDivision]) || (c.division === activeDivision ? c.plan : null);
+    const clientPlan = planForDiv(c);
     if (selected === "__none__") return !clientPlan;
     return clientPlan === selected;
   });
@@ -13414,7 +13420,7 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
         {TIER_KEYS.map(key => {
           const dt2 = (tiers || DEFAULT_TIERS)[activeDivision] || DEFAULT_TIERS[activeDivision] || DEFAULT_TIERS["Pond"];
           const t = dt2[key] || {};
-          const count = (clients || []).filter(c => c.plan === key).length;
+          const count = (clients || []).filter(c => planForDiv(c) === key).length;
           const active = selected === key;
           return (
             <button key={key} onClick={() => switchTier(key)}
@@ -13428,10 +13434,9 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
         {/* None tab — a fully editable base tier */}
         {(() => {
           const noneTier = divTierData["__none__"] || NONE_TIER_DEFAULT;
-          const noneCount = (clients || []).filter(c => {
-            const p = (c.plans && c.plans[activeDivision]) || (c.division === activeDivision ? c.plan : null);
-            return !p;
-          }).length;
+          // None = anything not on one of the named tiers, so the four buckets sum
+          // to the full client list even if a record carries a stale/renamed plan.
+          const noneCount = (clients || []).filter(c => !TIER_KEYS.includes(planForDiv(c))).length;
           const active = selected === "__none__";
           const col = noneTier.color || T.textMuted;
           return (
