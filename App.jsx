@@ -10540,6 +10540,12 @@ function AdvancedPermsEditor({ member, onChange }) {
           <div style={{ fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>Fine-tune individual actions. Each starts matching the tab access above — turn one off to restrict just that action.</div>
           {!anyParent && <div style={{ fontSize: 12, color: T.textMuted }}>Grant View/Edit on a tab above to fine-tune its actions.</div>}
           {eff.seeInventory && group("Inventory", <>{row("seeInventoryCost", "See cost & unit pricing", "Otherwise stock levels only — cost/pricing stays hidden")}</>)}
+          {eff.canInvoice && group("Invoices", <>
+            {row("invoiceCreate", "Create & edit", "Build and change invoices")}
+            {row("invoiceSend", "Send to clients", "Email / share invoices")}
+            {row("invoiceMarkPaid", "Mark paid", "Record payment or reopen")}
+            {row("invoiceDelete", "Delete / void", "Remove invoices")}
+          </>)}
           {eff.editClients && group("Clients", <>{row("deleteClients", "Delete clients", "Remove client records (editing stays on)")}</>)}
         </div>
       )}
@@ -10828,7 +10834,7 @@ function InvoiceRow({ iv, onClick }) {
 }
 
 function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCatalog, presetClientId, onSave, onClose, onDelete }) {
-  const { T } = useApp();
+  const { T, perms } = useApp();
   const money = (n) => `$${(n || 0).toFixed(2)}`;
   const toISO = (mdy) => { const d = parseMDY(mdy); return d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}` : ""; };
   const fromISO = (iso) => { if (!iso) return ""; const [y, m, d] = iso.split("-"); return `${m}/${d}/${y}`; };
@@ -11260,7 +11266,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           <div style={{ background: hexA("#E5484D", 0.06), border: `1px solid ${hexA("#E5484D", 0.25)}`, borderRadius: 12, padding: "11px 14px", fontSize: 13, fontWeight: 600, color: "#E5484D" }}>{qbMsg}</div>
         )}
 
-        {invoice && onDelete && <button onClick={() => { onDelete(inv.id); onClose(); }} style={{ background: "none", border: "none", color: "#C0392B", fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 6, fontFamily: "inherit" }}>Delete this invoice</button>}
+        {invoice && onDelete && perms.invoiceDelete && <button onClick={() => { onDelete(inv.id); onClose(); }} style={{ background: "none", border: "none", color: "#C0392B", fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 6, fontFamily: "inherit" }}>Delete this invoice</button>}
       </div>
 
       {/* Catalog item picker sheet */}
@@ -12026,7 +12032,11 @@ async function exportInvoicePdf(args) {
 }
 
 function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose, onEdit, onDelete, canManage, embedded }) {
-  const { T } = useApp();
+  const { T, perms } = useApp();
+  // Fine-grained invoice actions (default to canManage, so unchanged unless restricted).
+  const canSend     = canManage && perms.invoiceSend;
+  const canMarkPaid = canManage && perms.invoiceMarkPaid;
+  const canEditInv  = canManage && perms.invoiceCreate;
   const money = (n) => `$${(n || 0).toFixed(2)}`;
   const totals = invoiceTotals(invoice);
   const eff = effectiveStatus(invoice);
@@ -12127,7 +12137,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
   );
 
   // Send-to-client button + status feedback (stacked full-width — modal layout).
-  const sendBlock = canManage && (
+  const sendBlock = canSend && (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <Btn onClick={sendToClient} disabled={!clientEmail || sendState === "sending"}
         style={{ borderRadius: 12, gap: 8, justifyContent: "center", opacity: clientEmail ? 1 : 0.55 }}>
@@ -12148,10 +12158,10 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
   // Status / edit / print actions (wrapping row — modal layout).
   const actionRow = canManage && (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-      {eff !== "Paid" && <Btn variant="accent" onClick={() => setStatus("Paid")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Mark Paid</Btn>}
-      {invoice.status === "Draft" && <Btn variant="ghost" onClick={() => setStatus("Sent")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Mark Sent</Btn>}
-      {eff === "Paid" && <Btn variant="ghost" onClick={() => setStatus("Sent")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Reopen</Btn>}
-      <Btn variant="ghost" onClick={() => onEdit(invoice)} style={{ borderRadius: 12 }}>Edit</Btn>
+      {eff !== "Paid" && canMarkPaid && <Btn variant="accent" onClick={() => setStatus("Paid")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Mark Paid</Btn>}
+      {invoice.status === "Draft" && canMarkPaid && <Btn variant="ghost" onClick={() => setStatus("Sent")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Mark Sent</Btn>}
+      {eff === "Paid" && canMarkPaid && <Btn variant="ghost" onClick={() => setStatus("Sent")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Reopen</Btn>}
+      {canEditInv && <Btn variant="ghost" onClick={() => onEdit(invoice)} style={{ borderRadius: 12 }}>Edit</Btn>}
       <Btn variant="ghost" onClick={print} disabled={printing} style={{ borderRadius: 12 }}>{printing ? "Preparing…" : "Print / Export PDF"}</Btn>
     </div>
   );
@@ -12181,13 +12191,13 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
           </div>
           {canManage && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-              <Btn sm onClick={sendToClient} disabled={!clientEmail || sendState === "sending"} style={{ borderRadius: 10, gap: 6, opacity: clientEmail ? 1 : 0.55 }}>
+              {canSend && <Btn sm onClick={sendToClient} disabled={!clientEmail || sendState === "sending"} style={{ borderRadius: 10, gap: 6, opacity: clientEmail ? 1 : 0.55 }}>
                 <Icon name="mail" size={14} />{sendState === "sending" ? "Sending…" : sendState === "sent" ? "Sent ✓" : "Send"}
-              </Btn>
-              {eff !== "Paid" && <Btn sm variant="accent" onClick={() => setStatus("Paid")} style={{ borderRadius: 10 }}>Mark Paid</Btn>}
-              {invoice.status === "Draft" && <Btn sm variant="ghost" onClick={() => setStatus("Sent")} style={{ borderRadius: 10 }}>Mark Sent</Btn>}
-              {eff === "Paid" && <Btn sm variant="ghost" onClick={() => setStatus("Sent")} style={{ borderRadius: 10 }}>Reopen</Btn>}
-              <Btn sm variant="ghost" onClick={() => onEdit(invoice)} style={{ borderRadius: 10 }}>Edit</Btn>
+              </Btn>}
+              {eff !== "Paid" && canMarkPaid && <Btn sm variant="accent" onClick={() => setStatus("Paid")} style={{ borderRadius: 10 }}>Mark Paid</Btn>}
+              {invoice.status === "Draft" && canMarkPaid && <Btn sm variant="ghost" onClick={() => setStatus("Sent")} style={{ borderRadius: 10 }}>Mark Sent</Btn>}
+              {eff === "Paid" && canMarkPaid && <Btn sm variant="ghost" onClick={() => setStatus("Sent")} style={{ borderRadius: 10 }}>Reopen</Btn>}
+              {canEditInv && <Btn sm variant="ghost" onClick={() => onEdit(invoice)} style={{ borderRadius: 10 }}>Edit</Btn>}
               <Btn sm variant="ghost" onClick={print} disabled={printing} style={{ borderRadius: 10 }}>{printing ? "Preparing…" : "Print / PDF"}</Btn>
             </div>
           )}
@@ -12916,7 +12926,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
             <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M3 6h18M7 12h10M11 18h2"/></svg>
             Filter{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
           </button>
-          {perms.canInvoice && <Btn sm onClick={() => setCreating(true)}>+ New</Btn>}
+          {perms.invoiceCreate && <Btn sm onClick={() => setCreating(true)}>+ New</Btn>}
         </div>
       </div>
 
@@ -13068,7 +13078,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
               <div style={{ textAlign: "center", padding: "50px 20px", color: T.textMuted }}>
                 <div style={{ width: 56, height: 56, borderRadius: 18, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 14px" }}><Icon name="invoice" size={28} /></div>
                 <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 6 }}>No invoices{filter !== "All" ? ` marked ${filter}` : ""}</div>
-                {perms.canInvoice && filter === "All" && <><div style={{ fontSize: 13, marginBottom: 18 }}>Create one, or generate it from a completed visit.</div><Btn onClick={() => setCreating(true)}>+ New Invoice</Btn></>}
+                {perms.invoiceCreate && filter === "All" && <><div style={{ fontSize: 13, marginBottom: 18 }}>Create one, or generate it from a completed visit.</div><Btn onClick={() => setCreating(true)}>+ New Invoice</Btn></>}
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: groupBy !== "none" ? 20 : 8 }}>
@@ -13134,7 +13144,7 @@ function ClientInvoices({ client, invoices, invoicing, branding, catalog, setCat
 
   return (
     <Card>
-      <CardHeader title={`Invoices (${list.length})`} action={perms.canInvoice ? <Btn sm onClick={() => setCreating(true)}>+ New</Btn> : null} />
+      <CardHeader title={`Invoices (${list.length})`} action={perms.invoiceCreate ? <Btn sm onClick={() => setCreating(true)}>+ New</Btn> : null} />
       {list.length > 0 && (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1, borderBottom: `1px solid ${T.border}`, background: T.border }}>
           <div style={{ background: T.surfaceAlt, padding: "12px 16px" }}>
