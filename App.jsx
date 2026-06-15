@@ -18395,9 +18395,9 @@ function CPPond({ client, T }) {
 function CPHistory({ client, T }) { return <CPPond client={client} T={T} />; }
 
 // ── CP INVOICES ──
-function CPInvoices({ client, invoices, branding, T }) {
+function CPInvoices({ client, invoices, branding, T, vp = {} }) {
   const myInvoices = sortInvoices((invoices || []).filter(iv => invoiceMatchesClient(iv, client)));
-  const [open, setOpen] = useState(null);
+  const [sel, setSel] = useState(null);
 
   // Normalize status — handles both "Paid" and "paid", "Overdue"/"overdue" etc.
   const normStatus = (iv) => {
@@ -18438,79 +18438,144 @@ function CPInvoices({ client, invoices, branding, T }) {
 
   const outstanding = myInvoices.filter(iv => normStatus(iv) !== "paid" && normStatus(iv) !== "draft");
   const total = outstanding.reduce((s,iv) => s + invoiceTotals(iv).total, 0);
+  const selInv = sel != null ? myInvoices.find(iv => String(iv.id) === String(sel)) : null;
+
+  // ── Full invoice detail — CLIENT-SAFE ONLY: number, dates, status, line items
+  //    (desc/qty/price), subtotal/discount/tax/total, notes, pay link. Never any
+  //    cost / profit / margin (invoiceTotals also returns those — we don't read them). ──
+  const detail = (iv) => {
+    const st = normStatus(iv);
+    const isPaidSt = st === "paid";
+    const tot = invoiceTotals(iv);
+    const items = iv.lineItems || iv.items || [];
+    return (
+      <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+        <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:12 }}>
+          <div>
+            <div style={{ fontSize:20, fontWeight:800, color:T.text, letterSpacing:"-0.02em" }}>Invoice #{iv.number || iv.id}</div>
+            <div style={{ fontSize:12.5, color:T.textMuted, marginTop:3 }}>Issued {fmtDate(iv.date || iv.issueDate || "")}{iv.dueDate ? ` · Due ${fmtDate(iv.dueDate)}` : ""}</div>
+          </div>
+          <span style={{ fontSize:11, fontWeight:800, padding:"4px 12px", borderRadius:100, background:statusBg(st), color:statusColor(st), flexShrink:0 }}>{statusLabel(st)}</span>
+        </div>
+
+        {items.length > 0 && (
+          <div style={{ background:T.surfaceAlt, borderRadius:14, overflow:"hidden" }}>
+            {items.map((li,j) => {
+              // Support both the app shape (desc/qty/unitPrice) and the legacy QB shape (description/amount).
+              const lbl = li.desc || li.description || li.name || li.service || "—";
+              const qty = parseFloat(li.qty || 1) || 1;
+              const amt = li.amount != null ? parseFloat(li.amount)
+                : (li.unitPrice != null ? qty * (parseFloat(li.unitPrice) || 0)
+                : parseFloat(li.rate != null ? li.rate : li.price) || 0);
+              return (
+                <div key={j} style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12, padding:"12px 16px", borderBottom: j<items.length-1 ? `1px solid ${T.border}` : "none" }}>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontSize:13.5, color:T.text }}>{lbl}</div>
+                    {(qty > 1 || li.bundleNote) && <div style={{ fontSize:11.5, color:T.textMuted, marginTop:2 }}>{qty > 1 ? `Qty ${qty}` : ""}{qty > 1 && li.bundleNote ? " · " : ""}{li.bundleNote || ""}</div>}
+                  </div>
+                  <div style={{ fontSize:13.5, fontWeight:700, color:T.text, flexShrink:0 }}>${(amt||0).toFixed(2)}</div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Totals — client-safe figures only */}
+        <div style={{ display:"flex", flexDirection:"column", gap:6, fontSize:13 }}>
+          {tot.subtotal != null && <div style={{ display:"flex", justifyContent:"space-between", color:T.textMuted }}><span>Subtotal</span><span>${(tot.subtotal||0).toFixed(2)}</span></div>}
+          {tot.discountTotal > 0 && <div style={{ display:"flex", justifyContent:"space-between", color:T.textMuted }}><span>Discount</span><span>−${(tot.discountTotal||0).toFixed(2)}</span></div>}
+          {tot.tax > 0 && <div style={{ display:"flex", justifyContent:"space-between", color:T.textMuted }}><span>Tax</span><span>${(tot.tax||0).toFixed(2)}</span></div>}
+          <div style={{ display:"flex", justifyContent:"space-between", fontSize:16, fontWeight:800, color:T.text, borderTop:`1px solid ${T.border}`, paddingTop:8, marginTop:2 }}><span>Total</span><span>${(tot.total||0).toFixed(2)}</span></div>
+        </div>
+
+        {iv.notes && <div style={{ fontSize:12.5, color:T.textMuted, fontStyle:"italic", lineHeight:1.55 }}>{iv.notes}</div>}
+
+        {iv.paymentLink && !isPaidSt && (
+          <a href={iv.paymentLink} target="_blank" rel="noopener noreferrer"
+            onClick={(e) => { e.preventDefault(); openInAppBrowser(iv.paymentLink); }}
+            style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:8, background:"#2CA01C", color:"#fff", borderRadius:12, padding:"13px 18px", fontWeight:800, fontSize:14, textDecoration:"none", boxShadow:"0 4px 14px rgba(44,160,28,0.3)" }}>
+            Pay Now via QuickBooks
+          </a>
+        )}
+      </div>
+    );
+  };
+
+  // Compact, selectable invoice rows (shared by mobile list + desktop master list).
+  const rows = (
+    <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+      {myInvoices.map((iv) => {
+        const amt = invoiceTotals(iv).total;
+        const st  = normStatus(iv);
+        const isPaidSt = st === "paid";
+        const active = vp.isDesktop && String(sel) === String(iv.id);
+        return (
+          <button key={iv.id} onClick={() => setSel(iv.id)}
+            style={{ textAlign:"left", width:"100%", fontFamily:"inherit", cursor:"pointer", background:T.surface, borderRadius:18, border:`1.5px solid ${active ? T.primary : (isPaidSt ? T.border : hexA(statusColor(st), 0.3))}`, padding:"16px 18px", display:"flex", alignItems:"center", gap:14 }}>
+            <div style={{ width:3, alignSelf:"stretch", borderRadius:3, background:statusColor(st), flexShrink:0, minHeight:40 }} />
+            <div style={{ flex:1, minWidth:0 }}>
+              <div style={{ fontSize:14, fontWeight:700, color:T.text, letterSpacing:"-0.01em" }}>Invoice #{iv.number || iv.id}</div>
+              <div style={{ fontSize:12, color:T.textMuted, marginTop:2 }}>{fmtDate(iv.date || iv.issueDate || "")}</div>
+            </div>
+            <div style={{ textAlign:"right", flexShrink:0 }}>
+              <div style={{ fontSize:16, fontWeight:800, color: isPaidSt ? T.textMuted : T.text, letterSpacing:"-0.02em" }}>${amt.toFixed(2)}</div>
+              <div style={{ fontSize:10, fontWeight:700, padding:"3px 10px", borderRadius:100, background:statusBg(st), color:statusColor(st), marginTop:4, display:"inline-block" }}>{statusLabel(st)}</div>
+            </div>
+            <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{ opacity:0.45, flexShrink:0 }}><path d="M9 6l6 6-6 6"/></svg>
+          </button>
+        );
+      })}
+    </div>
+  );
+
+  const banner = outstanding.length > 0 && (
+    <div style={{ background:`linear-gradient(135deg, #E5484D, #c0392b)`, borderRadius:20, padding:"20px 22px", color:"#fff", boxShadow:"0 8px 24px rgba(229,72,77,0.35)" }}>
+      <div style={{ fontSize:11, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.1em", opacity:0.7, marginBottom:6 }}>Balance Due</div>
+      <div style={{ fontSize:34, fontWeight:900, letterSpacing:"-0.03em" }}>${total.toFixed(2)}</div>
+      <div style={{ fontSize:13, opacity:0.8, marginTop:4 }}>{outstanding.length} outstanding invoice{outstanding.length!==1?"s":""}</div>
+    </div>
+  );
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
       <div style={{ fontSize:26, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>Invoices</div>
+      {banner}
 
-      {outstanding.length > 0 && (
-        <div style={{ background:`linear-gradient(135deg, #E5484D, #c0392b)`, borderRadius:20, padding:"20px 22px", color:"#fff", boxShadow:"0 8px 24px rgba(229,72,77,0.35)" }}>
-          <div style={{ fontSize:11, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.1em", opacity:0.7, marginBottom:6 }}>Balance Due</div>
-          <div style={{ fontSize:34, fontWeight:900, letterSpacing:"-0.03em" }}>${total.toFixed(2)}</div>
-          <div style={{ fontSize:13, opacity:0.8, marginTop:4 }}>{outstanding.length} outstanding invoice{outstanding.length!==1?"s":""}</div>
+      {vp.isDesktop ? (
+        /* Desktop master-detail: list left, full invoice detail docked right */
+        <div style={{ display:"flex", gap:24, alignItems:"flex-start" }}>
+          <div style={{ width:360, flexShrink:0 }}>{rows}</div>
+          <div style={{ flex:1, minWidth:0, position:"sticky", top:0 }}>
+            {selInv ? (
+              <div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:20, padding:"20px 22px" }}>{detail(selInv)}</div>
+            ) : (
+              <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", textAlign:"center", gap:12, padding:"60px 40px", background:T.surface, border:`1px solid ${T.border}`, borderRadius:20, color:T.textMuted }}>
+                <div style={{ width:60, height:60, borderRadius:18, background:hexA(T.primary,0.08), color:T.primary, display:"flex", alignItems:"center", justifyContent:"center" }}>
+                  <svg viewBox="0 0 24 24" width={28} height={28} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round"><rect x="4" y="2" width="16" height="20" rx="2"/><path d="M9 7h6M9 11h6M9 15h4"/></svg>
+                </div>
+                <div style={{ fontSize:16, fontWeight:700, color:T.text }}>Select an invoice</div>
+                <div style={{ fontSize:13.5, maxWidth:240, lineHeight:1.5 }}>Choose an invoice to see its full breakdown here.</div>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : rows}
+
+      {/* Mobile: full-screen invoice detail */}
+      {!vp.isDesktop && selInv && (
+        <div style={{ position:"fixed", inset:0, zIndex:200, background:T.bg, display:"flex", flexDirection:"column" }}>
+          <div style={{ height:"env(safe-area-inset-top)" }} />
+          <div style={{ display:"flex", alignItems:"center", gap:8, padding:"12px 16px", borderBottom:`1px solid ${T.border}`, flexShrink:0 }}>
+            <button onClick={() => setSel(null)} style={{ background:"none", border:"none", color:T.primary, fontWeight:700, fontSize:14, cursor:"pointer", fontFamily:"inherit", display:"flex", alignItems:"center", gap:4, padding:0 }}>
+              <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+              Invoices
+            </button>
+          </div>
+          <div style={{ flex:1, minHeight:0, overflowY:"auto", WebkitOverflowScrolling:"touch", padding:"18px 18px calc(24px + env(safe-area-inset-bottom))" }}>
+            {detail(selInv)}
+          </div>
         </div>
       )}
-
-      <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-        {myInvoices.map((iv) => {
-          const isOpen = open === iv.id;
-          const amt    = invoiceTotals(iv).total;
-          const st     = normStatus(iv);
-          const isPaidSt = st === "paid";
-          return (
-            <div key={iv.id} style={{ background:T.surface, borderRadius:18, border:`1px solid ${isPaidSt ? T.border : hexA(statusColor(st), 0.3)}`, overflow:"hidden", transition:"box-shadow 0.15s" }}>
-              <div onClick={() => setOpen(isOpen ? null : iv.id)}
-                style={{ padding:"16px 18px", display:"flex", alignItems:"center", gap:14, cursor:"pointer" }}>
-                {/* Left accent */}
-                <div style={{ width:3, alignSelf:"stretch", borderRadius:3, background:statusColor(st), flexShrink:0, minHeight:40 }} />
-                <div style={{ flex:1, minWidth:0 }}>
-                  <div style={{ fontSize:14, fontWeight:700, color:T.text, letterSpacing:"-0.01em" }}>Invoice #{iv.number || iv.id}</div>
-                  <div style={{ fontSize:12, color:T.textMuted, marginTop:2 }}>{fmtDate(iv.date || iv.issueDate || "")}</div>
-                </div>
-                <div style={{ textAlign:"right", flexShrink:0 }}>
-                  <div style={{ fontSize:16, fontWeight:800, color: isPaidSt ? T.textMuted : T.text, letterSpacing:"-0.02em", textDecoration: isPaidSt ? "none" : "none" }}>${amt.toFixed(2)}</div>
-                  <div style={{ fontSize:10, fontWeight:700, padding:"3px 10px", borderRadius:100, background:statusBg(st), color:statusColor(st), marginTop:4, display:"inline-block" }}>{statusLabel(st)}</div>
-                </div>
-                <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{ transform:isOpen?"rotate(180deg)":"rotate(0)", transition:"transform 0.2s", opacity:0.5, flexShrink:0 }}><path d="M6 9l6 6 6-6"/></svg>
-              </div>
-              {isOpen && (
-                <div style={{ borderTop:`1px solid ${T.border}`, padding:"14px 18px", display:"flex", flexDirection:"column", gap:10 }}>
-                  {(iv.lineItems||iv.items||[]).length > 0 && (
-                    <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-                      {(iv.lineItems||iv.items||[]).map((li,j) => {
-                        // Support both the app shape (desc/qty/unitPrice) and the legacy QB shape (description/amount).
-                        const lbl = li.desc || li.description || li.name || li.service || "—";
-                        const amt = li.amount != null ? parseFloat(li.amount)
-                          : (li.unitPrice != null ? (parseFloat(li.qty || 1) || 1) * (parseFloat(li.unitPrice) || 0)
-                          : parseFloat(li.rate != null ? li.rate : li.price) || 0);
-                        return (
-                          <div key={j} style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:10, fontSize:13 }}>
-                            <span style={{ color:T.text, flex:1 }}>{lbl}</span>
-                            <span style={{ color:T.text, fontWeight:700, flexShrink:0 }}>${(amt || 0).toFixed(2)}</span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                  {iv.dueDate && !isPaidSt && (
-                    <div style={{ fontSize:12, color: new Date(iv.dueDate) < new Date() ? T.warning : T.textMuted }}>
-                      Due {fmtDate(iv.dueDate)}
-                    </div>
-                  )}
-                  {iv.notes && <div style={{ fontSize:12, color:T.textMuted, fontStyle:"italic" }}>{iv.notes}</div>}
-                  {iv.paymentLink && !isPaidSt && (
-                    <a href={iv.paymentLink} target="_blank" rel="noopener noreferrer"
-                      onClick={(e) => { e.preventDefault(); openInAppBrowser(iv.paymentLink); }}
-                      style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:8, background:"#2CA01C", color:"#fff", borderRadius:12, padding:"12px 18px", fontWeight:800, fontSize:14, textDecoration:"none", boxShadow:"0 4px 14px rgba(44,160,28,0.3)" }}>
-                      Pay Now via QuickBooks
-                    </a>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
     </div>
   );
 }
@@ -18809,7 +18874,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, team
       {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} team={team} onNav={setPage} onRateVisit={onRateVisit} T={T} vp={vp} />}
       {!settingsOpen && page === "cp_property" && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
       {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} />}
-      {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} />}
+      {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} vp={vp} />}
       {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} onSubmit={onServiceRequest} T={T} vp={vp} />}
       {!settingsOpen && page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
     </SectionErrorBoundary>
