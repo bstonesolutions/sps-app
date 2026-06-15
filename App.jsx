@@ -12508,7 +12508,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
   if (showSales && (perms.seeTotalSales || perms.isAdmin)) return <TotalSalesScreen invoices={invoices} clients={clients} onBack={() => setShowSales(false)} T={T} />;
 
   return (
-    <div style={vp.isDesktop ? { flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" } : undefined}>
+    <div style={vp.isDesktop ? { flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", padding: vp.isTablet ? "18px 18px 0" : "24px 34px 0" } : undefined}>
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <h2 style={{ margin: 0, fontSize: 26, fontWeight: 700, color: T.text, letterSpacing: "-0.03em" }}>Invoices</h2>
@@ -12553,7 +12553,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
       )}
 
       {/* Summary tiles — tap to see Total Sales */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 }}>
+      <div style={{ display: "grid", gridTemplateColumns: vp.isDesktop ? "repeat(2, minmax(0, 260px))" : "1fr 1fr", gap: 10, marginBottom: 16 }}>
         <div onClick={() => (perms.seeTotalSales || perms.isAdmin) && setShowSales(true)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "14px 16px", cursor: (perms.seeTotalSales || perms.isAdmin) ? "pointer" : "default" }}
           onMouseEnter={e => { if (perms.seeTotalSales || perms.isAdmin) e.currentTarget.style.boxShadow="0 4px 16px rgba(0,0,0,0.08)"; }}
           onMouseLeave={e => e.currentTarget.style.boxShadow="none"}>
@@ -19124,7 +19124,7 @@ function CPDesktopSidebar({ page, settingsOpen, portalUnread, branding, client, 
             : <span style={{ fontSize: 19 }}>{branding.logoEmoji || "💧"}</span>}
         </div>
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", lineHeight: 1.15, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.portalAppName || branding.companyName}</div>
+          <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", lineHeight: 1.18, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{branding.portalAppName || branding.companyName}</div>
           <div style={{ fontSize: 11, color: T.textMuted, lineHeight: 1.2 }}>Client Portal</div>
         </div>
       </div>
@@ -19425,7 +19425,7 @@ function DesktopSidebar({ page, perms, navUnread, reminderDue, onNav, onSignOut,
             : <span style={{ fontSize: 20 }}>{branding.logoEmoji}</span>}
         </div>
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", lineHeight: 1.15, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.companyName}</div>
+          <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", lineHeight: 1.18, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{branding.companyName}</div>
           <div style={{ fontSize: 11, color: T.textMuted, lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.division}</div>
         </div>
       </div>
