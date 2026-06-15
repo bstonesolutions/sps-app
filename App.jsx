@@ -329,6 +329,23 @@ function useSectionAutosave(value, setValue, delay = 500) {
     clearTimeout(timer.current);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Also flush when the app is backgrounded (iOS swipe-away / tab hidden). The
+  // unmount flush only fires on in-app navigation — if the OS suspends us while a
+  // debounced edit is still pending, it would otherwise be lost on next launch.
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === "hidden" && timer.current != null && pendingRef.current !== undefined) {
+        clearTimeout(timer.current);
+        timer.current = null;
+        const v = pendingRef.current;
+        pendingRef.current = undefined;
+        setValue(v);
+      }
+    };
+    document.addEventListener("visibilitychange", onHide);
+    return () => document.removeEventListener("visibilitychange", onHide);
+  }, [setValue]);
+
   return { draft, update, set, saved, dirty, undo };
 }
 
@@ -13132,8 +13149,26 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
   const liveTier = divTierData[selected] || DEFAULT_TIERS["Pond"]["Signature"];
   const [draft, setDraft] = useState(() => ({ ...liveTier }));
 
-  // Switch tiers: load fresh draft
+  // ── Tier-draft persistence ────────────────────────────────────────────────
+  // The draft is the live editor; switching tiers/divisions resets it and there
+  // was no flush on leave, so an edit you didn't explicitly Save was silently
+  // discarded. Write the draft through to the persisted tiers automatically:
+  // debounced after each edit, and immediately on tier/division switch, leaving
+  // Customize (unmount), or backgrounding the app — so nothing is ever lost.
+  const tierAutosaveRef = useRef(null);
+  const tierSavedTimerRef = useRef(null);
+  const tierCtxRef = useRef(null);
+  const commitTierDraft = (d, div, key) => {
+    setTiers(prev => {
+      const base = prev || DEFAULT_TIERS;
+      const divData = base[div] || DEFAULT_TIERS[div] || {};
+      return { ...base, [div]: { ...divData, [key]: { ...d } } };
+    });
+  };
+
+  // Switch tiers: persist current edits first, then load the new draft
   const switchTier = (key) => {
+    if (unsaved) { clearTimeout(tierAutosaveRef.current); commitTierDraft(draft, activeDivision, selected); }
     setSelected(key);
     const dt = (tiers || DEFAULT_TIERS)[activeDivision] || DEFAULT_TIERS[activeDivision] || DEFAULT_TIERS["Pond"];
     setDraft({ ...(dt[key] || DEFAULT_TIERS["Pond"][key] || {}) });
@@ -13142,6 +13177,7 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
   };
 
   const switchDivision = (div) => {
+    if (unsaved) { clearTimeout(tierAutosaveRef.current); commitTierDraft(draft, activeDivision, selected); }
     setActiveDivision(div);
     const dt = (tiers || DEFAULT_TIERS)[div] || DEFAULT_TIERS[div] || DEFAULT_TIERS["Pond"];
     setDraft({ ...(dt[selected] || DEFAULT_TIERS["Pond"][selected] || {}) });
@@ -13261,15 +13297,42 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
   };
 
   const saveTierDraft = () => {
-    setTiers(prev => {
-      const base = prev || DEFAULT_TIERS;
-      const divData = base[activeDivision] || DEFAULT_TIERS[activeDivision] || {};
-      return { ...base, [activeDivision]: { ...divData, [selected]: { ...draft } } };
-    });
+    clearTimeout(tierAutosaveRef.current);
+    commitTierDraft(draft, activeDivision, selected);
     setUnsaved(false);
     setTierSaved(true);
-    setTimeout(() => setTierSaved(false), 2500);
+    clearTimeout(tierSavedTimerRef.current);
+    tierSavedTimerRef.current = setTimeout(() => setTierSaved(false), 2500);
   };
+
+  // Keep the latest editor context for the unmount/background flush.
+  useEffect(() => { tierCtxRef.current = { draft, activeDivision, selected, unsaved }; });
+
+  // Autosave: commit the draft shortly after the last edit, so a change persists
+  // even if you never tap Save (switch tiers, leave Customize, or the app reloads).
+  useEffect(() => {
+    if (!unsaved) return;
+    clearTimeout(tierAutosaveRef.current);
+    tierAutosaveRef.current = setTimeout(() => {
+      commitTierDraft(draft, activeDivision, selected);
+      setUnsaved(false);
+      setTierSaved(true);
+      clearTimeout(tierSavedTimerRef.current);
+      tierSavedTimerRef.current = setTimeout(() => setTierSaved(false), 2000);
+    }, 700);
+    return () => clearTimeout(tierAutosaveRef.current);
+  }, [draft, unsaved]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Flush a pending edit on leaving Customize (unmount) or backgrounding the app.
+  useEffect(() => {
+    const flush = () => {
+      const c = tierCtxRef.current;
+      if (c && c.unsaved) { clearTimeout(tierAutosaveRef.current); commitTierDraft(c.draft, c.activeDivision, c.selected); }
+    };
+    const onHide = () => { if (document.visibilityState === "hidden") flush(); };
+    document.addEventListener("visibilitychange", onHide);
+    return () => { document.removeEventListener("visibilitychange", onHide); flush(); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // A client's plan for the division currently being viewed. Multi-division clients
   // keep per-division plans in c.plans; single-division falls back to the flat c.plan.
