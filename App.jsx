@@ -11576,57 +11576,98 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
     }
   };
 
-  const body = (
-      <div style={{ display: "flex", flexDirection: "column", gap: 14, paddingBottom: embedded ? 0 : "max(16px, env(safe-area-inset-bottom))" }}>
-        <InvoiceDocument invoice={invoice} client={client} branding={branding} cfg={cfg} T={T} />
-
-        {/* QB Payment link */}
-        {invoice.paymentLink && eff !== "Paid" && (
-          <a href={invoice.paymentLink} target="_blank" rel="noopener noreferrer"
-            style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: "#2CA01C", color: "#fff", borderRadius: 14, padding: "14px 20px", fontWeight: 800, fontSize: 15, textDecoration: "none", boxShadow: "0 4px 16px rgba(44,160,28,0.3)" }}>
-            <svg viewBox="0 0 24 24" width={18} height={18} fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>
-            Pay via QuickBooks
-          </a>
-        )}
-        {canManage && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <Btn onClick={sendToClient} disabled={!clientEmail || sendState === "sending"}
-              style={{ borderRadius: 12, gap: 8, justifyContent: "center", opacity: clientEmail ? 1 : 0.55 }}>
-              <Icon name="mail" size={15} />
-              {sendState === "sending" ? "Sending…" : sendState === "sent" ? "Sent ✓" : "Send to Client"}
-            </Btn>
-            {!clientEmail && (
-              <div style={{ fontSize: 12, color: T.textMuted, textAlign: "center" }}>No email on file for this client — add one to send the invoice.</div>
-            )}
-            {sendMsg && (
-              <div style={{ fontSize: 13, fontWeight: 600, textAlign: "center", padding: "9px 12px", borderRadius: 10,
-                background: sendState === "error" ? hexA("#C0392B", 0.08) : hexA("#2CA01C", 0.1),
-                color: sendState === "error" ? "#C0392B" : "#157a12" }}>{sendMsg}</div>
-            )}
-          </div>
-        )}
-        {canManage && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {eff !== "Paid" && <Btn variant="accent" onClick={() => setStatus("Paid")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Mark Paid</Btn>}
-            {invoice.status === "Draft" && <Btn variant="ghost" onClick={() => setStatus("Sent")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Mark Sent</Btn>}
-            {eff === "Paid" && <Btn variant="ghost" onClick={() => setStatus("Sent")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Reopen</Btn>}
-            <Btn variant="ghost" onClick={() => onEdit(invoice)} style={{ borderRadius: 12 }}>Edit</Btn>
-            <Btn variant="ghost" onClick={print} disabled={printing} style={{ borderRadius: 12 }}>{printing ? "Preparing…" : "Print / Export PDF"}</Btn>
-          </div>
-        )}
-      </div>
+  // Invoice document + the "Pay via QuickBooks" link — this is the scrollable content.
+  const doc = (
+    <>
+      <InvoiceDocument invoice={invoice} client={client} branding={branding} cfg={cfg} T={T} />
+      {invoice.paymentLink && eff !== "Paid" && (
+        <a href={invoice.paymentLink} target="_blank" rel="noopener noreferrer"
+          style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: "#2CA01C", color: "#fff", borderRadius: 14, padding: "14px 20px", fontWeight: 800, fontSize: 15, textDecoration: "none", boxShadow: "0 4px 16px rgba(44,160,28,0.3)", marginTop: 14 }}>
+          <svg viewBox="0 0 24 24" width={18} height={18} fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>
+          Pay via QuickBooks
+        </a>
+      )}
+    </>
   );
 
-  // Desktop master-detail: render the same content inline in the right pane (no modal).
-  if (embedded) return (
-    <div>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 16 }}>
-        <div style={{ fontWeight: 800, fontSize: 21, color: T.text, letterSpacing: "-0.02em" }}>{invoice.number}</div>
-        {onClose && <button onClick={onClose} aria-label="Close" style={{ width: 32, height: 32, borderRadius: "50%", border: "none", background: T.surfaceAlt, color: T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="close" size={16} /></button>}
-      </div>
-      {body}
+  // Send-to-client button + status feedback (stacked full-width — modal layout).
+  const sendBlock = canManage && (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <Btn onClick={sendToClient} disabled={!clientEmail || sendState === "sending"}
+        style={{ borderRadius: 12, gap: 8, justifyContent: "center", opacity: clientEmail ? 1 : 0.55 }}>
+        <Icon name="mail" size={15} />
+        {sendState === "sending" ? "Sending…" : sendState === "sent" ? "Sent ✓" : "Send to Client"}
+      </Btn>
+      {!clientEmail && (
+        <div style={{ fontSize: 12, color: T.textMuted, textAlign: "center" }}>No email on file for this client — add one to send the invoice.</div>
+      )}
+      {sendMsg && (
+        <div style={{ fontSize: 13, fontWeight: 600, textAlign: "center", padding: "9px 12px", borderRadius: 10,
+          background: sendState === "error" ? hexA("#C0392B", 0.08) : hexA("#2CA01C", 0.1),
+          color: sendState === "error" ? "#C0392B" : "#157a12" }}>{sendMsg}</div>
+      )}
     </div>
   );
+
+  // Status / edit / print actions (wrapping row — modal layout).
+  const actionRow = canManage && (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+      {eff !== "Paid" && <Btn variant="accent" onClick={() => setStatus("Paid")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Mark Paid</Btn>}
+      {invoice.status === "Draft" && <Btn variant="ghost" onClick={() => setStatus("Sent")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Mark Sent</Btn>}
+      {eff === "Paid" && <Btn variant="ghost" onClick={() => setStatus("Sent")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Reopen</Btn>}
+      <Btn variant="ghost" onClick={() => onEdit(invoice)} style={{ borderRadius: 12 }}>Edit</Btn>
+      <Btn variant="ghost" onClick={print} disabled={printing} style={{ borderRadius: 12 }}>{printing ? "Preparing…" : "Print / Export PDF"}</Btn>
+    </div>
+  );
+
+  // ── Modal layout (mobile / inside a client record): document, then actions stacked. ──
+  const body = (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14, paddingBottom: "max(16px, env(safe-area-inset-bottom))" }}>
+      {doc}
+      {sendBlock}
+      {actionRow}
+    </div>
+  );
+
+  // ── Desktop master-detail: pin the header + action toolbar at the top so the
+  //    buttons are always visible; only the invoice document below scrolls. ──
+  if (embedded) {
+    const statusColors = { Paid: "#16a34a", Overdue: "#E5484D", Sent: T.primary, Draft: T.textMuted };
+    const sc = statusColors[eff] || T.textMuted;
+    return (
+      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+        <div style={{ flexShrink: 0, paddingBottom: 14, borderBottom: `1px solid ${T.border}` }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: canManage ? 14 : 0 }}>
+            <div style={{ fontWeight: 800, fontSize: 21, color: T.text, letterSpacing: "-0.02em" }}>{invoice.number}</div>
+            <span style={{ fontSize: 11, fontWeight: 800, padding: "4px 11px", borderRadius: 100, background: hexA(sc, 0.12), color: sc }}>{eff}</span>
+            <div style={{ flex: 1 }} />
+            {onClose && <button onClick={onClose} aria-label="Close" style={{ width: 32, height: 32, borderRadius: "50%", border: "none", background: T.surfaceAlt, color: T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="close" size={16} /></button>}
+          </div>
+          {canManage && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              <Btn sm onClick={sendToClient} disabled={!clientEmail || sendState === "sending"} style={{ borderRadius: 10, gap: 6, opacity: clientEmail ? 1 : 0.55 }}>
+                <Icon name="mail" size={14} />{sendState === "sending" ? "Sending…" : sendState === "sent" ? "Sent ✓" : "Send"}
+              </Btn>
+              {eff !== "Paid" && <Btn sm variant="accent" onClick={() => setStatus("Paid")} style={{ borderRadius: 10 }}>Mark Paid</Btn>}
+              {invoice.status === "Draft" && <Btn sm variant="ghost" onClick={() => setStatus("Sent")} style={{ borderRadius: 10 }}>Mark Sent</Btn>}
+              {eff === "Paid" && <Btn sm variant="ghost" onClick={() => setStatus("Sent")} style={{ borderRadius: 10 }}>Reopen</Btn>}
+              <Btn sm variant="ghost" onClick={() => onEdit(invoice)} style={{ borderRadius: 10 }}>Edit</Btn>
+              <Btn sm variant="ghost" onClick={print} disabled={printing} style={{ borderRadius: 10 }}>{printing ? "Preparing…" : "Print / PDF"}</Btn>
+            </div>
+          )}
+          {canManage && !clientEmail && <div style={{ fontSize: 12, color: T.textMuted, marginTop: 8 }}>No email on file — add one to send this invoice.</div>}
+          {sendMsg && (
+            <div style={{ fontSize: 12.5, fontWeight: 600, marginTop: 8, padding: "8px 11px", borderRadius: 9,
+              background: sendState === "error" ? hexA("#C0392B", 0.08) : hexA("#2CA01C", 0.1),
+              color: sendState === "error" ? "#C0392B" : "#157a12" }}>{sendMsg}</div>
+          )}
+        </div>
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingTop: 18, paddingBottom: 8 }}>
+          {doc}
+        </div>
+      </div>
+    );
+  }
   return <Modal title={invoice.number} onClose={onClose}>{body}</Modal>;
 }
 
@@ -12476,11 +12517,11 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
             <div style={{ width: 440, flexShrink: 0, overflowY: "auto", borderRight: `1px solid ${T.border}`, paddingRight: 18 }}>
               {listContent}
             </div>
-            <div style={{ flex: 1, minWidth: 0, overflowY: "auto", paddingLeft: 26 }}>
+            <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden", paddingLeft: 26 }}>
               {livePreview
                 ? <InvoicePreview invoice={livePreview} client={clients.find(c => invoiceMatchesClient(livePreview, c))} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} embedded />
                 : (
-                  <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: T.textMuted, gap: 12, padding: 40, textAlign: "center" }}>
+                  <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: T.textMuted, gap: 12, padding: 40, textAlign: "center" }}>
                     <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.06), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="invoice" size={30} /></div>
                     <div style={{ fontSize: 16, fontWeight: 700, color: T.text }}>Select an invoice</div>
                     <div style={{ fontSize: 13.5, maxWidth: 260, lineHeight: 1.5 }}>Choose an invoice from the list to view it here.</div>
