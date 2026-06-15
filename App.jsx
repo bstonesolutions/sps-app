@@ -1016,9 +1016,10 @@ function applyFinePerms(out, member) {
   out.invoiceDelete     = g("invoiceDelete",     out.canInvoice);
   // Client deletion — default to the coarse "edit clients" capability.
   out.deleteClients     = g("deleteClients",     out.editClients);
-  // Settings by section — default to the coarse "App Settings" capability.
+  // Settings by section — default to the coarse capability that gated each today
+  // (branding/messaging under App Settings; costs under the Costs & Budget grant).
   out.editBranding      = g("editBranding",      out.editSettings);
-  out.editCosts         = g("editCosts",         out.editSettings);
+  out.editCosts         = g("editCosts",         out.seeCostsBudget);
   out.editNotifications = g("editNotifications", out.editSettings);
   // Schedule actions — default to the coarse "edit schedule" capability.
   out.scheduleAddRemove = g("scheduleAddRemove", out.editSchedule);
@@ -10528,7 +10529,7 @@ function AdvancedPermsEditor({ member, onChange }) {
       {rows}
     </div>
   );
-  const anyParent = eff.seeInventory || eff.canInvoice || eff.editClients || eff.editSettings || eff.editSchedule;
+  const anyParent = eff.seeInventory || eff.canInvoice || eff.editClients || eff.editSettings || eff.seeCostsBudget || eff.editSchedule;
   return (
     <div style={{ border: `1px solid ${T.border}`, borderRadius: 12, overflow: "hidden", marginTop: 10 }}>
       <button onClick={() => setOpen(o => !o)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", background: T.surfaceAlt, border: "none", cursor: "pointer", fontFamily: "inherit" }}>
@@ -10547,6 +10548,11 @@ function AdvancedPermsEditor({ member, onChange }) {
             {row("invoiceDelete", "Delete / void", "Remove invoices")}
           </>)}
           {eff.editClients && group("Clients", <>{row("deleteClients", "Delete clients", "Remove client records (editing stays on)")}</>)}
+          {(eff.editSettings || eff.seeCostsBudget) && group("Settings", <>
+            {eff.editSettings && row("editBranding", "Branding & appearance", "Logo, colors, fonts, portal")}
+            {eff.seeCostsBudget && row("editCosts", "Costs & labor", "Cost assumptions and rates")}
+            {eff.editSettings && row("editNotifications", "Messaging & alerts", "Templates, Owner Alerts, reminders")}
+          </>)}
         </div>
       )}
     </div>
@@ -13952,7 +13958,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
   };
 
   const tabs = [];
-  if (perms.editSettings) tabs.push(["branding", "Branding"]);
+  if (perms.editBranding) tabs.push(["branding", "Branding"]);
   if (perms.editCatalog || perms.editSettings || perms.isAdmin) tabs.push(["services", "Services"]);
   if (perms.seeCostsBudget || perms.editSettings || perms.canInvoice) tabs.push(["business", "Business"]);
   if (perms.isAdmin) tabs.push(["team", "Team"]);
@@ -14019,24 +14025,24 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
               <InviteEmailSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} />
             </Collapsible>
           )}
-          {perms.editSettings && (
+          {perms.editNotifications && (
             <Collapsible title="Messaging & Notifications" subtitle="On My Way texts, email templates, and client notification messages.">
               <SaveBar ctl={emailCtl} T={T} />
               <EmailSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} setBranding={brandCtl.update} />
             </Collapsible>
           )}
-          {perms.editSettings && (
+          {perms.editNotifications && (
             <Collapsible title="Owner Alerts" subtitle="Which client events notify you, and where alert emails are sent.">
               <SaveBar ctl={emailCtl} T={T} />
               <NotificationSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} />
             </Collapsible>
           )}
-          {(perms.editSettings || perms.editSchedule) && (
+          {(perms.editNotifications || perms.editSchedule) && (
             <Collapsible title="Reminders & Messaging" subtitle="Appointment reminders, lead time, send time, and the reminder message.">
               <ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />
             </Collapsible>
           )}
-          {perms.editSettings && (
+          {perms.editNotifications && (
             <Collapsible title="Reviews & Feedback" subtitle="Your Google review link for happy clients. Lower ratings route privately to you.">
               <SaveBar ctl={brandCtl} T={T} />
               <div style={{ padding: 18 }}>
@@ -14050,7 +14056,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
               </div>
             </Collapsible>
           )}
-          {perms.seeCostsBudget && (
+          {perms.editCosts && (
             <Collapsible title="Costs & Labor" subtitle="Hourly rate, overhead, gas, and per-stop cost assumptions.">
               <SaveBar ctl={costCtl} T={T} />
               <CostSettings costs={costCtl.draft} setCosts={costCtl.update} clients={clients} />
