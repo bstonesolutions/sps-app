@@ -13866,6 +13866,212 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
   );
 }
 
+// ── Master Backup & Restore (owner-only) ─────────────────────────────────────
+// One .zip of EVERYTHING: data.json (every app_state row) + /media (each embedded
+// photo/video/doc) + manifest.json. Media lives as base64 data: URLs inside the
+// JSON, so we extract each to a real /media file and leave a slim {_media} reference
+// in data.json. "Data only" omits the /media files for a small, fast daily copy.
+// Restore rebuilds media from /media; for a data-only file it preserves whatever
+// media is currently on each record (so a data-only restore never wipes photos).
+const BACKUP_MIME_EXT = {
+  "image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png", "image/gif": "gif",
+  "image/webp": "webp", "image/heic": "heic", "image/heif": "heif",
+  "video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm", "application/pdf": "pdf",
+};
+function blobToB64(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1] || "");
+    r.onerror = reject;
+    r.readAsDataURL(blob);
+  });
+}
+function fmtBytes(b) {
+  if (!b) return "0 KB";
+  if (b > 1e9) return (b / 1e9).toFixed(2) + " GB";
+  if (b > 1e6) return (b / 1e6).toFixed(1) + " MB";
+  return Math.max(1, Math.round(b / 1e3)) + " KB";
+}
+
+function BackupRestore() {
+  const { T } = useApp();
+  const [busy, setBusy] = useState("");       // "" | "everything" | "data" | "restore"
+  const [msg, setMsg] = useState(null);       // { type, text }
+  const [summary, setSummary] = useState(null);
+  const [confirm, setConfirm] = useState(null); // { zip, refData, keys, mediaInZip, dataOnly }
+  const fileRef = useRef(null);
+
+  const fetchAllState = async () => {
+    const { data, error } = await supabase.from("app_state").select("key, value");
+    if (error) throw new Error(error.message);
+    const obj = {};
+    (data || []).forEach(r => { try { obj[r.key] = JSON.parse(r.value); } catch { obj[r.key] = r.value; } });
+    return obj;
+  };
+
+  // Pull every base64 data: URL into a /media file + leave a {_media} reference.
+  const extractMedia = (dataObj) => {
+    const media = []; let n = 0;
+    const walk = (v) => {
+      if (typeof v === "string" && v.startsWith("data:")) {
+        const m = v.match(/^data:([^;,]+);base64,([\s\S]*)$/);
+        if (m) {
+          const mime = m[1], b64 = m[2];
+          const ext = BACKUP_MIME_EXT[mime.toLowerCase()] || "bin";
+          const path = `media/${String(++n).padStart(5, "0")}.${ext}`;
+          media.push({ path, b64, mime, size: Math.round(b64.length * 0.75) });
+          return { _media: path, _mime: mime };
+        }
+        return v;
+      }
+      if (Array.isArray(v)) return v.map(walk);
+      if (v && typeof v === "object") { const o = {}; for (const k in v) o[k] = walk(v[k]); return o; }
+      return v;
+    };
+    return { refData: walk(dataObj), media };
+  };
+
+  const saveZip = async (blob, filename) => {
+    const isNative = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+    if (isNative) {
+      const { Filesystem, Directory } = await import("@capacitor/filesystem");
+      const { Share } = await import("@capacitor/share");
+      const res = await Filesystem.writeFile({ path: filename, data: await blobToB64(blob), directory: Directory.Cache });
+      await Share.share({ title: filename, text: "SPS master backup", url: res.uri });
+    } else {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    }
+  };
+
+  const doExport = async (withMedia) => {
+    setBusy(withMedia ? "everything" : "data"); setMsg(null); setSummary(null);
+    try {
+      const dataObj = await fetchAllState();
+      const { refData, media } = extractMedia(dataObj);
+      const JSZip = (await import("jszip")).default;
+      const zip = new JSZip();
+      zip.file("data.json", JSON.stringify(refData));
+      const mediaBytes = media.reduce((s, m) => s + m.size, 0);
+      if (withMedia) media.forEach(m => zip.file(m.path, m.b64, { base64: true }));
+      zip.file("manifest.json", JSON.stringify({
+        backupVersion: 1, createdAt: new Date().toISOString(), appVersion: "1.0",
+        dataOnly: !withMedia, keys: Object.keys(dataObj).length, mediaCount: media.length, mediaBytes,
+        media: media.map(m => ({ path: m.path, mime: m.mime, size: m.size, ok: withMedia })),
+      }, null, 2));
+      const blob = await zip.generateAsync({ type: "blob", compression: "STORE" });
+      await saveZip(blob, `SPS-Master-Backup-${new Date().toISOString().slice(0, 10)}.zip`);
+      setSummary({ keys: Object.keys(dataObj).length, mediaCount: withMedia ? media.length : 0, mediaBytes: withMedia ? mediaBytes : 0, zipBytes: blob.size, dataOnly: !withMedia });
+      setMsg({ type: "ok", text: withMedia ? "Backup ready — choose where to save it." : "Data-only backup ready (no photos/videos)." });
+    } catch (e) {
+      setMsg({ type: "error", text: "Backup failed: " + (e.message || "unknown error") });
+    } finally { setBusy(""); }
+  };
+
+  const onPickRestore = async (file) => {
+    if (!file) return;
+    setBusy("restore"); setMsg(null); setSummary(null);
+    try {
+      const JSZip = (await import("jszip")).default;
+      const zip = await JSZip.loadAsync(file);
+      const dataFile = zip.file("data.json");
+      if (!dataFile) throw new Error("This doesn't look like an SPS backup (no data.json).");
+      const manFile = zip.file("manifest.json");
+      const manifest = manFile ? JSON.parse(await manFile.async("string")) : {};
+      if (manifest.backupVersion && manifest.backupVersion > 1) throw new Error("This backup is from a newer app version. Update the app first, then restore.");
+      const refData = JSON.parse(await dataFile.async("string"));
+      const mediaInZip = Object.keys(zip.files).filter(p => p.startsWith("media/") && !zip.files[p].dir).length;
+      setConfirm({ zip, refData, keys: Object.keys(refData).length, mediaInZip, dataOnly: !!manifest.dataOnly });
+    } catch (e) {
+      setMsg({ type: "error", text: "Couldn't read backup: " + (e.message || "unknown error") });
+    } finally { setBusy(""); }
+  };
+
+  const doRestore = async () => {
+    const { zip, refData } = confirm;
+    setBusy("restore"); setConfirm(null); setMsg(null);
+    try {
+      const cur = await fetchAllState(); // to preserve media on a data-only restore
+      const rebuild = async (v, curV) => {
+        if (v && typeof v === "object" && !Array.isArray(v) && v._media) {
+          const f = zip.file(v._media);
+          if (f) return `data:${v._mime || "application/octet-stream"};base64,${await f.async("base64")}`;
+          if (typeof curV === "string" && curV.startsWith("data:")) return curV; // keep existing media
+          return "";
+        }
+        if (Array.isArray(v)) return Promise.all(v.map((it, i) => rebuild(it, Array.isArray(curV) ? curV[i] : undefined)));
+        if (v && typeof v === "object") { const o = {}; for (const k in v) o[k] = await rebuild(v[k], (curV && typeof curV === "object") ? curV[k] : undefined); return o; }
+        return v;
+      };
+      let ok = 0, fail = 0;
+      for (const key of Object.keys(refData)) {
+        try { await store.set(key, JSON.stringify(await rebuild(refData[key], cur[key]))); ok++; }
+        catch (e) { fail++; console.warn("Restore key failed:", key, e.message); }
+      }
+      setMsg({ type: "ok", text: `Restored ${ok} section${ok !== 1 ? "s" : ""}${fail ? ` (${fail} failed)` : ""}. Reloading…` });
+      setTimeout(() => window.location.reload(), 1800);
+    } catch (e) {
+      setMsg({ type: "error", text: "Restore failed: " + (e.message || "unknown error") }); setBusy("");
+    }
+  };
+
+  const btn = (bg, color) => ({ display: "flex", alignItems: "center", justifyContent: "center", gap: 9, width: "100%", padding: "13px 16px", border: "none", borderRadius: 13, fontWeight: 700, fontSize: 14.5, cursor: busy ? "default" : "pointer", fontFamily: "inherit", background: bg, color, opacity: busy ? 0.6 : 1 });
+
+  return (
+    <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>
+        A complete off-device copy of all your data — clients, invoices, history, settings, and (with the full backup) every photo and video. Saved as a dated .zip you can keep in Files / iCloud Drive and restore from later. Use Wi-Fi for full backups.
+      </div>
+
+      <button disabled={!!busy} onClick={() => doExport(true)} style={btn(T.primary, "#fff")}>
+        {busy === "everything" ? <><div style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /> Building backup…</> : <><Icon name="download" size={16} /> Back up everything (with media)</>}
+      </button>
+      <button disabled={!!busy} onClick={() => doExport(false)} style={btn(T.surfaceAlt, T.text)}>
+        {busy === "data" ? <><div style={{ width: 16, height: 16, border: `2px solid ${T.border}`, borderTopColor: T.primary, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /> Building…</> : <><Icon name="file" size={16} /> Back up data only (fast)</>}
+      </button>
+
+      <div style={{ height: 1, background: T.border, margin: "2px 0" }} />
+
+      <button disabled={!!busy} onClick={() => fileRef.current?.click()} style={btn(T.surfaceAlt, T.text)}>
+        <Icon name="upload" size={16} /> Restore from a backup file
+      </button>
+      <input ref={fileRef} type="file" accept=".zip,application/zip" style={{ display: "none" }}
+        onChange={e => { const f = e.target.files?.[0]; e.target.value = ""; onPickRestore(f); }} />
+
+      {summary && (
+        <div style={{ background: hexA(T.accent, 0.07), border: `1px solid ${hexA(T.accent, 0.25)}`, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.text, lineHeight: 1.6 }}>
+          <b>{summary.dataOnly ? "Data-only backup" : "Full backup"} created.</b><br />
+          {summary.keys} data section{summary.keys !== 1 ? "s" : ""}
+          {summary.dataOnly ? " · media excluded" : ` · ${summary.mediaCount} media file${summary.mediaCount !== 1 ? "s" : ""} (${fmtBytes(summary.mediaBytes)})`}
+          {" · "}zip {fmtBytes(summary.zipBytes)}
+        </div>
+      )}
+      {msg && (
+        <div style={{ fontSize: 13, fontWeight: 600, padding: "10px 13px", borderRadius: 11, lineHeight: 1.4,
+          background: msg.type === "error" ? hexA("#C0392B", 0.08) : hexA("#16a34a", 0.1),
+          color: msg.type === "error" ? "#C0392B" : "#157a12" }}>{msg.text}</div>
+      )}
+
+      {confirm && (
+        <Modal title="Restore from backup?" onClose={() => setConfirm(null)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ background: hexA(T.warning, 0.1), border: `1px solid ${hexA(T.warning, 0.3)}`, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.text, lineHeight: 1.5 }}>
+              This <b>overwrites all current data</b> with the backup: {confirm.keys} section{confirm.keys !== 1 ? "s" : ""}
+              {confirm.dataOnly ? " (data only — your current photos/videos are kept)" : ` and ${confirm.mediaInZip} media file${confirm.mediaInZip !== 1 ? "s" : ""}`}.
+              This can't be undone — make a fresh backup first if you're unsure.
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={() => setConfirm(null)} style={{ flex: 1, background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 12, padding: "13px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+              <button onClick={doRestore} style={{ flex: 1, background: "#C0392B", color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Overwrite &amp; restore</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 // Owner Alerts — choose which client events notify the owner and through which
 // channels, plus the destination email/phone. Reads/writes email.notify so it
 // persists with the rest of the messaging settings (via the same autosave draft).
@@ -14064,6 +14270,11 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             <Collapsible title="Costs & Labor" subtitle="Hourly rate, overhead, gas, and per-stop cost assumptions.">
               <SaveBar ctl={costCtl} T={T} />
               <CostSettings costs={costCtl.draft} setCosts={costCtl.update} clients={clients} />
+            </Collapsible>
+          )}
+          {perms.isAdmin && (
+            <Collapsible title="Backup & Restore" subtitle="Save a complete .zip of all data + media to Files, and restore from one.">
+              <BackupRestore />
             </Collapsible>
           )}
         </div>
