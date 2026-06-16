@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useContext, createContext, useMemo, Compon
 import { createPortal } from "react-dom";
 import { store, supabase } from "./supabaseClient";
 import { PROD_URL } from "./config";
-import { sendWidgetPayload } from "./widgetBridge";
+import { sendWidgetPayload, clearWidgetPayload } from "./widgetBridge";
 
 // True only on a genuine fresh launch of the app shell (hard close / first open).
 // sessionStorage is wiped when the PWA is killed/swiped away, but survives reloads
@@ -84,6 +84,16 @@ let SENDER_IDENTITY = { fromName: "", fromAddress: "", textingNumber: "" };
 function setSenderIdentity(v) { SENDER_IDENTITY = { ...SENDER_IDENTITY, ...(v || {}) }; }
 // Spread into a Resend email body; the server only honors these on the verified domain.
 const senderEmailFields = () => ({ fromName: SENDER_IDENTITY.fromName || "", fromAddress: SENDER_IDENTITY.fromAddress || "" });
+
+// Home-screen widget sync status, surfaced in the Sync/Status tab. The owner widget
+// effect records each push here and registers the rebuild closure, so the tab can show
+// the last result AND trigger a fresh push (Sync now) or a clear-then-push (Reconnect).
+let WIDGET_SYNC = { at: null, ok: false, native: false, skipped: false, reason: "", fields: [] };
+let _widgetPush = null;
+function setWidgetSync(patch) { WIDGET_SYNC = { ...WIDGET_SYNC, at: new Date().toISOString(), ...(patch || {}) }; return WIDGET_SYNC; }
+function getWidgetSync() { return WIDGET_SYNC; }
+function registerWidgetPush(fn) { _widgetPush = fn; }
+async function resyncWidgets() { return _widgetPush ? _widgetPush() : setWidgetSync({ ok: false, skipped: true, reason: "Sign in as the owner on the iOS app to use widgets." }); }
 
 // Send a text via the business Quo number (server-side, from the company line).
 // Absolute PROD_URL so it works on the native app too. Returns { ok, error, missingEnv }.
@@ -15091,6 +15101,8 @@ function SyncStatus({ T, branding, team, currentUserId }) {
   const [testPhone, setTestPhone] = useState(owner.phone || branding.phone || "");
   const [smsMsg, setSmsMsg] = useState(null);
   const [smsBusy, setSmsBusy] = useState(false);
+  const [widget, setWidget] = useState(() => getWidgetSync());
+  const [widgetBusy, setWidgetBusy] = useState(false);
 
   const getJSON = async (url) => {
     try {
@@ -15169,6 +15181,10 @@ function SyncStatus({ T, branding, team, currentUserId }) {
     } catch (_) { setSmsMsg({ ok: false, text: "Couldn't reach the server." }); }
     setSmsBusy(false);
   };
+  // Sync now = rebuild + push the snapshot. Reconnect = clear the cached snapshot first,
+  // then push fresh (clears stale widget data).
+  const syncWidgetsNow = async () => { setWidgetBusy(true); try { const r = await resyncWidgets(); setWidget({ ...r }); } catch (_) {} setWidgetBusy(false); };
+  const reconnectWidgets = async () => { setWidgetBusy(true); try { await clearWidgetPayload(); const r = await resyncWidgets(); setWidget({ ...r }); } catch (_) {} setWidgetBusy(false); };
 
   const COLORS = { ok: "#16a34a", warn: "#F59E0B", down: "#E5484D", checking: T.textMuted };
   const LABELS = { ok: "Connected", warn: "Action needed", down: "Down", checking: "Checking…" };
@@ -15216,6 +15232,37 @@ function SyncStatus({ T, branding, team, currentUserId }) {
               </div>
             );
           })}
+        </div>
+      </Card>
+
+      <Card>
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+            <div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: T.text }}>Home-screen widgets</div>
+              <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 2 }}>iOS app only · owner snapshot (profit, outstanding, collected)</div>
+            </div>
+            {(() => {
+              const col = widget.ok ? "#16a34a" : (widget.skipped ? T.textMuted : "#E5484D");
+              const label = widget.ok ? "Synced" : (widget.native === false ? "iOS app only" : (widget.skipped ? "Nothing to sync" : "Not synced"));
+              return (
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: "50%", background: col }} />
+                  <span style={{ fontSize: 11.5, fontWeight: 700, color: col }}>{label}</span>
+                </div>
+              );
+            })()}
+          </div>
+          <div style={{ fontSize: 12.5, color: T.textMuted }}>
+            {widget.at ? `Last sync: ${new Date(widget.at).toLocaleString()}` : "Not synced yet."}
+            {widget.ok && widget.fields && widget.fields.length ? ` · ${widget.fields.filter(f => f !== "role" && f !== "updated_at").length} values pushed` : ""}
+            {!widget.ok && widget.reason ? ` · ${widget.reason}` : ""}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={syncWidgetsNow} disabled={widgetBusy} style={sendBtn(widgetBusy)}>{widgetBusy ? "Working…" : "Sync now"}</button>
+            <button onClick={reconnectWidgets} disabled={widgetBusy} style={{ ...sendBtn(widgetBusy), background: "transparent", color: T.primary, border: `1.5px solid ${T.primary}` }}>Reconnect</button>
+          </div>
+          <div style={{ fontSize: 11, color: T.textMuted }}>Sync now rebuilds the snapshot from your latest numbers. Reconnect clears the cached snapshot and pushes a fresh one — use it if a widget shows stale data after adding it.</div>
         </div>
       </Card>
 
@@ -21561,8 +21608,14 @@ export default function App({ authEmail = "", onSignOut }) {
   // faked. (The client-role payload + widgets are built too, but the native app is
   // staff/owner-only today, so no client session writes here yet.) No-op off-native.
   useEffect(() => {
-    if (!hydrated || !currentUser || effRole(currentUser) !== "owner") return;
-    try {
+    if (!hydrated || !currentUser || effRole(currentUser) !== "owner") {
+      // Limited staff / non-owner: nothing to push, but let the Sync tab explain why.
+      if (currentUser && effRole(currentUser) !== "owner") setWidgetSync({ ok: false, skipped: true, reason: "Widgets show owner figures only." });
+      return;
+    }
+    // Rebuild the owner snapshot + push it; also registered so the Sync tab can re-run it.
+    const pushNow = async () => {
+     try {
       const now = new Date();
       const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
       // Date-in-range test for the app's two on-disk formats (MM/DD/YYYY, ISO).
@@ -21628,8 +21681,15 @@ export default function App({ authEmail = "", onSignOut }) {
       };
       if (rateN > 0) payload.avg_effective_rate = r2(rateSum / rateN); // omit when unknowable
 
-      sendWidgetPayload(payload);
-    } catch (_) { /* widgets are best-effort; never disrupt the app */ }
+      const res = await sendWidgetPayload(payload);
+      return setWidgetSync({ ok: !!res.ok, native: !!res.native, skipped: !!res.skipped, reason: res.reason || "", fields: Object.keys(payload) });
+     } catch (e) {
+      // widgets are best-effort; never disrupt the app — just record the failure.
+      return setWidgetSync({ ok: false, skipped: false, reason: (e && e.message) || "Couldn't build the widget snapshot." });
+     }
+    };
+    registerWidgetPush(pushNow);
+    pushNow();
   }, [hydrated, currentUser, clients, invoices]);
   // Smart reopen on a warm resume (the app wasn't killed):
   //  • backgrounded ~30 min or more  → land on Home with the full splash (fresh start)
