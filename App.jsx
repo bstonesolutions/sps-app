@@ -4880,7 +4880,7 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
     if (!files.length) return;
     setBusy(true);
     const out = [];
-    for (const f of files) out.push(await compressImage(f));
+    for (const f of files) out.push({ src: await compressImage(f), label: "General" });
     setPhotos(p => [...p, ...out]);
     setBusy(false);
   };
@@ -4990,7 +4990,7 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
             {photos.map((p, i) => (
               <div key={i} style={{ position: "relative" }}>
-                <img src={p} alt="" style={{ width: 60, height: 60, borderRadius: 10, objectFit: "cover" }} />
+                <img src={typeof p === "string" ? p : p.src} alt="" style={{ width: 60, height: 60, borderRadius: 10, objectFit: "cover" }} />
                 <button onClick={() => setPhotos(ps => ps.filter((_, idx) => idx !== i))} style={{ position: "absolute", top: -6, right: -6, background: "#C0392B", color: "#fff", border: "none", borderRadius: "50%", width: 20, height: 20, fontSize: 12, cursor: "pointer", lineHeight: 1 }}>×</button>
               </div>
             ))}
@@ -7771,6 +7771,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   const [arrivedModal, setArrivedModal] = useState(null);
   const [headHereModal, setHeadHereModal] = useState(null);
   const [completeModal, setCompleteModal] = useState(null);
+  const [historyEdit, setHistoryEdit] = useState(null); // view/edit a completed stop's saved report ({ entry, clientId })
   const [editStopModal, setEditStopModal] = useState(null); // { stop, dayDate }
   const [sentStops, setSentStops] = useState({});
   const [showAdd, setShowAdd] = useState(false);
@@ -8118,8 +8119,14 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
         <div style={{ flex: 1, minWidth: 0 }}>
           {/* Main info row */}
           <div
-            onClick={() => selectMode ? toggle(s.sid) : (perms.completeStops ? setCompleteModal({ stop: s, client: c }) : null)}
-            style={{ padding: compact ? "11px 14px" : "14px 16px", cursor: (selectMode || perms.completeStops) ? "pointer" : "default", display: "flex", gap: 12, alignItems: "center" }}
+            onClick={() => {
+              if (selectMode) return toggle(s.sid);
+              // A finished stop opens its SAVED report (photos/readings/services/notes),
+              // not a blank complete form. Falls back to the complete form if no record.
+              if (isComplete) { const entry = (c?.history || []).find(h => String(h.sid) === String(s.sid)); if (entry) return setHistoryEdit({ entry, clientId: c.id }); }
+              if (perms.completeStops) setCompleteModal({ stop: s, client: c });
+            }}
+            style={{ padding: compact ? "11px 14px" : "14px 16px", cursor: (selectMode || perms.completeStops || isComplete) ? "pointer" : "default", display: "flex", gap: 12, alignItems: "center" }}
           >
             {selectMode && <Checkbox checked={isSel} onChange={() => toggle(s.sid)} />}
 
@@ -8579,6 +8586,19 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           onClose={() => setCompleteModal(null)}
           onViewClient={onClientSelect}
           onOfficeAlert={onOfficeAlert}
+        />
+      )}
+      {/* Finished-stop saved report (photos / readings / services / notes), editable. */}
+      {historyEdit && (
+        <HistoryEditModal
+          entry={historyEdit.entry}
+          catalog={catalog}
+          team={team}
+          onSave={(upd) => {
+            setClients(cs => (cs || []).map(cl => cl.id === historyEdit.clientId ? { ...cl, history: (cl.history || []).map(h => h.sid === upd.sid ? upd : h) } : cl));
+            setHistoryEdit(null);
+          }}
+          onClose={() => setHistoryEdit(null)}
         />
       )}
       {/* Optimize toast */}
