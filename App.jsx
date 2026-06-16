@@ -20485,10 +20485,17 @@ export default function App({ authEmail = "", onSignOut }) {
   // "I'm here"; the job clock runs from here until the stop is completed.
   const [arrivals, setArrivals, larr] = useStoredState("sps_arrivals", {});
   const vp = useViewport();
-  // Tweak 6: desktop WEB only — the native iPad app reports getPlatform()==='ios' even at
-  // 1366px landscape, so we gate on platform 'web' AND a wide min-width (not width alone) to
-  // let the desktop browser fill the window. iPad (native) and mobile are unaffected.
-  const isDesktopWeb = vp.width >= 1200 && ((typeof window !== "undefined" && window.Capacitor && typeof window.Capacitor.getPlatform === "function") ? window.Capacitor.getPlatform() === "web" : true);
+  // Desktop fill is driven by ENVIRONMENT, not platform alone. A real desktop browser
+  // — or the Mac app, which reports getPlatform()==='ios' but a 'Macintosh' user-agent
+  // with NO touch — should fill + reflow like the web desktop view. A genuine iPad is a
+  // touch device (even when iPadOS spoofs a 'Macintosh' UA), so it stays on the existing
+  // tablet layout; iPhone is unaffected by the wide min-width gate.
+  const _ua = (typeof navigator !== "undefined" && navigator.userAgent) || "";
+  const _noTouch = (typeof navigator !== "undefined" ? (navigator.maxTouchPoints || 0) : 0) <= 1;
+  const _plat = (typeof window !== "undefined" && window.Capacitor && typeof window.Capacitor.getPlatform === "function") ? window.Capacitor.getPlatform() : null;
+  const isMacApp = /Macintosh/.test(_ua) && _noTouch; // real Mac (incl. the "Designed for iPad" app on Apple Silicon), never an iPad
+  const isWebDesktopEnv = _plat == null ? true : (_plat === "web" || isMacApp);
+  const isDesktopWeb = vp.width >= 1200 && isWebDesktopEnv;
   const [reminderLog, setReminderLog, lrem] = useStoredState("sps_reminders", {}); // { [sid]: { sentAt, method } }
   const hydrated = lc && lb && ls && lcat && lem && lco && lh && lbud && loa && lscfg && lrol && ltm && lsesh && linv && linvc && lcomp && lrem && larr;
 

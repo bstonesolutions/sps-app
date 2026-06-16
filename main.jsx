@@ -8,7 +8,7 @@ import App from "./App.jsx";
 // The React content rendered underneath it is identical, so the handoff is invisible.
 const removeBootSplash = () => { const b = document.getElementById("boot-splash"); if (b) b.remove(); };
 
-const wrap = { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom)) 24px", background: "#F5F5F7", fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif" };
+const wrap = { minHeight: "100dvh", display: "flex", alignItems: "center", justifyContent: "center", padding: "max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom)) 24px", background: "#F5F5F7", fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif" };
 const card = { width: "100%", maxWidth: 360, background: "#fff", borderRadius: 22, boxShadow: "0 10px 40px rgba(0,0,0,0.08)", padding: 28 };
 const inp = { width: "100%", padding: "13px 14px", border: "1px solid #e5e7eb", borderRadius: 12, fontSize: 15, marginBottom: 10, boxSizing: "border-box", outline: "none", fontFamily: "inherit" };
 const btn = { width: "100%", padding: "13px", border: "none", borderRadius: 12, background: "#B81D24", color: "#fff", fontWeight: 700, fontSize: 15, cursor: "pointer", fontFamily: "inherit" };
@@ -33,8 +33,12 @@ const AUTH_FLAGS = {
 function useKeyboardInset() {
   const [inset, setInset] = useState(0);
   useEffect(() => {
+    // Only track the on-screen keyboard on touch devices. Desktop and the Mac app have
+    // no soft keyboard, and their visual-viewport can report spurious insets on focus —
+    // which would shift the centered card. Never lift/reflow there.
+    const isTouch = typeof navigator !== "undefined" && (navigator.maxTouchPoints || 0) > 1;
     const vv = window.visualViewport;
-    if (!vv) return;
+    if (!vv || !isTouch) return;
     const update = () => setInset(Math.max(0, window.innerHeight - (vv.height + vv.offsetTop)));
     vv.addEventListener("resize", update);
     vv.addEventListener("scroll", update);
