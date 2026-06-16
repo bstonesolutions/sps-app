@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { supabase } from "./supabaseClient";
 import { PROD_URL } from "./config";
+import { Capacitor } from "@capacitor/core";
 import App, { LiveTrack } from "./App.jsx";
 
 // Remove the static boot splash (in index.html) once a real React screen is up.
@@ -27,6 +28,50 @@ const AUTH_FLAGS = {
   magic: INITIAL_HASH.includes("access_token") || INITIAL_HASH.includes("type=magiclink") || INITIAL_HASH.includes("type=recovery"),
   recovery: INITIAL_HASH.includes("type=recovery"),
 };
+
+// ── Native deep-link auth ─────────────────────────────────────────────────────
+// A magic / password-reset link requested from the app redirects to
+// spsway://login#<tokens> (see sendMagicLink). On the web, Supabase's
+// detectSessionInUrl reads window.location automatically — but in the native shell
+// the location is capacitor://localhost, so it never sees the redirect. Here we
+// catch the incoming URL, mirror the same magic/recovery routing the web uses, and
+// establish the session explicitly. No change to supabaseClient.js — we only call
+// the existing client's auth methods.
+async function handleAuthDeepLink(rawUrl) {
+  if (!rawUrl || rawUrl.indexOf("spsway://") !== 0) return false;
+  let url;
+  try { url = new URL(rawUrl); } catch (_) { return false; }
+  const hp = new URLSearchParams((url.hash || "").replace(/^#/, ""));
+  const qp = url.searchParams;
+  const type = hp.get("type") || qp.get("type") || "";
+  const access_token = hp.get("access_token");
+  const refresh_token = hp.get("refresh_token");
+  // Mirror the web's first-login routing so set-password still triggers for staff.
+  if (type === "recovery") { AUTH_FLAGS.recovery = true; AUTH_FLAGS.magic = true; }
+  else if (type === "magiclink" || access_token) { AUTH_FLAGS.magic = true; }
+  try {
+    if (access_token && refresh_token) {
+      await supabase.auth.setSession({ access_token, refresh_token });
+      return true;
+    }
+    const code = qp.get("code"); // PKCE fallback (default magic links are implicit)
+    if (code) { await supabase.auth.exchangeCodeForSession(code); return true; }
+  } catch (e) {
+    if (typeof console !== "undefined") console.error("auth deep link failed:", (e && e.message) || e);
+  }
+  return false;
+}
+
+// Subscribe to inbound spsway:// URLs (warm app) and the launch URL (cold start).
+// No-op on web and if @capacitor/app isn't present.
+if (typeof window !== "undefined" && Capacitor.isNativePlatform()) {
+  import("@capacitor/app")
+    .then(({ App: CapApp }) => {
+      CapApp.addListener("appUrlOpen", (event) => { handleAuthDeepLink(event && event.url); });
+      CapApp.getLaunchUrl().then((res) => { if (res && res.url) handleAuthDeepLink(res.url); }).catch(() => {});
+    })
+    .catch(() => {});
+}
 
 // Bug 4: lift the auth card above the iOS keyboard. Mirrors the App-side useKeyboardInset
 // (same visual-viewport math); kept local so main.jsx stays decoupled from App.jsx.
@@ -98,19 +143,23 @@ function Login() {
     if (!email.trim()) { setErr("Enter your email address."); return; }
     setBusy(true); setErr("");
     const addr = email.trim();
+    // When the request comes from the NATIVE app, redirect the link back into the app
+    // via the spsway:// custom scheme (handled below) so the user lands where they
+    // asked to sign in. On the web it stays the normal https host.
+    const redirectTo = Capacitor.isNativePlatform() ? "spsway://login" : PROD_URL;
     // Prefer the branded SPS email delivered via Resend. The magic link itself is
     // still minted by Supabase server-side — only the delivery switches to Resend.
     // Fall back to Supabase's built-in email if the endpoint isn't configured (501)
     // or is unreachable, so login never breaks.
     try {
-      const r = await fetch("/api/send-magic-link", {
+      const r = await fetch(`${PROD_URL}/api/send-magic-link`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: addr, redirectTo: PROD_URL }),
+        body: JSON.stringify({ email: addr, redirectTo }),
       });
       if (r.ok) { setMode("sent"); setBusy(false); return; }
     } catch (_) { /* network error — fall through to Supabase */ }
-    const { error } = await supabase.auth.signInWithOtp({ email: addr, options: { shouldCreateUser: false, emailRedirectTo: PROD_URL } });
+    const { error } = await supabase.auth.signInWithOtp({ email: addr, options: { shouldCreateUser: false, emailRedirectTo: redirectTo } });
     if (error) { setErr(error.message); setBusy(false); return; }
     setMode("sent");
     setBusy(false);
