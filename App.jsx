@@ -13277,6 +13277,225 @@ function InvoicesTable({ items, onRowClick, T }) {
   );
 }
 
+// B9-4: batch invoicing. Pick several clients, build one editable invoice each in a
+// single view (shared line items apply to all; any client can be customized), then
+// create + sync them to QuickBooks individually and run ONE bundled messaging step.
+function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
+  const { T, branding, email } = useApp();
+  const cfg = { ...DEFAULT_INVOICING, ...(invoicing || {}) };
+  const prefix = (cfg.numberPrefix != null) ? cfg.numberPrefix : "INV-";
+  const money = (n) => `$${(Number(n) || 0).toFixed(2)}`;
+  const uid = () => `l${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
+  const newLine = () => ({ id: uid(), desc: "", qty: "1", unitPrice: "", taxable: false, kind: "custom" });
+  const toISO = (mdy) => { const d = parseMDY(mdy); return d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}` : ""; };
+
+  const [phase, setPhase] = useState("build"); // build | creating | messaging
+  const [sel, setSel] = useState({});
+  const [q, setQ] = useState("");
+  const [lines, setLines] = useState([newLine()]);   // shared template
+  const [overrides, setOverrides] = useState({});     // clientId -> custom lineItems[]
+  const [expanded, setExpanded] = useState(null);     // clientId being customized
+  const [taxRate, setTaxRate] = useState(String(cfg.taxRate || 0));
+  const [progress, setProgress] = useState([]);
+  const [doSms, setDoSms] = useState(true);
+  const [doChat, setDoChat] = useState(true);
+  const [doEmail, setDoEmail] = useState(true);
+  const [msgBusy, setMsgBusy] = useState(false);
+  const [msgErr, setMsgErr] = useState("");
+
+  const selIds = Object.keys(sel).filter(k => sel[k]);
+  const chosen = selIds.map(id => clients.find(c => String(c.id) === String(id))).filter(Boolean);
+  const linesFor = (cid) => overrides[cid] || lines;
+  const totalFor = (cid) => invoiceTotals({ lineItems: linesFor(cid), taxRate }).total;
+  const hasAmount = (li) => (li || []).some(l => (parseFloat(l.unitPrice) || 0) > 0);
+  const readyCount = chosen.filter(c => hasAmount(linesFor(c.id))).length;
+  const grand = chosen.reduce((s, c) => s + totalFor(c.id), 0);
+
+  const field = { width: "100%", padding: "9px 11px", border: `1.5px solid ${T.border}`, borderRadius: 10, fontSize: 13.5, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
+
+  // Inline line-items editor reused for the shared template + per-client overrides.
+  const LinesEditor = ({ value, onChange }) => (
+    <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+      {value.map((l, i) => (
+        <div key={l.id} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <input value={l.desc} onChange={e => onChange(value.map(x => x.id === l.id ? { ...x, desc: e.target.value } : x))} placeholder="Description" style={{ ...field, flex: 1 }} />
+          <input value={l.qty} onChange={e => onChange(value.map(x => x.id === l.id ? { ...x, qty: e.target.value.replace(/[^\d.]/g, "") } : x))} style={{ ...field, width: 46, textAlign: "center" }} />
+          <div style={{ position: "relative", width: 78 }}>
+            <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
+            <input value={l.unitPrice} onChange={e => onChange(value.map(x => x.id === l.id ? { ...x, unitPrice: e.target.value.replace(/[^\d.]/g, "") } : x))} placeholder="0" style={{ ...field, paddingLeft: 18, textAlign: "right" }} />
+          </div>
+          <button onClick={() => onChange(value.length > 1 ? value.filter(x => x.id !== l.id) : value)} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 18, cursor: "pointer", lineHeight: 1, padding: "0 2px" }}>×</button>
+        </div>
+      ))}
+      <button onClick={() => onChange([...value, newLine()])} style={{ alignSelf: "flex-start", background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4, padding: "2px 0" }}><Icon name="plus" size={13} /> Add line</button>
+    </div>
+  );
+
+  const qbPayload = (iv, c) => ({
+    number: iv.number, date: toISO(iv.date) || toISO(todayMDY()), dueDate: toISO(iv.dueDate),
+    clientName: c.name || "", clientEmail: c.email || "", clientPhone: c.phone || "", qbCustomerId: c.qbCustomerId || null, qbId: null,
+    taxRate: parseFloat(iv.taxRate) || 0, allowCard: cfg.qbAllowCard !== false, allowACH: cfg.qbAllowACH !== false,
+    lineItems: (iv.lineItems || []).map(l => { const qty = parseFloat(l.qty) || 1; const up = parseFloat(l.unitPrice) || 0; return { description: l.desc || "Service", qty: String(qty), unitPrice: up.toFixed(2), kind: l.kind || "custom", taxable: !!l.taxable, isLateFee: false }; }),
+    invoiceDiscountType: "", invoiceDiscount: "",
+  });
+
+  const createAll = async () => {
+    setPhase("creating");
+    const base = nextInvoiceNumber(invoices, cfg);
+    const results = [];
+    let n = 0;
+    for (const c of chosen) {
+      const li = (linesFor(c.id) || []).filter(l => (l.desc && l.desc.trim()) || (parseFloat(l.unitPrice) || 0) > 0);
+      if (!li.length) { results.push({ id: c.id, name: c.name, ok: false, error: "no line items" }); setProgress([...results]); continue; }
+      let inv = {
+        id: `iv${Date.now()}-${n}`, number: `${prefix}${base + n}`,
+        clientId: c.id, clientName: c.name, clientEmail: c.email || "", clientAddress: c.address || "",
+        date: todayMDY(), dueDate: addDaysMDY(todayMDY(), cfg.dueDays), status: "Draft",
+        lineItems: li, taxRate, notes: cfg.terms || "", createdAt: Date.now(),
+      };
+      n++;
+      if (qbIsConnected()) {
+        try {
+          const r = await fetch(`${QB_API}/create-invoice`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ invoice: qbPayload(inv, c) }) });
+          const d = await r.json().catch(() => ({}));
+          if (d && d.error) { onSave(inv); results.push({ id: c.id, name: c.name, ok: false, error: d.error, invoice: inv }); setProgress([...results]); continue; }
+          inv = { ...inv, qbId: d.qbId, paymentLink: d.paymentLink, status: "Sent", qbPushed: true };
+        } catch (_) { onSave(inv); results.push({ id: c.id, name: c.name, ok: false, error: "couldn't reach QuickBooks", invoice: inv }); setProgress([...results]); continue; }
+      }
+      onSave(inv);
+      results.push({ id: c.id, name: c.name, ok: true, invoice: inv });
+      setProgress([...results]);
+    }
+    setPhase("messaging");
+  };
+
+  const fill = (tpl, c, inv) => {
+    const totals = invoiceTotals(inv);
+    return String(tpl || "")
+      .replace(/\{first\}/g, (c.name || "").trim().split(" ")[0] || "there")
+      .replace(/\{company\}/g, branding.companyName || "")
+      .replace(/\{number\}/g, inv.number || "")
+      .replace(/\{amount\}/g, money(totals.total)).replace(/\{total\}/g, money(totals.total))
+      .replace(/\{dueDate\}/g, inv.dueDate || "soon")
+      .replace(/\{link\}/g, inv.paymentLink ? `Pay online: ${inv.paymentLink}` : "View it in your portal.");
+  };
+
+  const created = progress.filter(p => p.ok);
+  const sendBatch = async () => {
+    setMsgBusy(true); setMsgErr("");
+    let fails = 0;
+    for (const p of created) {
+      const c = clients.find(x => String(x.id) === String(p.id)); if (!c) continue;
+      const inv = p.invoice;
+      const phone = String(c.phone || "").replace(/[^\d+]/g, "");
+      const cEmail = (c.email || "").trim();
+      if (doSms && phone) { try { const r = await fetch(`${PROD_URL}/api/send-sms`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: phone, message: fill(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv) }) }); const d = await r.json().catch(() => ({})); if (!r.ok || !d.sent) fails++; } catch (_) { fails++; } }
+      if (doChat && c.id) { try { await supabase.from("sps_messages").insert({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) }); } catch (_) { fails++; } }
+      if (doEmail && cEmail) { try { const tt = invoiceTotals(inv); await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); } catch (_) { fails++; } }
+    }
+    setMsgBusy(false);
+    if (fails > 0) { setMsgErr(`${fails} message(s) couldn't be sent. The invoices were still created.`); return; }
+    onClose();
+  };
+
+  // ── BUILD PHASE ──
+  if (phase === "build") {
+    const visible = selectableClients(clients).filter(c => (c.name || "").toLowerCase().includes(q.toLowerCase()));
+    return (
+      <Modal title="Batch Invoice" onClose={onClose}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div>
+            <label style={lbl}>Clients {chosen.length ? `· ${chosen.length} selected` : ""}</label>
+            <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search clients…" style={{ ...field, marginBottom: 8 }} />
+            <div style={{ maxHeight: 170, overflowY: "auto", border: `1px solid ${T.border}`, borderRadius: 12 }}>
+              {visible.map((c, i) => (
+                <button key={c.id} onClick={() => setSel(s => ({ ...s, [c.id]: !s[c.id] }))} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "10px 12px", background: sel[c.id] ? hexA(T.primary, 0.06) : "transparent", border: "none", borderBottom: i < visible.length - 1 ? `1px solid ${T.border}` : "none", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+                  <div style={{ width: 18, height: 18, borderRadius: 5, border: `1.5px solid ${sel[c.id] ? T.primary : T.border}`, background: sel[c.id] ? T.primary : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{sel[c.id] && <Icon name="check" size={12} style={{ color: "#fff" }} />}</div>
+                  <span style={{ fontSize: 13.5, fontWeight: 600, color: T.text }}>{c.name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label style={lbl}>Line items — applied to every invoice</label>
+            <LinesEditor value={lines} onChange={setLines} />
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
+              <span style={{ fontSize: 12, color: T.textMuted }}>Tax rate %</span>
+              <input value={taxRate} onChange={e => setTaxRate(e.target.value.replace(/[^\d.]/g, ""))} style={{ ...field, width: 70, textAlign: "center" }} />
+            </div>
+          </div>
+
+          {chosen.length > 0 && (
+            <div>
+              <label style={lbl}>Invoices ({chosen.length}) · {money(grand)} total</label>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {chosen.map(c => (
+                  <div key={c.id} style={{ background: T.surfaceAlt, borderRadius: 10, padding: "10px 12px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ flex: 1, fontSize: 13.5, fontWeight: 700, color: T.text, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}{overrides[c.id] ? <span style={{ fontWeight: 400, color: T.primary, fontSize: 11 }}> · custom</span> : ""}</span>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: hasAmount(linesFor(c.id)) ? T.text : T.warning }}>{money(totalFor(c.id))}</span>
+                      <button onClick={() => { if (expanded === c.id) setExpanded(null); else { setOverrides(o => ({ ...o, [c.id]: o[c.id] || linesFor(c.id).map(l => ({ ...l, id: uid() })) })); setExpanded(c.id); } }} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>{expanded === c.id ? "Done" : "Customize"}</button>
+                      <button onClick={() => setSel(s => ({ ...s, [c.id]: false }))} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 16, cursor: "pointer", lineHeight: 1 }}>×</button>
+                    </div>
+                    {expanded === c.id && <div style={{ marginTop: 10 }}><LinesEditor value={overrides[c.id] || lines} onChange={(v) => setOverrides(o => ({ ...o, [c.id]: v }))} /></div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <button onClick={createAll} disabled={readyCount === 0} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "14px", fontWeight: 800, fontSize: 15, cursor: readyCount === 0 ? "default" : "pointer", fontFamily: "inherit", opacity: readyCount === 0 ? 0.5 : 1, boxShadow: `0 4px 16px ${hexA(T.primary, 0.3)}` }}>
+            {readyCount === 0 ? "Add clients + line items" : `Create & sync ${readyCount} invoice${readyCount !== 1 ? "s" : ""}`}
+          </button>
+        </div>
+      </Modal>
+    );
+  }
+
+  // ── CREATING PHASE ──
+  if (phase === "creating") {
+    return (
+      <Modal title="Creating invoices…" onClose={undefined}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {chosen.map(c => {
+            const p = progress.find(x => x.id === c.id);
+            return (
+              <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", background: T.surfaceAlt, borderRadius: 10 }}>
+                <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600, color: T.text }}>{c.name}</span>
+                {!p ? <div style={{ width: 14, height: 14, border: `2px solid ${hexA(T.textMuted, 0.3)}`, borderTopColor: T.textMuted, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+                  : p.ok ? <span style={{ color: "#16a34a", fontWeight: 800 }}>✓</span>
+                  : <span style={{ fontSize: 11, color: T.accent, fontWeight: 700 }}>{p.error}</span>}
+              </div>
+            );
+          })}
+        </div>
+      </Modal>
+    );
+  }
+
+  // ── MESSAGING PHASE (bundled) ──
+  return (
+    <Modal title="Notify clients" onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>{created.length} invoice{created.length !== 1 ? "s" : ""} created{qbIsConnected() ? " & synced" : ""}. Notify everyone, or skip. Messages are prefilled from your Settings defaults, per client.</div>
+        {[["Text message", doSms, setDoSms], ["In-app message", doChat, setDoChat], ["Email invoice", doEmail, setDoEmail]].map(([label, on, setOn]) => (
+          <button key={label} onClick={() => setOn(v => !v)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: T.surfaceAlt, border: "none", borderRadius: 12, padding: "13px 14px", cursor: "pointer", fontFamily: "inherit" }}>
+            <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{label}</span>
+            <div style={{ width: 38, height: 22, borderRadius: 100, background: on ? T.primary : T.border, position: "relative" }}><div style={{ width: 18, height: 18, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: on ? 18 : 2, transition: "left 0.2s" }} /></div>
+          </button>
+        ))}
+        {msgErr && <div style={{ fontSize: 12.5, fontWeight: 600, color: T.accent }}>{msgErr}</div>}
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={sendBatch} disabled={msgBusy || (!doSms && !doChat && !doEmail)} style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontWeight: 800, fontSize: 15, cursor: "pointer", fontFamily: "inherit", opacity: (msgBusy || (!doSms && !doChat && !doEmail)) ? 0.6 : 1 }}>{msgBusy ? "Sending…" : `Send to ${created.length}`}</button>
+          <button onClick={onClose} disabled={msgBusy} style={{ background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 12, padding: "13px 20px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Skip</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCatalog, onSave, onDelete, onSyncData, initialFilter = "All", vp = {} }) {
   const { T, perms } = useApp();
   const moneyFmt = (n) => `$${Math.round(n).toLocaleString()}`;
@@ -13295,6 +13514,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
 
   // ── Editor state ──
   const [creating,   setCreating]   = useState(false);
+  const [batching,   setBatching]   = useState(false); // B9-4 batch invoicing
   const [view,       setView]       = useState("split"); // desktop only: "split" (master-detail) | "table"
 
   // ── QuickBooks sync from the Invoices tab ──
@@ -13451,6 +13671,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
             <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M3 6h18M7 12h10M11 18h2"/></svg>
             Filter{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
           </button>
+          {perms.invoiceCreate && <Btn sm variant="ghost" onClick={() => setBatching(true)}>Batch</Btn>}
           {perms.invoiceCreate && <Btn sm onClick={() => setCreating(true)}>+ New</Btn>}
         </div>
       </div>
@@ -13649,6 +13870,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
       })()}
 
       {creating && <InvoiceEditor clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onClose={() => setCreating(false)} />}
+      {batching && <BatchInvoiceModal clients={clients} invoices={invoices} invoicing={invoicing} onSave={onSave} onClose={() => setBatching(false)} />}
       {editing  && <InvoiceEditor invoice={editing} clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onDelete={onDelete} onClose={() => setEditing(null)} />}
       {(!vp.isDesktop || view === "table") && livePreview && <InvoicePreview invoice={livePreview} client={clients.find(c => invoiceMatchesClient(livePreview, c))} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
     </div>
