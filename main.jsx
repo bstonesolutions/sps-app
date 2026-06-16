@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { supabase } from "./supabaseClient";
 import { PROD_URL } from "./config";
-import App from "./App.jsx";
+import App, { LiveTrack } from "./App.jsx";
 
 // Remove the static boot splash (in index.html) once a real React screen is up.
 // The React content rendered underneath it is identical, so the handoff is invisible.
@@ -243,7 +243,10 @@ function Root() {
   return <App authEmail={session.user.email} onSignOut={() => supabase.auth.signOut()} />;
 }
 
-createRoot(document.getElementById("root")).render(<Root />);
+// Public live-tracking page — ?track=<token> opens the tech's live map with no login,
+// bypassing the auth gate entirely.
+const _trackToken = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("track") : null;
+createRoot(document.getElementById("root")).render(_trackToken ? <LiveTrack token={_trackToken} /> : <Root />);
 
 // Native (Capacitor): the iOS launch screen stays up (launchAutoHide:false) until
 // the web is painted, then hands off to the boot/React splash — no white flash.

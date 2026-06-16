@@ -564,6 +564,105 @@ const loadGoogleMaps = () => {
   return _gmapsPromise;
 };
 
+// ── Per-stop live tracking link ──────────────────────────────────────────────
+// Each stop carries an unguessable token; the public /?track=<token> page below
+// maps it to the assigned tech's live GPS (staff_locations) and the client's
+// address, and draws a live map + ETA. No login — reads happen via the anon client.
+function genTrackToken() {
+  try {
+    const a = new Uint8Array(9);
+    (window.crypto || window.msCrypto).getRandomValues(a);
+    return Array.from(a, b => "0123456789abcdefghijklmnopqrstuvwxyz"[b % 36]).join("");
+  } catch { return (Math.random().toString(36) + Math.random().toString(36)).replace(/[^a-z0-9]/g, "").slice(0, 12); }
+}
+const stopTrackLink = (token) => `${PROD_URL}/?track=${token}`;
+
+// Public "your technician is on the way" map. Rendered by main.jsx when the URL has
+// ?track=<token>, BEFORE the auth gate. Polls the tech's live location every 15s.
+export function LiveTrack({ token }) {
+  const [phase, setPhase] = useState("loading"); // loading | notfound | nokey | map
+  const [brand, setBrand] = useState({});
+  const [active, setActive] = useState(false);
+  const [eta, setEta] = useState("");
+  const [clientName, setClientName] = useState("");
+  const mapEl = useRef(null);
+  const ctx = useRef({});
+
+  useEffect(() => {
+    let alive = true, timer = null;
+    (async () => {
+      try {
+        const [sched, br] = await Promise.all([
+          supabase.from("app_state").select("value").eq("key", "sps_schedule").maybeSingle(),
+          supabase.from("app_state").select("value").eq("key", "sps_branding").maybeSingle(),
+        ]);
+        if (!alive) return;
+        try { if (br?.data?.value) setBrand(JSON.parse(br.data.value)); } catch (_) {}
+        let stop = null;
+        try { const days = JSON.parse(sched?.data?.value || "[]"); for (const d of (days || [])) for (const s of (d.stops || [])) if (s.trackToken === token) stop = s; } catch (_) {}
+        if (!stop) { setPhase("notfound"); return; }
+        setClientName((stop.client || "").split(" ")[0] || "there");
+        if (!hasGoogleMaps()) { setPhase("nokey"); return; }
+        const maps = await loadGoogleMaps().catch(() => null);
+        if (!alive || !maps || !mapEl.current) { setPhase("nokey"); return; }
+        setPhase("map");
+        const c = ctx.current; c.maps = maps;
+        c.map = new maps.Map(mapEl.current, { zoom: 11, center: { lat: 40.0, lng: -75.8 }, disableDefaultUI: true, zoomControl: true, gestureHandling: "greedy" });
+        c.dm = new maps.DistanceMatrixService();
+        if (stop.address) new maps.Geocoder().geocode({ address: stop.address }, (res, st) => {
+          if (st === "OK" && res[0]) {
+            c.dest = res[0].geometry.location;
+            c.destMarker = new maps.Marker({ position: c.dest, map: c.map, title: stop.client || "Destination",
+              icon: { path: maps.SymbolPath.BACKWARD_CLOSED_ARROW, scale: 5, fillColor: "#16a34a", fillOpacity: 1, strokeColor: "#fff", strokeWeight: 1.5, rotation: 0 } });
+            if (!c.tech) { c.map.setCenter(c.dest); c.map.setZoom(13); }
+          }
+        });
+        const poll = async () => {
+          if (!alive) return;
+          const { data } = await supabase.from("staff_locations").select("*").eq("staff_id", String(stop.assigneeId || "")).maybeSingle();
+          const fresh = !!(data && data.is_active && data.lat != null && (Date.now() - new Date(data.updated_at || 0).getTime() < 6 * 60000));
+          setActive(fresh);
+          if (!fresh) { setEta(""); return; }
+          const pos = { lat: Number(data.lat), lng: Number(data.lng) };
+          if (!c.tech) c.tech = new maps.Marker({ position: pos, map: c.map, title: "Your technician", zIndex: 99,
+            icon: { path: maps.SymbolPath.CIRCLE, scale: 9, fillColor: "#B81D24", fillOpacity: 1, strokeColor: "#fff", strokeWeight: 3 } });
+          else c.tech.setPosition(pos);
+          if (c.dest) {
+            const b = new maps.LatLngBounds(); b.extend(pos); b.extend(c.dest); c.map.fitBounds(b, 64);
+            c.dm.getDistanceMatrix({ origins: [pos], destinations: [c.dest], travelMode: maps.TravelMode.DRIVING }, (r, st) => {
+              const el = st === "OK" && r && r.rows && r.rows[0] && r.rows[0].elements && r.rows[0].elements[0];
+              if (el && el.status === "OK") setEta(el.duration.text);
+            });
+          } else c.map.setCenter(pos);
+        };
+        poll(); timer = setInterval(poll, 15000);
+      } catch (_) { if (alive) setPhase("notfound"); }
+    })();
+    return () => { alive = false; if (timer) clearInterval(timer); };
+  }, [token]);
+
+  const company = brand.companyName || "Stone Property Solutions";
+  const accent = brand.accentColor || "#B81D24";
+  const center = { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100dvh", padding: 24, textAlign: "center", fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif", background: "#F5F5F7", color: "#1d1d1f" };
+  if (phase === "loading") return <div style={center}><div style={{ fontSize: 14, color: "#6b7280" }}>Loading live map…</div></div>;
+  if (phase === "notfound") return <div style={center}><div style={{ fontSize: 17, fontWeight: 800, marginBottom: 6 }}>Tracking link unavailable</div><div style={{ fontSize: 13.5, color: "#6b7280", maxWidth: 320, lineHeight: 1.5 }}>This live-tracking link has expired or is no longer valid. Reach out to {company} for an update.</div></div>;
+  if (phase === "nokey") return <div style={center}><div style={{ fontSize: 17, fontWeight: 800, marginBottom: 6 }}>{company}</div><div style={{ fontSize: 13.5, color: "#6b7280", maxWidth: 320, lineHeight: 1.5 }}>Live map isn't available right now. Your technician is on the way — we'll arrive soon.</div></div>;
+  return (
+    <div style={{ position: "fixed", inset: 0, display: "flex", flexDirection: "column", fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif", background: "#F5F5F7" }}>
+      <div style={{ flexShrink: 0, background: accent, color: "#fff", padding: "16px 18px max(16px, env(safe-area-inset-top))", paddingTop: "max(16px, env(safe-area-inset-top))" }}>
+        <div style={{ fontSize: 16, fontWeight: 800, letterSpacing: "-0.01em" }}>{company}</div>
+        <div style={{ fontSize: 13, opacity: 0.92, marginTop: 2 }}>
+          {active ? <>Your technician is on the way{eta ? <> · about <b>{eta}</b></> : ""}</> : <>Hang tight, {clientName} — we'll be moving shortly.</>}
+        </div>
+      </div>
+      <div ref={mapEl} style={{ flex: 1, minHeight: 0, width: "100%" }} />
+      <div style={{ flexShrink: 0, padding: "10px 16px max(12px, env(safe-area-inset-bottom))", fontSize: 11.5, color: "#6b7280", textAlign: "center", background: "#fff", borderTop: "1px solid #eef0f2" }}>
+        {active ? "Live location updates automatically." : "Live location will appear once your technician is en route."}
+      </div>
+    </div>
+  );
+}
+
 // True on iOS / iPadOS so we can prefer Apple Maps deep links.
 const isAppleDevice = () => {
   if (typeof navigator === "undefined") return false;
@@ -5281,7 +5380,9 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
 
   // Feature 8 — live-tracking behavior. Off (or no link set) → text only, map hidden.
   // Linked → text + live map together. Independent → the tech chooses here per send.
-  const trackingOn = (email && email.liveTrackingEnabled !== false) && !!(email && email.trackLink);
+  // Per-stop live-tracking link (falls back to the manual global link if no token yet).
+  const trackUrl = (stop && stop.trackToken) ? stopTrackLink(stop.trackToken) : ((email && email.trackLink) || "");
+  const trackingOn = (email && email.liveTrackingEnabled !== false) && !!trackUrl;
   const sync = (email && email.onMyWaySync) || "linked";
   const [shareMap, setShareMap] = useState(sync === "linked");
   const includeTrack = trackingOn && (sync === "linked" || shareMap);
@@ -5297,10 +5398,16 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
       .replace(/\{company\}/g, branding.companyName)
       .replace(/\{eta\}/g, String(eta))
       .replace(/\{arrival\}/g, arrivalStr)
-      .replace(/\{track\}/g, includeTrack && email.trackLink ? `Track my live location here: ${email.trackLink} — ` : "");
+      .replace(/\{track\}/g, includeTrack && trackUrl ? `Track my live location here: ${trackUrl} — ` : "");
   })();
 
   const [sending, setSending] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copyLink = async () => {
+    if (!trackUrl) return;
+    try { await navigator.clipboard.writeText(trackUrl); } catch (_) {}
+    setCopied(true); setTimeout(() => setCopied(false), 1800);
+  };
   const openDeviceSms = () => {
     const smsUrl = `sms:${phone}${/iPhone|iPad|iPod/i.test(navigator.userAgent) ? "&" : "?"}body=${encodeURIComponent(message)}`;
     window.open(smsUrl, "_blank");
@@ -5382,6 +5489,14 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
           </div>
           <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>Stopping for gas or lunch? Adjust the time above so the client isn't left waiting.</div>
         </div>
+
+        {/* Per-stop live tracking link — copy to share this client's live map */}
+        {trackingOn && trackUrl && (
+          <button onClick={copyLink}
+            style={{ width: "100%", marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, background: T.surfaceAlt, color: copied ? T.accent : T.primary, border: `1.5px solid ${copied ? hexA(T.accent, 0.4) : T.border}`, borderRadius: 12, padding: "11px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+            <Icon name={copied ? "check" : "map"} size={15} /> {copied ? "Live link copied" : "Copy live tracking link"}
+          </button>
+        )}
 
         {/* Actions */}
         {!phone && (
@@ -7689,6 +7804,14 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   };
   const exitSelect = () => { setSelectMode(false); setSelected({}); };
 
+  // Per-stop live-tracking link: ensure the stop has a token, persist it, return it.
+  const ensureTrackToken = (stop) => {
+    if (stop.trackToken) return stop.trackToken;
+    const token = genTrackToken();
+    setSchedule(days => (days || []).map(d => ({ ...d, stops: (d.stops || []).map(s => s.sid === stop.sid ? { ...s, trackToken: token } : s) })));
+    return token;
+  };
+
   const addStops = (date, newStops) => {
     setSchedule(prev => {
       const copy = prev.map(d => ({ ...d, stops: [...d.stops] }));
@@ -8039,7 +8162,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                     </button>
                   )}
                   {!isComplete && perms.sendTexts && (
-                    <button onClick={e => { e.stopPropagation(); setOmwModal({ stop: s, client: c, key: s.sid }); }}
+                    <button onClick={e => { e.stopPropagation(); setOmwModal({ stop: { ...s, trackToken: ensureTrackToken(s) }, client: c, key: s.sid }); }}
                       style={{ flex: 1, background: "transparent", color: T.primary, border: `1.5px solid ${hexA(T.primary, 0.4)}`, borderRadius: 11, padding: "10px 6px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
                       <Icon name="message" size={14} /> {sent ? "Resend" : "On My Way"}
                     </button>
