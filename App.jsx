@@ -13866,6 +13866,42 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
   );
 }
 
+// ── Snapshot guardrail (Bug 0 part two) ──────────────────────────────────────
+// Before any import, merge, or restore, save a FULL snapshot of app_state to the
+// app_state_backups table so a bad bulk write is a one-tap undo. Keeps the most
+// recent few and trims the rest. Best-effort: a snapshot failure (e.g. the table
+// hasn't been created yet) is logged and NEVER blocks the operation it guards.
+const SNAPSHOT_KEEP = 3;
+async function snapshotState(label) {
+  try {
+    const { data, error } = await supabase.from("app_state").select("key, value");
+    if (error) { console.warn("snapshot read failed:", error.message); return false; }
+    const snap = {};
+    (data || []).forEach(r => { snap[r.key] = r.value; }); // raw stringified values
+    const { error: insErr } = await supabase.from("app_state_backups").insert({ label: label || "Auto", snapshot: snap });
+    if (insErr) { console.warn("snapshot insert failed:", insErr.message); return false; }
+    const { data: rows } = await supabase.from("app_state_backups").select("id").order("created_at", { ascending: false });
+    if (rows && rows.length > SNAPSHOT_KEEP) {
+      await supabase.from("app_state_backups").delete().in("id", rows.slice(SNAPSHOT_KEEP).map(r => r.id));
+    }
+    return true;
+  } catch (e) { console.warn("snapshot failed:", e?.message || e); return false; }
+}
+async function loadSnapshots() {
+  try {
+    const { data, error } = await supabase.from("app_state_backups").select("id, created_at, label").order("created_at", { ascending: false });
+    return error ? [] : (data || []);
+  } catch { return []; }
+}
+async function applySnapshot(id) {
+  const { data, error } = await supabase.from("app_state_backups").select("snapshot").eq("id", id).single();
+  if (error || !data) throw new Error(error?.message || "Snapshot not found");
+  const snap = data.snapshot || {};
+  for (const key of Object.keys(snap)) {
+    await store.set(key, typeof snap[key] === "string" ? snap[key] : JSON.stringify(snap[key]));
+  }
+}
+
 // ── Master Backup & Restore (owner-only) ─────────────────────────────────────
 // One .zip of EVERYTHING: data.json (every app_state row) + /media (each embedded
 // photo/video/doc) + manifest.json. Media lives as base64 data: URLs inside the
@@ -13899,7 +13935,10 @@ function BackupRestore() {
   const [msg, setMsg] = useState(null);       // { type, text }
   const [summary, setSummary] = useState(null);
   const [confirm, setConfirm] = useState(null); // { zip, refData, keys, mediaInZip, dataOnly }
+  const [snaps, setSnaps] = useState([]);       // recent auto-snapshots (undo points)
+  const [revertId, setRevertId] = useState(null);
   const fileRef = useRef(null);
+  useEffect(() => { loadSnapshots().then(setSnaps); }, []);
 
   const fetchAllState = async () => {
     const { data, error } = await supabase.from("app_state").select("key, value");
@@ -13949,20 +13988,26 @@ function BackupRestore() {
     setBusy(withMedia ? "everything" : "data"); setMsg(null); setSummary(null);
     try {
       const dataObj = await fetchAllState();
+      // Client chat threads live in their own table (sps_messages), not app_state —
+      // include them so the backup is genuinely everything in a client's file.
+      const { data: msgRows } = await supabase.from("sps_messages").select("*");
+      const messages = msgRows || [];
       const { refData, media } = extractMedia(dataObj);
       const JSZip = (await import("jszip")).default;
       const zip = new JSZip();
       zip.file("data.json", JSON.stringify(refData));
+      zip.file("messages.json", JSON.stringify(messages)); // chat history (small text — in both modes)
       const mediaBytes = media.reduce((s, m) => s + m.size, 0);
       if (withMedia) media.forEach(m => zip.file(m.path, m.b64, { base64: true }));
       zip.file("manifest.json", JSON.stringify({
         backupVersion: 1, createdAt: new Date().toISOString(), appVersion: "1.0",
-        dataOnly: !withMedia, keys: Object.keys(dataObj).length, mediaCount: media.length, mediaBytes,
+        dataOnly: !withMedia, keys: Object.keys(dataObj).length, messagesCount: messages.length,
+        mediaCount: media.length, mediaBytes,
         media: media.map(m => ({ path: m.path, mime: m.mime, size: m.size, ok: withMedia })),
       }, null, 2));
       const blob = await zip.generateAsync({ type: "blob", compression: "STORE" });
       await saveZip(blob, `SPS-Master-Backup-${new Date().toISOString().slice(0, 10)}.zip`);
-      setSummary({ keys: Object.keys(dataObj).length, mediaCount: withMedia ? media.length : 0, mediaBytes: withMedia ? mediaBytes : 0, zipBytes: blob.size, dataOnly: !withMedia });
+      setSummary({ keys: Object.keys(dataObj).length, messages: messages.length, mediaCount: withMedia ? media.length : 0, mediaBytes: withMedia ? mediaBytes : 0, zipBytes: blob.size, dataOnly: !withMedia });
       setMsg({ type: "ok", text: withMedia ? "Backup ready — choose where to save it." : "Data-only backup ready (no photos/videos)." });
     } catch (e) {
       setMsg({ type: "error", text: "Backup failed: " + (e.message || "unknown error") });
@@ -13982,7 +14027,7 @@ function BackupRestore() {
       if (manifest.backupVersion && manifest.backupVersion > 1) throw new Error("This backup is from a newer app version. Update the app first, then restore.");
       const refData = JSON.parse(await dataFile.async("string"));
       const mediaInZip = Object.keys(zip.files).filter(p => p.startsWith("media/") && !zip.files[p].dir).length;
-      setConfirm({ zip, refData, keys: Object.keys(refData).length, mediaInZip, dataOnly: !!manifest.dataOnly });
+      setConfirm({ zip, refData, keys: Object.keys(refData).length, mediaInZip, messages: manifest.messagesCount || 0, dataOnly: !!manifest.dataOnly });
     } catch (e) {
       setMsg({ type: "error", text: "Couldn't read backup: " + (e.message || "unknown error") });
     } finally { setBusy(""); }
@@ -13992,6 +14037,7 @@ function BackupRestore() {
     const { zip, refData } = confirm;
     setBusy("restore"); setConfirm(null); setMsg(null);
     try {
+      await snapshotState("Before restore"); // so the restore itself can be undone
       const cur = await fetchAllState(); // to preserve media on a data-only restore
       const rebuild = async (v, curV) => {
         if (v && typeof v === "object" && !Array.isArray(v) && v._media) {
@@ -14009,11 +14055,44 @@ function BackupRestore() {
         try { await store.set(key, JSON.stringify(await rebuild(refData[key], cur[key]))); ok++; }
         catch (e) { fail++; console.warn("Restore key failed:", key, e.message); }
       }
-      setMsg({ type: "ok", text: `Restored ${ok} section${ok !== 1 ? "s" : ""}${fail ? ` (${fail} failed)` : ""}. Reloading…` });
+      // Restore chat threads — upsert by id (non-destructive: never drops current messages).
+      let msgCount = 0;
+      const msgFile = zip.file("messages.json");
+      if (msgFile) {
+        try {
+          const msgs = JSON.parse(await msgFile.async("string"));
+          if (Array.isArray(msgs)) {
+            for (let i = 0; i < msgs.length; i += 500) {
+              const batch = msgs.slice(i, i + 500);
+              const { error } = await supabase.from("sps_messages").upsert(batch, { onConflict: "id" });
+              if (!error) msgCount += batch.length; else console.warn("Message batch failed:", error.message);
+            }
+          }
+        } catch (e) { console.warn("Message restore failed:", e.message); }
+      }
+      setMsg({ type: "ok", text: `Restored ${ok} section${ok !== 1 ? "s" : ""}${msgCount ? ` + ${msgCount} message${msgCount !== 1 ? "s" : ""}` : ""}${fail ? ` (${fail} failed)` : ""}. Reloading…` });
       setTimeout(() => window.location.reload(), 1800);
     } catch (e) {
       setMsg({ type: "error", text: "Restore failed: " + (e.message || "unknown error") }); setBusy("");
     }
+  };
+
+  const doRevert = async () => {
+    const id = revertId; setRevertId(null);
+    setBusy("restore"); setMsg(null);
+    try {
+      await snapshotState("Before undo"); // so the undo is itself undoable
+      await applySnapshot(id);
+      setMsg({ type: "ok", text: "Reverted to that snapshot. Reloading…" });
+      setTimeout(() => window.location.reload(), 1500);
+    } catch (e) {
+      setMsg({ type: "error", text: "Revert failed: " + (e.message || "unknown error") }); setBusy("");
+    }
+  };
+
+  const fmtSnap = (s) => {
+    try { const d = new Date(s.created_at); return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); }
+    catch { return ""; }
   };
 
   const btn = (bg, color) => ({ display: "flex", alignItems: "center", justifyContent: "center", gap: 9, width: "100%", padding: "13px 16px", border: "none", borderRadius: 13, fontWeight: 700, fontSize: 14.5, cursor: busy ? "default" : "pointer", fontFamily: "inherit", background: bg, color, opacity: busy ? 0.6 : 1 });
@@ -14021,7 +14100,7 @@ function BackupRestore() {
   return (
     <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
       <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>
-        A complete off-device copy of all your data — clients, invoices, history, settings, and (with the full backup) every photo and video. Saved as a dated .zip you can keep in Files / iCloud Drive and restore from later. Use Wi-Fi for full backups.
+        A complete off-device copy of everything — every client file, products & services, branding, settings, chat threads, invoices, schedule, and (with the full backup) every photo and video. Saved as a dated .zip you can keep in Files / iCloud Drive and restore from later. Use Wi-Fi for full backups.
       </div>
 
       <button disabled={!!busy} onClick={() => doExport(true)} style={btn(T.primary, "#fff")}>
@@ -14039,10 +14118,29 @@ function BackupRestore() {
       <input ref={fileRef} type="file" accept=".zip,application/zip" style={{ display: "none" }}
         onChange={e => { const f = e.target.files?.[0]; e.target.value = ""; onPickRestore(f); }} />
 
+      {snaps.length > 0 && (
+        <div style={{ marginTop: 4 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 6 }}>Recent auto-saves · one-tap undo</div>
+          <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 10, lineHeight: 1.5 }}>The app snapshots everything right before each import, merge, or restore. Revert to undo a bad change.</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {snaps.map(s => (
+              <div key={s.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "11px 13px", background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 11 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{s.label || "Snapshot"}</div>
+                  <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 1 }}>{fmtSnap(s)}</div>
+                </div>
+                <button disabled={!!busy} onClick={() => setRevertId(s.id)} style={{ flexShrink: 0, background: "transparent", color: T.primary, border: `1.5px solid ${hexA(T.primary, 0.4)}`, borderRadius: 9, padding: "7px 13px", fontSize: 12.5, fontWeight: 700, cursor: busy ? "default" : "pointer", fontFamily: "inherit" }}>Revert</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {summary && (
         <div style={{ background: hexA(T.accent, 0.07), border: `1px solid ${hexA(T.accent, 0.25)}`, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.text, lineHeight: 1.6 }}>
           <b>{summary.dataOnly ? "Data-only backup" : "Full backup"} created.</b><br />
           {summary.keys} data section{summary.keys !== 1 ? "s" : ""}
+          {summary.messages ? ` · ${summary.messages} chat message${summary.messages !== 1 ? "s" : ""}` : ""}
           {summary.dataOnly ? " · media excluded" : ` · ${summary.mediaCount} media file${summary.mediaCount !== 1 ? "s" : ""} (${fmtBytes(summary.mediaBytes)})`}
           {" · "}zip {fmtBytes(summary.zipBytes)}
         </div>
@@ -14058,12 +14156,27 @@ function BackupRestore() {
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <div style={{ background: hexA(T.warning, 0.1), border: `1px solid ${hexA(T.warning, 0.3)}`, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.text, lineHeight: 1.5 }}>
               This <b>overwrites all current data</b> with the backup: {confirm.keys} section{confirm.keys !== 1 ? "s" : ""}
+              {confirm.messages ? `, ${confirm.messages} chat message${confirm.messages !== 1 ? "s" : ""}` : ""}
               {confirm.dataOnly ? " (data only — your current photos/videos are kept)" : ` and ${confirm.mediaInZip} media file${confirm.mediaInZip !== 1 ? "s" : ""}`}.
               This can't be undone — make a fresh backup first if you're unsure.
             </div>
             <div style={{ display: "flex", gap: 10 }}>
               <button onClick={() => setConfirm(null)} style={{ flex: 1, background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 12, padding: "13px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
               <button onClick={doRestore} style={{ flex: 1, background: "#C0392B", color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Overwrite &amp; restore</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {revertId != null && (
+        <Modal title="Undo to this snapshot?" onClose={() => setRevertId(null)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ fontSize: 13.5, color: T.text, lineHeight: 1.5 }}>
+              This replaces all current data with the snapshot from <b>{fmtSnap(snaps.find(s => s.id === revertId) || {})}</b>. A fresh snapshot of the current state is taken first, so you can redo it if needed.
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={() => setRevertId(null)} style={{ flex: 1, background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 12, padding: "13px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+              <button onClick={doRevert} style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Undo to this</button>
             </div>
           </div>
         </Modal>
@@ -20779,12 +20892,13 @@ export default function App({ authEmail = "", onSignOut }) {
     setAdding(false);
   };
 
-  const handleImportClients = (imported) => setClients(cs => [...cs, ...imported]);
+  const handleImportClients = async (imported) => { await snapshotState("Before client import"); setClients(cs => [...cs, ...imported]); };
 
   // CSV import commit: apply approved field changes to matched clients (by id), then
   // append any new ones — in one atomic setClients pass. Only the fields in each
   // `changes` object are written; everything else on the client is left untouched.
-  const handleImportApply = ({ updates = [], adds = [] }) => {
+  const handleImportApply = async ({ updates = [], adds = [] }) => {
+    await snapshotState("Before CSV import");
     setClients(cs => {
       const changesById = new Map((updates || []).map(u => [String(u.id), u.changes]));
       let next = (cs || []).map(c => changesById.has(String(c.id)) ? { ...c, ...changesById.get(String(c.id)) } : c);
@@ -20808,6 +20922,7 @@ export default function App({ authEmail = "", onSignOut }) {
     const clientIds = new Set((clients || []).map(c => String(c.id)));
     if (ids.some(id => teamIds.has(id))) { console.warn("Merge blocked: a team/owner record was in scope."); return; }
     if (!ids.every(id => clientIds.has(id))) { console.warn("Merge blocked: a non-client record was in scope."); return; }
+    await snapshotState("Before merge");
     const dupSet = new Set((dupIds || []).map(String));
     setClients(cs => (cs || [])
       .map(c => String(c.id) === String(survivorId) ? merged : c)
@@ -20824,8 +20939,9 @@ export default function App({ authEmail = "", onSignOut }) {
   // Additive service-history import: append entries to matched clients only.
   // Idempotent — skips any entry whose client already has the same date + type.
   // Never alters other client fields.
-  const handleImportHistory = (byClient) => {
+  const handleImportHistory = async (byClient) => {
     if (!byClient || !Object.keys(byClient).length) return;
+    await snapshotState("Before history import");
     setClients(cs => (cs || []).map(c => {
       const adds = byClient[c.id] || byClient[String(c.id)];
       if (!adds || !adds.length) return c;
