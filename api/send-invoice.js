@@ -86,6 +86,8 @@ function buildInvoiceText({ clientName, branding, invoice, payLink }) {
   return lines.join("\n");
 }
 
+import { resolveFrom } from "./_sender.js";
+
 export default async function handler(req, res) {
   if (req.method === "GET" || (req.query && req.query.check)) {
     return res.status(200).json({ ok: true, endpoint: "send-invoice", configured: { resend: !!process.env.RESEND_API_KEY } });
@@ -96,7 +98,7 @@ export default async function handler(req, res) {
   if (!to || !/.+@.+\..+/.test(to)) return res.status(400).json({ error: "A valid client email is required" });
 
   const RESEND_KEY = process.env.RESEND_API_KEY;
-  const FROM = process.env.RESEND_FROM || "Stone Property Solutions <noreply@stonepropertysolutions.com>";
+  const FROM = resolveFrom(req.body, process.env.RESEND_FROM || "Stone Property Solutions <noreply@stonepropertysolutions.com>");
   if (!RESEND_KEY) return res.status(501).json({ error: "Email delivery is not configured on the server.", missingEnv: true });
 
   try {

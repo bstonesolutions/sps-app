@@ -93,6 +93,8 @@ function setCors(res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
+import { resolveFrom, VERIFIED_DOMAIN } from "./_sender.js";
+
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
@@ -106,6 +108,7 @@ export default async function handler(req, res) {
         supabaseServiceRole: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
       },
       from: process.env.RESEND_FROM || `${COMPANY} <noreply@stonepropertysolutions.com>`,
+      verifiedDomain: VERIFIED_DOMAIN,
       appUrl: APP_URL,
     });
   }
@@ -117,7 +120,7 @@ export default async function handler(req, res) {
   const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
   const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
   const RESEND_KEY   = process.env.RESEND_API_KEY;
-  const FROM         = process.env.RESEND_FROM || `${COMPANY} <noreply@stonepropertysolutions.com>`;
+  const FROM         = resolveFrom(req.body, process.env.RESEND_FROM || `${COMPANY} <noreply@stonepropertysolutions.com>`);
 
   // Not configured yet — signal the caller so it can fall back to Supabase email.
   if (!SERVICE_KEY || !RESEND_KEY) {

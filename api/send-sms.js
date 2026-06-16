@@ -34,14 +34,32 @@ export default async function handler(req, res) {
   const FROM = process.env.QUO_PHONE_NUMBER;
 
   if (req.method === "GET" || (req.query && req.query.check)) {
-    return res.status(200).json({ ok: true, endpoint: "send-sms", configured: { quoKey: !!KEY, quoNumber: !!FROM } });
+    // Best-effort: list the numbers on the Quo account so the app can offer a picker
+    // and validate the chosen Sending Identity texting number.
+    let numbers = [];
+    if (KEY) {
+      try {
+        const nr = await fetch("https://api.quo.com/v1/phone-numbers", { headers: { "Authorization": KEY } });
+        const nd = await nr.json().catch(() => ({}));
+        const list = Array.isArray(nd?.data) ? nd.data : (Array.isArray(nd) ? nd : []);
+        numbers = list.map(n => {
+          const num = n.e164 || n.phoneNumber || n.number || n.formattedNumber || "";
+          return num ? { number: toE164(num), label: n.name || n.label || "" } : null;
+        }).filter(Boolean);
+      } catch (_) { /* listing is best-effort — the manual number still works */ }
+    }
+    return res.status(200).json({ ok: true, endpoint: "send-sms", configured: { quoKey: !!KEY, quoNumber: !!FROM }, from: FROM ? toE164(FROM) : null, numbers });
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-  if (!KEY || !FROM) return res.status(501).json({ error: "Texting is not configured on the server.", missingEnv: true });
+  if (!KEY) return res.status(501).json({ error: "Texting is not configured on the server.", missingEnv: true });
 
-  const { to, message } = req.body || {};
+  const { to, message, from } = req.body || {};
   const toNum = toE164(to);
-  const fromNum = toE164(FROM);
+  // Prefer the caller's "from" (the Sending Identity texting number) when it's a valid
+  // number; otherwise fall back to the server default. Quo rejects any number that
+  // isn't on the connected account, so a bad value can't impersonate an outside line.
+  const fromNum = toE164(from) || toE164(FROM);
+  if (!fromNum) return res.status(501).json({ error: "No business texting number is configured.", missingEnv: true });
   if (!toNum) return res.status(400).json({ error: "A valid recipient phone number is required." });
   if (!message || !String(message).trim()) return res.status(400).json({ error: "A message is required." });
 

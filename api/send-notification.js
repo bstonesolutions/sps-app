@@ -40,6 +40,8 @@ function buildHtml({ branding = {}, heading, message, rows = [] }) {
   </div>`;
 }
 
+import { resolveFrom } from "./_sender.js";
+
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
@@ -53,7 +55,7 @@ export default async function handler(req, res) {
   if (!subject) return res.status(400).json({ error: "A subject is required" });
 
   const RESEND_KEY = process.env.RESEND_API_KEY;
-  const FROM = process.env.RESEND_FROM || "Stone Property Solutions <noreply@stonepropertysolutions.com>";
+  const FROM = resolveFrom(req.body, process.env.RESEND_FROM || "Stone Property Solutions <noreply@stonepropertysolutions.com>");
   if (!RESEND_KEY) return res.status(501).json({ error: "Email delivery is not configured on the server.", missingEnv: true });
 
   try {

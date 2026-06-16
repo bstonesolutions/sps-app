@@ -31,7 +31,7 @@ async function sendBrandedAuthEmail(payload) {
   const r = await fetch(`${PROD_URL}/api/send-auth-email`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...senderEmailFields(), ...payload }),
   });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(d.error || "Email send failed"), { missingEnv: !!d.missingEnv });
@@ -75,6 +75,16 @@ const qbCheckStatus = async () => {
   } catch { return qbIsConnected(); }
 };
 
+// "Sending identity" mirror of the saved Email settings, so server calls can carry a
+// custom from-name/address + texting number WITHOUT threading props through every call
+// site. The App component keeps this current via setSenderIdentity() whenever the
+// settings change. The server validates both (verified domain / on-account number),
+// so a bad value here can never impersonate an outside address or line — it falls back.
+let SENDER_IDENTITY = { fromName: "", fromAddress: "", textingNumber: "" };
+function setSenderIdentity(v) { SENDER_IDENTITY = { ...SENDER_IDENTITY, ...(v || {}) }; }
+// Spread into a Resend email body; the server only honors these on the verified domain.
+const senderEmailFields = () => ({ fromName: SENDER_IDENTITY.fromName || "", fromAddress: SENDER_IDENTITY.fromAddress || "" });
+
 // Send a text via the business Quo number (server-side, from the company line).
 // Absolute PROD_URL so it works on the native app too. Returns { ok, error, missingEnv }.
 async function sendSms(to, message) {
@@ -82,7 +92,7 @@ async function sendSms(to, message) {
     const r = await fetch(`${PROD_URL}/api/send-sms`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ to, message }),
+      body: JSON.stringify({ to, message, from: SENDER_IDENTITY.textingNumber || "" }),
     });
     const d = await r.json().catch(() => ({}));
     if (r.ok && d.sent) return { ok: true };
@@ -1505,6 +1515,7 @@ const DEFAULT_EMAIL = {
   showPhotosNote: true,
   // text-message templates ({first}, {sender}, {company}, {eta}, {arrival}, {track})
   senderName: "Brandon",
+  textingNumber: "",           // Sending identity: business line texts go out from (blank = server default)
   trackLink: "",
   // Feature 8 — live tracking + On My Way behavior
   liveTrackingEnabled: true,   // master switch for sharing the live map / tracking link
@@ -9583,6 +9594,24 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
   const set = (k, v) => setEmail(e => ({ ...e, [k]: v }));
   const setB = (k, v) => setBranding(b => ({ ...b, [k]: v }));
 
+  // Sending-identity live status: the verified Resend domain + the Quo account's numbers.
+  const [identity, setIdentity] = useState({ verifiedDomain: "", numbers: [], smsFrom: "", loaded: false });
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const out = { verifiedDomain: "", numbers: [], smsFrom: "", loaded: true };
+      try { const r = await fetch(`${PROD_URL}/api/send-magic-link?check`); const d = await r.json(); if (d && d.verifiedDomain) out.verifiedDomain = String(d.verifiedDomain).toLowerCase(); } catch (_) {}
+      try { const r = await fetch(`${PROD_URL}/api/send-sms?check`); const d = await r.json(); if (d) { out.numbers = Array.isArray(d.numbers) ? d.numbers : []; out.smsFrom = d.from || ""; } } catch (_) {}
+      if (alive) setIdentity(out);
+    })();
+    return () => { alive = false; };
+  }, []);
+  const normNum = (s) => { const raw = String(s || "").trim(); if (raw.startsWith("+")) return "+" + raw.slice(1).replace(/\D/g, ""); const dd = raw.replace(/\D/g, ""); if (dd.length === 10) return "+1" + dd; if (dd.length === 11 && dd.startsWith("1")) return "+" + dd; return dd ? "+" + dd : ""; };
+  const emailDomain = (email.fromAddress || "").split("@").pop().toLowerCase();
+  const emailVerified = !!identity.verifiedDomain && emailDomain === identity.verifiedDomain;
+  const numNorm = normNum(email.textingNumber);
+  const numOnAccount = identity.numbers.length ? identity.numbers.some(n => n.number === numNorm) : null; // null = can't verify
+
   const sample = {
     firstName: "Robert", company: branding.companyName, serviceType: "Bi-Weekly Service",
     date: new Date().toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" }),
@@ -9622,8 +9651,44 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
           <div>
             <label style={labelStyle}>From Address</label>
             <input type="email" style={field} value={email.fromAddress} onChange={e => set("fromAddress", e.target.value)} placeholder="service@yourcompany.com" />
-            <div style={hint}>The address clients reply to. Auto-sending is set up with the backend; for now reports open in your own mail app.</div>
+            <div style={{ fontSize: 12, fontWeight: 700, marginTop: 6, color: !identity.loaded ? T.textMuted : emailVerified ? "#16a34a" : "#d97706" }}>
+              {!identity.loaded ? "Checking sending domain…"
+                : emailVerified ? "✓ Verified — emails send from this address"
+                : `⚠ ${emailDomain || "This domain"} isn't verified${identity.verifiedDomain ? ` (verified: ${identity.verifiedDomain})` : ""}. Emails will send from the default address until it is.`}
+            </div>
+            <div style={hint}>The address clients reply to and that emails send from. To use your own domain, verify it in Resend first.</div>
           </div>
+        </div>
+      </Card>
+
+      {/* Texting number (Quo) — the business line texts send from */}
+      <Card style={{ marginBottom: 14 }}>
+        <CardHeader title="Texting Number" />
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: -2 }}>The business line your texts go out from — On My Way, arrival, and invoice texts. Must be a number on your Quo account.</div>
+          {identity.numbers.length > 0 ? (
+            <div>
+              <label style={labelStyle}>Send Texts From</label>
+              <select style={field} value={numNorm && identity.numbers.some(n => n.number === numNorm) ? numNorm : ""} onChange={e => set("textingNumber", e.target.value)}>
+                <option value="">{identity.smsFrom ? `Default (${identity.smsFrom})` : "Server default"}</option>
+                {identity.numbers.map(n => <option key={n.number} value={n.number}>{n.number}{n.label ? ` — ${n.label}` : ""}</option>)}
+              </select>
+              <div style={hint}>Pick the line your texts go out from, or leave on Default to use the server's number.</div>
+            </div>
+          ) : (
+            <div>
+              <label style={labelStyle}>Texting Number</label>
+              <input type="tel" inputMode="tel" style={field} value={email.textingNumber || ""} onChange={e => set("textingNumber", e.target.value)} placeholder={identity.smsFrom || "+1 610 555 1234"} />
+              <div style={hint}>{!identity.loaded ? "Checking…" : identity.smsFrom ? `Leave blank to use the server default (${identity.smsFrom}).` : "Texting isn't configured on the server yet."}</div>
+            </div>
+          )}
+          {email.textingNumber ? (
+            <div style={{ fontSize: 12, fontWeight: 700, color: numOnAccount === false ? "#d97706" : (numOnAccount ? "#16a34a" : T.textMuted) }}>
+              {numOnAccount === false ? "⚠ Not found on your Quo account — texts from it may be rejected."
+                : numOnAccount ? "✓ On your Quo account"
+                : (numNorm ? `Will send from ${numNorm}` : "")}
+            </div>
+          ) : null}
         </div>
       </Card>
 
@@ -11128,7 +11193,7 @@ function InvoiceSendStep({ invoice, client, onClose }) {
     const fails = [];
     if (doSms && phone) {
       try {
-        const r = await fetch(`${PROD_URL}/api/send-sms`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: phone, message: smsMsg }) });
+        const r = await fetch(`${PROD_URL}/api/send-sms`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: phone, message: smsMsg, from: SENDER_IDENTITY.textingNumber || "" }) });
         const d = await r.json().catch(() => ({}));
         if (!r.ok || !d.sent) fails.push(`Text: ${d.error || "failed"}`);
       } catch (_) { fails.push("Text: couldn't reach server"); }
@@ -11144,6 +11209,7 @@ function InvoiceSendStep({ invoice, client, onClose }) {
         const r = await fetch(`${PROD_URL}/api/send-invoice`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            ...senderEmailFields(),
             to: clientEmail,
             clientName: invoice.clientName || client?.name || "",
             branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary },
@@ -12610,6 +12676,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          ...senderEmailFields(),
           to: clientEmail,
           clientName: invoice.clientName || client?.name || "",
           branding: {
@@ -13410,9 +13477,9 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
       const inv = p.invoice;
       const phone = String(c.phone || "").replace(/[^\d+]/g, "");
       const cEmail = (c.email || "").trim();
-      if (doSms && phone) { try { const r = await fetch(`${PROD_URL}/api/send-sms`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: phone, message: fill(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv) }) }); const d = await r.json().catch(() => ({})); if (!r.ok || !d.sent) fails++; } catch (_) { fails++; } }
+      if (doSms && phone) { try { const r = await fetch(`${PROD_URL}/api/send-sms`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: phone, message: fill(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv), from: SENDER_IDENTITY.textingNumber || "" }) }); const d = await r.json().catch(() => ({})); if (!r.ok || !d.sent) fails++; } catch (_) { fails++; } }
       if (doChat && c.id) { try { await supabase.from("sps_messages").insert({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) }); } catch (_) { fails++; } }
-      if (doEmail && cEmail) { try { const tt = invoiceTotals(inv); await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); } catch (_) { fails++; } }
+      if (doEmail && cEmail) { try { const tt = invoiceTotals(inv); await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...senderEmailFields(), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); } catch (_) { fails++; } }
     }
     setMsgBusy(false);
     if (fails > 0) { setMsgErr(`${fails} message(s) couldn't be sent. The invoices were still created.`); return; }
@@ -15086,7 +15153,7 @@ function SyncStatus({ T, branding, team, currentUserId }) {
     if (!testEmail.trim()) { setEmailMsg({ ok: false, text: "Enter an email address first." }); return; }
     setEmailBusy(true); setEmailMsg(null);
     try {
-      const r = await fetch(`${PROD_URL}/api/send-test-email`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: testEmail.trim() }) });
+      const r = await fetch(`${PROD_URL}/api/send-test-email`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...senderEmailFields(), to: testEmail.trim() }) });
       const d = await r.json().catch(() => ({}));
       setEmailMsg(r.ok ? { ok: true, text: `Sent — check ${testEmail.trim()} (and spam).` } : { ok: false, text: d.error || "Send failed." });
     } catch (_) { setEmailMsg({ ok: false, text: "Couldn't reach the server." }); }
@@ -15096,7 +15163,7 @@ function SyncStatus({ T, branding, team, currentUserId }) {
     if (!testPhone.trim()) { setSmsMsg({ ok: false, text: "Enter a phone number first." }); return; }
     setSmsBusy(true); setSmsMsg(null);
     try {
-      const r = await fetch(`${PROD_URL}/api/send-sms`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: testPhone.trim(), message: `${branding.companyName || "Stone Property Solutions"}: test text ✅ — your texting integration is working.` }) });
+      const r = await fetch(`${PROD_URL}/api/send-sms`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: testPhone.trim(), message: `${branding.companyName || "Stone Property Solutions"}: test text ✅ — your texting integration is working.`, from: SENDER_IDENTITY.textingNumber || "" }) });
       const d = await r.json().catch(() => ({}));
       setSmsMsg(r.ok ? { ok: true, text: `Sent — check ${testPhone.trim()}.` } : { ok: false, text: d.error || "Send failed." });
     } catch (_) { setSmsMsg({ ok: false, text: "Couldn't reach the server." }); }
@@ -21348,6 +21415,9 @@ export default function App({ authEmail = "", onSignOut }) {
   const [schedule, setSchedule, ls] = useStoredState("sps_schedule", DEFAULT_SCHEDULE);
   const [catalog, setCatalog, lcat] = useStoredState("sps_catalog", DEFAULT_CATALOG);
   const [email, setEmail, lem] = useStoredState("sps_email", DEFAULT_EMAIL);
+  // Keep the module-level sending identity current with saved Email settings, so every
+  // server email/SMS call goes out from the configured from-address + texting number.
+  useEffect(() => { setSenderIdentity({ fromName: email.fromName, fromAddress: email.fromAddress, textingNumber: email.textingNumber }); }, [email.fromName, email.fromAddress, email.textingNumber]);
   const [costs, setCosts, lco] = useStoredState("sps_costs", DEFAULT_COSTS);
   const [home, setHome, lh] = useStoredState("sps_home", DEFAULT_HOME);
   const [budget, setBudget, lbud] = useStoredState("sps_budget", DEFAULT_BUDGET);
@@ -22084,7 +22154,7 @@ export default function App({ authEmail = "", onSignOut }) {
       fetch(`${PROD_URL}/api/send-notification`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to, subject, heading, message, rows, branding }),
+        body: JSON.stringify({ ...senderEmailFields(), to, subject, heading, message, rows, branding }),
       })
         .then(r => { if (!r.ok) r.json().catch(() => ({})).then(d => console.warn("Owner email failed:", d?.error || r.status)); })
         .catch(err => console.warn("Owner email error:", err?.message || err));
