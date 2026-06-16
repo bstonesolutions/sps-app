@@ -6387,7 +6387,9 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
 
   const q = clientSearch.toLowerCase();
   const filteredClients = selectableClients(clients).filter(c => (c.name || "").toLowerCase().includes(q));
-  const selClientIds = Object.keys(selClients).filter(k => selClients[k]).map(Number);
+  // Keep ids in their original type — client ids can be strings (e.g. QuickBooks
+  // customer ids). Coercing to Number broke the client lookup → stops saved as "Client".
+  const selClientIds = Object.keys(selClients).filter(k => selClients[k]);
 
   const toggleClient = (id) => setSelClients(s => ({ ...s, [id]: !s[id] }));
   const toggleService = (id) => {
@@ -6421,11 +6423,12 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
     const services = catalog.services.filter(s => selServices[s.id]).map(s => ({ name: s.name, price: (svcPrices[s.id] ?? s.price ?? "") }));
     const products = catalog.products.filter(p => selProducts[p.id]).map(p => ({ name: p.name, price: p.price || "" }));
     const stops = selClientIds.map((id, i) => {
-      const c = clients.find(x => x.id === id);
+      const c = clients.find(x => String(x.id) === String(id));  // type-tolerant lookup
+      const cid = c ? c.id : id;
       return {
         sid: `${Date.now()}-${i}`,
-        id,
-        clientId: id,                 // explicit client link (Bug 1) — matchers read s.clientId
+        id: cid,
+        clientId: cid,                // explicit client link (Bug 1) — matchers read s.clientId
         client: c?.name || "Client",  // name snapshot for display
         address: c?.address || "",
         type: stopType,
@@ -7663,12 +7666,17 @@ function RouteAssignmentsTab({ clients, catalog, team, schedule, setSchedule, as
   );
 }
 
-function StopEditModal({ stop, dayDate, catalog, team, T, onSave, onClose }) {
+function StopEditModal({ stop, dayDate, clients, catalog, team, T, onSave, onClose }) {
   const [time, setTime] = useState(stop.time || "9:00 AM");
   const [type, setType] = useState(stop.type || (catalog?.stopTypes?.[0]) || "Service");
   const [duration, setDuration] = useState(String(stop.duration || "60").replace(/[^\d]/g, ""));
   const [assigneeId, setAssigneeId] = useState(stop.assigneeId || "");
   const [date, setDate] = useState(dayDate);
+  // Client is editable so a mis-saved / unlinked stop can be reassigned (Bug 1).
+  const [clientId, setClientId] = useState(() => {
+    const c = (clients || []).find(x => String(x.id) === String(stop.clientId ?? stop.id));
+    return c ? String(c.id) : "";
+  });
 
   const parsed = (() => {
     const m = (time || "").match(/(\d+):(\d+)\s*(AM|PM)/i);
@@ -7683,13 +7691,24 @@ function StopEditModal({ stop, dayDate, catalog, team, T, onSave, onClose }) {
   const fromISO = (iso) => { const [y, m, d] = (iso || "").split("-"); return (y && m && d) ? `${m}/${d}/${y}` : date; };
 
   const save = () => {
-    onSave({ time, type, duration: duration || "60", assigneeId: assigneeId || "", date });
+    // Persist the client link + name snapshot when reassigned (Bug 1).
+    const c = (clients || []).find(x => String(x.id) === String(clientId));
+    onSave({
+      ...(c ? { id: c.id, clientId: c.id, client: c.name, address: c.address || "" } : {}),
+      time, type, duration: duration || "60", assigneeId: assigneeId || "", date,
+    });
   };
 
   return (
     <Modal title="Edit Stop" onClose={onClose}>
       <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{stop.client}</div>
+        <div>
+          <label style={lbl}>Client</label>
+          <select value={clientId} onChange={e => setClientId(e.target.value)} style={field}>
+            <option value="">Select a client…</option>
+            {selectableClients(clients).map(c => <option key={c.id} value={String(c.id)}>{c.name}</option>)}
+          </select>
+        </div>
 
         <div>
           <label style={lbl}>Date</label>
@@ -11126,7 +11145,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     return item;
   };
 
-  const client = clients.find(c => c.id === inv.clientId);
+  const client = clients.find(c => String(c.id) === String(inv.clientId)); // type-tolerant (ids may be strings)
   const totals = invoiceTotals(inv);
   const completedHistory = client?.history || [];
 
@@ -11255,7 +11274,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         <div style={{ display: "flex", gap: 10 }}>
           <div style={{ flex: 2 }}>
             <label style={label}>Client</label>
-            <select value={inv.clientId ?? ""} onChange={e => set("clientId", Number(e.target.value))} style={{ ...field, appearance: "none", WebkitAppearance: "none" }}>
+            <select value={inv.clientId == null ? "" : String(inv.clientId)} onChange={e => { const c = clients.find(x => String(x.id) === e.target.value); set("clientId", c ? c.id : e.target.value); }} style={{ ...field, appearance: "none", WebkitAppearance: "none" }}>
               {selectableClients(clients).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </div>
