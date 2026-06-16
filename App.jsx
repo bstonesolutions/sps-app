@@ -72,6 +72,21 @@ const qbCheckStatus = async () => {
   } catch { return qbIsConnected(); }
 };
 
+// Send a text via the business Quo number (server-side, from the company line).
+// Absolute PROD_URL so it works on the native app too. Returns { ok, error, missingEnv }.
+async function sendSms(to, message) {
+  try {
+    const r = await fetch(`${PROD_URL}/api/send-sms`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ to, message }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok && d.sent) return { ok: true };
+    return { ok: false, error: d.error || `Error ${r.status}`, missingEnv: !!d.missingEnv };
+  } catch (e) { return { ok: false, error: e.message || "network error" }; }
+}
+
 // Open a URL in the device's DEFAULT/EXTERNAL browser (not the in-app browser) —
 // intentionally the opposite of openInAppBrowser. Used for Google reviews, where
 // the client's signed-in browser session makes leaving a review frictionless. On
@@ -1394,6 +1409,7 @@ const DEFAULT_EMAIL = {
   onMyWaySync: "linked",       // "linked" = text + live map together · "independent" = pick each at send time
   smsOnMyWay: "Hi {first}, this is {sender} with {company}. I'm on my way and should arrive in about {eta} minutes (around {arrival}). {track}See you soon!",
   smsArrived: "Hi {first}, {sender} with {company} has arrived and is getting started on your service. We'll send a full report when we're done!",
+  smsReport: "Hi {first}, your {service} is complete! Your full report is on its way by email, and photos are in your portal. Thanks for choosing {company}!",
   smsReminder: "Hi {first}, a friendly reminder from {company} that your service is scheduled for {date}. Reply here with any questions!",
   // Staff invite email ({name} = staff member, {company} = your company, {link} = secure sign-in link)
   staffInviteSubject: "You're invited to the {company} team app",
@@ -5284,10 +5300,17 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
       .replace(/\{track\}/g, includeTrack && email.trackLink ? `Track my live location here: ${email.trackLink} — ` : "");
   })();
 
-  const handleSend = () => {
-    if (!phone) return;
+  const [sending, setSending] = useState(false);
+  const openDeviceSms = () => {
     const smsUrl = `sms:${phone}${/iPhone|iPad|iPod/i.test(navigator.userAgent) ? "&" : "?"}body=${encodeURIComponent(message)}`;
     window.open(smsUrl, "_blank");
+  };
+  const handleSend = async () => {
+    if (!phone) return;
+    setSending(true);
+    const r = await sendSms(client.phone, message); // send from the business Quo line
+    setSending(false);
+    if (!r.ok) openDeviceSms(); // Quo unconfigured/failed → fall back to the device Messages app
     onSent();
     onClose();
   };
@@ -5367,8 +5390,8 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
           </div>
         )}
         <div style={{ display: "flex", gap: 10 }}>
-          <Btn onClick={handleSend} disabled={!phone} block style={{ flex: 1, gap: 7 }}>
-            <Icon name="message" size={15} /> Send via Messages
+          <Btn onClick={handleSend} disabled={!phone || sending} block style={{ flex: 1, gap: 7 }}>
+            {sending ? "Sending…" : <><Icon name="message" size={15} /> Send Text</>}
           </Btn>
           <button onClick={onClose}
             style={{ background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "13px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer", color: T.text, fontFamily: "inherit" }}>
@@ -5398,14 +5421,20 @@ function ArrivedModal({ stop, client, email, onClose, onArrived }) {
       .replace(/\{company\}/g, branding.companyName)
       .replace(/\{service\}/g, stop?.type || "service");
   })();
-  const send = () => {
+  const [sending, setSending] = useState(false);
+  const send = async () => {
     onArrived();                       // start the job clock (record arrival time)
     if (client?.id) {                  // in-app portal notification (best-effort)
       supabase.from("sps_messages").insert({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: message }).then(() => {}, () => {});
     }
-    if (phone) {                       // open the SMS composer within the user gesture
-      const smsUrl = `sms:${phone}${/iPhone|iPad|iPod/i.test(navigator.userAgent) ? "&" : "?"}body=${encodeURIComponent(message)}`;
-      window.open(smsUrl, "_blank");
+    if (phone) {                       // text the client from the business Quo line
+      setSending(true);
+      const r = await sendSms(client.phone, message);
+      setSending(false);
+      if (!r.ok) {                     // Quo unconfigured/failed → device Messages fallback
+        const smsUrl = `sms:${phone}${/iPhone|iPad|iPod/i.test(navigator.userAgent) ? "&" : "?"}body=${encodeURIComponent(message)}`;
+        window.open(smsUrl, "_blank");
+      }
     }
     onClose();
   };
@@ -5425,8 +5454,8 @@ function ArrivedModal({ stop, client, email, onClose, onArrived }) {
         </div>
         <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 6 }}>Message to client</div>
         <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: "12px 14px", fontSize: 13.5, color: T.text, lineHeight: 1.5, marginBottom: 16 }}>{message}</div>
-        <Btn onClick={send} style={{ width: "100%", padding: "13px", borderRadius: 12, gap: 7, justifyContent: "center" }}>
-          <Icon name="check" size={15} /> {phone ? "Mark Arrived & Text Client" : "Mark Arrived"}
+        <Btn onClick={send} disabled={sending} style={{ width: "100%", padding: "13px", borderRadius: 12, gap: 7, justifyContent: "center" }}>
+          {sending ? "Sending…" : <><Icon name="check" size={15} /> {phone ? "Mark Arrived & Text Client" : "Mark Arrived"}</>}
         </Btn>
         <div style={{ fontSize: 11, color: T.textMuted, textAlign: "center", marginTop: 8 }}>Edit this message in Customize → Messaging.</div>
       </div>
@@ -5699,9 +5728,15 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
     const subject = email.subject.replace("{date}", todayStr);
     window.open(`mailto:${client?.email || ""}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(reportText)}`, "_blank");
   };
-  const sendText = () => {
-    const short = `Hi ${firstName}, your ${stop.type} is complete! Full report sent to your email. Photos are in your portal. — ${branding.companyName}`;
-    window.open(`sms:${phone}${/iPhone|iPad|iPod/i.test(navigator.userAgent) ? "&" : "?"}body=${encodeURIComponent(short)}`, "_blank");
+  const sendText = async () => {
+    const tpl = (email && email.smsReport) || DEFAULT_EMAIL.smsReport;
+    const short = tpl
+      .replace(/\{first\}/g, firstName)
+      .replace(/\{service\}/g, stop.type || "service")
+      .replace(/\{company\}/g, branding.companyName)
+      .replace(/\{sender\}/g, (email && email.senderName) || branding.companyName);
+    const r = await sendSms(phone, short); // business Quo line
+    if (!r.ok) window.open(`sms:${phone}${/iPhone|iPad|iPod/i.test(navigator.userAgent) ? "&" : "?"}body=${encodeURIComponent(short)}`, "_blank");
   };
 
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
@@ -6683,6 +6718,7 @@ function HeadHereModal({ stop, client, email, onClose }) {
       .replace(/{arrival}/g, "soon").replace(/{track}/g, track);
   })();
   const smsHref = phone ? `sms:${phone}${/iPhone|iPad|iPod/.test(navigator.userAgent) ? "&" : "?"}body=${encodeURIComponent(msg)}` : null;
+  const sendOmwText = async () => { if (!phone) return; const r = await sendSms(phone, msg); if (!r.ok && smsHref) window.open(smsHref, "_blank"); }; // business Quo line, device fallback
   const openMap = (app) => { try { localStorage.setItem("sps_map_app", app); } catch {} setPref(app); };
   const mapApps = [{ key: "apple", label: "Apple Maps", icon: "A" }, { key: "google", label: "Google Maps", icon: "G" }, { key: "waze", label: "Waze", icon: "💜" }];
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10, display: "block" };
@@ -6692,7 +6728,7 @@ function HeadHereModal({ stop, client, email, onClose }) {
         {addr && <div style={{ fontSize: 13, color: T.textMuted, marginTop: -8, lineHeight: 1.4, display:"flex", alignItems:"center", gap:5 }}><Icon name="location" size={13} />{addr}</div>}
         <div>
           <span style={lbl}>On My Way Text</span>
-          {smsHref ? <Btn href={smsHref} variant="outline" block style={{ display:"flex", alignItems:"center", gap:6 }}><Icon name="message" size={15} /> Send On My Way to {firstName}</Btn>
+          {phone ? <Btn onClick={sendOmwText} variant="outline" block style={{ display:"flex", alignItems:"center", gap:6 }}><Icon name="message" size={15} /> Send On My Way to {firstName}</Btn>
             : <div style={{ fontSize: 13, color: T.textMuted, background: T.surfaceAlt, borderRadius: 10, padding: "11px 14px" }}>Add a phone number to this client to send texts.</div>}
         </div>
         <div>
@@ -9541,6 +9577,11 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
             <label style={labelStyle}>"I'm Here" (Arrived) Text</label>
             <textarea style={{ ...field, resize: "vertical" }} rows={3} value={email.smsArrived || ""} onChange={e => set("smsArrived", e.target.value)} placeholder={DEFAULT_EMAIL.smsArrived} />
             <div style={hint}>Sent in-app and by text when you tap "I'm Here" on a stop (which also starts the job clock). Extra tag: {"{service}"} = the service type.</div>
+          </div>
+          <div>
+            <label style={labelStyle}>"Service Complete" Text</label>
+            <textarea style={{ ...field, resize: "vertical" }} rows={3} value={email.smsReport || ""} onChange={e => set("smsReport", e.target.value)} placeholder={DEFAULT_EMAIL.smsReport} />
+            <div style={hint}>Sent when you tap "Text Report" after finishing a visit. Tags: {"{first}"}, {"{service}"}, {"{company}"}.</div>
           </div>
           <div>
             <label style={labelStyle}>Invoice Sent Text <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
@@ -12405,14 +12446,18 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
     return lines.join("\n");
   };
 
-  const sendViaSms = () => {
+  const sendViaSms = async () => {
     const client = (clients||[]).find(c => String(c.id) === String(form.clientId));
     const phone = (client?.phone||"").replace(/\D/g,"");
     if (!phone) { setSentMsg("No phone number on file for this client."); return; }
-    const smsUrl = `sms:${phone}${/iPhone|iPad|iPod/i.test(navigator.userAgent) ? "&" : "?"}body=${encodeURIComponent(buildSmsText())}`;
-    window.open(smsUrl, "_blank");
+    const text = buildSmsText();
+    const r = await sendSms(phone, text); // business Quo line
     set("status", "sent");
-    setSentMsg("Opened in Messages. Mark as sent when you've sent it.");
+    if (r.ok) { setSentMsg("Estimate texted to the client."); }
+    else {
+      window.open(`sms:${phone}${/iPhone|iPad|iPod/i.test(navigator.userAgent) ? "&" : "?"}body=${encodeURIComponent(text)}`, "_blank");
+      setSentMsg("Opened in Messages. Mark as sent when you've sent it.");
+    }
   };
 
   const sendViaEmail = () => {
@@ -15483,10 +15528,11 @@ function RemindersScreen({ schedule, clients, scheduleCfg, setScheduleCfg, email
   const markSent = (sid, method) => setReminderLog(m => ({ ...m, [sid]: { sentAt: new Date().toISOString(), method } }));
   const undoSent = (sid) => setReminderLog(m => { const n = { ...m }; delete n[sid]; return n; });
 
-  const sendOne = (entry) => {
+  const sendOne = async (entry) => {
     const msg = buildMsg(entry);
     if (entry.phone) {
-      window.location.href = `sms:${entry.phone}?&body=${encodeURIComponent(msg)}`;
+      const r = await sendSms(entry.phone, msg); // business Quo line
+      if (!r.ok) window.location.href = `sms:${entry.phone}?&body=${encodeURIComponent(msg)}`;
     } else {
       navigator.clipboard?.writeText(msg);
     }
