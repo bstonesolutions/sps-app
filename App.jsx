@@ -731,7 +731,7 @@ function buildReminderQueue(schedule, clients, cfg, reminderLog, now = new Date(
       const stopDate = new Date(yy, mm - 1, dd, hh, mn);
       if (stopDate < now) return; // past
 
-      const client = (clients || []).find(c => c.id === s.clientId);
+      const client = (clients || []).find(c => String(c.id) === String(s.clientId ?? s.id));
       if (client && client.notifyPrefs && client.notifyPrefs.serviceReminders === false) return; // client opted out of reminders
       const phone = (client?.phone || "").replace(/\D/g, "");
       const entry = { sid: s.sid, stop: s, client, date: d.date, stopDate, phone };
@@ -5720,6 +5720,9 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
   const [photos, setPhotos] = useState([]); // [{ src, label }]
   const [partsOpen, setPartsOpen] = useState(false); // Parts collapsed by default (Build 9); treatments stay open
   const [productsOpen, setProductsOpen] = useState(false); // Products Purchased collapsed by default (Build 9)
+  const [partSearch, setPartSearch] = useState("");       // filter the parts list (big catalogs)
+  const [productSearch, setProductSearch] = useState("");  // filter the products list
+  const [catCollapsed, setCatCollapsed] = useState({});    // `${kind}:${category}` -> collapsed (parts/treatments grouping)
   const MAX_PHOTOS = 10;
   const PHOTO_LABELS = ["Before", "After", "Detail", "Equipment", "Issue", "General"];
   const [busy, setBusy] = useState(false);
@@ -5948,6 +5951,33 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
     );
   }
 
+  // Group parts/treatments by category for collapsible sections (Uncategorized last).
+  // Data-safe: items with no category simply land under "Uncategorized".
+  const groupByCat = (items) => {
+    const map = {};
+    items.forEach(it => { const k = (it.category || "").trim() || "Uncategorized"; (map[k] = map[k] || []).push(it); });
+    return Object.keys(map).sort((a, b) => a === "Uncategorized" ? 1 : b === "Uncategorized" ? -1 : a.localeCompare(b)).map(cat => ({ cat, items: map[cat] }));
+  };
+  const catHeaderStyle = { display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: T.surfaceAlt, border: "none", borderRadius: 8, padding: "7px 12px", cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em" };
+  // Render rows flat (one/no category, or while searching) or as collapsible category groups.
+  const renderByCategory = (items, kind, renderRow, flat) => {
+    const groups = groupByCat(items);
+    if (flat || groups.length <= 1) return items.map(renderRow);
+    return groups.map(g => {
+      const key = `${kind}:${g.cat}`;
+      const collapsed = !!catCollapsed[key];
+      return (
+        <div key={key} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <button type="button" onClick={() => setCatCollapsed(s => ({ ...s, [key]: !s[key] }))} style={catHeaderStyle}>
+            <span>{g.cat} · {g.items.length}</span>
+            <span style={{ fontSize: 14, transform: collapsed ? "none" : "rotate(90deg)", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
+          </button>
+          {!collapsed && g.items.map(renderRow)}
+        </div>
+      );
+    });
+  };
+
   return (
     <Modal title={client?.name || "Service"} onClose={onClose}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: -8, marginBottom: 18 }}>
@@ -6160,7 +6190,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
         <div style={sectionGap}>
           <label style={labelStyle}>Treatments Applied</label>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {treatments.map(t => {
+            {renderByCategory(treatments, "tx", (t) => {
               const here = usageLoc ? invAtLoc(t, usageLoc) : invTotal(t);
               const over = num(tx[t.id]) > here;
               const unit = t.unit || "oz";
@@ -6177,7 +6207,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
                   <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: num(tx[t.id]) > 0 ? T.text : T.textMuted }}>{money(num(tx[t.id]) * num(t.costPerOz))}</div>
                 </div>
               );
-            })}
+            }, false)}
           </div>
         </div>
       )}
@@ -6191,7 +6221,8 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
             <span style={{ color: T.textMuted, fontSize: 16, transform: partsOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
           </button>
           <div style={{ display: partsOpen ? "flex" : "none", flexDirection: "column", gap: 8, marginTop: 8 }}>
-            {parts.map(p => {
+            {parts.length > 6 && <input value={partSearch} onChange={e => setPartSearch(e.target.value)} placeholder="Search parts…" style={{ width: "100%", padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />}
+            {renderByCategory(parts.filter(p => { const s = partSearch.trim().toLowerCase(); return !s || (p.name || "").toLowerCase().includes(s); }), "part", (p) => {
               const here = usageLoc ? invAtLoc(p, usageLoc) : invTotal(p);
               const qty = num(partsUsed[p.id]);
               const over = qty > here;
@@ -6224,7 +6255,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
                   )}
                 </div>
               );
-            })}
+            }, !!partSearch.trim())}
           </div>
         </div>
       )}
@@ -6239,7 +6270,8 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
             <span style={{ color: T.textMuted, fontSize: 16, transform: productsOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
           </button>
           <div style={{ display: productsOpen ? "flex" : "none", flexDirection: "column", gap: 8, marginTop: 8 }}>
-            {products.map(p => {
+            {products.length > 6 && <input value={productSearch} onChange={e => setProductSearch(e.target.value)} placeholder="Search products…" style={{ width: "100%", padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />}
+            {products.filter(p => { const s = productSearch.trim().toLowerCase(); return !s || (p.name || "").toLowerCase().includes(s); }).map(p => {
               const qty = num(productsQty[p.id]);
               const willBill = productBill[p.id] !== false; // default: billed to client
               return (
@@ -7714,6 +7746,42 @@ function RouteAssignmentsTab({ clients, catalog, team, schedule, setSchedule, as
   );
 }
 
+// Searchable client picker — keeps the familiar dropdown but lets you TYPE to filter a
+// big client list. Closed: shows the selected name. Focused: type to narrow the list.
+function ClientCombobox({ clients, value, onChange, T, placeholder = "Search clients…" }) {
+  const list = selectableClients(clients);
+  const selected = list.find(c => String(c.id) === String(value));
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const ql = q.trim().toLowerCase();
+  const shown = open ? (ql ? list.filter(c => (c.name || "").toLowerCase().includes(ql)) : list) : [];
+  return (
+    <div style={{ position: "relative" }}>
+      <input
+        value={open ? q : (selected?.name || "")}
+        placeholder={selected ? selected.name : placeholder}
+        onFocus={() => { setOpen(true); setQ(""); }}
+        onChange={e => { setQ(e.target.value); setOpen(true); }}
+        onBlur={() => setTimeout(() => setOpen(false), 160)}
+        style={field}
+      />
+      {open && (
+        <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 40, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, marginTop: 4, maxHeight: 260, overflowY: "auto", boxShadow: "0 8px 24px rgba(0,0,0,0.14)" }}>
+          {shown.length === 0 ? (
+            <div style={{ padding: "11px 13px", fontSize: 13, color: T.textMuted }}>No matching clients.</div>
+          ) : shown.slice(0, 80).map((c, i) => (
+            <div key={c.id} onMouseDown={() => { onChange(String(c.id)); setOpen(false); setQ(""); }}
+              style={{ padding: "10px 13px", cursor: "pointer", fontSize: 14, color: T.text, borderBottom: i < shown.length - 1 ? `1px solid ${T.border}` : "none", background: String(c.id) === String(value) ? hexA(T.primary, 0.08) : "transparent" }}>
+              {c.name}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function StopEditModal({ stop, dayDate, clients, catalog, team, T, onSave, onClose }) {
   const [time, setTime] = useState(stop.time || "9:00 AM");
   const [type, setType] = useState(stop.type || (catalog?.stopTypes?.[0]) || "Service");
@@ -7752,10 +7820,8 @@ function StopEditModal({ stop, dayDate, clients, catalog, team, T, onSave, onClo
       <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
         <div>
           <label style={lbl}>Client</label>
-          <select value={clientId} onChange={e => setClientId(e.target.value)} style={field}>
-            <option value="">Select a client…</option>
-            {selectableClients(clients).map(c => <option key={c.id} value={String(c.id)}>{c.name}</option>)}
-          </select>
+          <ClientCombobox clients={clients} value={clientId} onChange={setClientId} T={T} />
+          {!clientId && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>Type to search, then pick the client this stop belongs to.</div>}
         </div>
 
         <div>
@@ -8143,11 +8209,13 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   })();
 
   const goDirections = (addr) => `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(addr || "")}`;
-  const catChip = (s) => { const c = clients.find(x => x.id === s.id); return (c && c.division) || s.type; };
+  const catChip = (s) => { const c = clients.find(x => String(x.id) === String(s.clientId ?? s.id)); return (c && c.division) || s.type; };
 
   // one stop card, reused by the bulk-select list and the per-tech route
   const renderStopCard = (s, dayDate, displayNum, isToday) => {
-    const c = clients.find(x => x.id === s.id);
+    // Resolve the live client type-tolerantly (ids can be strings) and clientId-first,
+    // so the row shows the CURRENT client name even if the saved snapshot was generic.
+    const c = clients.find(x => String(x.id) === String(s.clientId ?? s.id));
     const sent = sentStops[s.sid];
     const arrived = arrivals[s.sid];
     const isSel = !!selected[s.sid];
@@ -8184,7 +8252,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontWeight: 800, fontSize: 14, color: isComplete ? T.textMuted : T.text, letterSpacing: "-0.01em", display: "flex", alignItems: "center", gap: 5 }}>
                 {isComplete && <Icon name="check" size={13} style={{ color: T.accent, flexShrink: 0 }} />}
-                {s.client}
+                {c?.name || s.client}
               </div>
               {cfg.showAddress && s.address && (
                 <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.address}</div>
@@ -16885,8 +16953,8 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
 
   // ── Item add / edit / delete ──
   const blankItem = () => kind === "part"
-    ? { id: "pt" + Date.now(), name: "", unit: "pieces", costPer: "", lowAt: "", stockByLoc: {} }
-    : { id: "t" + Date.now(), name: "", unit: "oz", costPerOz: "", inventoryOz: "0", stockByLoc: {} };
+    ? { id: "pt" + Date.now(), name: "", category: "", unit: "pieces", costPer: "", lowAt: "", stockByLoc: {} }
+    : { id: "t" + Date.now(), name: "", category: "", unit: "oz", costPerOz: "", inventoryOz: "0", stockByLoc: {} };
   const openAddItem = () => { if (!canEdit) return; setItemModal({ mode: "add", kind, data: blankItem() }); };
   const openEditItem = (item) => { if (!canEdit) return; setItemModal({ mode: "edit", kind, data: { ...item, stockByLoc: { ...(item.stockByLoc || {}) } } }); };
   const saveItem = () => {
@@ -17341,6 +17409,13 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
               <input type="text" style={field} value={itemModal.data.name}
                 onChange={e => setItemModal(m => ({ ...m, data: { ...m.data, name: e.target.value } }))}
                 placeholder={itemModal.kind === "part" ? "e.g. PVC Union (1.5in)" : "e.g. Beneficial Bacteria"} autoFocus />
+            </div>
+            <div>
+              <label style={lbl}>Category <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
+              <input type="text" style={field} list="inv-cats" value={itemModal.data.category || ""}
+                onChange={e => setItemModal(m => ({ ...m, data: { ...m.data, category: e.target.value } }))}
+                placeholder={itemModal.kind === "part" ? "e.g. Pumps, Plumbing, Filtration" : "e.g. Bacteria, Algae, Clarifiers"} />
+              <datalist id="inv-cats">{Array.from(new Set(allItems.map(it => (it.category || "").trim()).filter(Boolean))).map(cat => <option key={cat} value={cat} />)}</datalist>
             </div>
             <div style={{ display: "flex", gap: 10 }}>
               <div style={{ flex: 1 }}>
