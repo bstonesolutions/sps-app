@@ -35,6 +35,17 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- Privacy usage strings — REQUIRED or iOS hard-crashes (TCC) the moment the
+	     camera / photo library / mic is touched. Adding a stop photo or video opens
+	     the camera + photo picker; video also captures audio. -->
+	<key>NSCameraUsageDescription</key>
+	<string>Stone Property Solutions uses the camera to add photos and videos to a service stop and a client's file.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Stone Property Solutions lets you attach photos and videos from your library to a service stop and a client's file.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Stone Property Solutions can save service photos to your photo library.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Stone Property Solutions uses the microphone to record audio when you capture a video on a service stop.</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
