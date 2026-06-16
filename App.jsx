@@ -3082,10 +3082,18 @@ function Modal({ title, children, onClose }) {
 // records can have the two disagree. Derive the Hub's tier the same way: prefer the
 // client's plan for their own division, fall back to the legacy c.plan.
 const effectiveTier = (c) => {
-  if (c && c.division && c.plans && Object.prototype.hasOwnProperty.call(c.plans, c.division)) {
-    return c.plans[c.division] || "";
+  if (!c) return "";
+  // Prefer the plan for the client's own division.
+  if (c.division && c.plans && Object.prototype.hasOwnProperty.call(c.plans, c.division) && c.plans[c.division]) {
+    return c.plans[c.division];
   }
-  return (c && c.plan) || "";
+  // Legacy flat field (kept in sync when the edited division is the client's primary one).
+  if (c.plan) return c.plan;
+  // Last resort: any division that carries a non-empty plan, so a tier assigned in the
+  // bulk editor for a non-primary (or post-restore) division still surfaces in the Hub
+  // instead of showing "No tier". Display-only fallback — never hides an explicit tier.
+  if (c.plans) { for (const k in c.plans) if (c.plans[k]) return c.plans[k]; }
+  return "";
 };
 
 // Dense, sortable, full-width clients table — desktop "Table" view (Phase 3).
@@ -4087,7 +4095,11 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
   const [client, setClient] = useState(init);
   const [tab, setTab] = useState("overview");
   const [editing, setEditing] = useState(false);
-  const pm = planMeta(client.plan, T, tiers);
+  // Division-aware tier — same source of truth as the Service Tiers screen + clients list,
+  // so a tier set in the bulk editor links here even when c.plan is stale (post-restore /
+  // non-primary division). Don't read the flat client.plan directly for display.
+  const eTier = effectiveTier(client);
+  const pm = planMeta(eTier, T, tiers);
   const tabs = ["overview", "equipment", "history", ...((perms.canInvoice || perms.viewInvoices) ? ["invoices"] : []), "docs", "portal"];
   const owed = clientOutstanding(client, invoices);
 
@@ -4141,7 +4153,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
 
           {/* Tier badge + action buttons */}
           <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 10 }}>
-            <Badge label={client.plan || "No tier"} bg={pm.bg} color={pm.color || pm.text} />
+            <Badge label={eTier || "No tier"} bg={pm.bg} color={pm.color || pm.text} />
             <div style={{ flex: 1 }} />
             {perms.canInvoice && (invoices||[]).filter(iv => invoiceMatchesClient(iv, client)).length > 0 && (
               <Btn variant="ghost" sm onClick={() => generateStatementPDF(client, sortInvoices((invoices||[]).filter(iv => invoiceMatchesClient(iv, client))), branding)} style={{ display:"flex", alignItems:"center", gap:5 }}>
@@ -4295,6 +4307,8 @@ function ClientOverview({ client, onUpdate }) {
   const { T, perms } = useApp();
   const h = client.history?.[0];
   const m = dMeta(client.division);
+  // Division-aware tier (same source of truth as the Hub badge + Service Tiers screen).
+  const eTier = effectiveTier(client);
   const sitePhotos = client.sitePhotos || [];
   const siteVideos = client.siteVideos || [];
   const [videoViewer, setVideoViewer] = useState(null);
@@ -4520,8 +4534,8 @@ function ClientOverview({ client, onUpdate }) {
           {/* Plan — tier name as title, frequency derived from the tier underneath */}
           <div>
             <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 3 }}>Plan</div>
-            <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{client.plan || "—"}</div>
-            {client.plan && <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 1 }}>{TIER_FREQ[client.plan] || client.planFreq || "—"}</div>}
+            <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{eTier || "—"}</div>
+            {eTier && <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 1 }}>{TIER_FREQ[eTier] || client.planFreq || "—"}</div>}
           </div>
         </div>
       </Card>
@@ -13970,8 +13984,9 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
                             const planVal  = pill === "None" ? "" : pill;
                             const isActive = activePlan === planVal;
                             const isNone   = pill === "None";
-                            const changed  = planChanged && planVal !== curPlan;
-                            const activeCol = isNone ? T.textMuted : (changed ? T.primary : T.border);
+                            // Highlight the selected pill in the tier's OWN color (e.g. a blue
+                            // Signature), matching the individual tier badges + portal.
+                            const pillCol  = isNone ? T.textMuted : (divTierData[pill]?.color || T.primary);
                             return (
                              <button key={pill} onClick={() => {
                                const orig = curPlan;
@@ -13984,9 +13999,9 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
                                }
                              }}
                                style={{ flex: 1, padding: "6px 4px", borderRadius: 10,
-                                  border: `1.5px solid ${isActive ? activeCol : T.border}`,
-                                  background: isActive ? (isNone ? hexA(T.textMuted, 0.08) : (changed ? hexA(T.primary, 0.1) : T.surfaceAlt)) : T.surface,
-                                  color: isActive ? (isNone ? T.textMuted : (changed ? T.primary : T.text)) : T.textMuted,
+                                  border: `1.5px solid ${isActive ? pillCol : T.border}`,
+                                  background: isActive ? hexA(pillCol, isNone ? 0.08 : 0.12) : T.surface,
+                                  color: isActive ? pillCol : T.textMuted,
                                   fontWeight: isActive ? 800 : 500, fontSize: 11, cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s" }}>
                                {pill}
                              </button>
@@ -20620,9 +20635,16 @@ export default function App({ authEmail = "", onSignOut }) {
   const _ua = (typeof navigator !== "undefined" && navigator.userAgent) || "";
   const _noTouch = (typeof navigator !== "undefined" ? (navigator.maxTouchPoints || 0) : 0) <= 1;
   const _plat = (typeof window !== "undefined" && window.Capacitor && typeof window.Capacitor.getPlatform === "function") ? window.Capacitor.getPlatform() : null;
-  const isMacApp = /Macintosh/.test(_ua) && _noTouch; // real Mac (incl. the "Designed for iPad" app on Apple Silicon), never an iPad
+  const _native = _plat != null && _plat !== "web"; // Capacitor native shell (Mac app reports 'ios')
+  // A real Mac runs the "Designed for iPad" app with NO touchscreen; a genuine iPad always
+  // reports maxTouchPoints > 1 (even when iPadOS spoofs a 'Macintosh' UA). So "no touch" is
+  // the reliable Mac-vs-iPad signal — don't depend on the UA string carrying 'Macintosh',
+  // which the iPad-app build may drop. iPhone is unaffected (it's a touch device).
+  const isMacApp = _noTouch && (_native || /Macintosh/.test(_ua));
   const isWebDesktopEnv = _plat == null ? true : (_plat === "web" || isMacApp);
-  const isDesktopWeb = vp.width >= 1200 && isWebDesktopEnv;
+  // The Mac app fills at a slightly lower width than the 1200 web-desktop gate, so a
+  // normally-sized Mac window reflows to the desktop shell instead of a narrow column.
+  const isDesktopWeb = vp.width >= (isMacApp ? 1024 : 1200) && isWebDesktopEnv;
   const [reminderLog, setReminderLog, lrem] = useStoredState("sps_reminders", {}); // { [sid]: { sentAt, method } }
   const hydrated = lc && lb && ls && lcat && lem && lco && lh && lbud && loa && lscfg && lrol && ltm && lsesh && linv && linvc && lcomp && lrem && larr;
 
