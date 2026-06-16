@@ -15218,29 +15218,35 @@ function SyncStatus({ T, branding, team, currentUserId }) {
     { key: "email", label: "Email", icon: "mail", sub: "Resend — invites, magic links, invoices",
       run: async () => { const d = await getJSON(`${PROD_URL}/api/send-magic-link?check`);
         if (!d) return { status: "down", detail: "Couldn't reach server" };
-        return d.configured && d.configured.resend ? { status: "ok", detail: d.from || "Configured" } : { status: "down", detail: "RESEND_API_KEY not set" }; } },
+        return d.configured && d.configured.resend ? { status: "ok", detail: d.from || "Configured" } : { status: "down", detail: "RESEND_API_KEY not set" }; },
+      fix: { label: "Open Resend domains ↗", run: () => openExternalBrowser("https://resend.com/domains") } },
     { key: "links", label: "Secure links", icon: "lock", sub: "Supabase admin — minting sign-in links",
       run: async () => { const d = await getJSON(`${PROD_URL}/api/send-magic-link?check`);
         if (!d) return { status: "down", detail: "Couldn't reach server" };
-        return d.configured && d.configured.supabaseServiceRole ? { status: "ok", detail: "Service-role key set" } : { status: "down", detail: "SUPABASE_SERVICE_ROLE_KEY not set" }; } },
+        return d.configured && d.configured.supabaseServiceRole ? { status: "ok", detail: "Service-role key set" } : { status: "down", detail: "SUPABASE_SERVICE_ROLE_KEY not set" }; },
+      fix: { note: "Add SUPABASE_SERVICE_ROLE_KEY in Vercel → Settings → Environment Variables, then redeploy." } },
     { key: "sms", label: "Texting", icon: "message", sub: "Quo — On-My-Way + invoice texts",
       run: async () => { const d = await getJSON(`${PROD_URL}/api/send-sms?check`);
         if (!d) return { status: "down", detail: "Couldn't reach server" };
         const c = d.configured || {};
         if (c.quoKey && c.quoNumber) return { status: "ok", detail: "Number + key set" };
-        return { status: "down", detail: !c.quoKey ? "QUO_API_KEY not set" : "QUO_PHONE_NUMBER not set" }; } },
+        return { status: "down", detail: !c.quoKey ? "QUO_API_KEY not set" : "QUO_PHONE_NUMBER not set" }; },
+      fix: { label: "Open Quo settings ↗", run: () => openExternalBrowser("https://app.quo.com"), note: "Check A2P/Trust approval + that the number has texting credits." } },
     { key: "qb", label: "QuickBooks", icon: "invoice", sub: "Invoices + payments sync",
       run: async () => { const d = await getJSON(`${PROD_URL}/api/quickbooks/status`);
         if (!d) return { status: "down", detail: "Couldn't reach server" };
-        return d.connected ? { status: "ok", detail: "Connected" } : { status: "warn", detail: "Not connected — link it in Business" }; } },
+        return d.connected ? { status: "ok", detail: "Connected" } : { status: "warn", detail: "Not connected" }; },
+      fix: { label: "Reconnect QuickBooks", run: () => openInAppBrowser(`${QB_API}/auth`) } },
     { key: "maps", label: "Maps & routing", icon: "map", sub: "Google Maps — live tracking + ETAs",
-      run: async () => (hasGoogleMaps() ? { status: "ok", detail: "Key present in app" } : { status: "warn", detail: "No Maps key in this build" }) },
+      run: async () => (hasGoogleMaps() ? { status: "ok", detail: "Key present in app" } : { status: "warn", detail: "No Maps key in this build" }),
+      fix: { note: "Add VITE_GOOGLE_MAPS_API_KEY in Vercel → Settings → Environment Variables, then redeploy the app (it ships in the build)." } },
     { key: "gusto", label: "Payroll", icon: "dollar", sub: "Gusto — Clock In/Out timesheets (optional)",
       run: async () => { const d = await getJSON(`${PROD_URL}/api/gusto-timesheet?check`);
         if (!d) return { status: "down", detail: "Couldn't reach server" };
         const c = d.configured || {};
         if (c.apiKey && c.companyUuid) return { status: "ok", detail: d.mode === "demo" ? "Sandbox mode" : "Configured" };
-        return { status: "warn", detail: "Not configured (optional)" }; } },
+        return { status: "warn", detail: "Not configured (optional)" }; },
+      fix: { label: "Open Gusto ↗", run: () => openExternalBrowser("https://app.gusto.com"), note: "Set GUSTO_API_KEY + GUSTO_COMPANY_UUID in Vercel to enable timesheets." } },
   ];
 
   const runAll = async () => {
@@ -15309,21 +15315,34 @@ function SyncStatus({ T, branding, team, currentUserId }) {
           {CHECKS.map((c, i) => {
             const r = results[c.key] || { status: "checking" };
             const col = COLORS[r.status] || T.textMuted;
+            // When something needs attention, show the one-tap fix (external link → system
+            // browser, or in-app action like the QuickBooks reconnect), plus a one-line note.
+            const showFix = (r.status === "warn" || r.status === "down") && c.fix;
             return (
-              <div key={c.key} style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 8px", borderBottom: i < CHECKS.length - 1 ? `1px solid ${T.border}` : "none" }}>
-                <div style={{ width: 38, height: 38, borderRadius: 11, background: hexA(col, 0.1), color: col, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                  <Icon name={c.icon} size={18} />
+              <div key={c.key} style={{ borderBottom: i < CHECKS.length - 1 ? `1px solid ${T.border}` : "none" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 8px" }}>
+                  <div style={{ width: 38, height: 38, borderRadius: 11, background: hexA(col, 0.1), color: col, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    <Icon name={c.icon} size={18} />
+                  </div>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{c.label}</div>
+                    <div style={{ fontSize: 11.5, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.detail || c.sub}</div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                    {r.status === "checking"
+                      ? <div style={{ width: 13, height: 13, border: `2px solid ${hexA(T.textMuted, 0.3)}`, borderTopColor: T.textMuted, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+                      : <span style={{ width: 8, height: 8, borderRadius: "50%", background: col }} />}
+                    <span style={{ fontSize: 11.5, fontWeight: 700, color: col }}>{LABELS[r.status]}</span>
+                  </div>
                 </div>
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{c.label}</div>
-                  <div style={{ fontSize: 11.5, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.detail || c.sub}</div>
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-                  {r.status === "checking"
-                    ? <div style={{ width: 13, height: 13, border: `2px solid ${hexA(T.textMuted, 0.3)}`, borderTopColor: T.textMuted, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
-                    : <span style={{ width: 8, height: 8, borderRadius: "50%", background: col }} />}
-                  <span style={{ fontSize: 11.5, fontWeight: 700, color: col }}>{LABELS[r.status]}</span>
-                </div>
+                {showFix && (
+                  <div style={{ padding: "0 8px 13px 58px", display: "flex", flexDirection: "column", gap: 7 }}>
+                    {c.fix.run && (
+                      <button onClick={c.fix.run} style={{ alignSelf: "flex-start", background: hexA(col, 0.12), color: col, border: `1px solid ${hexA(col, 0.4)}`, borderRadius: 9, padding: "7px 14px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}>{c.fix.label}</button>
+                    )}
+                    {c.fix.note && <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.45 }}>{c.fix.note}</div>}
+                  </div>
+                )}
               </div>
             );
           })}
