@@ -1952,8 +1952,10 @@ const clientInvoicesOf = (invoices, clientId, client) => {
 // what a client owes: from their unpaid invoices if any exist, else the stored balance
 // Match invoice to client — by ID or by name (for QB imports)
 const invoiceMatchesClient = (iv, client) =>
-  iv.clientId === client.id ||
-  (iv.clientId === null && iv.clientName &&
+  // Type-tolerant id match (number vs string can drift across QB import / restore),
+  // falling back to name only when the invoice has no id (QB imports).
+  (iv.clientId != null && String(iv.clientId) === String(client.id)) ||
+  (iv.clientId == null && iv.clientName &&
    iv.clientName.toLowerCase().trim() === (client.name || "").toLowerCase().trim());
 
 const clientOutstanding = (client, invoices) => {
@@ -6423,7 +6425,8 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
       return {
         sid: `${Date.now()}-${i}`,
         id,
-        client: c?.name || "Client",
+        clientId: id,                 // explicit client link (Bug 1) — matchers read s.clientId
+        client: c?.name || "Client",  // name snapshot for display
         address: c?.address || "",
         type: stopType,
         time: `${time} ${ampm}`,
@@ -6636,6 +6639,7 @@ function BulkAddStops({ clients, catalog, onAdd, onClose, T }) {
         stop: {
           sid: `bulk-${Date.now()}-${i}`,
           id: c ? c.id : id,
+          clientId: c ? c.id : id,      // explicit client link (Bug 1)
           client: c ? c.name : "Client",
           address: c ? c.address || "" : "",
           type: card.service,
@@ -6981,6 +6985,7 @@ function computeMissingStops(assignments, schedule, clients, catalog, windowWeek
             stop: {
               sid: `route-${a.id}-${isoDate}`,
               id: client.id,
+              clientId: client.id,      // explicit client link (Bug 1)
               client: client.name,
               address: client.address || "",
               type: stopType,
@@ -7878,7 +7883,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   const nearestNeighbor = (stops, clients) => {
     if (stops.length <= 1) return stops;
     const getAddr = (s) => {
-      const c = clients.find(c => c.id === s.clientId);
+      const c = clients.find(c => String(c.id) === String(s.clientId ?? s.id));
       return s.address || c?.address || "";
     };
     const remaining = [...stops];
@@ -7907,7 +7912,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
     const key = `${date}|${techKey}`;
 
     const getAddr = (s) => {
-      const c = clients.find(c => c.id === s.clientId || c.id === s.id);
+      const c = clients.find(c => String(c.id) === String(s.clientId ?? s.id));
       return s.address || c?.address || "";
     };
     const baseline = orderStops(currentStops);
@@ -11180,7 +11185,9 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
 
   // Save the invoice. If QuickBooks is connected, sync automatically (no extra button).
   const save = async () => {
-    const baseInv = { ...inv, clientName: client?.name || "", clientAddress: client?.address || "", clientEmail: client?.email || "" };
+    // Persist the client link + a name snapshot on the record (Bug 1) — never rely on
+    // a transient field. clientId resolves the live client; clientName is the fallback.
+    const baseInv = { ...inv, clientId: client?.id ?? inv.clientId ?? null, clientName: client?.name || "", clientAddress: client?.address || "", clientEmail: client?.email || "" };
 
     // Not connected to QB, no client selected, or no line items — just save locally
     // and close. (QuickBooks requires at least one line, so an empty invoice can't sync.)
