@@ -595,6 +595,7 @@ function buildReminderQueue(schedule, clients, cfg, reminderLog, now = new Date(
       if (stopDate < now) return; // past
 
       const client = (clients || []).find(c => c.id === s.clientId);
+      if (client && client.notifyPrefs && client.notifyPrefs.serviceReminders === false) return; // client opted out of reminders
       const phone = (client?.phone || "").replace(/\D/g, "");
       const entry = { sid: s.sid, stop: s, client, date: d.date, stopDate, phone };
 
@@ -2802,8 +2803,8 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
         <Btn variant="ghost" sm onClick={() => setEditing(e => !e)}>{editing ? "Done" : "Edit"}</Btn>
       </div>
 
-      {/* Clock In / Clock Out — pushes completed shifts to Gusto */}
-      {me && <ClockInOut me={me} T={T} />}
+      {/* Clock In / Clock Out — pushes completed shifts to Gusto (per-member toggle in Team editor) */}
+      {me && me.clockInOut !== false && <ClockInOut me={me} T={T} />}
 
       {/* Reminders due — in-app surfacing */}
       {!editing && dueReminders.length > 0 && (
@@ -10766,6 +10767,15 @@ function TeamManager({ team, setTeam, currentUserId, email, branding }) {
               <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6, lineHeight: 1.5 }}>
                 Found in Gusto under People → the employee → the UUID in the page URL. When this person taps Clock Out, their shift is submitted to Gusto under this ID.
               </div>
+            </div>
+
+            {/* Clock In/Out visibility — hide the time clock for anyone who doesn't punch in */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>Show Clock In / Out</div>
+                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>The time clock on their Home screen. Turn off for anyone who doesn't punch in (like owners).</div>
+              </div>
+              <Toggle on={modal.data.clockInOut !== false} onChange={v => setD({ clockInOut: v })} />
             </div>
 
             {/* Permissions */}
@@ -19942,9 +19952,14 @@ function CPRequest({ client, branding, onSubmit, T }) {
 }
 
 // ── SPS CLIENT PORTAL SHELL ──
-function CPSettings({ client, branding, prefs, setPrefs, T, onSignOut, isStaffPreview }) {
+function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignOut, isStaffPreview }) {
   const set = (k, v) => setPrefs(p => ({ ...p, [k]: v }));
   const pondLbl = pondLabel(client);
+  // Notification preferences live on the client record (sps_clients) so they persist
+  // in app_state across devices/builds and the office can honor them. Opt-out model.
+  const NOTIFY_DEFAULTS = { serviceReminders: true, onMyWay: true, invoiceReady: true };
+  const [notify, setNotify] = useState(() => ({ ...NOTIFY_DEFAULTS, ...(client.notifyPrefs || {}) }));
+  const toggleNotify = (k) => { const next = { ...notify, [k]: !notify[k] }; setNotify(next); if (onSavePrefs) onSavePrefs(next); };
 
   const OptionRow = ({ label, value, options, onChange }) => (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 0", borderBottom: `1px solid ${T.border}` }}>
@@ -19989,6 +20004,27 @@ function CPSettings({ client, branding, prefs, setPrefs, T, onSignOut, isStaffPr
           </div>
           <div style={{ fontSize: 12, color: T.textMuted, marginTop: 4 }}>{client.name} · {client.plan} Plan</div>
         </div>
+      </div>
+
+      {/* Notifications */}
+      <div style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, padding: "4px 18px", marginBottom: 16 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, padding: "14px 0 2px" }}>Notifications</div>
+        {[
+          ["serviceReminders", "Service reminders", "Reminders about upcoming visits"],
+          ["onMyWay", "On-the-way alerts", `When ${branding.companyName || "we"} are heading over`],
+          ["invoiceReady", "Invoice ready", "When a new invoice is available"],
+        ].map(([k, label, hint], i, arr) => (
+          <div key={k} style={{ padding: "13px 0", borderBottom: i < arr.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{label}</div>
+              <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>{hint}</div>
+            </div>
+            <button onClick={() => toggleNotify(k)}
+              style={{ width: 48, height: 28, borderRadius: 100, background: notify[k] ? T.primary : T.surfaceAlt, border: "none", cursor: "pointer", position: "relative", transition: "background 0.2s", flexShrink: 0 }}>
+              <div style={{ width: 22, height: 22, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: notify[k] ? 23 : 3, transition: "left 0.2s", boxShadow: "0 1px 4px rgba(0,0,0,0.2)" }} />
+            </button>
+          </div>
+        ))}
       </div>
 
       {!isStaffPreview && (
@@ -20058,7 +20094,7 @@ function CPDesktopSidebar({ page, settingsOpen, portalUnread, branding, client, 
   );
 }
 
-function SPSClientPortal({ client, schedule, invoices, estimates, branding, team = [], T: globalT, fontStack, onSignOut, onServiceRequest, onApproveEstimate, onUpgradeRequest, onRateVisit, onClientMessage, isStaffPreview = false }) {
+function SPSClientPortal({ client, schedule, invoices, estimates, branding, team = [], T: globalT, fontStack, onSignOut, onServiceRequest, onApproveEstimate, onUpgradeRequest, onRateVisit, onClientMessage, onSavePrefs, isStaffPreview = false }) {
   // Client prefs stored in localStorage — personal per-device settings
   const prefsKey = `sps_client_prefs_${client.id}`;
   const [prefs, setPrefs] = useState(() => {
@@ -20113,7 +20149,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, team
   const screens = (
     <SectionErrorBoundary key={settingsOpen ? "cp_settings" : page}>
       {settingsOpen && (
-        <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
+        <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} onSavePrefs={isStaffPreview ? undefined : onSavePrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
       )}
       {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} team={team} onNav={setPage} onRateVisit={onRateVisit} T={T} vp={vp} />}
       {!settingsOpen && page === "cp_property" && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
@@ -21278,6 +21314,7 @@ export default function App({ authEmail = "", onSignOut }) {
           message: (body ? `"${body}"\n\n` : "") + `Open the app to reply: ${PROD_URL}`,
           rows: [["Client", clientUser.name]],
         })}
+        onSavePrefs={(notifyPrefs) => setClients(cs => (cs || []).map(c => String(c.id) === String(clientUser.id) ? { ...c, notifyPrefs } : c))}
       />
     );
   }
