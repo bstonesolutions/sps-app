@@ -5685,8 +5685,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
   const [officeFlagMsg, setOfficeFlagMsg] = useState("");
   // Unified photos: each entry is { src, label } — label is editable per photo
   const [photos, setPhotos] = useState([]); // [{ src, label }]
-  const [satisfaction,     setSatisfaction]     = useState(0);  // 1-5 stars, 0 = not rated
-  const [satisfactionNote, setSatisfactionNote] = useState(""); // required when rating is set
+  const [partsOpen, setPartsOpen] = useState(false); // Parts collapsed by default (Build 9); treatments stay open
   const MAX_PHOTOS = 10;
   const PHOTO_LABELS = ["Before", "After", "Detail", "Equipment", "Issue", "General"];
   const [busy, setBusy] = useState(false);
@@ -5828,8 +5827,6 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
     ph: readings["pH"] || "—", ammonia: readings["Ammonia"] || "—", nitrite: readings["Nitrite"] || "—", temp: readings["Temperature"] || "—",
     invoice: revenue ? `$${revenue}` : "$0",
     photos,  // [{ src, label }]
-    satisfaction,
-    satisfactionNote,
     treatmentsUsed, productsUsed,
     partsUsed: partsUsedArr,
     usageLoc,
@@ -5847,10 +5844,6 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
   });
 
   const finish = () => {
-    if (satisfaction > 0 && !satisfactionNote.trim()) {
-      alert("Please add a note to support your satisfaction rating before completing.");
-      return;
-    }
     onComplete(stop.id, buildEntry(), stop.sid);
     if (officeFlag && officeFlagMsg.trim() && onOfficeAlert) {
       onOfficeAlert({ client: client?.name || "Client", clientId: client?.id, message: officeFlagMsg.trim(), date: todayStr });
@@ -5950,6 +5943,45 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
           <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>Prices feed the amount charged below. Edit any line for this stop.</div>
         </div>
       )}
+
+      {/* Photos — moved up + emphasized so techs capture before/after first (Build 9) */}
+      <div style={{ ...sectionGap, background: hexA(T.primary, 0.04), border: `1px solid ${hexA(T.primary, 0.18)}`, borderRadius: 14, padding: 14 }}>
+        <label style={{ ...labelStyle, fontSize: 13, display: "flex", alignItems: "center", gap: 7, marginBottom: 10, color: T.primary }}>
+          <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={T.primary} strokeWidth={2} strokeLinecap="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+          Photos
+          <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>({photos.length}/{MAX_PHOTOS})</span>
+        </label>
+        {photos.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 12 }}>
+            {photos.map((ph, i) => (
+              <div key={i} style={{ display: "flex", gap: 10, alignItems: "center", background: T.surface, borderRadius: 12, padding: "8px 10px" }}>
+                <img src={ph.src} alt="" style={{ width: 56, height: 56, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                    {PHOTO_LABELS.map(lbl => (
+                      <button key={lbl} type="button" onClick={() => relabelPhoto(i, lbl)}
+                        style={{ padding: "4px 10px", borderRadius: 20, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit",
+                          background: ph.label === lbl ? T.primary : T.surfaceAlt,
+                          color: ph.label === lbl ? "#fff" : T.textMuted }}>
+                        {lbl}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <button onClick={() => removePhoto(i)}
+                  style={{ background: "none", border: "none", color: T.textMuted, fontSize: 18, cursor: "pointer", lineHeight: 1, flexShrink: 0, padding: "0 4px" }}>×</button>
+              </div>
+            ))}
+          </div>
+        )}
+        {photos.length < MAX_PHOTOS && (
+          <label style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 9, padding: "16px 14px", borderRadius: 12, border: `2px dashed ${hexA(T.primary, 0.5)}`, background: T.surface, cursor: "pointer", color: T.primary, fontSize: 14, fontWeight: 800 }}>
+            <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            {busy ? "Adding…" : `Add photos (${MAX_PHOTOS - photos.length} remaining)`}
+            <input type="file" accept="image/*,image/heic,image/heif" multiple onChange={e => addPhotos(e, "General")} style={{ display: "none" }} />
+          </label>
+        )}
+      </div>
 
       {/* Checklist */}
       <div style={sectionGap}>
@@ -6093,11 +6125,15 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
         </div>
       )}
 
-      {/* Parts */}
+      {/* Parts — collapsed by default (Build 9); treatments above stay expanded */}
       {parts.length > 0 && (
         <div style={sectionGap}>
-          <label style={labelStyle}>Parts Used</label>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <button type="button" onClick={() => setPartsOpen(o => !o)}
+            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit" }}>
+            <label style={{ ...labelStyle, marginBottom: 0, cursor: "pointer" }}>Parts Used{parts.filter(p => num(partsUsed[p.id]) > 0).length ? ` · ${parts.filter(p => num(partsUsed[p.id]) > 0).length} selected` : ""}</label>
+            <span style={{ color: T.textMuted, fontSize: 16, transform: partsOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
+          </button>
+          <div style={{ display: partsOpen ? "flex" : "none", flexDirection: "column", gap: 8, marginTop: 8 }}>
             {parts.map(p => {
               const here = usageLoc ? invAtLoc(p, usageLoc) : invTotal(p);
               const qty = num(partsUsed[p.id]);
@@ -6150,93 +6186,6 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
           </div>
         </div>
       )}
-
-      {/* Photos — up to 10, each labeled */}
-      <div style={sectionGap}>
-        <label style={labelStyle}>
-          Photos
-          <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}> ({photos.length}/{MAX_PHOTOS})</span>
-        </label>
-
-        {/* Existing photos with label picker */}
-        {photos.length > 0 && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 12 }}>
-            {photos.map((ph, i) => (
-              <div key={i} style={{ display: "flex", gap: 10, alignItems: "center", background: T.surfaceAlt, borderRadius: 12, padding: "8px 10px" }}>
-                <img src={ph.src} alt="" style={{ width: 56, height: 56, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-                    {PHOTO_LABELS.map(lbl => (
-                      <button key={lbl} type="button" onClick={() => relabelPhoto(i, lbl)}
-                        style={{ padding: "4px 10px", borderRadius: 20, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit",
-                          background: ph.label === lbl ? T.primary : T.surface,
-                          color: ph.label === lbl ? "#fff" : T.textMuted }}>
-                        {lbl}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <button onClick={() => removePhoto(i)}
-                  style={{ background: "none", border: "none", color: T.textMuted, fontSize: 18, cursor: "pointer", lineHeight: 1, flexShrink: 0, padding: "0 4px" }}>×</button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Add photo button */}
-        {photos.length < MAX_PHOTOS && (
-          <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 14px", borderRadius: 12, border: `2px dashed ${T.border}`, cursor: "pointer", color: T.textMuted, fontSize: 13, fontWeight: 600 }}>
-            <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-            {busy ? "Adding…" : `Add photos (${MAX_PHOTOS - photos.length} remaining)`}
-            <input type="file" accept="image/*,image/heic,image/heif" multiple onChange={e => addPhotos(e, "General")} style={{ display: "none" }} />
-          </label>
-        )}
-      </div>
-
-      {/* Client Satisfaction */}
-      <div style={sectionGap}>
-        <label style={labelStyle}>
-          Client Satisfaction
-          <span style={{ textTransform: "none", color: T.textMuted, fontWeight: 400 }}> (optional)</span>
-        </label>
-        <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: satisfaction > 0 ? 10 : 0 }}>
-          {[1,2,3,4,5].map(star => (
-            <button key={star} type="button"
-              onClick={() => { setSatisfaction(satisfaction === star ? 0 : star); if (satisfaction === star) setSatisfactionNote(""); }}
-              style={{ background: "none", border: "none", cursor: "pointer", padding: "2px 4px", fontSize: 30, lineHeight: 1,
-                color: star <= satisfaction ? "#F59E0B" : T.border,
-                transform: star <= satisfaction ? "scale(1.1)" : "scale(1)",
-                transition: "color 0.12s, transform 0.12s" }}>
-              ★
-            </button>
-          ))}
-          {satisfaction > 0 && (
-            <span style={{ fontSize: 13, fontWeight: 700, color: "#F59E0B", marginLeft: 4 }}>
-              {["","Poor","Fair","Good","Great","Excellent"][satisfaction]}
-            </span>
-          )}
-        </div>
-        {satisfaction > 0 && (
-          <div>
-            <textarea
-              value={satisfactionNote}
-              onChange={e => setSatisfactionNote(e.target.value)}
-              placeholder={satisfaction <= 2
-                ? "What went wrong? (required)"
-                : satisfaction === 3
-                  ? "What could have been better? (required)"
-                  : "What stood out about this visit? (required)"}
-              rows={2}
-              style={{ width: "100%", padding: "10px 13px", border: `1.5px solid ${satisfactionNote.trim() ? T.border : "#E5484D"}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical" }}
-            />
-            {!satisfactionNote.trim() && (
-              <div style={{ fontSize: 11, color: "#E5484D", marginTop: 4, fontWeight: 600 }}>
-                A note is required with every rating.
-              </div>
-            )}
-          </div>
-        )}
-      </div>
 
       {/* Notes to client */}
       <div style={sectionGap}>
