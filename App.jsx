@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useContext, createContext, useMemo, Compon
 import { createPortal } from "react-dom";
 import { store, supabase } from "./supabaseClient";
 import { PROD_URL } from "./config";
+import { sendWidgetPayload } from "./widgetBridge";
 
 // True only on a genuine fresh launch of the app shell (hard close / first open).
 // sessionStorage is wiped when the PWA is killed/swiped away, but survives reloads
@@ -25,7 +26,9 @@ const fillEmailVars = (str, vars) => String(str || "")
 // Throws on failure (incl. the server not being configured yet) so callers can
 // fall back to Supabase's built-in email until Resend env vars are set.
 async function sendBrandedAuthEmail(payload) {
-  const r = await fetch("/api/send-auth-email", {
+  // Absolute URL so the native app (capacitor://localhost) reaches Vercel; the web
+  // build resolves the same origin. The endpoint sends CORS headers for the native case.
+  const r = await fetch(`${PROD_URL}/api/send-auth-email`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -14444,6 +14447,175 @@ function NotificationSettings({ email, setEmail, branding }) {
   );
 }
 
+// Sync / Status tab (Customize → Sync). Live-checks every integration the app relies
+// on — Supabase, Resend, Quo, QuickBooks, Google Maps, Gusto — by pinging each one's
+// health endpoint, and offers test-send for email + SMS so delivery can be proven.
+// Owner/admin only. Read-only: it never writes app data (supabaseClient.js untouched).
+function SyncStatus({ T, branding, team, currentUserId }) {
+  const owner = (team || []).find(m => String(m.id) === String(currentUserId)) || (team || [])[0] || {};
+  const [results, setResults] = useState({});
+  const [checking, setChecking] = useState(false);
+  const [lastAt, setLastAt] = useState(null);
+  const [testEmail, setTestEmail] = useState(owner.email || branding.email || "");
+  const [emailMsg, setEmailMsg] = useState(null);
+  const [emailBusy, setEmailBusy] = useState(false);
+  const [testPhone, setTestPhone] = useState(owner.phone || branding.phone || "");
+  const [smsMsg, setSmsMsg] = useState(null);
+  const [smsBusy, setSmsBusy] = useState(false);
+
+  const getJSON = async (url) => {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 12000);
+      const r = await fetch(url, { signal: ctrl.signal });
+      clearTimeout(t);
+      return await r.json();
+    } catch (_) { return null; }
+  };
+
+  const CHECKS = [
+    { key: "supabase", label: "Database", icon: "box", sub: "Supabase — clients, invoices, schedule",
+      run: async () => {
+        try { const { error } = await supabase.from("app_state").select("key").limit(1);
+          return error ? { status: "down", detail: error.message } : { status: "ok", detail: "Connected & syncing" }; }
+        catch (e) { return { status: "down", detail: (e && e.message) || "Unreachable" }; } } },
+    { key: "email", label: "Email", icon: "mail", sub: "Resend — invites, magic links, invoices",
+      run: async () => { const d = await getJSON(`${PROD_URL}/api/send-magic-link?check`);
+        if (!d) return { status: "down", detail: "Couldn't reach server" };
+        return d.configured && d.configured.resend ? { status: "ok", detail: d.from || "Configured" } : { status: "down", detail: "RESEND_API_KEY not set" }; } },
+    { key: "links", label: "Secure links", icon: "lock", sub: "Supabase admin — minting sign-in links",
+      run: async () => { const d = await getJSON(`${PROD_URL}/api/send-magic-link?check`);
+        if (!d) return { status: "down", detail: "Couldn't reach server" };
+        return d.configured && d.configured.supabaseServiceRole ? { status: "ok", detail: "Service-role key set" } : { status: "down", detail: "SUPABASE_SERVICE_ROLE_KEY not set" }; } },
+    { key: "sms", label: "Texting", icon: "message", sub: "Quo — On-My-Way + invoice texts",
+      run: async () => { const d = await getJSON(`${PROD_URL}/api/send-sms?check`);
+        if (!d) return { status: "down", detail: "Couldn't reach server" };
+        const c = d.configured || {};
+        if (c.quoKey && c.quoNumber) return { status: "ok", detail: "Number + key set" };
+        return { status: "down", detail: !c.quoKey ? "QUO_API_KEY not set" : "QUO_PHONE_NUMBER not set" }; } },
+    { key: "qb", label: "QuickBooks", icon: "invoice", sub: "Invoices + payments sync",
+      run: async () => { const d = await getJSON(`${PROD_URL}/api/quickbooks/status`);
+        if (!d) return { status: "down", detail: "Couldn't reach server" };
+        return d.connected ? { status: "ok", detail: "Connected" } : { status: "warn", detail: "Not connected — link it in Business" }; } },
+    { key: "maps", label: "Maps & routing", icon: "map", sub: "Google Maps — live tracking + ETAs",
+      run: async () => (hasGoogleMaps() ? { status: "ok", detail: "Key present in app" } : { status: "warn", detail: "No Maps key in this build" }) },
+    { key: "gusto", label: "Payroll", icon: "dollar", sub: "Gusto — Clock In/Out timesheets (optional)",
+      run: async () => { const d = await getJSON(`${PROD_URL}/api/gusto-timesheet?check`);
+        if (!d) return { status: "down", detail: "Couldn't reach server" };
+        const c = d.configured || {};
+        if (c.apiKey && c.companyUuid) return { status: "ok", detail: d.mode === "demo" ? "Sandbox mode" : "Configured" };
+        return { status: "warn", detail: "Not configured (optional)" }; } },
+  ];
+
+  const runAll = async () => {
+    setChecking(true);
+    setResults(() => { const n = {}; CHECKS.forEach(c => { n[c.key] = { status: "checking" }; }); return n; });
+    const entries = await Promise.all(CHECKS.map(async c => {
+      const r = await c.run().catch(e => ({ status: "down", detail: (e && e.message) || "Error" }));
+      return [c.key, r];
+    }));
+    setResults(Object.fromEntries(entries));
+    setLastAt(Date.now());
+    setChecking(false);
+  };
+  useEffect(() => { runAll(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const sendTestEmail = async () => {
+    if (!testEmail.trim()) { setEmailMsg({ ok: false, text: "Enter an email address first." }); return; }
+    setEmailBusy(true); setEmailMsg(null);
+    try {
+      const r = await fetch(`${PROD_URL}/api/send-test-email`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: testEmail.trim() }) });
+      const d = await r.json().catch(() => ({}));
+      setEmailMsg(r.ok ? { ok: true, text: `Sent — check ${testEmail.trim()} (and spam).` } : { ok: false, text: d.error || "Send failed." });
+    } catch (_) { setEmailMsg({ ok: false, text: "Couldn't reach the server." }); }
+    setEmailBusy(false);
+  };
+  const sendTestSms = async () => {
+    if (!testPhone.trim()) { setSmsMsg({ ok: false, text: "Enter a phone number first." }); return; }
+    setSmsBusy(true); setSmsMsg(null);
+    try {
+      const r = await fetch(`${PROD_URL}/api/send-sms`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: testPhone.trim(), message: `${branding.companyName || "Stone Property Solutions"}: test text ✅ — your texting integration is working.` }) });
+      const d = await r.json().catch(() => ({}));
+      setSmsMsg(r.ok ? { ok: true, text: `Sent — check ${testPhone.trim()}.` } : { ok: false, text: d.error || "Send failed." });
+    } catch (_) { setSmsMsg({ ok: false, text: "Couldn't reach the server." }); }
+    setSmsBusy(false);
+  };
+
+  const COLORS = { ok: "#16a34a", warn: "#F59E0B", down: "#E5484D", checking: T.textMuted };
+  const LABELS = { ok: "Connected", warn: "Action needed", down: "Down", checking: "Checking…" };
+  const okCount = CHECKS.filter(c => (results[c.key] || {}).status === "ok").length;
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
+  const sendBtn = (busy) => ({ background: T.primary, color: "#fff", border: "none", borderRadius: 11, padding: "11px 16px", fontWeight: 700, fontSize: 13, cursor: busy ? "default" : "pointer", fontFamily: "inherit", opacity: busy ? 0.6 : 1, whiteSpace: "nowrap", flexShrink: 0 });
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>Live status of every service the app connects to. Keys live in Vercel — this only reports whether each one is reachable and configured.</div>
+
+      <Card>
+        <div style={{ padding: 18, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: T.text }}>Integrations</div>
+            <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 2 }}>{checking ? "Checking all services…" : `${okCount}/${CHECKS.length} connected${lastAt ? " · checked just now" : ""}`}</div>
+          </div>
+          <button onClick={runAll} disabled={checking} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 11, padding: "10px 16px", fontWeight: 700, fontSize: 13, cursor: checking ? "default" : "pointer", fontFamily: "inherit", opacity: checking ? 0.6 : 1, display: "flex", alignItems: "center", gap: 7 }}>
+            <Icon name="refresh" size={14} /> {checking ? "Checking…" : "Re-check all"}
+          </button>
+        </div>
+      </Card>
+
+      <Card>
+        <div style={{ padding: "4px 8px" }}>
+          {CHECKS.map((c, i) => {
+            const r = results[c.key] || { status: "checking" };
+            const col = COLORS[r.status] || T.textMuted;
+            return (
+              <div key={c.key} style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 8px", borderBottom: i < CHECKS.length - 1 ? `1px solid ${T.border}` : "none" }}>
+                <div style={{ width: 38, height: 38, borderRadius: 11, background: hexA(col, 0.1), color: col, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <Icon name={c.icon} size={18} />
+                </div>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{c.label}</div>
+                  <div style={{ fontSize: 11.5, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.detail || c.sub}</div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                  {r.status === "checking"
+                    ? <div style={{ width: 13, height: 13, border: `2px solid ${hexA(T.textMuted, 0.3)}`, borderTopColor: T.textMuted, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+                    : <span style={{ width: 8, height: 8, borderRadius: "50%", background: col }} />}
+                  <span style={{ fontSize: 11.5, fontWeight: 700, color: col }}>{LABELS[r.status]}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader title="Send a test" />
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 18 }}>
+          <div>
+            <label style={lbl}>Test email (Resend)</label>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input value={testEmail} onChange={e => setTestEmail(e.target.value)} placeholder="you@email.com" style={field} type="email" inputMode="email" />
+              <button onClick={sendTestEmail} disabled={emailBusy} style={sendBtn(emailBusy)}>{emailBusy ? "Sending…" : "Send"}</button>
+            </div>
+            {emailMsg && <div style={{ fontSize: 12.5, fontWeight: 600, marginTop: 7, color: emailMsg.ok ? "#16a34a" : T.accent }}>{emailMsg.text}</div>}
+          </div>
+          <div>
+            <label style={lbl}>Test text (Quo)</label>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input value={testPhone} onChange={e => setTestPhone(e.target.value)} placeholder="(555) 123-4567" style={field} type="tel" inputMode="tel" />
+              <button onClick={sendTestSms} disabled={smsBusy} style={sendBtn(smsBusy)}>{smsBusy ? "Sending…" : "Send"}</button>
+            </div>
+            {smsMsg && <div style={{ fontSize: 12.5, fontWeight: 600, marginTop: 7, color: smsMsg.ok ? "#16a34a" : T.accent }}>{smsMsg.text}</div>}
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 7 }}>Quo requires prepaid credits — a test text uses one message.</div>
+          </div>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEmail, costs, setCosts, budget, setBudget, clients, setClients, invoices, scheduleCfg, setScheduleCfg, team, setTeam, invoicing, setInvoicing, currentUserId, onResetData, serviceTiers, setServiceTiers, onSyncData, onNav, navDock, setNavDock }) {
   const { T, perms } = useApp();
   const fileRef = useRef();
@@ -14482,6 +14654,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
   if (perms.editCatalog || perms.editSettings || perms.isAdmin) tabs.push(["services", "Services"]);
   if (perms.seeCostsBudget || perms.editSettings || perms.canInvoice) tabs.push(["business", "Business"]);
   if (perms.isAdmin) tabs.push(["team", "Team"]);
+  if (perms.isAdmin) tabs.push(["sync", "Sync"]);
   // if the current tab isn't available (e.g. switched to employee view), fall back to the first one
   const activeTab = tabs.some(([id]) => id === tab) ? tab : (tabs[0] ? tabs[0][0] : null);
 
@@ -14590,6 +14763,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
         </div>
       )}
       {activeTab === "team" && perms.isAdmin && <TeamManager team={team} setTeam={setTeam} currentUserId={currentUserId} email={email} branding={branding} />}
+      {activeTab === "sync" && perms.isAdmin && <SyncStatus T={T} branding={branding} team={team} currentUserId={currentUserId} />}
       {activeTab === "branding" && <>
 
       {/* ── LOGO & IDENTITY ── */}
@@ -18254,7 +18428,8 @@ function clientUpcomingVisits(schedule, client) {
   // 2) Projected recurring dates through Dec 31 of the current year.
   const FREQ_WEEKS = { weekly: 1, biweekly: 2, monthly: 4, "6week": 6 };
   const tierFreqId = { "Weekly": "weekly", "Bi-Weekly": "biweekly", "Monthly": "monthly" };
-  const freqId = client.routeFreq || tierFreqId[TIER_FREQ[client.plan]] || null;
+  const cTier = effectiveTier(client); // division-aware tier (not the flat client.plan)
+  const freqId = client.routeFreq || tierFreqId[TIER_FREQ[cTier]] || null;
   const stepWeeks = freqId && FREQ_WEEKS[freqId];
   if (stepWeeks) {
     const DOW = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -18263,7 +18438,7 @@ function clientUpcomingVisits(schedule, client) {
     const start = out.length ? new Date(Math.max(...out.map(v => v.date.getTime()))) : new Date(today);
     let cursor = new Date(start); cursor.setDate(cursor.getDate() + stepWeeks * 7);
     if (targetDow >= 0) cursor.setDate(cursor.getDate() + ((targetDow - cursor.getDay() + 7) % 7));
-    const projType = client.plan ? `${TIER_FREQ[client.plan] || "Recurring"} Service` : "Service Visit";
+    const projType = cTier ? `${TIER_FREQ[cTier] || "Recurring"} Service` : "Service Visit";
     let guard = 0;
     while (cursor <= yearEnd && guard++ < 120) {
       const k = keyOf(cursor);
@@ -18563,7 +18738,12 @@ function CPHome({ client, schedule, invoices, branding, team, onNav, onRateVisit
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
   const firstName = (client.name || "").split(" ")[0] || "there";
-  const tier = client.plan ? (CP_TIERS[client.plan] || CP_TIERS["Signature"]) : null;
+  // Division-aware tier — same source of truth as the staff Hub + the other portal tabs.
+  // CP_TIERS is keyed by division ({ Pond, Pool, Seasonal }), so resolve the tier object
+  // through the client's division, not by tier-name directly (which never matched).
+  const eTier = effectiveTier(client);
+  const _cpDivSet = (CP_TIERS && (CP_TIERS[client.division || "Pond"] || CP_TIERS["Pond"])) || {};
+  const tier = eTier ? (_cpDivSet[eTier] || null) : null;
   const tierColor = tier?.color || T.surfaceAlt;
 
   // Shared block JSX so phone (single column) and wide (dashboard grid) can both use them
@@ -18585,7 +18765,7 @@ function CPHome({ client, schedule, invoices, branding, team, onNav, onRateVisit
       <div style={{ position: "absolute", left: -20, bottom: -20, width: 80, height: 80, borderRadius: "50%", background: "rgba(255,255,255,0.03)", pointerEvents: "none" }} />
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
         <div style={{ background: "rgba(255,255,255,0.18)", borderRadius: 100, padding: "5px 14px", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)" }}>
-          <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase" }}>{client.plan ? `${client.plan} Plan` : "No Service Tier"}</span>
+          <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase" }}>{eTier ? `${eTier} Plan` : "No Service Tier"}</span>
         </div>
         <button onClick={() => onNav("cp_service")}
           style={{ background: "rgba(255,255,255,0.15)", border: "none", borderRadius: 100, padding: "5px 14px", color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)" }}>
@@ -18670,7 +18850,7 @@ function CPHome({ client, schedule, invoices, branding, team, onNav, onRateVisit
       <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginBottom: 12 }}>Quick Actions</div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
         {[
-          { label: "My Service Plan", sub: client.plan ? `${client.plan} — tap to manage` : "No tier assigned", icon: "clients", page: "cp_service", accent: !!client.plan },
+          { label: "My Service Plan", sub: eTier ? `${eTier} — tap to manage` : "No tier assigned", icon: "clients", page: "cp_service", accent: !!eTier },
           { label: "Messages", sub: "Chat with our team", icon: "message", page: "cp_messages", accent: false },
           { label: "My Property", sub: `${pondLabel(client)} · ${(client.history||[]).length} visits`, icon: "history", page: "cp_property", accent: false },
           { label: "My Invoices", sub: outstanding.length ? `${outstanding.length} outstanding` : "All paid up", icon: "invoice", page: "cp_invoices", accent: false },
@@ -18926,7 +19106,7 @@ function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T, vp
   const [section, setSection] = useState("property"); // "property" | "plan"
   const [detailItem, setDetailItem] = useState(null); // { kind:"visit"|"equipment", data } — full-detail overlay
   const [lightbox, setLightbox] = useState(null); // { photos, index }
-  const plan = client.plan || "";
+  const plan = effectiveTier(client) || "";
   const clientDiv = client.division || "Pond";
   const allTiers = tiers || CP_TIERS;
   const divTierSet = (allTiers[clientDiv] || allTiers["Pond"] || DEFAULT_TIERS["Pond"]);
@@ -19374,9 +19554,9 @@ function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T, vp
 // ── CP SERVICE (My Service Plan) ──
 function CPService({ client, branding, onNav, onUpgradeRequest, T }) {
   const { tiers } = useApp();
-  // Read the client's REAL tier — same source of truth as the dashboard (client.plan).
+  // Read the client's REAL tier — division-aware, same source of truth as the staff Hub.
   // Missing/empty means NO tier; never default to Signature (or any tier).
-  const plan = client.plan || null;
+  const plan = effectiveTier(client) || null;
   const clientDiv = client.division || "Pond";
   const allTiers = tiers || CP_TIERS;
   const divTierSet = (allTiers[clientDiv] || allTiers["Pond"] || DEFAULT_TIERS["Pond"]);
@@ -19528,6 +19708,7 @@ function CPService({ client, branding, onNav, onUpgradeRequest, T }) {
 // ── CP HISTORY ──
 function CPPond({ client, T }) {
   const [section, setSection] = useState("overview"); // overview | service | equipment | fish | purchases
+  const eTier = effectiveTier(client); // division-aware tier (not the flat client.plan)
   const history  = client.history  || [];
   const equipment = client.equipment || [];
   const sitePhotos = client.sitePhotos || [];
@@ -19603,12 +19784,12 @@ function CPPond({ client, T }) {
           </div>
 
           {/* Plan + price card */}
-          {(client.monthlyRate || client.plan) && (
+          {(client.monthlyRate || eTier) && (
             <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, padding: "15px 18px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div>
                 <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 3 }}>Service Plan</div>
-                <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>{client.plan || "—"}</div>
-                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>{TIER_FREQ[client.plan] || client.planFreq || "—"} service</div>
+                <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>{eTier || "—"}</div>
+                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>{TIER_FREQ[eTier] || client.planFreq || "—"} service</div>
               </div>
               {client.monthlyRate && (
                 <div style={{ textAlign: "right" }}>
@@ -20190,7 +20371,7 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
             <span style={{ fontSize: 14, fontWeight: 600, color: T.text }}>Account</span>
             <span style={{ fontSize: 12, color: T.textMuted }}>{client.email}</span>
           </div>
-          <div style={{ fontSize: 12, color: T.textMuted, marginTop: 4 }}>{client.name} · {client.plan} Plan</div>
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: 4 }}>{client.name}{effectiveTier(client) ? ` · ${effectiveTier(client)} Plan` : ""}</div>
         </div>
       </div>
 
@@ -20740,6 +20921,84 @@ export default function App({ authEmail = "", onSignOut }) {
   // boot-splash removal effect below, keyed on `hydrated`.)
   // Broadcast staff location while clocked in (no-op until a shift opts in).
   useStaffLocationTracking();
+
+  // ── Native iOS home-screen widgets ───────────────────────────────────────────
+  // Push a small OWNER snapshot into the App Group shared store so the WidgetKit
+  // extension renders with no network + no secrets. Owner only — limited staff never
+  // expose profit/invoice figures. Unknown values are omitted by the bridge, never
+  // faked. (The client-role payload + widgets are built too, but the native app is
+  // staff/owner-only today, so no client session writes here yet.) No-op off-native.
+  useEffect(() => {
+    if (!hydrated || !currentUser || effRole(currentUser) !== "owner") return;
+    try {
+      const now = new Date();
+      const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+      // Date-in-range test for the app's two on-disk formats (MM/DD/YYYY, ISO).
+      const inRange = (s, start, end) => {
+        if (!s) return false;
+        let d;
+        if (String(s).includes("/")) { const [mm, dd, yy] = String(s).split("/").map(Number); d = new Date(yy, mm - 1, dd); }
+        else d = new Date(s);
+        return d instanceof Date && !isNaN(d) && d >= start && d < end;
+      };
+      // Mirrors Reports' monthActuals (cost from completed-stop breakdowns + revenue
+      // from paid invoices; profit = revenue − cost) but over an arbitrary range so
+      // the weekly figure is computed the same way as the monthly one.
+      const rangeProfit = (start, end) => {
+        let revenue = 0, cost = 0, jobs = 0;
+        (clients || []).forEach((c) => (c.history || []).forEach((h) => {
+          if (h.breakdown && inRange(h.date, start, end)) { cost += h.breakdown.total || 0; jobs += 1; }
+        }));
+        (invoices || []).forEach((iv) => {
+          if (iv.status !== "Paid" && effectiveStatus(iv) !== "Paid") return;
+          if (!inRange(iv.paidDate || iv.date, start, end)) return;
+          const t = invoiceTotals(iv); revenue += t.total; if (t.cost) cost += t.cost;
+        });
+        if (revenue === 0) (clients || []).forEach((c) => (c.history || []).forEach((h) => {
+          if (h.breakdown && inRange(h.date, start, end)) revenue += h.breakdown.revenue || 0;
+        }));
+        return { profit: revenue - cost, jobs };
+      };
+      const weekStart = new Date(now); weekStart.setHours(0, 0, 0, 0); weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+      const weekEnd = new Date(weekStart); weekEnd.setDate(weekEnd.getDate() + 7);
+      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+      const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+      const wk = rangeProfit(weekStart, weekEnd);
+      const mo = rangeProfit(monthStart, monthEnd);
+
+      // Average effective hourly rate over this month's completed stops with hours.
+      let rateSum = 0, rateN = 0;
+      (clients || []).forEach((c) => (c.history || []).forEach((h) => {
+        const hrs = Number(h.actual_hours) || 0;
+        const rev = Number(h.quoted_price) || (h.breakdown && h.breakdown.revenue) || 0;
+        if (hrs > 0 && rev > 0 && inRange(h.date, monthStart, monthEnd)) { rateSum += rev / hrs; rateN += 1; }
+      }));
+
+      // Invoice aggregates.
+      const live = invoices || [];
+      const open = live.filter((iv) => effectiveStatus(iv) !== "Paid" && iv.status !== "Draft");
+      const outstanding = open.reduce((s, iv) => s + invoiceTotals(iv).total, 0);
+      const overdue = live.filter((iv) => effectiveStatus(iv) === "Overdue").length;
+      const collected = live
+        .filter((iv) => effectiveStatus(iv) === "Paid")
+        .filter((iv) => inRange(iv.paidDate || iv.date, monthStart, monthEnd))
+        .reduce((s, iv) => s + invoiceTotals(iv).total, 0);
+
+      const payload = {
+        role: "owner",
+        updated_at: now.toISOString(),
+        profit_week: r2(wk.profit),
+        profit_month: r2(mo.profit),
+        outstanding_total: r2(outstanding),
+        unpaid_count: open.length,
+        overdue_count: overdue,
+        collected_month: r2(collected),
+      };
+      if (rateN > 0) payload.avg_effective_rate = r2(rateSum / rateN); // omit when unknowable
+
+      sendWidgetPayload(payload);
+    } catch (_) { /* widgets are best-effort; never disrupt the app */ }
+  }, [hydrated, currentUser, clients, invoices]);
   // Smart reopen on a warm resume (the app wasn't killed):
   //  • backgrounded ~30 min or more  → land on Home with the full splash (fresh start)
   //  • backgrounded under ~30 min     → stay exactly where I left off (no disruption)
