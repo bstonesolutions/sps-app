@@ -1538,6 +1538,12 @@ const DEFAULT_EMAIL = {
   // Invoice notifications ({first}, {company}, {number}, {amount}, {dueDate}, {link})
   smsInvoice: "Hi {first}, your invoice {number} for {amount} from {company} is ready. {link}",
   chatInvoice: "New invoice {number} — {amount} due {dueDate}. View & pay it in your portal.",
+  // Invoice EMAIL wording (the rest of the invoice — line items/totals/pay button — is
+  // structural). Tags: {number} {company} {first} {amount} {dueDate}.
+  invoiceEmailSubject: "Invoice {number} from {company}",
+  invoiceEmailIntro: "Here's your invoice — thank you for your business!",
+  // Sent to the client (text) when an upgrade is finalized. Tags: {first} {company} {plan}.
+  upgradeConfirm: "Hi {first}, great news — your upgrade to {plan} with {company} is all set! Thanks for trusting us with your property.",
   // Staff invite email ({name} = staff member, {company} = your company, {link} = secure sign-in link)
   staffInviteSubject: "You're invited to the {company} team app",
   staffInviteBody: "Hi {name},\n\nYou've been added to the {company} team app. Tap the secure link below to sign in — no password needed.\n\n{link}\n\nSee you inside,\nThe {company} Team",
@@ -9622,13 +9628,13 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
   const setB = (k, v) => setBranding(b => ({ ...b, [k]: v }));
 
   // Sending-identity live status: the verified Resend domain + the Quo account's numbers.
-  const [identity, setIdentity] = useState({ verifiedDomain: "", numbers: [], smsFrom: "", loaded: false });
+  const [identity, setIdentity] = useState({ verifiedDomain: "", numbers: [], smsFrom: "", resendOk: false, quoOk: false, loaded: false });
   useEffect(() => {
     let alive = true;
     (async () => {
-      const out = { verifiedDomain: "", numbers: [], smsFrom: "", loaded: true };
-      try { const r = await fetch(`${PROD_URL}/api/send-magic-link?check`); const d = await r.json(); if (d && d.verifiedDomain) out.verifiedDomain = String(d.verifiedDomain).toLowerCase(); } catch (_) {}
-      try { const r = await fetch(`${PROD_URL}/api/send-sms?check`); const d = await r.json(); if (d) { out.numbers = Array.isArray(d.numbers) ? d.numbers : []; out.smsFrom = d.from || ""; } } catch (_) {}
+      const out = { verifiedDomain: "", numbers: [], smsFrom: "", resendOk: false, quoOk: false, loaded: true };
+      try { const r = await fetch(`${PROD_URL}/api/send-magic-link?check`); const d = await r.json(); if (d) { if (d.verifiedDomain) out.verifiedDomain = String(d.verifiedDomain).toLowerCase(); out.resendOk = !!(d.configured && d.configured.resend); } } catch (_) {}
+      try { const r = await fetch(`${PROD_URL}/api/send-sms?check`); const d = await r.json(); if (d) { out.numbers = Array.isArray(d.numbers) ? d.numbers : []; out.smsFrom = d.from || ""; out.quoOk = !!(d.configured && d.configured.quoKey && d.configured.quoNumber); } } catch (_) {}
       if (alive) setIdentity(out);
     })();
     return () => { alive = false; };
@@ -9638,6 +9644,19 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
   const emailVerified = !!identity.verifiedDomain && emailDomain === identity.verifiedDomain;
   const numNorm = normNum(email.textingNumber);
   const numOnAccount = identity.numbers.length ? identity.numbers.some(n => n.number === numNorm) : null; // null = can't verify
+  // Fill any template with clearly-fake sample data for live previews.
+  const sampleFill = (tpl) => String(tpl || "")
+    .replace(/\{first\}/g, "Robert")
+    .replace(/\{sender\}/g, email.senderName || email.fromName || branding.companyName || "your name")
+    .replace(/\{company\}/g, branding.companyName || "Stone Property Solutions")
+    .replace(/\{service\}/g, "Bi-Weekly Service")
+    .replace(/\{number\}/g, "1042")
+    .replace(/\{amount\}/g, "$180.00").replace(/\{total\}/g, "$180.00")
+    .replace(/\{dueDate\}/g, "Jun 30").replace(/\{date\}/g, "06/30/2025")
+    .replace(/\{plan\}/g, "Premium")
+    .replace(/\{eta\}/g, "15").replace(/\{arrival\}/g, "3:45 PM")
+    .replace(/\{link\}/g, "Pay online: stonepropertysolutions.com/pay").replace(/\{track\}/g, "");
+  const previewBox = { marginTop: 8, background: T.surfaceAlt, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.text, lineHeight: 1.5, borderTopLeftRadius: 4 };
 
   const sample = {
     firstName: "Robert", company: branding.companyName, serviceType: "Bi-Weekly Service",
@@ -9658,6 +9677,27 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
 
   return (
     <>
+      {/* Quo + Resend connection status — confirm both are synced before relying on sends */}
+      <Card style={{ marginBottom: 14 }}>
+        <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>Sending status</div>
+          {[
+            { label: "Email (Resend)", ok: identity.resendOk, hint: identity.resendOk ? "Connected" : "Not configured — set RESEND_API_KEY in Vercel" },
+            { label: "Texting (Quo)", ok: identity.quoOk, hint: identity.quoOk ? (identity.smsFrom || "Connected") : "Not configured — set QUO_API_KEY + number in Vercel" },
+          ].map((row) => {
+            const col = !identity.loaded ? T.textMuted : row.ok ? "#16a34a" : "#d97706";
+            return (
+              <div key={row.label} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: col, flexShrink: 0 }} />
+                <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{row.label}</span>
+                <span style={{ fontSize: 12, color: T.textMuted }}>— {!identity.loaded ? "checking…" : row.hint}</span>
+              </div>
+            );
+          })}
+          <div style={{ fontSize: 11, color: T.textMuted }}>The templates below send through these. Fix a connection in Customize → Sync.</div>
+        </div>
+      </Card>
+
       {/* Company contact — used on invoices, the portal, and tap-to-call/email */}
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Company Contact" />
@@ -9842,6 +9882,31 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
         </div>
       </Card>
 
+      {/* Invoice email wording + upgrade confirmation (the matching SMS texts are in
+          Notification Templates below). Previews use clearly-fake sample data. */}
+      <Card style={{ marginBottom: 14 }}>
+        <CardHeader title="Invoice Email & Upgrade" />
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: -2 }}>The wording on invoice emails — line items, totals, and the pay button are added automatically. Tags: {"{number}"} {"{company}"} {"{first}"} {"{amount}"} {"{dueDate}"}.</div>
+          <div>
+            <label style={labelStyle}>Invoice Email Subject</label>
+            <input type="text" style={field} value={email.invoiceEmailSubject || ""} onChange={e => set("invoiceEmailSubject", e.target.value)} placeholder={DEFAULT_EMAIL.invoiceEmailSubject} />
+            <div style={hint}>Preview: {sampleFill(email.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject)}</div>
+          </div>
+          <div>
+            <label style={labelStyle}>Invoice Email Intro</label>
+            <textarea style={{ ...field, resize: "vertical" }} rows={2} value={email.invoiceEmailIntro || ""} onChange={e => set("invoiceEmailIntro", e.target.value)} placeholder={DEFAULT_EMAIL.invoiceEmailIntro} />
+            <div style={previewBox}>{sampleFill(email.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro)}</div>
+          </div>
+          <div>
+            <label style={labelStyle}>Upgrade Confirmation Text</label>
+            <textarea style={{ ...field, resize: "vertical" }} rows={2} value={email.upgradeConfirm || ""} onChange={e => set("upgradeConfirm", e.target.value)} placeholder={DEFAULT_EMAIL.upgradeConfirm} />
+            <div style={hint}>Texted to the client when you finish a plan upgrade. Tags: {"{first}"} {"{company}"} {"{plan}"}.</div>
+            <div style={previewBox}>{sampleFill(email.upgradeConfirm || DEFAULT_EMAIL.upgradeConfirm)}</div>
+          </div>
+        </div>
+      </Card>
+
       {/* Notifications */}
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Notification Templates" />
@@ -9863,6 +9928,7 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
             <label style={labelStyle}>"Service Complete" Text</label>
             <textarea style={{ ...field, resize: "vertical" }} rows={3} value={email.smsReport || ""} onChange={e => set("smsReport", e.target.value)} placeholder={DEFAULT_EMAIL.smsReport} />
             <div style={hint}>Sent when you tap "Text Report" after finishing a visit. Tags: {"{first}"}, {"{service}"}, {"{company}"}.</div>
+            <div style={previewBox}>{sampleFill(email.smsReport || DEFAULT_EMAIL.smsReport)}</div>
           </div>
           <div>
             <label style={labelStyle}>Invoice Sent Text <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
@@ -9870,6 +9936,7 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
               value={email.smsInvoice || ""}
               onChange={e => set("smsInvoice", e.target.value)}
               placeholder={`Hi {first}, you have a new invoice from {company}. Log in to your portal to view and pay it.`} />
+            <div style={previewBox}>{sampleFill(email.smsInvoice || DEFAULT_EMAIL.smsInvoice)}</div>
           </div>
           <div>
             <label style={labelStyle}>Job Complete Text <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
@@ -11237,6 +11304,8 @@ function InvoiceSendStep({ invoice, client, onClose }) {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             ...senderEmailFields(),
+            emailSubject: fill(e.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject),
+            emailIntro: fill(e.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro),
             to: clientEmail,
             clientName: invoice.clientName || client?.name || "",
             branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary },
@@ -12650,7 +12719,7 @@ function MarkPaidModal({ invoice, client, onSave, onClose }) {
 }
 
 function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose, onEdit, onDelete, canManage, embedded }) {
-  const { T, perms } = useApp();
+  const { T, perms, email } = useApp();
   const [markPaid, setMarkPaid] = useState(false); // B9-3: mark-as-paid + QB payment modal
   // Fine-grained invoice actions (default to canManage, so unchanged unless restricted).
   const canSend     = canManage && perms.invoiceSend;
@@ -12697,6 +12766,13 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
     if (!clientEmail || sendState === "sending") return;
     setSendState("sending"); setSendMsg("");
     const payLink = invoice.paymentLink || PROD_URL;
+    // Fill the editable invoice-email templates with this invoice's details.
+    const fillInv = (tpl) => String(tpl || "")
+      .replace(/\{first\}/g, ((client?.name || invoice.clientName || "").trim().split(" ")[0]) || "there")
+      .replace(/\{company\}/g, branding.companyName || "")
+      .replace(/\{number\}/g, invoice.number || "")
+      .replace(/\{amount\}/g, money(totals.total)).replace(/\{total\}/g, money(totals.total))
+      .replace(/\{dueDate\}/g, invoice.dueDate || "soon");
     try {
       // 1) Branded invoice email via Resend
       const r = await fetch("/api/send-invoice", {
@@ -12704,6 +12780,8 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...senderEmailFields(),
+          emailSubject: fillInv(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject),
+          emailIntro: fillInv(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro),
           to: clientEmail,
           clientName: invoice.clientName || client?.name || "",
           branding: {
@@ -13506,7 +13584,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
       const cEmail = (c.email || "").trim();
       if (doSms && phone) { try { const r = await fetch(`${PROD_URL}/api/send-sms`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: phone, message: fill(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv), from: SENDER_IDENTITY.textingNumber || "" }) }); const d = await r.json().catch(() => ({})); if (!r.ok || !d.sent) fails++; } catch (_) { fails++; } }
       if (doChat && c.id) { try { await supabase.from("sps_messages").insert({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) }); } catch (_) { fails++; } }
-      if (doEmail && cEmail) { try { const tt = invoiceTotals(inv); await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...senderEmailFields(), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); } catch (_) { fails++; } }
+      if (doEmail && cEmail) { try { const tt = invoiceTotals(inv); await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...senderEmailFields(), emailSubject: fill(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, c, inv), emailIntro: fill(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, c, inv), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); } catch (_) { fails++; } }
     }
     setMsgBusy(false);
     if (fails > 0) { setMsgErr(`${fails} message(s) couldn't be sent. The invoices were still created.`); return; }
@@ -22313,6 +22391,15 @@ export default function App({ authEmail = "", onSignOut }) {
           : existingDocs;
         return { ...c, plan: updatedAlert.requestedPlan, documents: newDocs };
       }));
+      // Confirm the upgrade to the client by text through the business Quo line (in-app, never the device).
+      const upPhone = String(updatedClient.phone || "").replace(/[^\d+]/g, "");
+      if (upPhone) {
+        const cmsg = (email.upgradeConfirm || DEFAULT_EMAIL.upgradeConfirm)
+          .replace(/\{first\}/g, (updatedClient.name || "").trim().split(" ")[0] || "there")
+          .replace(/\{company\}/g, branding.companyName || "")
+          .replace(/\{plan\}/g, updatedAlert.requestedPlan || "your new plan");
+        sendSms(upPhone, cmsg);
+      }
     }
   };
 

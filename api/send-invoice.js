@@ -9,7 +9,7 @@ const escapeHtml = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const money = (n) => "$" + (Number(n) || 0).toFixed(2);
 
-function buildInvoiceHtml({ clientName, branding, invoice, payLink }) {
+function buildInvoiceHtml({ clientName, branding, invoice, payLink, intro }) {
   const accent = /^#?[0-9a-fA-F]{3,8}$/.test(branding.accent || "") ? branding.accent : "#B81D24";
   const company = escapeHtml(branding.companyName || "");
   const rows = (invoice.lineItems || []).map((li) => {
@@ -51,7 +51,7 @@ function buildInvoiceHtml({ clientName, branding, invoice, payLink }) {
         </div>
       </div>
       <div style="font-size:13px;color:#374151;margin-top:12px">Hi ${escapeHtml((clientName || "").split(" ")[0] || clientName || "there")},</div>
-      <div style="font-size:13px;color:#374151;margin:6px 0 14px">Here's your invoice from ${company}.</div>
+      <div style="font-size:13px;color:#374151;margin:6px 0 14px">${intro ? escapeHtml(intro) : ("Here's your invoice from " + company + ".")}</div>
       <table style="width:100%;border-collapse:collapse">${rows || `<tr><td style="font-size:13px;color:#6b7280;padding:8px 0">No line items.</td></tr>`}</table>
       <table style="width:100%;border-collapse:collapse;margin-top:12px">
         ${Number(invoice.discountTotal) > 0 ? totalRow("Discount", "−" + money(invoice.discountTotal)) : ""}
@@ -67,9 +67,10 @@ function buildInvoiceHtml({ clientName, branding, invoice, payLink }) {
   </div>`;
 }
 
-function buildInvoiceText({ clientName, branding, invoice, payLink }) {
+function buildInvoiceText({ clientName, branding, invoice, payLink, intro }) {
   const lines = [];
   lines.push(`Invoice ${invoice.number || ""} from ${branding.companyName || ""}`);
+  if (intro) { lines.push(""); lines.push(intro); }
   lines.push("");
   (invoice.lineItems || []).forEach((li) => {
     const qty = Number(li.qty) || 0, price = Number(li.unitPrice) || 0;
@@ -94,7 +95,7 @@ export default async function handler(req, res) {
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { to, clientName, branding = {}, invoice = {}, payLink } = req.body || {};
+  const { to, clientName, branding = {}, invoice = {}, payLink, emailSubject, emailIntro } = req.body || {};
   if (!to || !/.+@.+\..+/.test(to)) return res.status(400).json({ error: "A valid client email is required" });
 
   const RESEND_KEY = process.env.RESEND_API_KEY;
@@ -102,9 +103,9 @@ export default async function handler(req, res) {
   if (!RESEND_KEY) return res.status(501).json({ error: "Email delivery is not configured on the server.", missingEnv: true });
 
   try {
-    const subject = `Invoice ${invoice.number || ""} from ${branding.companyName || "your service provider"}`.trim();
-    const html = buildInvoiceHtml({ clientName, branding, invoice, payLink });
-    const text = buildInvoiceText({ clientName, branding, invoice, payLink });
+    const subject = (emailSubject && String(emailSubject).trim()) || `Invoice ${invoice.number || ""} from ${branding.companyName || "your service provider"}`.trim();
+    const html = buildInvoiceHtml({ clientName, branding, invoice, payLink, intro: emailIntro });
+    const text = buildInvoiceText({ clientName, branding, invoice, payLink, intro: emailIntro });
 
     const sendRes = await fetch("https://api.resend.com/emails", {
       method: "POST",
