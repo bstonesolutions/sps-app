@@ -8553,6 +8553,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
         <StopEditModal
           stop={editStopModal.stop}
           dayDate={editStopModal.dayDate}
+          clients={clients}
           catalog={catalog}
           team={team}
           T={T}
