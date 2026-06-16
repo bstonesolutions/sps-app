@@ -1514,6 +1514,9 @@ const DEFAULT_EMAIL = {
   smsArrived: "Hi {first}, {sender} with {company} has arrived and is getting started on your service. We'll send a full report when we're done!",
   smsReport: "Hi {first}, your {service} is complete! Your full report is on its way by email, and photos are in your portal. Thanks for choosing {company}!",
   smsReminder: "Hi {first}, a friendly reminder from {company} that your service is scheduled for {date}. Reply here with any questions!",
+  // Invoice notifications ({first}, {company}, {number}, {amount}, {dueDate}, {link})
+  smsInvoice: "Hi {first}, your invoice {number} for {amount} from {company} is ready. {link}",
+  chatInvoice: "New invoice {number} — {amount} due {dueDate}. View & pay it in your portal.",
   // Staff invite email ({name} = staff member, {company} = your company, {link} = secure sign-in link)
   staffInviteSubject: "You're invited to the {company} team app",
   staffInviteBody: "Hi {name},\n\nYou've been added to the {company} team app. Tap the secure link below to sign in — no password needed.\n\n{link}\n\nSee you inside,\nThe {company} Team",
@@ -11069,6 +11072,129 @@ function InvoiceRow({ iv, onClick }) {
   );
 }
 
+// B9-2: shown right after an invoice is created/synced (without leaving the flow).
+// Lets the owner notify the client via text, in-app message, and/or the branded
+// email — prefilled from Settings defaults, editable per-send, with skip. Nothing
+// sends silently. Defaults live in Settings; edits here don't change them.
+function InvoiceSendStep({ invoice, client, onClose }) {
+  const { T, branding, email } = useApp();
+  const e = email || {};
+  const money = (n) => `$${(Number(n) || 0).toFixed(2)}`;
+  const totals = invoiceTotals(invoice);
+  const first = ((client?.name || invoice.clientName || "").trim().split(" ")[0]) || "there";
+  const amount = money(totals.total);
+  const payLink = invoice.paymentLink || "";
+  const phone = String(client?.phone || "").replace(/[^\d+]/g, "");
+  const clientEmail = (invoice.clientEmail || client?.email || "").trim();
+
+  const fill = (tpl) => String(tpl || "")
+    .replace(/\{first\}/g, first)
+    .replace(/\{company\}/g, branding.companyName || "")
+    .replace(/\{number\}/g, invoice.number || "")
+    .replace(/\{amount\}/g, amount).replace(/\{total\}/g, amount)
+    .replace(/\{dueDate\}/g, invoice.dueDate || "soon")
+    .replace(/\{link\}/g, payLink ? `Pay online: ${payLink}` : "View it in your portal.");
+
+  const [doSms, setDoSms]   = useState(!!phone);
+  const [doChat, setDoChat] = useState(true);
+  const [doEmail, setDoEmail] = useState(!!clientEmail);
+  const [smsMsg, setSmsMsg]   = useState(fill(e.smsInvoice || DEFAULT_EMAIL.smsInvoice));
+  const [chatMsg, setChatMsg] = useState(fill(e.chatInvoice || DEFAULT_EMAIL.chatInvoice));
+  const [sending, setSending] = useState(false);
+  const [err, setErr] = useState("");
+
+  const send = async () => {
+    setSending(true); setErr("");
+    const fails = [];
+    if (doSms && phone) {
+      try {
+        const r = await fetch(`${PROD_URL}/api/send-sms`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: phone, message: smsMsg }) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || !d.sent) fails.push(`Text: ${d.error || "failed"}`);
+      } catch (_) { fails.push("Text: couldn't reach server"); }
+    }
+    if (doChat && client?.id) {
+      try {
+        const { error } = await supabase.from("sps_messages").insert({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: chatMsg });
+        if (error) fails.push(`In-app: ${error.message}`);
+      } catch (_) { fails.push("In-app: failed"); }
+    }
+    if (doEmail && clientEmail) {
+      try {
+        const r = await fetch(`${PROD_URL}/api/send-invoice`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            to: clientEmail,
+            clientName: invoice.clientName || client?.name || "",
+            branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary },
+            invoice: { number: invoice.number, date: invoice.date, dueDate: invoice.dueDate, terms: invoice.notes || "", taxRate: invoice.taxRate || 0, lineItems: (invoice.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, bundleNote: l.bundleNote, taxable: l.taxable })), subtotal: totals.subtotal, tax: totals.tax, total: totals.total, discountTotal: totals.discountTotal },
+            payLink: payLink || PROD_URL,
+          }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) fails.push(`Email: ${d.error || "failed"}`);
+      } catch (_) { fails.push("Email: couldn't reach server"); }
+    }
+    setSending(false);
+    if (fails.length) { setErr(fails.join(" · ")); return; }
+    onClose();
+  };
+
+  const lblS = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted };
+  const taS = { width: "100%", padding: "10px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13.5, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical", marginTop: 8 };
+  const Toggle = ({ on, onClick, disabled }) => (
+    <button type="button" onClick={disabled ? undefined : onClick} style={{ background: "none", border: "none", padding: 0, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.4 : 1, flexShrink: 0 }}>
+      <div style={{ width: 38, height: 22, borderRadius: 100, background: on ? T.primary : T.border, position: "relative", transition: "background 0.2s" }}>
+        <div style={{ width: 18, height: 18, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: on ? 18 : 2, transition: "left 0.2s" }} />
+      </div>
+    </button>
+  );
+  const Row = ({ icon, title, sub, on, setOn, disabled, children }) => (
+    <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: 14, opacity: disabled ? 0.6 : 1 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ width: 34, height: 34, borderRadius: 10, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name={icon} size={16} /></div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{title}</div>
+          <div style={{ fontSize: 11.5, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sub}</div>
+        </div>
+        <Toggle on={on && !disabled} onClick={() => setOn(v => !v)} disabled={disabled} />
+      </div>
+      {on && !disabled && children}
+    </div>
+  );
+
+  return (
+    <Modal title={`Notify ${first}`} onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>
+          Invoice <b style={{ color: T.text }}>{invoice.number}</b> · <b style={{ color: T.text }}>{amount}</b> saved{invoice.qbPushed ? " & synced to QuickBooks" : ""}. Choose how to let {first} know — or skip.
+        </div>
+
+        <Row icon="message" title="Text message" sub={phone ? phone : "No phone on file"} on={doSms} setOn={setDoSms} disabled={!phone}>
+          <textarea rows={3} value={smsMsg} onChange={ev => setSmsMsg(ev.target.value)} style={taS} />
+        </Row>
+
+        <Row icon="clients" title="In-app message" sub="Shows in their client portal" on={doChat} setOn={setDoChat} disabled={!client?.id}>
+          <textarea rows={2} value={chatMsg} onChange={ev => setChatMsg(ev.target.value)} style={taS} />
+        </Row>
+
+        <Row icon="mail" title="Email invoice" sub={clientEmail ? clientEmail : "No email on file"} on={doEmail} setOn={setDoEmail} disabled={!clientEmail}>
+          <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 8, lineHeight: 1.5 }}>Sends the branded invoice{payLink ? " with a Pay-online button" : ""} to {clientEmail}.</div>
+        </Row>
+
+        {err && <div style={{ fontSize: 12.5, fontWeight: 600, color: T.accent }}>{err}</div>}
+
+        <div style={{ display: "flex", gap: 10, marginTop: 2 }}>
+          <button onClick={send} disabled={sending || (!doSms && !doChat && !doEmail)} style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontWeight: 800, fontSize: 15, cursor: (sending || (!doSms && !doChat && !doEmail)) ? "default" : "pointer", fontFamily: "inherit", opacity: (sending || (!doSms && !doChat && !doEmail)) ? 0.6 : 1, boxShadow: `0 4px 16px ${hexA(T.primary, 0.3)}` }}>
+            {sending ? "Sending…" : "Send"}
+          </button>
+          <button onClick={onClose} disabled={sending} style={{ background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 12, padding: "13px 20px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Skip</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCatalog, presetClientId, onSave, onClose, onDelete }) {
   const { T, perms } = useApp();
   const money = (n) => `$${(n || 0).toFixed(2)}`;
@@ -11089,6 +11215,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   });
   const [inv, setInv] = useState(() => invoice ? { ...invoice, lineItems: (invoice.lineItems || []).map(l => ({ ...l })) } : fresh());
   const [visitPick, setVisitPick] = useState(false);
+  const [sendStep, setSendStep] = useState(null); // B9-2: client-notification step after a successful save
   const set = (k, v) => setInv(s => ({ ...s, [k]: v }));
   const setLine = (id, k, v) => setInv(s => ({ ...s, lineItems: s.lineItems.map(l => l.id === id ? { ...l, [k]: v } : l) }));
   const addLine = () => setInv(s => ({ ...s, lineItems: [...s.lineItems, { id: `l${Date.now()}`, desc: "", qty: "1", unitPrice: "", unitCost: "", taxable: false, kind: "custom" }] }));
@@ -11214,16 +11341,23 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   });
 
   // Save the invoice. If QuickBooks is connected, sync automatically (no extra button).
+  // B9-2: persist, then stay in-flow and offer the client-notification step (when
+  // there's a client + line items); otherwise just close.
+  const finishSave = (finalInv) => {
+    onSave(finalInv);
+    if (client && (finalInv.lineItems || []).length) setSendStep(finalInv);
+    else onClose();
+  };
+
   const save = async () => {
     // Persist the client link + a name snapshot on the record (Bug 1) — never rely on
     // a transient field. clientId resolves the live client; clientName is the fallback.
     const baseInv = { ...inv, clientId: client?.id ?? inv.clientId ?? null, clientName: client?.name || "", clientAddress: client?.address || "", clientEmail: client?.email || "" };
 
-    // Not connected to QB, no client selected, or no line items — just save locally
-    // and close. (QuickBooks requires at least one line, so an empty invoice can't sync.)
+    // Not connected to QB, no client selected, or no line items — just save locally.
+    // (QuickBooks requires at least one line, so an empty invoice can't sync.)
     if (!qbIsConnected() || !client || !(inv.lineItems || []).length) {
-      onSave(baseInv);
-      onClose();
+      finishSave(baseInv);
       return;
     }
 
@@ -11250,8 +11384,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         });
         const createData = await createRes.json();
         if (createData.error) { onSave(baseInv); setQbState("error"); setQbMsg("Saved locally. QuickBooks sync failed: " + createData.error); return; }
-        onSave({ ...baseInv, qbId: createData.qbId, paymentLink: createData.paymentLink, status: inv.status === "Draft" ? "Sent" : inv.status, qbPushed: true });
-        onClose();
+        finishSave({ ...baseInv, qbId: createData.qbId, paymentLink: createData.paymentLink, status: inv.status === "Draft" ? "Sent" : inv.status, qbPushed: true });
         return;
       }
       if (data.error) {
@@ -11267,8 +11400,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         status: inv.status === "Draft" ? "Sent" : inv.status,
         qbPushed: true,
       };
-      onSave(updated);
-      onClose();
+      finishSave(updated);
     } catch (err) {
       onSave(baseInv);
       setQbState("error"); setQbMsg("Saved locally. Could not reach QuickBooks: " + (err.message || "network error"));
@@ -11278,6 +11410,9 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const field = { width: "100%", padding: "11px 13px", border: `1px solid ${T.border}`, borderRadius: 11, fontSize: 15, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
   const small = { width: "100%", padding: "9px 8px", border: `1px solid ${T.border}`, borderRadius: 9, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" };
   const label = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 };
+
+  // B9-2: after a successful save, swap to the client-notification step (same flow).
+  if (sendStep) return <InvoiceSendStep invoice={sendStep} client={client} onClose={onClose} />;
 
   return (
     <Modal title={invoice ? `Edit ${inv.number}` : "New Invoice"} onClose={onClose}>
@@ -21930,7 +22065,7 @@ export default function App({ authEmail = "", onSignOut }) {
     // every other page keeps the centered, single-scroll column.
     const dtMasterDetail = (page === "clients" && !adding) || (page === "invoices" && (perms.canInvoice || perms.viewInvoices));
     return (
-      <AppCtx.Provider value={{ T, branding, perms, tiers: serviceTiers || DEFAULT_TIERS }}>
+      <AppCtx.Provider value={{ T, branding, perms, email, tiers: serviceTiers || DEFAULT_TIERS }}>
         <div style={{ fontFamily: fontStack, background: T.bg, position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden", display: "flex", flexDirection: "row", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ["--ring"]: hexA(T.primary, 0.22), ["--ringBorder"]: T.primary }}>
           {shellCss}
           <DesktopSidebar page={page} perms={perms} navUnread={navUnread} reminderDue={reminderDueCount} onNav={handleNav} onSignOut={handleSignOut} currentUser={currentUser} branding={branding} syncState={syncState} onSync={manualSync} T={T} vp={vp} />
