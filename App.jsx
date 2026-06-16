@@ -5446,22 +5446,19 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
   })();
 
   const [sending, setSending] = useState(false);
+  const [sendErr, setSendErr] = useState("");
   const [copied, setCopied] = useState(false);
   const copyLink = async () => {
     if (!trackUrl) return;
     try { await navigator.clipboard.writeText(trackUrl); } catch (_) {}
     setCopied(true); setTimeout(() => setCopied(false), 1800);
   };
-  const openDeviceSms = () => {
-    const smsUrl = `sms:${phone}${/iPhone|iPad|iPod/i.test(navigator.userAgent) ? "&" : "?"}body=${encodeURIComponent(message)}`;
-    window.open(smsUrl, "_blank");
-  };
   const handleSend = async () => {
     if (!phone) return;
-    setSending(true);
-    const r = await sendSms(client.phone, message); // send from the business Quo line
+    setSending(true); setSendErr("");
+    const r = await sendSms(client.phone, message); // business Quo line ONLY — never the device Messages app
     setSending(false);
-    if (!r.ok) openDeviceSms(); // Quo unconfigured/failed → fall back to the device Messages app
+    if (!r.ok) { setSendErr(r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send the text — try again.")); return; }
     onSent();
     onClose();
   };
@@ -5548,6 +5545,7 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
             <Icon name="warning" size={14} /> No phone number on file for this client.
           </div>
         )}
+        {sendErr && <div style={{ fontSize: 12.5, fontWeight: 700, color: T.accent, marginBottom: 10, textAlign: "center" }}>{sendErr}</div>}
         <div style={{ display: "flex", gap: 10 }}>
           <Btn onClick={handleSend} disabled={!phone || sending} block style={{ flex: 1, gap: 7 }}>
             {sending ? "Sending…" : <><Icon name="message" size={15} /> Send Text</>}
@@ -5581,19 +5579,21 @@ function ArrivedModal({ stop, client, email, onClose, onArrived }) {
       .replace(/\{service\}/g, stop?.type || "service");
   })();
   const [sending, setSending] = useState(false);
+  const [sendErr, setSendErr] = useState("");
+  const arrivedRef = useRef(false);
   const send = async () => {
-    onArrived();                       // start the job clock (record arrival time)
-    if (client?.id) {                  // in-app portal notification (best-effort)
-      supabase.from("sps_messages").insert({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: message }).then(() => {}, () => {});
+    if (!arrivedRef.current) {         // record arrival + in-app notice once, even if a retry is needed
+      arrivedRef.current = true;
+      onArrived();                     // start the job clock (record arrival time)
+      if (client?.id) {                // in-app portal notification (best-effort)
+        supabase.from("sps_messages").insert({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: message }).then(() => {}, () => {});
+      }
     }
-    if (phone) {                       // text the client from the business Quo line
-      setSending(true);
+    if (phone) {                       // text the client from the business Quo line ONLY — never the device
+      setSending(true); setSendErr("");
       const r = await sendSms(client.phone, message);
       setSending(false);
-      if (!r.ok) {                     // Quo unconfigured/failed → device Messages fallback
-        const smsUrl = `sms:${phone}${/iPhone|iPad|iPod/i.test(navigator.userAgent) ? "&" : "?"}body=${encodeURIComponent(message)}`;
-        window.open(smsUrl, "_blank");
-      }
+      if (!r.ok) { setSendErr(r.error || (r.missingEnv ? "Texting isn't set up yet — arrival was still recorded." : "Text didn't send — arrival was still recorded.")); return; }
     }
     onClose();
   };
@@ -5616,6 +5616,7 @@ function ArrivedModal({ stop, client, email, onClose, onArrived }) {
         <Btn onClick={send} disabled={sending} style={{ width: "100%", padding: "13px", borderRadius: 12, gap: 7, justifyContent: "center" }}>
           {sending ? "Sending…" : <><Icon name="check" size={15} /> {phone ? "Mark Arrived & Text Client" : "Mark Arrived"}</>}
         </Btn>
+        {sendErr && <div style={{ fontSize: 12, fontWeight: 700, color: T.accent, textAlign: "center", marginTop: 10 }}>{sendErr}</div>}
         <div style={{ fontSize: 11, color: T.textMuted, textAlign: "center", marginTop: 8 }}>Edit this message in Customize → Messaging.</div>
       </div>
     </div>,
@@ -5885,19 +5886,34 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
     setDone(true);
   };
 
-  const sendEmail = () => {
-    const subject = email.subject.replace("{date}", todayStr);
-    window.open(`mailto:${client?.email || ""}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(reportText)}`, "_blank");
+  const [reportSend, setReportSend] = useState({ busy: "", msg: null });
+  // Reports go out through the business identity — Resend email + Quo text — never the
+  // phone's Mail or Messages app, so they always send as the company (not the tech).
+  const sendEmail = async () => {
+    const to = (client?.email || "").trim();
+    if (!to) { setReportSend({ busy: "", msg: { ok: false, text: "No email on file for this client." } }); return; }
+    setReportSend({ busy: "email", msg: null });
+    const subject = (email.subject || DEFAULT_EMAIL.subject).replace("{date}", todayStr);
+    try {
+      const r = await fetch(`${PROD_URL}/api/send-notification`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...senderEmailFields(), to, subject, heading: subject, message: reportText, branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary } }),
+      });
+      const d = await r.json().catch(() => ({}));
+      setReportSend({ busy: "", msg: (r.ok && d.sent) ? { ok: true, text: `Report emailed to ${to}.` } : { ok: false, text: d.error || "Email failed to send." } });
+    } catch (_) { setReportSend({ busy: "", msg: { ok: false, text: "Couldn't reach the server." } }); }
   };
   const sendText = async () => {
+    if (!phone) { setReportSend({ busy: "", msg: { ok: false, text: "No phone number on file for this client." } }); return; }
+    setReportSend({ busy: "text", msg: null });
     const tpl = (email && email.smsReport) || DEFAULT_EMAIL.smsReport;
     const short = tpl
       .replace(/\{first\}/g, firstName)
       .replace(/\{service\}/g, stop.type || "service")
       .replace(/\{company\}/g, branding.companyName)
       .replace(/\{sender\}/g, (email && email.senderName) || branding.companyName);
-    const r = await sendSms(phone, short); // business Quo line
-    if (!r.ok) window.open(`sms:${phone}${/iPhone|iPad|iPod/i.test(navigator.userAgent) ? "&" : "?"}body=${encodeURIComponent(short)}`, "_blank");
+    const r = await sendSms(phone, short); // business Quo line ONLY
+    setReportSend({ busy: "", msg: r.ok ? { ok: true, text: `Report texted to ${client?.name || "the client"}.` } : { ok: false, text: r.error || (r.missingEnv ? "Texting isn't set up yet." : "Text failed to send.") } });
   };
 
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
@@ -5916,9 +5932,10 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
           </div>
           <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 18, lineHeight: 1.5 }}>Send the client their report:</div>
           <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
-            <Btn onClick={sendEmail} style={{ flex: 1, padding: "13px", borderRadius: 12, display:"flex", alignItems:"center", gap:6 }}><Icon name="mail" size={14} /> Email Report</Btn>
-            <Btn onClick={sendText} variant="ghost" style={{ flex: 1, padding: "13px", borderRadius: 12, display:"flex", alignItems:"center", gap:6 }}><Icon name="message" size={14} /> Text Report</Btn>
+            <Btn onClick={sendEmail} disabled={!!reportSend.busy} style={{ flex: 1, padding: "13px", borderRadius: 12, display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}><Icon name="mail" size={14} /> {reportSend.busy === "email" ? "Sending…" : "Email Report"}</Btn>
+            <Btn onClick={sendText} variant="ghost" disabled={!!reportSend.busy} style={{ flex: 1, padding: "13px", borderRadius: 12, display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}><Icon name="message" size={14} /> {reportSend.busy === "text" ? "Sending…" : "Text Report"}</Btn>
           </div>
+          {reportSend.msg && <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 10, color: reportSend.msg.ok ? "#16a34a" : T.accent }}>{reportSend.msg.text}</div>}
           <button onClick={onClose} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 8, fontFamily: "inherit" }}>Done</button>
         </div>
       </Modal>
@@ -13008,24 +13025,24 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
     const phone = (client?.phone||"").replace(/\D/g,"");
     if (!phone) { setSentMsg("No phone number on file for this client."); return; }
     const text = buildSmsText();
-    const r = await sendSms(phone, text); // business Quo line
-    set("status", "sent");
-    if (r.ok) { setSentMsg("Estimate texted to the client."); }
-    else {
-      window.open(`sms:${phone}${/iPhone|iPad|iPod/i.test(navigator.userAgent) ? "&" : "?"}body=${encodeURIComponent(text)}`, "_blank");
-      setSentMsg("Opened in Messages. Mark as sent when you've sent it.");
-    }
+    const r = await sendSms(phone, text); // business Quo line ONLY — never the device
+    if (r.ok) { set("status", "sent"); setSentMsg("Estimate texted to the client."); }
+    else { setSentMsg(r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send the text — try again.")); }
   };
 
-  const sendViaEmail = () => {
+  const sendViaEmail = async () => {
     const client = (clients||[]).find(c => String(c.id) === String(form.clientId));
-    const em = client?.email || "";
+    const em = (client?.email || "").trim();
     if (!em) { setSentMsg("No email on file for this client."); return; }
-    const subject = encodeURIComponent(`Estimate from ${branding.companyName}`);
-    const body = encodeURIComponent(buildSmsText());
-    window.open(`mailto:${em}?subject=${subject}&body=${body}`, "_blank");
-    set("status", "sent");
-    setSentMsg("Opened in Mail. Save after sending.");
+    try {
+      const r = await fetch(`${PROD_URL}/api/send-notification`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...senderEmailFields(), to: em, subject: `Estimate from ${branding.companyName || "Stone Property Solutions"}`, heading: "Your Estimate", message: buildSmsText(), branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary } }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && d.sent) { set("status", "sent"); setSentMsg("Estimate emailed to the client."); }
+      else { setSentMsg(d.error || "Email failed to send."); }
+    } catch (_) { setSentMsg("Couldn't reach the server."); }
   };
 
   const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", outline: "none", color: T.text, background: T.surface };
@@ -16517,17 +16534,19 @@ function RemindersScreen({ schedule, clients, scheduleCfg, setScheduleCfg, email
       .replace(/{date}/g, entry.date || "");
   };
 
+  const [reminderErr, setReminderErr] = useState("");
   const markSent = (sid, method) => setReminderLog(m => ({ ...m, [sid]: { sentAt: new Date().toISOString(), method } }));
   const undoSent = (sid) => setReminderLog(m => { const n = { ...m }; delete n[sid]; return n; });
 
   const sendOne = async (entry) => {
     const msg = buildMsg(entry);
     if (entry.phone) {
-      const r = await sendSms(entry.phone, msg); // business Quo line
-      if (!r.ok) window.location.href = `sms:${entry.phone}?&body=${encodeURIComponent(msg)}`;
+      const r = await sendSms(entry.phone, msg); // business Quo line ONLY — never the device Messages app
+      if (!r.ok) { setReminderErr(r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send the reminder text.")); return; }
     } else {
-      navigator.clipboard?.writeText(msg);
+      navigator.clipboard?.writeText(msg); // no phone on file — copy so it can be sent manually
     }
+    setReminderErr("");
     markSent(entry.sid, "manual");
   };
 
@@ -16560,6 +16579,13 @@ function RemindersScreen({ schedule, clients, scheduleCfg, setScheduleCfg, email
           {cfg.remindersOn ? `${queue.due.length} due · ${queue.upcoming.length} queued` : "Appointment reminders are off"}
         </div>
       </div>
+
+      {reminderErr && (
+        <div style={{ background: hexA(T.accent, 0.1), color: T.accent, borderRadius: 12, padding: "11px 14px", fontSize: 12.5, fontWeight: 700, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+          <span>{reminderErr}</span>
+          <button onClick={() => setReminderErr("")} style={{ background: "none", border: "none", color: T.accent, cursor: "pointer", fontWeight: 800, fontFamily: "inherit", fontSize: 14 }}>✕</button>
+        </div>
+      )}
 
       {/* Reminder settings now live in Customize → Business → "Reminders & Messaging". */}
 
