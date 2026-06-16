@@ -1,0 +1,46 @@
+//  Theme.swift
+//  SPSWidgets — brand palette + shared formatting helpers.
+//  On brand: crimson #AF011A, white surface, slate grey secondary text. Apple-sleek.
+
+import SwiftUI
+import WidgetKit
+
+enum Brand {
+    static let crimson      = Color(red: 0xAF / 255.0, green: 0x01 / 255.0, blue: 0x1A / 255.0) // #AF011A
+    static let crimsonDark  = Color(red: 0x7A / 255.0, green: 0x01 / 255.0, blue: 0x12 / 255.0)
+    static let ink          = Color(red: 0x1C / 255.0, green: 0x1C / 255.0, blue: 0x1E / 255.0)
+    static let slate        = Color(red: 0x55 / 255.0, green: 0x5C / 255.0, blue: 0x66 / 255.0)
+    static let muted        = Color(red: 0x8A / 255.0, green: 0x90 / 255.0, blue: 0x99 / 255.0)
+    static let hair         = Color(red: 0xEE / 255.0, green: 0xEF / 255.0, blue: 0xF1 / 255.0)
+    static let surface      = Color.white
+}
+
+// Whole-dollar currency, e.g. "$1,240" — clean for small tiles.
+func sps_money(_ v: Double) -> String {
+    let f = NumberFormatter()
+    f.numberStyle = .currency
+    f.currencyCode = "USD"
+    f.maximumFractionDigits = 0
+    return f.string(from: NSNumber(value: v.rounded())) ?? "$\(Int(v.rounded()))"
+}
+
+// Compact currency for tight spaces (lock screen circular), e.g. "$1.2k".
+func sps_moneyShort(_ v: Double) -> String {
+    let a = abs(v)
+    if a >= 1000 { return "$\(String(format: "%.1f", v / 1000))k" }
+    return "$\(Int(v.rounded()))"
+}
+
+func sps_rate(_ v: Double) -> String { sps_money(v) + "/hr" }
+
+extension View {
+    // iOS 17+ requires containerBackground for widgets; fall back to a plain background below.
+    @ViewBuilder
+    func sps_widgetBackground(_ color: Color) -> some View {
+        if #available(iOS 17.0, *) {
+            self.containerBackground(color, for: .widget)
+        } else {
+            self.background(color)
+        }
+    }
+}

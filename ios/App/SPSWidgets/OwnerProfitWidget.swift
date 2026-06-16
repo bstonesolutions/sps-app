@@ -1,0 +1,75 @@
+//  OwnerProfitWidget.swift
+//  Owner · Profit. Small = this week's profit. Medium = this week, this month,
+//  and average effective hourly rate. Source = the app's post-job profitability roll-up.
+
+import WidgetKit
+import SwiftUI
+
+struct OwnerProfitWidget: Widget {
+    let kind = "OwnerProfitWidget"
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: kind, provider: SPSProvider()) { entry in
+            OwnerProfitView(entry: entry)
+        }
+        .configurationDisplayName("Profit")
+        .description("This week's profit at a glance.")
+        .supportedFamilies([.systemSmall, .systemMedium])
+    }
+}
+
+struct OwnerProfitView: View {
+    @Environment(\.widgetFamily) var family
+    let entry: SPSEntry
+
+    private var p: WidgetPayload? { entry.payload }
+    private var hasData: Bool {
+        p?.profitWeek != nil || p?.profitMonth != nil || p?.avgEffectiveRate != nil
+    }
+
+    var body: some View {
+        Group {
+            if !hasData {
+                EmptyWidgetView(icon: "chart.line.uptrend.xyaxis", line1: "Profit", line2: "Open the app to sync")
+            } else if family == .systemSmall {
+                small
+            } else {
+                medium
+            }
+        }
+        .sps_widgetBackground(Brand.surface)
+        .widgetURL(URL(string: "spsway://profit"))
+    }
+
+    private var small: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Header(title: "THIS WEEK")
+            Spacer(minLength: 6)
+            Text(p?.profitWeek.map(sps_money) ?? "—")
+                .font(.system(size: 32, weight: .heavy, design: .rounded))
+                .foregroundColor(Brand.ink)
+                .minimumScaleFactor(0.5)
+                .lineLimit(1)
+            Text("Profit")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Brand.muted)
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+    }
+
+    private var medium: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Header(title: "PROFIT")
+            Spacer(minLength: 12)
+            HStack(spacing: 0) {
+                StatColumn(label: "This Week",  value: p?.profitWeek.map(sps_money) ?? "—", accent: true)
+                VSeparator()
+                StatColumn(label: "This Month", value: p?.profitMonth.map(sps_money) ?? "—")
+                VSeparator()
+                StatColumn(label: "Avg Rate",   value: p?.avgEffectiveRate.map(sps_rate) ?? "—")
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+    }
+}
