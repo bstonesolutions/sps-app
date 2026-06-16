@@ -85,7 +85,17 @@ ${link}
 ${FOOTER}`;
 }
 
+// CORS so the native app (capacitor://localhost) can call this cross-origin via the
+// absolute PROD_URL; the web build calls it same-origin.
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
 export default async function handler(req, res) {
+  setCors(res);
+  if (req.method === "OPTIONS") return res.status(204).end();
   // Health check — GET reports whether keys are detected, without exposing them.
   if (req.method === "GET" || (req.query && req.query.check)) {
     return res.status(200).json({

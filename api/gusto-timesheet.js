@@ -24,7 +24,15 @@ const GUSTO_API_VERSION = "2024-04-01";
 // Default to the sandbox host until production credentials are confirmed.
 const GUSTO_BASE = (process.env.GUSTO_API_BASE || "https://api.gusto-demo.com").replace(/\/+$/, "");
 
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
 export default async function handler(req, res) {
+  setCors(res);
+  if (req.method === "OPTIONS") return res.status(204).end();
   // Health check — GET reports whether the credentials are configured, WITHOUT
   // exposing any secret values. Visit /api/gusto-timesheet to confirm setup.
   if (req.method === "GET" || (req.query && req.query.check)) {

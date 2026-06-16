@@ -41,7 +41,17 @@ function buildHtml(body, link) {
   return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.6;color:#1f2937;max-width:520px;margin:0 auto;padding:8px">${html}<div style="margin-top:18px;font-size:12px;color:#9ca3af;word-break:break-all">If the button doesn't work, copy this link:<br>${link}</div></div>`;
 }
 
+// CORS so the native app (capacitor://localhost) can call this cross-origin via the
+// absolute PROD_URL; the web build calls it same-origin.
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
 export default async function handler(req, res) {
+  setCors(res);
+  if (req.method === "OPTIONS") return res.status(204).end();
   // Health check — GET (or ?check=1) reports whether the keys are detected,
   // WITHOUT exposing any secret values. Visit /api/send-auth-email to confirm.
   if (req.method === "GET" || (req.query && req.query.check)) {
