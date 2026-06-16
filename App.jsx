@@ -12404,8 +12404,141 @@ async function exportInvoicePdf(args) {
   return "downloaded";
 }
 
+// B9-3: record a manual payment (cash / check / card / other) — marks the invoice
+// paid in the app AND, when QuickBooks is connected, posts a matching Payment with
+// the method, reference, and deposit-to account (read from QB's chart of accounts).
+function MarkPaidModal({ invoice, client, onSave, onClose }) {
+  const { T } = useApp();
+  const money = (n) => `$${(Number(n) || 0).toFixed(2)}`;
+  const totals = invoiceTotals(invoice);
+  const qb = qbIsConnected() && !!invoice.qbId;
+  const isoToday = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })();
+  const isoToMDY = (iso) => { const [y, m, d] = (iso || "").split("-"); return (y && m && d) ? `${m}/${d}/${y}` : todayMDY(); };
+
+  const METHODS = ["Cash", "Check", "Manual Card", "Other"];
+  const [method, setMethod] = useState("Check");
+  const [amount, setAmount] = useState(String((totals.total || 0).toFixed(2)));
+  const [dateISO, setDateISO] = useState(isoToday);
+  const [reference, setReference] = useState("");
+  const [accts, setAccts] = useState(qb ? null : []); // null = loading
+  const [depositId, setDepositId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    if (!qb) return;
+    let alive = true;
+    (async () => {
+      try {
+        const r = await fetch(`${QB_API}/accounts`);
+        const d = await r.json().catch(() => ({}));
+        if (!alive) return;
+        const list = d.depositAccounts || [];
+        setAccts(list);
+        const undep = list.find(a => /undeposited/i.test(a.name || ""));
+        setDepositId(undep ? undep.id : (list[0]?.id || ""));
+      } catch (_) { if (alive) setAccts([]); }
+    })();
+    return () => { alive = false; };
+  }, [qb]);
+
+  const refLabel = method === "Check" ? "Check #" : method === "Manual Card" ? "Auth / last 4" : "Reference (optional)";
+  const depName = (accts || []).find(a => a.id === depositId)?.name || "";
+
+  const markLocal = (synced) => {
+    onSave({
+      ...invoice, status: "Paid", paidDate: isoToMDY(dateISO),
+      payment: { method, amount: parseFloat(amount) || 0, date: isoToMDY(dateISO), reference: reference.trim(), depositAccount: depName, depositAccountId: depositId || "", qbSynced: !!synced },
+    });
+    onClose();
+  };
+
+  const submit = async () => {
+    setBusy(true); setErr("");
+    if (qb) {
+      try {
+        const r = await fetch(`${QB_API}/record-payment`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ qbId: invoice.qbId, amount: parseFloat(amount) || 0, method, reference: reference.trim(), txnDate: dateISO, depositAccountId: depositId }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { setErr("QuickBooks: " + (d.error || "couldn't record the payment.")); setBusy(false); return; }
+      } catch (_) { setErr("Couldn't reach QuickBooks."); setBusy(false); return; }
+    }
+    markLocal(qb);
+  };
+
+  const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+
+  return (
+    <Modal title="Mark as Paid" onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <div style={{ fontSize: 13, color: T.textMuted }}>Invoice <b style={{ color: T.text }}>{invoice.number}</b> · {client?.name || invoice.clientName || "client"}</div>
+
+        <div>
+          <label style={lbl}>Payment Method</label>
+          <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+            {METHODS.map(m => (
+              <button key={m} onClick={() => setMethod(m)}
+                style={{ flex: 1, minWidth: 70, padding: "9px 6px", borderRadius: 11, border: `1.5px solid ${method === m ? T.primary : T.border}`, background: method === m ? hexA(T.primary, 0.08) : T.surface, color: method === m ? T.primary : T.text, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>{m}</button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <label style={lbl}>Amount</label>
+            <div style={{ position: "relative" }}>
+              <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: T.textMuted }}>$</span>
+              <input type="text" inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value.replace(/[^\d.]/g, ""))} style={{ ...field, paddingLeft: 24 }} />
+            </div>
+          </div>
+          <div style={{ flex: 1 }}>
+            <label style={lbl}>Date</label>
+            <input type="date" value={dateISO} onChange={e => setDateISO(e.target.value)} style={field} />
+          </div>
+        </div>
+
+        <div>
+          <label style={lbl}>{refLabel}</label>
+          <input type="text" value={reference} onChange={e => setReference(e.target.value)} placeholder={method === "Check" ? "e.g. 1042" : ""} style={field} />
+        </div>
+
+        {qb ? (
+          <div>
+            <label style={lbl}>Deposit To <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(from QuickBooks)</span></label>
+            {accts === null
+              ? <div style={{ fontSize: 13, color: T.textMuted, padding: "8px 0" }}>Loading accounts…</div>
+              : accts.length === 0
+                ? <div style={{ fontSize: 12.5, color: T.textMuted }}>No bank accounts found — QuickBooks will use Undeposited Funds.</div>
+                : <select value={depositId} onChange={e => setDepositId(e.target.value)} style={{ ...field, appearance: "none", WebkitAppearance: "none" }}>
+                    {accts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                  </select>}
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>Records a matching payment in QuickBooks with the method, reference, and deposit account.</div>
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, color: T.textMuted, background: T.surfaceAlt, borderRadius: 10, padding: "10px 12px" }}>QuickBooks isn't connected, so this is recorded in the app only.</div>
+        )}
+
+        {err && (
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.accent }}>
+            {err}
+            <button onClick={() => markLocal(false)} style={{ display: "block", marginTop: 6, background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit", padding: 0 }}>Mark paid in the app only →</button>
+          </div>
+        )}
+
+        <button onClick={submit} disabled={busy} style={{ background: T.accent || T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontWeight: 800, fontSize: 15, cursor: busy ? "default" : "pointer", fontFamily: "inherit", opacity: busy ? 0.6 : 1 }}>
+          {busy ? "Recording…" : `Record ${money(parseFloat(amount) || 0)} payment`}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
 function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose, onEdit, onDelete, canManage, embedded }) {
   const { T, perms } = useApp();
+  const [markPaid, setMarkPaid] = useState(false); // B9-3: mark-as-paid + QB payment modal
   // Fine-grained invoice actions (default to canManage, so unchanged unless restricted).
   const canSend     = canManage && perms.invoiceSend;
   const canMarkPaid = canManage && perms.invoiceMarkPaid;
@@ -12531,7 +12664,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
   // Status / edit / print actions (wrapping row — modal layout).
   const actionRow = canManage && (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-      {eff !== "Paid" && canMarkPaid && <Btn variant="accent" onClick={() => setStatus("Paid")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Mark Paid</Btn>}
+      {eff !== "Paid" && canMarkPaid && <Btn variant="accent" onClick={() => setMarkPaid(true)} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Mark Paid</Btn>}
       {invoice.status === "Draft" && canMarkPaid && <Btn variant="ghost" onClick={() => setStatus("Sent")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Mark Sent</Btn>}
       {eff === "Paid" && canMarkPaid && <Btn variant="ghost" onClick={() => setStatus("Sent")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Reopen</Btn>}
       {canEditInv && <Btn variant="ghost" onClick={() => onEdit(invoice)} style={{ borderRadius: 12 }}>Edit</Btn>}
@@ -12539,10 +12672,18 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
     </div>
   );
 
+  // Paid-details line (B9-3) — reflect how + where it was paid back in the app.
+  const paidInfo = (eff === "Paid" && invoice.payment) ? (
+    <div style={{ fontSize: 12.5, color: "#157a12", background: hexA("#2CA01C", 0.1), borderRadius: 10, padding: "8px 12px", fontWeight: 600 }}>
+      Paid{invoice.payment.method ? ` · ${invoice.payment.method}` : ""}{invoice.payment.reference ? ` #${invoice.payment.reference}` : ""}{invoice.payment.date ? ` · ${invoice.payment.date}` : ""}{invoice.payment.depositAccount ? ` → ${invoice.payment.depositAccount}` : ""}{invoice.payment.qbSynced ? " · synced to QuickBooks" : ""}
+    </div>
+  ) : null;
+
   // ── Modal layout (mobile / inside a client record): document, then actions stacked. ──
   const body = (
     <div style={{ display: "flex", flexDirection: "column", gap: 14, paddingBottom: "max(16px, env(safe-area-inset-bottom))" }}>
       {doc}
+      {paidInfo}
       {sendBlock}
       {actionRow}
     </div>
@@ -12567,13 +12708,14 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
               {canSend && <Btn sm onClick={sendToClient} disabled={!clientEmail || sendState === "sending"} style={{ borderRadius: 10, gap: 6, opacity: clientEmail ? 1 : 0.55 }}>
                 <Icon name="mail" size={14} />{sendState === "sending" ? "Sending…" : sendState === "sent" ? "Sent ✓" : "Send"}
               </Btn>}
-              {eff !== "Paid" && canMarkPaid && <Btn sm variant="accent" onClick={() => setStatus("Paid")} style={{ borderRadius: 10 }}>Mark Paid</Btn>}
+              {eff !== "Paid" && canMarkPaid && <Btn sm variant="accent" onClick={() => setMarkPaid(true)} style={{ borderRadius: 10 }}>Mark Paid</Btn>}
               {invoice.status === "Draft" && canMarkPaid && <Btn sm variant="ghost" onClick={() => setStatus("Sent")} style={{ borderRadius: 10 }}>Mark Sent</Btn>}
               {eff === "Paid" && canMarkPaid && <Btn sm variant="ghost" onClick={() => setStatus("Sent")} style={{ borderRadius: 10 }}>Reopen</Btn>}
               {canEditInv && <Btn sm variant="ghost" onClick={() => onEdit(invoice)} style={{ borderRadius: 10 }}>Edit</Btn>}
               <Btn sm variant="ghost" onClick={print} disabled={printing} style={{ borderRadius: 10 }}>{printing ? "Preparing…" : "Print / PDF"}</Btn>
             </div>
           )}
+          {paidInfo && <div style={{ marginTop: 10 }}>{paidInfo}</div>}
           {canManage && !clientEmail && <div style={{ fontSize: 12, color: T.textMuted, marginTop: 8 }}>No email on file — add one to send this invoice.</div>}
           {sendMsg && (
             <div style={{ fontSize: 12.5, fontWeight: 600, marginTop: 8, padding: "8px 11px", borderRadius: 9,
@@ -12584,10 +12726,16 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingTop: 18, paddingBottom: 8 }}>
           {doc}
         </div>
+        {markPaid && <MarkPaidModal invoice={invoice} client={client} onSave={(upd) => { onSave(upd); setMarkPaid(false); }} onClose={() => setMarkPaid(false)} />}
       </div>
     );
   }
-  return <Modal title={invoice.number} onClose={onClose}>{body}</Modal>;
+  return (
+    <>
+      <Modal title={invoice.number} onClose={onClose}>{body}</Modal>
+      {markPaid && <MarkPaidModal invoice={invoice} client={client} onSave={(upd) => { onSave(upd); setMarkPaid(false); }} onClose={() => setMarkPaid(false)} />}
+    </>
+  );
 }
 
 // ─────────────────────────────────────────────
