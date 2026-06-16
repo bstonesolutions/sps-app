@@ -18,7 +18,7 @@ function setCors(res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
-function buildHtml({ branding = {}, heading, message, rows = [] }) {
+function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = "" }) {
   const accent = /^#?[0-9a-fA-F]{3,8}$/.test(branding.accent || "") ? branding.accent : "#B81D24";
   const company = escapeHtml(branding.companyName || "Stone Property Solutions");
   const contactBits = [branding.companyPhone, branding.companyEmail, branding.companyAddress]
@@ -36,6 +36,7 @@ function buildHtml({ branding = {}, heading, message, rows = [] }) {
       ${heading ? `<div style="font-size:16px;font-weight:800;margin-bottom:10px">${escapeHtml(heading)}</div>` : ""}
       ${message ? `<div style="font-size:14px;color:#374151;line-height:1.5;white-space:pre-wrap">${escapeHtml(message)}</div>` : ""}
       ${rowsHtml ? `<table style="width:100%;border-collapse:collapse;margin-top:14px;border-top:1px solid #eef0f2;padding-top:6px">${rowsHtml}</table>` : ""}
+      ${photosHtml || ""}
     </div>
   </div>`;
 }
@@ -50,7 +51,7 @@ export default async function handler(req, res) {
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { to, subject, heading, message, rows = [], branding = {} } = req.body || {};
+  const { to, subject, heading, message, rows = [], branding = {}, photos = [] } = req.body || {};
   if (!to || !/.+@.+\..+/.test(to)) return res.status(400).json({ error: "A valid recipient email is required" });
   if (!subject) return res.status(400).json({ error: "A subject is required" });
 
@@ -59,15 +60,32 @@ export default async function handler(req, res) {
   if (!RESEND_KEY) return res.status(501).json({ error: "Email delivery is not configured on the server.", missingEnv: true });
 
   try {
-    const html = buildHtml({ branding, heading: heading || subject, message, rows });
+    // Embed any provided photos (base64 data URLs) as inline cid attachments referenced
+    // from the HTML, so the report email shows the pictures (and they're downloadable too).
+    const attachments = [];
+    const photoBlocks = [];
+    (Array.isArray(photos) ? photos : []).slice(0, 12).forEach((ph, i) => {
+      const src = typeof ph === "string" ? ph : (ph && ph.src) || "";
+      const m = /^data:(image\/[a-zA-Z+]+);base64,(.+)$/.exec(src || "");
+      if (!m) return;
+      const ext = (m[1].split("/")[1] || "jpg").replace("jpeg", "jpg");
+      const cid = `photo${i}@sps`;
+      const label = (ph && typeof ph === "object" && ph.label) ? String(ph.label) : "";
+      attachments.push({ filename: `${label ? label.toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-" : ""}photo-${i + 1}.${ext}`, content: m[2], content_type: m[1], content_id: cid });
+      photoBlocks.push(`<div style="margin-bottom:12px">${label ? `<div style="font-size:11px;font-weight:700;color:#6b7280;margin-bottom:5px">${escapeHtml(label)}</div>` : ""}<img src="cid:${cid}" alt="${escapeHtml(label || "Service photo")}" style="width:100%;max-width:520px;border-radius:10px;display:block;border:1px solid #eef0f2" /></div>`);
+    });
+    const photosHtml = photoBlocks.length ? `<div style="margin-top:16px;border-top:1px solid #eef0f2;padding-top:14px"><div style="font-size:14px;font-weight:800;margin-bottom:10px">Photos</div>${photoBlocks.join("")}</div>` : "";
+
+    const html = buildHtml({ branding, heading: heading || subject, message, rows, photosHtml });
     const textLines = [heading || subject, "", message || ""];
     (rows || []).filter(Boolean).forEach(([k, v]) => textLines.push(`${k}: ${v}`));
+    if (attachments.length) textLines.push("", `(${attachments.length} photo${attachments.length > 1 ? "s" : ""} attached)`);
     const text = textLines.join("\n");
 
     const sendRes = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { "Authorization": `Bearer ${RESEND_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: FROM, to: [to], subject, html, text }),
+      body: JSON.stringify({ from: FROM, to: [to], subject, html, text, ...(attachments.length ? { attachments } : {}) }),
     });
     const sendData = await sendRes.json().catch(() => ({}));
     if (!sendRes.ok) {

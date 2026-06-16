@@ -1589,6 +1589,27 @@ function renderReport(email, ctx, { plain = false } = {}) {
 
 // Compress an image — keeps original quality unless result exceeds 1MB,
 // then iteratively reduces quality by 0.05 until it fits.
+// Downscale a stored photo (data URL) to an email-friendly size so several can ride along
+// in the report email without blowing the serverless request limit (~4.5MB).
+function shrinkForEmail(dataUrl, maxDim = 1000, quality = 0.6) {
+  return new Promise((resolve) => {
+    try {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > height && width > maxDim) { height = Math.round(height * maxDim / width); width = maxDim; }
+        else if (height > maxDim) { width = Math.round(width * maxDim / height); height = maxDim; }
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    } catch (_) { resolve(dataUrl); }
+  });
+}
+
 function compressImage(file, maxDim = 1600) {
   const MAX_BYTES = 1 * 1024 * 1024; // 1 MB
   return new Promise((resolve) => {
@@ -5903,13 +5924,26 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
     if (!to) { setReportSend({ busy: "", msg: { ok: false, text: "No email on file for this client." } }); return; }
     setReportSend({ busy: "email", msg: null });
     const subject = (email.subject || DEFAULT_EMAIL.subject).replace("{date}", todayStr);
+    // Shrink + size-cap the stop photos so they ride along in the email under the request limit.
+    let photoPayload = [];
+    try {
+      let budget = 3_800_000; // ~base64 char budget to keep the POST under Vercel's ~4.5MB limit
+      for (const ph of (photos || []).slice(0, 12)) {
+        const src = typeof ph === "string" ? ph : (ph && ph.src) || "";
+        if (!src.startsWith("data:image")) continue;
+        const small = await shrinkForEmail(src);
+        if (small.length > budget) break;
+        budget -= small.length;
+        photoPayload.push({ src: small, label: (ph && typeof ph === "object" && ph.label) || "" });
+      }
+    } catch (_) { photoPayload = []; }
     try {
       const r = await fetch(`${PROD_URL}/api/send-notification`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...senderEmailFields(), to, subject, heading: subject, message: reportText, branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary } }),
+        body: JSON.stringify({ ...senderEmailFields(), to, subject, heading: subject, message: reportText, photos: photoPayload, branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary } }),
       });
       const d = await r.json().catch(() => ({}));
-      setReportSend({ busy: "", msg: (r.ok && d.sent) ? { ok: true, text: `Report emailed to ${to}.` } : { ok: false, text: d.error || "Email failed to send." } });
+      setReportSend({ busy: "", msg: (r.ok && d.sent) ? { ok: true, text: `Report emailed to ${to}${photoPayload.length ? ` with ${photoPayload.length} photo${photoPayload.length > 1 ? "s" : ""}` : ""}.` } : { ok: false, text: d.error || "Email failed to send." } });
     } catch (_) { setReportSend({ busy: "", msg: { ok: false, text: "Couldn't reach the server." } }); }
   };
   const sendText = async () => {
