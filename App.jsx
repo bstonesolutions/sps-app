@@ -1371,12 +1371,13 @@ const DEFAULT_CATALOG = {
     { id: "s5", name: "Spring Opening", price: "295", products: ["p1", "p4"], tests: ["pH", "Ammonia", "Nitrite", "Temperature"] },
     { id: "s6", name: "Fall Closing", price: "265", products: ["p2"], tests: ["pH", "Temperature"] },
   ],
+  // Products PURCHASED by the client (billed like parts): price = sale price, cost = our COGS.
   products: [
-    { id: "p1", name: "Beneficial Bacteria", price: "32" },
-    { id: "p2", name: "Barley Straw Extract", price: "24" },
-    { id: "p3", name: "EcoBlast Algae Remover", price: "38" },
-    { id: "p4", name: "Filter Pad (replacement)", price: "18" },
-    { id: "p5", name: "Pond Dye", price: "22" },
+    { id: "p1", name: "Beneficial Bacteria", price: "32", cost: "14" },
+    { id: "p2", name: "Barley Straw Extract", price: "24", cost: "10" },
+    { id: "p3", name: "EcoBlast Algae Remover", price: "38", cost: "17" },
+    { id: "p4", name: "Filter Pad (replacement)", price: "18", cost: "7" },
+    { id: "p5", name: "Pond Dye", price: "22", cost: "9" },
   ],
   // Inventory storage locations — user-managed (shed, trucks, etc.)
   locations: [
@@ -4947,10 +4948,10 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
           </div>
         </div>
 
-        {/* Products used */}
+        {/* Products purchased (past visit — name list only) */}
         {(catalog?.products || []).length > 0 && (
           <div>
-            <label style={labelStyle}>Products Used</label>
+            <label style={labelStyle}>Products Purchased</label>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
               {(catalog.products || []).map(p => {
                 const name = typeof p === "string" ? p : p.name;
@@ -5678,7 +5679,8 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
   const [partsUsed, setPartsUsedState] = useState({}); // partId -> qty
   const [partBill, setPartBill] = useState({}); // partId -> bool (bill to client?)
   const [usageLoc, setUsageLoc] = useState(""); // which location stock is pulled from
-  const [prods, setProds] = useState({});  // productId -> true
+  const [productsQty, setProductsQty] = useState({}); // productId -> qty purchased (billed like parts)
+  const [productBill, setProductBill] = useState({}); // productId -> bill client at sale price (default true)
   const [notesClient, setNotesClient] = useState("");
   const [notesOffice, setNotesOffice] = useState("");
   const [officeFlag, setOfficeFlag] = useState(false);
@@ -5758,10 +5760,13 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
   // Parts: billed ones add retail value to the job; all parts cost us their cost basis
   const partsCost = parts.reduce((sum, p) => sum + num(partsUsed[p.id]) * num(p.costPer), 0);
   const partsBilledRetail = parts.reduce((sum, p) => sum + ((partBill[p.id] !== false && num(partsUsed[p.id]) > 0) ? num(partsUsed[p.id]) * num(p.retailPer) : 0), 0);
-  const productCost = products.reduce((sum, p) => sum + (prods[p.id] ? num(p.price) : 0), 0);
+  // Products purchased: client buys them — our cost is COGS; the sale price is revenue
+  // when billed (default), exactly like parts.
+  const productCost = products.reduce((sum, p) => sum + num(productsQty[p.id]) * num(p.cost), 0);
+  const productsBilledRetail = products.reduce((sum, p) => sum + ((productBill[p.id] !== false && num(productsQty[p.id]) > 0) ? num(productsQty[p.id]) * num(p.price) : 0), 0);
   const totalCost = laborCost + treatmentCost + partsCost + productCost + num(gas) + num(insurance) + num(equipment) + num(overhead);
-  // Revenue includes the flat service fee plus any parts billed to the client at retail
-  const effectiveRevenue = num(revenue) + partsBilledRetail;
+  // Revenue = service fee + parts billed at retail + products purchased by the client
+  const effectiveRevenue = num(revenue) + partsBilledRetail + productsBilledRetail;
   const profit = effectiveRevenue - totalCost;
   const margin = effectiveRevenue > 0 ? (profit / effectiveRevenue) * 100 : 0;
   const money = (n) => `$${n.toFixed(2)}`;
@@ -5790,7 +5795,10 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
   const partsUsedArr = parts
     .filter(p => num(partsUsed[p.id]) > 0)
     .map(p => ({ id: p.id, name: p.name, qty: num(partsUsed[p.id]), unit: p.unit || "pieces", costPer: num(p.costPer), retailPer: num(p.retailPer), cost: num(partsUsed[p.id]) * num(p.costPer), retail: num(partsUsed[p.id]) * num(p.retailPer), locId: usageLoc, bill: partBill[p.id] !== false }));
-  const productsUsed = products.filter(p => prods[p.id]).map(p => p.name);
+  const productsUsed = products.filter(p => num(productsQty[p.id]) > 0).map(p => p.name);
+  const productsPurchasedArr = products
+    .filter(p => num(productsQty[p.id]) > 0)
+    .map(p => ({ id: p.id, name: p.name, qty: num(productsQty[p.id]), cost: num(p.cost), price: num(p.price), costTotal: num(productsQty[p.id]) * num(p.cost), retail: num(productsQty[p.id]) * num(p.price), bill: productBill[p.id] !== false }));
 
   const ctx = {
     firstName, company: branding.companyName, serviceType: stop.type,
@@ -5828,6 +5836,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
     invoice: revenue ? `$${revenue}` : "$0",
     photos,  // [{ src, label }]
     treatmentsUsed, productsUsed,
+    productsPurchased: productsPurchasedArr,
     partsUsed: partsUsedArr,
     usageLoc,
     // Feature 3B snapshots — frozen at completion so later service/price edits never rewrite history
@@ -5837,7 +5846,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
     arrivedAt: arrivedAt || null,
     breakdown: {
       revenue: num(revenue), minutes: num(minutes), hourlyRate: num(hourlyRate),
-      labor: laborCost, treatment: treatmentCost, treatmentRetail, parts: partsCost, partsBilledRetail, product: productCost,
+      labor: laborCost, treatment: treatmentCost, treatmentRetail, parts: partsCost, partsBilledRetail, product: productCost, productBilledRetail: productsBilledRetail,
       gas: num(gas), insurance: num(insurance), equipment: num(equipment), overhead: num(overhead),
       total: totalCost, effectiveRevenue, profit, margin,
     },
@@ -6173,16 +6182,41 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
       )}
 
       {/* Products */}
+      {/* Products Purchased — items the client buys from us; billed like parts (Build 9) */}
       {products.length > 0 && (
         <div style={sectionGap}>
-          <label style={labelStyle}>Products Used</label>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-            {products.map(p => (
-              <button key={p.id} onClick={() => setProds(s => ({ ...s, [p.id]: !s[p.id] }))}
-                style={{ padding: "7px 13px", borderRadius: 20, border: `1.5px solid ${prods[p.id] ? T.primary : T.border}`, background: prods[p.id] ? T.navActiveBg : T.surface, color: prods[p.id] ? T.primary : T.text, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-                {p.name}{p.price ? ` · $${p.price}` : ""}
-              </button>
-            ))}
+          <label style={labelStyle}>Products Purchased</label>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {products.map(p => {
+              const qty = num(productsQty[p.id]);
+              const willBill = productBill[p.id] !== false; // default: billed to client
+              return (
+                <div key={p.id} style={{ background: T.surfaceAlt, borderRadius: 10, padding: "8px 12px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{p.name}</div>
+                      <div style={{ fontSize: 11, color: T.textMuted }}>
+                        ${num(p.cost).toFixed(2)} cost · ${num(p.price).toFixed(2)} sale
+                      </div>
+                    </div>
+                    <input type="text" inputMode="decimal" value={productsQty[p.id] || ""} onChange={e => setProductsQty(x => ({ ...x, [p.id]: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0" style={{ width: 60, padding: "8px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
+                    <span style={{ fontSize: 12, color: T.textMuted, width: 32 }}>qty</span>
+                    <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: qty > 0 ? T.text : T.textMuted }}>{money(qty * (willBill ? num(p.price) : num(p.cost)))}</div>
+                  </div>
+                  {qty > 0 && (
+                    <button onClick={() => setProductBill(b => ({ ...b, [p.id]: !willBill }))}
+                      style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", padding: 0 }}>
+                      <div style={{ width: 34, height: 20, borderRadius: 100, background: willBill ? T.primary : T.border, position: "relative", transition: "background 0.2s", flexShrink: 0 }}>
+                        <div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: willBill ? 16 : 2, transition: "left 0.2s" }} />
+                      </div>
+                      <span style={{ fontSize: 11.5, color: willBill ? T.primary : T.textMuted, fontWeight: 700 }}>
+                        {willBill ? `Bill client (${money(qty * num(p.price))})` : "Not billed — internal"}
+                      </span>
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -6233,8 +6267,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
         <div style={{ borderTop: `1px solid ${T.border}`, margin: "10px 0", paddingTop: 10 }} />
 
         {/* computed cost lines */}
-        {[["Labor", money(laborCost), `${minutes} min @ $${num(hourlyRate)}/hr`],
-          ["Products", money(productCost), null]].map(([k, v, sub]) => (
+        {[["Labor", money(laborCost), `${minutes} min @ $${num(hourlyRate)}/hr`]].map(([k, v, sub]) => (
           <div key={k} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
             <span style={{ fontSize: 13, color: T.text }}>{k}{sub && <span style={{ fontSize: 11, color: T.textMuted }}> · {sub}</span>}</span>
             <span style={{ fontSize: 13, color: T.textMuted }}>−{v}</span>
@@ -6267,6 +6300,20 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
           </div>
         )}
 
+        {/* Products purchased by the client — our cost (COGS) + billed sale price */}
+        {productCost > 0 && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <span style={{ fontSize: 13, color: T.text }}>Products cost</span>
+            <span style={{ fontSize: 13, color: T.textMuted }}>−{money(productCost)}</span>
+          </div>
+        )}
+        {productsBilledRetail > 0 && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <span style={{ fontSize: 13, color: "#15803D" }}>Products purchased by client</span>
+            <span style={{ fontSize: 13, color: "#15803D", fontWeight: 700 }}>+{money(productsBilledRetail)}</span>
+          </div>
+        )}
+
         {/* editable cost lines */}
         {[["Labor rate /hr", hourlyRate, setHourlyRate],["Gas", gas, setGas],["Insurance", insurance, setInsurance],["Equipment", equipment, setEquipment],["Overhead", overhead, setOverhead]].map(([k, val, setter]) => (
           <div key={k} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -6279,9 +6326,9 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
         ))}
 
         <div style={{ borderTop: `1px solid ${T.border}`, margin: "10px 0", paddingTop: 10 }} />
-        {partsBilledRetail > 0 && (
+        {(partsBilledRetail > 0 || productsBilledRetail > 0) && (
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-            <span style={{ fontSize: 13, color: T.textMuted }}>Service + billed parts</span>
+            <span style={{ fontSize: 13, color: T.textMuted }}>Service + billed items</span>
             <span style={{ fontSize: 13, color: T.textMuted }}>{money(effectiveRevenue)}</span>
           </div>
         )}
@@ -9760,7 +9807,7 @@ function CatalogManager({ catalog, setCatalog }) {
   };
 
   // ---- products: add / edit / delete ----
-  const openAddProd = () => setProdModal({ mode: "add", data: { id: `p${Date.now()}`, name: "", price: "" } });
+  const openAddProd = () => setProdModal({ mode: "add", data: { id: `p${Date.now()}`, name: "", price: "", cost: "" } });
   const openEditProd = (p) => setProdModal({ mode: "edit", data: { ...p } });
   const saveProd = () => {
     const d = prodModal.data; if (!d.name.trim()) return;
@@ -9860,14 +9907,15 @@ function CatalogManager({ catalog, setCatalog }) {
 
       {/* Products */}
       <Card style={{ marginBottom: 14 }}>
-        <CardHeader title="Products" action={<Btn sm onClick={openAddProd}>+ Add</Btn>} />
+        <CardHeader title="Products Purchased" action={<Btn sm onClick={openAddProd}>+ Add</Btn>} />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 4 }}>Items clients buy from you — billed to them at the sale price. Not the treatments/parts used during a stop.</div>
           {products.length === 0 && <div style={{ fontSize: 13, color: T.textMuted }}>No products yet. Tap "+ Add" to create one.</div>}
           {products.map(p => (
             <div key={p.id} onClick={() => openEditProd(p)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", background: T.surfaceAlt, borderRadius: 12, cursor: "pointer" }}>
               <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{p.name}</span>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                {p.price && <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>${p.price}</span>}
+                {p.price && <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>${p.price}{p.cost ? <span style={{ fontWeight: 400, color: T.textMuted }}> · ${p.cost} cost</span> : null}</span>}
                 <Icon name="edit" size={14} />
               </div>
             </div>
@@ -9939,10 +9987,18 @@ function CatalogManager({ catalog, setCatalog }) {
                 autoFocus
               />
             </div>
-            <div><label style={labelStyle}>Price</label>
-              <div style={{ position: "relative" }}>
-                <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: T.textMuted }}>$</span>
-                <input style={{ ...field, paddingLeft: 24 }} value={prodModal.data.price} onChange={e => setProdModal(m => ({ ...m, data: { ...m.data, price: e.target.value.replace(/[^\d.]/g, "") } }))} placeholder="0" />
+            <div style={{ display: "flex", gap: 12 }}>
+              <div style={{ flex: 1 }}><label style={labelStyle}>Sale Price <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(billed to client)</span></label>
+                <div style={{ position: "relative" }}>
+                  <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: T.textMuted }}>$</span>
+                  <input style={{ ...field, paddingLeft: 24 }} value={prodModal.data.price} onChange={e => setProdModal(m => ({ ...m, data: { ...m.data, price: e.target.value.replace(/[^\d.]/g, "") } }))} placeholder="0" />
+                </div>
+              </div>
+              <div style={{ flex: 1 }}><label style={labelStyle}>Cost <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(your COGS)</span></label>
+                <div style={{ position: "relative" }}>
+                  <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: T.textMuted }}>$</span>
+                  <input style={{ ...field, paddingLeft: 24 }} value={prodModal.data.cost || ""} onChange={e => setProdModal(m => ({ ...m, data: { ...m.data, cost: e.target.value.replace(/[^\d.]/g, "") } }))} placeholder="0" />
+                </div>
               </div>
             </div>
             <Btn onClick={saveProd} style={{ width: "100%", padding: "12px", borderRadius: 12 }}>{prodModal.mode === "add" ? "Add Product" : "Save Changes"}</Btn>
