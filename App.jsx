@@ -5688,6 +5688,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
   // Unified photos: each entry is { src, label } — label is editable per photo
   const [photos, setPhotos] = useState([]); // [{ src, label }]
   const [partsOpen, setPartsOpen] = useState(false); // Parts collapsed by default (Build 9); treatments stay open
+  const [productsOpen, setProductsOpen] = useState(false); // Products Purchased collapsed by default (Build 9)
   const MAX_PHOTOS = 10;
   const PHOTO_LABELS = ["Before", "After", "Detail", "Equipment", "Issue", "General"];
   const [busy, setBusy] = useState(false);
@@ -6182,11 +6183,15 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
       )}
 
       {/* Products */}
-      {/* Products Purchased — items the client buys from us; billed like parts (Build 9) */}
+      {/* Products Purchased — items the client buys from us; billed like parts, collapsed by default (Build 9) */}
       {products.length > 0 && (
         <div style={sectionGap}>
-          <label style={labelStyle}>Products Purchased</label>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <button type="button" onClick={() => setProductsOpen(o => !o)}
+            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit" }}>
+            <label style={{ ...labelStyle, marginBottom: 0, cursor: "pointer" }}>Products Purchased{products.filter(p => num(productsQty[p.id]) > 0).length ? ` · ${products.filter(p => num(productsQty[p.id]) > 0).length} selected` : ""}</label>
+            <span style={{ color: T.textMuted, fontSize: 16, transform: productsOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
+          </button>
+          <div style={{ display: productsOpen ? "flex" : "none", flexDirection: "column", gap: 8, marginTop: 8 }}>
             {products.map(p => {
               const qty = num(productsQty[p.id]);
               const willBill = productBill[p.id] !== false; // default: billed to client
