@@ -13478,9 +13478,12 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
       const updatedPlans = newPlanRaw !== undefined
         ? { ...(c.plans || {}), [activeDivision]: newPlan || "" }
         : c.plans;
-      const isPrimary = c.division === activeDivision;
+      // A client with no division (common after a restore) is claimed for the active
+      // one, so the flat c.plan + c.division stay in sync and the Client Hub links.
+      const isPrimary = !c.division || c.division === activeDivision;
       return {
         ...c,
+        ...(newPlanRaw !== undefined && !c.division ? { division: activeDivision } : {}),
         ...(newRate !== undefined ? { monthlyRate: newRate } : {}),
         ...(newPlanRaw !== undefined && isPrimary ? {
           plan:     newPlan || "",
@@ -13803,9 +13806,10 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
               <div style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, overflow: "hidden" }}>
                 {tierClients.sort((a,b) => (a.name||"").localeCompare(b.name||"")).map((c, i) => {
                   const currentRate = bulkPrices[String(c.id)] !== undefined ? bulkPrices[String(c.id)] : (c.monthlyRate || "");
+                  const curPlan      = planForDiv(c) || "";   // active-division plan, NOT flat c.plan — keeps the pill in sync with the counts + Client Hub
                   const priceChanged = bulkPrices[String(c.id)] !== undefined;
                   const planChanged  = !!bulkPlans[String(c.id)];
-                  const activePlan   = bulkPlans[String(c.id)] !== undefined ? (bulkPlans[String(c.id)] || "") : (c.plan || "");
+                  const activePlan   = bulkPlans[String(c.id)] !== undefined ? (bulkPlans[String(c.id)] || "") : curPlan;
                   const anyChange    = priceChanged || planChanged;
                   return (
                     <div key={c.id} style={{ padding: "12px 16px", borderBottom: i < tierClients.length - 1 ? `1px solid ${T.border}` : "none", background: anyChange ? hexA(T.primary, 0.03) : "transparent" }}>
@@ -13815,8 +13819,8 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
                           <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{c.name}</div>
                           <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>
                             {planChanged
-                              ? <><span style={{ textDecoration: "line-through", opacity: 0.5 }}>{c.plan}</span> → <span style={{ color: T.primary, fontWeight: 700 }}>{activePlan}</span> · {TIER_FREQ[activePlan]}</>
-                              : <>{c.plan} · {TIER_FREQ[c.plan] || c.planFreq || "—"}</>
+                              ? <><span style={{ textDecoration: "line-through", opacity: 0.5 }}>{curPlan || "None"}</span> → <span style={{ color: T.primary, fontWeight: 700 }}>{activePlan || "None"}</span> · {TIER_FREQ[activePlan]}</>
+                              : <>{curPlan || "None"} · {TIER_FREQ[curPlan] || c.planFreq || "—"}</>
                             }
                           </div>
                         </div>
@@ -13843,11 +13847,11 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
                             const planVal  = pill === "None" ? "" : pill;
                             const isActive = activePlan === planVal;
                             const isNone   = pill === "None";
-                            const changed  = planChanged && planVal !== (c.plan || "");
+                            const changed  = planChanged && planVal !== curPlan;
                             const activeCol = isNone ? T.textMuted : (changed ? T.primary : T.border);
                             return (
                              <button key={pill} onClick={() => {
-                               const orig = c.plan || "";
+                               const orig = curPlan;
                                if (planVal === orig) {
                                  setBulkPlans(prev => { const n = { ...prev }; delete n[String(c.id)]; return n; });
                                  if (planVal === "") setBulkPrices(prev => { const n = { ...prev }; delete n[String(c.id)]; return n; });
