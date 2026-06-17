@@ -96,7 +96,17 @@ function buildInvoiceText({ clientName, branding, invoice, payLink, intro }) {
 
 import { resolveFrom } from "./_sender.js";
 
+// CORS so the native app (capacitor://localhost) can POST cross-origin to the absolute
+// PROD_URL. Without this the native invoice send fails as "couldn't reach server".
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
 export default async function handler(req, res) {
+  setCors(res);
+  if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method === "GET" || (req.query && req.query.check)) {
     return res.status(200).json({ ok: true, endpoint: "send-invoice", configured: { resend: !!process.env.RESEND_API_KEY } });
   }

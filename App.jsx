@@ -12945,7 +12945,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
       .replace(/\{dueDate\}/g, invoice.dueDate || "soon");
     try {
       // 1) Branded invoice email via Resend
-      const r = await fetch("/api/send-invoice", {
+      const r = await fetch(`${PROD_URL}/api/send-invoice`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
