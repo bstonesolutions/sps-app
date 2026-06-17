@@ -59,27 +59,27 @@ struct ClientBalanceView: View {
             Spacer(minLength: 6)
             if due == nil {
                 Text("—")
-                    .font(.system(size: 30, weight: .heavy, design: .rounded))
+                    .font(.system(size: 31, weight: .heavy, design: .rounded))
                     .foregroundColor(Brand.ink)
                 Text("Open the app to sync")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(Brand.muted)
             } else if isPaidUp {
                 Text("Paid up")
-                    .font(.system(size: 26, weight: .heavy, design: .rounded))
+                    .font(.system(size: 27, weight: .heavy, design: .rounded))
                     .foregroundColor(Brand.ink)
                 Text("Thank you!")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(Brand.muted)
             } else {
                 Text(sps_money(due!))
-                    .font(.system(size: 30, weight: .heavy, design: .rounded))
+                    .font(.system(size: 31, weight: .heavy, design: .rounded))
                     .foregroundColor(Brand.crimson)
                     .minimumScaleFactor(0.5)
                     .lineLimit(1)
                 if let d = dueDate {
                     Text("Due \(SPSDate.dayLabel(d))")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: 15, weight: .semibold))
                         .foregroundColor(Brand.muted)
                 }
             }
@@ -95,9 +95,9 @@ struct ClientBalanceView: View {
         ZStack {
             AccessoryWidgetBackground()
             VStack(spacing: 0) {
-                Image(systemName: "dollarsign.circle.fill").font(.system(size: 12, weight: .semibold))
+                Image(systemName: "dollarsign.circle.fill").font(.system(size: 15, weight: .semibold))
                 Text(due.map(sps_moneyShort) ?? "—")
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.system(size: 16, weight: .bold))
                     .minimumScaleFactor(0.5)
                     .lineLimit(1)
             }
@@ -107,10 +107,10 @@ struct ClientBalanceView: View {
     @available(iOS 16.0, *)
     private var accessoryRectangular: some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text("Balance Due").font(.system(size: 13, weight: .semibold))
-            Text(due.map(sps_money) ?? "—").font(.system(size: 20, weight: .heavy, design: .rounded))
+            Text("Balance Due").font(.system(size: 16, weight: .semibold))
+            Text(due.map(sps_money) ?? "—").font(.system(size: 23, weight: .heavy, design: .rounded))
             if let d = dueDate {
-                Text("Due \(SPSDate.dayLabel(d))").font(.system(size: 12)).foregroundColor(.secondary)
+                Text("Due \(SPSDate.dayLabel(d))").font(.system(size: 15)).foregroundColor(.secondary)
             }
         }
     }

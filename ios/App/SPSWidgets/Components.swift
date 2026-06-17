@@ -12,7 +12,7 @@ struct LogoMark: View {
             .frame(width: 18, height: 18)
             .overlay(
                 Text("S")
-                    .font(.system(size: 11, weight: .black, design: .rounded))
+                    .font(.system(size: 14, weight: .black, design: .rounded))
                     .foregroundColor(.white)
             )
     }
@@ -24,7 +24,7 @@ struct Header: View {
         HStack(spacing: 6) {
             LogoMark()
             Text(title)
-                .font(.system(size: 11, weight: .bold))
+                .font(.system(size: 14, weight: .bold))
                 .tracking(0.6)
                 .foregroundColor(Brand.muted)
             Spacer(minLength: 0)
@@ -39,12 +39,12 @@ struct StatColumn: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(value)
-                .font(.system(size: 18, weight: .heavy, design: .rounded))
+                .font(.system(size: 21, weight: .heavy, design: .rounded))
                 .foregroundColor(accent ? Brand.crimson : Brand.ink)
                 .minimumScaleFactor(0.5)
                 .lineLimit(1)
             Text(label)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 14, weight: .medium))
                 .foregroundColor(Brand.muted)
                 .lineLimit(1)
         }
@@ -63,14 +63,14 @@ struct EmptyWidgetView: View {
     var body: some View {
         VStack(spacing: 6) {
             Image(systemName: icon)
-                .font(.system(size: 22, weight: .semibold))
+                .font(.system(size: 25, weight: .semibold))
                 .foregroundColor(Brand.crimson)
             Text(line1)
-                .font(.system(size: 15, weight: .bold))
+                .font(.system(size: 18, weight: .bold))
                 .foregroundColor(Brand.ink)
                 .multilineTextAlignment(.center)
             Text(line2)
-                .font(.system(size: 12))
+                .font(.system(size: 15))
                 .foregroundColor(Brand.muted)
                 .multilineTextAlignment(.center)
         }

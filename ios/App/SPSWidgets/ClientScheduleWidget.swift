@@ -47,14 +47,14 @@ struct ClientScheduleView: View {
             VStack(spacing: 0) {
                 if let d = nextDate {
                     Text(SPSDate.monthAbbrev(d))
-                        .font(.system(size: 12, weight: .bold))
+                        .font(.system(size: 15, weight: .bold))
                         .foregroundColor(.white.opacity(0.92))
                     Text(SPSDate.dayNum(d))
-                        .font(.system(size: 32, weight: .heavy, design: .rounded))
+                        .font(.system(size: 33, weight: .heavy, design: .rounded))
                         .foregroundColor(.white)
                 } else {
                     Image(systemName: "calendar")
-                        .font(.system(size: 26, weight: .semibold))
+                        .font(.system(size: 27, weight: .semibold))
                         .foregroundColor(.white)
                 }
             }
@@ -67,30 +67,30 @@ struct ClientScheduleView: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 Text("NEXT SERVICE")
-                    .font(.system(size: 10, weight: .bold)).tracking(0.6)
+                    .font(.system(size: 13, weight: .bold)).tracking(0.6)
                     .foregroundColor(Brand.muted)
                 Text(p?.nextVisitService ?? "Service Visit")
-                    .font(.system(size: 17, weight: .bold))
+                    .font(.system(size: 20, weight: .bold))
                     .foregroundColor(Brand.ink)
                     .lineLimit(1)
                 if let d = nextDate {
                     Text("\(SPSDate.dayLabel(d)) · \(SPSDate.timeLabel(d))")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 15, weight: .medium))
                         .foregroundColor(Brand.slate)
                         .lineLimit(1)
                 }
                 if let tech = p?.nextVisitTech, !tech.isEmpty {
                     HStack(spacing: 4) {
                         Image(systemName: "person.fill")
-                            .font(.system(size: 10)).foregroundColor(Brand.muted)
+                            .font(.system(size: 13)).foregroundColor(Brand.muted)
                         Text(tech)
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(size: 15, weight: .medium))
                             .foregroundColor(Brand.slate).lineLimit(1)
                     }
                 }
                 if let then = thenLine {
                     Text(then)
-                        .font(.system(size: 11))
+                        .font(.system(size: 14))
                         .foregroundColor(Brand.muted)
                         .lineLimit(1)
                 }
