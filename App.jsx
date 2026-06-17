@@ -9947,12 +9947,6 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
           <div style={{ display: "flex", gap: 10 }}>
             <div style={{ flex: 1 }}><label style={labelStyle}>Sender Name</label><input type="text" style={field} value={email.senderName || ""} onChange={e => set("senderName", e.target.value)} placeholder="Brandon" /></div>
           </div>
-          <div>
-            <label style={labelStyle}>Live Tracking Link <span style={{ textTransform: "none", color: T.textMuted, fontWeight: 400 }}>(optional — leave blank)</span></label>
-            <input type="url" style={field} value={email.trackLink || ""} onChange={e => set("trackLink", e.target.value)} placeholder="Automatic — no link needed" />
-            <div style={hint}>You don't need to set this. With Maps connected, each "On My Way" already sends the client a live map link for that stop, and they see the live tech map + ETA in their portal automatically. Only fill this to force one fixed link instead.</div>
-          </div>
-
           {/* Feature 8 — live tracking + On My Way behavior */}
           <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 14, display: "flex", flexDirection: "column", gap: 13 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
@@ -15678,41 +15672,19 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
               <InvoiceSettings invoicing={invCtl.draft} setInvoicing={invCtl.update} branding={brandCtl.draft} setBranding={brandCtl.update} onSyncData={onSyncData} />
             </Collapsible>
           )}
-          {(perms.editSettings || perms.canInvoice || perms.isAdmin) && (
-            <Collapsible title="Invite & Login Emails" subtitle="Customize the staff invite and client portal magic-link emails.">
+          {/* Merged: client message/email templates + sending identity + staff invite/login emails */}
+          {(perms.editNotifications || perms.editSettings || perms.canInvoice || perms.isAdmin) && (
+            <Collapsible title="Messages & Templates" subtitle="Client texts + email templates, your sending identity, and the staff invite + login emails.">
               <SaveBar ctl={emailCtl} T={T} />
-              <InviteEmailSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} />
+              {perms.editNotifications && <EmailSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} setBranding={brandCtl.update} />}
+              {(perms.editSettings || perms.canInvoice || perms.isAdmin) && <InviteEmailSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} />}
             </Collapsible>
           )}
-          {perms.editNotifications && (
-            <Collapsible title="Messaging & Notifications" subtitle="On My Way texts, email templates, and client notification messages.">
-              <SaveBar ctl={emailCtl} T={T} />
-              <EmailSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} setBranding={brandCtl.update} />
-            </Collapsible>
-          )}
-          {perms.editNotifications && (
-            <Collapsible title="Owner Alerts" subtitle="Which client events notify you, and where alert emails are sent.">
-              <SaveBar ctl={emailCtl} T={T} />
-              <NotificationSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} />
-            </Collapsible>
-          )}
+          {/* Merged: owner alerts + appointment reminders */}
           {(perms.editNotifications || perms.editSchedule) && (
-            <Collapsible title="Reminders & Messaging" subtitle="Appointment reminders, lead time, send time, and the reminder message.">
+            <Collapsible title="Alerts & Reminders" subtitle="Which client events notify you, plus appointment reminders sent to clients.">
+              {perms.editNotifications && <><SaveBar ctl={emailCtl} T={T} /><NotificationSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} /></>}
               <ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />
-            </Collapsible>
-          )}
-          {perms.editNotifications && (
-            <Collapsible title="Reviews & Feedback" subtitle="Your Google review link for happy clients. Lower ratings route privately to you.">
-              <SaveBar ctl={brandCtl} T={T} />
-              <div style={{ padding: 18 }}>
-                <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 }}>Google Review Link</label>
-                <input type="url" value={brandCtl.draft.googleReviewLink || ""} onChange={e => { const v = e.target.value; brandCtl.update(prev => ({ ...prev, googleReviewLink: v })); }}
-                  placeholder="https://g.page/r/…/review" autoCapitalize="none" autoCorrect="off" spellCheck={false}
-                  style={{ width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
-                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 8, lineHeight: 1.5 }}>
-                  From business.google.com — your "g.page/r/…/review" shortcut. After a completed visit, clients who rate 4–5★ see a "Leave us a Google review" button that opens this in their browser; lower ratings go privately to your office instead. Leave blank to hide the review button.
-                </div>
-              </div>
             </Collapsible>
           )}
           {perms.editCosts && (
@@ -15850,6 +15822,10 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
           <FieldRow label="Address">
             <Input value={localBranding.companyAddress || ""} onChange={e => set("companyAddress", e.target.value)} placeholder="123 Main St, Honey Brook, PA 19344" />
           </FieldRow>
+          <FieldRow label="Google Review Link">
+            <Input value={localBranding.googleReviewLink || ""} onChange={e => set("googleReviewLink", e.target.value)} placeholder="https://g.page/r/…/review" />
+          </FieldRow>
+          <div style={{ fontSize: 11, color: T.textMuted, marginTop: -4, lineHeight: 1.5 }}>After a visit, clients who rate 4–5★ get a "Leave us a Google review" button that opens this link; lower ratings route privately to your office. Leave blank to hide it.</div>
         </div>
       </Collapsible>
 
