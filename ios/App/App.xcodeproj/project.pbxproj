@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		06A75C216380A397606B597D /* WidgetData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3EE7FF203DCBC26110928B87 /* WidgetData.swift */; };
 		178EDFB0838EE63C2CA11959 /* SPSWidgetBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FCB50470F608CD5F316E8DB /* SPSWidgetBridge.swift */; };
+		A1B2C3D4E5F6000000000001 /* MainViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6000000000002 /* MainViewController.swift */; };
 		2FAD9763203C412B000D30F8 /* config.xml in Resources */ = {isa = PBXBuildFile; fileRef = 2FAD9762203C412B000D30F8 /* config.xml */; };
 		31637BA49EDF72F63C7BFDEE /* Provider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 316F22DE77FD97092FB3AC36 /* Provider.swift */; };
 		37EA33B56D4416EA61426717 /* OwnerProfitWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74F553504F0B9B91FE8A5228 /* OwnerProfitWidget.swift */; };
@@ -72,6 +73,7 @@
 		7F53044C23E4451758909D90 /* Theme.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		958DCC722DB07C7200EA8C5F /* debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = debug.xcconfig; path = ../debug.xcconfig; sourceTree = SOURCE_ROOT; };
 		9FCB50470F608CD5F316E8DB /* SPSWidgetBridge.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SPSWidgetBridge.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F6000000000002 /* MainViewController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MainViewController.swift; sourceTree = "<group>"; };
 		A81F1A1B5B6426450AECA4BD /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AC545A4D440AE0B4BFEAD6AF /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		B088F9EF2E83851AC9F83C03 /* SPSWidgetsBundle.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SPSWidgetsBundle.swift; sourceTree = "<group>"; };
@@ -133,6 +135,7 @@
 				2FAD9762203C412B000D30F8 /* config.xml */,
 				50B271D01FEDC1A000F3C39B /* public */,
 				9FCB50470F608CD5F316E8DB /* SPSWidgetBridge.swift */,
+				A1B2C3D4E5F6000000000002 /* MainViewController.swift */,
 				21F686A7FB136930B0FC54CE /* App.entitlements */,
 			);
 			path = App;
@@ -284,6 +287,7 @@
 			files = (
 				504EC3081FED79650016851F /* AppDelegate.swift in Sources */,
 				178EDFB0838EE63C2CA11959 /* SPSWidgetBridge.swift in Sources */,
+				A1B2C3D4E5F6000000000001 /* MainViewController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
