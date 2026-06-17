@@ -15694,8 +15694,24 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             </Collapsible>
           )}
           {perms.isAdmin && (
-            <Collapsible title="Backup & Restore" subtitle="Save a complete .zip of all data + media to Files, and restore from one.">
+            <Collapsible title="Backup, Restore & Reset" subtitle="Save/restore a full .zip of all data + media, or reset everything to factory defaults.">
               <BackupRestore />
+              <div style={{ padding: "0 18px 18px" }}>
+                {!confirmReset ? (
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, borderTop: `1px solid ${T.border}`, paddingTop: 16 }}>
+                    <div style={{ fontSize: 13, color: T.textMuted }}>Reset all data — clear everything and restore demo defaults. Can't be undone.</div>
+                    <button onClick={() => setConfirmReset(true)} style={{ flexShrink: 0, background: "transparent", color: "#C0392B", border: `1.5px solid #C0392B`, borderRadius: 10, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Reset</button>
+                  </div>
+                ) : (
+                  <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 16 }}>
+                    <div style={{ fontSize: 13, color: T.text, marginBottom: 12, fontWeight: 600 }}>This erases everything. Are you sure?</div>
+                    <div style={{ display: "flex", gap: 10 }}>
+                      <button onClick={() => { onResetData(); setConfirmReset(false); }} style={{ background: "#C0392B", color: "#fff", border: "none", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Yes, Reset Everything</button>
+                      <button onClick={() => setConfirmReset(false)} style={{ background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </Collapsible>
           )}
         </div>
@@ -15830,7 +15846,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
       </Collapsible>
 
       {/* ── APPEARANCE ── */}
-      <Collapsible title="Appearance" subtitle="Light mode, dark mode, and font settings.">
+      <Collapsible title="Appearance & Theme" subtitle="Light/dark mode, app font, and color theme.">
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
           <div>
             <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Mode</div>
@@ -15864,12 +15880,8 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             </div>
             <div style={{ fontSize: 12, color: T.textMuted, marginTop: 8 }}>Applies everywhere — staff app, client portal, and popups. Each button is shown in its own font.</div>
           </div>
-        </div>
-      </Collapsible>
-
-      {/* ── THEME ── */}
-      <Collapsible title="Color Theme" subtitle="Choose a preset theme or build a custom one.">
-        <div style={{ padding: 18 }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 10 }}>Color Theme</div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
             {Object.entries(THEMES).map(([key, theme]) => {
               const pal = palOf(theme);
@@ -15913,81 +15925,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
               );
             })()}
           </div>
-        </div>
-      </Collapsible>
-
-      {/* ── SAVED COLOR PALETTE ── */}
-      <Collapsible title="Brand Palette" subtitle="Your saved brand colors for quick access.">
-        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
-          <button onClick={() => setEditingPalette(e => !e)}
-            style={{ background: editingPalette ? T.primary : T.surfaceAlt, color: editingPalette ? "#fff" : T.textMuted, border: "none", borderRadius: 10, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-            {editingPalette ? "Done" : "Edit"}
-          </button>
-        </div>
-        <div style={{ padding: "14px 18px" }}>
-          <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 14, lineHeight: 1.5 }}>
-            Your saved colors. Tap any chip in the color editor below to apply instantly. These are pre-loaded with SPS brand colors.
           </div>
-
-          {/* Palette grid */}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: editingPalette ? 16 : 0 }}>
-            {(palette || DEFAULT_PALETTE).map((p, i) => (
-              <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 5 }}>
-                <div style={{ position: "relative" }}>
-                  <div style={{ width: 44, height: 44, borderRadius: 12, background: p.hex, border: `1px solid ${T.border}`, boxShadow: "0 1px 4px rgba(0,0,0,0.12)" }} />
-                  {editingPalette && (
-                    <button onClick={() => setPalette(prev => (prev||DEFAULT_PALETTE).filter((_, j) => j !== i))}
-                      style={{ position: "absolute", top: -6, right: -6, width: 18, height: 18, borderRadius: "50%", background: "#E5484D", border: `2px solid ${T.surface}`, color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", padding: 0, fontSize: 10 }}>
-                      ×
-                    </button>
-                  )}
-                </div>
-                <div style={{ fontSize: 10, color: T.textMuted, textAlign: "center", maxWidth: 44, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>{p.name}</div>
-              </div>
-            ))}
-
-            {/* Add new color */}
-            {editingPalette && (palette || DEFAULT_PALETTE).length < 16 && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, background: T.surfaceAlt, borderRadius: 12, padding: "10px 12px" }}>
-                  <div style={{ position: "relative", width: 36, height: 36, borderRadius: 9, overflow: "hidden", border: `1px solid ${T.border}`, background: newPaletteHex, flexShrink: 0 }}>
-                    <input type="color" value={newPaletteHex} onChange={e => setNewPaletteHex(e.target.value)}
-                      style={{ position: "absolute", inset: -4, width: 48, height: 48, border: "none", padding: 0, cursor: "pointer" }} />
-                  </div>
-                  <input
-                    type="text"
-                    value={newPaletteName}
-                    onChange={e => setNewPaletteName(e.target.value)}
-                    onKeyDown={e => {
-                      if (e.key === "Enter" && newPaletteName.trim()) {
-                        setPalette(prev => [...(prev || DEFAULT_PALETTE), { name: newPaletteName.trim(), hex: newPaletteHex }]);
-                        setNewPaletteName(""); setNewPaletteHex("#000000");
-                      }
-                    }}
-                    placeholder="Color name"
-                    style={{ flex: 1, padding: "6px 10px", border: `1.5px solid ${T.border}`, borderRadius: 9, fontSize: 12, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none" }}
-                  />
-                  <button
-                    onClick={() => {
-                      if (!newPaletteName.trim()) return;
-                      setPalette(prev => [...(prev || DEFAULT_PALETTE), { name: newPaletteName.trim(), hex: newPaletteHex }]);
-                      setNewPaletteName(""); setNewPaletteHex("#000000");
-                    }}
-                    style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 9, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
-                    Add
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {editingPalette && (
-            <button
-              onClick={() => setPalette(DEFAULT_PALETTE)}
-              style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12, cursor: "pointer", fontFamily: "inherit", padding: 0 }}>
-              Reset to SPS defaults
-            </button>
-          )}
         </div>
       </Collapsible>
 
@@ -16213,25 +16151,6 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
         </div>
       </Collapsible>
 
-      {/* ── RESET ── */}
-      <Collapsible title="Reset All Data" subtitle="Restore all app data to factory defaults.">
-        <div style={{ padding: 18 }}>
-          {!confirmReset ? (
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-              <div style={{ fontSize: 13, color: T.textMuted }}>Clear all saved data and restore demo defaults. This cannot be undone.</div>
-              <button onClick={() => setConfirmReset(true)} style={{ flexShrink: 0, background: "transparent", color: "#C0392B", border: `1.5px solid #C0392B`, borderRadius: 10, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Reset</button>
-            </div>
-          ) : (
-            <div>
-              <div style={{ fontSize: 13, color: T.text, marginBottom: 12, fontWeight: 600 }}>This erases everything. Are you sure?</div>
-              <div style={{ display: "flex", gap: 10 }}>
-                <button onClick={() => { onResetData(); setConfirmReset(false); }} style={{ background: "#C0392B", color: "#fff", border: "none", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Yes, Reset Everything</button>
-                <button onClick={() => setConfirmReset(false)} style={{ background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
-              </div>
-            </div>
-          )}
-        </div>
-      </Collapsible>
       </>}
       </>)}
     </div>
