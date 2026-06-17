@@ -15679,7 +15679,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             </Collapsible>
           )}
           {(perms.editSettings || perms.canInvoice || perms.isAdmin) && (
-            <Collapsible title="Invite & Login Emails" subtitle="Customize the staff invite and client portal magic-link emails." defaultOpen>
+            <Collapsible title="Invite & Login Emails" subtitle="Customize the staff invite and client portal magic-link emails.">
               <SaveBar ctl={emailCtl} T={T} />
               <InviteEmailSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} />
             </Collapsible>
@@ -15733,7 +15733,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
       {activeTab === "branding" && <>
 
       {/* ── LOGO & IDENTITY ── */}
-      <Collapsible title="Logo & Identity" subtitle="Name, logo, emoji, and app appearance." defaultOpen={true}>
+      <Collapsible title="Logo & Identity" subtitle="Name, logo, emoji, and app appearance.">
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
 
           {/* Live preview */}
