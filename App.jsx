@@ -8580,6 +8580,10 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
             ? (() => { const bySid = Object.fromEntries(m.ordered.map(s => [s.sid, s])); return routeOpt.order.map(sid => bySid[sid]).filter(Boolean); })()
             : m.ordered;
           const nextStop = orderedStops.find(s => !(completedSids && completedSids[s.sid]));
+          // The next stop's client, so the big "Head to next" button can launch the full
+          // flow (On My Way text + directions in the tech's preferred app), not just a link.
+          const nextStopClient = nextStop ? clients.find(x => String(x.id) === String(nextStop.clientId ?? nextStop.id)) : null;
+          const headToNext = () => nextStop && setHeadHereModal({ stop: nextStop, client: nextStopClient });
           return (
             <div style={{ paddingBottom: vp.isDesktop ? 0 : (nextStop ? 80 : 0) }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 0 12px" }}>
@@ -8644,19 +8648,19 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
               </div>
 
               {nextStop && (vp.isDesktop ? (
-                <a href={goDirections(nextStop.address)} target="_blank" rel="noreferrer" style={{ display: "block", textDecoration: "none", marginTop: 14 }}>
+                <div onClick={headToNext} role="button" style={{ display: "block", cursor: "pointer", marginTop: 14 }}>
                   <div style={{ background: T.primary, color: "#fff", borderRadius: 14, padding: "13px 16px", textAlign: "center", boxShadow: "0 6px 24px rgba(0,0,0,0.2)" }}>
-                    <div style={{ fontSize: 14, fontWeight: 800 }}>Directions to {nextStop.client} ›</div>
-                    <div style={{ fontSize: 11.5, opacity: 0.9, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nextStop.address}</div>
+                    <div style={{ fontSize: 14, fontWeight: 800 }}>Head to {nextStop.client} ›</div>
+                    <div style={{ fontSize: 11.5, opacity: 0.9, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>On My Way text + directions · {nextStop.address}</div>
                   </div>
-                </a>
+                </div>
               ) : (
-                <a href={goDirections(nextStop.address)} target="_blank" rel="noreferrer" style={{ position: "fixed", bottom: "calc(74px + env(safe-area-inset-bottom))", left: 0, right: 0, zIndex: 95, maxWidth: 740, margin: "0 auto", textDecoration: "none" }}>
+                <div onClick={headToNext} role="button" style={{ position: "fixed", bottom: "calc(74px + env(safe-area-inset-bottom))", left: 0, right: 0, zIndex: 95, maxWidth: 740, margin: "0 auto", cursor: "pointer" }}>
                   <div style={{ margin: "0 16px", background: T.primary, color: "#fff", borderRadius: 14, padding: "13px 16px", textAlign: "center", boxShadow: "0 6px 24px rgba(0,0,0,0.25)" }}>
-                    <div style={{ fontSize: 14, fontWeight: 800 }}>Directions to {nextStop.client} ›</div>
-                    <div style={{ fontSize: 11.5, opacity: 0.9, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nextStop.address}</div>
+                    <div style={{ fontSize: 14, fontWeight: 800 }}>Head to {nextStop.client} ›</div>
+                    <div style={{ fontSize: 11.5, opacity: 0.9, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>On My Way text + directions · {nextStop.address}</div>
                   </div>
-                </a>
+                </div>
               ))}
             </div>
           );
