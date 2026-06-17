@@ -5709,7 +5709,7 @@ function PhotoStrip({ photos, size = 56 }) {
 // ─────────────────────────────────────────────
 // SERVICE WORKSPACE (perform & log a stop, with profitability)
 // ─────────────────────────────────────────────
-function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedAt, onComplete, onClose, onViewClient, onOfficeAlert }) {
+function CompleteStopModal({ stop, client, email, catalog, costs, team, clients, dayDate, arrivedAt, onComplete, onUpdateStop, onClose, onViewClient, onOfficeAlert }) {
   const { T, branding, perms } = useApp();
   const todayStr = new Date().toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" });
   const firstName = client?.name?.split(" ")[0] || "there";
@@ -5744,6 +5744,18 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
   const [partSearch, setPartSearch] = useState("");       // filter the parts list (big catalogs)
   const [productSearch, setProductSearch] = useState("");  // filter the products list
   const [catCollapsed, setCatCollapsed] = useState({});    // `${kind}:${category}` -> collapsed (parts/treatments grouping)
+  // Combined editor: edit this stop's client + date right here (replaces the old Edit button).
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [edClientId, setEdClientId] = useState(() => String(stop.clientId ?? stop.id ?? ""));
+  const [edDateISO, setEdDateISO] = useState(() => { const [m, d, y] = (dayDate || "").split("/"); return (y && m && d) ? `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}` : ""; });
+  const applyDetails = () => {
+    if (!onUpdateStop) return;
+    const [y, m, d] = (edDateISO || "").split("-");
+    const newDate = (y && m && d) ? `${m}/${d}/${y}` : (dayDate || "");
+    const c = (clients || []).find(x => String(x.id) === String(edClientId));
+    onUpdateStop({ date: newDate, ...(c ? { id: c.id, clientId: c.id, client: c.name, address: c.address || "" } : {}) });
+    if (newDate && dayDate && newDate !== dayDate) onClose(); else setDetailsOpen(false);
+  };
   const MAX_PHOTOS = 10;
   const PHOTO_LABELS = ["Before", "After", "Detail", "Equipment", "Issue", "General"];
   const [busy, setBusy] = useState(false);
@@ -6018,6 +6030,29 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, arrivedA
         <div style={{ fontSize: 12, color: T.textMuted }}>{stop.type} · {todayStr}</div>
         {onViewClient && client && <button onClick={() => { onViewClient(client); onClose(); }} style={{ background: "none", border: "none", color: T.primary, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>View client →</button>}
       </div>
+
+      {/* Combined editor — change this stop's client or date right here (replaces the Edit button) */}
+      {onUpdateStop && (
+        <div style={sectionGap}>
+          <button type="button" onClick={() => setDetailsOpen(o => !o)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit" }}>
+            <label style={{ ...labelStyle, marginBottom: 0, cursor: "pointer" }}>Edit stop details</label>
+            <span style={{ color: T.textMuted, fontSize: 16, transform: detailsOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
+          </button>
+          {detailsOpen && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 10 }}>
+              <div>
+                <label style={labelStyle}>Client</label>
+                <ClientCombobox clients={clients} value={edClientId} onChange={setEdClientId} T={T} />
+              </div>
+              <div>
+                <label style={labelStyle}>Date</label>
+                <input type="date" value={edDateISO} onChange={e => setEdDateISO(e.target.value)} style={{ width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
+              </div>
+              <Btn onClick={applyDetails} block>Save changes</Btn>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Assigned to */}
       {(team || []).length > 0 && (
@@ -8285,7 +8320,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
               // A finished stop opens its SAVED report (photos/readings/services/notes),
               // not a blank complete form. Falls back to the complete form if no record.
               if (isComplete) { const entry = (c?.history || []).find(h => String(h.sid) === String(s.sid)); if (entry) return setHistoryEdit({ entry, clientId: c.id }); }
-              if (perms.completeStops) setCompleteModal({ stop: s, client: c });
+              if (perms.completeStops) setCompleteModal({ stop: s, client: c, dayDate });
             }}
             style={{ padding: compact ? "11px 14px" : "14px 16px", cursor: (selectMode || perms.completeStops || isComplete) ? "pointer" : "default", display: "flex", gap: 12, alignItems: "center" }}
           >
@@ -8353,44 +8388,31 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
               <div style={{ padding: "8px 12px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
                 {/* Primary: Complete / Re-open */}
                 {perms.completeStops && (
-                  <button onClick={e => { e.stopPropagation(); if (isComplete) { if (confirm("Re-open this stop? This removes its completed record so you can redo it.")) onUncomplete(s.id, s.sid); } else { setCompleteModal({ stop: s, client: c }); } }}
+                  <button onClick={e => { e.stopPropagation(); if (isComplete) { if (confirm("Re-open this stop? This removes its completed record so you can redo it.")) onUncomplete(s.id, s.sid); } else { setCompleteModal({ stop: s, client: c, dayDate }); } }}
                     style={{ width: "100%", background: isComplete ? hexA(T.accent, 0.1) : T.accent, color: isComplete ? T.accent : "#fff", border: isComplete ? `1.5px solid ${hexA(T.accent, 0.3)}` : "none", borderRadius: 12, padding: "12px", fontSize: 14, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
                     <Icon name={isComplete ? "refresh" : "check"} size={16} />
                     {isComplete ? "Re-open Stop" : "Complete Stop"}
                   </button>
                 )}
 
-                {/* Secondary row */}
-                <div style={{ display: "flex", gap: 7 }}>
-                  {perms.scheduleAddRemove && (
-                    <button onClick={e => { e.stopPropagation(); setEditStopModal({ stop: s, dayDate }); }}
-                      style={{ flex: 1, background: "transparent", color: T.textMuted, border: `1.5px solid ${T.border}`, borderRadius: 11, padding: "10px 6px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
-                      <Icon name="edit" size={14} /> Edit
-                    </button>
-                  )}
+                {/* Action row — tap the card above to edit + complete (the total editor).
+                    Head Here (directions + On My Way) is primary; arrival + delete sit beside it. */}
+                <div style={{ display: "flex", gap: 8 }}>
                   {!isComplete && (
                     <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: s, client: c }); }}
-                      style={{ flex: 1, background: hexA(T.primary, 0.08), color: T.primary, border: `1.5px solid ${hexA(T.primary, 0.25)}`, borderRadius: 11, padding: "10px 6px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
-                      <Icon name="map" size={14} /> Head Here
-                    </button>
-                  )}
-                  {!isComplete && perms.sendTexts && (
-                    <button onClick={e => { e.stopPropagation(); setOmwModal({ stop: { ...s, trackToken: ensureTrackToken(s) }, client: c, key: s.sid }); }}
-                      style={{ flex: 1, background: "transparent", color: T.primary, border: `1.5px solid ${hexA(T.primary, 0.4)}`, borderRadius: 11, padding: "10px 6px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
-                      <Icon name="message" size={14} /> {sent ? "Resend" : "On My Way"}
+                      style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "12px 10px", fontSize: 13.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+                      <Icon name="map" size={15} /> Head Here
                     </button>
                   )}
                   {!isComplete && (
                     <button onClick={e => { e.stopPropagation(); if (!arrived) setArrivedModal({ stop: s, client: c, key: s.sid }); }}
-                      style={{ flex: 1, background: arrived ? hexA("#16a34a", 0.1) : "transparent", color: arrived ? "#16a34a" : T.primary, border: `1.5px solid ${arrived ? hexA("#16a34a", 0.4) : hexA(T.primary, 0.4)}`, borderRadius: 11, padding: "10px 6px", fontSize: 12.5, fontWeight: 700, cursor: arrived ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
-                      {arrived
-                        ? <><Icon name="check" size={14} /> Arrived</>
-                        : <><svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 21s7-5.5 7-11a7 7 0 0 0-14 0c0 5.5 7 11 7 11z"/><circle cx="12" cy="10" r="2.5"/></svg> I'm Here</>}
+                      style={{ flexShrink: 0, minWidth: 102, background: arrived ? hexA("#16a34a", 0.12) : T.surfaceAlt, color: arrived ? "#16a34a" : T.text, border: `1px solid ${arrived ? hexA("#16a34a", 0.4) : T.border}`, borderRadius: 12, padding: "12px 12px", fontSize: 13, fontWeight: 700, cursor: arrived ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
+                      {arrived ? <><Icon name="check" size={14} /> Arrived</> : "I'm Here"}
                     </button>
                   )}
                   {perms.scheduleAddRemove && (
                     <button onClick={e => { e.stopPropagation(); if (confirm(`Delete this stop for ${c?.name || "this client"}? This can't be undone.`)) deleteStop(dayDate, s.sid); }}
-                      style={{ width: 44, flexShrink: 0, background: "transparent", color: "#C0392B", border: `1.5px solid ${hexA("#C0392B", 0.3)}`, borderRadius: 11, padding: "10px 0", cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center" }}
+                      style={{ flexShrink: 0, width: 46, background: T.surfaceAlt, color: "#C0392B", border: `1px solid ${T.border}`, borderRadius: 12, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center" }}
                       title="Delete stop">
                       <Icon name="trash" size={15} />
                     </button>
@@ -8746,8 +8768,11 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           catalog={catalog}
           costs={costs}
           team={team}
+          clients={clients}
+          dayDate={completeModal.dayDate}
           arrivedAt={arrivals[completeModal.stop.sid]}
           onComplete={onComplete}
+          onUpdateStop={completeModal.dayDate ? (changes) => updateStop(completeModal.dayDate, completeModal.stop.sid, changes) : null}
           onClose={() => setCompleteModal(null)}
           onViewClient={onClientSelect}
           onOfficeAlert={onOfficeAlert}
