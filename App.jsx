@@ -9947,7 +9947,11 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
           <div style={{ display: "flex", gap: 10 }}>
             <div style={{ flex: 1 }}><label style={labelStyle}>Sender Name</label><input type="text" style={field} value={email.senderName || ""} onChange={e => set("senderName", e.target.value)} placeholder="Brandon" /></div>
           </div>
-          <div><label style={labelStyle}>Live Tracking Link <span style={{ textTransform: "none", color: T.textMuted, fontWeight: 400 }}>(optional)</span></label><input type="url" style={field} value={email.trackLink || ""} onChange={e => set("trackLink", e.target.value)} placeholder="Leave blank until Maps API is connected" /></div>
+          <div>
+            <label style={labelStyle}>Live Tracking Link <span style={{ textTransform: "none", color: T.textMuted, fontWeight: 400 }}>(optional — leave blank)</span></label>
+            <input type="url" style={field} value={email.trackLink || ""} onChange={e => set("trackLink", e.target.value)} placeholder="Automatic — no link needed" />
+            <div style={hint}>You don't need to set this. With Maps connected, each "On My Way" already sends the client a live map link for that stop, and they see the live tech map + ETA in their portal automatically. Only fill this to force one fixed link instead.</div>
+          </div>
 
           {/* Feature 8 — live tracking + On My Way behavior */}
           <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 14, display: "flex", flexDirection: "column", gap: 13 }}>
