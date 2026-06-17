@@ -18,7 +18,7 @@ function setCors(res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
-function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = "" }) {
+function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = "", actionUrl = "", actionLabel = "" }) {
   const accent = /^#?[0-9a-fA-F]{3,8}$/.test(branding.accent || "") ? branding.accent : "#B81D24";
   const company = escapeHtml(branding.companyName || "Stone Property Solutions");
   // Wrap phone/email as explicitly white, non-underlined links so Apple Mail doesn't
@@ -42,6 +42,7 @@ function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = ""
       ${heading ? `<div style="font-size:16px;font-weight:800;margin-bottom:10px">${escapeHtml(heading)}</div>` : ""}
       ${message ? `<div style="font-size:14px;color:#374151;line-height:1.5;white-space:pre-wrap">${escapeHtml(message)}</div>` : ""}
       ${rowsHtml ? `<table style="width:100%;border-collapse:collapse;margin-top:14px;border-top:1px solid #eef0f2;padding-top:6px">${rowsHtml}</table>` : ""}
+      ${actionUrl ? `<div style="margin-top:18px"><a href="${escapeHtml(actionUrl)}" style="display:inline-block;background:${accent};color:#fff;text-decoration:none;font-weight:800;padding:12px 22px;border-radius:10px;font-size:14px">${escapeHtml(actionLabel || "Open in the app")}</a></div>` : ""}
       ${photosHtml || ""}
     </div>
   </div>`;
@@ -57,7 +58,7 @@ export default async function handler(req, res) {
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { to, subject, heading, message, rows = [], branding = {}, photos = [] } = req.body || {};
+  const { to, subject, heading, message, rows = [], branding = {}, photos = [], actionUrl = "", actionLabel = "" } = req.body || {};
   if (!to || !/.+@.+\..+/.test(to)) return res.status(400).json({ error: "A valid recipient email is required" });
   if (!subject) return res.status(400).json({ error: "A subject is required" });
 
@@ -82,7 +83,7 @@ export default async function handler(req, res) {
     });
     const photosHtml = photoBlocks.length ? `<div style="margin-top:16px;border-top:1px solid #eef0f2;padding-top:14px"><div style="font-size:14px;font-weight:800;margin-bottom:10px">Photos</div>${photoBlocks.join("")}</div>` : "";
 
-    const html = buildHtml({ branding, heading: heading || subject, message, rows, photosHtml });
+    const html = buildHtml({ branding, heading: heading || subject, message, rows, photosHtml, actionUrl, actionLabel });
     const textLines = [heading || subject, "", message || ""];
     (rows || []).filter(Boolean).forEach(([k, v]) => textLines.push(`${k}: ${v}`));
     if (attachments.length) textLines.push("", `(${attachments.length} photo${attachments.length > 1 ? "s" : ""} attached)`);

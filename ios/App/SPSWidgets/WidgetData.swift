@@ -20,6 +20,11 @@ struct WidgetPayload: Codable {
     var overdueCount: Int?
     var collectedMonth: Double?
 
+    // Owner · today's route progress
+    var stopsTotal: Int?
+    var stopsDone: Int?
+    var techs: [TechProgress]?
+
     // Client
     var nextVisitAt: String?
     var nextVisitService: String?
@@ -38,6 +43,9 @@ struct WidgetPayload: Codable {
         case unpaidCount      = "unpaid_count"
         case overdueCount     = "overdue_count"
         case collectedMonth   = "collected_month"
+        case stopsTotal       = "stops_total"
+        case stopsDone        = "stops_done"
+        case techs
         case nextVisitAt      = "next_visit_at"
         case nextVisitService = "next_visit_service"
         case nextVisitTech    = "next_visit_tech"
@@ -45,6 +53,16 @@ struct WidgetPayload: Codable {
         case balanceDue       = "balance_due"
         case balanceDueDate   = "balance_due_date"
     }
+}
+
+// One tech's progress for today: name + stops done / total. Keys already match the
+// JSON the app writes (name/done/total), so no CodingKeys remapping is needed.
+struct TechProgress: Codable, Identifiable {
+    var name: String?
+    var done: Int?
+    var total: Int?
+    // Stable identity for ForEach without relying on array index.
+    var id: String { (name ?? "tech") + "-\(total ?? 0)" }
 }
 
 enum SharedStore {

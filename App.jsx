@@ -1537,7 +1537,7 @@ const DEFAULT_EMAIL = {
   smsReminder: "Hi {first}, a friendly reminder from {company} that your service is scheduled for {date}. Reply here with any questions!",
   // Invoice notifications ({first}, {company}, {number}, {amount}, {dueDate}, {link})
   smsInvoice: "Hi {first}, your invoice {number} for {amount} from {company} is ready. {link}",
-  chatInvoice: "New invoice {number} — {amount} due {dueDate}. View & pay it in your portal.",
+  chatInvoice: "New invoice {number} — {amount} due {dueDate}. View & pay it in your portal here.",
   // Invoice EMAIL wording (the rest of the invoice — line items/totals/pay button — is
   // structural). Tags: {number} {company} {first} {amount} {dueDate}.
   invoiceEmailSubject: "Invoice {number} from {company}",
@@ -1565,8 +1565,22 @@ function renderReport(email, ctx, { plain = false } = {}) {
   if (ctx.tech) lines.push(`Technician: ${ctx.tech}`);
   lines.push("");
   if (ctx.notes) { lines.push("Work completed:"); lines.push(ctx.notes); lines.push(""); }
-  if (email.showReadings && (ctx.ph || ctx.ammonia || ctx.nitrite || ctx.temp)) {
-    lines.push(`Water readings: pH ${ctx.ph || "-"} · Ammonia ${ctx.ammonia || "-"} · Nitrite ${ctx.nitrite || "-"} · Temp ${ctx.temp || "-"}`);
+  // Water tests — list every reading the tech recorded (full panel), so clients who
+  // rely on the emailed/texted report (not the app) get the complete picture.
+  if (email.showReadings) {
+    const entries = ctx.readings && typeof ctx.readings === "object"
+      ? Object.entries(ctx.readings).filter(([, v]) => v !== "" && v != null && v !== "—")
+      : [["pH", ctx.ph], ["Ammonia", ctx.ammonia], ["Nitrite", ctx.nitrite], ["Temperature", ctx.temp]].filter(([, v]) => v && v !== "—");
+    if (entries.length) {
+      lines.push("Water tests:");
+      entries.forEach(([k, v]) => lines.push(`  • ${k}: ${v}`));
+      lines.push("");
+    }
+  }
+  // Treatments applied — name + amount (oz), so the report stands on its own.
+  if (Array.isArray(ctx.treatmentsUsed) && ctx.treatmentsUsed.length) {
+    lines.push("Treatments applied:");
+    ctx.treatmentsUsed.forEach(t => lines.push(`  • ${t.name}: ${t.oz} ${t.unit || "oz"}`));
     lines.push("");
   }
   if (email.showPhotosNote && ctx.photoCount > 0) {
@@ -5871,6 +5885,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
   const ctx = {
     firstName, company: branding.companyName, serviceType: stop.type,
     date: todayStr, tech: "B. Stone", notes: notesClient,
+    readings, treatmentsUsed,   // full water-test panel + treatments (name + oz) for the report
     ph: readings["pH"] || "", ammonia: readings["Ammonia"] || "", nitrite: readings["Nitrite"] || "", temp: readings["Temperature"] || "",
     photoCount: photos.length,
     photosBeforeCount: photos.filter(p => p.label === "Before").length,
@@ -5929,6 +5944,17 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
   };
 
   const [reportSend, setReportSend] = useState({ busy: "", msg: null });
+  // Drop the same report into the client's in-app portal thread so they always have it
+  // in the app too — not just email/text. Posted once per completed report (deduped),
+  // best-effort: a failure never blocks the send.
+  const reportPostedRef = useRef(false);
+  const postReportToPortal = () => {
+    if (reportPostedRef.current || !client?.id) return;
+    reportPostedRef.current = true;
+    supabase.from("sps_messages")
+      .insert({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: reportText })
+      .then(() => {}, () => {});
+  };
   // Reports go out through the business identity — Resend email + Quo text — never the
   // phone's Mail or Messages app, so they always send as the company (not the tech).
   const sendEmail = async () => {
@@ -5955,6 +5981,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
         body: JSON.stringify({ ...senderEmailFields(), to, subject, heading: subject, message: reportText, photos: photoPayload, branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary } }),
       });
       const d = await r.json().catch(() => ({}));
+      if (r.ok && d.sent) postReportToPortal();   // mirror the report into the in-app portal thread
       setReportSend({ busy: "", msg: (r.ok && d.sent) ? { ok: true, text: `Report emailed to ${to}${photoPayload.length ? ` with ${photoPayload.length} photo${photoPayload.length > 1 ? "s" : ""}` : ""}.` } : { ok: false, text: d.error || "Email failed to send." } });
     } catch (_) { setReportSend({ busy: "", msg: { ok: false, text: "Couldn't reach the server." } }); }
   };
@@ -5968,6 +5995,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
       .replace(/\{company\}/g, branding.companyName)
       .replace(/\{sender\}/g, (email && email.senderName) || branding.companyName);
     const r = await sendSms(phone, short); // business Quo line ONLY
+    if (r.ok) postReportToPortal();   // mirror the full report into the in-app portal thread
     setReportSend({ busy: "", msg: r.ok ? { ok: true, text: `Report texted to ${client?.name || "the client"}.` } : { ok: false, text: r.error || (r.missingEnv ? "Texting isn't set up yet." : "Text failed to send.") } });
   };
 
@@ -11977,6 +12005,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
             <div style={{ fontSize: 12, fontWeight: 700, color: "#16a34a", marginBottom: 8 }}>Payment link ready</div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <a href={inv.paymentLink} target="_blank" rel="noopener noreferrer"
+                onClick={(e) => { e.preventDefault(); openInAppBrowser(inv.paymentLink); }}
                 style={{ flex: 1, minWidth: 140, textAlign: "center", background: "#fff", border: `1px solid ${hexA("#16a34a", 0.3)}`, color: "#16a34a", borderRadius: 10, padding: "9px 12px", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>
                 Open Payment Link
               </a>
@@ -12976,7 +13005,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
 
       // 2) In-app notification in the client's portal (drives the Messages badge on login)
       if (client?.id) {
-        const note = `New invoice ${invoice.number} — ${money(totals.total)} due ${invoice.dueDate || "soon"}. View & pay it in your portal.`;
+        const note = `New invoice ${invoice.number} — ${money(totals.total)} due ${invoice.dueDate || "soon"}. View & pay it in your portal here.[[inv:${invoice.id}]]`;
         const { error: msgErr } = await supabase.from("sps_messages").insert({
           client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: note,
         });
@@ -12990,17 +13019,13 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
     }
   };
 
-  // Invoice document + the "Pay via QuickBooks" link — this is the scrollable content.
+  // Invoice document. The big green "Pay via QuickBooks" CTA is intentionally NOT here —
+  // staff manage payment with "Mark Paid" (below) and the Open/Copy payment link in the
+  // editor; the client-facing pay button lives in the portal (CPInvoices). Keeping it off
+  // the staff view avoids a confusing "pay your own invoice" control.
   const doc = (
     <>
       <InvoiceDocument invoice={invoice} client={client} branding={branding} cfg={cfg} T={T} />
-      {invoice.paymentLink && eff !== "Paid" && (
-        <a href={invoice.paymentLink} target="_blank" rel="noopener noreferrer"
-          style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: "#2CA01C", color: "#fff", borderRadius: 14, padding: "14px 20px", fontWeight: 800, fontSize: 15, textDecoration: "none", boxShadow: "0 4px 16px rgba(44,160,28,0.3)", marginTop: 14 }}>
-          <svg viewBox="0 0 24 24" width={18} height={18} fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>
-          Pay via QuickBooks
-        </a>
-      )}
     </>
   );
 
@@ -13753,7 +13778,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
       const phone = String(c.phone || "").replace(/[^\d+]/g, "");
       const cEmail = (c.email || "").trim();
       if (doSms && phone) { try { const r = await fetch(`${PROD_URL}/api/send-sms`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: phone, message: fill(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv), from: SENDER_IDENTITY.textingNumber || "" }) }); const d = await r.json().catch(() => ({})); if (!r.ok || !d.sent) fails++; } catch (_) { fails++; } }
-      if (doChat && c.id) { try { await supabase.from("sps_messages").insert({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) }); } catch (_) { fails++; } }
+      if (doChat && c.id) { try { await supabase.from("sps_messages").insert({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) + `[[inv:${inv.id}]]` }); } catch (_) { fails++; } }
       if (doEmail && cEmail) { try { const tt = invoiceTotals(inv); await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...senderEmailFields(), emailSubject: fill(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, c, inv), emailIntro: fill(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, c, inv), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); } catch (_) { fails++; } }
     }
     setMsgBusy(false);
@@ -16286,7 +16311,7 @@ function MessagesScreen({ clients, currentUser, T }) {
       const map = {};
       data.forEach(m => {
         const cid = String(m.client_id);
-        if (!map[cid]) map[cid] = { lastMsg: m.body, lastAt: m.created_at, unread: 0 };
+        if (!map[cid]) map[cid] = { lastMsg: String(m.body || "").replace(/\[\[inv:[^\]]+\]\]/g, ""), lastAt: m.created_at, unread: 0 };
         if (m.sender === "client" && !m.read_at) map[cid].unread++;
       });
       setThreadMap(map);
@@ -16409,7 +16434,25 @@ function MessagesScreen({ clients, currentUser, T }) {
 }
 
 // ── Shared chat thread UI (used by both staff and client) ──
-function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onSent }) {
+// Render a chat message body. Invoice notifications carry a hidden marker `[[inv:<id>]]`;
+// strip it always, and — when the portal hands us onOpenInvoice — turn the trailing word
+// "here" into a tap target that jumps straight to that invoice (falling back to a chip).
+function renderChatBody(body, onOpenInvoice) {
+  const raw = String(body || "");
+  const mk = raw.match(/\[\[inv:([^\]]+)\]\]/);
+  const invId = mk ? mk[1] : null;
+  const text = raw.replace(/\[\[inv:[^\]]+\]\]/g, "").trim();
+  if (!invId || !onOpenInvoice) return text;
+  const link = (label) => (
+    <span onClick={(e) => { e.stopPropagation(); onOpenInvoice(invId); }}
+      style={{ fontWeight: 800, textDecoration: "underline", cursor: "pointer" }}>{label}</span>
+  );
+  const idx = text.toLowerCase().lastIndexOf("here");
+  if (idx >= 0) return <>{text.slice(0, idx)}{link(text.slice(idx, idx + 4))}{text.slice(idx + 4)}</>;
+  return <>{text} {link("View invoice →")}</>;
+}
+
+function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onSent, onOpenInvoice }) {
   const { messages, loading, send, markRead } = useMessages(clientId);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
@@ -16471,7 +16514,7 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
                   wordBreak: "break-word",
                   boxShadow: isMine ? `0 2px 8px ${hexA(T.primary, 0.25)}` : "none",
                 }}>
-                  {m.body}
+                  {renderChatBody(m.body, isMine ? null : onOpenInvoice)}
                 </div>
               </div>
             </div>
@@ -16523,7 +16566,7 @@ function StaffChat({ client, currentUser, T, onBack }) {
 }
 
 // ── Client messages tab ──
-function CPMessages({ client, branding, onSubmit, onClientMessage, T, vp = {} }) {
+function CPMessages({ client, branding, onSubmit, onClientMessage, onOpenInvoice, T, vp = {} }) {
   const [view, setView] = useState("messages"); // "messages" | "request"
 
   if (view === "request") {
@@ -16551,7 +16594,7 @@ function CPMessages({ client, branding, onSubmit, onClientMessage, T, vp = {} })
           Request Service
         </button>
       </div>
-      <ChatThread clientId={client.id} sender="client" senderName={client.name} T={T} onSent={onClientMessage} />
+      <ChatThread clientId={client.id} sender="client" senderName={client.name} T={T} onSent={onClientMessage} onOpenInvoice={onOpenInvoice} />
     </div>
   );
 
@@ -20895,9 +20938,11 @@ function CPPond({ client, T }) {
 function CPHistory({ client, T }) { return <CPPond client={client} T={T} />; }
 
 // ── CP INVOICES ──
-function CPInvoices({ client, invoices, branding, T, vp = {} }) {
+function CPInvoices({ client, invoices, branding, T, vp = {}, initialSel = null }) {
   const myInvoices = sortInvoices((invoices || []).filter(iv => invoiceMatchesClient(iv, client)));
-  const [sel, setSel] = useState(null);
+  const [sel, setSel] = useState(initialSel);
+  // Open a specific invoice when deep-linked from a portal message ("here" link).
+  useEffect(() => { if (initialSel != null) setSel(initialSel); }, [initialSel]);
 
   // Normalize status — handles both "Paid" and "paid", "Overdue"/"overdue" etc.
   const normStatus = (iv) => {
@@ -21347,6 +21392,10 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, team
     try { return JSON.parse(localStorage.getItem(prefsKey) || "{}"); } catch { return {}; }
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Deep-link target: tapping the "here" link in an invoice message jumps to Invoices
+  // with that invoice pre-opened. (setPage is defined below; only called on tap.)
+  const [cpInvoiceSel, setCpInvoiceSel] = useState(null);
+  const openInvoice = (id) => { setCpInvoiceSel(String(id)); setSettingsOpen(false); setPage("cp_invoices"); };
 
   // Persist prefs to localStorage whenever they change
   useEffect(() => {
@@ -21400,8 +21449,8 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, team
       {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} team={team} onNav={setPage} onRateVisit={onRateVisit} T={T} vp={vp} />}
       {!settingsOpen && page === "cp_property" && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
       {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
-      {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} vp={vp} />}
-      {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} onSubmit={onServiceRequest} onClientMessage={isStaffPreview ? undefined : onClientMessage} T={T} vp={vp} />}
+      {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} vp={vp} initialSel={cpInvoiceSel} />}
+      {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} onSubmit={onServiceRequest} onClientMessage={isStaffPreview ? undefined : onClientMessage} onOpenInvoice={openInvoice} T={T} vp={vp} />}
       {!settingsOpen && page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
     </SectionErrorBoundary>
   );
@@ -21870,6 +21919,28 @@ export default function App({ authEmail = "", onSignOut }) {
         .filter((iv) => inRange(iv.paidDate || iv.date, monthStart, monthEnd))
         .reduce((s, iv) => s + invoiceTotals(iv).total, 0);
 
+      // Today's route progress — stops scheduled today, completed vs total, broken
+      // down by the techs working today. Mirrors the Schedule tab's per-tech grouping
+      // (assigneeId → team member; anything unassigned rolls into "Unassigned").
+      const todayStr = todayMDY();
+      const todayObj = (schedule || []).find((d) => d.date === todayStr);
+      const todayStops = todayObj ? (todayObj.stops || []) : [];
+      const isDone = (s) => !!(completedSids && completedSids[s.sid]);
+      const doneCount = todayStops.filter(isDone).length;
+      const techRows = [];
+      if (todayStops.length) {
+        if ((team || []).length === 0) {
+          techRows.push({ name: "My Route", total: todayStops.length, done: doneCount });
+        } else {
+          (team || []).forEach((m) => {
+            const ss = todayStops.filter((s) => s.assigneeId === m.id);
+            if (ss.length) techRows.push({ name: m.name, total: ss.length, done: ss.filter(isDone).length });
+          });
+          const un = todayStops.filter((s) => !s.assigneeId || !(team || []).some((m) => m.id === s.assigneeId));
+          if (un.length) techRows.push({ name: "Unassigned", total: un.length, done: un.filter(isDone).length });
+        }
+      }
+
       const payload = {
         role: "owner",
         updated_at: now.toISOString(),
@@ -21879,8 +21950,11 @@ export default function App({ authEmail = "", onSignOut }) {
         unpaid_count: open.length,
         overdue_count: overdue,
         collected_month: r2(collected),
+        stops_total: todayStops.length,
+        stops_done: doneCount,
       };
       if (rateN > 0) payload.avg_effective_rate = r2(rateSum / rateN); // omit when unknowable
+      if (techRows.length) payload.techs = techRows;                   // omit when no route today
 
       const res = await sendWidgetPayload(payload);
       return setWidgetSync({ ok: !!res.ok, native: !!res.native, skipped: !!res.skipped, reason: res.reason || "", fields: Object.keys(payload) });
@@ -21891,7 +21965,7 @@ export default function App({ authEmail = "", onSignOut }) {
     };
     registerWidgetPush(pushNow);
     pushNow();
-  }, [hydrated, currentUser, clients, invoices]);
+  }, [hydrated, currentUser, clients, invoices, schedule, team, completedSids]);
   // Smart reopen on a warm resume (the app wasn't killed):
   //  • backgrounded ~30 min or more  → land on Home with the full splash (fresh start)
   //  • backgrounded under ~30 min     → stay exactly where I left off (no disruption)
@@ -22219,15 +22293,40 @@ export default function App({ authEmail = "", onSignOut }) {
         ...(qi.lateFeeAppliedAt ? { lateFeeAppliedAt: qi.lateFeeAppliedAt } : {}),
         total:      String(qi.total),
         balance:    qi.balance,
+        ...(qi.paymentLink ? { paymentLink: qi.paymentLink } : {}),
         source:     "quickbooks",
         createdAt:  Date.now(),
       };
     });
 
-    // Merge — keep manual invoices, replace all QB ones
+    // Merge — dedupe by QB id. An invoice created in-app and pushed to QuickBooks already
+    // lives locally WITH its payment link; the pull-sync used to add a second `qb_<id>`
+    // copy (no link) so the client saw two invoices — one payable, one inert. Instead,
+    // fold the QB snapshot INTO the existing local record (keeping its id + payment link),
+    // and only add QB invoices that have no local twin (created directly in QuickBooks).
     setInvoices(prev => {
-      const manual = (prev || []).filter(iv => iv.source !== "quickbooks");
-      return [...manual, ...newInvoices];
+      const prevList = prev || [];
+      const usedQbIds = new Set();
+      const kept = prevList.filter(iv => iv.source !== "quickbooks"); // drop prior QB-only copies
+      const merged = kept.map(iv => {
+        if (!iv.qbId) return iv;
+        const qi = newInvoices.find(n => String(n.qbId) === String(iv.qbId));
+        if (!qi) return iv;
+        usedQbIds.add(String(iv.qbId));
+        // Refresh QB-owned fields but preserve the local id, the payment link, and the
+        // manual source so the client keeps a single, payable invoice.
+        return {
+          ...iv,
+          number:   qi.number  || iv.number,
+          status:   qi.status  || iv.status,
+          total:    qi.total   != null ? qi.total   : iv.total,
+          balance:  qi.balance != null ? qi.balance : iv.balance,
+          dueDate:  qi.dueDate || iv.dueDate,
+          paymentLink: iv.paymentLink || qi.paymentLink,
+        };
+      });
+      const fresh = newInvoices.filter(n => !usedQbIds.has(String(n.qbId)));
+      return [...merged, ...fresh];
     });
 
     // Log match stats
@@ -22268,6 +22367,23 @@ export default function App({ authEmail = "", onSignOut }) {
     setInvoiceFilter(opts.invoiceFilter || "All");
     window.scrollTo({ top: 0, behavior: "instant" });
   };
+
+  // Consume in-app deep links (spsway://alerts / schedule / invoices). Owner-email "Open
+  // in the SPS app" buttons and the widgets land here. Handles a warm app (event) and a
+  // cold start (target stashed in localStorage by main.jsx before React mounted).
+  useEffect(() => {
+    if (!hydrated) return;
+    const map = { alerts: "dashboard", schedule: "schedule", invoices: "invoices", profit: "dashboard" };
+    const go = (section) => {
+      const target = map[String(section || "").toLowerCase()];
+      if (target) handleNav(target);
+      try { localStorage.removeItem("sps_deeplink"); } catch (_) {}
+    };
+    try { const pending = localStorage.getItem("sps_deeplink"); if (pending) go(pending); } catch (_) {}
+    const onDeep = (e) => go(e && e.detail);
+    window.addEventListener("sps-deeplink", onDeep);
+    return () => window.removeEventListener("sps-deeplink", onDeep);
+  }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSaveNewClient = (form) => {
     const newClient = {
@@ -22405,7 +22521,7 @@ export default function App({ authEmail = "", onSignOut }) {
   // so this is fire-and-forget: a failed/blocked send is logged, never blocks the
   // request. Uses the absolute PROD_URL so it works on the native app
   // (capacitor://localhost) as well as the web build.
-  const notifyOwnerEmail = (eventKey, { subject, heading, message, rows }) => {
+  const notifyOwnerEmail = (eventKey, { subject, heading, message, rows, actionUrl, actionLabel }) => {
     try {
       const notify = (email && email.notify) || {};
       const cfg = (notify.events || {})[eventKey];
@@ -22415,7 +22531,7 @@ export default function App({ authEmail = "", onSignOut }) {
       fetch(`${PROD_URL}/api/send-notification`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...senderEmailFields(), to, subject, heading, message, rows, branding }),
+        body: JSON.stringify({ ...senderEmailFields(), to, subject, heading, message, rows, branding, actionUrl, actionLabel }),
       })
         .then(r => { if (!r.ok) r.json().catch(() => ({})).then(d => console.warn("Owner email failed:", d?.error || r.status)); })
         .catch(err => console.warn("Owner email error:", err?.message || err));
@@ -22438,8 +22554,10 @@ export default function App({ authEmail = "", onSignOut }) {
     notifyOwnerEmail("service_request", {
       subject: `Service request: ${req.clientName}`,
       heading: `${req.clientName} requested service`,
-      message: req.notes ? `Their note:\n"${req.notes}"\n\nOpen the app to schedule it: ${PROD_URL}` : `Open the app to schedule it: ${PROD_URL}`,
+      message: `${req.notes ? `Their note:\n"${req.notes}"\n\n` : ""}Tap "Open in the SPS app" below to schedule it. On a computer? ${PROD_URL}`,
       rows: [["Client", req.clientName], ["Service", req.type || "—"], req.dates ? ["Preferred dates", req.dates] : null],
+      actionUrl: "spsway://alerts",
+      actionLabel: "Open in the SPS app",
     });
     postClientMessage(req.clientId, "client", req.clientName, `I'd like to request ${req.type || "service"}${req.dates ? ` (${req.dates})` : ""}.${req.notes ? ` ${req.notes}` : ""}`);
   };
@@ -22516,12 +22634,14 @@ export default function App({ authEmail = "", onSignOut }) {
     notifyOwnerEmail("upgrade_request", {
       subject: `Upgrade request: ${req.clientName} → ${req.requestedPlan}`,
       heading: `${req.clientName} wants to upgrade`,
-      message: (req.message ? `Their note:\n"${req.message}"\n\n` : "") + `Open the app to review and process this request: ${PROD_URL}`,
+      message: (req.message ? `Their note:\n"${req.message}"\n\n` : "") + `Tap "Open in the SPS app" below to review and process it. On a computer? ${PROD_URL}`,
       rows: [
         ["Client", req.clientName],
         ["Current plan", req.currentPlan || "None"],
         ["Requested plan", req.requestedPlan],
       ],
+      actionUrl: "spsway://alerts",
+      actionLabel: "Open in the SPS app",
     });
     postClientMessage(req.clientId, "client", req.clientName, `I'd like to upgrade to ${req.requestedPlan}${req.currentPlan ? ` (from ${req.currentPlan})` : ""}.${req.message ? ` ${req.message}` : ""}`);
   };

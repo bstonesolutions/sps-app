@@ -62,13 +62,26 @@ async function handleAuthDeepLink(rawUrl) {
   return false;
 }
 
+// Route in-app deep links (spsway://alerts, spsway://schedule, spsway://invoices, and the
+// widgets' spsway://… URLs) to the right screen. Stash the target so a cold start can pick
+// it up after the app mounts, and broadcast an event for a warm app. Auth links
+// (spsway://login#tokens) are handled by handleAuthDeepLink above and skipped here.
+function handleAppDeepLink(rawUrl) {
+  if (!rawUrl || rawUrl.indexOf("spsway://") !== 0) return;
+  let host = "";
+  try { host = (new URL(rawUrl).host || "").toLowerCase(); } catch (_) { return; }
+  if (!host || host === "login") return; // login = auth deep link, not a navigation target
+  try { localStorage.setItem("sps_deeplink", host); } catch (_) {}
+  try { window.dispatchEvent(new CustomEvent("sps-deeplink", { detail: host })); } catch (_) {}
+}
+
 // Subscribe to inbound spsway:// URLs (warm app) and the launch URL (cold start).
 // No-op on web and if @capacitor/app isn't present.
 if (typeof window !== "undefined" && Capacitor.isNativePlatform()) {
   import("@capacitor/app")
     .then(({ App: CapApp }) => {
-      CapApp.addListener("appUrlOpen", (event) => { handleAuthDeepLink(event && event.url); });
-      CapApp.getLaunchUrl().then((res) => { if (res && res.url) handleAuthDeepLink(res.url); }).catch(() => {});
+      CapApp.addListener("appUrlOpen", (event) => { const u = event && event.url; handleAuthDeepLink(u); handleAppDeepLink(u); });
+      CapApp.getLaunchUrl().then((res) => { if (res && res.url) { handleAuthDeepLink(res.url); handleAppDeepLink(res.url); } }).catch(() => {});
     })
     .catch(() => {});
 }
