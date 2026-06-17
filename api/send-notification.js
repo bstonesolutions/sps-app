@@ -21,8 +21,14 @@ function setCors(res) {
 function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = "" }) {
   const accent = /^#?[0-9a-fA-F]{3,8}$/.test(branding.accent || "") ? branding.accent : "#B81D24";
   const company = escapeHtml(branding.companyName || "Stone Property Solutions");
-  const contactBits = [branding.companyPhone, branding.companyEmail, branding.companyAddress]
-    .filter(Boolean).map(escapeHtml).join(" &middot; ");
+  // Wrap phone/email as explicitly white, non-underlined links so Apple Mail doesn't
+  // auto-detect them and render blue underlined "links" — they read as plain text.
+  const noLink = "color:#fff;text-decoration:none";
+  const contactBits = [
+    branding.companyPhone ? `<a href="tel:${escapeHtml(String(branding.companyPhone).replace(/[^\d+]/g, ""))}" style="${noLink}">${escapeHtml(branding.companyPhone)}</a>` : "",
+    branding.companyEmail ? `<a href="mailto:${escapeHtml(branding.companyEmail)}" style="${noLink}">${escapeHtml(branding.companyEmail)}</a>` : "",
+    branding.companyAddress ? `<span style="${noLink}">${escapeHtml(branding.companyAddress)}</span>` : "",
+  ].filter(Boolean).join(" &middot; ");
   const rowsHtml = (rows || []).filter(Boolean).map(([k, v]) => `<tr>
       <td style="padding:6px 0;font-size:13px;color:#6b7280;white-space:nowrap;vertical-align:top">${escapeHtml(k)}</td>
       <td style="padding:6px 0 6px 14px;font-size:13px;color:#111827;font-weight:700;vertical-align:top">${escapeHtml(v)}</td>

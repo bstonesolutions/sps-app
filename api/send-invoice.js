@@ -32,7 +32,14 @@ function buildInvoiceHtml({ clientName, branding, invoice, payLink, intro }) {
     <td style="padding:3px 0;text-align:right;font-size:${opts.big ? 17 : 13}px;${opts.big ? "font-weight:800;color:" + accent : "color:#374151"};white-space:nowrap">${value}</td>
   </tr>`;
 
-  const contactBits = [branding.companyPhone, branding.companyEmail, branding.companyAddress].filter(Boolean).map(escapeHtml).join(" &middot; ");
+  // Wrap phone/email as explicitly white, non-underlined links so Apple Mail doesn't
+  // auto-detect them and render blue underlined "links" — they read as plain text.
+  const _noLink = "color:#fff;text-decoration:none";
+  const contactBits = [
+    branding.companyPhone ? `<a href="tel:${escapeHtml(String(branding.companyPhone).replace(/[^\d+]/g, ""))}" style="${_noLink}">${escapeHtml(branding.companyPhone)}</a>` : "",
+    branding.companyEmail ? `<a href="mailto:${escapeHtml(branding.companyEmail)}" style="${_noLink}">${escapeHtml(branding.companyEmail)}</a>` : "",
+    branding.companyAddress ? `<span style="${_noLink}">${escapeHtml(branding.companyAddress)}</span>` : "",
+  ].filter(Boolean).join(" &middot; ");
 
   return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:8px;color:#111827">
     <div style="background:${accent};border-radius:14px 14px 0 0;padding:18px 20px;color:#fff">
