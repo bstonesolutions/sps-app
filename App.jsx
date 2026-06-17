@@ -7006,8 +7006,14 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", onClose }) {
       .replace(/{company}/g, branding.companyName).replace(/{eta}/g, "a few minutes")
       .replace(/{arrival}/g, "soon").replace(/{track}/g, track);
   })();
-  const smsHref = phone ? `sms:${phone}${/iPhone|iPad|iPod/.test(navigator.userAgent) ? "&" : "?"}body=${encodeURIComponent(msg)}` : null;
-  const sendOmwText = async () => { if (!phone) return; const r = await sendSms(phone, msg); if (!r.ok && smsHref) window.open(smsHref, "_blank"); }; // business Quo line, device fallback
+  const [omw, setOmw] = useState({ busy: false, msg: null });
+  // Send via the business Quo line ONLY — never open the device Messages app.
+  const sendOmwText = async () => {
+    if (!phone) return;
+    setOmw({ busy: true, msg: null });
+    const r = await sendSms(phone, msg);
+    setOmw({ busy: false, msg: r.ok ? { ok: true, text: "On My Way text sent." } : { ok: false, text: r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send — your Quo texting may not be A2P-approved yet.") } });
+  };
   const openMap = (app) => { try { localStorage.setItem("sps_map_app", app); } catch {} setPref(app); };
   const mapApps = [{ key: "apple", label: "Apple Maps", icon: "A" }, { key: "google", label: "Google Maps", icon: "G" }, { key: "waze", label: "Waze", icon: "💜" }];
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10, display: "block" };
@@ -7017,7 +7023,10 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", onClose }) {
         {addr && <div style={{ fontSize: 13, color: T.textMuted, marginTop: -8, lineHeight: 1.4, display:"flex", alignItems:"center", gap:5 }}><Icon name="location" size={13} />{addr}</div>}
         <div>
           <span style={lbl}>On My Way Text</span>
-          {phone ? <Btn onClick={sendOmwText} variant="outline" block style={{ display:"flex", alignItems:"center", gap:6 }}><Icon name="message" size={15} /> Send On My Way to {firstName}</Btn>
+          {phone ? <>
+            <Btn onClick={sendOmwText} disabled={omw.busy} variant="outline" block style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}><Icon name="message" size={15} /> {omw.busy ? "Sending…" : `Send On My Way to ${firstName}`}</Btn>
+            {omw.msg && <div style={{ fontSize: 12.5, fontWeight: 700, marginTop: 8, color: omw.msg.ok ? "#16a34a" : T.accent }}>{omw.msg.text}</div>}
+          </>
             : <div style={{ fontSize: 13, color: T.textMuted, background: T.surfaceAlt, borderRadius: 10, padding: "11px 14px" }}>Add a phone number to this client to send texts.</div>}
         </div>
         <div>
