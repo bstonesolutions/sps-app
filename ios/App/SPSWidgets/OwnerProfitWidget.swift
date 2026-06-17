@@ -44,39 +44,41 @@ struct OwnerProfitView: View {
         VStack(alignment: .leading, spacing: 0) {
             Header(title: "THIS WEEK")
             Spacer(minLength: 8)
-            Text(p?.profitWeek.map(sps_money) ?? "—")
-                .font(.system(size: 40, weight: .heavy, design: .rounded))
-                .foregroundColor(Brand.ink)
-                .minimumScaleFactor(0.4)
-                .lineLimit(1)
-            Spacer(minLength: 8)
-            Text("Profit")
-                .font(.system(size: 17, weight: .bold))
-                .foregroundColor(Brand.slate)
-            if let mo = p?.profitMonth {
-                Text("\(sps_money(mo)) this month")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(Brand.muted)
-                    .minimumScaleFactor(0.6)
+            VStack(spacing: 4) {
+                Text(p?.profitWeek.map(sps_money) ?? "—")
+                    .font(.system(size: 40, weight: .heavy, design: .rounded))
+                    .foregroundColor(Brand.ink)
+                    .minimumScaleFactor(0.4)
                     .lineLimit(1)
-                    .padding(.top, 2)
+                Text("Profit")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundColor(Brand.slate)
+                if let mo = p?.profitMonth {
+                    Text("\(sps_money(mo)) / mo")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(Brand.muted)
+                        .minimumScaleFactor(0.6)
+                        .lineLimit(1)
+                }
             }
+            .frame(maxWidth: .infinity)
+            Spacer(minLength: 0)
         }
         .padding(16)
     }
 
     private var medium: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(spacing: 0) {
             Header(title: "PROFIT")
-            Spacer(minLength: 12)
-            HStack(spacing: 0) {
-                BigStat(label: "This Week",  value: p?.profitWeek.map(sps_money) ?? "—", accent: true)
-                BigStat(label: "This Month", value: p?.profitMonth.map(sps_money) ?? "—")
+            Spacer(minLength: 14)
+            HStack(spacing: 16) {
+                CenterStat(label: "This Week",  value: p?.profitWeek.map(sps_money) ?? "—", accent: true, size: 27)
+                CenterStat(label: "This Month", value: p?.profitMonth.map(sps_money) ?? "—", size: 27)
             }
-            Spacer(minLength: 12)
-            HStack(spacing: 0) {
-                BigStat(label: "Avg Rate",  value: p?.avgEffectiveRate.map(sps_rate) ?? "—")
-                BigStat(label: "Jobs (mo)", value: p?.jobsMonth.map { "\($0)" } ?? "—")
+            Spacer(minLength: 16)
+            HStack(spacing: 16) {
+                CenterStat(label: "Avg Rate",  value: p?.avgEffectiveRate.map(sps_rate) ?? "—", size: 27)
+                CenterStat(label: "Jobs (mo)", value: p?.jobsMonth.map { "\($0)" } ?? "—", size: 27)
             }
             Spacer(minLength: 0)
         }

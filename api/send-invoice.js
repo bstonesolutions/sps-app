@@ -12,6 +12,8 @@ const money = (n) => "$" + (Number(n) || 0).toFixed(2);
 function buildInvoiceHtml({ clientName, branding, invoice, payLink, intro }) {
   const accent = /^#?[0-9a-fA-F]{3,8}$/.test(branding.accent || "") ? branding.accent : "#B81D24";
   const company = escapeHtml(branding.companyName || "");
+  // Monogram (company initial) — matches the app's logo mark for consistent branding.
+  const initial = escapeHtml((((branding.companyName || "Stone Property Solutions").trim())[0] || "S").toUpperCase());
   const rows = (invoice.lineItems || []).map((li) => {
     const qty = Number(li.qty) || 0;
     const price = Number(li.unitPrice) || 0;
@@ -42,9 +44,12 @@ function buildInvoiceHtml({ clientName, branding, invoice, payLink, intro }) {
   ].filter(Boolean).join(" &middot; ");
 
   return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:8px;color:#111827">
-    <div style="background:${accent};border-radius:14px 14px 0 0;padding:18px 20px;color:#fff">
-      <div style="font-size:17px;font-weight:800">${company}</div>
-      ${contactBits ? `<div style="font-size:11px;opacity:0.85;margin-top:3px">${contactBits}</div>` : ""}
+    <div style="background:${accent};border-radius:14px 14px 0 0;padding:18px 20px;color:#fff;display:flex;align-items:center;gap:12px">
+      <div style="width:40px;height:40px;border-radius:11px;background:#fff;text-align:center;line-height:40px;flex-shrink:0;font-size:21px;font-weight:800;color:${accent}">${initial}</div>
+      <div>
+        <div style="font-size:17px;font-weight:800">${company}</div>
+        ${contactBits ? `<div style="font-size:11px;opacity:0.85;margin-top:2px">${contactBits}</div>` : ""}
+      </div>
     </div>
     <div style="border:1px solid #eef0f2;border-top:none;border-radius:0 0 14px 14px;padding:20px">
       <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px">

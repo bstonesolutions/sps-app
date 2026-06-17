@@ -1576,8 +1576,10 @@ const DEFAULT_EMAIL = {
   testMode: { on: false, mode: "redirect", email: "", phone: "" },
 };
 
-// Build the report text from the template + a completed-visit record
-function renderReport(email, ctx, { plain = false } = {}) {
+// Build the report text from the template + a completed-visit record.
+// includeUsage=false omits the water-tests/treatments lines (the email renders those as a
+// prominent table via `rows` instead); the portal/text versions keep them inline.
+function renderReport(email, ctx, { plain = false, includeUsage = true } = {}) {
   const lines = [];
   lines.push(`Hi ${ctx.firstName},`);
   lines.push("");
@@ -1590,19 +1592,19 @@ function renderReport(email, ctx, { plain = false } = {}) {
   if (ctx.notes) { lines.push("Work completed:"); lines.push(ctx.notes); lines.push(""); }
   // Water tests — list every reading the tech recorded (full panel), so clients who
   // rely on the emailed/texted report (not the app) get the complete picture.
-  if (email.showReadings) {
+  if (includeUsage && email.showReadings) {
     const entries = ctx.readings && typeof ctx.readings === "object"
       ? Object.entries(ctx.readings).filter(([, v]) => v !== "" && v != null && v !== "—")
       : [["pH", ctx.ph], ["Ammonia", ctx.ammonia], ["Nitrite", ctx.nitrite], ["Temperature", ctx.temp]].filter(([, v]) => v && v !== "—");
     if (entries.length) {
-      lines.push("Water tests:");
+      lines.push("WATER TESTS");
       entries.forEach(([k, v]) => lines.push(`  • ${k}: ${v}`));
       lines.push("");
     }
   }
   // Treatments applied — name + amount (oz), so the report stands on its own.
-  if (Array.isArray(ctx.treatmentsUsed) && ctx.treatmentsUsed.length) {
-    lines.push("Treatments applied:");
+  if (includeUsage && Array.isArray(ctx.treatmentsUsed) && ctx.treatmentsUsed.length) {
+    lines.push("WATER TREATMENTS APPLIED");
     ctx.treatmentsUsed.forEach(t => lines.push(`  • ${t.name}: ${t.oz} ${t.unit || "oz"}`));
     lines.push("");
   }
@@ -2136,8 +2138,8 @@ function Card({ children, style }) {
 function CardHeader({ title, action }) {
   const { T } = useApp();
   return (
-    <div style={{ padding: "14px 18px", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-      <span style={{ fontWeight: 700, fontSize: 13, color: T.text, letterSpacing: "-0.01em" }}>{title}</span>
+    <div style={{ padding: "14px 18px", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+      <span style={{ fontWeight: 800, fontSize: 15, color: T.text, letterSpacing: "-0.02em" }}>{title}</span>
       {action}
     </div>
   );
@@ -2220,7 +2222,7 @@ function Collapsible({ title, subtitle, children, defaultOpen = false }) {
       <button onClick={() => setOpen(o => !o)}
         style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 18px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", textAlign: "left", gap: 12, WebkitTapHighlightColor: "transparent" }}>
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 15, fontWeight: 800, color: T.text, letterSpacing: "-0.01em" }}>{title}</div>
+          <div style={{ fontSize: 17, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{title}</div>
           {subtitle && !open && <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subtitle}</div>}
         </div>
         <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
@@ -4969,7 +4971,7 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
     if (!files.length) return;
     setBusy(true);
     const out = [];
-    for (const f of files) out.push({ src: await compressImage(f), label: "General" });
+    for (const f of files) out.push({ src: await compressImage(f), label: "General", takenAt: Date.now() });
     setPhotos(p => [...p, ...out]);
     setBusy(false);
   };
@@ -5166,10 +5168,13 @@ function ClientHistory({ client, catalog, team, onChange }) {
                   <div style={{ fontSize: 12, color: T.textMuted }}>{h.type} · {h.tech}</div>
                 </div>
                 <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-                  <div style={{ textAlign: "right" }}>
-                    <div style={{ fontWeight: 700, fontSize: 14, color: T.text }}>{h.invoice}</div>
-                    {b && perms.seeProfit && <div style={{ fontSize: 11, fontWeight: 700, color: b.profit >= 0 ? T.accent : "#C0392B" }}>{b.profit >= 0 ? "+" : "−"}{money(Math.abs(b.profit))}</div>}
-                  </div>
+                  {/* Money is staff-gated: field crew see the report, not the charge/profit. */}
+                  {(perms.seeProfit || perms.seeBalances) && (
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontWeight: 700, fontSize: 14, color: T.text }}>{h.invoice}</div>
+                      {b && perms.seeProfit && <div style={{ fontSize: 11, fontWeight: 700, color: b.profit >= 0 ? T.accent : "#C0392B" }}>{b.profit >= 0 ? "+" : "−"}{money(Math.abs(b.profit))}</div>}
+                    </div>
+                  )}
                   {perms.editHistory && <button onClick={() => setEditIdx(i)} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 4, display:"flex", alignItems:"center" }}><Icon name="edit" size={15} /></button>}
                 </div>
               </div>
@@ -5183,13 +5188,16 @@ function ClientHistory({ client, catalog, team, onChange }) {
               )}
 
               {readingPairs.length > 0 && (
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-                  {readingPairs.map(([k, v]) => (
-                    <div key={k} style={{ background: T.surfaceAlt, borderRadius: 10, padding: "8px 6px", textAlign: "center" }}>
-                      <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{k}</div>
-                      <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginTop: 2 }}>{v}</div>
-                    </div>
-                  ))}
+                <div style={{ marginTop: 4 }}>
+                  <div style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Water Tests</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+                    {readingPairs.map(([k, v]) => (
+                      <div key={k} style={{ background: T.surfaceAlt, borderRadius: 10, padding: "8px 6px", textAlign: "center" }}>
+                        <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{k}</div>
+                        <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginTop: 2 }}>{v}</div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 
@@ -5200,7 +5208,15 @@ function ClientHistory({ client, catalog, team, onChange }) {
               )}
 
               {h.treatmentsUsed && h.treatmentsUsed.length > 0 && (
-                <div style={{ marginTop: 12, fontSize: 12, color: T.textMuted, display:"flex", alignItems:"center", gap:5 }}><Icon name="info" size={12} /> {h.treatmentsUsed.map(t => `${t.name} (${t.oz}${t.unit || "oz"})`).join(", ")}</div>
+                <div style={{ marginTop: 14 }}>
+                  <div style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Water Treatments Used</div>
+                  {h.treatmentsUsed.map((t, ti) => (
+                    <div key={ti} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", fontSize: 13.5, color: T.text, padding: "2px 0", gap: 10 }}>
+                      <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name}</span>
+                      <span style={{ fontWeight: 800, flexShrink: 0 }}>{t.oz} {t.unit || "oz"}</span>
+                    </div>
+                  ))}
+                </div>
               )}
 
               {h.partsUsed && h.partsUsed.length > 0 && (
@@ -5702,17 +5718,20 @@ function PhotoViewer({ photos, index, onClose }) {
   const prev = (e) => { e.stopPropagation(); setI(x => (x - 1 + photos.length) % photos.length); };
   const next = (e) => { e.stopPropagation(); setI(x => (x + 1) % photos.length); };
   const label = cur.label, caption = cur.caption;
-  const lc = label === "Before" ? "#F59E0B" : label === "After" ? "#16a34a" : "rgba(255,255,255,0.5)";
+  const at = cur.takenAt ? new Date(cur.takenAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+  const lc = label === "Before" ? "#F59E0B" : label === "After" ? "#16a34a" : "rgba(0,0,0,0.55)";
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)", zIndex: 400, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 20 }}>
       <button onClick={onClose} style={{ position: "absolute", top: 16, right: 16, background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 38, height: 38, cursor: "pointer", display:"flex", alignItems:"center", justifyContent:"center", zIndex: 2 }}><Icon name="close" size={18} /></button>
       {photos.length > 1 && <button onClick={prev} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 42, height: 42, cursor: "pointer", display:"flex", alignItems:"center", justifyContent:"center", zIndex: 2 }}><Icon name="back" size={20} /></button>}
-      <img src={cur.src} alt="" style={{ maxWidth: "92%", maxHeight: (label || caption) ? "74%" : "82%", borderRadius: 10, objectFit: "contain" }} onClick={e => e.stopPropagation()} />
-      {(label || caption) && (
-        <div onClick={e => e.stopPropagation()} style={{ marginTop: 14, textAlign: "center", maxWidth: "90%" }}>
-          {label && <span style={{ display: "inline-block", fontSize: 11, fontWeight: 800, color: "#fff", background: lc, borderRadius: 6, padding: "3px 10px", marginBottom: caption ? 8 : 0 }}>{label}</span>}
-          {caption && <div style={{ color: "rgba(255,255,255,0.92)", fontSize: 14, lineHeight: 1.5 }}>{caption}</div>}
-        </div>
+      <div onClick={e => e.stopPropagation()} style={{ position: "relative", display: "inline-block" }}>
+        <img src={cur.src} alt="" style={{ maxWidth: "92vw", maxHeight: caption ? "70vh" : "80vh", borderRadius: 10, objectFit: "contain", display: "block" }} />
+        {/* Label top-left, timestamp top-right — overlaid on the photo, white, readable. */}
+        {label && <div style={{ position: "absolute", top: 10, left: 10, fontSize: 12, fontWeight: 800, color: "#fff", background: lc, borderRadius: 7, padding: "4px 11px", boxShadow: "0 1px 6px rgba(0,0,0,0.4)" }}>{label}</div>}
+        {at && <div style={{ position: "absolute", top: 10, right: 10, fontSize: 12.5, fontWeight: 700, color: "#fff", background: "rgba(0,0,0,0.5)", borderRadius: 7, padding: "4px 11px", textShadow: "0 1px 3px rgba(0,0,0,0.7)" }}>{at}</div>}
+      </div>
+      {caption && (
+        <div onClick={e => e.stopPropagation()} style={{ marginTop: 14, textAlign: "center", maxWidth: "90%", color: "rgba(255,255,255,0.92)", fontSize: 14, lineHeight: 1.5 }}>{caption}</div>
       )}
       {photos.length > 1 && <button onClick={next} style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 42, height: 42, cursor: "pointer", display:"flex", alignItems:"center", justifyContent:"center", zIndex: 2 }}><svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="#fff" strokeWidth={2.2} strokeLinecap="round"><path d="m9 18 6-6-6-6"/></svg></button>}
       <div style={{ position: "absolute", bottom: 20, color: "rgba(255,255,255,0.7)", fontSize: 13 }}>{i + 1} / {photos.length}</div>
@@ -5802,8 +5821,28 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
 
-  // services on this stop (editable price per stop)
-  const initServices = (stop.services || []).map(s => typeof s === "string" ? { name: s, price: "" } : { name: s.name, price: s.price || "" });
+  // The client's maintenance price (their plan rate) so the tech doesn't retype it every
+  // stop. Per-client monthlyRate wins; otherwise fall back to their service-tier price.
+  // (Interim until the route scheduler sets pricing automatically.)
+  const clientMaintRate = (() => {
+    const r = parseFloat(String(client?.monthlyRate || "").replace(/[^\d.]/g, ""));
+    if (r > 0) return String(r);
+    try {
+      const set = (CP_TIERS && (CP_TIERS[client?.division || "Pond"] || CP_TIERS.Pond)) || {};
+      const tier = set[effectiveTier(client)] || null;
+      const tp = parseFloat(String(tier?.price || "").replace(/[^\d.]/g, ""));
+      if (tp > 0) return String(tp);
+    } catch (_) {}
+    return "";
+  })();
+  // Services on this stop (editable price per stop). Blank prices default to the client's
+  // maintenance rate; a stop added with just a type seeds one service at that rate.
+  const initServices = (() => {
+    const fromStop = (stop.services || []).map(s => typeof s === "string" ? { name: s, price: "" } : { name: s.name, price: s.price || "" });
+    if (fromStop.length) return fromStop.map(s => ({ ...s, price: s.price || clientMaintRate }));
+    if (clientMaintRate || stop.type) return [{ name: stop.type || "Service", price: clientMaintRate }];
+    return [];
+  })();
   const [svcList, setSvcList] = useState(initServices);
   const servicesTotal = svcList.reduce((sum, s) => sum + (parseFloat(s.price) || 0), 0);
 
@@ -5889,7 +5928,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
     const compressed = [];
     for (const f of files.slice(0, remaining)) {
       const src = await compressImage(f);
-      compressed.push({ src, label: defaultLabel });
+      compressed.push({ src, label: defaultLabel, takenAt: Date.now() });
     }
     setPhotos(p => [...p, ...compressed]);
     setBusy(false);
@@ -5999,13 +6038,19 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
         const small = await shrinkForEmail(src);
         if (small.length > budget) break;
         budget -= small.length;
-        photoPayload.push({ src: small, label: (ph && typeof ph === "object" && ph.label) || "" });
+        photoPayload.push({ src: small, label: (ph && typeof ph === "object" && ph.label) || "", at: (ph && ph.takenAt) ? new Date(ph.takenAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "" });
       }
     } catch (_) { photoPayload = []; }
+    // Surface water tests + treatments/parts as a prominent label/value table in the email
+    // (more legible than inline text), so the narrative stays clean and the data stands out.
+    const reportRows = [];
+    Object.entries(readings || {}).filter(([, v]) => v !== "" && v != null && v !== "—").forEach(([k, v]) => reportRows.push([k, String(v)]));
+    if (treatmentsUsed.length) reportRows.push(["Treatments", treatmentsUsed.map(t => `${t.name} (${t.oz}${t.unit || "oz"})`).join(", ")]);
+    if (partsUsedArr.length) reportRows.push(["Parts used", partsUsedArr.map(pt => `${pt.name} ×${pt.qty}`).join(", ")]);
     try {
       const r = await fetch(`${PROD_URL}/api/send-notification`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...senderEmailFields(), to, subject, heading: subject, message: reportText, photos: photoPayload, branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary } }),
+        body: JSON.stringify({ ...senderEmailFields(), to, subject, heading: subject, message: renderReport(email, ctx, { includeUsage: false }), rows: reportRows, photos: photoPayload, branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary } }),
       });
       const d = await r.json().catch(() => ({}));
       if (r.ok) postReportToPortal();   // mirror the report into the in-app portal thread (always posts)
@@ -6046,6 +6091,54 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
           <div style={{ display: "inline-block", background: profit >= 0 ? `${T.accent}18` : "#C0392B18", color: profit >= 0 ? T.accent : "#C0392B", borderRadius: 20, padding: "6px 16px", fontSize: 14, fontWeight: 800, marginBottom: 16 }}>
             {profit >= 0 ? "Profit" : "Loss"}: {money(Math.abs(profit))} · {margin.toFixed(0)}% margin
           </div>
+          {/* Full service report — what was tested + used today (in-app, mirrors what the
+              client sees + what's saved to history). Water tests + treatments up top. */}
+          {(() => {
+            const testEntries = Object.entries(readings || {}).filter(([, v]) => v !== "" && v != null && v !== "—");
+            if (!testEntries.length && !treatmentsUsed.length && !partsUsedArr.length && !(productsPurchasedArr && productsPurchasedArr.length)) return null;
+            const secTitle = { fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 };
+            const lineRow = (name, qty) => (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", fontSize: 13.5, color: T.text, padding: "3px 0", gap: 10 }}>
+                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
+                <span style={{ fontWeight: 800, flexShrink: 0 }}>{qty}</span>
+              </div>
+            );
+            return (
+              <div style={{ textAlign: "left", background: T.surfaceAlt, borderRadius: 14, padding: "14px 16px", marginBottom: 16, display: "flex", flexDirection: "column", gap: 14 }}>
+                {testEntries.length > 0 && (
+                  <div>
+                    <div style={secTitle}>Water Tests</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                      {testEntries.map(([k, v]) => (
+                        <div key={k} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, padding: "6px 11px", minWidth: 58, textAlign: "center" }}>
+                          <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em" }}>{k}</div>
+                          <div style={{ fontSize: 16, fontWeight: 800, color: T.text }}>{v}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {treatmentsUsed.length > 0 && (
+                  <div>
+                    <div style={secTitle}>Water Treatments Used</div>
+                    {treatmentsUsed.map(t => lineRow(t.name, `${t.oz} ${t.unit || "oz"}`))}
+                  </div>
+                )}
+                {partsUsedArr.length > 0 && (
+                  <div>
+                    <div style={secTitle}>Parts Used</div>
+                    {partsUsedArr.map(pt => lineRow(pt.name, `×${pt.qty}`))}
+                  </div>
+                )}
+                {productsPurchasedArr && productsPurchasedArr.length > 0 && (
+                  <div>
+                    <div style={secTitle}>Products</div>
+                    {productsPurchasedArr.map(pr => lineRow(pr.name, `×${pr.qty}`))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
           <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 18, lineHeight: 1.5 }}>Send the client their report:</div>
           <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
             <Btn onClick={sendEmail} disabled={!!reportSend.busy} style={{ flex: 1, padding: "13px", borderRadius: 12, display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}><Icon name="mail" size={14} /> {reportSend.busy === "email" ? "Sending…" : "Email Report"}</Btn>
@@ -7059,13 +7152,18 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", onClose }) {
   const firstName = client && client.name ? client.name.split(" ")[0] : (stop.client || "there");
   const phone = ((client && (client.phone || client.contactPhone || "")) || "").replace(/[^\d+]/g, "");
   const addr = stop.address || "";
+  // This quick "Head here" flow has no ETA picker, so use the same sensible default as the
+  // full On-My-Way modal (15 min) and a real clock time — never "a few minutes minutes"
+  // or "(around soon)". {eta} is the number (template already adds "minutes"); {arrival} is the time.
+  const etaMin = 15;
+  const arrivalStr = new Date(Date.now() + etaMin * 60000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   const msg = (() => {
     const tpl = (email && email.smsOnMyWay) || DEFAULT_EMAIL.smsOnMyWay;
     const track = email && email.trackLink ? `Track: ${email.trackLink} ` : "";
     return (tpl || "")
       .replace(/{first}/g, firstName).replace(/{sender}/g, (email && email.senderName) || branding.companyName)
-      .replace(/{company}/g, branding.companyName).replace(/{eta}/g, "a few minutes")
-      .replace(/{arrival}/g, "soon").replace(/{track}/g, track);
+      .replace(/{company}/g, branding.companyName).replace(/{eta}/g, String(etaMin))
+      .replace(/{arrival}/g, arrivalStr).replace(/{track}/g, track);
   })();
   const [omw, setOmw] = useState({ busy: false, msg: null });
   // Send via the business Quo line ONLY — never open the device Messages app.
@@ -7247,7 +7345,7 @@ function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, o
     clientId: "", techId: "", dayOfWeek: "Monday", frequency: "biweekly",
     startDate: new Date().toISOString().split("T")[0],
     stopAfter: "", skipWeeks: "", time: "08:00",
-    stopType: "", serviceIds: [], duration: "60", paused: false,
+    stopType: "", serviceIds: [], treatmentIds: [], testIds: [], duration: "60", paused: false,
   };
   const [form, setForm] = useState({ ...blank, ...(assignment || {}) });
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
@@ -7263,9 +7361,11 @@ function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, o
   const isAdd = !assignment;
   const [selClients, setSelClients] = useState({});   // { [String(clientId)]: true }
   const [tierFilter, setTierFilter] = useState("all"); // "all" | tier name | "__none__"
-  // Tiers come straight from each client's existing plan — never hardcoded/invented.
+  // Tiers come from each client's DIVISION-AWARE tier (effectiveTier) — the same value the
+  // rest of the app shows. (Reading the flat c.plan left this empty, so the filter only
+  // ever showed "All / No Tier".) "" = genuinely untiered.
   const TIER_ORDER = ["Essential", "Signature", "Premium"];
-  const clientTier = (c) => (c && c.plan && String(c.plan).trim()) ? c.plan : ""; // "" = no tier
+  const clientTier = (c) => { const t = effectiveTier(c); return t ? String(t).trim() : ""; };
   const presentTiers = [...new Set(selectableClients(clients).map(clientTier))];
   const orderedTiers = [
     ...TIER_ORDER.filter(t => presentTiers.includes(t)),
@@ -7331,6 +7431,8 @@ function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, o
   const toggleService = (id) => set("serviceIds",
     form.serviceIds.includes(id) ? form.serviceIds.filter(x => x !== id) : [...form.serviceIds, id]
   );
+  const toggleTreatment = (id) => { const list = form.treatmentIds || []; set("treatmentIds", list.includes(id) ? list.filter(x => x !== id) : [...list, id]); };
+  const toggleTest = (t) => { const list = form.testIds || []; set("testIds", list.includes(t) ? list.filter(x => x !== t) : [...list, t]); };
 
   const canSave = (isAdd ? selIds.length > 0 : !!form.clientId) && form.dayOfWeek && form.frequency && form.startDate;
 
@@ -7481,6 +7583,42 @@ function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, o
                   <button key={s.id} onClick={() => toggleService(s.id)}
                     style={{ padding: "7px 12px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.1) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
                     {s.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Default Water Treatments — linked to your catalog/inventory (chemicals dosed by oz) */}
+        {(catalog?.treatments||[]).length > 0 && (
+          <div>
+            <label style={lbl}>Default Water Treatments <span style={{ textTransform:"none", fontWeight:400 }}>(optional)</span></label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+              {(catalog.treatments||[]).map(t => {
+                const on = (form.treatmentIds||[]).includes(t.id);
+                return (
+                  <button key={t.id} onClick={() => toggleTreatment(t.id)}
+                    style={{ padding: "7px 12px", borderRadius: 100, border: `1.5px solid ${on ? "#0E9488" : T.border}`, background: on ? hexA("#0E9488", 0.1) : T.surface, color: on ? "#0E9488" : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                    {t.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Default Water Tests */}
+        {(catalog?.tests||[]).length > 0 && (
+          <div>
+            <label style={lbl}>Default Water Tests <span style={{ textTransform:"none", fontWeight:400 }}>(optional)</span></label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+              {(catalog.tests||[]).map(t => {
+                const on = (form.testIds||[]).includes(t);
+                return (
+                  <button key={t} onClick={() => toggleTest(t)}
+                    style={{ padding: "7px 12px", borderRadius: 100, border: `1.5px solid ${on ? T.accent : T.border}`, background: on ? `${T.accent}14` : T.surface, color: on ? T.accent : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                    {t}
                   </button>
                 );
               })}
@@ -8404,8 +8542,8 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
 
             {/* Client + details */}
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 800, fontSize: 14, color: isComplete ? T.textMuted : T.text, letterSpacing: "-0.01em", display: "flex", alignItems: "center", gap: 5 }}>
-                {isComplete && <Icon name="check" size={13} style={{ color: T.accent, flexShrink: 0 }} />}
+              <div style={{ fontWeight: 800, fontSize: 16.5, color: isComplete ? T.textMuted : T.text, letterSpacing: "-0.02em", display: "flex", alignItems: "center", gap: 5 }}>
+                {isComplete && <Icon name="check" size={14} style={{ color: T.accent, flexShrink: 0 }} />}
                 {c?.name || s.client}
               </div>
               {cfg.showAddress && s.address && (
@@ -8439,8 +8577,8 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           {/* Action bar — full width, no overflow */}
           {!selectMode && (
             <div style={{ borderTop: `1px solid ${T.border}`, background: isComplete ? hexA(T.accent, 0.06) : T.surfaceAlt }}>
-              {/* Status line */}
-              <div style={{ padding: "8px 16px 0", display: "flex", alignItems: "center", gap: 6 }}>
+              {/* Status line — with a quiet delete tucked top-right (no longer a clunky boxed button) */}
+              <div style={{ padding: "8px 16px 0", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
                 {isComplete ? (
                   <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: T.accent, fontWeight: 700 }}>
                     <Icon name="check" size={12} /> Completed · Report saved
@@ -8451,6 +8589,12 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                   </div>
                 ) : (
                   <div style={{ fontSize: 11, color: T.textMuted }}>Not yet started</div>
+                )}
+                {perms.scheduleAddRemove && (
+                  <button onClick={e => { e.stopPropagation(); if (confirm(`Delete this stop for ${c?.name || "this client"}? This can't be undone.`)) deleteStop(dayDate, s.sid); }}
+                    title="Delete stop" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 2, display: "flex", alignItems: "center", opacity: 0.55, flexShrink: 0 }}>
+                    <Icon name="trash" size={14} />
+                  </button>
                 )}
               </div>
 
@@ -8465,29 +8609,20 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                   </button>
                 )}
 
-                {/* Action row — tap the card above to edit + complete (the total editor).
-                    Head Here (directions + On My Way) is primary; arrival + delete sit beside it. */}
-                <div style={{ display: "flex", gap: 8 }}>
-                  {!isComplete && (
+                {/* Active-stop actions: Head Here (directions + On My Way) + arrival.
+                    Delete now lives quietly in the status line above. */}
+                {!isComplete && (
+                  <div style={{ display: "flex", gap: 8 }}>
                     <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: s, client: c }); }}
                       style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "12px 10px", fontSize: 13.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
                       <Icon name="map" size={15} /> Head Here
                     </button>
-                  )}
-                  {!isComplete && (
                     <button onClick={e => { e.stopPropagation(); if (!arrived) setArrivedModal({ stop: s, client: c, key: s.sid }); }}
                       style={{ flexShrink: 0, minWidth: 102, background: arrived ? hexA("#16a34a", 0.12) : T.surfaceAlt, color: arrived ? "#16a34a" : T.text, border: `1px solid ${arrived ? hexA("#16a34a", 0.4) : T.border}`, borderRadius: 12, padding: "12px 12px", fontSize: 13, fontWeight: 700, cursor: arrived ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
                       {arrived ? <><Icon name="check" size={14} /> Arrived</> : "I'm Here"}
                     </button>
-                  )}
-                  {perms.scheduleAddRemove && (
-                    <button onClick={e => { e.stopPropagation(); if (confirm(`Delete this stop for ${c?.name || "this client"}? This can't be undone.`)) deleteStop(dayDate, s.sid); }}
-                      style={{ flexShrink: 0, width: 46, background: T.surfaceAlt, color: "#C0392B", border: `1px solid ${T.border}`, borderRadius: 12, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center" }}
-                      title="Delete stop">
-                      <Icon name="trash" size={15} />
-                    </button>
-                  )}
-                </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -8638,7 +8773,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                         <RouteRing done={m.done} total={m.total} size={68} label="stops" />
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                            <div style={{ fontSize: 18, fontWeight: 700, color: T.text, letterSpacing: "-0.02em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.name}</div>
+                            <div style={{ fontSize: 21, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.name}</div>
                             <span style={{ color: T.textMuted, fontSize: 20, flexShrink: 0 }}>›</span>
                           </div>
                           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: T.textMuted, margin: "6px 0 5px" }}>
@@ -8680,7 +8815,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
             <div style={{ paddingBottom: vp.isDesktop ? 0 : (nextStop ? 80 : 0) }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 0 12px" }}>
                 {vp.isDesktop
-                  ? <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{techName}</div>
+                  ? <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{techName}</div>
                   : <button onClick={() => setViewTech(null)} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
                       <Icon name="back" size={14} /> All routes
                     </button>}
@@ -8699,7 +8834,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
               <div style={{ background: T.surface, borderRadius: 18, boxShadow: T.shadow, padding: "16px 18px", marginBottom: 16, display: "flex", alignItems: "center", gap: 16 }}>
                 <RouteRing done={m.done} total={m.total} size={64} label="stops" />
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 17, fontWeight: 700, color: T.text, letterSpacing: "-0.02em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{techName}</div>
+                  <div style={{ fontSize: 19, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{techName}</div>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: T.textMuted, margin: "7px 0 5px" }}>
                     <span>{fmtMin(m.startMin)}</span><span>~{m.milesEst} mi est</span><span>{fmtMin(m.endMin)}</span>
                   </div>
@@ -9918,7 +10053,6 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Company Contact" />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
-          <div style={{ fontSize: 12, color: T.textMuted, marginTop: -2 }}>Your public contact details. These power the portal's Request Service and Contact Us buttons and show on invoices.</div>
           <div><label style={labelStyle}>Phone</label><input type="tel" style={field} value={branding.companyPhone || ""} onChange={e => setB("companyPhone", e.target.value)} placeholder="(610) 555-1234" inputMode="tel" /></div>
           <div><label style={labelStyle}>Contact Email</label><input type="email" style={field} value={branding.companyEmail || ""} onChange={e => setB("companyEmail", e.target.value)} placeholder="hello@yourcompany.com" /></div>
           <div><label style={labelStyle}>Website</label><input type="url" style={field} value={branding.companyWebsite || ""} onChange={e => setB("companyWebsite", e.target.value)} placeholder="yourcompany.com" /></div>
@@ -10002,9 +10136,6 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Text Messages" />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
-          <div style={{ background: T.surfaceAlt, borderRadius: 10, padding: "10px 13px", fontSize: 11.5, color: T.textMuted, lineHeight: 1.5 }}>
-            Tags you can use: <b style={{ color: T.text }}>{"{first}"}</b> name, <b style={{ color: T.text }}>{"{sender}"}</b> your name, <b style={{ color: T.text }}>{"{company}"}</b>, <b style={{ color: T.text }}>{"{eta}"}</b> minutes, <b style={{ color: T.text }}>{"{arrival}"}</b> time, <b style={{ color: T.text }}>{"{track}"}</b> tracking link.
-          </div>
           <div style={{ display: "flex", gap: 10 }}>
             <div style={{ flex: 1 }}><label style={labelStyle}>Sender Name</label><input type="text" style={field} value={email.senderName || ""} onChange={e => set("senderName", e.target.value)} placeholder="Brandon" /></div>
           </div>
@@ -10076,7 +10207,6 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Client Portal" />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
-          <div style={{ fontSize: 12, color: T.textMuted, marginTop: -2 }}>Controls what clients see and how they interact with your portal.</div>
           <div>
             <label style={labelStyle}>Welcome Message</label>
             <textarea style={{ ...field, resize: "vertical" }} rows={2}
@@ -10208,7 +10338,7 @@ function CatalogManager({ catalog, setCatalog }) {
   };
 
   // ---- products: add / edit / delete ----
-  const openAddProd = () => setProdModal({ mode: "add", data: { id: `p${Date.now()}`, name: "", price: "", cost: "" } });
+  const openAddProd = () => setProdModal({ mode: "add", data: { id: `p${Date.now()}`, name: "", price: "", cost: "", sku: "", vendor: "", purchaseDate: "" } });
   const openEditProd = (p) => setProdModal({ mode: "edit", data: { ...p } });
   const saveProd = () => {
     const d = prodModal.data; if (!d.name.trim()) return;
@@ -10236,7 +10366,7 @@ function CatalogManager({ catalog, setCatalog }) {
   const addInvAmount = () => setTxModal(m => ({ ...m, data: { ...m.data, inventoryOz: String(Math.max(0, num(m.data.inventoryOz) + num(m.addOz))) }, addOz: "" }));
 
   // ---- services: add / edit / delete ----
-  const openAddSvc = () => setSvcModal({ mode: "add", data: { id: `s${Date.now()}`, name: "", price: "", price_type: "flat", target_hourly_rate: "", products: [], tests: [] } });
+  const openAddSvc = () => setSvcModal({ mode: "add", data: { id: `s${Date.now()}`, name: "", price: "", price_type: "flat", target_hourly_rate: "", products: [], treatments: [], tests: [] } });
   const openEditSvc = (s) => setSvcModal({ mode: "edit", data: { ...s, products: s.products || [], tests: s.tests || [] } });
   const saveSvc = () => {
     const d = svcModal.data;
@@ -10258,8 +10388,13 @@ function CatalogManager({ catalog, setCatalog }) {
     const has = m.data.tests.includes(t);
     return { ...m, data: { ...m.data, tests: has ? m.data.tests.filter(x => x !== t) : [...m.data.tests, t] } };
   });
+  const toggleSvcTreatment = (tid) => setSvcModal(m => {
+    const list = m.data.treatments || [];
+    const has = list.includes(tid);
+    return { ...m, data: { ...m.data, treatments: has ? list.filter(x => x !== tid) : [...list, tid] } };
+  });
 
-  const chipInput = { flex: 1, padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const chipInput = { width: "100%", flex: 1, minWidth: 0, padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
   const field = { width: "100%", padding: "10px 13px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
   const productName = (pid) => (products.find(p => p.id === pid) || {}).name || "";
@@ -10402,6 +10537,20 @@ function CatalogManager({ catalog, setCatalog }) {
                 </div>
               </div>
             </div>
+            <div>
+              <label style={labelStyle}>SKU <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(to reuse + match inventory)</span></label>
+              <input style={field} value={prodModal.data.sku || ""} onChange={e => setProdModal(m => ({ ...m, data: { ...m.data, sku: e.target.value } }))} placeholder="e.g. BB-32OZ" />
+            </div>
+            <div style={{ display: "flex", gap: 12 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <label style={labelStyle}>Received From <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(vendor)</span></label>
+                <input style={field} value={prodModal.data.vendor || ""} onChange={e => setProdModal(m => ({ ...m, data: { ...m.data, vendor: e.target.value } }))} placeholder="e.g. Pond Supplies Co." />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <label style={labelStyle}>Purchase Date</label>
+                <input type="date" style={field} value={prodModal.data.purchaseDate || ""} onChange={e => setProdModal(m => ({ ...m, data: { ...m.data, purchaseDate: e.target.value } }))} />
+              </div>
+            </div>
             <Btn onClick={saveProd} style={{ width: "100%", padding: "12px", borderRadius: 12 }}>{prodModal.mode === "add" ? "Add Product" : "Save Changes"}</Btn>
             {prodModal.mode === "edit" && <button onClick={deleteProd} style={{ background: "none", border: "none", color: "#C0392B", fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 6, fontFamily: "inherit" }}>Delete this product</button>}
           </div>
@@ -10533,7 +10682,45 @@ function CatalogManager({ catalog, setCatalog }) {
             </div>
 
             <div>
-              <label style={labelStyle}>Products Needed</label>
+              <label style={labelStyle}>Water Tests Required</label>
+              {tests.length === 0 ? (
+                <div style={{ fontSize: 12, color: T.textMuted }}>Add water tests first (above), then attach them here.</div>
+              ) : (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+                  {tests.map(t => {
+                    const on = svcModal.data.tests.includes(t);
+                    return (
+                      <button key={t} onClick={() => toggleSvcTest(t)}
+                        style={{ padding: "7px 13px", borderRadius: 20, border: `1.5px solid ${on ? T.accent : T.border}`, background: on ? `${T.accent}14` : T.surface, color: on ? T.accent : T.text, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                        {t}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <label style={labelStyle}>Water Treatments Needed <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(chemicals, dosed by oz)</span></label>
+              {treatments.length === 0 ? (
+                <div style={{ fontSize: 12, color: T.textMuted }}>Add treatments (above), then attach them here.</div>
+              ) : (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+                  {treatments.map(t => {
+                    const on = (svcModal.data.treatments || []).includes(t.id);
+                    return (
+                      <button key={t.id} onClick={() => toggleSvcTreatment(t.id)}
+                        style={{ padding: "7px 13px", borderRadius: 20, border: `1.5px solid ${on ? "#0E9488" : T.border}`, background: on ? hexA("#0E9488", 0.1) : T.surface, color: on ? "#0E9488" : T.text, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                        {t.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <label style={labelStyle}>Products / Add-ons <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(sold to the client)</span></label>
               {products.length === 0 ? (
                 <div style={{ fontSize: 12, color: T.textMuted }}>Add products first, then attach them here.</div>
               ) : (
@@ -10544,25 +10731,6 @@ function CatalogManager({ catalog, setCatalog }) {
                       <button key={p.id} onClick={() => toggleSvcProduct(p.id)}
                         style={{ padding: "7px 13px", borderRadius: 20, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? T.navActiveBg : T.surface, color: on ? T.primary : T.text, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
                         {p.name}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            <div>
-              <label style={labelStyle}>Tests Required</label>
-              {tests.length === 0 ? (
-                <div style={{ fontSize: 12, color: T.textMuted }}>Add water tests first, then attach them here.</div>
-              ) : (
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-                  {tests.map(t => {
-                    const on = svcModal.data.tests.includes(t);
-                    return (
-                      <button key={t} onClick={() => toggleSvcTest(t)}
-                        style={{ padding: "7px 13px", borderRadius: 20, border: `1.5px solid ${on ? T.accent : T.border}`, background: on ? `${T.accent}14` : T.surface, color: on ? T.accent : T.text, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-                        {t}
                       </button>
                     );
                   })}
@@ -11957,7 +12125,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
                     )}
                     <div style={{ marginLeft: "auto", textAlign: "right" }}>
                       <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{money(lineNet)}</div>
-                      {n(l.unitCost) > 0 && (
+                      {perms.seeProfit && n(l.unitCost) > 0 && (
                         <div style={{ fontSize: 10, color: lineProfit >= 0 ? T.accent : "#E5484D", fontWeight: 700 }}>
                           {lineProfit >= 0 ? "+" : ""}{money(lineProfit)} ({Math.round(lineMargin)}%)
                         </div>
@@ -12005,8 +12173,8 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted, marginTop: 4 }}><span>Subtotal</span><span>{money(totals.subtotal)}</span></div>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted, marginTop: 4 }}><span>Tax</span><span>{money(totals.tax)}</span></div>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 16, fontWeight: 800, color: T.text, marginTop: 6, borderTop: `1px solid ${T.border}`, paddingTop: 6 }}><span>Total</span><span>{money(totals.total)}</span></div>
-            {/* Admin profit readout — never sent to the client */}
-            {totals.cost > 0 && (
+            {/* Admin profit readout — never sent to the client, and staff-gated (owner/full only) */}
+            {perms.seeProfit && totals.cost > 0 && (
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginTop: 6, paddingTop: 6, borderTop: `1px dashed ${T.border}`, color: totals.profit >= 0 ? T.accent : "#E5484D", fontWeight: 700 }}>
                 <span>Your profit</span><span>{money(totals.profit)} ({Math.round(totals.margin)}%)</span>
               </div>
@@ -15456,7 +15624,7 @@ function NotificationSettings({ email, setEmail, branding }) {
 // on — Supabase, Resend, Quo, QuickBooks, Google Maps, Gusto — by pinging each one's
 // health endpoint, and offers test-send for email + SMS so delivery can be proven.
 // Owner/admin only. Read-only: it never writes app data (supabaseClient.js untouched).
-function SyncStatus({ T, branding, team, currentUserId }) {
+function SyncStatus({ T, branding, team, currentUserId, email = {} }) {
   const owner = (team || []).find(m => String(m.id) === String(currentUserId)) || (team || [])[0] || {};
   const [results, setResults] = useState({});
   const [checking, setChecking] = useState(false);
@@ -15489,7 +15657,7 @@ function SyncStatus({ T, branding, team, currentUserId }) {
     { key: "email", label: "Email", icon: "mail", sub: "Resend — invites, magic links, invoices",
       run: async () => { const d = await getJSON(`${PROD_URL}/api/send-magic-link?check`);
         if (!d) return { status: "down", detail: "Couldn't reach server" };
-        return d.configured && d.configured.resend ? { status: "ok", detail: d.from || "Configured" } : { status: "down", detail: "RESEND_API_KEY not set" }; },
+        return d.configured && d.configured.resend ? { status: "ok", detail: (email && email.fromAddress) ? `Sends from ${email.fromAddress}` : (d.from || "Configured") } : { status: "down", detail: "RESEND_API_KEY not set" }; },
       fix: { label: "Open Resend domains ↗", run: () => openExternalBrowser("https://resend.com/domains") } },
     { key: "links", label: "Secure links", icon: "lock", sub: "Supabase admin — minting sign-in links",
       run: async () => { const d = await getJSON(`${PROD_URL}/api/send-magic-link?check`);
@@ -15794,31 +15962,33 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
               <CostSettings costs={costCtl.draft} setCosts={costCtl.update} clients={clients} />
             </Collapsible>
           )}
-          {perms.isAdmin && (
-            <Collapsible title="Backup, Restore & Reset" subtitle="Save/restore a full .zip of all data + media, or reset everything to factory defaults.">
-              <BackupRestore />
-              <div style={{ padding: "0 18px 18px" }}>
-                {!confirmReset ? (
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, borderTop: `1px solid ${T.border}`, paddingTop: 16 }}>
-                    <div style={{ fontSize: 13, color: T.textMuted }}>Reset all data — clear everything and restore demo defaults. Can't be undone.</div>
-                    <button onClick={() => setConfirmReset(true)} style={{ flexShrink: 0, background: "transparent", color: "#C0392B", border: `1.5px solid #C0392B`, borderRadius: 10, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Reset</button>
-                  </div>
-                ) : (
-                  <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 16 }}>
-                    <div style={{ fontSize: 13, color: T.text, marginBottom: 12, fontWeight: 600 }}>This erases everything. Are you sure?</div>
-                    <div style={{ display: "flex", gap: 10 }}>
-                      <button onClick={() => { onResetData(); setConfirmReset(false); }} style={{ background: "#C0392B", color: "#fff", border: "none", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Yes, Reset Everything</button>
-                      <button onClick={() => setConfirmReset(false)} style={{ background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </Collapsible>
-          )}
         </div>
       )}
       {activeTab === "team" && perms.isAdmin && <TeamManager team={team} setTeam={setTeam} currentUserId={currentUserId} email={email} branding={branding} />}
-      {activeTab === "sync" && perms.isAdmin && <SyncStatus T={T} branding={branding} team={team} currentUserId={currentUserId} />}
+      {activeTab === "sync" && perms.isAdmin && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <SyncStatus T={T} branding={branding} team={team} currentUserId={currentUserId} email={email} />
+          <Collapsible title="Backup, Restore & Reset" subtitle="Save/restore a full .zip of all data + media, or reset everything to factory defaults.">
+            <BackupRestore />
+            <div style={{ padding: "0 18px 18px" }}>
+              {!confirmReset ? (
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, borderTop: `1px solid ${T.border}`, paddingTop: 16 }}>
+                  <div style={{ fontSize: 13, color: T.textMuted }}>Reset all data — clear everything and restore demo defaults. Can't be undone.</div>
+                  <button onClick={() => setConfirmReset(true)} style={{ flexShrink: 0, background: "transparent", color: "#C0392B", border: `1.5px solid #C0392B`, borderRadius: 10, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Reset</button>
+                </div>
+              ) : (
+                <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 16 }}>
+                  <div style={{ fontSize: 13, color: T.text, marginBottom: 12, fontWeight: 600 }}>This erases everything. Are you sure?</div>
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <button onClick={() => { onResetData(); setConfirmReset(false); }} style={{ background: "#C0392B", color: "#fff", border: "none", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Yes, Reset Everything</button>
+                    <button onClick={() => setConfirmReset(false)} style={{ background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </Collapsible>
+        </div>
+      )}
       {activeTab === "branding" && <>
 
       {/* ── LOGO & IDENTITY ── */}
@@ -16957,8 +17127,16 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
   const locations = catalog.locations || [];
   const treatments = catalog.treatments || [];
   const parts = catalog.parts || [];
+  const products = catalog.products || [];
 
-  const [tab, setTab] = useState("treatments"); // "treatments" | "parts"
+  // Kind → which cost/retail field that item type stores (products use cost/price, parts
+  // costPer/retailPer, treatments costPerOz/retailPerOz). Lets one code path handle all three.
+  const COST_FIELD = { treatment: "costPerOz", part: "costPer", product: "cost" };
+  const RETAIL_FIELD = { treatment: "retailPerOz", part: "retailPer", product: "price" };
+  const costFieldFor = (k) => COST_FIELD[k] || "costPerOz";
+  const retailFieldFor = (k) => RETAIL_FIELD[k] || "retailPerOz";
+
+  const [tab, setTab] = useState("treatments"); // "treatments" | "parts" | "products"
   const [locFilter, setLocFilter] = useState("all"); // "all" | locId
   const [adjustModal, setAdjustModal] = useState(null); // { item, kind, mode, locId }
   const [adjustAmt, setAdjustAmt] = useState("");
@@ -16970,6 +17148,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
   const [showLocs, setShowLocs] = useState(false);
   const [showValue, setShowValue] = useState(false);
   const [showReorder, setShowReorder] = useState(false);
+  const [catCollapsed, setCatCollapsed] = useState({}); // `${tab}:${category}` -> collapsed in the list view
 
   // Build usage history from client stop history (treatments + parts)
   const usageHistory = {};
@@ -16998,7 +17177,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
     return h[0]?.date || null;
   };
 
-  const lowThreshold = (item, kind) => kind === "part" ? (parseFloat(item.lowAt) || 0) : 32;
+  const lowThreshold = (item, kind) => kind === "treatment" ? 32 : (parseFloat(item.lowAt) || 0);
   const statusOf = (item, kind) => {
     const total = invTotal(item);
     const low = lowThreshold(item, kind);
@@ -17007,16 +17186,26 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
     return { label: "In Stock", color: "#16a34a", bg: hexA("#16a34a", 0.1) };
   };
 
-  const items = tab === "treatments" ? treatments : parts;
-  const kind = tab === "treatments" ? "treatment" : "part";
-  const catKey = tab === "treatments" ? "treatments" : "parts";
+  const items = tab === "treatments" ? treatments : tab === "products" ? products : parts;
+  const kind = tab === "treatments" ? "treatment" : tab === "products" ? "product" : "part";
+  const catKey = tab; // tab values match the catalog keys: treatments | parts | products
+
+  // Group the visible list by category into collapsible sections (e.g. PVC under Parts).
+  // Uncategorized falls to the bottom; a single category renders flat (no header).
+  const invGroupByCat = (list) => {
+    const map = {};
+    list.forEach(it => { const k = (it.category || "").trim() || "Uncategorized"; (map[k] = map[k] || []).push(it); });
+    return Object.keys(map)
+      .sort((a, b) => a === "Uncategorized" ? 1 : b === "Uncategorized" ? -1 : a.localeCompare(b))
+      .map(cat => ({ cat, items: map[cat] }));
+  };
 
   // Low items for the current tab
   const lowItems = items.filter(it => invTotal(it) < lowThreshold(it, kind));
 
   // Overall valuation
   const tabValue = items.reduce((s, it) => {
-    const cost = parseFloat(kind === "part" ? it.costPer : it.costPerOz) || 0;
+    const cost = parseFloat(it[costFieldFor(kind)]) || 0;
     return s + cost * invTotal(it);
   }, 0);
 
@@ -17074,6 +17263,8 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
   // ── Item add / edit / delete ──
   const blankItem = () => kind === "part"
     ? { id: "pt" + Date.now(), name: "", category: "", unit: "pieces", costPer: "", lowAt: "", stockByLoc: {} }
+    : kind === "product"
+    ? { id: "p" + Date.now(), name: "", category: "", unit: "each", cost: "", price: "", sku: "", vendor: "", purchaseDate: "", lowAt: "", stockByLoc: {} }
     : { id: "t" + Date.now(), name: "", category: "", unit: "oz", costPerOz: "", inventoryOz: "0", stockByLoc: {} };
   const openAddItem = () => { if (!canEdit) return; setItemModal({ mode: "add", kind, data: blankItem() }); };
   const openEditItem = (item) => { if (!canEdit) return; setItemModal({ mode: "edit", kind, data: { ...item, stockByLoc: { ...(item.stockByLoc || {}) } } }); };
@@ -17116,6 +17307,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
       // strip that location's stock from every item
       treatments: (cat.treatments || []).map(it => { const s = { ...(it.stockByLoc || {}) }; delete s[id]; return { ...it, stockByLoc: s, inventoryOz: String(Object.values(s).reduce((a, v) => a + (parseFloat(v) || 0), 0)) }; }),
       parts: (cat.parts || []).map(it => { const s = { ...(it.stockByLoc || {}) }; delete s[id]; return { ...it, stockByLoc: s, inventoryOz: String(Object.values(s).reduce((a, v) => a + (parseFloat(v) || 0), 0)) }; }),
+      products: (cat.products || []).map(it => { const s = { ...(it.stockByLoc || {}) }; delete s[id]; return { ...it, stockByLoc: s }; }),
     }));
     setLocModal(null);
   };
@@ -17124,7 +17316,8 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
   const unitOf = (item) => item.unit || "oz";
   const itemCost = (it) => parseFloat(it.unit && it.costPer !== undefined ? it.costPer : (it.costPer ?? it.costPerOz)) || 0;
   const allItems = [...treatments.map(it => ({ ...it, _kind: "treatment", _cost: parseFloat(it.costPerOz) || 0, _retail: parseFloat(it.retailPerOz) || 0, _low: 32 })),
-                    ...parts.map(it => ({ ...it, _kind: "part", _cost: parseFloat(it.costPer) || 0, _retail: parseFloat(it.retailPer) || 0, _low: parseFloat(it.lowAt) || 0 }))];
+                    ...parts.map(it => ({ ...it, _kind: "part", _cost: parseFloat(it.costPer) || 0, _retail: parseFloat(it.retailPer) || 0, _low: parseFloat(it.lowAt) || 0 })),
+                    ...products.map(it => ({ ...it, _kind: "product", _cost: parseFloat(it.cost) || 0, _retail: parseFloat(it.price) || 0, _low: parseFloat(it.lowAt) || 0 }))];
 
   // Total inventory value at cost and at retail
   const totalValue = allItems.reduce((s, it) => s + it._cost * invTotal(it), 0);
@@ -17138,10 +17331,10 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
 
   // Reorder list — anything below its low threshold, with suggested restock to 2x low
   const reorderItems = allItems
-    .filter(it => invTotal(it) < (it._kind === "part" ? it._low : 32))
+    .filter(it => invTotal(it) < (it._kind === "treatment" ? 32 : it._low))
     .map(it => {
       const total = invTotal(it);
-      const target = (it._kind === "part" ? it._low : 32) * 2;
+      const target = (it._kind === "treatment" ? 32 : it._low) * 2;
       const suggest = Math.max(0, Math.ceil(target - total));
       return { ...it, total, suggest, estCost: suggest * it._cost };
     });
@@ -17158,10 +17351,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
         <div>
           <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Inventory</div>
           <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>
-            {treatments.length + parts.length} items · {locations.length} location{locations.length !== 1 ? "s" : ""}{canSeeCost ? ` · $${(
-              treatments.reduce((s, it) => s + (parseFloat(it.costPerOz) || 0) * invTotal(it), 0) +
-              parts.reduce((s, it) => s + (parseFloat(it.costPer) || 0) * invTotal(it), 0)
-            ).toFixed(0)} on hand` : ""}
+            {allItems.length} items · {locations.length} location{locations.length !== 1 ? "s" : ""}{canSeeCost ? ` · $${totalValue.toFixed(0)} on hand` : ""}
           </div>
         </div>
         <Btn sm variant="ghost" onClick={() => setShowLocs(s => !s)}>Locations</Btn>
@@ -17233,7 +17423,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
       {showReorder && (
         <Card>
           <CardHeader title="Suggested Reorder" action={reorderItems.length > 0 ? <button onClick={() => {
-            const lines = reorderItems.map(it => `${it.name}: ${it.suggest} ${it.unit || (it._kind === "part" ? "pieces" : "oz")} (~$${it.estCost.toFixed(2)})`);
+            const lines = reorderItems.map(it => `${it.name}: ${it.suggest} ${it.unit || (it._kind === "treatment" ? "oz" : it._kind === "product" ? "each" : "pieces")} (~$${it.estCost.toFixed(2)})`);
             const text = `SPS Reorder List — ${new Date().toLocaleDateString()}\n\n${lines.join("\n")}\n\nEstimated total: $${reorderTotal.toFixed(2)}`;
             if (navigator.share) navigator.share({ text }).catch(() => {});
             else { navigator.clipboard?.writeText(text); }
@@ -17248,7 +17438,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text }}>{it.name}</div>
                       <div style={{ fontSize: 11.5, color: "#B45309", marginTop: 2 }}>
-                        {it.total} {it.unit || (it._kind === "part" ? "pieces" : "oz")} left · suggest +{it.suggest}
+                        {it.total} {it.unit || (it._kind === "treatment" ? "oz" : it._kind === "product" ? "each" : "pieces")} left · suggest +{it.suggest}
                       </div>
                     </div>
                     <div style={{ textAlign: "right" }}>
@@ -17292,7 +17482,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
 
       {/* Tab switch */}
       <div style={{ display: "flex", gap: 8, background: T.surfaceAlt, padding: 4, borderRadius: 14 }}>
-        {[["treatments", "Treatments"], ["parts", "Parts"]].map(([val, label]) => (
+        {[["treatments", "Treatments"], ["parts", "Parts"], ["products", "Products"]].map(([val, label]) => (
           <button key={val} onClick={() => { setTab(val); setLocFilter("all"); }}
             style={{ flex: 1, padding: "10px", borderRadius: 11, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 14, fontWeight: 700, background: tab === val ? T.surface : "transparent", color: tab === val ? T.primary : T.textMuted, boxShadow: tab === val ? "0 1px 4px rgba(0,0,0,0.08)" : "none", transition: "all 0.15s" }}>
             {label}
@@ -17348,7 +17538,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
       {canEdit && (
         <button onClick={openAddItem}
           style={{ background: hexA(T.primary, 0.08), color: T.primary, border: `1.5px dashed ${hexA(T.primary, 0.3)}`, borderRadius: 14, padding: "12px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
-          + Add {tab === "treatments" ? "Treatment" : "Part"}
+          + Add {tab === "treatments" ? "Treatment" : tab === "products" ? "Product" : "Part"}
         </button>
       )}
 
@@ -17356,19 +17546,33 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {items.length === 0 && (
           <div style={{ textAlign: "center", padding: "30px 20px", color: T.textMuted, fontSize: 14 }}>
-            No {tab} yet. Tap "Add {tab === "treatments" ? "Treatment" : "Part"}" to get started.
+            No {tab} yet. Tap "Add {tab === "treatments" ? "Treatment" : tab === "products" ? "Product" : "Part"}" to get started.
           </div>
         )}
-        {items
-          .filter(it => locFilter === "all" ? true : invAtLoc(it, locFilter) > 0 || (it.stockByLoc && locFilter in (it.stockByLoc || {})))
-          .map(it => {
+        {(() => {
+          const visible = items.filter(it => locFilter === "all" ? true : invAtLoc(it, locFilter) > 0 || (it.stockByLoc && locFilter in (it.stockByLoc || {})));
+          const groups = invGroupByCat(visible);
+          const flat = groups.length <= 1; // one (or zero) category → render plain, no headers
+          const catHdr = { display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: T.surfaceAlt, border: "none", borderRadius: 10, padding: "9px 13px", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em" };
+          return groups.map(g => {
+            const ck = `${tab}:${g.cat}`;
+            const collapsed = !flat && !!catCollapsed[ck];
+            return (
+              <div key={ck} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {!flat && (
+                  <button type="button" onClick={() => setCatCollapsed(s => ({ ...s, [ck]: !s[ck] }))} style={catHdr}>
+                    <span>{g.cat} · {g.items.length}</span>
+                    <span style={{ fontSize: 15, transform: collapsed ? "none" : "rotate(90deg)", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
+                  </button>
+                )}
+                {!collapsed && g.items.map(it => {
             const unit = unitOf(it);
             const total = invTotal(it);
             const displayAmt = locFilter === "all" ? total : invAtLoc(it, locFilter);
             const status = statusOf(it, kind);
             const used = totalUsed(it, kind);
             const last = lastUsed(it, kind);
-            const cost = parseFloat(kind === "part" ? it.costPer : it.costPerOz) || 0;
+            const cost = parseFloat(it[costFieldFor(kind)]) || 0;
             const low = lowThreshold(it, kind);
             const maxScale = Math.max(total + used, low * 4, 1);
             const pct = Math.min(100, (total / maxScale) * 100);
@@ -17449,7 +17653,11 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
                 </div>
               </div>
             );
-          })}
+                })}
+              </div>
+            );
+          });
+        })()}
       </div>
 
       {/* Adjust / Restock modal */}
@@ -17522,7 +17730,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
 
       {/* Item add/edit modal */}
       {itemModal && (
-        <Modal title={itemModal.mode === "add" ? `Add ${itemModal.kind === "part" ? "Part" : "Treatment"}` : itemModal.data.name} onClose={() => setItemModal(null)}>
+        <Modal title={itemModal.mode === "add" ? `Add ${itemModal.kind === "part" ? "Part" : itemModal.kind === "product" ? "Product" : "Treatment"}` : itemModal.data.name} onClose={() => setItemModal(null)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <div>
               <label style={lbl}>Name</label>
@@ -17540,7 +17748,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
             <div style={{ display: "flex", gap: 10 }}>
               <div style={{ flex: 1 }}>
                 <label style={lbl}>Unit</label>
-                <select value={itemModal.data.unit || (itemModal.kind === "part" ? "pieces" : "oz")}
+                <select value={itemModal.data.unit || (itemModal.kind === "treatment" ? "oz" : itemModal.kind === "product" ? "each" : "pieces")}
                   onChange={e => setItemModal(m => ({ ...m, data: { ...m.data, unit: e.target.value } }))} style={field}>
                   {INV_UNITS.map(u => <option key={u} value={u}>{u}</option>)}
                 </select>
@@ -17548,10 +17756,10 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
               <div style={{ flex: 1 }}>
                 <label style={lbl}>Low stock at</label>
                 <input type="text" inputMode="decimal" style={field}
-                  value={itemModal.kind === "part" ? (itemModal.data.lowAt ?? "") : "32"}
-                  disabled={itemModal.kind !== "part"}
+                  value={itemModal.kind === "treatment" ? "32" : (itemModal.data.lowAt ?? "")}
+                  disabled={itemModal.kind === "treatment"}
                   onChange={e => setItemModal(m => ({ ...m, data: { ...m.data, lowAt: e.target.value.replace(/[^0-9.]/g, "") } }))}
-                  placeholder={itemModal.kind === "part" ? "e.g. 6" : "32"} />
+                  placeholder={itemModal.kind === "treatment" ? "32" : "e.g. 6"} />
               </div>
             </div>
 
@@ -17559,26 +17767,26 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
             {canSeeCost && (<>
             <div style={{ display: "flex", gap: 10 }}>
               <div style={{ flex: 1 }}>
-                <label style={lbl}>Cost per {itemModal.data.unit || (itemModal.kind === "part" ? "piece" : "oz")}</label>
+                <label style={lbl}>Cost per {itemModal.data.unit || (itemModal.kind === "treatment" ? "oz" : itemModal.kind === "product" ? "each" : "piece")}</label>
                 <input type="text" inputMode="decimal" style={field}
-                  value={itemModal.kind === "part" ? (itemModal.data.costPer ?? "") : (itemModal.data.costPerOz ?? "")}
-                  onChange={e => { const v = e.target.value.replace(/[^0-9.]/g, ""); setItemModal(m => ({ ...m, data: { ...m.data, [itemModal.kind === "part" ? "costPer" : "costPerOz"]: v } })); }}
+                  value={itemModal.data[costFieldFor(itemModal.kind)] ?? ""}
+                  onChange={e => { const v = e.target.value.replace(/[^0-9.]/g, ""); setItemModal(m => ({ ...m, data: { ...m.data, [costFieldFor(itemModal.kind)]: v } })); }}
                   placeholder="0.00" />
                 <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 4 }}>What you pay</div>
               </div>
               <div style={{ flex: 1 }}>
-                <label style={lbl}>Retail per {itemModal.data.unit || (itemModal.kind === "part" ? "piece" : "oz")}</label>
+                <label style={lbl}>Retail per {itemModal.data.unit || (itemModal.kind === "treatment" ? "oz" : itemModal.kind === "product" ? "each" : "piece")}</label>
                 <input type="text" inputMode="decimal" style={field}
-                  value={itemModal.kind === "part" ? (itemModal.data.retailPer ?? "") : (itemModal.data.retailPerOz ?? "")}
-                  onChange={e => { const v = e.target.value.replace(/[^0-9.]/g, ""); setItemModal(m => ({ ...m, data: { ...m.data, [itemModal.kind === "part" ? "retailPer" : "retailPerOz"]: v } })); }}
+                  value={itemModal.data[retailFieldFor(itemModal.kind)] ?? ""}
+                  onChange={e => { const v = e.target.value.replace(/[^0-9.]/g, ""); setItemModal(m => ({ ...m, data: { ...m.data, [retailFieldFor(itemModal.kind)]: v } })); }}
                   placeholder="0.00" />
                 <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 4 }}>What you charge</div>
               </div>
             </div>
             {/* Margin preview */}
             {(() => {
-              const c = parseFloat(itemModal.kind === "part" ? itemModal.data.costPer : itemModal.data.costPerOz) || 0;
-              const r = parseFloat(itemModal.kind === "part" ? itemModal.data.retailPer : itemModal.data.retailPerOz) || 0;
+              const c = parseFloat(itemModal.data[costFieldFor(itemModal.kind)]) || 0;
+              const r = parseFloat(itemModal.data[retailFieldFor(itemModal.kind)]) || 0;
               if (c <= 0 || r <= 0) return null;
               const margin = ((r - c) / r) * 100;
               const markup = ((r - c) / c) * 100;
@@ -22842,7 +23050,8 @@ export default function App({ authEmail = "", onSignOut }) {
     // subtract used treatments + parts from inventory at the chosen location
     const txUsed = entry.treatmentsUsed || [];
     const ptUsed = entry.partsUsed || [];
-    if (txUsed.length || ptUsed.length) {
+    const prUsed = entry.productsPurchased || []; // products are now inventory-tracked too
+    if (txUsed.length || ptUsed.length || prUsed.length) {
       setCatalog(cat => {
         const decFromLoc = (item, usedAmt, locId) => {
           // Pull from the picked location first, then spill over to other locations if short
@@ -22874,6 +23083,10 @@ export default function App({ authEmail = "", onSignOut }) {
           }),
           parts: (cat.parts || []).map(p => {
             const used = ptUsed.find(u => u.id === p.id);
+            return used ? decFromLoc(p, used.qty || 0, used.locId || entry.usageLoc) : p;
+          }),
+          products: (cat.products || []).map(p => {
+            const used = prUsed.find(u => u.id === p.id);
             return used ? decFromLoc(p, used.qty || 0, used.locId || entry.usageLoc) : p;
           }),
         };

@@ -21,6 +21,8 @@ function setCors(res) {
 function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = "", actionUrl = "", actionLabel = "" }) {
   const accent = /^#?[0-9a-fA-F]{3,8}$/.test(branding.accent || "") ? branding.accent : "#B81D24";
   const company = escapeHtml(branding.companyName || "Stone Property Solutions");
+  // Monogram (company initial) in the header — matches the app's logo mark for consistent branding.
+  const initial = escapeHtml((((branding.companyName || "Stone Property Solutions").trim())[0] || "S").toUpperCase());
   // Wrap phone/email as explicitly white, non-underlined links so Apple Mail doesn't
   // auto-detect them and render blue underlined "links" — they read as plain text.
   const noLink = "color:#fff;text-decoration:none";
@@ -34,9 +36,12 @@ function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = ""
       <td style="padding:6px 0 6px 14px;font-size:13px;color:#111827;font-weight:700;vertical-align:top">${escapeHtml(v)}</td>
     </tr>`).join("");
   return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:8px;color:#111827">
-    <div style="background:${accent};border-radius:14px 14px 0 0;padding:18px 20px;color:#fff">
-      <div style="font-size:17px;font-weight:800">${company}</div>
-      ${contactBits ? `<div style="font-size:11px;opacity:0.85;margin-top:3px">${contactBits}</div>` : ""}
+    <div style="background:${accent};border-radius:14px 14px 0 0;padding:18px 20px;color:#fff;display:flex;align-items:center;gap:12px">
+      <div style="width:40px;height:40px;border-radius:11px;background:#fff;text-align:center;line-height:40px;flex-shrink:0;font-size:21px;font-weight:800;color:${accent}">${initial}</div>
+      <div>
+        <div style="font-size:17px;font-weight:800">${company}</div>
+        ${contactBits ? `<div style="font-size:11px;opacity:0.85;margin-top:2px">${contactBits}</div>` : ""}
+      </div>
     </div>
     <div style="border:1px solid #eef0f2;border-top:none;border-radius:0 0 14px 14px;padding:20px">
       ${heading ? `<div style="font-size:16px;font-weight:800;margin-bottom:10px">${escapeHtml(heading)}</div>` : ""}
@@ -89,8 +94,10 @@ export default async function handler(req, res) {
       const ext = (m[1].split("/")[1] || "jpg").replace("jpeg", "jpg");
       const cid = `photo${i}@sps`;
       const label = (ph && typeof ph === "object" && ph.label) ? String(ph.label) : "";
+      const at = (ph && typeof ph === "object" && ph.at) ? String(ph.at) : "";
       attachments.push({ filename: `${label ? label.toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-" : ""}photo-${i + 1}.${ext}`, content: m[2], content_type: m[1], content_id: cid });
-      photoBlocks.push(`<div style="margin-bottom:12px">${label ? `<div style="font-size:11px;font-weight:700;color:#6b7280;margin-bottom:5px">${escapeHtml(label)}</div>` : ""}<img src="cid:${cid}" alt="${escapeHtml(label || "Service photo")}" style="width:100%;max-width:520px;border-radius:10px;display:block;border:1px solid #eef0f2" /></div>`);
+      // Caption UNDER the photo, prominent — label (+ time when known).
+      photoBlocks.push(`<div style="margin-bottom:18px"><img src="cid:${cid}" alt="${escapeHtml(label || "Service photo")}" style="width:100%;max-width:520px;border-radius:10px;display:block;border:1px solid #eef0f2" />${(label || at) ? `<div style="font-size:13px;font-weight:800;color:#111827;margin-top:7px">${escapeHtml(label || "Photo")}${at ? ` <span style="font-weight:500;color:#6b7280">&middot; ${escapeHtml(at)}</span>` : ""}</div>` : ""}</div>`);
     });
     const photosHtml = photoBlocks.length ? `<div style="margin-top:16px;border-top:1px solid #eef0f2;padding-top:14px"><div style="font-size:14px;font-weight:800;margin-bottom:10px">Photos</div>${photoBlocks.join("")}</div>` : "";
 
