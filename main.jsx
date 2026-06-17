@@ -187,20 +187,20 @@ function Login() {
         <div style={{ display: "flex", justifyContent: "center", marginBottom: 8 }}>
           {hasImg
             ? <img src={brand.image} alt="" style={{ width: 72, height: 72, borderRadius: 18, objectFit: "cover" }} />
-            : <div style={{ width: 72, height: 72, borderRadius: 18, background: "#f1f5f9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 40 }}>{(brand && brand.emoji) || "💧"}</div>}
+            : <div style={{ width: 72, height: 72, borderRadius: 18, background: "#f1f5f9", display: "flex", alignItems: "center", justifyContent: "center" }}><span style={{ fontSize: 32, fontWeight: 800, color: "#B81D24" }}>{((brand && brand.name) || "S").trim().charAt(0).toUpperCase() || "S"}</span></div>}
         </div>
         <h1 style={{ fontSize: 20, fontWeight: 800, textAlign: "center", margin: "0 0 4px", color: "#111" }}>{(brand && brand.name) || "Stone Property Solutions"}</h1>
 
         {mode === "sent" ? (
           <div style={{ textAlign: "center", padding: "16px 0 8px" }}>
-            <div style={{ fontSize: 36, marginBottom: 12 }}>📬</div>
+            <div style={{ marginBottom: 12, display: "flex", justifyContent: "center" }}><svg viewBox="0 0 24 24" width={40} height={40} fill="none" stroke="#B81D24" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg></div>
             <div style={{ fontSize: 16, fontWeight: 700, color: "#111", marginBottom: 8 }}>Check your email</div>
             <div style={{ fontSize: 13, color: "#6b7280", lineHeight: 1.6, marginBottom: 20 }}>We sent a login link to <b>{email}</b>. Tap the link to sign in.</div>
             <button style={linkBtn} onClick={() => { setMode("magic"); setErr(""); }}>Try a different email</button>
           </div>
         ) : mode === "reset_sent" ? (
           <div style={{ textAlign: "center", padding: "16px 0 8px" }}>
-            <div style={{ fontSize: 36, marginBottom: 12 }}>🔑</div>
+            <div style={{ marginBottom: 12, display: "flex", justifyContent: "center" }}><svg viewBox="0 0 24 24" width={40} height={40} fill="none" stroke="#B81D24" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
             <div style={{ fontSize: 16, fontWeight: 700, color: "#111", marginBottom: 8 }}>Check your email</div>
             <div style={{ fontSize: 13, color: "#6b7280", lineHeight: 1.6, marginBottom: 20 }}>We sent a password-reset link to <b>{email}</b>. Tap it to choose a new password.</div>
             <button style={linkBtn} onClick={() => { setMode("password"); setErr(""); }}>Back to sign in</button>
@@ -266,7 +266,7 @@ function SetPassword({ email, recovery, onDone }) {
         <div style={{ display: "flex", justifyContent: "center", marginBottom: 8 }}>
           {hasImg
             ? <img src={brand.image} alt="" style={{ width: 72, height: 72, borderRadius: 18, objectFit: "cover" }} />
-            : <div style={{ width: 72, height: 72, borderRadius: 18, background: "#f1f5f9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 40 }}>{(brand && brand.emoji) || "💧"}</div>}
+            : <div style={{ width: 72, height: 72, borderRadius: 18, background: "#f1f5f9", display: "flex", alignItems: "center", justifyContent: "center" }}><span style={{ fontSize: 32, fontWeight: 800, color: "#B81D24" }}>{((brand && brand.name) || "S").trim().charAt(0).toUpperCase() || "S"}</span></div>}
         </div>
         <h1 style={{ fontSize: 20, fontWeight: 800, textAlign: "center", margin: "0 0 4px", color: "#111" }}>{recovery ? "Reset your password" : "Create your password"}</h1>
         <p style={{ textAlign: "center", color: "#6b7280", fontSize: 13, margin: "0 0 20px", lineHeight: 1.5 }}>

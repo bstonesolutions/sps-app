@@ -82,8 +82,20 @@ const qbCheckStatus = async () => {
 // so a bad value here can never impersonate an outside address or line — it falls back.
 let SENDER_IDENTITY = { fromName: "", fromAddress: "", textingNumber: "" };
 function setSenderIdentity(v) { SENDER_IDENTITY = { ...SENDER_IDENTITY, ...(v || {}) }; }
-// Spread into a Resend email body; the server only honors these on the verified domain.
-const senderEmailFields = () => ({ fromName: SENDER_IDENTITY.fromName || "", fromAddress: SENDER_IDENTITY.fromAddress || "" });
+
+// Test/launch safety. While ON, every client-facing email + text is HELD or REDIRECTED
+// to the owner so nothing reaches real clients until you flip it live. Kept current by an
+// App effect (with owner/company fallbacks resolved). mode: "redirect" | "hold".
+let TEST_MODE = { on: false, mode: "redirect", email: "", phone: "" };
+function setTestMode(v) { TEST_MODE = { ...TEST_MODE, ...(v || {}) }; }
+
+// Spread into a Resend email body; the server only honors the from-fields on the verified
+// domain. When test mode is on it also carries the redirect instruction the server enforces.
+const senderEmailFields = () => ({
+  fromName: SENDER_IDENTITY.fromName || "",
+  fromAddress: SENDER_IDENTITY.fromAddress || "",
+  ...(TEST_MODE.on ? { testMode: { on: true, mode: TEST_MODE.mode, to: TEST_MODE.email || "" } } : {}),
+});
 
 // Home-screen widget sync status, surfaced in the Sync/Status tab. The owner widget
 // effect records each push here and registers the rebuild closure, so the tab can show
@@ -98,11 +110,19 @@ async function resyncWidgets() { return _widgetPush ? _widgetPush() : setWidgetS
 // Send a text via the business Quo number (server-side, from the company line).
 // Absolute PROD_URL so it works on the native app too. Returns { ok, error, missingEnv }.
 async function sendSms(to, message) {
+  // Test/launch safety: hold or redirect to the owner so real clients get nothing.
+  let dest = to, body = message;
+  if (TEST_MODE.on) {
+    if (TEST_MODE.mode === "hold") return { ok: true, held: true };
+    if (!TEST_MODE.phone) return { ok: false, error: "Test mode is on, but no owner phone is set to redirect texts to." };
+    dest = TEST_MODE.phone;
+    body = `[TEST → ${to}] ${message}`;
+  }
   try {
     const r = await fetch(`${PROD_URL}/api/send-sms`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ to, message, from: SENDER_IDENTITY.textingNumber || "" }),
+      body: JSON.stringify({ to: dest, message: body, from: SENDER_IDENTITY.textingNumber || "" }),
     });
     const d = await r.json().catch(() => ({}));
     if (r.ok && d.sent) return { ok: true };
@@ -910,7 +930,7 @@ const DEFAULT_BRANDING = {
   googleReviewLink: "",   // g.page/r/.../review link — opens in the EXTERNAL browser (signed-in session)
   division: "All Divisions",
   logoType: "image",
-  logoEmoji: "💧",
+  logoEmoji: "",          // legacy field; the non-image logo now renders a clean monogram
   logoImage: "/icon-192.png",
   themeKey: "sps",
   appearance: "system",
@@ -1361,15 +1381,15 @@ function clientServices(client, tierData) {
 // Per-division labels, icon, and type options so the app fits all three divisions.
 const DIVISION_META = {
   Pond: {
-    icon: "🐟", siteLabel: "Pond", typeLabel: "Pond Type", sizeLabel: "Volume",
+    icon: "", siteLabel: "Pond", typeLabel: "Pond Type", sizeLabel: "Volume",
     typeOptions: ["Koi Pond", "Ecosystem Pond", "Water Garden", "Pondless Waterfall", "Natural Pond"],
   },
   Pool: {
-    icon: "🏊", siteLabel: "Pool", typeLabel: "Pool Type", sizeLabel: "Volume",
+    icon: "", siteLabel: "Pool", typeLabel: "Pool Type", sizeLabel: "Volume",
     typeOptions: ["In-Ground", "Above-Ground", "Saltwater", "Chlorine", "Spa / Hot Tub"],
   },
   Seasonal: {
-    icon: "🍂", siteLabel: "Property", typeLabel: "Service Type", sizeLabel: "Property Size",
+    icon: "", siteLabel: "Property", typeLabel: "Service Type", sizeLabel: "Property Size",
     typeOptions: ["Leaf Removal", "Gutter Cleaning", "Full Property", "Snow Removal"],
   },
 };
@@ -1551,6 +1571,9 @@ const DEFAULT_EMAIL = {
   clientMagicSubject: "Your {company} client portal link",
   clientMagicBody: "Hi {first},\n\nHere's your secure link to your {company} client portal. Tap below to view your service history, invoices, and photos — no password required.\n\n{link}\n\nThank you for being a valued client,\nThe {company} Team",
   notify: DEFAULT_NOTIFY,
+  // Test/launch safety — while ON, nothing reaches real clients. "redirect" sends every
+  // client email/text to you instead (tagged [TEST]); "hold" sends nothing. Off = live.
+  testMode: { on: false, mode: "redirect", email: "", phone: "" },
 };
 
 // Build the report text from the template + a completed-visit record
@@ -1849,6 +1872,10 @@ const DEFAULT_INVOICING = {
 // date helpers (MM/DD/YYYY)
 const parseMDY = (s) => { const [m, d, y] = (s || "").split("/").map(Number); return (m && d && y) ? new Date(y, m - 1, d) : null; };
 const fmtMDY = (dt) => `${String(dt.getMonth() + 1).padStart(2, "0")}/${String(dt.getDate()).padStart(2, "0")}/${dt.getFullYear()}`;
+
+// First initial of the company name — the clean monogram shown anywhere there's no image
+// logo (replaces the old emoji logo). Always a single uppercase letter, never an emoji.
+const logoInitial = (b) => (((b && b.companyName) || "S").trim().charAt(0) || "S").toUpperCase();
 
 // Responsive viewport hook — the foundation for adapting layout to phone / tablet / desktop.
 // Returns { width, isPhone, isTablet, isDesktop }. Breakpoints: phone <700, tablet (narrow
@@ -5981,8 +6008,11 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
         body: JSON.stringify({ ...senderEmailFields(), to, subject, heading: subject, message: reportText, photos: photoPayload, branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary } }),
       });
       const d = await r.json().catch(() => ({}));
-      if (r.ok && d.sent) postReportToPortal();   // mirror the report into the in-app portal thread
-      setReportSend({ busy: "", msg: (r.ok && d.sent) ? { ok: true, text: `Report emailed to ${to}${photoPayload.length ? ` with ${photoPayload.length} photo${photoPayload.length > 1 ? "s" : ""}` : ""}.` } : { ok: false, text: d.error || "Email failed to send." } });
+      if (r.ok) postReportToPortal();   // mirror the report into the in-app portal thread (always posts)
+      const okMsg = d.held ? "Test Mode (hold) — report NOT sent to the client."
+        : TEST_MODE.on ? "Test Mode — report sent to you, tagged [TEST]."
+        : `Report emailed to ${to}${photoPayload.length ? ` with ${photoPayload.length} photo${photoPayload.length > 1 ? "s" : ""}` : ""}.`;
+      setReportSend({ busy: "", msg: (r.ok && (d.sent || d.held)) ? { ok: true, text: okMsg } : { ok: false, text: d.error || "Email failed to send." } });
     } catch (_) { setReportSend({ busy: "", msg: { ok: false, text: "Couldn't reach the server." } }); }
   };
   const sendText = async () => {
@@ -5996,7 +6026,10 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
       .replace(/\{sender\}/g, (email && email.senderName) || branding.companyName);
     const r = await sendSms(phone, short); // business Quo line ONLY
     if (r.ok) postReportToPortal();   // mirror the full report into the in-app portal thread
-    setReportSend({ busy: "", msg: r.ok ? { ok: true, text: `Report texted to ${client?.name || "the client"}.` } : { ok: false, text: r.error || (r.missingEnv ? "Texting isn't set up yet." : "Text failed to send.") } });
+    const txtMsg = r.held ? "Test Mode (hold) — text NOT sent."
+      : TEST_MODE.on ? "Test Mode — text sent to you, tagged [TEST]."
+      : `Report texted to ${client?.name || "the client"}.`;
+    setReportSend({ busy: "", msg: r.ok ? { ok: true, text: txtMsg } : { ok: false, text: r.error || (r.missingEnv ? "Texting isn't set up yet." : "Text failed to send.") } });
   };
 
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
@@ -6627,7 +6660,7 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
       <div style={{ marginBottom: 18 }}>
         <label style={labelStyle}>Client(s) — {selClientIds.length} selected</label>
         <div style={{ position: "relative", marginBottom: 8 }}>
-          <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>🔍</span>
+          <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", display: "flex", color: T.textMuted }}><svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg></span>
           <input type="search" placeholder="Search clients..." value={clientSearch} onChange={e => setClientSearch(e.target.value)}
             style={{ width: "100%", padding: "9px 12px 9px 34px", border: `1px solid ${T.border}`, borderRadius: 9, fontSize: 13, boxSizing: "border-box", outline: "none", fontFamily: "inherit", color: T.text, background: T.surface }} />
         </div>
@@ -6862,7 +6895,7 @@ function BulkAddStops({ clients, catalog, onAdd, onClose, T }) {
       {step === 1 && (
         <>
           <div style={{ position: "relative", marginBottom: 10 }}>
-            <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>🔍</span>
+            <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", display: "flex", color: T.textMuted }}><svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg></span>
             <input type="search" placeholder="Search clients..." value={search} onChange={e => setSearch(e.target.value)} style={{ ...field, paddingLeft: 34 }} />
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -7043,7 +7076,7 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", onClose }) {
     setOmw({ busy: false, msg: r.ok ? { ok: true, text: "On My Way text sent." } : { ok: false, text: r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send — your Quo texting may not be A2P-approved yet.") } });
   };
   const openMap = (app) => { try { localStorage.setItem("sps_map_app", app); } catch {} setPref(app); };
-  const mapApps = [{ key: "apple", label: "Apple Maps", icon: "A" }, { key: "google", label: "Google Maps", icon: "G" }, { key: "waze", label: "Waze", icon: "💜" }];
+  const mapApps = [{ key: "apple", label: "Apple Maps", icon: "A" }, { key: "google", label: "Google Maps", icon: "G" }, { key: "waze", label: "Waze", icon: "W" }];
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10, display: "block" };
   return (
     <Modal title={`Head to ${stop.client || "Stop"}`} onClose={onClose}>
@@ -9904,7 +9937,7 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
             <div style={{ fontSize: 12, fontWeight: 700, marginTop: 6, color: !identity.loaded ? T.textMuted : emailVerified ? "#16a34a" : "#d97706" }}>
               {!identity.loaded ? "Checking sending domain…"
                 : emailVerified ? "✓ Verified — emails send from this address"
-                : `⚠ ${emailDomain || "This domain"} isn't verified${identity.verifiedDomain ? ` (verified: ${identity.verifiedDomain})` : ""}. Emails will send from the default address until it is.`}
+                : `${emailDomain || "This domain"} isn't verified${identity.verifiedDomain ? ` (verified: ${identity.verifiedDomain})` : ""}. Emails will send from the default address until it is.`}
             </div>
             <div style={hint}>The address clients reply to and that emails send from. To use your own domain, verify it in Resend first.</div>
           </div>
@@ -9934,7 +9967,7 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
           )}
           {email.textingNumber ? (
             <div style={{ fontSize: 12, fontWeight: 700, color: numOnAccount === false ? "#d97706" : (numOnAccount ? "#16a34a" : T.textMuted) }}>
-              {numOnAccount === false ? "⚠ Not found on your Quo account — texts from it may be rejected."
+              {numOnAccount === false ? "Not found on your Quo account — texts from it may be rejected."
                 : numOnAccount ? "✓ On your Quo account"
                 : (numNorm ? `Will send from ${numNorm}` : "")}
             </div>
@@ -10024,7 +10057,7 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
           <div style={{ border: `1px solid ${T.border}`, borderRadius: 12, overflow: "hidden" }}>
             <div style={{ background: T.primary, color: "#fff", padding: "14px 16px", display: "flex", alignItems: "center", gap: 10 }}>
               <div style={{ width: 28, height: 28, borderRadius: 7, background: "rgba(255,255,255,0.18)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, overflow: "hidden" }}>
-                {branding.logoType === "image" && branding.logoImage ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span>{branding.logoEmoji}</span>}
+                {branding.logoType === "image" && branding.logoImage ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontWeight: 800, color: "#fff" }}>{logoInitial(branding)}</span>}
               </div>
               <span style={{ fontSize: 13, fontWeight: 700 }}>{email.fromName}</span>
             </div>
@@ -11485,9 +11518,8 @@ function InvoiceSendStep({ invoice, client, onClose }) {
     const fails = [];
     if (doSms && phone) {
       try {
-        const r = await fetch(`${PROD_URL}/api/send-sms`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: phone, message: smsMsg, from: SENDER_IDENTITY.textingNumber || "" }) });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok || !d.sent) fails.push(`Text: ${d.error || "failed"}`);
+        const r = await sendSms(phone, smsMsg); // gated: honors Test Mode (hold/redirect)
+        if (!r.ok) fails.push(`Text: ${r.error || "failed"}`);
       } catch (_) { fails.push("Text: couldn't reach server"); }
     }
     if (doChat && client?.id) {
@@ -12539,7 +12571,7 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
     <div style={{ display: "flex", gap: 11, alignItems: centered ? "center" : "flex-start", justifyContent: centered ? "center" : "flex-start", flexDirection: centered ? "column" : "row", textAlign: centered ? "center" : "left", minWidth: 0, width: centered ? "100%" : "auto", flex: centered ? "none" : 1 }}>
       {cfg.showLogo !== false && (
         <div style={{ width: 40, height: 40, borderRadius: 11, background: light ? "rgba(255,255,255,0.22)" : hexA(accent, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
-          {branding.logoType === "image" && branding.logoImage ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontSize: 21 }}>{branding.logoEmoji}</span>}
+          {branding.logoType === "image" && branding.logoImage ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontSize: 21, fontWeight: 800, color: light ? T.primary : "#fff" }}>{logoInitial(branding)}</span>}
         </div>
       )}
       <div style={{ minWidth: 0, flex: centered ? "none" : 1, width: "100%", textAlign: centered ? "center" : "left" }}>
@@ -13012,7 +13044,8 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
         if (msgErr) { setSendState("error"); setSendMsg(`Emailed, but the portal notification failed: ${msgErr.message}`); return; }
       }
 
-      setSendState("sent"); setSendMsg(`Invoice sent to ${clientEmail}.`);
+      setSendState("sent");
+      setSendMsg(d.held ? "Test Mode (hold) — invoice NOT emailed to the client." : TEST_MODE.on ? "Test Mode — invoice sent to you, tagged [TEST]." : `Invoice sent to ${clientEmail}.`);
       setTimeout(() => { setSendState("idle"); setSendMsg(""); }, 6000);
     } catch (e) {
       setSendState("error"); setSendMsg("Couldn't send: " + (e.message || "unknown error"));
@@ -13777,7 +13810,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
       const inv = p.invoice;
       const phone = String(c.phone || "").replace(/[^\d+]/g, "");
       const cEmail = (c.email || "").trim();
-      if (doSms && phone) { try { const r = await fetch(`${PROD_URL}/api/send-sms`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: phone, message: fill(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv), from: SENDER_IDENTITY.textingNumber || "" }) }); const d = await r.json().catch(() => ({})); if (!r.ok || !d.sent) fails++; } catch (_) { fails++; } }
+      if (doSms && phone) { try { const r = await sendSms(phone, fill(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv)); if (!r.ok) fails++; } catch (_) { fails++; } }
       if (doChat && c.id) { try { await supabase.from("sps_messages").insert({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) + `[[inv:${inv.id}]]` }); } catch (_) { fails++; } }
       if (doEmail && cEmail) { try { const tt = invoiceTotals(inv); await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...senderEmailFields(), emailSubject: fill(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, c, inv), emailIntro: fill(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, c, inv), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); } catch (_) { fails++; } }
     }
@@ -15322,6 +15355,8 @@ function NotificationSettings({ email, setEmail, branding }) {
   const base = { ...DEFAULT_NOTIFY, ...(email.notify || {}) };
   const events = { ...DEFAULT_NOTIFY.events, ...(base.events || {}) };
   const companyEmail = (branding && branding.companyEmail) || email.fromAddress || "";
+  const tm = { on: false, mode: "redirect", email: "", phone: "", ...(email.testMode || {}) };
+  const setTM = (k, v) => setEmail(prev => ({ ...prev, testMode: { on: false, mode: "redirect", email: "", phone: "", ...(prev.testMode || {}), [k]: v } }));
   const setField = (k, v) => setEmail(prev => {
     const pn = { ...DEFAULT_NOTIFY, ...(prev.notify || {}) };
     return { ...prev, notify: { ...pn, events: { ...DEFAULT_NOTIFY.events, ...(pn.events || {}) }, [k]: v } };
@@ -15336,8 +15371,49 @@ function NotificationSettings({ email, setEmail, branding }) {
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
   return (
     <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 18 }}>
+      {/* Test / launch safety — hold or redirect all client email + text while testing. */}
+      <div style={{ border: `1.5px solid ${tm.on ? hexA("#F59E0B", 0.55) : T.border}`, borderRadius: 16, padding: "15px 16px", background: tm.on ? hexA("#F59E0B", 0.07) : T.surface, display: "flex", flexDirection: "column", gap: 13 }}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: T.text, display: "flex", alignItems: "center", gap: 8 }}>
+              Test Mode
+              {tm.on && <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.06em", color: "#B45309", background: hexA("#F59E0B", 0.2), padding: "2px 8px", borderRadius: 100 }}>ON</span>}
+            </div>
+            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3, lineHeight: 1.45 }}>While testing, keep client emails &amp; texts from reaching real clients. Turn off to go live.</div>
+          </div>
+          <Toggle on={tm.on} onChange={v => setTM("on", v)} />
+        </div>
+        {tm.on && (
+          <>
+            <div style={{ display: "flex", gap: 8 }}>
+              {[["redirect", "Send to me"], ["hold", "Send nothing"]].map(([val, label]) => (
+                <button key={val} onClick={() => setTM("mode", val)}
+                  style={{ flex: 1, padding: "10px", borderRadius: 10, border: `1.5px solid ${tm.mode === val ? T.primary : T.border}`, background: tm.mode === val ? hexA(T.primary, 0.08) : T.surface, color: tm.mode === val ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            {tm.mode === "redirect" ? (
+              <>
+                <div>
+                  <label style={lbl}>Send all client email to</label>
+                  <input type="email" inputMode="email" value={tm.email || ""} placeholder={base.ownerEmail || companyEmail || "you@yourcompany.com"} onChange={e => setTM("email", e.target.value)} style={field} />
+                </div>
+                <div>
+                  <label style={lbl}>Send all client texts to</label>
+                  <input type="tel" inputMode="tel" value={tm.phone || ""} placeholder={base.ownerPhone || "(555) 555-5555"} onChange={e => setTM("phone", e.target.value)} style={field} />
+                </div>
+                <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5 }}>Every client email &amp; text goes to you instead, tagged <b style={{ color: "#B45309" }}>[TEST → client]</b>. Leave blank to use your Owner Alert contacts below. In-app portal messages still post (only a logged-in client sees those).</div>
+              </>
+            ) : (
+              <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5 }}>No client emails or texts are sent at all. In-app portal messages still post (only a logged-in client sees those). Turn Test Mode off to go live.</div>
+            )}
+          </>
+        )}
+      </div>
+
       <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>
-        Client events always appear in your in-app Alerts. Use the toggles below to also get an email, and set where those emails go. (Text alerts are coming soon.)
+        Client events always appear in your in-app Alerts. Use the toggles below to also get an email, and set where those emails go.
       </div>
       <div>
         <label style={lbl}>Owner email — where alert emails are sent</label>
@@ -15346,7 +15422,7 @@ function NotificationSettings({ email, setEmail, branding }) {
         {!base.ownerEmail && companyEmail && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>Defaults to your company email ({companyEmail}) until you set one here.</div>}
       </div>
       <div>
-        <label style={lbl}>Owner phone — for text alerts (coming soon)</label>
+        <label style={lbl}>Owner phone — for text alerts</label>
         <input type="tel" inputMode="tel" value={base.ownerPhone || ""} placeholder="(555) 555-5555"
           onChange={e => setField("ownerPhone", e.target.value)} style={field} />
       </div>
@@ -15471,7 +15547,7 @@ function SyncStatus({ T, branding, team, currentUserId }) {
     if (!testPhone.trim()) { setSmsMsg({ ok: false, text: "Enter a phone number first." }); return; }
     setSmsBusy(true); setSmsMsg(null);
     try {
-      const r = await fetch(`${PROD_URL}/api/send-sms`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: testPhone.trim(), message: `${branding.companyName || "Stone Property Solutions"}: test text ✅ — your texting integration is working.`, from: SENDER_IDENTITY.textingNumber || "" }) });
+      const r = await fetch(`${PROD_URL}/api/send-sms`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: testPhone.trim(), message: `${branding.companyName || "Stone Property Solutions"}: test text — your texting integration is working.`, from: SENDER_IDENTITY.textingNumber || "" }) });
       const d = await r.json().catch(() => ({}));
       setSmsMsg(r.ok ? { ok: true, text: `Sent — check ${testPhone.trim()}.` } : { ok: false, text: d.error || "Send failed." });
     } catch (_) { setSmsMsg({ ok: false, text: "Couldn't reach the server." }); }
@@ -15754,7 +15830,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             <div style={{ width: 52, height: 52, borderRadius: 14, background: T.surface, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
               {localBranding.logoType === "image" && localBranding.logoImage
                 ? <img src={localBranding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                : <span style={{ fontSize: 26 }}>{localBranding.logoEmoji}</span>}
+                : <span style={{ fontSize: 26, fontWeight: 800, color: T.primary }}>{logoInitial(localBranding)}</span>}
             </div>
             <div>
               <div style={{ fontWeight: 800, fontSize: 16, color: T.text, letterSpacing: "-0.01em" }}>{localBranding.companyName || "Company Name"}</div>
@@ -15798,7 +15874,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
               {["image", "emoji"].map(opt => (
                 <button key={opt} onClick={() => set("logoType", opt)}
                   style={{ flex: 1, padding: "9px 12px", border: `1.5px solid ${localBranding.logoType === opt ? T.primary : T.border}`, borderRadius: 10, background: localBranding.logoType === opt ? hexA(T.primary, 0.08) : T.surface, color: localBranding.logoType === opt ? T.primary : T.text, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
-                  {opt === "image" ? "Upload Image" : "Use Emoji"}
+                  {opt === "image" ? "Upload Image" : "Monogram"}
                 </button>
               ))}
             </div>
@@ -15818,13 +15894,11 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             )}
 
             {localBranding.logoType === "emoji" && (
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                {["💧","🌿","🏡","🐟","🌊","⚙️","🔧","🍃","🪴","🌱","🌻","🦆"].map(e => (
-                  <button key={e} onClick={() => set("logoEmoji", e)}
-                    style={{ width: 44, height: 44, borderRadius: 10, border: `2px solid ${localBranding.logoEmoji === e ? T.primary : T.border}`, background: localBranding.logoEmoji === e ? hexA(T.primary, 0.08) : T.surface, fontSize: 22, cursor: "pointer" }}>
-                    {e}
-                  </button>
-                ))}
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{ width: 44, height: 44, borderRadius: 10, background: T.primary, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <span style={{ fontSize: 22, fontWeight: 800, color: "#fff" }}>{logoInitial(localBranding)}</span>
+                </div>
+                <div style={{ fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>A clean monogram from your company name's first letter. Switch to <b>Upload Image</b> for a custom logo.</div>
               </div>
             )}
           </FieldRow>
@@ -19595,7 +19669,7 @@ function CPRatingPrompt({ client, branding, onRateVisit, T }) {
   if (stage === "positive") {
     return (
       <div style={card}>
-        <div style={{ fontSize: 16, fontWeight: 800, color: T.text }}>So glad to hear it! 🎉</div>
+        <div style={{ fontSize: 16, fontWeight: 800, color: T.text }}>So glad to hear it!</div>
         {reviewUrl ? (
           <>
             <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4, lineHeight: 1.5 }}>A quick Google review would mean a lot to us.</div>
@@ -20531,7 +20605,7 @@ function CPService({ client, branding, onNav, onUpgradeRequest, T }) {
               <div style={{ width: 48, height: 48, borderRadius: 14, background: "rgba(255,255,255,0.2)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, backdropFilter: "blur(8px)" }}>
                 {branding.logoType === "image" && branding.logoImage
                   ? <img src={branding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                  : <span style={{ fontSize: 24 }}>{branding.logoEmoji}</span>}
+                  : <span style={{ fontSize: 24, fontWeight: 800, color: "#fff" }}>{logoInitial(branding)}</span>}
               </div>
             )}
           </div>
@@ -21342,7 +21416,7 @@ function CPDesktopSidebar({ page, settingsOpen, portalUnread, branding, client, 
         <div style={{ width: 38, height: 38, borderRadius: 11, background: T.primary, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, boxShadow: `0 2px 8px ${hexA(T.primary, 0.35)}` }}>
           {branding.logoType === "image" && branding.logoImage
             ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-            : <span style={{ fontSize: 19 }}>{branding.logoEmoji || "💧"}</span>}
+            : <span style={{ fontSize: 18, fontWeight: 800, color: "#fff" }}>{(branding.companyName || "S").trim().charAt(0).toUpperCase() || "S"}</span>}
         </div>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", lineHeight: 1.18, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{branding.portalAppName || branding.companyName}</div>
@@ -21501,7 +21575,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, team
             <div style={{ width: 34, height: 34, borderRadius: 10, background: T.primary, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, boxShadow: `0 2px 8px ${hexA(T.primary, 0.35)}` }}>
               {branding.logoType === "image" && branding.logoImage
                 ? <img src={branding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                : <span style={{ fontSize: 17 }}>{branding.logoEmoji || "💧"}</span>}
+                : <span style={{ fontSize: 16, fontWeight: 800, color: "#fff" }}>{(branding.companyName || "S").trim().charAt(0).toUpperCase() || "S"}</span>}
             </div>
             <div>
               <div style={{ fontSize: 14, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", lineHeight: 1.1 }}>{branding.portalAppName || branding.companyName}</div>
@@ -21592,7 +21666,7 @@ function LoginScreen({ team, branding, T, fontStack, onSignIn }) {
           <div style={{ width: 64, height: 64, borderRadius: 18, background: hexA(T.primary, 0.12), display: "inline-flex", alignItems: "center", justifyContent: "center", overflow: "hidden", marginBottom: 14 }}>
             {branding.logoType === "image" && branding.logoImage
               ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-              : <span style={{ fontSize: 34 }}>{branding.logoEmoji}</span>}
+              : <span style={{ fontSize: 34, fontWeight: 800, color: T.primary }}>{logoInitial(branding)}</span>}
           </div>
           <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: "-0.03em" }}>{branding.companyName}</div>
           <div style={{ fontSize: 13, color: T.textMuted, marginTop: 3 }}>{pinFor ? `Enter ${pinFor.name.split(" ")[0]}'s PIN` : "Choose your account to sign in"}</div>
@@ -21647,7 +21721,7 @@ function DesktopSidebar({ page, perms, navUnread, reminderDue, onNav, onSignOut,
         <div style={{ width: 38, height: 38, borderRadius: 11, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
           {branding.logoType === "image" && branding.logoImage
             ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-            : <span style={{ fontSize: 20 }}>{branding.logoEmoji}</span>}
+            : <span style={{ fontSize: 20, fontWeight: 800, color: T.primary }}>{logoInitial(branding)}</span>}
         </div>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", lineHeight: 1.18, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{branding.companyName}</div>
@@ -21715,6 +21789,14 @@ export default function App({ authEmail = "", onSignOut }) {
   // Keep the module-level sending identity current with saved Email settings, so every
   // server email/SMS call goes out from the configured from-address + texting number.
   useEffect(() => { setSenderIdentity({ fromName: email.fromName, fromAddress: email.fromAddress, textingNumber: email.textingNumber }); }, [email.fromName, email.fromAddress, email.textingNumber]);
+  // Keep the module-level TEST_MODE in sync so every send path can read it. Resolve the
+  // redirect targets with fallbacks: explicit → Owner Alert contacts → company contacts.
+  useEffect(() => {
+    const tm = email.testMode || {};
+    const redirEmail = tm.email || (email.notify && email.notify.ownerEmail) || branding.companyEmail || "";
+    const redirPhone = tm.phone || (email.notify && email.notify.ownerPhone) || branding.companyPhone || "";
+    setTestMode({ on: !!tm.on, mode: tm.mode || "redirect", email: redirEmail, phone: redirPhone });
+  }, [email.testMode, email.notify, branding.companyEmail, branding.companyPhone]);
   const [costs, setCosts, lco] = useStoredState("sps_costs", DEFAULT_COSTS);
   const [home, setHome, lh] = useStoredState("sps_home", DEFAULT_HOME);
   const [budget, setBudget, lbud] = useStoredState("sps_budget", DEFAULT_BUDGET);
@@ -21855,8 +21937,8 @@ export default function App({ authEmail = "", onSignOut }) {
   // Push a small OWNER snapshot into the App Group shared store so the WidgetKit
   // extension renders with no network + no secrets. Owner only — limited staff never
   // expose profit/invoice figures. Unknown values are omitted by the bridge, never
-  // faked. (The client-role payload + widgets are built too, but the native app is
-  // staff/owner-only today, so no client session writes here yet.) No-op off-native.
+  // faked. (A signed-in CLIENT gets their own payload from the client effect below.)
+  // No-op off-native.
   useEffect(() => {
     if (!hydrated || !currentUser || effRole(currentUser) !== "owner") {
       // Limited staff / non-owner: nothing to push, but let the Sync tab explain why.
@@ -21952,6 +22034,8 @@ export default function App({ authEmail = "", onSignOut }) {
         collected_month: r2(collected),
         stops_total: todayStops.length,
         stops_done: doneCount,
+        active_clients: (clients || []).filter((c) => (c.status || "Active") === "Active").length,
+        jobs_month: mo.jobs || 0,
       };
       if (rateN > 0) payload.avg_effective_rate = r2(rateSum / rateN); // omit when unknowable
       if (techRows.length) payload.techs = techRows;                   // omit when no route today
@@ -21966,6 +22050,60 @@ export default function App({ authEmail = "", onSignOut }) {
     registerWidgetPush(pushNow);
     pushNow();
   }, [hydrated, currentUser, clients, invoices, schedule, team, completedSids]);
+
+  // CLIENT widget snapshot — when a client is signed into the native app, push their
+  // next visit + balance so the Service Schedule + Balance Due widgets render (no network,
+  // no secrets). Mutually exclusive with the owner effect above (owner XOR client session).
+  useEffect(() => {
+    if (!hydrated || currentUser || !clientUser) return;
+    const pushClient = async () => {
+      try {
+        const c = clientUser;
+        // Combine a MM/DD/YYYY date + "9:00 AM" time into an ISO datetime the widget parses.
+        const toISO = (mdy, timeStr) => {
+          const d = parseMDY(mdy); if (!d) return mdy;
+          const mt = /(\d+):(\d+)\s*(AM|PM)?/i.exec(timeStr || "");
+          if (mt) { let h = (+mt[1]) % 12; if (/pm/i.test(mt[3] || "")) h += 12; d.setHours(h, +mt[2], 0, 0); }
+          return d.toISOString();
+        };
+        const today = new Date(); today.setHours(0, 0, 0, 0);
+        const upcoming = [];
+        (schedule || []).forEach(d => {
+          const dd = parseMDY(d.date); if (!dd || dd < today) return;
+          (d.stops || []).forEach(s => {
+            const mine = String(s.id) === String(c.id) || String(s.clientId) === String(c.id) || s.client === c.name;
+            if (!mine || (completedSids && completedSids[s.sid])) return;
+            upcoming.push({ day: dd, date: d.date, stop: s });
+          });
+        });
+        upcoming.sort((a, b) => a.day - b.day);
+        const nextV = upcoming[0];
+
+        const bal = clientOutstanding(c, invoices);
+        const unpaid = clientInvoicesOf(invoices, c.id, c)
+          .filter(iv => !["Paid", "paid"].includes(effectiveStatus(iv)) && iv.status !== "Draft" && iv.status !== "draft")
+          .sort((a, b) => ((parseMDY(a.dueDate) || 0) - (parseMDY(b.dueDate) || 0)));
+
+        const payload = { role: "client", updated_at: new Date().toISOString() };
+        if (nextV) {
+          payload.next_visit_at = toISO(nextV.date, nextV.stop.time);
+          payload.next_visit_service = nextV.stop.type || "Service Visit";
+          const emp = (team || []).find(e => e.id === nextV.stop.assigneeId);
+          if (emp) payload.next_visit_tech = emp.name;
+        }
+        if (upcoming.length) payload.upcoming = upcoming.slice(0, 3).map(u => toISO(u.date, u.stop.time));
+        payload.balance_due = Math.round((Number(bal) || 0) * 100) / 100;
+        if (unpaid[0] && unpaid[0].dueDate) payload.balance_due_date = unpaid[0].dueDate;
+
+        const res = await sendWidgetPayload(payload);
+        return setWidgetSync({ ok: !!res.ok, native: !!res.native, skipped: !!res.skipped, reason: res.reason || "", fields: Object.keys(payload) });
+      } catch (e) {
+        return setWidgetSync({ ok: false, reason: (e && e.message) || "Couldn't build the client widget snapshot." });
+      }
+    };
+    registerWidgetPush(pushClient);
+    pushClient();
+  }, [hydrated, currentUser, clientUser, schedule, invoices, completedSids, team]);
   // Smart reopen on a warm resume (the app wasn't killed):
   //  • backgrounded ~30 min or more  → land on Home with the full splash (fresh start)
   //  • backgrounded under ~30 min     → stay exactly where I left off (no disruption)
@@ -22997,10 +23135,16 @@ export default function App({ authEmail = "", onSignOut }) {
             <div style={{ width: 30, height: 30, borderRadius: 9, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
               {branding.logoType === "image" && branding.logoImage
                 ? <img src={branding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                : <span style={{ fontSize: 16 }}>{branding.logoEmoji}</span>}
+                : <span style={{ fontSize: 16, fontWeight: 800, color: T.primary }}>{logoInitial(branding)}</span>}
             </div>
             <div>
-              <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: "-0.02em", lineHeight: 1.15, color: T.text }}>{branding.companyName}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: "-0.02em", lineHeight: 1.15, color: T.text }}>{branding.companyName}</div>
+                {email?.testMode?.on && (
+                  <span title={`Test mode is on — client ${email.testMode.mode === "hold" ? "emails & texts are held" : "emails & texts go to you"}`}
+                    style={{ fontSize: 8.5, fontWeight: 800, letterSpacing: "0.06em", color: "#B45309", background: hexA("#F59E0B", 0.16), padding: "1.5px 6px", borderRadius: 100, textTransform: "uppercase", whiteSpace: "nowrap" }}>Test</span>
+                )}
+              </div>
               <div style={{ fontSize: 10.5, color: T.textMuted, letterSpacing: "0.01em", lineHeight: 1.2 }}>{branding.division}</div>
             </div>
           </div>

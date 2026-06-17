@@ -115,19 +115,29 @@ export default async function handler(req, res) {
   const { to, clientName, branding = {}, invoice = {}, payLink, emailSubject, emailIntro } = req.body || {};
   if (!to || !/.+@.+\..+/.test(to)) return res.status(400).json({ error: "A valid client email is required" });
 
+  // Test/launch safety — enforced server-side so a forgotten call site can't leak to a
+  // real client. "hold" sends nothing; "redirect" sends to the owner, tagged [TEST → …].
+  const tm = req.body.testMode;
+  let recipient = to, subjectPrefix = "";
+  if (tm && tm.on) {
+    if (tm.mode === "hold") return res.status(200).json({ sent: false, held: true, testMode: true });
+    if (tm.to && /.+@.+\..+/.test(tm.to)) { recipient = tm.to; subjectPrefix = `[TEST → ${to}] `; }
+    else return res.status(200).json({ sent: false, held: true, testMode: true, reason: "No test redirect email set." });
+  }
+
   const RESEND_KEY = process.env.RESEND_API_KEY;
   const FROM = resolveFrom(req.body, process.env.RESEND_FROM || "Stone Property Solutions <noreply@stonepropertysolutions.com>");
   if (!RESEND_KEY) return res.status(501).json({ error: "Email delivery is not configured on the server.", missingEnv: true });
 
   try {
-    const subject = (emailSubject && String(emailSubject).trim()) || `Invoice ${invoice.number || ""} from ${branding.companyName || "your service provider"}`.trim();
+    const subject = subjectPrefix + ((emailSubject && String(emailSubject).trim()) || `Invoice ${invoice.number || ""} from ${branding.companyName || "your service provider"}`.trim());
     const html = buildInvoiceHtml({ clientName, branding, invoice, payLink, intro: emailIntro });
     const text = buildInvoiceText({ clientName, branding, invoice, payLink, intro: emailIntro });
 
     const sendRes = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { "Authorization": `Bearer ${RESEND_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: FROM, to: [to], subject, html, text }),
+      body: JSON.stringify({ from: FROM, to: [recipient], subject, html, text }),
     });
     const sendData = await sendRes.json().catch(() => ({}));
     if (!sendRes.ok) {

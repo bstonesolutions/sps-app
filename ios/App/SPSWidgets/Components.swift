@@ -56,6 +56,56 @@ struct VSeparator: View {
     var body: some View { Rectangle().fill(Brand.hair).frame(width: 1, height: 40) }
 }
 
+// Big, screen-filling stat — the shared building block for every stat widget so they all
+// read at a glance with no dead space (value on top, label under, crimson accent for the
+// figure that matters). Pair with Spacers to distribute and fill the tile vertically.
+struct BigStat: View {
+    let label: String
+    let value: String
+    var accent: Bool = false
+    var size: CGFloat = 27
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(.system(size: size, weight: .heavy, design: .rounded))
+                .foregroundColor(accent ? Brand.crimson : Brand.ink)
+                .minimumScaleFactor(0.45)
+                .lineLimit(1)
+            Text(label)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(Brand.muted)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// Centered stat — value stacked directly over its label, both centered. Used where a tile
+// reads as a tidy grid (Business Overview). Equal-width columns + HStack spacing keep big
+// numbers from crowding each other.
+struct CenterStat: View {
+    let label: String
+    let value: String
+    var accent: Bool = false
+    var size: CGFloat = 23
+    var body: some View {
+        VStack(spacing: 3) {
+            Text(value)
+                .font(.system(size: size, weight: .heavy, design: .rounded))
+                .foregroundColor(accent ? Brand.crimson : Brand.ink)
+                .minimumScaleFactor(0.4)
+                .lineLimit(1)
+            Text(label)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Brand.muted)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
 struct EmptyWidgetView: View {
     let icon: String
     let line1: String

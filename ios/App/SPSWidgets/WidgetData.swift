@@ -25,6 +25,10 @@ struct WidgetPayload: Codable {
     var stopsDone: Int?
     var techs: [TechProgress]?
 
+    // Owner · whole-business overview
+    var activeClients: Int?
+    var jobsMonth: Int?
+
     // Client
     var nextVisitAt: String?
     var nextVisitService: String?
@@ -46,6 +50,8 @@ struct WidgetPayload: Codable {
         case stopsTotal       = "stops_total"
         case stopsDone        = "stops_done"
         case techs
+        case activeClients    = "active_clients"
+        case jobsMonth        = "jobs_month"
         case nextVisitAt      = "next_visit_at"
         case nextVisitService = "next_visit_service"
         case nextVisitTech    = "next_visit_tech"

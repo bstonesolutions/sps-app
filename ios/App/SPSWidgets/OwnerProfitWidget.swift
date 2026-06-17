@@ -43,16 +43,24 @@ struct OwnerProfitView: View {
     private var small: some View {
         VStack(alignment: .leading, spacing: 0) {
             Header(title: "THIS WEEK")
-            Spacer(minLength: 6)
+            Spacer(minLength: 8)
             Text(p?.profitWeek.map(sps_money) ?? "—")
-                .font(.system(size: 33, weight: .heavy, design: .rounded))
+                .font(.system(size: 40, weight: .heavy, design: .rounded))
                 .foregroundColor(Brand.ink)
-                .minimumScaleFactor(0.5)
+                .minimumScaleFactor(0.4)
                 .lineLimit(1)
+            Spacer(minLength: 8)
             Text("Profit")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundColor(Brand.muted)
-            Spacer(minLength: 0)
+                .font(.system(size: 17, weight: .bold))
+                .foregroundColor(Brand.slate)
+            if let mo = p?.profitMonth {
+                Text("\(sps_money(mo)) this month")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(Brand.muted)
+                    .minimumScaleFactor(0.6)
+                    .lineLimit(1)
+                    .padding(.top, 2)
+            }
         }
         .padding(16)
     }
@@ -62,11 +70,13 @@ struct OwnerProfitView: View {
             Header(title: "PROFIT")
             Spacer(minLength: 12)
             HStack(spacing: 0) {
-                StatColumn(label: "This Week",  value: p?.profitWeek.map(sps_money) ?? "—", accent: true)
-                VSeparator()
-                StatColumn(label: "This Month", value: p?.profitMonth.map(sps_money) ?? "—")
-                VSeparator()
-                StatColumn(label: "Avg Rate",   value: p?.avgEffectiveRate.map(sps_rate) ?? "—")
+                BigStat(label: "This Week",  value: p?.profitWeek.map(sps_money) ?? "—", accent: true)
+                BigStat(label: "This Month", value: p?.profitMonth.map(sps_money) ?? "—")
+            }
+            Spacer(minLength: 12)
+            HStack(spacing: 0) {
+                BigStat(label: "Avg Rate",  value: p?.avgEffectiveRate.map(sps_rate) ?? "—")
+                BigStat(label: "Jobs (mo)", value: p?.jobsMonth.map { "\($0)" } ?? "—")
             }
             Spacer(minLength: 0)
         }

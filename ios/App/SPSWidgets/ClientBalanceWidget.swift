@@ -56,34 +56,42 @@ struct ClientBalanceView: View {
     private var small: some View {
         VStack(alignment: .leading, spacing: 0) {
             Header(title: "BALANCE DUE")
-            Spacer(minLength: 6)
+            Spacer(minLength: 8)
             if due == nil {
                 Text("—")
-                    .font(.system(size: 31, weight: .heavy, design: .rounded))
+                    .font(.system(size: 42, weight: .heavy, design: .rounded))
                     .foregroundColor(Brand.ink)
+                Spacer(minLength: 8)
                 Text("Open the app to sync")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(Brand.muted)
             } else if isPaidUp {
                 Text("Paid up")
-                    .font(.system(size: 27, weight: .heavy, design: .rounded))
+                    .font(.system(size: 36, weight: .heavy, design: .rounded))
                     .foregroundColor(Brand.ink)
+                    .minimumScaleFactor(0.5)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
                 Text("Thank you!")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(Brand.muted)
             } else {
                 Text(sps_money(due!))
-                    .font(.system(size: 31, weight: .heavy, design: .rounded))
+                    .font(.system(size: 42, weight: .heavy, design: .rounded))
                     .foregroundColor(Brand.crimson)
-                    .minimumScaleFactor(0.5)
+                    .minimumScaleFactor(0.4)
                     .lineLimit(1)
+                Spacer(minLength: 8)
                 if let d = dueDate {
                     Text("Due \(SPSDate.dayLabel(d))")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundColor(Brand.slate)
+                } else {
+                    Text("Balance due")
+                        .font(.system(size: 16, weight: .semibold))
                         .foregroundColor(Brand.muted)
                 }
             }
-            Spacer(minLength: 0)
         }
         .padding(16)
     }

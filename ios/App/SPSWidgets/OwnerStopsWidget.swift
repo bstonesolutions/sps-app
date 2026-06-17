@@ -118,7 +118,7 @@ struct OwnerStopsView: View {
 
     private var statusLine: String {
         if !hasStops { return "No stops today" }
-        return allDone ? "All done 🎉" : "\(remaining) left"
+        return allDone ? "All done" : "\(remaining) left"
     }
 
     var body: some View {
@@ -210,7 +210,7 @@ struct OwnerStopsView: View {
                     Text("stops complete")
                         .font(.system(size: 15, weight: .medium))
                         .foregroundColor(Brand.muted)
-                    Text(allDone ? "Route finished — nice work 🎉" : "\(pct) · \(remaining) remaining")
+                    Text(allDone ? "Route finished — nice work" : "\(pct) · \(remaining) remaining")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundColor(allDone ? Brand.crimson : Brand.slate)
                         .lineLimit(1)

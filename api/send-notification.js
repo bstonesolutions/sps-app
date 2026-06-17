@@ -62,6 +62,17 @@ export default async function handler(req, res) {
   if (!to || !/.+@.+\..+/.test(to)) return res.status(400).json({ error: "A valid recipient email is required" });
   if (!subject) return res.status(400).json({ error: "A subject is required" });
 
+  // Test/launch safety — enforced server-side. "hold" sends nothing; "redirect" sends to
+  // the owner, tagged [TEST → …]. (Owner-alert emails already go to the owner, so redirect
+  // is effectively a no-op for them beyond the tag.)
+  const tm = req.body.testMode;
+  let recipient = to, subjectPrefix = "";
+  if (tm && tm.on) {
+    if (tm.mode === "hold") return res.status(200).json({ sent: false, held: true, testMode: true });
+    if (tm.to && /.+@.+\..+/.test(tm.to)) { recipient = tm.to; subjectPrefix = `[TEST → ${to}] `; }
+    else return res.status(200).json({ sent: false, held: true, testMode: true, reason: "No test redirect email set." });
+  }
+
   const RESEND_KEY = process.env.RESEND_API_KEY;
   const FROM = resolveFrom(req.body, process.env.RESEND_FROM || "Stone Property Solutions <noreply@stonepropertysolutions.com>");
   if (!RESEND_KEY) return res.status(501).json({ error: "Email delivery is not configured on the server.", missingEnv: true });
@@ -92,7 +103,7 @@ export default async function handler(req, res) {
     const sendRes = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { "Authorization": `Bearer ${RESEND_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: FROM, to: [to], subject, html, text, ...(attachments.length ? { attachments } : {}) }),
+      body: JSON.stringify({ from: FROM, to: [recipient], subject: subjectPrefix + subject, html, text, ...(attachments.length ? { attachments } : {}) }),
     });
     const sendData = await sendRes.json().catch(() => ({}));
     if (!sendRes.ok) {
