@@ -9,7 +9,7 @@ const escapeHtml = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const money = (n) => "$" + (Number(n) || 0).toFixed(2);
 
-function buildInvoiceHtml({ clientName, branding, invoice, payLink, intro }) {
+function buildInvoiceHtml({ clientName, branding, invoice, payLink, intro, logoHtml, appUrl }) {
   const accent = /^#?[0-9a-fA-F]{3,8}$/.test(branding.accent || "") ? branding.accent : "#B81D24";
   const company = escapeHtml(branding.companyName || "");
   // Monogram (company initial) — matches the app's logo mark for consistent branding.
@@ -45,7 +45,7 @@ function buildInvoiceHtml({ clientName, branding, invoice, payLink, intro }) {
 
   return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:8px;color:#111827">
     <div style="background:${accent};border-radius:14px 14px 0 0;padding:18px 20px;color:#fff;display:flex;align-items:center;gap:12px">
-      <div style="width:40px;height:40px;border-radius:11px;background:#fff;text-align:center;line-height:40px;flex-shrink:0;font-size:21px;font-weight:800;color:${accent}">${initial}</div>
+      ${logoHtml || `<div style="width:40px;height:40px;border-radius:11px;background:#fff;text-align:center;line-height:40px;flex-shrink:0;font-size:21px;font-weight:800;color:${accent}">${initial}</div>`}
       <div>
         <div style="font-size:17px;font-weight:800">${company}</div>
         ${contactBits ? `<div style="font-size:11px;opacity:0.85;margin-top:2px">${contactBits}</div>` : ""}
@@ -72,7 +72,10 @@ function buildInvoiceHtml({ clientName, branding, invoice, payLink, intro }) {
         ${totalRow("Total Due", money(invoice.total), { big: true })}
       </table>
       ${payLink ? `<div style="text-align:center;margin-top:20px">
-        <a href="${escapeHtml(payLink)}" style="display:inline-block;background:${accent};color:#fff;text-decoration:none;font-weight:800;padding:14px 30px;border-radius:12px;font-size:15px">View &amp; Pay Invoice</a>
+        <a href="${escapeHtml(payLink)}" style="display:inline-block;background:${accent};color:#fff;text-decoration:none;font-weight:800;padding:14px 30px;border-radius:12px;font-size:15px">Pay Invoice Online</a>
+      </div>` : ""}
+      ${appUrl ? `<div style="text-align:center;margin-top:11px">
+        <a href="${escapeHtml(appUrl)}" style="display:inline-block;color:${accent};text-decoration:none;font-weight:700;font-size:13.5px">Or pay in the ${company} app &rarr;</a>
       </div>` : ""}
       ${invoice.terms ? `<div style="font-size:12px;color:#6b7280;margin-top:18px;line-height:1.5;border-top:1px solid #eef0f2;padding-top:12px">${escapeHtml(invoice.terms)}</div>` : ""}
     </div>
@@ -136,13 +139,30 @@ export default async function handler(req, res) {
 
   try {
     const subject = subjectPrefix + ((emailSubject && String(emailSubject).trim()) || `Invoice ${invoice.number || ""} from ${branding.companyName || "your service provider"}`.trim());
-    const html = buildInvoiceHtml({ clientName, branding, invoice, payLink, intro: emailIntro });
+
+    // Embed the real uploaded logo as an inline cid attachment (reliable across mail clients,
+    // unlike data: URIs) — buildInvoiceHtml falls back to the monogram when there's no image.
+    const attachments = [];
+    let logoHtml = "";
+    const li = branding.logoImage || "";
+    if (branding.logoType === "image" && li) {
+      const lm = /^data:(image\/[a-zA-Z+]+);base64,(.+)$/.exec(li);
+      if (lm) {
+        const ext = (lm[1].split("/")[1] || "png").replace("jpeg", "jpg");
+        attachments.push({ filename: `logo.${ext}`, content: lm[2], content_type: lm[1], content_id: "splogo@sps" });
+        logoHtml = `<img src="cid:splogo@sps" alt="" style="width:40px;height:40px;border-radius:11px;object-fit:cover;background:#fff;flex-shrink:0" />`;
+      } else if (/^https?:\/\//i.test(li)) {
+        logoHtml = `<img src="${escapeHtml(li)}" alt="" style="width:40px;height:40px;border-radius:11px;object-fit:cover;background:#fff;flex-shrink:0" />`;
+      }
+    }
+    const appUrl = (typeof req.body.appUrl === "string" && req.body.appUrl) ? req.body.appUrl : "spsway://invoices";
+    const html = buildInvoiceHtml({ clientName, branding, invoice, payLink, intro: emailIntro, logoHtml, appUrl });
     const text = buildInvoiceText({ clientName, branding, invoice, payLink, intro: emailIntro });
 
     const sendRes = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { "Authorization": `Bearer ${RESEND_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: FROM, to: [recipient], subject, html, text }),
+      body: JSON.stringify({ from: FROM, to: [recipient], subject, html, text, ...(attachments.length ? { attachments } : {}) }),
     });
     const sendData = await sendRes.json().catch(() => ({}));
     if (!sendRes.ok) {

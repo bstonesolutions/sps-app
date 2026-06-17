@@ -2556,11 +2556,16 @@ const ACTIVE_SHIFT_KEY = "sps_active_shift";
 //   );
 //
 // This hook lives at the App level (always mounted while the staff app is open)
-// so location keeps updating as the tech navigates between tabs. It tracks ONLY
-// when an active shift exists in localStorage AND that shift opted into location
-// (shift.track). On clock-out (no shift) it flips is_active=false. Never tracks
-// clients — only the signed-in staff member's own shift.
-function useStaffLocationTracking() {
+// so location keeps updating as the tech navigates between tabs. It broadcasts when
+// EITHER (a) an active shift opted into location (shift.track), OR (b) the signed-in
+// tech is inside their scheduled route window today (auto-share — see autoShareWant),
+// as long as location was allowed once. Otherwise it flips is_active=false. Never
+// tracks clients — only the signed-in staff member's own location.
+function useStaffLocationTracking(opts) {
+  // Keep the latest identity/schedule in a ref so the long-lived watcher effect
+  // (mounted once) always reads current values without re-subscribing.
+  const optsRef = useRef(opts || {});
+  optsRef.current = opts || {};
   useEffect(() => {
     if (typeof window === "undefined") return;
     let watchId = null;
@@ -2594,9 +2599,32 @@ function useStaffLocationTracking() {
       );
     };
 
+    // Auto-share window: broadcast the signed-in tech's location during their
+    // scheduled route today (first stop − lead → last stop + trail), even without a
+    // clock-in. Gated on a prior location consent so it never surprises a tech with a
+    // permission prompt. Returns the staffId to broadcast, or null.
+    const AUTO_LEAD_MIN = 30, AUTO_TRAIL_MIN = 120;
+    const autoShareWant = () => {
+      const o = optsRef.current || {};
+      if (!o.staffId) return null;
+      let consented = false;
+      try { consented = localStorage.getItem("sps_loc_consent") === "1"; } catch (_) {}
+      if (!consented) return null;
+      const times = (o.stops || []).map(s => s && s.time).filter(t => t && /\d{1,2}:\d{2}/.test(t)).map(to24).filter(n => Number.isFinite(n));
+      if (!times.length) return null;
+      const first = Math.min(...times), last = Math.max(...times);
+      const d = new Date();
+      const nowMin = d.getHours() * 60 + d.getMinutes();
+      const inWindow = nowMin >= first - AUTO_LEAD_MIN && nowMin <= last + AUTO_TRAIL_MIN;
+      return inWindow ? String(o.staffId) : null;
+    };
+
     const sync = () => {
       const shift = readShift();
-      const want = shift && shift.staffId && shift.track !== false ? String(shift.staffId) : null;
+      const shiftWant = shift && shift.staffId && shift.track !== false ? String(shift.staffId) : null;
+      // Respect an explicit per-shift opt-out; otherwise fall back to auto-share.
+      const optedOut = shift && shift.track === false;
+      const want = shiftWant || (optedOut ? null : autoShareWant());
       if (want) {
         if (activeId !== want) { if (activeId) stop(activeId); activeId = want; start(want); }
       } else if (activeId) {
@@ -2816,7 +2844,7 @@ function ClockInOut({ me, T }) {
   );
 }
 
-function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onNav, catalog, onConfirmUpgrade, userName, me, scheduleCfg, reminderLog, vp = {} }) {
+function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onOpenAlert, onOpenStop, onNav, catalog, onConfirmUpgrade, userName, me, scheduleCfg, reminderLog, vp = {} }) {
   const { T, perms } = useApp();
   const [editing, setEditing] = useState(false);
 
@@ -2906,7 +2934,7 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
         <CardHeader title="Today's Route" action={<Btn variant="text" sm onClick={() => onNav("schedule")}>View All</Btn>} />
         {today.stops.length === 0 && <div style={{ padding: 18, fontSize: 13, color: T.textMuted }}>No stops scheduled today.</div>}
         {today.stops.map((s, i) => (
-          <div key={i} style={{ padding: "14px 18px", borderBottom: i < today.stops.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", gap: 14, alignItems: "center" }}>
+          <div key={i} onClick={() => onOpenStop && onOpenStop(s, today.date)} style={{ padding: "14px 18px", borderBottom: i < today.stops.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", gap: 14, alignItems: "center", cursor: onOpenStop ? "pointer" : "default" }}>
             <div style={{ background: T.surfaceAlt, borderRadius: 10, padding: "7px 10px", textAlign: "center", minWidth: 58, flexShrink: 0 }}>
               <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{s.time.split(" ")[1]}</div>
               <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>{s.time.split(" ")[0]}</div>
@@ -2981,14 +3009,14 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
                 </div>
               ) : (
                 /* ── Standard office alert ── */
-                <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                <div onClick={() => onOpenAlert && onOpenAlert(a)} style={{ display: "flex", gap: 12, alignItems: "flex-start", cursor: onOpenAlert ? "pointer" : "default" }}>
                   <Icon name="warning" size={18} />
-                  <div style={{ flex: 1 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontWeight: 700, fontSize: 13, color: T.text }}>{a.client || a.clientName} — needs office attention</div>
                     <div style={{ fontSize: 12, color: T.textMuted }}>{a.message || a.body}</div>
-                    <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{a.date}</div>
+                    <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{a.date}{onOpenAlert ? " · tap to view the report & photos" : ""}</div>
                   </div>
-                  <button onClick={() => onResolveAlert && onResolveAlert(a.id)} style={{ background: "none", border: `1px solid ${T.border}`, borderRadius: 7, padding: "4px 10px", fontSize: 11, fontWeight: 700, color: T.textMuted, cursor: "pointer", fontFamily: "inherit" }}>Resolve</button>
+                  <button onClick={(e) => { e.stopPropagation(); onResolveAlert && onResolveAlert(a.id); }} style={{ background: "none", border: `1px solid ${T.border}`, borderRadius: 7, padding: "4px 10px", fontSize: 11, fontWeight: 700, color: T.textMuted, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Resolve</button>
                 </div>
               )}
             </div>
@@ -3693,6 +3721,17 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
     } else {
       base.street = base.street || ""; base.city = base.city || ""; base.state = base.state || ""; base.zip = base.zip || "";
     }
+    // Reconcile the service plan with the app's source of truth (effectiveTier) so the
+    // editor shows the SAME tier the Hub does, the primary division's plan is explicit
+    // (so "None" sticks instead of snapping back to Essential), and a Save persists it
+    // consistently across c.plan + c.plans[division].
+    {
+      const primaryDiv = base.division || "Pond";
+      const eTier = effectiveTier(client) || "";
+      base.plans = { ...(base.plans || {}) };
+      if (!Object.prototype.hasOwnProperty.call(base.plans, primaryDiv)) base.plans[primaryDiv] = eTier;
+      base.plan = base.plans[primaryDiv] || "";
+    }
     return base;
   });
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
@@ -3830,7 +3869,10 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
                   <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 }}>Service Plans</label>
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                     {[form.division, ...getDivisions(tiers).filter(d => d !== form.division && form["service" + d])].map(div => {
-                      const currentPlan = (form.plans && form.plans[div]) || (div === (form.division || "Pond") ? (form.plan || "Essential") : "Essential");
+                      // Use the explicit per-division value when set (incl. "" = None, so it sticks);
+                      // otherwise seed the primary division from effectiveTier so it matches the Hub.
+                      const hasPlan = form.plans && Object.prototype.hasOwnProperty.call(form.plans, div);
+                      const currentPlan = hasPlan ? (form.plans[div] || "") : (div === (form.division || "Pond") ? (effectiveTier(client) || "") : "");
                       return (
                         <div key={div} style={{ background: T.surfaceAlt, borderRadius: 14, padding: "12px 14px" }}>
                           <div style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>{div}</div>
@@ -4190,10 +4232,10 @@ function ClientDocuments({ client, onChange }) {
   );
 }
 
-function ClientDetail({ client: init, invoices, invoicing, branding, catalog, setCatalog, team, schedule, email, onBack, onUpdate, onSaveInvoice, onDeleteInvoice, onDelete, onPreviewClient }) {
+function ClientDetail({ client: init, invoices, invoicing, branding, catalog, setCatalog, team, schedule, email, onBack, onUpdate, onSaveInvoice, onDeleteInvoice, onDelete, onPreviewClient, initialTab }) {
   const { T, perms, tiers } = useApp();
   const [client, setClient] = useState(init);
-  const [tab, setTab] = useState("overview");
+  const [tab, setTab] = useState(initialTab || "overview");
   const [editing, setEditing] = useState(false);
   // Division-aware tier — same source of truth as the Service Tiers screen + clients list,
   // so a tier set in the bulk editor links here even when c.plan is stale (post-restore /
@@ -4312,7 +4354,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
       {tab === "history" && <ClientHistory client={client} catalog={catalog} team={team} onChange={hist => update({ history: hist })} />}
       {tab === "invoices" && (perms.canInvoice || perms.viewInvoices) && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={onSaveInvoice} onDelete={onDeleteInvoice} />}
       {tab === "docs"    && <ClientDocuments client={client} onChange={docs => update({ documents: docs })} />}
-      {tab === "portal" && <ClientPortal client={client} invoices={invoices} schedule={schedule} branding={branding} email={email} onPreviewClient={onPreviewClient} />}
+      {tab === "portal" && <ClientPortal client={client} invoices={invoices} invoicing={invoicing} schedule={schedule} branding={branding} email={email} onPreviewClient={onPreviewClient} />}
     </div>
   );
 }
@@ -4476,148 +4518,152 @@ function ClientOverview({ client, onUpdate }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
 
-      {/* Site Photos */}
+      {/* Site Media — photos + videos consolidated into one prominent card */}
       <Card>
-        <CardHeader title={`${m.siteLabel} Photos`} />
-        <div style={{ padding: "16px 18px" }}>
-          {sitePhotos.length === 0 && !perms.editClients ? (
-            <div style={{ fontSize: 13, color: T.textMuted, textAlign: "center", padding: "16px 0" }}>No photos added yet.</div>
-          ) : (
-            <>
-              {sitePhotos.length > 0 && !perms.editClients && (
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-                  {sitePhotos.map((p, i) => {
-                    const src = typeof p === "string" ? p : p.src;
-                    const cap = typeof p === "object" ? p.caption : "";
-                    return (
-                      <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                        <img src={src} alt={cap || ""} style={{ width: 90, height: 90, borderRadius: 12, objectFit: "cover", border: `1px solid ${T.border}` }} />
-                        {cap && <div style={{ fontSize: 11, color: T.textMuted, textAlign: "center", maxWidth: 90, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{cap}</div>}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-              {perms.editClients && (
-                <PhotoPicker
-                  photos={sitePhotos}
-                  onChange={updateSitePhotos}
-                  label={sitePhotos.length === 0 ? `Add photos of the ${m.siteLabel.toLowerCase()} to document its current state` : "Add more photos"}
-                  maxPhotos={20}
-                  allowCaptions={true}
-                />
-              )}
-            </>
-          )}
-        </div>
-      </Card>
+        <CardHeader title={`${m.siteLabel} Photos & Videos`} />
+        <div style={{ padding: "16px 18px", display: "flex", flexDirection: "column", gap: 18 }}>
 
-      {/* Site Videos */}
-      <Card>
-        <CardHeader
-          title={`${m.siteLabel} Videos`}
-          action={perms.editClients && siteVideos.length < 6 ? (
-            <button onClick={() => videoInputRef.current?.click()}
-              style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontFamily: "inherit" }}>
-              <Icon name="plus" size={14} /> Add
-            </button>
-          ) : null}
-        />
-        <div style={{ padding: "16px 18px" }}>
-          {siteVideos.length === 0 ? (
-            perms.editClients ? (
-              <button onClick={() => videoInputRef.current?.click()}
-                style={{ width: "100%", padding: "24px 16px", border: `2px dashed ${T.border}`, borderRadius: 14, background: T.surfaceAlt, cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 10, color: T.textMuted, fontFamily: "inherit" }}>
-                <div style={{ width: 44, height: 44, borderRadius: 13, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                  <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M15 10l4.553-2.069A1 1 0 0 1 21 8.87v6.26a1 1 0 0 1-1.447.899L15 14M3 8a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8z" />
-                  </svg>
-                </div>
-                <div>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text, marginBottom: 3 }}>Add a video</div>
-                  <div style={{ fontSize: 12, lineHeight: 1.5 }}>Take a video, pick from your library, or upload a file. Up to 6 clips, 20 sec each.</div>
-                </div>
-              </button>
+          {/* Photos */}
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>Photos</div>
+            {sitePhotos.length === 0 && !perms.editClients ? (
+              <div style={{ fontSize: 13, color: T.textMuted, textAlign: "center", padding: "8px 0" }}>No photos added yet.</div>
             ) : (
-              <div style={{ fontSize: 13, color: T.textMuted, textAlign: "center", padding: "16px 0" }}>No videos added yet.</div>
-            )
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {siteVideos.map((v, i) => (
-                <div key={i} style={{ background: T.surfaceAlt, borderRadius: 14, overflow: "hidden", border: `1px solid ${T.border}` }}>
-                  {/* Video player */}
-                  <div style={{ position: "relative", background: "#000", borderRadius: "14px 14px 0 0" }}>
-                    <video
-                      src={v.src}
-                      controls
-                      playsInline
-                      preload="metadata"
-                      style={{ width: "100%", maxHeight: 260, borderRadius: "14px 14px 0 0", display: "block", objectFit: "contain" }}
-                    />
-                    {perms.editClients && (
-                      <button onClick={() => removeVideo(i)}
-                        style={{ position: "absolute", top: 8, right: 8, width: 28, height: 28, borderRadius: "50%", background: "rgba(0,0,0,0.55)", border: "none", color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                        <Icon name="close" size={13} />
-                      </button>
-                    )}
+              <>
+                {sitePhotos.length > 0 && !perms.editClients && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+                    {sitePhotos.map((p, i) => {
+                      const src = typeof p === "string" ? p : p.src;
+                      const cap = typeof p === "object" ? p.caption : "";
+                      return (
+                        <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          <img src={src} alt={cap || ""} style={{ width: 110, height: 110, borderRadius: 14, objectFit: "cover", border: `1px solid ${T.border}` }} />
+                          {cap && <div style={{ fontSize: 11, color: T.textMuted, textAlign: "center", maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{cap}</div>}
+                        </div>
+                      );
+                    })}
                   </div>
-                  {/* Caption + metadata */}
-                  <div style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 10 }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      {perms.editClients ? (
-                        editingVideoCaption === i ? (
-                          <input
-                            type="text"
-                            autoFocus
-                            value={v.caption || ""}
-                            onChange={e => setVideoCaption(i, e.target.value)}
-                            onBlur={() => setEditingVideoCaption(null)}
-                            onKeyDown={e => e.key === "Enter" && setEditingVideoCaption(null)}
-                            placeholder="Add a label for this clip..."
-                            style={{ width: "100%", padding: "6px 10px", border: `1.5px solid ${T.primary}`, borderRadius: 9, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }}
-                          />
-                        ) : (
-                          <button onClick={() => setEditingVideoCaption(i)}
-                            style={{ background: "none", border: "none", color: v.caption ? T.text : T.textMuted, fontWeight: v.caption ? 600 : 400, fontSize: 13, cursor: "pointer", fontFamily: "inherit", padding: 0, textAlign: "left" }}>
-                            {v.caption || "Tap to add label"}
-                          </button>
-                        )
-                      ) : (
-                        v.caption && <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{v.caption}</div>
-                      )}
-                      {v.size && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{fmtFileSize(v.size)}</div>}
-                    </div>
-                  </div>
-                </div>
-              ))}
-              {perms.editClients && siteVideos.length < 6 && (
+                )}
+                {perms.editClients && (
+                  <PhotoPicker
+                    photos={sitePhotos}
+                    onChange={updateSitePhotos}
+                    label={sitePhotos.length === 0 ? `Add photos of the ${m.siteLabel.toLowerCase()} to document its current state` : "Add more photos"}
+                    maxPhotos={20}
+                    allowCaptions={true}
+                  />
+                )}
+              </>
+            )}
+          </div>
+
+          {/* Videos */}
+          <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>Videos</div>
+              {perms.editClients && siteVideos.length > 0 && siteVideos.length < 6 && (
                 <button onClick={() => videoInputRef.current?.click()}
-                  style={{ padding: "12px", border: `2px dashed ${T.border}`, borderRadius: 12, background: "none", color: T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, fontFamily: "inherit", fontSize: 13, fontWeight: 600 }}>
-                  <Icon name="plus" size={16} /> Record or select clip
+                  style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontFamily: "inherit" }}>
+                  <Icon name="plus" size={14} /> Add
                 </button>
               )}
             </div>
-          )}
-          {/* Hidden file input — no capture attribute so it shows the full picker including existing videos */}
-          <input
-            ref={videoInputRef}
-            type="file"
-            accept="video/mp4,video/quicktime,video/mov,video/*"
-            multiple
-            style={{ display: "none" }}
-            onChange={e => { addVideos(e.target.files); e.target.value = ""; }}
-          />
-          {videoError && (
-            <div style={{ background: hexA(T.warning, 0.08), border: `1px solid ${hexA(T.warning, 0.25)}`, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.warning, marginTop: 8, display: "flex", alignItems: "flex-start", gap: 8, lineHeight: 1.5 }}>
-              <Icon name="warning" size={15} style={{ flexShrink: 0, marginTop: 1 }} />
-              <span>{videoError}</span>
-            </div>
-          )}
-          {perms.editClients && (
-            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 10, lineHeight: 1.5 }}>
-              Max 20 seconds per clip. For best quality, record at 1080p: iPhone Settings → Camera → Record Video → 1080p HD at 60 fps.
-            </div>
-          )}
+            {siteVideos.length === 0 ? (
+              perms.editClients ? (
+                <button onClick={() => videoInputRef.current?.click()}
+                  style={{ width: "100%", padding: "24px 16px", border: `2px dashed ${T.border}`, borderRadius: 14, background: T.surfaceAlt, cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 10, color: T.textMuted, fontFamily: "inherit" }}>
+                  <div style={{ width: 44, height: 44, borderRadius: 13, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M15 10l4.553-2.069A1 1 0 0 1 21 8.87v6.26a1 1 0 0 1-1.447.899L15 14M3 8a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: T.text, marginBottom: 3 }}>Add a video</div>
+                    <div style={{ fontSize: 12, lineHeight: 1.5 }}>Take a video, pick from your library, or upload a file. Up to 6 clips, 20 sec each.</div>
+                  </div>
+                </button>
+              ) : (
+                <div style={{ fontSize: 13, color: T.textMuted, textAlign: "center", padding: "8px 0" }}>No videos added yet.</div>
+              )
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {siteVideos.map((v, i) => (
+                  <div key={i} style={{ background: T.surfaceAlt, borderRadius: 14, overflow: "hidden", border: `1px solid ${T.border}` }}>
+                    {/* Video player */}
+                    <div style={{ position: "relative", background: "#000", borderRadius: "14px 14px 0 0" }}>
+                      <video
+                        src={v.src}
+                        controls
+                        playsInline
+                        preload="metadata"
+                        style={{ width: "100%", maxHeight: 260, borderRadius: "14px 14px 0 0", display: "block", objectFit: "contain" }}
+                      />
+                      {perms.editClients && (
+                        <button onClick={() => removeVideo(i)}
+                          style={{ position: "absolute", top: 8, right: 8, width: 28, height: 28, borderRadius: "50%", background: "rgba(0,0,0,0.55)", border: "none", color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          <Icon name="close" size={13} />
+                        </button>
+                      )}
+                    </div>
+                    {/* Caption + metadata */}
+                    <div style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 10 }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        {perms.editClients ? (
+                          editingVideoCaption === i ? (
+                            <input
+                              type="text"
+                              autoFocus
+                              value={v.caption || ""}
+                              onChange={e => setVideoCaption(i, e.target.value)}
+                              onBlur={() => setEditingVideoCaption(null)}
+                              onKeyDown={e => e.key === "Enter" && setEditingVideoCaption(null)}
+                              placeholder="Add a label for this clip..."
+                              style={{ width: "100%", padding: "6px 10px", border: `1.5px solid ${T.primary}`, borderRadius: 9, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }}
+                            />
+                          ) : (
+                            <button onClick={() => setEditingVideoCaption(i)}
+                              style={{ background: "none", border: "none", color: v.caption ? T.text : T.textMuted, fontWeight: v.caption ? 600 : 400, fontSize: 13, cursor: "pointer", fontFamily: "inherit", padding: 0, textAlign: "left" }}>
+                              {v.caption || "Tap to add label"}
+                            </button>
+                          )
+                        ) : (
+                          v.caption && <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{v.caption}</div>
+                        )}
+                        {v.size && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{fmtFileSize(v.size)}</div>}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                {perms.editClients && siteVideos.length < 6 && (
+                  <button onClick={() => videoInputRef.current?.click()}
+                    style={{ padding: "12px", border: `2px dashed ${T.border}`, borderRadius: 12, background: "none", color: T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, fontFamily: "inherit", fontSize: 13, fontWeight: 600 }}>
+                    <Icon name="plus" size={16} /> Record or select clip
+                  </button>
+                )}
+              </div>
+            )}
+            {/* Hidden file input — no capture attribute so it shows the full picker including existing videos */}
+            <input
+              ref={videoInputRef}
+              type="file"
+              accept="video/mp4,video/quicktime,video/mov,video/*"
+              multiple
+              style={{ display: "none" }}
+              onChange={e => { addVideos(e.target.files); e.target.value = ""; }}
+            />
+            {videoError && (
+              <div style={{ background: hexA(T.warning, 0.08), border: `1px solid ${hexA(T.warning, 0.25)}`, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.warning, marginTop: 8, display: "flex", alignItems: "flex-start", gap: 8, lineHeight: 1.5 }}>
+                <Icon name="warning" size={15} style={{ flexShrink: 0, marginTop: 1 }} />
+                <span>{videoError}</span>
+              </div>
+            )}
+            {perms.editClients && (
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 10, lineHeight: 1.5 }}>
+                Max 20 seconds per clip. For best quality, record at 1080p: iPhone Settings → Camera → Record Video → 1080p HD at 60 fps.
+              </div>
+            )}
+          </div>
+
         </div>
       </Card>
 
@@ -5272,7 +5318,7 @@ function ClientHistory({ client, catalog, team, onChange }) {
   );
 }
 
-function ClientPortal({ client, invoices, schedule, branding, email, onPreviewClient }) {
+function ClientPortal({ client, invoices, schedule, branding, email, invoicing, onPreviewClient }) {
   const { T } = useApp();
   const [inviteState, setInviteState] = useState("idle"); // idle | sending | sent | error
   const [inviteMsg, setInviteMsg] = useState("");
@@ -5449,7 +5495,7 @@ function ClientPortal({ client, invoices, schedule, branding, email, onPreviewCl
 // Renders the real client portal inside a fixed overlay
 // with a staff-only banner so you can exit back instantly.
 // ─────────────────────────────────────────────
-function StaffClientPreview({ client, invoices, schedule, branding, onClose }) {
+function StaffClientPreview({ client, invoices, invoicing, schedule, branding, onClose }) {
   const { T } = useApp();
   const fontStack = '-apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif';
 
@@ -5480,6 +5526,7 @@ function StaffClientPreview({ client, invoices, schedule, branding, onClose }) {
         <SPSClientPortal
           client={client}
           invoices={invoices}
+          invoicing={invoicing}
           schedule={schedule}
           branding={branding}
           estimates={[]}
@@ -6004,7 +6051,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
   const finish = () => {
     onComplete(stop.id, buildEntry(), stop.sid);
     if (officeFlag && officeFlagMsg.trim() && onOfficeAlert) {
-      onOfficeAlert({ client: client?.name || "Client", clientId: client?.id, message: officeFlagMsg.trim(), date: todayStr });
+      onOfficeAlert({ client: client?.name || "Client", clientId: client?.id, sid: stop?.sid, message: officeFlagMsg.trim(), date: todayStr });
     }
     setDone(true);
   };
@@ -8162,7 +8209,7 @@ function StopEditModal({ stop, dayDate, clients, catalog, team, T, onSave, onClo
   );
 }
 
-function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, me, onClientSelect, seedClientIds, clearSeed, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {}, arrivals = {}, onArrived }) {
+function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, me, onClientSelect, seedClientIds, clearSeed, focusStop, clearFocus, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {}, arrivals = {}, onArrived }) {
   const { T, perms } = useApp();
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
   const compact = cfg.density === "compact";
@@ -8234,6 +8281,15 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   useEffect(() => {
     if (seedClientIds && seedClientIds.length) setShowAdd(true);
   }, [seedClientIds]);
+
+  // Open a specific stop's editor when deep-linked from Home ("Today's Route" tap).
+  useEffect(() => {
+    if (!focusStop || !focusStop.sid) return;
+    const day = (schedule || []).find(d => d.date === focusStop.date);
+    const s = day && (day.stops || []).find(x => String(x.sid) === String(focusStop.sid));
+    if (s) setEditStopModal({ stop: s, dayDate: focusStop.date });
+    if (clearFocus) clearFocus();
+  }, [focusStop]);
 
   const handleOmwSent = (key) => setSentStops(s => ({ ...s, [key]: true }));
 
@@ -10006,7 +10062,7 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
     .replace(/\{dueDate\}/g, "Jun 30").replace(/\{date\}/g, "06/30/2025")
     .replace(/\{plan\}/g, "Premium")
     .replace(/\{eta\}/g, "15").replace(/\{arrival\}/g, "3:45 PM")
-    .replace(/\{link\}/g, "Pay online: stonepropertysolutions.com/pay").replace(/\{track\}/g, "");
+    .replace(/\{link\}/g, "Pay online: stonepropertysolutions.com/pay\nPay in the app: spsway://invoices").replace(/\{track\}/g, "");
   const previewBox = { marginTop: 8, background: T.surfaceAlt, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.text, lineHeight: 1.5, borderTopLeftRadius: 4 };
 
   const sample = {
@@ -11671,7 +11727,7 @@ function InvoiceSendStep({ invoice, client, onClose }) {
     .replace(/\{number\}/g, invoice.number || "")
     .replace(/\{amount\}/g, amount).replace(/\{total\}/g, amount)
     .replace(/\{dueDate\}/g, invoice.dueDate || "soon")
-    .replace(/\{link\}/g, payLink ? `Pay online: ${payLink}` : "View it in your portal.");
+    .replace(/\{link\}/g, payLink ? `Pay online: ${payLink}\nPay in the app: spsway://invoices` : "View & pay it in your portal.");
 
   const [doSms, setDoSms]   = useState(!!phone);
   const [doChat, setDoChat] = useState(true);
@@ -11706,7 +11762,7 @@ function InvoiceSendStep({ invoice, client, onClose }) {
             emailIntro: fill(e.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro),
             to: clientEmail,
             clientName: invoice.clientName || client?.name || "",
-            branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary },
+            branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary },
             invoice: { number: invoice.number, date: invoice.date, dueDate: invoice.dueDate, terms: invoice.notes || "", taxRate: invoice.taxRate || 0, lineItems: (invoice.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, bundleNote: l.bundleNote, taxable: l.taxable })), subtotal: totals.subtotal, tax: totals.tax, total: totals.total, discountTotal: totals.discountTotal },
             payLink: payLink || PROD_URL,
           }),
@@ -13188,6 +13244,8 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
             companyEmail: branding.companyEmail || "",
             companyPhone: branding.companyPhone || "",
             companyAddress: branding.companyAddress || "",
+            logoType: branding.logoType || "",
+            logoImage: branding.logoImage || "",
             accent,
           },
           invoice: {
@@ -13966,7 +14024,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
       .replace(/\{number\}/g, inv.number || "")
       .replace(/\{amount\}/g, money(totals.total)).replace(/\{total\}/g, money(totals.total))
       .replace(/\{dueDate\}/g, inv.dueDate || "soon")
-      .replace(/\{link\}/g, inv.paymentLink ? `Pay online: ${inv.paymentLink}` : "View it in your portal.");
+      .replace(/\{link\}/g, inv.paymentLink ? `Pay online: ${inv.paymentLink}\nPay in the app: spsway://invoices` : "View & pay it in your portal.");
   };
 
   const created = progress.filter(p => p.ok);
@@ -13980,7 +14038,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
       const cEmail = (c.email || "").trim();
       if (doSms && phone) { try { const r = await sendSms(phone, fill(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv)); if (!r.ok) fails++; } catch (_) { fails++; } }
       if (doChat && c.id) { try { await supabase.from("sps_messages").insert({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) + `[[inv:${inv.id}]]` }); } catch (_) { fails++; } }
-      if (doEmail && cEmail) { try { const tt = invoiceTotals(inv); await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...senderEmailFields(), emailSubject: fill(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, c, inv), emailIntro: fill(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, c, inv), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); } catch (_) { fails++; } }
+      if (doEmail && cEmail) { try { const tt = invoiceTotals(inv); await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...senderEmailFields(), emailSubject: fill(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, c, inv), emailIntro: fill(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, c, inv), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); } catch (_) { fails++; } }
     }
     setMsgBusy(false);
     if (fails > 0) { setMsgErr(`${fails} message(s) couldn't be sent. The invoices were still created.`); return; }
@@ -17264,7 +17322,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
   const blankItem = () => kind === "part"
     ? { id: "pt" + Date.now(), name: "", category: "", unit: "pieces", costPer: "", lowAt: "", stockByLoc: {} }
     : kind === "product"
-    ? { id: "p" + Date.now(), name: "", category: "", unit: "each", cost: "", price: "", sku: "", vendor: "", purchaseDate: "", lowAt: "", stockByLoc: {} }
+    ? { id: "p" + Date.now(), name: "", category: "", unit: "each", cost: "", price: "", sku: "", vendor: "", sourceUrl: "", purchaseDate: "", lowAt: "", stockByLoc: {} }
     : { id: "t" + Date.now(), name: "", category: "", unit: "oz", costPerOz: "", inventoryOz: "0", stockByLoc: {} };
   const openAddItem = () => { if (!canEdit) return; setItemModal({ mode: "add", kind, data: blankItem() }); };
   const openEditItem = (item) => { if (!canEdit) return; setItemModal({ mode: "edit", kind, data: { ...item, stockByLoc: { ...(item.stockByLoc || {}) } } }); };
@@ -17798,6 +17856,31 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
             })()}
             </>)}
 
+            {/* Product sourcing — where you buy it + a tappable link to the vendor's page */}
+            {itemModal.kind === "product" && (<>
+              <div>
+                <label style={lbl}>Purchased From <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(vendor / source)</span></label>
+                <input type="text" style={field} value={itemModal.data.vendor || ""}
+                  onChange={e => setItemModal(m => ({ ...m, data: { ...m.data, vendor: e.target.value } }))}
+                  placeholder="e.g. Practical Garden Ponds" />
+              </div>
+              <div>
+                <label style={lbl}>Product Link <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(vendor product page)</span></label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input type="url" inputMode="url" style={{ ...field, flex: 1, minWidth: 0 }} value={itemModal.data.sourceUrl || ""}
+                    onChange={e => setItemModal(m => ({ ...m, data: { ...m.data, sourceUrl: e.target.value } }))}
+                    placeholder="https://…" />
+                  {/^https?:\/\//i.test((itemModal.data.sourceUrl || "").trim()) && (
+                    <button type="button" onClick={() => openExternalBrowser(itemModal.data.sourceUrl.trim())}
+                      style={{ flexShrink: 0, background: hexA(T.primary, 0.1), color: T.primary, border: "none", borderRadius: 11, padding: "0 16px", fontWeight: 800, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+                      Open ↗
+                    </button>
+                  )}
+                </div>
+                <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 4 }}>Opens in your browser (where you're signed in for contractor pricing) so you can check current pricing, then update Cost / Retail above.</div>
+              </div>
+            </>)}
+
             {/* Per-location starting stock */}
             <div>
               <label style={lbl}>Stock by location</label>
@@ -17821,7 +17904,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
             </Btn>
             {itemModal.mode === "edit" && (
               <button onClick={deleteItem} style={{ background: "none", border: "none", color: "#E5484D", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit", padding: "4px" }}>
-                Delete {itemModal.kind === "part" ? "Part" : "Treatment"}
+                Delete {itemModal.kind === "part" ? "Part" : itemModal.kind === "product" ? "Product" : "Treatment"}
               </button>
             )}
           </div>
@@ -19827,18 +19910,33 @@ function ClientTrackingCard({ client, todayStop, tech, loc, schedule, branding, 
   const lastMin = Math.max(0, Math.round((nowTs - new Date(loc.updated_at).getTime()) / 60000));
 
   return (
-    <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 20, overflow: "hidden", boxShadow: "0 2px 12px rgba(0,0,0,0.06)" }}>
-      <div style={{ padding: "14px 16px 10px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#16a34a", boxShadow: "0 0 0 4px rgba(22,163,74,0.18)", flexShrink: 0 }} />
-          <div style={{ fontSize: 16, fontWeight: 800, color: T.text, letterSpacing: "-0.01em" }}>{techFirst} is on the way</div>
+    <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 22, overflow: "hidden", boxShadow: "0 6px 22px rgba(0,0,0,0.08)" }}>
+      {/* Header — who's coming */}
+      <div style={{ padding: "16px 18px 12px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+          <span style={{ width: 9, height: 9, borderRadius: "50%", background: "#16a34a", boxShadow: "0 0 0 4px rgba(22,163,74,0.18)", flexShrink: 0 }} />
+          <div style={{ fontSize: 19, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{techFirst} is on the way</div>
         </div>
-        {eta && <div style={{ fontSize: 13, color: T.textMuted, marginTop: 5 }}>Estimated arrival: <b style={{ color: T.text }}>{eta.arrivalText}</b>{eta.durText ? ` (approx. ${eta.durText})` : ""}</div>}
-        {stopsAhead > 0 && <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 3 }}>{stopsAhead} stop{stopsAhead !== 1 ? "s" : ""} ahead of you</div>}
+        <div style={{ fontSize: 13.5, color: T.textMuted, marginTop: 4 }}>Heading to your property now</div>
       </div>
-      {!mapFailed && <div ref={mapRef} style={{ width: "100%", height: 200, background: T.surfaceAlt }} />}
-      <div style={{ padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-        <div style={{ fontSize: 11, color: T.textMuted }}>Last updated {lastMin <= 0 ? "just now" : `${lastMin} min ago`}</div>
+      {/* Live map */}
+      {!mapFailed && <div ref={mapRef} style={{ width: "100%", height: 260, background: T.surfaceAlt }} />}
+      {/* ETA — hero number */}
+      <div style={{ padding: "15px 18px 6px", textAlign: "center", borderTop: mapFailed ? "none" : `1px solid ${T.border}` }}>
+        {eta ? (
+          <>
+            <div style={{ fontSize: 30, fontWeight: 900, color: T.primary, letterSpacing: "-0.03em", lineHeight: 1 }}>{eta.durText ? `${eta.durText} away` : "On the way"}</div>
+            <div style={{ fontSize: 13.5, color: T.textMuted, marginTop: 7, fontWeight: 600 }}>
+              {stopsAhead > 0 ? `${stopsAhead} stop${stopsAhead !== 1 ? "s" : ""} before you · ` : ""}arriving ~{eta.arrivalText}
+            </div>
+          </>
+        ) : (
+          <div style={{ fontSize: 15, fontWeight: 700, color: T.textMuted }}>Calculating arrival…</div>
+        )}
+      </div>
+      {/* Footer — freshness + open externally */}
+      <div style={{ padding: "10px 18px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+        <div style={{ fontSize: 11, color: T.textMuted }}>Updated {lastMin <= 0 ? "just now" : `${lastMin} min ago`}</div>
         <a href={mapsPinUrl(lat, lng)} target="_blank" rel="noreferrer"
           style={{ fontSize: 12.5, fontWeight: 700, color: T.primary, textDecoration: "none", display: "flex", alignItems: "center", gap: 5 }}>
           <Icon name="map" size={13} /> Open in Maps
@@ -20303,7 +20401,7 @@ function CPLightbox({ photos, index, onClose, T }) {
   );
 }
 
-function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T, vp = {} }) {
+function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeRequest, T, vp = {} }) {
   const { tiers } = useApp();
   const [section, setSection] = useState("property"); // "property" | "plan"
   const [detailItem, setDetailItem] = useState(null); // { kind:"visit"|"equipment", data } — full-detail overlay
@@ -20522,6 +20620,9 @@ function CPProperty({ client, schedule, branding, onNav, onUpgradeRequest, T, vp
         <div style={{ fontSize:26, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>{pondLabel(client, true)}</div>
         <div style={{ fontSize:14, color:T.textMuted, marginTop:3 }}>{client.pondType || m.typeOptions[0]}</div>
       </div>
+
+      {/* Live tracking — appears only while the assigned tech is en route to this property */}
+      <ClientLiveTracking client={client} schedule={schedule} team={team} branding={branding} T={T} />
 
       {/* Service plan card — tappable */}
       <PlanCard />
@@ -21220,7 +21321,8 @@ function CPPond({ client, T }) {
 function CPHistory({ client, T }) { return <CPPond client={client} T={T} />; }
 
 // ── CP INVOICES ──
-function CPInvoices({ client, invoices, branding, T, vp = {}, initialSel = null }) {
+function CPInvoices({ client, invoices, branding, T, vp = {}, initialSel = null, invoicing }) {
+  const cfg = { ...DEFAULT_INVOICING, ...(invoicing || {}) };
   const myInvoices = sortInvoices((invoices || []).filter(iv => invoiceMatchesClient(iv, client)));
   const [sel, setSel] = useState(initialSel);
   // Open a specific invoice when deep-linked from a portal message ("here" link).
@@ -21274,55 +21376,28 @@ function CPInvoices({ client, invoices, branding, T, vp = {}, initialSel = null 
     const st = normStatus(iv);
     const isPaidSt = st === "paid";
     const tot = invoiceTotals(iv);
-    const items = iv.lineItems || iv.items || [];
     return (
-      <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-        <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:12 }}>
-          <div>
-            <div style={{ fontSize:20, fontWeight:800, color:T.text, letterSpacing:"-0.02em" }}>Invoice #{iv.number || iv.id}</div>
-            <div style={{ fontSize:12.5, color:T.textMuted, marginTop:3 }}>Issued {fmtDate(iv.date || iv.issueDate || "")}{iv.dueDate ? ` · Due ${fmtDate(iv.dueDate)}` : ""}</div>
-          </div>
-          <span style={{ fontSize:11, fontWeight:800, padding:"4px 12px", borderRadius:100, background:statusBg(st), color:statusColor(st), flexShrink:0 }}>{statusLabel(st)}</span>
-        </div>
+      <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+        {/* Full, branded invoice document — the same one staff, the email, and the PDF use.
+            Client-safe by design: InvoiceDocument never renders cost / profit / margin. */}
+        <InvoiceDocument invoice={iv} client={client} branding={branding} cfg={cfg} T={T} />
 
-        {items.length > 0 && (
-          <div style={{ background:T.surfaceAlt, borderRadius:14, overflow:"hidden" }}>
-            {items.map((li,j) => {
-              // Support both the app shape (desc/qty/unitPrice) and the legacy QB shape (description/amount).
-              const lbl = li.desc || li.description || li.name || li.service || "—";
-              const qty = parseFloat(li.qty || 1) || 1;
-              const amt = li.amount != null ? parseFloat(li.amount)
-                : (li.unitPrice != null ? qty * (parseFloat(li.unitPrice) || 0)
-                : parseFloat(li.rate != null ? li.rate : li.price) || 0);
-              return (
-                <div key={j} style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12, padding:"12px 16px", borderBottom: j<items.length-1 ? `1px solid ${T.border}` : "none" }}>
-                  <div style={{ flex:1, minWidth:0 }}>
-                    <div style={{ fontSize:13.5, color:T.text }}>{lbl}</div>
-                    {(qty > 1 || li.bundleNote) && <div style={{ fontSize:11.5, color:T.textMuted, marginTop:2 }}>{qty > 1 ? `Qty ${qty}` : ""}{qty > 1 && li.bundleNote ? " · " : ""}{li.bundleNote || ""}</div>}
-                  </div>
-                  <div style={{ fontSize:13.5, fontWeight:700, color:T.text, flexShrink:0 }}>${(amt||0).toFixed(2)}</div>
-                </div>
-              );
-            })}
+        {isPaidSt && iv.payment && (
+          <div style={{ fontSize:12.5, color:"#157a12", background:hexA("#2CA01C",0.1), borderRadius:12, padding:"11px 14px", fontWeight:700, textAlign:"center" }}>
+            Paid{iv.payment.method ? ` · ${iv.payment.method}` : ""}{iv.payment.date ? ` on ${fmtDate(iv.payment.date)}` : ""} — thank you!
           </div>
         )}
 
-        {/* Totals — client-safe figures only */}
-        <div style={{ display:"flex", flexDirection:"column", gap:6, fontSize:13 }}>
-          {tot.subtotal != null && <div style={{ display:"flex", justifyContent:"space-between", color:T.textMuted }}><span>Subtotal</span><span>${(tot.subtotal||0).toFixed(2)}</span></div>}
-          {tot.discountTotal > 0 && <div style={{ display:"flex", justifyContent:"space-between", color:T.textMuted }}><span>Discount</span><span>−${(tot.discountTotal||0).toFixed(2)}</span></div>}
-          {tot.tax > 0 && <div style={{ display:"flex", justifyContent:"space-between", color:T.textMuted }}><span>Tax</span><span>${(tot.tax||0).toFixed(2)}</span></div>}
-          <div style={{ display:"flex", justifyContent:"space-between", fontSize:16, fontWeight:800, color:T.text, borderTop:`1px solid ${T.border}`, paddingTop:8, marginTop:2 }}><span>Total</span><span>${(tot.total||0).toFixed(2)}</span></div>
-        </div>
-
-        {iv.notes && <div style={{ fontSize:12.5, color:T.textMuted, fontStyle:"italic", lineHeight:1.55 }}>{iv.notes}</div>}
-
         {iv.paymentLink && !isPaidSt && (
-          <a href={iv.paymentLink} target="_blank" rel="noopener noreferrer"
-            onClick={(e) => { e.preventDefault(); openInAppBrowser(iv.paymentLink); }}
-            style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:8, background:"#2CA01C", color:"#fff", borderRadius:12, padding:"13px 18px", fontWeight:800, fontSize:14, textDecoration:"none", boxShadow:"0 4px 14px rgba(44,160,28,0.3)" }}>
-            Pay Now via QuickBooks
-          </a>
+          <>
+            <a href={iv.paymentLink} target="_blank" rel="noopener noreferrer"
+              onClick={(e) => { e.preventDefault(); openInAppBrowser(iv.paymentLink); }}
+              style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:9, background:"#2CA01C", color:"#fff", borderRadius:14, padding:"16px 18px", fontWeight:800, fontSize:16, textDecoration:"none", boxShadow:"0 6px 18px rgba(44,160,28,0.3)" }}>
+              <svg viewBox="0 0 24 24" width={19} height={19} fill="none" stroke="#fff" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>
+              Pay ${(tot.total||0).toFixed(2)} Now
+            </a>
+            <div style={{ fontSize:11.5, color:T.textMuted, textAlign:"center", marginTop:-4 }}>Secure payment via QuickBooks · opens right in the app</div>
+          </>
         )}
       </div>
     );
@@ -21667,7 +21742,7 @@ function CPDesktopSidebar({ page, settingsOpen, portalUnread, branding, client, 
   );
 }
 
-function SPSClientPortal({ client, schedule, invoices, estimates, branding, team = [], T: globalT, fontStack, onSignOut, onServiceRequest, onApproveEstimate, onUpgradeRequest, onRateVisit, onClientMessage, onSavePrefs, isStaffPreview = false }) {
+function SPSClientPortal({ client, schedule, invoices, estimates, branding, invoicing = {}, deepLink, onDeepLinkHandled, team = [], T: globalT, fontStack, onSignOut, onServiceRequest, onApproveEstimate, onUpgradeRequest, onRateVisit, onClientMessage, onSavePrefs, isStaffPreview = false }) {
   // Client prefs stored in localStorage — personal per-device settings
   const prefsKey = `sps_client_prefs_${client.id}`;
   const [prefs, setPrefs] = useState(() => {
@@ -21678,6 +21753,13 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, team
   // with that invoice pre-opened. (setPage is defined below; only called on tap.)
   const [cpInvoiceSel, setCpInvoiceSel] = useState(null);
   const openInvoice = (id) => { setCpInvoiceSel(String(id)); setSettingsOpen(false); setPage("cp_invoices"); };
+  // Deep link ("Pay in the app" from an invoice email/text) → route the portal to invoices.
+  useEffect(() => {
+    if (!deepLink) return;
+    const t = String(deepLink).toLowerCase();
+    if (t === "invoices" || t.indexOf("invoice") === 0) setPage("cp_invoices");
+    if (onDeepLinkHandled) onDeepLinkHandled();
+  }, [deepLink]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Persist prefs to localStorage whenever they change
   useEffect(() => {
@@ -21729,9 +21811,9 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, team
         <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} onSavePrefs={isStaffPreview ? undefined : onSavePrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
       )}
       {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} team={team} onNav={setPage} onRateVisit={onRateVisit} T={T} vp={vp} />}
-      {!settingsOpen && page === "cp_property" && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
-      {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} schedule={schedule} branding={branding} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
-      {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} T={T} vp={vp} initialSel={cpInvoiceSel} />}
+      {!settingsOpen && page === "cp_property" && <CPProperty client={client} schedule={schedule} branding={branding} team={team} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
+      {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} schedule={schedule} branding={branding} team={team} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
+      {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} invoicing={invoicing} T={T} vp={vp} initialSel={cpInvoiceSel} />}
       {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} onSubmit={onServiceRequest} onClientMessage={isStaffPreview ? undefined : onClientMessage} onOpenInvoice={openInvoice} T={T} vp={vp} />}
       {!settingsOpen && page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
     </SectionErrorBoundary>
@@ -21972,6 +22054,9 @@ function DesktopSidebar({ page, perms, navUnread, reminderDue, onNav, onSignOut,
 
 export default function App({ authEmail = "", onSignOut }) {
   const [selectedClient, setSelectedClient] = useState(null);
+  const [clientOpenTab, setClientOpenTab] = useState(null); // which ClientDetail tab to open (e.g. from a Home alert)
+  const [scheduleFocus, setScheduleFocus] = useState(null); // { sid, date } — open a specific stop from Home
+  const [portalDeepLink, setPortalDeepLink] = useState(null); // route the client portal from a deep link (e.g. invoice "Pay in the app")
   const [adding, setAdding] = useState(false);
   const [clientsView, setClientsView] = useState("split"); // desktop only: "split" (master-detail) | "table"
   const [scheduleSeed, setScheduleSeed] = useState(null);
@@ -22138,8 +22223,16 @@ export default function App({ authEmail = "", onSignOut }) {
   const perms = memberPerms(currentUser ? { ...currentUser, role: effRole(currentUser) } : null);
   // (The boot splash from index.html is removed once the app is ready — see the
   // boot-splash removal effect below, keyed on `hydrated`.)
-  // Broadcast staff location while clocked in (no-op until a shift opts in).
-  useStaffLocationTracking();
+  // Today's stops for the signed-in tech — powers auto-share-on-route below.
+  const myTodayStops = useMemo(() => {
+    if (!currentUser) return [];
+    const key = fmtMDY(new Date());
+    const day = (schedule || []).find(d => d.date === key);
+    return day ? (day.stops || []).filter(s => String(s.assigneeId) === String(currentUser.id)) : [];
+  }, [schedule, currentUser && currentUser.id]);
+  // Broadcast staff location while clocked in OR during the tech's scheduled route
+  // window today (auto-share — no clock-in needed once location's been allowed once).
+  useStaffLocationTracking({ staffId: currentUser ? currentUser.id : null, stops: myTodayStops });
 
   // ── Native iOS home-screen widgets ───────────────────────────────────────────
   // Push a small OWNER snapshot into the App Group shared store so the WidgetKit
@@ -22488,7 +22581,11 @@ export default function App({ authEmail = "", onSignOut }) {
     });
   }, [ltm, emailKey, currentUser, anyEmail]);
 
-  const handleClientSelect = (c) => { setSelectedClient(c); setAdding(false); setPage("clients"); window.scrollTo({ top: 0, behavior: "instant" }); };
+  const handleClientSelect = (c, tab) => { setSelectedClient(c); setClientOpenTab(tab || null); setAdding(false); setPage("clients"); window.scrollTo({ top: 0, behavior: "instant" }); };
+  // Tap a Home alert → open that client's record at their service history (where the flagged visit's report + photos live).
+  const handleOpenAlert = (a) => { const c = (clients || []).find(x => String(x.id) === String(a && a.clientId)); if (c) handleClientSelect(c, "history"); };
+  // Tap a Home "Today's Route" stop → jump to Schedule and open that stop to edit.
+  const handleOpenStop = (stop, date) => { if (stop && stop.sid) setScheduleFocus({ sid: stop.sid, date }); handleNav("schedule"); };
 
   // ── Sync body + theme-color to the active screen so the safe-area never shows a mismatched bar ──
   useEffect(() => {
@@ -22719,17 +22816,20 @@ export default function App({ authEmail = "", onSignOut }) {
   // cold start (target stashed in localStorage by main.jsx before React mounted).
   useEffect(() => {
     if (!hydrated) return;
-    const map = { alerts: "dashboard", schedule: "schedule", invoices: "invoices", profit: "dashboard" };
+    const map = { alerts: "dashboard", schedule: "schedule", invoices: "invoices", invoice: "invoices", profit: "dashboard" };
     const go = (section) => {
-      const target = map[String(section || "").toLowerCase()];
-      if (target) handleNav(target);
+      const sec = String(section || "").toLowerCase();
       try { localStorage.removeItem("sps_deeplink"); } catch (_) {}
+      // A signed-in client sees the portal, not the staff pages — route within the portal instead.
+      if (clientUser && !currentUser) { setPortalDeepLink(sec); return; }
+      const target = map[sec.split("/")[0]];
+      if (target) handleNav(target);
     };
     try { const pending = localStorage.getItem("sps_deeplink"); if (pending) go(pending); } catch (_) {}
     const onDeep = (e) => go(e && e.detail);
     window.addEventListener("sps-deeplink", onDeep);
     return () => window.removeEventListener("sps-deeplink", onDeep);
-  }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [hydrated, !!clientUser, !!currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSaveNewClient = (form) => {
     const newClient = {
@@ -23134,6 +23234,9 @@ export default function App({ authEmail = "", onSignOut }) {
         onApproveEstimate={(id, status) => setEstimatesRaw(prev => (prev||[]).map(e => String(e.id) === String(id) ? { ...e, status } : e))}
         schedule={schedule}
         invoices={invoices}
+        invoicing={invoicing}
+        deepLink={portalDeepLink}
+        onDeepLinkHandled={() => setPortalDeepLink(null)}
         branding={branding}
         team={team}
         T={T}
@@ -23212,7 +23315,7 @@ export default function App({ authEmail = "", onSignOut }) {
   );
   const pageBody = (
     <>
-      {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} vp={vp} />}
+      {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onOpenAlert={handleOpenAlert} onOpenStop={handleOpenStop} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} vp={vp} />}
       {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
       {page === "clients" && !adding && (vp.isDesktop ? (
         clientsView === "table" ? (
@@ -23228,7 +23331,7 @@ export default function App({ authEmail = "", onSignOut }) {
           </div>
           <div style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: vp.isTablet ? "20px 16px" : "24px 30px" }}>
             {selectedClient
-              ? <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>
+              ? <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} initialTab={clientOpenTab} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>
               : (
                 <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: T.textMuted, gap: 12, padding: 40, textAlign: "center" }}>
                   <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.06), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="clients" size={30} /></div>
@@ -23245,7 +23348,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {selectedClient && <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>}
         </>
       ))}
-      {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} />}
+      {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} />}
       {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} />}
       {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
@@ -23286,7 +23389,7 @@ export default function App({ authEmail = "", onSignOut }) {
           </div>
         </div>
         {previewClient && (
-          <StaffClientPreview client={previewClient} invoices={invoices} schedule={schedule} branding={branding} onClose={() => setPreviewClient(null)} />
+          <StaffClientPreview client={previewClient} invoices={invoices} invoicing={invoicing} schedule={schedule} branding={branding} onClose={() => setPreviewClient(null)} />
         )}
       </AppCtx.Provider>
     );
@@ -23446,6 +23549,7 @@ export default function App({ authEmail = "", onSignOut }) {
         <StaffClientPreview
           client={previewClient}
           invoices={invoices}
+          invoicing={invoicing}
           schedule={schedule}
           branding={branding}
           onClose={() => setPreviewClient(null)}
