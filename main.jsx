@@ -203,19 +203,20 @@ function Login() {
             </div>
           </>
         ) : (
-          <>
+          <form onSubmit={e => { e.preventDefault(); signInPassword(); }}>
             <p style={{ textAlign: "center", color: "#6b7280", fontSize: 13, margin: "0 0 20px" }}>Sign in to your account</p>
-            <input style={inp} placeholder="Email" type="email" autoCapitalize="none" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} />
-            <input style={inp} placeholder="Password" type="password" autoComplete="current-password" value={pw} onChange={e => setPw(e.target.value)} onKeyDown={e => e.key === "Enter" && signInPassword()} />
+            {/* name + autocomplete + a real form submit = the OS/browser offers to save the password */}
+            <input style={inp} placeholder="Email" type="email" name="username" autoCapitalize="none" autoComplete="username" inputMode="email" value={email} onChange={e => setEmail(e.target.value)} />
+            <input style={inp} placeholder="Password" type="password" name="password" autoComplete="current-password" value={pw} onChange={e => setPw(e.target.value)} />
             {err && <div style={{ color: "#dc2626", fontSize: 13, margin: "2px 0 10px" }}>{err}</div>}
-            <button style={{ ...btn, opacity: busy ? 0.6 : 1 }} onClick={signInPassword} disabled={busy}>{busy ? "Signing in…" : "Sign In"}</button>
+            <button type="submit" style={{ ...btn, opacity: busy ? 0.6 : 1 }} disabled={busy}>{busy ? "Signing in…" : "Sign In"}</button>
             <div style={{ textAlign: "center", marginTop: 12 }}>
-              <button style={linkBtn} onClick={sendReset} disabled={busy}>Forgot password?</button>
+              <button type="button" style={linkBtn} onClick={sendReset} disabled={busy}>Forgot password?</button>
             </div>
             <div style={{ textAlign: "center", marginTop: 10, paddingTop: 10, borderTop: "1px solid #f1f5f9" }}>
-              <button style={linkBtn} onClick={() => { setMode("magic"); setErr(""); }}>Client? Sign in with email link</button>
+              <button type="button" style={linkBtn} onClick={() => { setMode("magic"); setErr(""); }}>Client? Sign in with email link</button>
             </div>
-          </>
+          </form>
         )}
       </div>
     </div>
@@ -292,7 +293,10 @@ function Root() {
     if (native) return;
     const apply = () => {
       const w = window.innerWidth;
-      document.body.style.zoom = w >= 1600 ? "1.2" : w >= 1280 ? "1.15" : w >= 1024 ? "1.08" : "";
+      // Touch devices (iPad, touchscreen laptops) keep native size — zoom + position:fixed
+      // shifts the login off-center there. True desktops (Mac/PC) report 0 touch points.
+      const touch = (navigator.maxTouchPoints || 0) > 0;
+      document.body.style.zoom = (!touch && w >= 1024) ? (w >= 1600 ? "1.2" : w >= 1280 ? "1.15" : "1.08") : "";
     };
     apply();
     window.addEventListener("resize", apply);
