@@ -282,6 +282,23 @@ function Root() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
+  // Scale the whole UI up on a real DESKTOP browser (≥1024px, not iPad, not the native app):
+  // the layout is pixel-based, so it reads tiny on large Mac screens. CSS zoom scales
+  // everything uniformly — including modals (they portal onto <body>). Tiered so bigger
+  // screens get more, while widths near the breakpoint stay conservative (no overflow).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let native = false; try { native = Capacitor.isNativePlatform(); } catch (_) {}
+    if (native) return;
+    const apply = () => {
+      const w = window.innerWidth;
+      document.body.style.zoom = w >= 1600 ? "1.2" : w >= 1280 ? "1.15" : w >= 1024 ? "1.08" : "";
+    };
+    apply();
+    window.addEventListener("resize", apply);
+    return () => { window.removeEventListener("resize", apply); document.body.style.zoom = ""; };
+  }, []);
+
   if (session === undefined) return <div style={{ ...wrap, color: "#6b7280", fontSize: 14 }}>Loading…</div>;
   if (!session) return <Login />;
   // First login via invite link (no password yet), or a password-reset link →
