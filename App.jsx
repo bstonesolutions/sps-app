@@ -6956,9 +6956,10 @@ function RouteRing({ done, total, size = 58, label = "stops" }) {
   );
 }
 
-function HeadHereModal({ stop, client, email, onClose }) {
+function HeadHereModal({ stop, client, email, defaultMapApp = "", onClose }) {
   const { T, branding } = useApp();
-  const [pref, setPref] = useState(() => { try { return localStorage.getItem("sps_map_app") || null; } catch { return null; } });
+  const [pref, setPref] = useState(() => { if (defaultMapApp) return defaultMapApp; try { return localStorage.getItem("sps_map_app") || null; } catch { return null; } });
+  const [expanded, setExpanded] = useState(false);
   const firstName = client && client.name ? client.name.split(" ")[0] : (stop.client || "there");
   const phone = ((client && (client.phone || client.contactPhone || "")) || "").replace(/[^\d+]/g, "");
   const addr = stop.address || "";
@@ -6986,14 +6987,25 @@ function HeadHereModal({ stop, client, email, onClose }) {
         </div>
         <div>
           <span style={lbl}>Open in Maps</span>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {mapApps.map(a => (
-              <Btn key={a.key} href={buildMapUrl(addr, a.key)} variant={pref === a.key ? "primary" : "ghost"} block onClick={() => openMap(a.key)}>
-                {a.label}{pref === a.key ? " ✓" : ""}
+          {pref && !expanded ? (
+            <>
+              <Btn href={buildMapUrl(addr, pref)} variant="primary" block onClick={() => openMap(pref)} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+                <Icon name="location" size={15} /> Open in {(mapApps.find(a => a.key === pref) || {}).label || "Maps"}
               </Btn>
-            ))}
-          </div>
-          {pref && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 8 }}>Preferred map app saved on this device.</div>}
+              <button onClick={() => setExpanded(true)} style={{ background: "none", border: "none", color: T.primary, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", marginTop: 8, padding: 4 }}>Use a different app</button>
+            </>
+          ) : (
+            <>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {mapApps.map(a => (
+                  <Btn key={a.key} href={buildMapUrl(addr, a.key)} variant={pref === a.key ? "primary" : "ghost"} block onClick={() => openMap(a.key)}>
+                    {a.label}{pref === a.key ? " ✓" : ""}
+                  </Btn>
+                ))}
+              </div>
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 8 }}>Tip: set a default in Customize → Team so this opens straight away.</div>
+            </>
+          )}
         </div>
         <Btn variant="ghost" block onClick={onClose}>Done</Btn>
       </div>
@@ -7907,7 +7919,7 @@ function StopEditModal({ stop, dayDate, clients, catalog, team, T, onSave, onClo
   );
 }
 
-function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, onClientSelect, seedClientIds, clearSeed, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {}, arrivals = {}, onArrived }) {
+function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, me, onClientSelect, seedClientIds, clearSeed, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {}, arrivals = {}, onArrived }) {
   const { T, perms } = useApp();
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
   const compact = cfg.density === "compact";
@@ -8242,7 +8254,10 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
     return cells;
   })();
 
-  const goDirections = (addr) => `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(addr || "")}`;
+  // Tech's preferred maps app (saved per-tech in Customize → Team; falls back to the device's
+  // last choice). Empty => the default web directions, so behavior is unchanged when unset.
+  const preferredMapApp = (me && me.mapApp) || (() => { try { return localStorage.getItem("sps_map_app") || ""; } catch { return ""; } })();
+  const goDirections = (addr) => buildMapUrl(addr || "", preferredMapApp);
   const catChip = (s) => { const c = clients.find(x => String(x.id) === String(s.clientId ?? s.id)); return (c && c.division) || s.type; };
 
   // one stop card, reused by the bulk-select list and the per-tech route
@@ -8704,7 +8719,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
       {arrivedModal && (
         <ArrivedModal stop={arrivedModal.stop} client={arrivedModal.client} email={email} onClose={() => setArrivedModal(null)} onArrived={() => { onArrived && onArrived(arrivedModal.key); }} />
       )}
-      {headHereModal && <HeadHereModal stop={headHereModal.stop} client={headHereModal.client} email={email} onClose={() => setHeadHereModal(null)} />}
+      {headHereModal && <HeadHereModal stop={headHereModal.stop} client={headHereModal.client} email={email} defaultMapApp={preferredMapApp} onClose={() => setHeadHereModal(null)} />}
 
       {editStopModal && (
         <StopEditModal
@@ -11258,6 +11273,23 @@ function TeamManager({ team, setTeam, currentUserId, email, branding }) {
                 <input style={{ ...field, paddingLeft: 28 }} value={modal.data.rate} onChange={e => setD({ rate: e.target.value.replace(/[^\d.]/g, "") })} placeholder="0.00" />
               </div>
               <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>Used to calculate job profitability on assigned stops.</div>
+            </div>
+
+            {/* Preferred maps app — when set, "Head here" opens directions straight in it (no prompt) */}
+            <div>
+              <label style={labelStyle}>Preferred Maps App <span style={{ textTransform: "none", fontWeight: 400 }}>(for "Head here" directions)</span></label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {[{ k: "", l: "Ask each time" }, { k: "apple", l: "Apple Maps" }, { k: "google", l: "Google Maps" }, { k: "waze", l: "Waze" }].map(o => {
+                  const on = (modal.data.mapApp || "") === o.k;
+                  return (
+                    <button key={o.k || "ask"} type="button" onClick={() => setD({ mapApp: o.k })}
+                      style={{ padding: "9px 14px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.1) : T.surface, color: on ? T.primary : T.text, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+                      {o.l}
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>When set, tapping "Head here" opens directions straight in this app — no prompt each time.</div>
             </div>
 
             {/* Gusto Employee ID — maps this person to their Gusto record for timesheets */}
@@ -22805,7 +22837,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {selectedClient && <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>}
         </>
       ))}
-      {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} />}
+      {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} />}
       {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} />}
       {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
