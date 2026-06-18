@@ -33,11 +33,52 @@ These are used via the existing `supabase` client (we never modify `supabaseClie
 
 ```sql
 -- Live staff location while clocked in (one row per staff member, upserted).
-CREATE TABLE staff_locations (
+CREATE TABLE IF NOT EXISTS public.staff_locations (
   staff_id   text PRIMARY KEY,
   lat        float,
   lng        float,
   updated_at timestamptz DEFAULT now(),
   is_active  boolean DEFAULT false
 );
+-- RLS on (same posture as app_state): signed-in users only; the shipped anon key gets nothing.
+ALTER TABLE public.staff_locations ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "staff_locations read (authenticated)"
+  ON public.staff_locations FOR SELECT TO authenticated USING (true);
+CREATE POLICY "staff_locations insert (authenticated)"
+  ON public.staff_locations FOR INSERT TO authenticated WITH CHECK (true);
+CREATE POLICY "staff_locations update (authenticated)"
+  ON public.staff_locations FOR UPDATE TO authenticated USING (true) WITH CHECK (true);
 ```
+
+## Supabase Realtime (run once in the SQL editor)
+
+The app subscribes to live changes on `app_state` (client comm prefs, arrivals, completed) and
+`staff_locations` (tech live map). **Realtime is per-TABLE, not per-key** — every key in
+`app_state` (`sps_clients`, `sps_arrivals`, `sps_completed`, …) rides the one publication, so this
+covers current and future key-based subscriptions. Idempotent — safe to re-run:
+
+```sql
+do $$
+begin
+  -- app_state powers client comm prefs + arrivals/completed (always present).
+  if not exists (select 1 from pg_publication_tables where pubname='supabase_realtime' and tablename='app_state') then
+    alter publication supabase_realtime add table public.app_state;
+  end if;
+  alter table public.app_state replica identity full;
+
+  -- staff_locations only exists once you've created it (tech live-map; see table SQL above).
+  -- Guarded on existence so this block never fails when that feature isn't set up yet.
+  if exists (select 1 from information_schema.tables where table_schema='public' and table_name='staff_locations') then
+    if not exists (select 1 from pg_publication_tables where pubname='supabase_realtime' and tablename='staff_locations') then
+      alter publication supabase_realtime add table public.staff_locations;
+    end if;
+    alter table public.staff_locations replica identity full;
+  end if;
+end $$;
+
+-- Verify (app_state always listed; staff_locations too, once it exists):
+select tablename from pg_publication_tables where pubname='supabase_realtime' order by tablename;
+```
+
+Realtime also respects RLS — the authenticated client must be able to `SELECT` the table for
+events to arrive (already the case, since arrivals/locations sync works today).

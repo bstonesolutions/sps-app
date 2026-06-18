@@ -4379,6 +4379,18 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
         </div>
       </Card>
 
+      {/* How this client wants to be reached — a read-only mirror of what they chose in their
+          portal (kept live by the realtime sync). Staff override per message in the notify modals. */}
+      <Card style={{ marginBottom: 14 }}>
+        <CardHeader title="Communication Preferences" />
+        <div style={{ padding: "13px 16px 15px" }}>
+          <CommPrefBadges client={client} />
+          <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 9, lineHeight: 1.45 }}>
+            Chosen by {client.name ? client.name.split(" ")[0] : "the client"} in their portal. We only reach out on the channels left on — you can override per message when you really need to.
+          </div>
+        </div>
+      </Card>
+
       <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 10, padding: 4, marginBottom: 16, gap: 3 }}>
         {tabs.map(t => (
           <button key={t} onClick={() => setTab(t)} style={{
@@ -5759,11 +5771,11 @@ function ArrivedModal({ stop, client, email, onClose, onArrived }) {
     if (!arrivedRef.current) {         // record arrival + in-app notice once, even if a retry is needed
       arrivedRef.current = true;
       onArrived();                     // start the job clock (record arrival time)
-      if (client?.id) {                // in-app portal notification (best-effort)
+      if (client?.id && commPref(client, "app")) {  // in-app portal notification (best-effort), if they want in-app
         supabase.from("sps_messages").insert({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: message }).then(() => {}, () => {});
       }
     }
-    if (phone) {                       // text the client from the business Quo line ONLY — never the device
+    if (phone && commPref(client, "text")) {  // text the client from the business Quo line ONLY — never the device
       setSending(true); setSendErr("");
       const r = await sendSms(client.phone, message);
       setSending(false);
@@ -5788,9 +5800,10 @@ function ArrivedModal({ stop, client, email, onClose, onArrived }) {
         <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 6 }}>Message to client</div>
         <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: "12px 14px", fontSize: 13.5, color: T.text, lineHeight: 1.5, marginBottom: 16 }}>{message}</div>
         <Btn onClick={send} disabled={sending} style={{ width: "100%", padding: "13px", borderRadius: 12, gap: 7, justifyContent: "center" }}>
-          {sending ? "Sending…" : <><Icon name="check" size={15} /> {phone ? "Mark Arrived & Text Client" : "Mark Arrived"}</>}
+          {sending ? "Sending…" : <><Icon name="check" size={15} /> {(phone && commPref(client, "text")) ? "Mark Arrived & Text Client" : "Mark Arrived"}</>}
         </Btn>
         {sendErr && <div style={{ fontSize: 12, fontWeight: 700, color: T.accent, textAlign: "center", marginTop: 10 }}>{sendErr}</div>}
+        {phone && !commPref(client, "text") && <div style={{ fontSize: 11, color: T.warning, textAlign: "center", marginTop: 8 }}>{firstName} prefers no texts — arrival is recorded without one.</div>}
         <div style={{ fontSize: 11, color: T.textMuted, textAlign: "center", marginTop: 8 }}>Edit this message in Customize → Messaging.</div>
       </div>
     </div>,
@@ -6142,7 +6155,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
   // best-effort: a failure never blocks the send.
   const reportPostedRef = useRef(false);
   const postReportToPortal = () => {
-    if (reportPostedRef.current || !client?.id) return;
+    if (reportPostedRef.current || !client?.id || !commPref(client, "app")) return; // honor client's in-app channel choice
     reportPostedRef.current = true;
     supabase.from("sps_messages")
       .insert({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: reportText + svcCardMarker(stop?.type || "Service visit", todayStr, branding.companyName) })
@@ -6266,11 +6279,13 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
               </div>
             );
           })()}
-          <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 18, lineHeight: 1.5 }}>Send the client their report:</div>
+          <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 10, lineHeight: 1.5 }}>Send the client their report:</div>
+          <div style={{ marginBottom: 12 }}><CommPrefBadges client={client} compact /></div>
           <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
-            <Btn onClick={sendEmail} disabled={!!reportSend.busy} style={{ flex: 1, padding: "13px", borderRadius: 12, display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}><Icon name="mail" size={14} /> {reportSend.busy === "email" ? "Sending…" : "Email Report"}</Btn>
-            <Btn onClick={sendText} variant="ghost" disabled={!!reportSend.busy} style={{ flex: 1, padding: "13px", borderRadius: 12, display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}><Icon name="message" size={14} /> {reportSend.busy === "text" ? "Sending…" : "Text Report"}</Btn>
+            <Btn onClick={sendEmail} disabled={!!reportSend.busy} style={{ flex: 1, padding: "13px", borderRadius: 12, display:"flex", alignItems:"center", justifyContent:"center", gap:6, opacity: commPref(client, "email") ? 1 : 0.5 }}><Icon name="mail" size={14} /> {reportSend.busy === "email" ? "Sending…" : "Email Report"}</Btn>
+            <Btn onClick={sendText} variant="ghost" disabled={!!reportSend.busy} style={{ flex: 1, padding: "13px", borderRadius: 12, display:"flex", alignItems:"center", justifyContent:"center", gap:6, opacity: commPref(client, "text") ? 1 : 0.5 }}><Icon name="message" size={14} /> {reportSend.busy === "text" ? "Sending…" : "Text Report"}</Btn>
           </div>
+          {(!commPref(client, "email") || !commPref(client, "text")) && <div style={{ fontSize: 11.5, color: T.textMuted, marginBottom: 8, lineHeight: 1.4 }}>Dimmed = the client opted out of that channel. Sending still works if you need to reach them.</div>}
           {reportSend.msg && <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 10, color: reportSend.msg.ok ? "#16a34a" : T.accent }}>{reportSend.msg.text}</div>}
           <button onClick={onClose} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 8, fontFamily: "inherit" }}>Done</button>
         </div>
@@ -7322,6 +7337,7 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", onClose }) {
           <span style={lbl}>On My Way Text</span>
           {phone ? <>
             <Btn onClick={sendOmwText} disabled={omw.busy} variant="outline" block style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}><Icon name="message" size={15} /> {omw.busy ? "Sending…" : `Send On My Way to ${firstName}`}</Btn>
+            {!commPref(client, "text") && <div style={{ fontSize: 12, color: T.warning, marginTop: 8, lineHeight: 1.4 }}>Heads up: {firstName} prefers not to be texted. Sending will still reach them — use it only if you need to.</div>}
             {omw.msg && <div style={{ fontSize: 12.5, fontWeight: 700, marginTop: 8, color: omw.msg.ok ? "#16a34a" : T.accent }}>{omw.msg.text}</div>}
           </>
             : <div style={{ fontSize: 13, color: T.textMuted, background: T.surfaceAlt, borderRadius: 10, padding: "11px 14px" }}>Add a phone number to this client to send texts.</div>}
@@ -11826,9 +11842,14 @@ function InvoiceSendStep({ invoice, client, onClose }) {
     .replace(/\{dueDate\}/g, invoice.dueDate || "soon")
     .replace(/\{link\}/g, payLink ? `Pay online: ${payLink}\nPay in the app: spsway://invoices` : "View & pay it in your portal.");
 
-  const [doSms, setDoSms]   = useState(!!phone);
-  const [doChat, setDoChat] = useState(true);
-  const [doEmail, setDoEmail] = useState(!!clientEmail);
+  const [doSms, setDoSms]   = useState(!!phone && commPref(client, "text"));
+  const [doChat, setDoChat] = useState(commPref(client, "app"));
+  const [doEmail, setDoEmail] = useState(!!clientEmail && commPref(client, "email"));
+  // Channels the CLIENT opted out of (data exists, but they said no) — shown dimmed + labeled,
+  // yet still tappable so staff can knowingly override and reach them when truly needed.
+  const smsOptedOut   = !!phone && !commPref(client, "text");
+  const chatOptedOut  = !!client?.id && !commPref(client, "app");
+  const emailOptedOut = !!clientEmail && !commPref(client, "email");
   const [smsMsg, setSmsMsg]   = useState(fill(e.smsInvoice || DEFAULT_EMAIL.smsInvoice));
   const [chatMsg, setChatMsg] = useState(fill(e.chatInvoice || DEFAULT_EMAIL.chatInvoice));
   const [sending, setSending] = useState(false);
@@ -11882,13 +11903,15 @@ function InvoiceSendStep({ invoice, client, onClose }) {
       </div>
     </button>
   );
-  const Row = ({ icon, title, sub, on, setOn, disabled, children }) => (
+  const Row = ({ icon, title, sub, on, setOn, disabled, optedOut, children }) => (
     <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: 14, opacity: disabled ? 0.6 : 1 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <div style={{ width: 34, height: 34, borderRadius: 10, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name={icon} size={16} /></div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{title}</div>
-          <div style={{ fontSize: 11.5, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sub}</div>
+          <div style={{ fontSize: 11.5, color: (optedOut && !disabled) ? T.warning : T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {(optedOut && !disabled) ? (on ? "Overriding — they prefer not to be reached here" : "Client opted out — tap to override") : sub}
+          </div>
         </div>
         <Toggle on={on && !disabled} onClick={() => setOn(v => !v)} disabled={disabled} />
       </div>
@@ -11903,15 +11926,15 @@ function InvoiceSendStep({ invoice, client, onClose }) {
           Invoice <b style={{ color: T.text }}>{invoice.number}</b> · <b style={{ color: T.text }}>{amount}</b> saved{invoice.qbPushed ? " & synced to QuickBooks" : ""}. Choose how to let {first} know — or skip.
         </div>
 
-        <Row icon="message" title="Text message" sub={phone ? phone : "No phone on file"} on={doSms} setOn={setDoSms} disabled={!phone}>
+        <Row icon="message" title="Text message" sub={phone ? phone : "No phone on file"} on={doSms} setOn={setDoSms} disabled={!phone} optedOut={smsOptedOut}>
           <textarea rows={3} value={smsMsg} onChange={ev => setSmsMsg(ev.target.value)} style={taS} />
         </Row>
 
-        <Row icon="clients" title="In-app message" sub="Shows in their client portal" on={doChat} setOn={setDoChat} disabled={!client?.id}>
+        <Row icon="clients" title="In-app message" sub="Shows in their client portal" on={doChat} setOn={setDoChat} disabled={!client?.id} optedOut={chatOptedOut}>
           <textarea rows={2} value={chatMsg} onChange={ev => setChatMsg(ev.target.value)} style={taS} />
         </Row>
 
-        <Row icon="mail" title="Email invoice" sub={clientEmail ? clientEmail : "No email on file"} on={doEmail} setOn={setDoEmail} disabled={!clientEmail}>
+        <Row icon="mail" title="Email invoice" sub={clientEmail ? clientEmail : "No email on file"} on={doEmail} setOn={setDoEmail} disabled={!clientEmail} optedOut={emailOptedOut}>
           <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 8, lineHeight: 1.5 }}>Sends the branded invoice{payLink ? " with a Pay-online button" : ""} to {clientEmail}.</div>
         </Row>
 
@@ -14177,9 +14200,9 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
       const inv = p.invoice;
       const phone = String(c.phone || "").replace(/[^\d+]/g, "");
       const cEmail = (c.email || "").trim();
-      if (doSms && phone) { try { const r = await sendSms(phone, fill(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv)); if (!r.ok) fails++; } catch (_) { fails++; } }
-      if (doChat && c.id) { try { await supabase.from("sps_messages").insert({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) + invCardMarker(inv, "$" + ((invoiceTotals(inv).total) || 0).toFixed(2), branding.companyName) }); } catch (_) { fails++; } }
-      if (doEmail && cEmail) { try { const tt = invoiceTotals(inv); await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...senderEmailFields(), emailSubject: fill(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, c, inv), emailIntro: fill(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, c, inv), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); } catch (_) { fails++; } }
+      if (doSms && phone && commPref(c, "text")) { try { const r = await sendSms(phone, fill(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv)); if (!r.ok) fails++; } catch (_) { fails++; } }
+      if (doChat && c.id && commPref(c, "app")) { try { await supabase.from("sps_messages").insert({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) + invCardMarker(inv, "$" + ((invoiceTotals(inv).total) || 0).toFixed(2), branding.companyName) }); } catch (_) { fails++; } }
+      if (doEmail && cEmail && commPref(c, "email")) { try { const tt = invoiceTotals(inv); await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...senderEmailFields(), emailSubject: fill(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, c, inv), emailIntro: fill(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, c, inv), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); } catch (_) { fails++; } }
     }
     setMsgBusy(false);
     if (fails > 0) { setMsgErr(`${fails} message(s) couldn't be sent. The invoices were still created.`); return; }
@@ -14273,6 +14296,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
             <div style={{ width: 38, height: 22, borderRadius: 100, background: on ? T.primary : T.border, position: "relative" }}><div style={{ width: 18, height: 18, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: on ? 18 : 2, transition: "left 0.2s" }} /></div>
           </button>
         ))}
+        <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.45, marginTop: -4 }}>Each client's own channel choices are honored automatically — anyone who's turned off a channel won't be messaged there, even if it's on above.</div>
         {msgErr && <div style={{ fontSize: 12.5, fontWeight: 600, color: T.accent }}>{msgErr}</div>}
         <div style={{ display: "flex", gap: 10 }}>
           <button onClick={sendBatch} disabled={msgBusy || (!doSms && !doChat && !doEmail)} style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontWeight: 800, fontSize: 15, cursor: "pointer", fontFamily: "inherit", opacity: (msgBusy || (!doSms && !doChat && !doEmail)) ? 0.6 : 1 }}>{msgBusy ? "Sending…" : `Send to ${created.length}`}</button>
@@ -21904,6 +21928,33 @@ function CPRequest({ client, branding, onSubmit, T }) {
 }
 
 // ── SPS CLIENT PORTAL SHELL ──
+// A client's chosen communication channels (text / email / in-app). Opt-out model: a channel
+// the client hasn't explicitly turned off counts as ON, so existing clients are unaffected until
+// they choose. Every send path defaults/gates on this so a client gets only what they asked for.
+function commPref(client, ch) {
+  const c = client && client.notifyPrefs && client.notifyPrefs.channels;
+  return !c || c[ch] !== false;
+}
+
+// Read-only chips showing a client's chosen channels, for STAFF. Mirrors commPref, so it always
+// reflects the client's latest saved choice (kept live by the sps_clients realtime sync below).
+function CommPrefBadges({ client, compact }) {
+  const { T } = useApp();
+  const chans = [["text", "Text", "message"], ["email", "Email", "mail"], ["app", "In-app", "clients"]];
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+      {chans.map(([ch, label, icon]) => {
+        const on = commPref(client, ch);
+        return (
+          <span key={ch} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: compact ? 11 : 12, fontWeight: 700, padding: compact ? "3px 9px" : "5px 11px", borderRadius: 100, background: on ? hexA(T.primary, 0.1) : T.surfaceAlt, color: on ? T.primary : T.textMuted, border: `1px solid ${on ? hexA(T.primary, 0.25) : T.border}`, opacity: on ? 1 : 0.8 }}>
+            <Icon name={icon} size={compact ? 11 : 12} /> {label}{on ? "" : " · off"}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignOut, isStaffPreview }) {
   const set = (k, v) => setPrefs(p => ({ ...p, [k]: v }));
   const pondLbl = pondLabel(client);
@@ -21912,6 +21963,10 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
   const NOTIFY_DEFAULTS = { serviceReminders: true, onMyWay: true, invoiceReady: true };
   const [notify, setNotify] = useState(() => ({ ...NOTIFY_DEFAULTS, ...(client.notifyPrefs || {}) }));
   const toggleNotify = (k) => { const next = { ...notify, [k]: !notify[k] }; setNotify(next); if (onSavePrefs) onSavePrefs(next); };
+  // Communication channels the client wants reached on (text / email / in-app). Opt-out: all on
+  // by default; saved onto the same notifyPrefs record so the office honors it on every send.
+  const channels = { text: true, email: true, app: true, ...(notify.channels || {}) };
+  const toggleChannel = (ch) => { const next = { ...notify, channels: { ...channels, [ch]: !channels[ch] } }; setNotify(next); if (onSavePrefs) onSavePrefs(next); };
 
   const OptionRow = ({ label, value, options, onChange }) => (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 0", borderBottom: `1px solid ${T.border}` }}>
@@ -21977,6 +22032,31 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
             </button>
           </div>
         ))}
+      </div>
+
+      {/* Communication preferences — the client picks which channels reach them (any, or one) */}
+      <div style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, padding: "4px 18px", marginBottom: 16 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, padding: "14px 0 2px" }}>How we reach you</div>
+        <div style={{ fontSize: 12.5, color: T.textMuted, paddingBottom: 6, lineHeight: 1.45 }}>Choose the ways you'd like to hear from {branding.companyName || "us"} — keep them all on, or just the one you prefer.</div>
+        {[
+          ["text", "Text message", "On-the-way alerts, invoices & reminders by SMS"],
+          ["email", "Email", "Invoices and service reports by email"],
+          ["app", "In-app", "Messages and notifications inside this portal"],
+        ].map(([ch, label, hint], i, arr) => (
+          <div key={ch} style={{ padding: "13px 0", borderBottom: i < arr.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{label}</div>
+              <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>{hint}</div>
+            </div>
+            <button onClick={() => toggleChannel(ch)}
+              style={{ width: 48, height: 28, borderRadius: 100, background: channels[ch] ? T.primary : T.surfaceAlt, border: "none", cursor: "pointer", position: "relative", transition: "background 0.2s", flexShrink: 0 }}>
+              <div style={{ width: 22, height: 22, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: channels[ch] ? 23 : 3, transition: "left 0.2s", boxShadow: "0 1px 4px rgba(0,0,0,0.2)" }} />
+            </button>
+          </div>
+        ))}
+        {!channels.text && !channels.email && !channels.app && (
+          <div style={{ fontSize: 12, color: "#C0392B", padding: "0 0 12px", lineHeight: 1.45 }}>With all channels off, you won't receive alerts. We'll still keep everything in your portal.</div>
+        )}
       </div>
 
       {!isStaffPreview && (
@@ -22398,6 +22478,39 @@ export default function App({ authEmail = "", onSignOut }) {
 
   // Persistent data — survives reloads and app updates
   const [clients, setClients, lc] = useStoredState("sps_clients", []);
+  // Live-sync a client's communication/notification preferences onto THIS device the moment they
+  // change them in their portal — no manual reload. We subscribe to the shared sps_clients row and
+  // merge ONLY each client's notifyPrefs by id; we never replace the array (that would clobber
+  // in-progress local edits, roles, or tiers). The "changed" guard makes it idempotent and stops
+  // any cross-device echo after a single pass. Read-only sync — persistence layer is untouched.
+  useEffect(() => {
+    let alive = true, ch = null;
+    const pullPrefs = async () => {
+      try {
+        const { data } = await supabase.from("app_state").select("value").eq("key", "sps_clients").maybeSingle();
+        if (!alive || !data?.value) return;
+        let remote; try { remote = JSON.parse(data.value); } catch { return; }
+        if (!Array.isArray(remote)) return;
+        const prefById = {};
+        remote.forEach(c => { if (c && c.id != null && c.notifyPrefs) prefById[String(c.id)] = c.notifyPrefs; });
+        setClients(cs => {
+          let changed = false;
+          const next = (cs || []).map(c => {
+            const np = prefById[String(c.id)];
+            if (np && JSON.stringify(np) !== JSON.stringify(c.notifyPrefs || null)) { changed = true; return { ...c, notifyPrefs: np }; }
+            return c;
+          });
+          return changed ? next : cs;
+        });
+      } catch (_) {}
+    };
+    try {
+      ch = supabase.channel("sps-client-prefs")
+        .on("postgres_changes", { event: "*", schema: "public", table: "app_state", filter: "key=eq.sps_clients" }, pullPrefs)
+        .subscribe();
+    } catch (_) {}
+    return () => { alive = false; try { if (ch) supabase.removeChannel(ch); } catch (_) {} };
+  }, []);
   const [branding, setBranding, lb] = useStoredState("sps_branding", DEFAULT_BRANDING);
   // Persist the current page so a quick reopen lands me back where I was. On a hard
   // close (cold start), always start on Home for a definitive fresh start.
