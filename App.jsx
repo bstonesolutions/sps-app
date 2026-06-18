@@ -1594,7 +1594,7 @@ const DEFAULT_EMAIL = {
   smsReminder: "Hi {first}, a friendly reminder from {company} that your service is scheduled for {date}. Reply here with any questions!",
   // Invoice notifications ({first}, {company}, {number}, {amount}, {dueDate}, {link})
   smsInvoice: "Hi {first}, your invoice {number} for {amount} from {company} is ready. {link}",
-  chatInvoice: "New invoice {number} — {amount} due {dueDate}. View & pay it in your portal here.",
+  chatInvoice: "You have a new invoice from {company}.",
   // Invoice EMAIL wording (the rest of the invoice — line items/totals/pay button — is
   // structural). Tags: {number} {company} {first} {amount} {dueDate}.
   invoiceEmailSubject: "Invoice {number} from {company}",
@@ -13357,7 +13357,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
 
       // 2) In-app notification in the client's portal (drives the Messages badge on login)
       if (client?.id) {
-        const note = `New invoice ${invoice.number} — ${money(totals.total)} due ${invoice.dueDate || "soon"}. View & pay it in your portal here.[[inv:${invoice.id}]]`;
+        const note = `New invoice from ${branding.companyName || "us"}.` + invCardMarker(invoice, money(totals.total), branding.companyName);
         const { error: msgErr } = await supabase.from("sps_messages").insert({
           client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: note,
         });
@@ -14175,7 +14175,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
       const phone = String(c.phone || "").replace(/[^\d+]/g, "");
       const cEmail = (c.email || "").trim();
       if (doSms && phone) { try { const r = await sendSms(phone, fill(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv)); if (!r.ok) fails++; } catch (_) { fails++; } }
-      if (doChat && c.id) { try { await supabase.from("sps_messages").insert({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) + `[[inv:${inv.id}]]` }); } catch (_) { fails++; } }
+      if (doChat && c.id) { try { await supabase.from("sps_messages").insert({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) + invCardMarker(inv, "$" + ((invoiceTotals(inv).total) || 0).toFixed(2), branding.companyName) }); } catch (_) { fails++; } }
       if (doEmail && cEmail) { try { const tt = invoiceTotals(inv); await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...senderEmailFields(), emailSubject: fill(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, c, inv), emailIntro: fill(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, c, inv), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); } catch (_) { fails++; } }
     }
     setMsgBusy(false);
@@ -16759,7 +16759,7 @@ function MessagesScreen({ clients, currentUser, T }) {
       const map = {};
       data.forEach(m => {
         const cid = String(m.client_id);
-        if (!map[cid]) map[cid] = { lastMsg: String(m.body || "").replace(/\[\[inv:[^\]]+\]\]/g, ""), lastAt: m.created_at, unread: 0 };
+        if (!map[cid]) map[cid] = { lastMsg: String(m.body || "").replace(/\[\[inv(?:card)?:[^\]]+\]\]/g, "").trim() || "Invoice", lastAt: m.created_at, unread: 0 };
         if (m.sender === "client" && !m.read_at) map[cid].unread++;
       });
       setThreadMap(map);
@@ -16882,11 +16882,41 @@ function MessagesScreen({ clients, currentUser, T }) {
 }
 
 // ── Shared chat thread UI (used by both staff and client) ──
-// Render a chat message body. Invoice notifications carry a hidden marker `[[inv:<id>]]`;
-// strip it always, and — when the portal hands us onOpenInvoice — turn the trailing word
-// "here" into a tap target that jumps straight to that invoice (falling back to a chip).
-function renderChatBody(body, onOpenInvoice) {
+// Build 15, Item 5 — encode an invoice into a chat preview-card marker. renderChatBody turns
+// this into a tappable card (business · amount due · due date) that opens the invoice in-app.
+// One message: a short lead line + the card. Fields are pipe-delimited (pipes/brackets stripped).
+function invCardMarker(invoice, amountStr, company) {
+  const s = (v) => String(v == null ? "" : v).replace(/[|\]]/g, " ").trim();
+  return `[[invcard:${s(invoice.id)}|${s(invoice.number)}|${s(amountStr)}|${s(invoice.dueDate)}|${s(company)}]]`;
+}
+
+// Render a chat message body. Invoice notifications carry a hidden marker:
+//   [[invcard:id|number|amount|dueDate|company]]  → a tappable preview CARD (Build 15, Item 5)
+//   [[inv:<id>]]                                   → legacy: the trailing "here" becomes a link
+// Either way the marker is stripped from the visible text; onOpenInvoice makes it tappable.
+function renderChatBody(body, onOpenInvoice, T) {
   const raw = String(body || "");
+  const t = T || { primary: "#B81D24", text: "#111827", textMuted: "#6b7280", border: "#e5e7eb", surface: "#ffffff" };
+  const cm = raw.match(/\[\[invcard:([^\]]+)\]\]/);
+  if (cm) {
+    const [id, number, amount, due, company] = cm[1].split("|");
+    const text = raw.replace(/\[\[invcard:[^\]]+\]\]/g, "").trim();
+    const tap = onOpenInvoice ? (e) => { e.stopPropagation(); onOpenInvoice(id); } : undefined;
+    return (
+      <>
+        {text && <div style={{ marginBottom: 9 }}>{text}</div>}
+        <div onClick={tap} style={{ cursor: tap ? "pointer" : "default", width: 244, maxWidth: "100%", border: `1px solid ${t.border}`, borderRadius: 16, overflow: "hidden", background: t.surface, boxShadow: "0 2px 10px rgba(0,0,0,0.10)" }}>
+          <div style={{ background: t.primary, color: "#fff", padding: "9px 13px", fontSize: 12, fontWeight: 800, letterSpacing: "0.03em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{company || "Invoice"}</div>
+          <div style={{ padding: "13px 14px" }}>
+            <div style={{ fontSize: 10.5, color: t.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>Invoice {number || ""}</div>
+            <div style={{ fontSize: 25, fontWeight: 900, color: t.text, marginTop: 3, letterSpacing: "-0.02em" }}>{amount || ""}</div>
+            {due && <div style={{ fontSize: 12.5, color: t.textMuted, marginTop: 2 }}>Due {due}</div>}
+            {tap && <div style={{ marginTop: 11, background: hexA(t.primary, 0.1), color: t.primary, borderRadius: 10, padding: "9px", textAlign: "center", fontWeight: 800, fontSize: 13.5 }}>View &amp; Pay &rarr;</div>}
+          </div>
+        </div>
+      </>
+    );
+  }
   const mk = raw.match(/\[\[inv:([^\]]+)\]\]/);
   const invId = mk ? mk[1] : null;
   const text = raw.replace(/\[\[inv:[^\]]+\]\]/g, "").trim();
@@ -16966,7 +16996,7 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
                   wordBreak: "break-word",
                   boxShadow: isMine ? `0 2px 8px ${hexA(T.primary, 0.28)}` : `0 1px 3px ${hexA("#000", 0.07)}`,
                 }}>
-                  {renderChatBody(m.body, isMine ? null : onOpenInvoice)}
+                  {renderChatBody(m.body, isMine ? null : onOpenInvoice, T)}
                 </div>
               </div>
             </div>
