@@ -13419,10 +13419,53 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
     </div>
   ) : null;
 
+  // Build 15, Item 3 — owner-facing Status & Delivery reporting, pulled live from QuickBooks
+  // (sent + paid dates, partial, balance). "Viewed" is honestly marked Not tracked: QB exposes
+  // invoice opens only in its own web UI, never through the API — so we never imply not-viewed.
+  const fmtRep = (s) => {
+    if (!s) return "";
+    try {
+      let d;
+      if (String(s).includes("/")) { const [m, da, y] = String(s).split("/").map(Number); d = (m && da && y) ? new Date(y, m - 1, da) : null; }
+      else { d = new Date(String(s) + (String(s).length === 10 ? "T00:00:00" : "")); }
+      return (d && !isNaN(d.getTime())) ? d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : String(s);
+    } catch { return String(s); }
+  };
+  const repBalance = invoice.balance != null ? Number(invoice.balance) : (totals.total || 0);
+  const repPaidDate = invoice.paidDate || (invoice.payment && invoice.payment.date) || null;
+  const repSent = invoice.qbEmailStatus === "EmailSent" || !!invoice.sentDate;
+  const repRows = [
+    ["Issued",  fmtRep(invoice.date) || "—", T.text],
+    ["Sent",    repSent ? (invoice.sentDate ? fmtRep(invoice.sentDate) : "Yes") : (invoice.source === "quickbooks" ? "Not sent via QuickBooks" : "Sent from the app"), T.text],
+    ["Viewed",  "Not tracked via QuickBooks", T.textMuted],
+    ["Paid",    eff === "Paid" ? (repPaidDate ? fmtRep(repPaidDate) : "Yes")
+                : invoice.partial ? `Partial — ${money(Math.max(0, (totals.total || 0) - repBalance))} of ${money(totals.total)}`
+                : eff === "Overdue" ? "Overdue" : "Unpaid",
+                eff === "Paid" ? "#157a12" : eff === "Overdue" ? "#C0392B" : T.text],
+  ];
+  const reportBlock = (canManage && eff !== "Draft") ? (
+    <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: "12px 14px", display: "flex", flexDirection: "column", gap: 7 }}>
+      <div style={{ fontSize: 11, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Status &amp; Delivery</div>
+      {repRows.map(([k, v, color]) => (
+        <div key={k} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, fontSize: 13 }}>
+          <span style={{ color: T.textMuted, fontWeight: 600 }}>{k}</span>
+          <span style={{ color, fontWeight: 700, textAlign: "right" }}>{v}</span>
+        </div>
+      ))}
+      {repBalance > 0 && (
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, borderTop: `1px solid ${T.border}`, paddingTop: 7 }}>
+          <span style={{ color: T.textMuted, fontWeight: 600 }}>Balance due</span>
+          <span style={{ color: T.text, fontWeight: 800 }}>{money(repBalance)}</span>
+        </div>
+      )}
+    </div>
+  ) : null;
+
   // ── Modal layout (mobile / inside a client record): document, then actions stacked. ──
   const body = (
     <div style={{ display: "flex", flexDirection: "column", gap: 14, paddingBottom: "max(16px, env(safe-area-inset-bottom))" }}>
       {doc}
+      {reportBlock}
       {paidInfo}
       {sendBlock}
       {actionRow}
@@ -13465,6 +13508,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
         </div>
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingTop: 18, paddingBottom: 8 }}>
           {doc}
+          {reportBlock && <div style={{ marginTop: 14 }}>{reportBlock}</div>}
         </div>
         {markPaid && <MarkPaidModal invoice={invoice} client={client} onSave={(upd) => { onSave(upd); setMarkPaid(false); }} onClose={() => setMarkPaid(false)} />}
       </div>
@@ -22849,6 +22893,12 @@ export default function App({ authEmail = "", onSignOut }) {
         ...(qi.lateFeeAppliedAt ? { lateFeeAppliedAt: qi.lateFeeAppliedAt } : {}),
         total:      String(qi.total),
         balance:    qi.balance,
+        // Build 15, Item 3 — richer QB reporting fields (sent/paid dates, email state, partial).
+        qbEmailStatus:  qi.qbEmailStatus || "NotSet",
+        sentDate:       qi.sentDate || null,
+        qbDeliveryType: qi.qbDeliveryType || null,
+        ...(qi.paidDate ? { paidDate: qi.paidDate } : {}),
+        partial:        !!qi.partial,
         ...(qi.paymentLink ? { paymentLink: qi.paymentLink } : {}),
         source:     "quickbooks",
         createdAt:  Date.now(),
@@ -22879,6 +22929,12 @@ export default function App({ authEmail = "", onSignOut }) {
           balance:  qi.balance != null ? qi.balance : iv.balance,
           dueDate:  qi.dueDate || iv.dueDate,
           paymentLink: iv.paymentLink || qi.paymentLink,
+          // Build 15, Item 3 — refresh QB reporting; keep a manually-recorded paidDate if set.
+          qbEmailStatus:  qi.qbEmailStatus || iv.qbEmailStatus || "NotSet",
+          sentDate:       qi.sentDate || iv.sentDate || null,
+          qbDeliveryType: qi.qbDeliveryType || iv.qbDeliveryType || null,
+          paidDate:       iv.paidDate || qi.paidDate || null,
+          partial:        !!qi.partial,
         };
       });
       const fresh = newInvoices.filter(n => !usedQbIds.has(String(n.qbId)));

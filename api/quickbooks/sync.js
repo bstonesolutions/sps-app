@@ -26,10 +26,16 @@ export default async function handler(req, res) {
     const customerQuery = encodeURIComponent(
       "SELECT * FROM Customer WHERE Active = true MAXRESULTS 1000"
     );
+    // Build 15, Item 3 — pull Payments too so we can report the real DATE PAID per invoice.
+    // QB's LinkedTxn on the invoice only references the payment; the date lives on Payment.
+    const paymentQuery = encodeURIComponent(
+      "SELECT * FROM Payment ORDER BY MetaData.LastUpdatedTime DESC MAXRESULTS 1000"
+    );
 
-    const [invoiceRes, customerRes] = await Promise.all([
+    const [invoiceRes, customerRes, paymentRes] = await Promise.all([
       fetch(`${base}/query?query=${invoiceQuery}&minorversion=65`, { headers }),
       fetch(`${base}/query?query=${customerQuery}&minorversion=65`, { headers }),
+      fetch(`${base}/query?query=${paymentQuery}&minorversion=65`, { headers }),
     ]);
 
     if (invoiceRes.status === 401) {
@@ -44,6 +50,20 @@ export default async function handler(req, res) {
 
     const invoices  = invoiceData?.QueryResponse?.Invoice   || [];
     const customers = customerData?.QueryResponse?.Customer || [];
+    // Map invoice id -> most recent payment date applied to it (Item 3). Payments are
+    // supplementary: if the query failed (e.g. scope), date-paid is simply omitted.
+    const paymentData = (paymentRes && paymentRes.ok) ? await paymentRes.json().catch(() => ({})) : {};
+    const paidDateByInvoice = {};
+    for (const pm of (paymentData?.QueryResponse?.Payment || [])) {
+      const when = pm.TxnDate || String(pm.MetaData?.CreateTime || "").slice(0, 10);
+      for (const line of (pm.Line || [])) {
+        for (const lt of (line.LinkedTxn || [])) {
+          if (lt.TxnType === "Invoice" && lt.TxnId && when && (!paidDateByInvoice[lt.TxnId] || when > paidDateByInvoice[lt.TxnId])) {
+            paidDateByInvoice[lt.TxnId] = when;
+          }
+        }
+      }
+    }
 
     // Reverse-map a QuickBooks item name back to the app's line "kind".
     const itemNameToKind = (name) => {
@@ -91,6 +111,14 @@ export default async function handler(req, res) {
         balance:      inv.Balance,
         taxRate,
         source:       'quickbooks',
+        // Build 15, Item 3 — richer reporting straight from QuickBooks. NOTE: "viewed" is
+        // intentionally absent — QB does NOT expose invoice opens via its API (UI-only), so
+        // the app marks viewed "Not tracked via QuickBooks" rather than implying not-viewed.
+        qbEmailStatus:  inv.EmailStatus || 'NotSet',          // NotSet | NeedToSend | EmailSent
+        sentDate:       inv.DeliveryInfo?.DeliveryTime ? String(inv.DeliveryInfo.DeliveryTime).slice(0, 10) : null,
+        qbDeliveryType: inv.DeliveryInfo?.DeliveryType || null,
+        paidDate:       paidDateByInvoice[inv.Id] || null,
+        partial:        (parseFloat(inv.Balance) > 0 && parseFloat(inv.Balance) < parseFloat(inv.TotalAmt)),
         // Flag so the app's auto-apply logic won't add a second late fee.
         ...(hasLateFee ? { lateFeeAppliedAt: todayISO } : {}),
         status:       inv.Balance <= 0 ? 'Paid'
