@@ -88,6 +88,15 @@ function setSenderIdentity(v) { SENDER_IDENTITY = { ...SENDER_IDENTITY, ...(v ||
 // App effect (with owner/company fallbacks resolved). mode: "redirect" | "hold".
 let TEST_MODE = { on: false, mode: "redirect", email: "", phone: "" };
 function setTestMode(v) { TEST_MODE = { ...TEST_MODE, ...(v || {}) }; }
+// Test Mode must ALSO hold staff→client in-app/portal messages, not just email + SMS — a portal
+// notification (new-invoice card, arrival notice, service report) reaches the REAL client, which
+// is exactly what Test Mode exists to prevent pre-launch. Returns a clean "held" result (no error)
+// so callers treat it as a no-op success, never a failure. Use ONLY for staff-originated posts;
+// a client's own inbound actions (sender:"client") should still record.
+function postToPortalSafe(row) {
+  if (TEST_MODE.on) return Promise.resolve({ data: null, error: null, held: true });
+  return supabase.from("sps_messages").insert(row);
+}
 
 // Spread into a Resend email body; the server only honors the from-fields on the verified
 // domain. When test mode is on it also carries the redirect instruction the server enforces.
@@ -766,6 +775,7 @@ function buildReminderQueue(schedule, clients, cfg, reminderLog, now = new Date(
 
       const client = (clients || []).find(c => String(c.id) === String(s.clientId ?? s.id));
       if (client && client.notifyPrefs && client.notifyPrefs.serviceReminders === false) return; // client opted out of reminders
+      if (client && !commPref(client, "text")) return; // client opted out of the text channel
       const phone = (client?.phone || "").replace(/\D/g, "");
       const entry = { sid: s.sid, stop: s, client, date: d.date, stopDate, phone };
 
@@ -809,6 +819,8 @@ function buildSeasonalQueue(cfg, clients, reminderLog, now = new Date()) {
     (clients || []).forEach(c => {
       if ((c.status || "Active") === "Inactive") return;
       if (div !== "All" && c.division !== div) return;
+      if (c.notifyPrefs && c.notifyPrefs.serviceReminders === false) return; // opted out of reminders
+      if (!commPref(c, "text")) return; // opted out of the text channel
       const sid = `seas_${r.id}_${c.id}_${year}`;
       const entry = { sid, client: c, phone: (c.phone || "").replace(/\D/g, ""), date: label, stop: { type: r.name || "Seasonal Reminder" }, message: r.message || "", isSeasonal: true };
       if (reminderLog && reminderLog[sid]) sent.push({ ...entry, sentAt: reminderLog[sid].sentAt });
@@ -5072,7 +5084,7 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
     if (!files.length) return;
     setBusy(true);
     const out = [];
-    for (const f of files) out.push({ src: await compressImage(f), label: "General", takenAt: Date.now() });
+    for (const f of files) { const src = await compressImage(f); if (src && src.startsWith("data:image")) out.push({ src, label: "General", takenAt: Date.now() }); } // skip a failed/undecodable (e.g. HEIC) result
     setPhotos(p => [...p, ...out]);
     setBusy(false);
   };
@@ -5772,7 +5784,7 @@ function ArrivedModal({ stop, client, email, onClose, onArrived }) {
       arrivedRef.current = true;
       onArrived();                     // start the job clock (record arrival time)
       if (client?.id && commPref(client, "app")) {  // in-app portal notification (best-effort), if they want in-app
-        supabase.from("sps_messages").insert({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: message }).then(() => {}, () => {});
+        postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: message }).then(() => {}, () => {});
       }
     }
     if (phone && commPref(client, "text")) {  // text the client from the business Quo line ONLY — never the device
@@ -6067,7 +6079,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
     const compressed = [];
     for (const f of files.slice(0, remaining)) {
       const src = await compressImage(f);
-      compressed.push({ src, label: defaultLabel, takenAt: Date.now() });
+      if (src && src.startsWith("data:image")) compressed.push({ src, label: defaultLabel, takenAt: Date.now() }); // skip a failed/undecodable (e.g. HEIC) result
     }
     setPhotos(p => [...p, ...compressed]);
     setBusy(false);
@@ -6157,8 +6169,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
   const postReportToPortal = () => {
     if (reportPostedRef.current || !client?.id || !commPref(client, "app")) return; // honor client's in-app channel choice
     reportPostedRef.current = true;
-    supabase.from("sps_messages")
-      .insert({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: reportText + svcCardMarker(stop?.type || "Service visit", todayStr, branding.companyName) })
+    postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: reportText + svcCardMarker(stop?.type || "Service visit", todayStr, branding.companyName) })
       .then(() => {}, () => {});
   };
   // Reports go out through the business identity — Resend email + Quo text — never the
@@ -11866,7 +11877,7 @@ function InvoiceSendStep({ invoice, client, onClose }) {
     }
     if (doChat && client?.id) {
       try {
-        const { error } = await supabase.from("sps_messages").insert({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: chatMsg });
+        const { error } = await postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: chatMsg });
         if (error) fails.push(`In-app: ${error.message}`);
       } catch (_) { fails.push("In-app: failed"); }
     }
@@ -13174,7 +13185,7 @@ function MarkPaidModal({ invoice, client, onSave, onClose }) {
 
   const METHODS = ["Cash", "Check", "Manual Card", "Other"];
   const [method, setMethod] = useState("Check");
-  const [amount, setAmount] = useState(String((totals.total || 0).toFixed(2)));
+  const [amount, setAmount] = useState(String(Number(invoice.balance != null ? invoice.balance : (totals.total || 0)).toFixed(2)));
   const [dateISO, setDateISO] = useState(isoToday);
   const [reference, setReference] = useState("");
   const [accts, setAccts] = useState(qb ? null : []); // null = loading
@@ -13203,9 +13214,18 @@ function MarkPaidModal({ invoice, client, onSave, onClose }) {
   const depName = (accts || []).find(a => a.id === depositId)?.name || "";
 
   const markLocal = (synced) => {
+    // Only mark fully Paid when the entered amount covers the remaining balance; a partial
+    // payment keeps the invoice open, flags `partial`, and reduces the balance.
+    const remaining = invoice.balance != null ? Number(invoice.balance) : (totals.total || 0);
+    const amt = parseFloat(amount) || 0;
+    const coversFull = amt + 0.005 >= remaining;
     onSave({
-      ...invoice, status: "Paid", paidDate: isoToMDY(dateISO),
-      payment: { method, amount: parseFloat(amount) || 0, date: isoToMDY(dateISO), reference: reference.trim(), depositAccount: depName, depositAccountId: depositId || "", qbSynced: !!synced },
+      ...invoice,
+      status: coversFull ? "Paid" : (invoice.status || "Sent"),
+      partial: !coversFull && amt > 0,
+      balance: Math.max(0, remaining - amt),
+      ...(coversFull ? { paidDate: isoToMDY(dateISO) } : {}),
+      payment: { method, amount: amt, date: isoToMDY(dateISO), reference: reference.trim(), depositAccount: depName, depositAccountId: depositId || "", qbSynced: !!synced },
     });
     onClose();
   };
@@ -13384,7 +13404,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
       // 2) In-app notification in the client's portal (drives the Messages badge on login)
       if (client?.id) {
         const note = `New invoice from ${branding.companyName || "us"}.` + invCardMarker(invoice, money(totals.total), branding.companyName);
-        const { error: msgErr } = await supabase.from("sps_messages").insert({
+        const { error: msgErr } = await postToPortalSafe({
           client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: note,
         });
         if (msgErr) { setSendState("error"); setSendMsg(`Emailed, but the portal notification failed: ${msgErr.message}`); return; }
@@ -14201,7 +14221,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
       const phone = String(c.phone || "").replace(/[^\d+]/g, "");
       const cEmail = (c.email || "").trim();
       if (doSms && phone && commPref(c, "text")) { try { const r = await sendSms(phone, fill(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv)); if (!r.ok) fails++; } catch (_) { fails++; } }
-      if (doChat && c.id && commPref(c, "app")) { try { await supabase.from("sps_messages").insert({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) + invCardMarker(inv, "$" + ((invoiceTotals(inv).total) || 0).toFixed(2), branding.companyName) }); } catch (_) { fails++; } }
+      if (doChat && c.id && commPref(c, "app")) { try { await postToPortalSafe({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) + invCardMarker(inv, "$" + ((invoiceTotals(inv).total) || 0).toFixed(2), branding.companyName) }); } catch (_) { fails++; } }
       if (doEmail && cEmail && commPref(c, "email")) { try { const tt = invoiceTotals(inv); await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...senderEmailFields(), emailSubject: fill(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, c, inv), emailIntro: fill(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, c, inv), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); } catch (_) { fails++; } }
     }
     setMsgBusy(false);
@@ -22783,6 +22803,7 @@ export default function App({ authEmail = "", onSignOut }) {
       const payload = {
         role: "owner",
         updated_at: now.toISOString(),
+        app_font: branding.appFont, // widgets render in the app's chosen font (rounded/system/grotesk)
         profit_week: r2(wk.profit),
         profit_month: r2(mo.profit),
         outstanding_total: r2(outstanding),
@@ -22806,7 +22827,7 @@ export default function App({ authEmail = "", onSignOut }) {
     };
     registerWidgetPush(pushNow);
     pushNow();
-  }, [hydrated, currentUser, clients, invoices, schedule, team, completedSids]);
+  }, [hydrated, currentUser, clients, invoices, schedule, team, completedSids, branding.appFont]);
 
   // CLIENT widget snapshot — when a client is signed into the native app, push their
   // next visit + balance so the Service Schedule + Balance Due widgets render (no network,
@@ -22841,7 +22862,7 @@ export default function App({ authEmail = "", onSignOut }) {
           .filter(iv => !["Paid", "paid"].includes(effectiveStatus(iv)) && iv.status !== "Draft" && iv.status !== "draft")
           .sort((a, b) => ((parseMDY(a.dueDate) || 0) - (parseMDY(b.dueDate) || 0)));
 
-        const payload = { role: "client", updated_at: new Date().toISOString() };
+        const payload = { role: "client", updated_at: new Date().toISOString(), app_font: branding.appFont };
         if (nextV) {
           payload.next_visit_at = toISO(nextV.date, nextV.stop.time);
           payload.next_visit_service = nextV.stop.type || "Service Visit";
@@ -22860,7 +22881,7 @@ export default function App({ authEmail = "", onSignOut }) {
     };
     registerWidgetPush(pushClient);
     pushClient();
-  }, [hydrated, currentUser, clientUser, schedule, invoices, completedSids, team]);
+  }, [hydrated, currentUser, clientUser, schedule, invoices, completedSids, team, branding.appFont]);
   // Smart reopen on a warm resume (the app wasn't killed):
   //  • backgrounded ~30 min or more  → land on Home with the full splash (fresh start)
   //  • backgrounded under ~30 min     → stay exactly where I left off (no disruption)
@@ -23469,6 +23490,7 @@ export default function App({ authEmail = "", onSignOut }) {
   // can reply to. Best-effort: a failure is logged, never blocks the action.
   const postClientMessage = (clientId, sender, senderName, body) => {
     if (!clientId || !body) return;
+    if (sender === "staff" && TEST_MODE.on) return; // Test Mode holds staff→client posts (client's own actions still record)
     supabase.from("sps_messages")
       .insert({ client_id: String(clientId), sender, sender_name: senderName || "", body })
       .then(({ error }) => { if (error) console.warn("Chat message insert failed:", error.message); }, () => {});
@@ -23511,7 +23533,7 @@ export default function App({ authEmail = "", onSignOut }) {
     }
   };
 
-  const handleConfirmUpgrade = (updatedAlert, updatedClient) => {
+  const handleConfirmUpgrade = async (updatedAlert, updatedClient) => {
     // Save progress state back to the alert (persists steps across modal opens)
     setOfficeAlerts(list => list.map(a => a.id === updatedAlert.id ? { ...a, ...updatedAlert } : a));
     // Final step — apply plan change and save signed doc to client record
@@ -23534,12 +23556,13 @@ export default function App({ authEmail = "", onSignOut }) {
       }));
       // Confirm the upgrade to the client by text through the business Quo line (in-app, never the device).
       const upPhone = String(updatedClient.phone || "").replace(/[^\d+]/g, "");
-      if (upPhone) {
+      if (upPhone && commPref(updatedClient, "text")) {  // honor the client's text-channel choice
         const cmsg = (email.upgradeConfirm || DEFAULT_EMAIL.upgradeConfirm)
           .replace(/\{first\}/g, (updatedClient.name || "").trim().split(" ")[0] || "there")
           .replace(/\{company\}/g, branding.companyName || "")
           .replace(/\{plan\}/g, updatedAlert.requestedPlan || "your new plan");
-        sendSms(upPhone, cmsg);
+        const r = await sendSms(upPhone, cmsg);  // await so a failure is surfaced, not swallowed
+        if (!r.ok && !r.held) handleOfficeAlert({ title: "Upgrade text didn't send", body: r.error || "Couldn't text the upgrade confirmation.", type: "feedback", clientId: updatedAlert.clientId });
       }
     }
   };

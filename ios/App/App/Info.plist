@@ -46,6 +46,14 @@
 	<string>Stone Property Solutions can save service photos to your photo library.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Stone Property Solutions uses the microphone to record audio when you capture a video on a service stop.</string>
+	<!-- Location: live staff position on the client map + ETA, and recording where service
+	     stops happen. When-In-Use only — location is read solely while the app is open. -->
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Stone Property Solutions uses your location to show your live position to clients during a service visit and to record where service stops happen. Location is used only while the app is open.</string>
+	<!-- Export compliance: app uses only standard HTTPS/TLS, so it qualifies for the exemption.
+	     Set so TestFlight/App Store uploads don't prompt "Missing Compliance" every time. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
