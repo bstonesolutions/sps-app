@@ -2640,13 +2640,17 @@ function useStaffLocationTracking(opts) {
     let watchId = null;
     let lastSent = 0;
     let activeId = null;
+    // The signed-in user's Supabase auth uid. staff_locations RLS requires each row's auth_uid to
+    // equal the writer's auth.uid(), so a tech can only write their OWN location (anti-spoof).
+    let authUid = null;
+    supabase.auth.getUser().then(({ data }) => { authUid = (data && data.user && data.user.id) || null; }, () => {});
 
     const readShift = () => { try { return JSON.parse(localStorage.getItem(ACTIVE_SHIFT_KEY) || "null"); } catch { return null; } };
 
     const stop = async (id) => {
       if (watchId != null && navigator.geolocation) { try { navigator.geolocation.clearWatch(watchId); } catch (_) {} }
       watchId = null;
-      if (id) { try { await supabase.from("staff_locations").update({ is_active: false, updated_at: new Date().toISOString() }).eq("staff_id", String(id)); } catch (_) {} }
+      if (id) { try { const { data: ud } = await supabase.auth.getUser(); await supabase.from("staff_locations").update({ is_active: false, updated_at: new Date().toISOString(), auth_uid: (ud && ud.user && ud.user.id) || authUid || null }).eq("staff_id", String(id)); } catch (_) {} }
     };
 
     const start = (id) => {
@@ -2658,10 +2662,12 @@ function useStaffLocationTracking(opts) {
           if (t - lastSent < 30000) return;   // never hammer GPS — at most once / 30s
           lastSent = t;
           const { latitude, longitude } = pos.coords;
-          supabase.from("staff_locations").upsert(
-            { staff_id: String(id), lat: latitude, lng: longitude, updated_at: new Date().toISOString(), is_active: true },
+          const writeLoc = (uid) => supabase.from("staff_locations").upsert(
+            { staff_id: String(id), lat: latitude, lng: longitude, updated_at: new Date().toISOString(), is_active: true, auth_uid: uid || null },
             { onConflict: "staff_id" }
           ).then(() => {}, () => {});
+          if (authUid) writeLoc(authUid);
+          else supabase.auth.getUser().then(({ data }) => { authUid = (data && data.user && data.user.id) || null; writeLoc(authUid); }, () => writeLoc(null));
         },
         () => { /* denied / unavailable — clock-in still works, just no broadcast */ },
         { enableHighAccuracy: true, maximumAge: 30000, timeout: 27000 }
