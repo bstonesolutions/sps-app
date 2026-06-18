@@ -39,6 +39,13 @@ export default async function handler(req, res) {
     const inv = (await invRes.json())?.Invoice;
     if (!inv || !inv.CustomerRef) return res.status(500).json({ error: "Invoice has no customer in QuickBooks." });
 
+    // Guard against over-applying: a stale UI total must not exceed the live balance due, or QB
+    // records an overpayment/credit. Reject with the real balance so the app can correct itself.
+    const balanceDue = Number(inv.Balance);
+    if (Number.isFinite(balanceDue) && amt > balanceDue + 0.005) {
+      return res.status(400).json({ error: `Amount ($${amt.toFixed(2)}) exceeds the balance due ($${balanceDue.toFixed(2)}).`, balanceDue });
+    }
+
     // Resolve the QB PaymentMethod id by name (optional — payment records without it).
     let paymentMethodRef = null;
     const pmName = ({ "Manual Card": "Credit Card", "Card": "Credit Card" }[method]) || method;

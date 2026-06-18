@@ -17,12 +17,20 @@ function page(title, message, ok) {
 }
 
 export default async function handler(req, res) {
-  const { code, realmId, error } = req.query;
+  const { code, realmId, error, state } = req.query;
 
   res.setHeader("Content-Type", "text/html; charset=utf-8");
 
   if (error)             return res.status(200).send(page("QuickBooks not connected", "Authorization was cancelled or denied. You can close this window and try again.", false));
   if (!code || !realmId) return res.status(200).send(page("QuickBooks not connected", "Missing authorization code. Please close this window and try again.", false));
+
+  // CSRF: the state we set in the qb_state cookie (auth.js) must match the state Intuit echoes
+  // back, BEFORE we exchange the code or bind any tokens to this realm. Then clear the cookie.
+  const cookieState = (req.headers.cookie || "").split(/;\s*/).find(c => c.startsWith("qb_state="))?.slice("qb_state=".length);
+  if (!state || !cookieState || state !== cookieState) {
+    return res.status(200).send(page("QuickBooks not connected", "Security check failed. Please close this window and try connecting again.", false));
+  }
+  res.setHeader("Set-Cookie", "qb_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
 
   const clientId     = process.env.QB_CLIENT_ID;
   const clientSecret = process.env.QB_CLIENT_SECRET;
