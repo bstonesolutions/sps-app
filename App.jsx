@@ -16938,7 +16938,7 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       {/* Messages */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "12px 0", display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ flex: 1, overflowY: "auto", padding: "14px 2px", display: "flex", flexDirection: "column", gap: 10 }}>
         {messages.length === 0 && (
           <div style={{ textAlign: "center", padding: "40px 20px", color: T.textMuted, fontSize: 13 }}>No messages yet. Start the conversation below.</div>
         )}
@@ -16952,15 +16952,19 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
               )}
               <div style={{ display: "flex", justifyContent: isMine ? "flex-end" : "flex-start", paddingLeft: isMine ? 48 : 0, paddingRight: isMine ? 0 : 48 }}>
                 <div style={{
+                  // Build 15, Item 4 — roomier bubbles (more padding, rounder) + a defined gray
+                  // bubble (border + soft shadow) so the other person's messages read as distinct
+                  // bubbles, not background. Red = you sending, gray = them (both perspectives).
                   background: isMine ? T.primary : T.surfaceAlt,
                   color: isMine ? "#fff" : T.text,
-                  borderRadius: isMine ? "18px 18px 4px 18px" : "18px 18px 18px 4px",
-                  padding: "10px 14px",
-                  fontSize: 14,
+                  border: isMine ? "none" : `1px solid ${T.border}`,
+                  borderRadius: isMine ? "20px 20px 6px 20px" : "20px 20px 20px 6px",
+                  padding: "12px 16px",
+                  fontSize: 15,
                   lineHeight: 1.5,
                   maxWidth: "100%",
                   wordBreak: "break-word",
-                  boxShadow: isMine ? `0 2px 8px ${hexA(T.primary, 0.25)}` : "none",
+                  boxShadow: isMine ? `0 2px 8px ${hexA(T.primary, 0.28)}` : `0 1px 3px ${hexA("#000", 0.07)}`,
                 }}>
                   {renderChatBody(m.body, isMine ? null : onOpenInvoice)}
                 </div>
