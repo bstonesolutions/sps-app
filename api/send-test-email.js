@@ -12,13 +12,14 @@ const CRIMSON = "#B81D24";
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
 const escapeHtml = (s) => String(s || "")
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 import { resolveFrom } from "./_sender.js";
+import { requireUser } from "./_auth.js";
 
 export default async function handler(req, res) {
   setCors(res);
@@ -31,10 +32,18 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, endpoint: "send-test-email", configured: { resend: !!KEY }, from: FROM });
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+  const _u = await requireUser(req, res);
+  if (!_u) return;
+
   if (!KEY) return res.status(501).json({ error: "Email is not configured on the server.", missingEnv: true });
 
   const { to } = req.body || {};
   if (!to || !/.+@.+\..+/.test(to)) return res.status(400).json({ error: "A valid recipient email is required." });
+
+  // Mirror real-send From resolution (same as send-invoice.js): honor body.fromName/fromAddress
+  // when on the verified domain, else fall back to the env default.
+  const SEND_FROM = resolveFrom(req.body, FROM);
 
   const when = new Date().toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" });
   const html = `<!doctype html><html><body style="margin:0;padding:24px;background:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
@@ -53,7 +62,7 @@ export default async function handler(req, res) {
     const r = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { "Authorization": `Bearer ${KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: FROM, to: [to], subject: `${COMPANY} — test email ✅`, html, text }),
+      body: JSON.stringify({ from: SEND_FROM, to: [to], subject: `${COMPANY} — test email ✅`, html, text }),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) return res.status(502).json({ error: data?.message || "Resend rejected the email.", details: data });

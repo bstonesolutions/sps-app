@@ -4,10 +4,14 @@
 // accounts, so the app can offer a real "deposit to" account when recording a
 // manual payment. The app NEVER moves money — this only reads names/ids.
 import { getValidAccessToken, QB_API_BASE, setCors } from "./qb-store.js";
+import { requireUser } from "../_auth.js";
 
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
+
+  const _u = await requireUser(req, res);
+  if (!_u) return;
 
   let access_token, realm_id;
   try {

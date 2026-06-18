@@ -30,7 +30,7 @@ async function sendBrandedAuthEmail(payload) {
   // build resolves the same origin. The endpoint sends CORS headers for the native case.
   const r = await fetch(`${PROD_URL}/api/send-auth-email`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ ...senderEmailFields(), ...payload }),
   });
   const d = await r.json().catch(() => ({}));
@@ -64,6 +64,20 @@ const openInAppBrowser = async (url) => {
 // flag, refreshed from /status, and always hits the endpoints at the absolute
 // PROD_URL so it works on the native app (capacitor://localhost) too.
 const QB_API = `${PROD_URL}/api/quickbooks`;
+// Attach the signed-in user's Supabase token so the privileged api/ endpoints can verify a real
+// caller (gated server-side in api/_auth.js). Owner/tech is always signed in, so a token is
+// present; if not, the call still goes (the server gate is fail-open until API_AUTH_ENFORCED is
+// turned on). Merges into any extra headers. ONLY use for our own api/ endpoints — never external.
+async function authHeaders(extra = {}) {
+  try {
+    const { data } = await supabase.auth.getSession();
+    const tok = data && data.session && data.session.access_token;
+    return tok ? { ...extra, Authorization: `Bearer ${tok}` } : { ...extra };
+  } catch (_) { return { ...extra }; }
+}
+// When THIS device saves a client's own comm prefs, note the time so the sps_clients realtime
+// merge won't momentarily revert the in-flight edit before its save lands (diagnostic L1).
+let _lastLocalPrefWriteAt = 0;
 const qbIsConnected = () => { try { return localStorage.getItem("qb_connected") === "1"; } catch { return false; } };
 const qbSetConnected = (v) => { try { v ? localStorage.setItem("qb_connected", "1") : localStorage.removeItem("qb_connected"); } catch {} };
 const qbCheckStatus = async () => {
@@ -130,7 +144,7 @@ async function sendSms(to, message) {
   try {
     const r = await fetch(`${PROD_URL}/api/send-sms`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: await authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ to: dest, message: body, from: SENDER_IDENTITY.textingNumber || "" }),
     });
     const d = await r.json().catch(() => ({}));
@@ -2783,7 +2797,7 @@ function ClockInOut({ me, T }) {
     try {
       const r = await fetch("/api/gusto-timesheet", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           employeeUuid: shift.employeeUuid,
           shiftStartedAt: shift.startTime,
@@ -6200,7 +6214,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
     if (partsUsedArr.length) reportRows.push(["Parts used", partsUsedArr.map(pt => `${pt.name} ×${pt.qty}`).join(", ")]);
     try {
       const r = await fetch(`${PROD_URL}/api/send-notification`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ ...senderEmailFields(), to, subject, heading: subject, message: renderReport(email, ctx, { includeUsage: false }), rows: reportRows, photos: photoPayload, branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary } }),
       });
       const d = await r.json().catch(() => ({}));
@@ -11834,7 +11848,7 @@ function InvoiceSendStep({ invoice, client, onClose }) {
     if (doEmail && clientEmail) {
       try {
         const r = await fetch(`${PROD_URL}/api/send-invoice`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
+          method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({
             ...senderEmailFields(),
             emailSubject: fill(e.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject),
@@ -12083,7 +12097,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
       const endpoint = inv.qbId ? `${QB_API}/update-invoice` : `${QB_API}/create-invoice`;
       const res = await fetch(endpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ invoice: buildQbPayload() }),
       });
       if (res.status === 401) {
@@ -12096,7 +12110,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
       // If updating and QB says the invoice is gone, recreate it fresh
       if (data.recreate) {
         const createRes = await fetch(`${QB_API}/create-invoice`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
+          method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({ invoice: { ...buildQbPayload(), qbId: null } }),
         });
         const createData = await createRes.json();
@@ -12540,7 +12554,7 @@ function QBConnect({ onSyncData }) {
   };
 
   const handleDisconnect = async () => {
-    try { await fetch(`${QB_API}/disconnect`, { method: "POST" }); } catch (_) {}
+    try { await fetch(`${QB_API}/disconnect`, { method: "POST", headers: await authHeaders() }); } catch (_) {}
     qbSetConnected(false);
     setConnected(false);
     setStatus("idle");
@@ -12552,7 +12566,7 @@ function QBConnect({ onSyncData }) {
     setResult(null);
     try {
       // Tokens (and refresh) are handled server-side; the app sends none.
-      const res = await fetch(`${QB_API}/sync`);
+      const res = await fetch(`${QB_API}/sync`, { headers: await authHeaders() });
       if (res.status === 401) {
         qbSetConnected(false);
         setConnected(false);
@@ -13148,7 +13162,7 @@ function MarkPaidModal({ invoice, client, onSave, onClose }) {
     let alive = true;
     (async () => {
       try {
-        const r = await fetch(`${QB_API}/accounts`);
+        const r = await fetch(`${QB_API}/accounts`, { headers: await authHeaders() });
         const d = await r.json().catch(() => ({}));
         if (!alive) return;
         const list = d.depositAccounts || [];
@@ -13185,7 +13199,7 @@ function MarkPaidModal({ invoice, client, onSave, onClose }) {
     if (qb) {
       try {
         const r = await fetch(`${QB_API}/record-payment`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
+          method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({ qbId: invoice.qbId, amount: parseFloat(amount) || 0, method, reference: reference.trim(), txnDate: dateISO, depositAccountId: depositId }),
         });
         const d = await r.json().catch(() => ({}));
@@ -13322,7 +13336,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
       // 1) Branded invoice email via Resend
       const r = await fetch(`${PROD_URL}/api/send-invoice`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           ...senderEmailFields(),
           emailSubject: fillInv(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject),
@@ -13702,7 +13716,7 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
     if (!em) { setSentMsg("No email on file for this client."); return; }
     try {
       const r = await fetch(`${PROD_URL}/api/send-notification`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ ...senderEmailFields(), to: em, subject: `Estimate from ${branding.companyName || "Stone Property Solutions"}`, heading: "Your Estimate", message: buildSmsText(), branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary } }),
       });
       const d = await r.json().catch(() => ({}));
@@ -14137,7 +14151,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
       n++;
       if (qbIsConnected()) {
         try {
-          const r = await fetch(`${QB_API}/create-invoice`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ invoice: qbPayload(inv, c) }) });
+          const r = await fetch(`${QB_API}/create-invoice`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ invoice: qbPayload(inv, c) }) });
           const d = await r.json().catch(() => ({}));
           if (d && d.error) { onSave(inv); results.push({ id: c.id, name: c.name, ok: false, error: d.error, invoice: inv }); setProgress([...results]); continue; }
           inv = { ...inv, qbId: d.qbId, paymentLink: d.paymentLink, status: "Sent", qbPushed: true };
@@ -14172,7 +14186,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
       const cEmail = (c.email || "").trim();
       if (doSms && phone && commPref(c, "text")) { try { const r = await sendSms(phone, fill(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv)); if (!r.ok) fails++; } catch (_) { fails++; } }
       if (doChat && c.id && commPref(c, "app")) { try { await postToPortalSafe({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) + invCardMarker(inv, "$" + ((invoiceTotals(inv).total) || 0).toFixed(2), branding.companyName) }); } catch (_) { fails++; } }
-      if (doEmail && cEmail && commPref(c, "email")) { try { const tt = invoiceTotals(inv); await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...senderEmailFields(), emailSubject: fill(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, c, inv), emailIntro: fill(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, c, inv), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); } catch (_) { fails++; } }
+      if (doEmail && cEmail && commPref(c, "email")) { try { const tt = invoiceTotals(inv); await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ ...senderEmailFields(), emailSubject: fill(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, c, inv), emailIntro: fill(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, c, inv), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); } catch (_) { fails++; } }
     }
     setMsgBusy(false);
     if (fails > 0) { setMsgErr(`${fails} message(s) couldn't be sent. The invoices were still created.`); return; }
@@ -14309,7 +14323,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
 
     try {
       // Tokens + refresh are handled server-side; the app sends none.
-      const res = await fetch(`${QB_API}/sync`);
+      const res = await fetch(`${QB_API}/sync`, { headers: await authHeaders() });
       if (res.status === 401) { qbSetConnected(false); setQbSyncMsg("QuickBooks session expired. Reconnect under Customize."); return; }
       const data = await res.json();
       if (data.error) throw new Error(data.error);
@@ -15906,7 +15920,7 @@ function SyncStatus({ T, branding, team, currentUserId, email = {} }) {
     if (!testEmail.trim()) { setEmailMsg({ ok: false, text: "Enter an email address first." }); return; }
     setEmailBusy(true); setEmailMsg(null);
     try {
-      const r = await fetch(`${PROD_URL}/api/send-test-email`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...senderEmailFields(), to: testEmail.trim() }) });
+      const r = await fetch(`${PROD_URL}/api/send-test-email`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ ...senderEmailFields(), to: testEmail.trim() }) });
       const d = await r.json().catch(() => ({}));
       setEmailMsg(r.ok ? { ok: true, text: `Sent — check ${testEmail.trim()} (and spam).` } : { ok: false, text: d.error || "Send failed." });
     } catch (_) { setEmailMsg({ ok: false, text: "Couldn't reach the server." }); }
@@ -15916,7 +15930,7 @@ function SyncStatus({ T, branding, team, currentUserId, email = {} }) {
     if (!testPhone.trim()) { setSmsMsg({ ok: false, text: "Enter a phone number first." }); return; }
     setSmsBusy(true); setSmsMsg(null);
     try {
-      const r = await fetch(`${PROD_URL}/api/send-sms`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: testPhone.trim(), message: `${branding.companyName || "Stone Property Solutions"}: test text — your texting integration is working.`, from: SENDER_IDENTITY.textingNumber || "" }) });
+      const r = await fetch(`${PROD_URL}/api/send-sms`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ to: testPhone.trim(), message: `${branding.companyName || "Stone Property Solutions"}: test text — your texting integration is working.`, from: SENDER_IDENTITY.textingNumber || "" }) });
       const d = await r.json().catch(() => ({}));
       setSmsMsg(r.ok ? { ok: true, text: `Sent — check ${testPhone.trim()}.` } : { ok: false, text: d.error || "Send failed." });
     } catch (_) { setSmsMsg({ ok: false, text: "Couldn't reach the server." }); }
@@ -22168,6 +22182,7 @@ export default function App({ authEmail = "", onSignOut }) {
     let alive = true, ch = null;
     const pullPrefs = async () => {
       try {
+        if (Date.now() - _lastLocalPrefWriteAt < 3000) return; // don't revert this device's just-saved pref before its own save lands (L1)
         const { data } = await supabase.from("app_state").select("value").eq("key", "sps_clients").maybeSingle();
         if (!alive || !data?.value) return;
         let remote; try { remote = JSON.parse(data.value); } catch { return; }
@@ -22791,7 +22806,7 @@ export default function App({ authEmail = "", onSignOut }) {
       if (sessionStorage.getItem("qb_auto_synced")) return; // sync once per session
       sessionStorage.setItem("qb_auto_synced", "1");
       try {
-        const res = await fetch(`${QB_API}/sync`); // tokens handled server-side
+        const res = await fetch(`${QB_API}/sync`, { headers: await authHeaders() }); // tokens handled server-side
         if (!res.ok) { if (res.status === 401) qbSetConnected(false); return; }
         const data = await res.json();
         if (data.invoices) handleQBSync(data.invoices, data.customers);
@@ -22945,7 +22960,7 @@ export default function App({ authEmail = "", onSignOut }) {
     try {
       const res = await fetch(`${QB_API}/create-invoice`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           invoice: {
             ...invoice,
@@ -23136,13 +23151,15 @@ export default function App({ authEmail = "", onSignOut }) {
       if (!cfg || !cfg.email) return;                      // owner turned this channel off
       const to = notify.ownerEmail || (branding && branding.companyEmail) || "";
       if (!to) return;                                     // no destination configured
-      fetch(`${PROD_URL}/api/send-notification`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...senderEmailFields(), to, subject, heading, message, rows, branding, actionUrl, actionLabel }),
-      })
-        .then(r => { if (!r.ok) r.json().catch(() => ({})).then(d => console.warn("Owner email failed:", d?.error || r.status)); })
-        .catch(err => console.warn("Owner email error:", err?.message || err));
+      authHeaders({ "Content-Type": "application/json" }).then(h =>
+        fetch(`${PROD_URL}/api/send-notification`, {
+          method: "POST",
+          headers: h,
+          body: JSON.stringify({ ...senderEmailFields(), to, subject, heading, message, rows, branding, actionUrl, actionLabel }),
+        })
+          .then(r => { if (!r.ok) r.json().catch(() => ({})).then(d => console.warn("Owner email failed:", d?.error || r.status)); })
+          .catch(err => console.warn("Owner email error:", err?.message || err))
+      );
     } catch (e) { console.warn("notifyOwnerEmail error:", e?.message || e); }
   };
 
@@ -23287,13 +23304,15 @@ export default function App({ authEmail = "", onSignOut }) {
     const target = (invoices || []).find(iv => iv.id === id);
     // If this invoice was pushed to QuickBooks, delete it there too
     if (target && target.qbId && qbIsConnected()) {
-      fetch(`${QB_API}/delete-invoice`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ qb_id: target.qbId }), // tokens handled server-side
-      }).then(r => r.json()).then(d => {
-        if (d.error) console.error("QB delete failed:", d.error);
-      }).catch(e => console.error("QB delete error:", e.message));
+      authHeaders({ "Content-Type": "application/json" }).then(h =>
+        fetch(`${QB_API}/delete-invoice`, {
+          method: "POST",
+          headers: h,
+          body: JSON.stringify({ qb_id: target.qbId }), // tokens handled server-side
+        }).then(r => r.json()).then(d => {
+          if (d.error) console.error("QB delete failed:", d.error);
+        }).catch(e => console.error("QB delete error:", e.message))
+      );
     }
     setInvoices(list => (list || []).filter(iv => iv.id !== id));
   };
@@ -23415,7 +23434,7 @@ export default function App({ authEmail = "", onSignOut }) {
           message: (body ? `"${body}"\n\n` : "") + `Open the app to reply: ${PROD_URL}`,
           rows: [["Client", clientUser.name]],
         })}
-        onSavePrefs={(notifyPrefs) => setClients(cs => (cs || []).map(c => String(c.id) === String(clientUser.id) ? { ...c, notifyPrefs } : c))}
+        onSavePrefs={(notifyPrefs) => { _lastLocalPrefWriteAt = Date.now(); setClients(cs => (cs || []).map(c => String(c.id) === String(clientUser.id) ? { ...c, notifyPrefs } : c)); }}
       />
     );
   }

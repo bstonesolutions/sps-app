@@ -10,10 +10,12 @@
 // CORS is permissive so the native app (capacitor://localhost) can call it
 // cross-origin via the absolute PROD_URL; the web build calls it same-origin.
 
+import { requireUser } from "./_auth.js";
+
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
 // Best-effort E.164 (defaults to US +1 for 10-digit numbers).
@@ -51,6 +53,11 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, endpoint: "send-sms", configured: { quoKey: !!KEY, quoNumber: !!FROM }, from: FROM ? toE164(FROM) : null, numbers });
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+  // Gate the privileged send path (the GET "?check"/health branch above stays open).
+  const _u = await requireUser(req, res);
+  if (!_u) return;
+
   if (!KEY) return res.status(501).json({ error: "Texting is not configured on the server.", missingEnv: true });
 
   const { to, message, from } = req.body || {};

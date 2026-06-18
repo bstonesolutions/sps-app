@@ -3,6 +3,7 @@
 // Requires the invoice's current SyncToken, which we fetch first.
 import { makeItemResolver, lineTaxCodeRef } from "./qb-helpers.js";
 import { getValidAccessToken, QB_API_BASE, setCors } from "./qb-store.js";
+import { requireUser } from "../_auth.js";
 
 export default async function handler(req, res) {
   setCors(res);
@@ -10,6 +11,9 @@ export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
+
+  const _u = await requireUser(req, res);
+  if (!_u) return;
 
   const { invoice } = req.body;
   if (!invoice || !invoice.qbId) {

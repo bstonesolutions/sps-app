@@ -4,6 +4,7 @@
 // method, and a reference (e.g. check #). The app never moves money — this only
 // writes the payment record so QuickBooks reflects how + where it was paid.
 import { getValidAccessToken, QB_API_BASE, setCors } from "./qb-store.js";
+import { requireUser } from "../_auth.js";
 
 export default async function handler(req, res) {
   setCors(res);
@@ -14,6 +15,9 @@ export default async function handler(req, res) {
   if (!qbId) return res.status(400).json({ error: "Missing qbId" });
   const amt = Number(amount) || 0;
   if (amt <= 0) return res.status(400).json({ error: "Amount must be greater than zero" });
+
+  const _u = await requireUser(req, res);
+  if (!_u) return;
 
   let access_token, realm_id;
   try {

@@ -1,9 +1,16 @@
 // api/quickbooks/sync.js
 import { getValidAccessToken, QB_API_BASE, setCors } from "./qb-store.js";
+import { requireUser } from "../_auth.js";
 
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
+
+  // Caller-auth gate: this endpoint returns ALL invoices + customers (sensitive).
+  // OPTIONS preflight is handled above and stays open. There is no GET "?check"/health
+  // branch here, so gate immediately before any privileged QuickBooks work.
+  const _u = await requireUser(req, res);
+  if (!_u) return;
 
   // Tokens are read server-side from the store (never passed by the client).
   let access_token, realm_id;
@@ -121,8 +128,11 @@ export default async function handler(req, res) {
         partial:        (parseFloat(inv.Balance) > 0 && parseFloat(inv.Balance) < parseFloat(inv.TotalAmt)),
         // Flag so the app's auto-apply logic won't add a second late fee.
         ...(hasLateFee ? { lateFeeAppliedAt: todayISO } : {}),
+        // LOW#3: only treat an unpaid invoice as Overdue when DueDate is present AND a
+        // valid date. A missing/invalid DueDate yields an Invalid Date whose comparison is
+        // always false, which would silently mislabel it 'Sent' — so fall back instead.
         status:       inv.Balance <= 0 ? 'Paid'
-                      : new Date(inv.DueDate) < new Date() ? 'Overdue'
+                      : (inv.DueDate && !isNaN(new Date(inv.DueDate).getTime()) && new Date(inv.DueDate) < new Date()) ? 'Overdue'
                       : 'Sent',
         lineItems,
         // Keep the legacy read-only shape too, for any display that used it.

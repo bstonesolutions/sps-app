@@ -27,6 +27,21 @@ Serverless functions under `api/` read these. None are committed; missing ones m
 
 Optional: `SUPABASE_URL`, `RESEND_FROM`, `PUBLIC_APP_URL`, `QB_CLIENT_ID`, `QB_CLIENT_SECRET`.
 
+### `API_AUTH_ENFORCED` — turning on endpoint auth (two-step, safe rollout)
+
+The privileged `api/` endpoints (send-sms/-invoice/-notification/-auth-email/-magic-link, QuickBooks
+writers + sync/accounts) verify the caller's Supabase token via `api/_auth.js`. **Enforcement is OFF
+by default** so a deploy can't break sending: an unauthenticated call is *allowed and logged*
+(`[auth] unauthenticated call (enforcement off)`) unless `API_AUTH_ENFORCED === "true"`.
+
+To turn it on safely:
+1. Deploy (the app already attaches `Authorization: Bearer <session token>` on every api call).
+2. Exercise each flow once (send a test text/email, sync QB, record a payment) and watch the Vercel
+   function logs. Authenticated calls log nothing; any path still missing a token logs the warning
+   above with its URL — tell Claude that path and it'll attach the token there.
+3. Once the warnings stop, set `API_AUTH_ENFORCED=true` in Vercel. Now unauthenticated calls get a
+   401. To roll back instantly, unset it.
+
 ## Supabase tables to create (run once in the SQL editor)
 
 These are used via the existing `supabase` client (we never modify `supabaseClient.js`):

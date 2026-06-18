@@ -2,10 +2,15 @@
 // Deletes an invoice in QuickBooks. QB requires the invoice Id AND its current
 // SyncToken, so we first read the invoice to get the token, then delete.
 import { getValidAccessToken, QB_API_BASE, setCors } from "./qb-store.js";
+import { requireUser } from "../_auth.js";
 
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
+
+  const _u = await requireUser(req, res);
+  if (!_u) return;
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }

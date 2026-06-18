@@ -20,6 +20,8 @@
 //                          (https://api.gusto-demo.com). Set this to
 //                          https://api.gusto.com once production creds are live.
 
+import { requireUser } from "./_auth.js";
+
 const GUSTO_API_VERSION = "2024-04-01";
 // Default to the sandbox host until production credentials are confirmed.
 const GUSTO_BASE = (process.env.GUSTO_API_BASE || "https://api.gusto-demo.com").replace(/\/+$/, "");
@@ -27,7 +29,7 @@ const GUSTO_BASE = (process.env.GUSTO_API_BASE || "https://api.gusto-demo.com").
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
 export default async function handler(req, res) {
@@ -50,6 +52,9 @@ export default async function handler(req, res) {
   }
 
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
+
+  const _u = await requireUser(req, res);
+  if (!_u) return;
 
   const { employeeUuid, shiftStartedAt, shiftEndedAt, hoursWorked, jobUuid } = req.body || {};
 

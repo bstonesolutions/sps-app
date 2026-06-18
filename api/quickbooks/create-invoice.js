@@ -4,6 +4,7 @@
 // fetching the payment link later fails. We never report failure after creation.
 import { makeItemResolver, lineTaxCodeRef } from "./qb-helpers.js";
 import { getValidAccessToken, QB_API_BASE, setCors } from "./qb-store.js";
+import { requireUser } from "../_auth.js";
 
 export default async function handler(req, res) {
   setCors(res);
@@ -11,6 +12,10 @@ export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
+
+  // Require an authenticated caller before any privileged QuickBooks work.
+  const _u = await requireUser(req, res);
+  if (!_u) return;
 
   const { invoice } = req.body;
   if (!invoice) {
@@ -67,8 +72,26 @@ export default async function handler(req, res) {
             PrimaryPhone: invoice.clientPhone ? { FreeFormNumber: invoice.clientPhone } : undefined,
           }),
         });
-        const custData = await createCustRes.json();
-        qbCustomerId = custData?.Customer?.Id;
+        if (!createCustRes.ok) {
+          // Capture the real QuickBooks fault instead of returning a generic 400.
+          const custErr = await createCustRes.text();
+          console.error("QB create customer error:", custErr);
+          // A duplicate-name fault means the customer already exists — re-query and reuse it.
+          if (/duplicate/i.test(custErr)) {
+            const reqRes = await fetch(`${base}/query?query=${query}&minorversion=65`, { headers });
+            const reqData = await reqRes.json().catch(() => null);
+            qbCustomerId = reqData?.QueryResponse?.Customer?.[0]?.Id;
+          }
+          if (!qbCustomerId) {
+            return res.status(400).json({
+              error: "QuickBooks could not create the customer: " + readableQbError(custErr),
+              details: custErr,
+            });
+          }
+        } else {
+          const custData = await createCustRes.json();
+          qbCustomerId = custData?.Customer?.Id;
+        }
       }
     }
 

@@ -90,10 +90,18 @@ ${FOOTER}`;
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
 import { resolveFrom, VERIFIED_DOMAIN } from "./_sender.js";
+import { requireUser } from "./_auth.js";
+
+// LOW#6 — open-redirect allowlist. Only permit redirecting to the app's own
+// origin or the native deep-link scheme; anything else falls back to APP_URL.
+const ALLOWED_REDIRECTS = [APP_URL, "spsway://login"];
+function safeRedirect(value) {
+  return ALLOWED_REDIRECTS.includes(value) ? value : APP_URL;
+}
 
 export default async function handler(req, res) {
   setCors(res);
@@ -113,6 +121,11 @@ export default async function handler(req, res) {
     });
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+  // Caller-auth gate — POST send path only (OPTIONS preflight and the GET
+  // "?check" health branch above stay open / unauthenticated).
+  const _u = await requireUser(req, res);
+  if (!_u) return;
 
   const { email, first, redirectTo } = req.body || {};
   if (!email || !/.+@.+\..+/.test(email)) return res.status(400).json({ error: "A valid email is required" });
@@ -140,7 +153,7 @@ export default async function handler(req, res) {
     const genRes = await fetch(`${SUPABASE_URL}/auth/v1/admin/generate_link`, {
       method: "POST",
       headers: adminHeaders,
-      body: JSON.stringify({ type: "magiclink", email, redirect_to: redirectTo || APP_URL }),
+      body: JSON.stringify({ type: "magiclink", email, redirect_to: safeRedirect(redirectTo) }),
     });
     const genData = await genRes.json().catch(() => ({}));
 

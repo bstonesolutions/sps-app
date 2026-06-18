@@ -46,10 +46,11 @@ function buildHtml(body, link) {
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
 import { resolveFrom, VERIFIED_DOMAIN } from "./_sender.js";
+import { requireUser } from "./_auth.js";
 
 export default async function handler(req, res) {
   setCors(res);
@@ -71,6 +72,11 @@ export default async function handler(req, res) {
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
+  // Gate the privileged POST path (this endpoint creates Supabase auth users + mints sign-in links).
+  // OPTIONS preflight and the GET "?check"/health branch above stay open and unauthenticated.
+  const _u = await requireUser(req, res);
+  if (!_u) return;
+
   const { email, name, kind = "client", subject, body, redirectTo, company } = req.body || {};
   if (!email || !/.+@.+\..+/.test(email)) return res.status(400).json({ error: "A valid email is required" });
 
@@ -78,6 +84,12 @@ export default async function handler(req, res) {
   const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
   const RESEND_KEY   = process.env.RESEND_API_KEY;
   const FROM         = resolveFrom(req.body, process.env.RESEND_FROM || "Stone Property Solutions <noreply@stonepropertysolutions.com>");
+  const APP_URL      = process.env.PUBLIC_APP_URL || "https://sps-app-azure.vercel.app";
+
+  // Open-redirect guard (LOW#6): only allow redirect_to values we trust. Anything else
+  // (including a missing/unknown value) falls back to the prod app URL.
+  const ALLOWED_REDIRECTS = [APP_URL, "spsway://login"];
+  const safeRedirectTo = ALLOWED_REDIRECTS.includes(redirectTo) ? redirectTo : APP_URL;
 
   // Not configured yet — signal the caller so it can fall back to Supabase email.
   if (!SERVICE_KEY || !RESEND_KEY) {
@@ -104,7 +116,7 @@ export default async function handler(req, res) {
     const genRes = await fetch(`${SUPABASE_URL}/auth/v1/admin/generate_link`, {
       method: "POST",
       headers: adminHeaders,
-      body: JSON.stringify({ type: "magiclink", email, redirect_to: redirectTo || undefined }),
+      body: JSON.stringify({ type: "magiclink", email, redirect_to: safeRedirectTo }),
     });
     const genData = await genRes.json().catch(() => ({}));
     if (!genRes.ok) {

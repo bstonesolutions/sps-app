@@ -15,7 +15,7 @@ const escapeHtml = (s) => String(s == null ? "" : s)
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
 function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = "", actionUrl = "", actionLabel = "" }) {
@@ -54,6 +54,7 @@ function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = ""
 }
 
 import { resolveFrom } from "./_sender.js";
+import { requireUser } from "./_auth.js";
 
 export default async function handler(req, res) {
   setCors(res);
@@ -62,6 +63,9 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, endpoint: "send-notification", configured: { resend: !!process.env.RESEND_API_KEY } });
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+  const _u = await requireUser(req, res);
+  if (!_u) return;
 
   const { to, subject, heading, message, rows = [], branding = {}, photos = [], actionUrl = "", actionLabel = "" } = req.body || {};
   if (!to || !/.+@.+\..+/.test(to)) return res.status(400).json({ error: "A valid recipient email is required" });

@@ -103,13 +103,14 @@ function buildInvoiceText({ clientName, branding, invoice, payLink, intro }) {
 }
 
 import { resolveFrom } from "./_sender.js";
+import { requireUser } from "./_auth.js";
 
 // CORS so the native app (capacitor://localhost) can POST cross-origin to the absolute
 // PROD_URL. Without this the native invoice send fails as "couldn't reach server".
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
 export default async function handler(req, res) {
@@ -119,6 +120,9 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, endpoint: "send-invoice", configured: { resend: !!process.env.RESEND_API_KEY } });
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+  const _u = await requireUser(req, res);
+  if (!_u) return;
 
   const { to, clientName, branding = {}, invoice = {}, payLink, emailSubject, emailIntro } = req.body || {};
   if (!to || !/.+@.+\..+/.test(to)) return res.status(400).json({ error: "A valid client email is required" });
