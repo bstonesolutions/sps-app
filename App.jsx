@@ -6142,7 +6142,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
     if (reportPostedRef.current || !client?.id) return;
     reportPostedRef.current = true;
     supabase.from("sps_messages")
-      .insert({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: reportText })
+      .insert({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: reportText + svcCardMarker(stop?.type || "Service visit", todayStr, branding.companyName) })
       .then(() => {}, () => {});
   };
   // Reports go out through the business identity — Resend email + Quo text — never the
@@ -16889,12 +16889,18 @@ function invCardMarker(invoice, amountStr, company) {
   const s = (v) => String(v == null ? "" : v).replace(/[|\]]/g, " ").trim();
   return `[[invcard:${s(invoice.id)}|${s(invoice.number)}|${s(amountStr)}|${s(invoice.dueDate)}|${s(company)}]]`;
 }
+// Build 15, Item 5 — same tappable-card pattern for a completed-service notification; opens the
+// report in My Property. Carries service type | date | company.
+function svcCardMarker(serviceType, dateStr, company) {
+  const s = (v) => String(v == null ? "" : v).replace(/[|\]]/g, " ").trim();
+  return `[[svccard:${s(serviceType)}|${s(dateStr)}|${s(company)}]]`;
+}
 
 // Render a chat message body. Invoice notifications carry a hidden marker:
 //   [[invcard:id|number|amount|dueDate|company]]  → a tappable preview CARD (Build 15, Item 5)
 //   [[inv:<id>]]                                   → legacy: the trailing "here" becomes a link
 // Either way the marker is stripped from the visible text; onOpenInvoice makes it tappable.
-function renderChatBody(body, onOpenInvoice, T) {
+function renderChatBody(body, onOpenInvoice, T, onOpenService) {
   const raw = String(body || "");
   const t = T || { primary: "#B81D24", text: "#111827", textMuted: "#6b7280", border: "#e5e7eb", surface: "#ffffff" };
   const cm = raw.match(/\[\[invcard:([^\]]+)\]\]/);
@@ -16917,6 +16923,26 @@ function renderChatBody(body, onOpenInvoice, T) {
       </>
     );
   }
+  const sc = raw.match(/\[\[svccard:([^\]]+)\]\]/);
+  if (sc) {
+    const [svcType, date, company] = sc[1].split("|");
+    const text = raw.replace(/\[\[svccard:[^\]]+\]\]/g, "").trim();
+    const tap = onOpenService ? (e) => { e.stopPropagation(); onOpenService(); } : undefined;
+    return (
+      <>
+        {text && <div style={{ marginBottom: 9 }}>{text}</div>}
+        <div onClick={tap} style={{ cursor: tap ? "pointer" : "default", width: 244, maxWidth: "100%", border: `1px solid ${t.border}`, borderRadius: 16, overflow: "hidden", background: t.surface, boxShadow: "0 2px 10px rgba(0,0,0,0.10)" }}>
+          <div style={{ background: "#16a34a", color: "#fff", padding: "9px 13px", fontSize: 12, fontWeight: 800, letterSpacing: "0.03em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{company || "Service complete"}</div>
+          <div style={{ padding: "13px 14px" }}>
+            <div style={{ fontSize: 10.5, color: t.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>Service complete</div>
+            <div style={{ fontSize: 18, fontWeight: 900, color: t.text, marginTop: 3, letterSpacing: "-0.01em" }}>{svcType || "Service visit"}</div>
+            {date && <div style={{ fontSize: 12.5, color: t.textMuted, marginTop: 2 }}>{date}</div>}
+            {tap && <div style={{ marginTop: 11, background: hexA("#16a34a", 0.1), color: "#16a34a", borderRadius: 10, padding: "9px", textAlign: "center", fontWeight: 800, fontSize: 13.5 }}>View report &rarr;</div>}
+          </div>
+        </div>
+      </>
+    );
+  }
   const mk = raw.match(/\[\[inv:([^\]]+)\]\]/);
   const invId = mk ? mk[1] : null;
   const text = raw.replace(/\[\[inv:[^\]]+\]\]/g, "").trim();
@@ -16930,7 +16956,7 @@ function renderChatBody(body, onOpenInvoice, T) {
   return <>{text} {link("View invoice →")}</>;
 }
 
-function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onSent, onOpenInvoice }) {
+function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onSent, onOpenInvoice, onOpenService }) {
   const { messages, loading, send, markRead } = useMessages(clientId);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
@@ -16996,7 +17022,7 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
                   wordBreak: "break-word",
                   boxShadow: isMine ? `0 2px 8px ${hexA(T.primary, 0.28)}` : `0 1px 3px ${hexA("#000", 0.07)}`,
                 }}>
-                  {renderChatBody(m.body, isMine ? null : onOpenInvoice, T)}
+                  {renderChatBody(m.body, isMine ? null : onOpenInvoice, T, isMine ? null : onOpenService)}
                 </div>
               </div>
             </div>
@@ -17048,7 +17074,7 @@ function StaffChat({ client, currentUser, T, onBack }) {
 }
 
 // ── Client messages tab ──
-function CPMessages({ client, branding, onSubmit, onClientMessage, onOpenInvoice, T, vp = {} }) {
+function CPMessages({ client, branding, onSubmit, onClientMessage, onOpenInvoice, onOpenService, T, vp = {} }) {
   const [view, setView] = useState("messages"); // "messages" | "request"
 
   if (view === "request") {
@@ -17076,7 +17102,7 @@ function CPMessages({ client, branding, onSubmit, onClientMessage, onOpenInvoice
           Request Service
         </button>
       </div>
-      <ChatThread clientId={client.id} sender="client" senderName={client.name} T={T} onSent={onClientMessage} onOpenInvoice={onOpenInvoice} />
+      <ChatThread clientId={client.id} sender="client" senderName={client.name} T={T} onSent={onClientMessage} onOpenInvoice={onOpenInvoice} onOpenService={onOpenService} />
     </div>
   );
 
@@ -22089,7 +22115,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
       {!settingsOpen && page === "cp_property" && <CPProperty client={client} schedule={schedule} branding={branding} team={team} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
       {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} schedule={schedule} branding={branding} team={team} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
       {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} invoicing={invoicing} T={T} vp={vp} initialSel={cpInvoiceSel} />}
-      {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} onSubmit={onServiceRequest} onClientMessage={isStaffPreview ? undefined : onClientMessage} onOpenInvoice={openInvoice} T={T} vp={vp} />}
+      {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} onSubmit={onServiceRequest} onClientMessage={isStaffPreview ? undefined : onClientMessage} onOpenInvoice={openInvoice} onOpenService={() => setPage("cp_property")} T={T} vp={vp} />}
       {!settingsOpen && page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
     </SectionErrorBoundary>
   );
