@@ -33,6 +33,25 @@ func sps_moneyShort(_ v: Double) -> String {
 
 func sps_rate(_ v: Double) -> String { sps_money(v) + "/hr" }
 
+// Map the app's saved font key to a SwiftUI font design, so the widgets always match whatever
+// font the user picked in the app's font picker. "rounded" → .rounded; the sharp families
+// (system / grotesk / anything else, incl. nil) → .default.
+func sps_design(_ font: String?) -> Font.Design {
+    (font ?? "rounded") == "rounded" ? .rounded : .default
+}
+
+// Carry the chosen design down the view tree so the shared stat components (CenterStat, BigStat,
+// StatColumn) match without threading a parameter through every call site.
+private struct SPSFontDesignKey: EnvironmentKey {
+    static let defaultValue: Font.Design = .rounded
+}
+extension EnvironmentValues {
+    var spsFontDesign: Font.Design {
+        get { self[SPSFontDesignKey.self] }
+        set { self[SPSFontDesignKey.self] = newValue }
+    }
+}
+
 extension View {
     // iOS 17+ requires containerBackground for widgets; fall back to a plain background below.
     @ViewBuilder

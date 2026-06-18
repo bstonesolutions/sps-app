@@ -39,13 +39,14 @@ struct Header: View {
 }
 
 struct StatColumn: View {
+    @Environment(\.spsFontDesign) var design
     let label: String
     let value: String
     var accent: Bool = false
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(value)
-                .font(.system(size: 24, weight: .heavy, design: .rounded))
+                .font(.system(size: 24, weight: .heavy, design: design))
                 .foregroundColor(accent ? Brand.crimson : Brand.ink)
                 .minimumScaleFactor(0.5)
                 .lineLimit(1)
@@ -66,6 +67,7 @@ struct VSeparator: View {
 // read at a glance with no dead space (value on top, label under, crimson accent for the
 // figure that matters). Pair with Spacers to distribute and fill the tile vertically.
 struct BigStat: View {
+    @Environment(\.spsFontDesign) var design
     let label: String
     let value: String
     var accent: Bool = false
@@ -73,7 +75,7 @@ struct BigStat: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(value)
-                .font(.system(size: size, weight: .heavy, design: .rounded))
+                .font(.system(size: size, weight: .heavy, design: design))
                 .foregroundColor(accent ? Brand.crimson : Brand.ink)
                 .minimumScaleFactor(0.45)
                 .lineLimit(1)
@@ -91,6 +93,7 @@ struct BigStat: View {
 // reads as a tidy grid (Business Overview). Equal-width columns + HStack spacing keep big
 // numbers from crowding each other.
 struct CenterStat: View {
+    @Environment(\.spsFontDesign) var design
     let label: String
     let value: String
     var accent: Bool = false
@@ -98,7 +101,7 @@ struct CenterStat: View {
     var body: some View {
         VStack(spacing: 4) {
             Text(value)
-                .font(.system(size: size, weight: .heavy, design: .rounded))
+                .font(.system(size: size, weight: .heavy, design: design))
                 .foregroundColor(accent ? Brand.crimson : Brand.ink)
                 .minimumScaleFactor(0.4)
                 .lineLimit(1)

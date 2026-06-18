@@ -22,6 +22,7 @@ struct OwnerProfitView: View {
     let entry: SPSEntry
 
     private var p: WidgetPayload? { entry.payload }
+    private var fontDesign: Font.Design { sps_design(p?.appFont) }
     private var hasData: Bool {
         p?.profitWeek != nil || p?.profitMonth != nil || p?.avgEffectiveRate != nil
     }
@@ -37,6 +38,7 @@ struct OwnerProfitView: View {
             }
         }
         .sps_widgetBackground(Brand.surface)
+        .environment(\.spsFontDesign, fontDesign)
         .widgetURL(URL(string: "spsway://profit"))
     }
 
@@ -46,7 +48,7 @@ struct OwnerProfitView: View {
             Spacer(minLength: 8)
             VStack(spacing: 4) {
                 Text(p?.profitWeek.map(sps_money) ?? "—")
-                    .font(.system(size: 40, weight: .heavy, design: .rounded))
+                    .font(.system(size: 40, weight: .heavy, design: fontDesign))
                     .foregroundColor(Brand.ink)
                     .minimumScaleFactor(0.4)
                     .lineLimit(1)
@@ -70,17 +72,17 @@ struct OwnerProfitView: View {
     private var medium: some View {
         VStack(spacing: 0) {
             Header(title: "PROFIT")
-            Spacer(minLength: 14)
-            HStack(spacing: 16) {
-                CenterStat(label: "This Week",  value: p?.profitWeek.map(sps_money) ?? "—", accent: true, size: 29)
-                CenterStat(label: "This Month", value: p?.profitMonth.map(sps_money) ?? "—", size: 29)
+            HStack(spacing: 14) {
+                CenterStat(label: "This Week",  value: p?.profitWeek.map(sps_money) ?? "—", accent: true, size: 32)
+                CenterStat(label: "This Month", value: p?.profitMonth.map(sps_money) ?? "—", size: 32)
             }
-            Spacer(minLength: 16)
-            HStack(spacing: 16) {
-                CenterStat(label: "Avg Rate",  value: p?.avgEffectiveRate.map(sps_rate) ?? "—", size: 29)
-                CenterStat(label: "Jobs (mo)", value: p?.jobsMonth.map { "\($0)" } ?? "—", size: 29)
+            .frame(maxHeight: .infinity)
+            Rectangle().fill(Brand.hair).frame(height: 1)
+            HStack(spacing: 14) {
+                CenterStat(label: "Avg Rate",  value: p?.avgEffectiveRate.map(sps_rate) ?? "—", size: 32)
+                CenterStat(label: "Jobs (mo)", value: p?.jobsMonth.map { "\($0)" } ?? "—", size: 32)
             }
-            Spacer(minLength: 0)
+            .frame(maxHeight: .infinity)
         }
         .padding(16)
     }

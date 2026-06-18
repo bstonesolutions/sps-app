@@ -22,6 +22,7 @@ struct OwnerInvoiceView: View {
     let entry: SPSEntry
 
     private var p: WidgetPayload? { entry.payload }
+    private var fontDesign: Font.Design { sps_design(p?.appFont) }
     private var hasData: Bool { p?.outstandingTotal != nil || p?.unpaidCount != nil }
 
     var body: some View {
@@ -35,6 +36,7 @@ struct OwnerInvoiceView: View {
             }
         }
         .sps_widgetBackground(Brand.surface)
+        .environment(\.spsFontDesign, fontDesign)
         .widgetURL(URL(string: "spsway://invoices"))
     }
 
@@ -46,7 +48,7 @@ struct OwnerInvoiceView: View {
             Spacer(minLength: 8)
             VStack(spacing: 4) {
                 Text(p?.outstandingTotal.map(sps_money) ?? "—")
-                    .font(.system(size: 42, weight: .heavy, design: .rounded))
+                    .font(.system(size: 42, weight: .heavy, design: fontDesign))
                     .foregroundColor(Brand.crimson)
                     .minimumScaleFactor(0.4)
                     .lineLimit(1)
@@ -72,17 +74,17 @@ struct OwnerInvoiceView: View {
     private var medium: some View {
         VStack(spacing: 0) {
             Header(title: "INVOICES")
-            Spacer(minLength: 14)
-            HStack(spacing: 16) {
-                CenterStat(label: "Outstanding", value: p?.outstandingTotal.map(sps_money) ?? "—", accent: true, size: 29)
-                CenterStat(label: "Unpaid",      value: p?.unpaidCount.map { "\($0)" } ?? "—", size: 29)
+            HStack(spacing: 14) {
+                CenterStat(label: "Outstanding", value: p?.outstandingTotal.map(sps_money) ?? "—", accent: true, size: 32)
+                CenterStat(label: "Unpaid",      value: p?.unpaidCount.map { "\($0)" } ?? "—", size: 32)
             }
-            Spacer(minLength: 16)
-            HStack(spacing: 16) {
-                CenterStat(label: "Overdue",        value: p?.overdueCount.map { "\($0)" } ?? "—", accent: overdue > 0, size: 29)
-                CenterStat(label: "Collected (mo)", value: p?.collectedMonth.map(sps_money) ?? "—", size: 29)
+            .frame(maxHeight: .infinity)
+            Rectangle().fill(Brand.hair).frame(height: 1)
+            HStack(spacing: 14) {
+                CenterStat(label: "Overdue",        value: p?.overdueCount.map { "\($0)" } ?? "—", accent: overdue > 0, size: 32)
+                CenterStat(label: "Collected (mo)", value: p?.collectedMonth.map(sps_money) ?? "—", size: 32)
             }
-            Spacer(minLength: 0)
+            .frame(maxHeight: .infinity)
         }
         .padding(16)
     }

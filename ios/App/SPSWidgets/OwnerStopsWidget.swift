@@ -22,6 +22,7 @@ struct OwnerStopsWidget: Widget {
 // MARK: - Progress ring (the hero visual)
 
 struct ProgressRing: View {
+    @Environment(\.spsFontDesign) var design
     let fraction: Double   // 0…1
     let center: String     // "2/10"
     let sub: String        // "stops"
@@ -43,7 +44,7 @@ struct ProgressRing: View {
                 .rotationEffect(.degrees(-90))
             VStack(spacing: 1) {
                 Text(center)
-                    .font(.system(size: size * 0.30, weight: .heavy, design: .rounded))
+                    .font(.system(size: size * 0.30, weight: .heavy, design: design))
                     .foregroundColor(Brand.ink)
                     .minimumScaleFactor(0.5)
                     .lineLimit(1)
@@ -59,6 +60,7 @@ struct ProgressRing: View {
 // MARK: - One tech's progress row (name + done/total + mini bar)
 
 struct TechProgressRow: View {
+    @Environment(\.spsFontDesign) var design
     let name: String
     let done: Int
     let total: Int
@@ -80,7 +82,7 @@ struct TechProgressRow: View {
                         .foregroundColor(Brand.crimson)
                 }
                 Text("\(done)/\(total)")
-                    .font(.system(size: 14, weight: .heavy, design: .rounded))
+                    .font(.system(size: 14, weight: .heavy, design: design))
                     .foregroundColor(complete ? Brand.crimson : Brand.slate)
             }
             GeometryReader { geo in
@@ -104,6 +106,7 @@ struct OwnerStopsView: View {
     let entry: SPSEntry
 
     private var p: WidgetPayload? { entry.payload }
+    private var fontDesign: Font.Design { sps_design(p?.appFont) }
     private var total: Int { p?.stopsTotal ?? 0 }
     private var done: Int { p?.stopsDone ?? 0 }
     private var techs: [TechProgress] { p?.techs ?? [] }
@@ -136,6 +139,7 @@ struct OwnerStopsView: View {
             }
         }
         .sps_widgetBackground(Brand.surface)
+        .environment(\.spsFontDesign, fontDesign)
         .widgetURL(URL(string: "spsway://schedule"))
     }
 
@@ -203,7 +207,7 @@ struct OwnerStopsView: View {
                              size: 104, lineWidth: 12)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("\(done) of \(total)")
-                        .font(.system(size: 30, weight: .heavy, design: .rounded))
+                        .font(.system(size: 30, weight: .heavy, design: fontDesign))
                         .foregroundColor(Brand.ink)
                         .minimumScaleFactor(0.5)
                         .lineLimit(1)

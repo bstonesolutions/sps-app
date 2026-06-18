@@ -30,12 +30,13 @@ struct ClientBalanceView: View {
     let entry: SPSEntry
 
     private var p: WidgetPayload? { entry.payload }
+    private var fontDesign: Font.Design { sps_design(p?.appFont) }
     private var due: Double? { p?.balanceDue }
     private var dueDate: Date? { SPSDate.parse(p?.balanceDueDate) }
     private var isPaidUp: Bool { (due ?? -1) <= 0 && due != nil }
 
     var body: some View {
-        content.widgetURL(URL(string: "spsway://invoices"))
+        content.environment(\.spsFontDesign, fontDesign).widgetURL(URL(string: "spsway://invoices"))
     }
 
     @ViewBuilder
@@ -59,7 +60,7 @@ struct ClientBalanceView: View {
             Spacer(minLength: 8)
             if due == nil {
                 Text("—")
-                    .font(.system(size: 42, weight: .heavy, design: .rounded))
+                    .font(.system(size: 42, weight: .heavy, design: fontDesign))
                     .foregroundColor(Brand.ink)
                 Spacer(minLength: 8)
                 Text("Open the app to sync")
@@ -67,7 +68,7 @@ struct ClientBalanceView: View {
                     .foregroundColor(Brand.muted)
             } else if isPaidUp {
                 Text("Paid up")
-                    .font(.system(size: 36, weight: .heavy, design: .rounded))
+                    .font(.system(size: 36, weight: .heavy, design: fontDesign))
                     .foregroundColor(Brand.ink)
                     .minimumScaleFactor(0.5)
                     .lineLimit(1)
@@ -77,7 +78,7 @@ struct ClientBalanceView: View {
                     .foregroundColor(Brand.muted)
             } else {
                 Text(sps_money(due!))
-                    .font(.system(size: 42, weight: .heavy, design: .rounded))
+                    .font(.system(size: 42, weight: .heavy, design: fontDesign))
                     .foregroundColor(Brand.crimson)
                     .minimumScaleFactor(0.4)
                     .lineLimit(1)
@@ -116,7 +117,7 @@ struct ClientBalanceView: View {
     private var accessoryRectangular: some View {
         VStack(alignment: .leading, spacing: 1) {
             Text("Balance Due").font(.system(size: 16, weight: .semibold))
-            Text(due.map(sps_money) ?? "—").font(.system(size: 23, weight: .heavy, design: .rounded))
+            Text(due.map(sps_money) ?? "—").font(.system(size: 23, weight: .heavy, design: fontDesign))
             if let d = dueDate {
                 Text("Due \(SPSDate.dayLabel(d))").font(.system(size: 15)).foregroundColor(.secondary)
             }

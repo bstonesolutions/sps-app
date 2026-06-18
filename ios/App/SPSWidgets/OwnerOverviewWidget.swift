@@ -24,6 +24,7 @@ struct OwnerOverviewView: View {
     let entry: SPSEntry
 
     private var p: WidgetPayload? { entry.payload }
+    private var fontDesign: Font.Design { sps_design(p?.appFont) }
     private var stopsTotal: Int { p?.stopsTotal ?? 0 }
     private var stopsDone: Int { p?.stopsDone ?? 0 }
     private var stopFrac: Double { stopsTotal > 0 ? Double(stopsDone) / Double(stopsTotal) : 0 }
@@ -48,6 +49,7 @@ struct OwnerOverviewView: View {
             }
         }
         .sps_widgetBackground(Brand.surface)
+        .environment(\.spsFontDesign, fontDesign)
         .widgetURL(URL(string: "spsway://profit"))
     }
 
@@ -64,7 +66,7 @@ struct OwnerOverviewView: View {
             Spacer(minLength: 6)
             VStack(spacing: 1) {
                 Text(money(p?.profitWeek))
-                    .font(.system(size: 19, weight: .heavy, design: .rounded))
+                    .font(.system(size: 19, weight: .heavy, design: fontDesign))
                     .foregroundColor(Brand.ink)
                     .minimumScaleFactor(0.5).lineLimit(1)
                 Text("profit / wk")
@@ -80,17 +82,17 @@ struct OwnerOverviewView: View {
     private var medium: some View {
         VStack(spacing: 0) {
             Header(title: "BUSINESS OVERVIEW")
-            Spacer(minLength: 14)
-            HStack(spacing: 16) {
-                CenterStat(label: "Profit / wk",   value: money(p?.profitWeek), accent: true, size: 27)
-                CenterStat(label: "Today's stops", value: "\(stopsDone)/\(stopsTotal)", size: 27)
+            HStack(spacing: 14) {
+                CenterStat(label: "Profit / wk",   value: money(p?.profitWeek), accent: true, size: 32)
+                CenterStat(label: "Today's stops", value: "\(stopsDone)/\(stopsTotal)", size: 32)
             }
-            Spacer(minLength: 16)
-            HStack(spacing: 16) {
-                CenterStat(label: "Outstanding", value: money(p?.outstandingTotal), accent: overdue > 0, size: 27)
-                CenterStat(label: "Collected",   value: money(p?.collectedMonth), size: 27)
+            .frame(maxHeight: .infinity)
+            Rectangle().fill(Brand.hair).frame(height: 1)
+            HStack(spacing: 14) {
+                CenterStat(label: "Outstanding", value: money(p?.outstandingTotal), accent: overdue > 0, size: 32)
+                CenterStat(label: "Collected",   value: money(p?.collectedMonth), size: 32)
             }
-            Spacer(minLength: 0)
+            .frame(maxHeight: .infinity)
         }
         .padding(16)
     }
@@ -107,7 +109,7 @@ struct OwnerOverviewView: View {
                         .font(.system(size: 12, weight: .bold)).tracking(0.5)
                         .foregroundColor(Brand.muted)
                     Text("\(stopsDone) of \(stopsTotal) stops")
-                        .font(.system(size: 24, weight: .heavy, design: .rounded))
+                        .font(.system(size: 24, weight: .heavy, design: fontDesign))
                         .foregroundColor(Brand.ink).minimumScaleFactor(0.5).lineLimit(1)
                     Text(stopsDone >= stopsTotal && stopsTotal > 0 ? "All done" : "\(max(0, stopsTotal - stopsDone)) left")
                         .font(.system(size: 14, weight: .medium))

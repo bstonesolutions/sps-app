@@ -21,6 +21,7 @@ struct ClientScheduleView: View {
     let entry: SPSEntry
 
     private var p: WidgetPayload? { entry.payload }
+    private var fontDesign: Font.Design { sps_design(p?.appFont) }
     private var nextDate: Date? { SPSDate.parse(p?.nextVisitAt) }
     private var hasData: Bool { nextDate != nil || (p?.nextVisitService?.isEmpty == false) }
 
@@ -39,6 +40,7 @@ struct ClientScheduleView: View {
             }
         }
         .sps_widgetBackground(Brand.surface)
+        .environment(\.spsFontDesign, fontDesign)
         .widgetURL(URL(string: "spsway://schedule"))
     }
 
@@ -50,7 +52,7 @@ struct ClientScheduleView: View {
                         .font(.system(size: 15, weight: .bold))
                         .foregroundColor(.white.opacity(0.92))
                     Text(SPSDate.dayNum(d))
-                        .font(.system(size: 33, weight: .heavy, design: .rounded))
+                        .font(.system(size: 33, weight: .heavy, design: fontDesign))
                         .foregroundColor(.white)
                 } else {
                     Image(systemName: "calendar")
