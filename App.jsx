@@ -319,22 +319,33 @@ function generateStatementPDF(client, invoices, branding) {
 function useStoredState(key, initial) {
   const [value, setValue] = useState(initial);
   const [loaded, setLoaded] = useState(false);
+  // Build 15, Item 7A — the JSON we believe storage currently holds. Seeded with the initial
+  // so an UNTOUCHED default is never written, and updated on a successful load. This is the
+  // data-loss fence: if a remount's async load returns empty or fails, `value` stays at the
+  // `initial` and matches `lastPersisted`, so the save effect skips — a blank/stale remount
+  // can never overwrite good saved data (the same bug family as the team clobber in Item 1).
+  const lastPersisted = useRef(JSON.stringify(initial));
   // load once on mount
   useEffect(() => {
     let alive = true;
     (async () => {
       const res = await store.get(key);
       if (alive && res && res.value != null) {
-        try { setValue(JSON.parse(res.value)); } catch (e) {}
+        try { const parsed = JSON.parse(res.value); lastPersisted.current = JSON.stringify(parsed); setValue(parsed); } catch (e) {}
       }
       if (alive) setLoaded(true);
     })();
     return () => { alive = false; };
   }, [key]);
-  // save on change, but only after the initial load (so we don't overwrite saved data with defaults)
+  // Save on change, but only after load AND only when the value actually differs from what
+  // storage holds — never re-write the loaded value, and never write an unchanged default
+  // over real saved data (the remount/failed-read overwrite that lost stops, notes, tasks).
   useEffect(() => {
     if (!loaded) return;
-    store.set(key, JSON.stringify(value));
+    const json = JSON.stringify(value);
+    if (json === lastPersisted.current) return;
+    lastPersisted.current = json;
+    store.set(key, json);
     // Notify App of a save so the sync indicator can pulse
     if (typeof window.__onSpsSync === "function") window.__onSpsSync();
   }, [key, value, loaded]);
@@ -1022,11 +1033,16 @@ const MEMBER_ROLES = [
 ];
 const roleLabel = (key) => (MEMBER_ROLES.find(r => r.key === key) || {}).label || "Field Crew";
 
-// Guard a team write before it is saved (Bug 0, Part C). Rejects malformed structures,
-// never drops the last owner, and never blanks an owner email that was previously set.
-// Returns the validated `next`, or the previous array unchanged when the write is rejected.
-// (The on-disk format lives in the storage layer, which we never touch — this validates
-// the value in app code BEFORE it reaches the setter.)
+// Module-scoped actor gate — set from React to the signed-in user's owner status so the
+// pure guard below can fence role/owner/membership writes to owners only (Build 15, Item 1).
+let ACTOR_IS_OWNER = false;
+function setActorIsOwner(v) { ACTOR_IS_OWNER = !!v; }
+
+// Guard a team write before it is saved (Bug 0, Part C; hardened in Build 15, Item 1).
+// Rejects malformed structures, never drops the last owner, never blanks an owner email,
+// and — the Build 15 fence — never lets a NON-owner change any role, the owner identity, or
+// the membership set. Field edits (name/email/pin/rate) by a non-owner still pass. Returns
+// the validated `next`, or the previous array unchanged when the write is rejected.
 function validateTeamWrite(next, prev) {
   const prevArr = Array.isArray(prev) ? prev : [];
   // Must be an array of member objects, each with a stable id.
@@ -1039,7 +1055,26 @@ function validateTeamWrite(next, prev) {
   const prevOwnerHadEmail = prevOwners.some(m => (m.email || "").trim());
   const nextOwnerHasEmail = owners.some(m => (m.email || "").trim());
   if (prevOwnerHadEmail && !nextOwnerHasEmail) return prevArr;
+  // Actor fence (Build 15, Item 1): a non-owner may never change a role, the owner identity,
+  // or who is on the team — blocks every silent-promotion path, from any screen or action.
+  const roleSig = a => JSON.stringify(a.map(m => [String(m.id), m.role || ""]).sort());
+  const idSig = a => JSON.stringify(a.map(m => String(m.id)).sort());
+  if (!ACTOR_IS_OWNER && prevArr.length && (roleSig(next) !== roleSig(prevArr) || idSig(next) !== idSig(prevArr))) return prevArr;
+  // Guardrail snapshot — before a write that changes WHO the owner is, stash the previous
+  // team so an accidental change is revertable and the diff is visible.
+  const ownerSig = a => a.filter(m => m.role === "owner").map(m => String(m.id)).sort().join(",");
+  if (ownerSig(next) !== ownerSig(prevArr)) {
+    try { localStorage.setItem("sps_team_prev", JSON.stringify({ at: new Date().toISOString(), team: prevArr })); } catch (_) {}
+    try { console.warn("[team-guard] owner identity change", { from: ownerSig(prevArr), to: ownerSig(next), byOwner: ACTOR_IS_OWNER }); } catch (_) {}
+  }
   return next;
+}
+
+// A restore/undo must never write a corrupted team (one with no owner) — that would drop the
+// owner and re-open the promotion path. Returns false to skip writing this key (Build 15, Item 1).
+function restoreTeamGuard(key, valueJson) {
+  if (key !== "sps_team") return true;
+  try { const arr = JSON.parse(valueJson); return Array.isArray(arr) && arr.some(m => m && m.role === "owner"); } catch { return false; }
 }
 // ─────────────────────────────────────────────
 // PER-TAB STAFF PERMISSIONS
@@ -15286,7 +15321,10 @@ async function applySnapshot(id) {
   if (error || !data) throw new Error(error?.message || "Snapshot not found");
   const snap = data.snapshot || {};
   for (const key of Object.keys(snap)) {
-    await store.set(key, typeof snap[key] === "string" ? snap[key] : JSON.stringify(snap[key]));
+    const json = typeof snap[key] === "string" ? snap[key] : JSON.stringify(snap[key]);
+    // Build 15, Item 1 — never restore a corrupted team (no owner); it would drop the owner.
+    if (!restoreTeamGuard(key, json)) { console.warn("[team-guard] skipped restoring sps_team with no owner"); continue; }
+    await store.set(key, json);
   }
 }
 
@@ -15440,7 +15478,12 @@ function BackupRestore() {
       };
       let ok = 0, fail = 0;
       for (const key of Object.keys(refData)) {
-        try { await store.set(key, JSON.stringify(await rebuild(refData[key], cur[key]))); ok++; }
+        try {
+          const json = JSON.stringify(await rebuild(refData[key], cur[key]));
+          // Build 15, Item 1 — never restore a corrupted team (no owner); it would drop the owner.
+          if (!restoreTeamGuard(key, json)) { console.warn("[team-guard] skipped restoring sps_team with no owner"); fail++; continue; }
+          await store.set(key, json); ok++;
+        }
         catch (e) { fail++; console.warn("Restore key failed:", key, e.message); }
       }
       // Restore chat threads — upsert by id (non-destructive: never drops current messages).
@@ -22174,17 +22217,20 @@ export default function App({ authEmail = "", onSignOut }) {
 
   useEffect(() => {
     if (!ltm) return;
-    setTeam(list => {
+    // Build 15, Item 1 — backfill ONLY fills missing role/pin defaults. The old code here
+    // promoted team[0] to owner whenever no owner was found and persisted it (RAW setTeam),
+    // which silently crowned whoever sat first and evicted the real owner. That promotion is
+    // removed, and the write is routed through setTeamSafe so the guard validates it.
+    setTeamSafe(list => {
       const arr = Array.isArray(list) ? list : [];
       if (!arr.length) return list;
       let changed = false;
-      let next = arr.map(m => {
+      const next = arr.map(m => {
         const nm = { ...m };
         if (nm.role === undefined) { nm.role = "field"; changed = true; }
         if (nm.pin === undefined) { nm.pin = ""; changed = true; }
         return nm;
       });
-      if (!next.some(m => m.role === "owner")) { next = next.map((m, i) => i === 0 ? { ...m, role: "owner" } : m); changed = true; }
       return changed ? next : list;
     });
   }, [ltm]);
@@ -22219,8 +22265,13 @@ export default function App({ authEmail = "", onSignOut }) {
   const clientUser = !currentUser && emailKey ? (clients || []).find(c => (c.email || "").trim().toLowerCase() === emailKey) || null : null;
   // older saved team data may predate roles — guarantee an owner so admin powers always resolve
   const teamHasOwner = (team || []).some(m => m.role === "owner");
-  const effRole = (m) => m ? (m.role || ((!teamHasOwner && team[0] && team[0].id === m.id) ? "owner" : "field")) : null;
+  // Build 15, Item 1 — roles come ONLY from the stored team record. Never infer "owner" from
+  // team position / current user (that promoted whoever sat at team[0]). Missing role = field.
+  const effRole = (m) => m ? (m.role || "field") : null;
   const perms = memberPerms(currentUser ? { ...currentUser, role: effRole(currentUser) } : null);
+  // Build 15, Item 1 — keep the module-scoped team-write guard in sync with the signed-in
+  // user's owner status, so validateTeamWrite can fence role/owner changes to owners only.
+  useEffect(() => { setActorIsOwner(effRole(currentUser) === "owner"); }, [currentUser && currentUser.id, currentUser && currentUser.role]); // eslint-disable-line react-hooks/exhaustive-deps
   // (The boot splash from index.html is removed once the app is ready — see the
   // boot-splash removal effect below, keyed on `hydrated`.)
   // Today's stops for the signed-in tech — powers auto-share-on-route below.
