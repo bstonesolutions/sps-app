@@ -19981,7 +19981,66 @@ function CIcon({ name, size = 22 }) {
 // Shows only when: there's a stop scheduled TODAY for this client, AND the
 // assigned tech is currently clocked in with a fresh location (staff_locations
 // is_active=true, updated within 5 min). Otherwise renders nothing.
-function ClientLiveTracking({ client, schedule, team, branding, T }) {
+// Build 15, Item 8 — the four-stage progress rail shown on every live-stop card.
+function ClientStopProgress({ stage, T }) {
+  const steps = [["scheduled", "Scheduled"], ["enroute", "On the way"], ["arrived", "Arrived"], ["complete", "Complete"]];
+  const idx = steps.findIndex(s => s[0] === stage);
+  const doneColor = stage === "complete" ? "#16a34a" : T.primary;
+  return (
+    <div style={{ display: "flex", alignItems: "flex-start", padding: "2px 4px" }}>
+      {steps.map((s, i) => (
+        <div key={s[0]} style={{ display: "flex", alignItems: "center", flex: i < steps.length - 1 ? 1 : "0 0 auto", minWidth: 0 }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 5, flexShrink: 0 }}>
+            <div style={{ width: 22, height: 22, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", background: i <= idx ? doneColor : T.surfaceAlt, border: i <= idx ? "none" : `1.5px solid ${T.border}` }}>
+              {i < idx
+                ? <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="#fff" strokeWidth={3} strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                : <span style={{ width: 7, height: 7, borderRadius: "50%", background: i <= idx ? "#fff" : T.textMuted }} />}
+            </div>
+            <span style={{ fontSize: 10, fontWeight: 700, color: i <= idx ? T.text : T.textMuted, whiteSpace: "nowrap" }}>{s[1]}</span>
+          </div>
+          {i < steps.length - 1 && <div style={{ flex: 1, height: 2, background: i < idx ? doneColor : T.border, marginTop: 10, marginLeft: 3, marginRight: 3, minWidth: 8 }} />}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Build 15, Item 8 — the scheduled / arrived / complete status card (the en-route stage uses
+// the live map card instead). Crimson + slate, matches the rest of the portal.
+function ClientStopStatusCard({ stage, stop, tech, client, branding, T, onNav }) {
+  const techFirst = ((tech && tech.name) || "Your technician").split(" ")[0];
+  const dotColor = stage === "complete" ? "#16a34a" : T.primary;
+  const headline = stage === "complete" ? "Service complete"
+    : stage === "arrived" ? `${techFirst} has arrived`
+    : `Scheduled today${stop.time ? ` · ${stop.time}` : ""}`;
+  const sub = stage === "complete" ? "Your full report is saved in Service History."
+    : stage === "arrived" ? `${techFirst} is on site — service is underway.`
+    : `${(branding && branding.companyName) || "We"}'ll be on the way soon — you'll see live tracking here.`;
+  return (
+    <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 22, overflow: "hidden", boxShadow: "0 6px 22px rgba(0,0,0,0.08)" }}>
+      <div style={{ padding: "16px 18px 12px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+          <span style={{ width: 9, height: 9, borderRadius: "50%", background: dotColor, flexShrink: 0, boxShadow: `0 0 0 4px ${hexA(dotColor, 0.18)}` }} />
+          <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{headline}</div>
+        </div>
+        <div style={{ fontSize: 13.5, color: T.textMuted, marginTop: 4 }}>{sub}</div>
+      </div>
+      <div style={{ padding: "0 14px 16px" }}>
+        <ClientStopProgress stage={stage} T={T} />
+      </div>
+      {stage === "complete" && onNav && (
+        <button onClick={() => onNav("cp_property")} style={{ width: "100%", border: "none", borderTop: `1px solid ${T.border}`, background: "none", color: T.primary, fontWeight: 800, fontSize: 14, padding: "13px", cursor: "pointer", fontFamily: "inherit" }}>View service report →</button>
+      )}
+    </div>
+  );
+}
+
+// Build 15, Item 8 — live service-stop view for the client portal (Home + My Property).
+// Reflects the stop in REAL TIME — scheduled → on the way → arrived → complete — via Supabase
+// realtime subscriptions on staff_locations + the sps_arrivals / sps_completed app_state keys,
+// with a 60s poll fallback if realtime isn't enabled on those tables. While the tech is en
+// route it shows the live map; once complete the stop lives on in Service History.
+function ClientLiveTracking({ client, schedule, team, branding, T, onNav }) {
   const todayStop = useMemo(() => {
     const todayKey = fmtMDY(new Date());
     const day = (schedule || []).find(d => d.date === todayKey);
@@ -19993,32 +20052,68 @@ function ClientLiveTracking({ client, schedule, team, branding, T }) {
     ? (team || []).find(m => String(m.id) === String(todayStop.assigneeId)) || null
     : null, [todayStop, team]);
 
+  const sid = todayStop && todayStop.sid;
   const [loc, setLoc] = useState(null);
+  const [arrived, setArrived] = useState(false);
+  const [complete, setComplete] = useState(false);
   const [nowTs, setNowTs] = useState(() => Date.now());
 
-  // Poll the assigned tech's live location every 60s.
+  // Tech live location — realtime subscription + 60s poll fallback.
   useEffect(() => {
     if (!tech) { setLoc(null); return; }
     let alive = true;
+    const load = async () => { try { const { data } = await supabase.from("staff_locations").select("*").eq("staff_id", String(tech.id)).maybeSingle(); if (alive) setLoc(data || null); } catch (_) {} };
+    load();
+    let ch = null;
+    try { ch = supabase.channel(`sps-loc-${tech.id}`).on("postgres_changes", { event: "*", schema: "public", table: "staff_locations", filter: `staff_id=eq.${tech.id}` }, load).subscribe(); } catch (_) {}
+    const iv = setInterval(load, 60000);
+    return () => { alive = false; clearInterval(iv); try { if (ch) supabase.removeChannel(ch); } catch (_) {} };
+  }, [tech && tech.id]);
+
+  // Arrived / complete — realtime on the app_state keys + 60s poll fallback.
+  useEffect(() => {
+    if (!sid) { setArrived(false); setComplete(false); return; }
+    let alive = true;
     const load = async () => {
       try {
-        const { data } = await supabase.from("staff_locations").select("*").eq("staff_id", String(tech.id)).maybeSingle();
-        if (alive) setLoc(data || null);
-      } catch (_) { if (alive) setLoc(null); }
+        const [a, c] = await Promise.all([
+          supabase.from("app_state").select("value").eq("key", "sps_arrivals").maybeSingle(),
+          supabase.from("app_state").select("value").eq("key", "sps_completed").maybeSingle(),
+        ]);
+        if (!alive) return;
+        try { setArrived(!!JSON.parse(a?.data?.value || "{}")[sid]); } catch (_) {}
+        try { setComplete(!!JSON.parse(c?.data?.value || "{}")[sid]); } catch (_) {}
+      } catch (_) {}
     };
     load();
+    let ch = null;
+    try {
+      ch = supabase.channel(`sps-stop-${sid}`)
+        .on("postgres_changes", { event: "*", schema: "public", table: "app_state", filter: "key=eq.sps_arrivals" }, load)
+        .on("postgres_changes", { event: "*", schema: "public", table: "app_state", filter: "key=eq.sps_completed" }, load)
+        .subscribe();
+    } catch (_) {}
     const iv = setInterval(load, 60000);
-    return () => { alive = false; clearInterval(iv); };
-  }, [tech && tech.id]);
+    return () => { alive = false; clearInterval(iv); try { if (ch) supabase.removeChannel(ch); } catch (_) {} };
+  }, [sid]);
 
   // Refresh freshness / "last updated" every 30s.
   useEffect(() => { const iv = setInterval(() => setNowTs(Date.now()), 30000); return () => clearInterval(iv); }, []);
 
+  if (!todayStop) return null;
+
   const updatedMs = loc && loc.updated_at ? new Date(loc.updated_at).getTime() : 0;
   const fresh = loc && loc.is_active && updatedMs && (nowTs - updatedMs < 5 * 60 * 1000);
+  const stage = complete ? "complete" : arrived ? "arrived" : (fresh && tech) ? "enroute" : "scheduled";
 
-  if (!todayStop || !tech || !fresh) return null;
-  return <ClientTrackingCard client={client} todayStop={todayStop} tech={tech} loc={loc} schedule={schedule} branding={branding} T={T} nowTs={nowTs} />;
+  if (stage === "enroute" && tech) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <ClientTrackingCard client={client} todayStop={todayStop} tech={tech} loc={loc} schedule={schedule} branding={branding} T={T} nowTs={nowTs} />
+      </div>
+    );
+  }
+  return <ClientStopStatusCard stage={stage} stop={todayStop} tech={tech} client={client} branding={branding} T={T} onNav={onNav} />;
 }
 
 function ClientTrackingCard({ client, todayStop, tech, loc, schedule, branding, T, nowTs }) {
@@ -20352,7 +20447,7 @@ function CPHome({ client, schedule, invoices, branding, team, onNav, onRateVisit
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
       {greetingBlock}
-      <ClientLiveTracking client={client} schedule={schedule} team={team} branding={branding} T={T} />
+      <ClientLiveTracking client={client} schedule={schedule} team={team} branding={branding} T={T} onNav={onNav} />
       <CPRatingPrompt client={client} branding={branding} onRateVisit={onRateVisit} T={T} />
       {heroBlock}
       {balanceBlock}
@@ -20802,7 +20897,7 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
       </div>
 
       {/* Live tracking — appears only while the assigned tech is en route to this property */}
-      <ClientLiveTracking client={client} schedule={schedule} team={team} branding={branding} T={T} />
+      <ClientLiveTracking client={client} schedule={schedule} team={team} branding={branding} T={T} onNav={onNav} />
 
       {/* Service plan card — tappable */}
       <PlanCard />
