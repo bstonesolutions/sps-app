@@ -74,13 +74,13 @@ struct OwnerInvoiceView: View {
             Header(title: "INVOICES")
             Spacer(minLength: 14)
             HStack(spacing: 16) {
-                CenterStat(label: "Outstanding", value: p?.outstandingTotal.map(sps_money) ?? "—", accent: true, size: 27)
-                CenterStat(label: "Unpaid",      value: p?.unpaidCount.map { "\($0)" } ?? "—", size: 27)
+                CenterStat(label: "Outstanding", value: p?.outstandingTotal.map(sps_money) ?? "—", accent: true, size: 29)
+                CenterStat(label: "Unpaid",      value: p?.unpaidCount.map { "\($0)" } ?? "—", size: 29)
             }
             Spacer(minLength: 16)
             HStack(spacing: 16) {
-                CenterStat(label: "Overdue",        value: p?.overdueCount.map { "\($0)" } ?? "—", accent: overdue > 0, size: 27)
-                CenterStat(label: "Collected (mo)", value: p?.collectedMonth.map(sps_money) ?? "—", size: 27)
+                CenterStat(label: "Overdue",        value: p?.overdueCount.map { "\($0)" } ?? "—", accent: overdue > 0, size: 29)
+                CenterStat(label: "Collected (mo)", value: p?.collectedMonth.map(sps_money) ?? "—", size: 29)
             }
             Spacer(minLength: 0)
         }

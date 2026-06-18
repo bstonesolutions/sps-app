@@ -6,13 +6,15 @@ import SwiftUI
 import WidgetKit
 
 struct LogoMark: View {
+    // Build 15, Item 2 — the brand mark. Slightly larger + rounder so it reads clearly at the
+    // top of every widget; a fixed frame keeps it from being clipped or shifted by the row.
     var body: some View {
-        RoundedRectangle(cornerRadius: 5, style: .continuous)
+        RoundedRectangle(cornerRadius: 6, style: .continuous)
             .fill(Brand.crimson)
-            .frame(width: 18, height: 18)
+            .frame(width: 22, height: 22)
             .overlay(
                 Text("S")
-                    .font(.system(size: 14, weight: .black, design: .rounded))
+                    .font(.system(size: 16, weight: .black, design: .rounded))
                     .foregroundColor(.white)
             )
     }
@@ -21,12 +23,16 @@ struct LogoMark: View {
 struct Header: View {
     let title: String
     var body: some View {
-        HStack(spacing: 6) {
+        // Build 15, Item 2 — logo + title pinned to the top, vertically centered, never wrapping.
+        // Each widget insets it from the top edge with its own padding; this row stays consistent.
+        HStack(alignment: .center, spacing: 8) {
             LogoMark()
             Text(title)
-                .font(.system(size: 14, weight: .bold))
-                .tracking(0.6)
+                .font(.system(size: 14.5, weight: .bold))
+                .tracking(0.5)
                 .foregroundColor(Brand.muted)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
             Spacer(minLength: 0)
         }
     }
@@ -39,12 +45,12 @@ struct StatColumn: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(value)
-                .font(.system(size: 21, weight: .heavy, design: .rounded))
+                .font(.system(size: 24, weight: .heavy, design: .rounded))
                 .foregroundColor(accent ? Brand.crimson : Brand.ink)
                 .minimumScaleFactor(0.5)
                 .lineLimit(1)
             Text(label)
-                .font(.system(size: 14, weight: .medium))
+                .font(.system(size: 15, weight: .semibold))
                 .foregroundColor(Brand.muted)
                 .lineLimit(1)
         }
@@ -63,16 +69,16 @@ struct BigStat: View {
     let label: String
     let value: String
     var accent: Bool = false
-    var size: CGFloat = 27
+    var size: CGFloat = 30
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 3) {
             Text(value)
                 .font(.system(size: size, weight: .heavy, design: .rounded))
                 .foregroundColor(accent ? Brand.crimson : Brand.ink)
                 .minimumScaleFactor(0.45)
                 .lineLimit(1)
             Text(label)
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 15, weight: .semibold))
                 .foregroundColor(Brand.muted)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
@@ -88,16 +94,16 @@ struct CenterStat: View {
     let label: String
     let value: String
     var accent: Bool = false
-    var size: CGFloat = 23
+    var size: CGFloat = 26
     var body: some View {
-        VStack(spacing: 3) {
+        VStack(spacing: 4) {
             Text(value)
                 .font(.system(size: size, weight: .heavy, design: .rounded))
                 .foregroundColor(accent ? Brand.crimson : Brand.ink)
                 .minimumScaleFactor(0.4)
                 .lineLimit(1)
             Text(label)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(Brand.muted)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)

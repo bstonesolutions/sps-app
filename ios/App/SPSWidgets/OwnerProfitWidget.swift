@@ -72,13 +72,13 @@ struct OwnerProfitView: View {
             Header(title: "PROFIT")
             Spacer(minLength: 14)
             HStack(spacing: 16) {
-                CenterStat(label: "This Week",  value: p?.profitWeek.map(sps_money) ?? "—", accent: true, size: 27)
-                CenterStat(label: "This Month", value: p?.profitMonth.map(sps_money) ?? "—", size: 27)
+                CenterStat(label: "This Week",  value: p?.profitWeek.map(sps_money) ?? "—", accent: true, size: 29)
+                CenterStat(label: "This Month", value: p?.profitMonth.map(sps_money) ?? "—", size: 29)
             }
             Spacer(minLength: 16)
             HStack(spacing: 16) {
-                CenterStat(label: "Avg Rate",  value: p?.avgEffectiveRate.map(sps_rate) ?? "—", size: 27)
-                CenterStat(label: "Jobs (mo)", value: p?.jobsMonth.map { "\($0)" } ?? "—", size: 27)
+                CenterStat(label: "Avg Rate",  value: p?.avgEffectiveRate.map(sps_rate) ?? "—", size: 29)
+                CenterStat(label: "Jobs (mo)", value: p?.jobsMonth.map { "\($0)" } ?? "—", size: 29)
             }
             Spacer(minLength: 0)
         }
