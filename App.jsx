@@ -22327,11 +22327,39 @@ function DesktopSidebar({ page, perms, navUnread, reminderDue, onNav, onSignOut,
   );
 }
 
+// Build 15, Item 6 — in-app "payment received" banner. Shows to the owner while they're in the
+// app when an invoice flips to Paid (detected on QuickBooks sync). Tappable (opens Paid invoices),
+// dismissible, and auto-dismisses on its own after ~9s. (The out-of-app phone push is the
+// QuickBooks-webhook Edge Function — see supabase/functions/qb-payment-webhook.)
+function PaymentBanner({ banner, T, onOpen, onClose }) {
+  useEffect(() => {
+    if (!banner) return;
+    const t = setTimeout(() => onClose && onClose(), 9000);
+    return () => clearTimeout(t);
+  }, [banner && banner.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!banner) return null;
+  return (
+    <div style={{ position: "fixed", top: "calc(env(safe-area-inset-top) + 8px)", left: 0, right: 0, zIndex: 150, display: "flex", justifyContent: "center", padding: "0 12px", pointerEvents: "none" }}>
+      <div onClick={onOpen} style={{ pointerEvents: "auto", cursor: "pointer", width: "100%", maxWidth: 460, background: T.surface, border: `1px solid ${T.border}`, borderLeft: "4px solid #16a34a", borderRadius: 14, boxShadow: "0 10px 34px rgba(0,0,0,0.20)", padding: "12px 14px", display: "flex", alignItems: "center", gap: 12 }}>
+        <div style={{ width: 36, height: 36, borderRadius: 11, background: hexA("#16a34a", 0.12), color: "#16a34a", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <svg viewBox="0 0 24 24" width={20} height={20} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>Payment received — {banner.amount}</div>
+          <div style={{ fontSize: 12.5, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{banner.clientName}{banner.number ? ` · ${banner.number}` : ""}</div>
+        </div>
+        <button onClick={(e) => { e.stopPropagation(); onClose && onClose(); }} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 20, lineHeight: 1, cursor: "pointer", flexShrink: 0, padding: "0 4px", fontFamily: "inherit" }}>×</button>
+      </div>
+    </div>
+  );
+}
+
 export default function App({ authEmail = "", onSignOut }) {
   const [selectedClient, setSelectedClient] = useState(null);
   const [clientOpenTab, setClientOpenTab] = useState(null); // which ClientDetail tab to open (e.g. from a Home alert)
   const [scheduleFocus, setScheduleFocus] = useState(null); // { sid, date } — open a specific stop from Home
   const [portalDeepLink, setPortalDeepLink] = useState(null); // route the client portal from a deep link (e.g. invoice "Pay in the app")
+  const [payBanner, setPayBanner] = useState(null); // Build 15, Item 6 — in-app "payment received" banner (owner, while in the app)
   const [adding, setAdding] = useState(false);
   const [clientsView, setClientsView] = useState("split"); // desktop only: "split" (master-detail) | "table"
   const [scheduleSeed, setScheduleSeed] = useState(null);
@@ -23039,6 +23067,16 @@ export default function App({ authEmail = "", onSignOut }) {
     // copy (no link) so the client saw two invoices — one payable, one inert. Instead,
     // fold the QB snapshot INTO the existing local record (keeping its id + payment link),
     // and only add QB invoices that have no local twin (created directly in QuickBooks).
+    // Build 15, Item 6 — detect a payment that just landed (was unpaid, now Paid) for the
+    // in-app banner the owner sees while using the app. (Out-of-app push is the Edge Function.)
+    let _newlyPaid = null;
+    (invoices || []).forEach(iv => {
+      if (!iv.qbId) return;
+      const qi = newInvoices.find(n => String(n.qbId) === String(iv.qbId));
+      if (!qi) return;
+      const wasPaid = effectiveStatus(iv) === "Paid" || iv.status === "Paid";
+      if (!wasPaid && qi.status === "Paid") _newlyPaid = { clientName: iv.clientName || qi.clientName || "A client", amount: "$" + ((Number(qi.total) || 0).toFixed(2)), number: qi.number || iv.number, invoiceId: iv.id };
+    });
     setInvoices(prev => {
       const prevList = prev || [];
       const usedQbIds = new Set();
@@ -23070,6 +23108,8 @@ export default function App({ authEmail = "", onSignOut }) {
       return [...merged, ...fresh];
     });
 
+    // Build 15, Item 6 — surface a payment-received banner to the owner (in-app, while open).
+    if (_newlyPaid && perms && perms.isAdmin) setPayBanner({ ..._newlyPaid, id: Date.now() });
     // Log match stats
     const matched = newInvoices.filter(iv => iv.clientId).length;
     console.log(`QB Sync: ${newInvoices.length} invoices, ${matched} matched to clients`);
@@ -23739,6 +23779,8 @@ export default function App({ authEmail = "", onSignOut }) {
           textarea { line-height: 1.6; }
           img { -webkit-user-drag: none; }
         `}</style>
+
+        <PaymentBanner banner={payBanner} T={T} onOpen={() => { setPayBanner(null); handleNav("invoices", { invoiceFilter: "Paid" }); }} onClose={() => setPayBanner(null)} />
 
         {/* Header — a non-scrolling flex child, frozen at the top */}
         <header style={{ background: hexA(T.surface, 0.9), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, position: "relative", zIndex: 100, flexShrink: 0, borderBottom: `1px solid ${T.border}` }}>
