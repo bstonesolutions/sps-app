@@ -22176,6 +22176,9 @@ export default function App({ authEmail = "", onSignOut }) {
   // Staff "Preview Portal as X" lives at the App top level (rendered OUTSIDE the shell's
   // <main> scroll container) so iOS doesn't clip this position:fixed overlay.
   const [previewClient, setPreviewClient] = useState(null);
+  // Server-mediated client portal slice (api/portal-data): undefined = idle/loading, null = not a
+  // client (or fetch failed → fall back to local arrays), object = this client's scoped data only.
+  const [portalData, setPortalData] = useState(undefined);
 
   // Persistent data — survives reloads and app updates
   const [clients, setClients, lc] = useStoredState("sps_clients", []);
@@ -22370,6 +22373,21 @@ export default function App({ authEmail = "", onSignOut }) {
   const currentUser = (team || []).find(m => (m.email || "").trim().toLowerCase() === emailKey) || null;
   // client portal: if no staff match, check if email belongs to a client record
   const clientUser = !currentUser && emailKey ? (clients || []).find(c => (c.email || "").trim().toLowerCase() === emailKey) || null : null;
+  // When a signed-in email isn't staff, fetch ONLY this client's slice from api/portal-data
+  // (scoped server-side) instead of relying on the shared app_state the device loads. Falls back to
+  // null (→ local arrays) on any failure, so this is non-breaking until app_state is locked.
+  useEffect(() => {
+    if (!hydrated || currentUser || !emailKey) { setPortalData(undefined); return; }
+    let alive = true;
+    (async () => {
+      try {
+        const res = await fetch(`${PROD_URL}/api/portal-data`, { headers: await authHeaders() });
+        const d = await res.json().catch(() => null);
+        if (alive) setPortalData(res.ok && d ? d : null);
+      } catch (_) { if (alive) setPortalData(null); }
+    })();
+    return () => { alive = false; };
+  }, [hydrated, !!currentUser, emailKey]);
   // older saved team data may predate roles — guarantee an owner so admin powers always resolve
   const teamHasOwner = (team || []).some(m => m.role === "owner");
   // Build 15, Item 1 — roles come ONLY from the stored team record. Never infer "owner" from
@@ -23414,33 +23432,48 @@ export default function App({ authEmail = "", onSignOut }) {
     );
   }
 
-  // Client portal — email matched a client record, not a staff member
-  if (!currentUser && clientUser) {
+  // Client portal — the signed-in email belongs to a client. Prefer the server-scoped slice
+  // (api/portal-data) so the device holds ONLY this client's data; fall back to the local arrays
+  // until app_state is locked to staff-only.
+  const sData = portalData && portalData.client ? portalData : null;
+  const portalClient = sData ? sData.client : clientUser;
+  // Client session still loading its scoped slice with no local fallback yet — show a spinner.
+  if (!currentUser && emailKey && portalData === undefined && !clientUser) {
+    return <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: fontStack, background: T.bg, color: T.textMuted, fontSize: 14 }}>Loading…</div>;
+  }
+  if (!currentUser && portalClient) {
+    // Theme/branding from the (possibly server-provided) branding, so the portal looks right even
+    // once app_state is locked and the device's local branding is just the default.
+    const pBranding = sData ? { ...DEFAULT_BRANDING, ...(sData.branding || {}) } : branding;
+    const pMode = pBranding.appearance === "system" ? (systemDark ? "dark" : "light") : (pBranding.appearance || "light");
+    const pThemeDef = THEMES[pBranding.themeKey];
+    const pT = pBranding.themeKey === "custom" ? buildCustomTheme(pBranding.custom, pMode) : (pThemeDef ? (pThemeDef[pMode] || pThemeDef.light) : THEMES.sps.light);
+    const pFont = FONTS[pBranding.appFont || "rounded"]?.stack || DEFAULT_FONT_STACK;
     return (
       <SPSClientPortal
-        client={clientUser}
-        estimates={estimatesRaw}
+        client={portalClient}
+        estimates={sData ? sData.estimates : estimatesRaw}
         onApproveEstimate={(id, status) => setEstimatesRaw(prev => (prev||[]).map(e => String(e.id) === String(id) ? { ...e, status } : e))}
-        schedule={schedule}
-        invoices={invoices}
-        invoicing={invoicing}
+        schedule={sData ? sData.schedule : schedule}
+        invoices={sData ? sData.invoices : invoices}
+        invoicing={sData ? (sData.invoicing || invoicing) : invoicing}
         deepLink={portalDeepLink}
         onDeepLinkHandled={() => setPortalDeepLink(null)}
-        branding={branding}
-        team={team}
-        T={T}
-        fontStack={fontStack}
+        branding={pBranding}
+        team={sData ? (sData.team || []) : team}
+        T={pT}
+        fontStack={pFont}
         onSignOut={handleSignOut}
         onServiceRequest={handleServiceRequest}
         onRateVisit={handleRateVisit}
         onUpgradeRequest={handleUpgradeRequest}
         onClientMessage={(body) => notifyOwnerEmail("client_message", {
-          subject: `New message from ${clientUser.name}`,
-          heading: `${clientUser.name} sent you a message`,
+          subject: `New message from ${portalClient.name}`,
+          heading: `${portalClient.name} sent you a message`,
           message: (body ? `"${body}"\n\n` : "") + `Open the app to reply: ${PROD_URL}`,
-          rows: [["Client", clientUser.name]],
+          rows: [["Client", portalClient.name]],
         })}
-        onSavePrefs={(notifyPrefs) => { _lastLocalPrefWriteAt = Date.now(); setClients(cs => (cs || []).map(c => String(c.id) === String(clientUser.id) ? { ...c, notifyPrefs } : c)); }}
+        onSavePrefs={(notifyPrefs) => { _lastLocalPrefWriteAt = Date.now(); setClients(cs => (cs || []).map(c => String(c.id) === String(portalClient.id) ? { ...c, notifyPrefs } : c)); }}
       />
     );
   }
