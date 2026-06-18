@@ -551,7 +551,9 @@ const buildMapUrl = (address, app) => {
   if (app === "apple") return `maps://maps.apple.com/?daddr=${enc}`;
   if (app === "google") return `https://maps.google.com/maps?daddr=${enc}`;
   if (app === "waze") return `waze://?q=${enc}&navigate=yes`;
-  return `https://www.google.com/maps/dir/?api=1&destination=${enc}`;
+  // Build 15, 7D — when no map app is chosen, follow the device (Apple Maps on iOS, Google on
+  // the web) instead of always forcing Google. Staff and clients both get the right default.
+  return isAppleDevice() ? `maps://maps.apple.com/?daddr=${enc}` : `https://www.google.com/maps/dir/?api=1&destination=${enc}`;
 };
 
 // ── Inventory helpers ──────────────────────────────────────────
@@ -1720,7 +1722,10 @@ function compressImage(file, maxDim = 1600) {
       img.onerror = () => resolve(e.target.result);
       img.src = e.target.result;
     };
-    reader.readAsDataURL(file);
+    // Build 15, 7B — never leave the promise unsettled if the read fails (corrupt/HEIC/large
+    // file, permission), which froze/crashed photo capture. Resolve empty and let the caller skip.
+    reader.onerror = () => resolve("");
+    try { reader.readAsDataURL(file); } catch (_) { resolve(""); }
   });
 }
 
@@ -5851,7 +5856,7 @@ function PhotoStrip({ photos, size = 56 }) {
 // ─────────────────────────────────────────────
 // SERVICE WORKSPACE (perform & log a stop, with profitability)
 // ─────────────────────────────────────────────
-function CompleteStopModal({ stop, client, email, catalog, costs, team, clients, dayDate, arrivedAt, onComplete, onUpdateStop, onClose, onViewClient, onOfficeAlert }) {
+function CompleteStopModal({ stop, client, email, catalog, costs, team, clients, dayDate, arrivedAt, draft, onSaveDraft, onClearDraft, onComplete, onUpdateStop, onClose, onViewClient, onOfficeAlert }) {
   const { T, branding, perms } = useApp();
   const todayStr = new Date().toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" });
   const firstName = client?.name?.split(" ")[0] || "there";
@@ -5961,6 +5966,42 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
   const addTask = () => { if (!newTask.trim()) return; setChecklist(cl => [...cl, { id: `c${Date.now()}`, text: newTask.trim(), done: false }]); setNewTask(""); };
   const removeTask = (id) => setChecklist(cl => cl.filter(t => t.id !== id));
   const tasksDone = checklist.filter(t => t.done).length;
+
+  // Build 15, 7A — persist in-progress work so a lock / rotate / background / remount never
+  // loses it. Restore this stop's saved draft once on mount, then debounce-save changes.
+  const draftRestored = useRef(false);
+  useEffect(() => {
+    const d = draft;
+    if (d && typeof d === "object") {
+      if (Array.isArray(d.checklist)) setChecklist(d.checklist);
+      if (d.readings) setReadings(d.readings);
+      if (d.tx) setTx(d.tx);
+      if (d.partsUsed) setPartsUsedState(d.partsUsed);
+      if (d.partBill) setPartBill(d.partBill);
+      if (d.productsQty) setProductsQty(d.productsQty);
+      if (d.productBill) setProductBill(d.productBill);
+      if (d.notesClient != null) setNotesClient(d.notesClient);
+      if (d.notesOffice != null) setNotesOffice(d.notesOffice);
+      if (typeof d.officeFlag === "boolean") setOfficeFlag(d.officeFlag);
+      if (d.officeFlagMsg != null) setOfficeFlagMsg(d.officeFlagMsg);
+      if (Array.isArray(d.photos)) setPhotos(d.photos);
+      if (d.usageLoc) setUsageLoc(d.usageLoc);
+      if (Array.isArray(d.svcList)) setSvcList(d.svcList);
+      if (d.actualHours != null) setActualHours(d.actualHours);
+      if (d.minutes != null) setMinutes(d.minutes);
+    }
+    draftRestored.current = true;
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!draftRestored.current || !stop.sid || typeof onSaveDraft !== "function") return;
+    // Only persist once there's real work to lose — never write an empty draft for every stop opened.
+    const hasContent = (checklist || []).some(t => t.done) || Object.keys(readings).length || Object.keys(tx).length
+      || Object.keys(partsUsed).length || Object.keys(productsQty).length || (notesClient || "").trim()
+      || (notesOffice || "").trim() || officeFlag || (photos || []).length;
+    if (!hasContent) return;
+    const t = setTimeout(() => onSaveDraft(stop.sid, { checklist, readings, tx, partsUsed, partBill, productsQty, productBill, notesClient, notesOffice, officeFlag, officeFlagMsg, photos, usageLoc, svcList, actualHours, minutes }), 700);
+    return () => clearTimeout(t);
+  }, [checklist, readings, tx, partsUsed, partBill, productsQty, productBill, notesClient, notesOffice, officeFlag, officeFlagMsg, photos, usageLoc, svcList, actualHours, minutes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // timer
   useEffect(() => {
@@ -6085,6 +6126,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
 
   const finish = () => {
     onComplete(stop.id, buildEntry(), stop.sid);
+    if (typeof onClearDraft === "function") onClearDraft(stop.sid); // Build 15, 7A — clear the in-progress draft once the stop is completed
     if (officeFlag && officeFlagMsg.trim() && onOfficeAlert) {
       onOfficeAlert({ client: client?.name || "Client", clientId: client?.id, sid: stop?.sid, message: officeFlagMsg.trim(), date: todayStr });
     }
@@ -6367,11 +6409,20 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
           </div>
         )}
         {photos.length < MAX_PHOTOS && (
-          <label style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 9, padding: "16px 14px", borderRadius: 12, border: `2px dashed ${hexA(T.primary, 0.5)}`, background: T.surface, cursor: "pointer", color: T.primary, fontSize: 14, fontWeight: 800 }}>
-            <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-            {busy ? "Adding…" : `Add photos (${MAX_PHOTOS - photos.length} remaining)`}
-            <input type="file" accept="image/*,image/heic,image/heif" multiple onChange={e => addPhotos(e, "General")} style={{ display: "none" }} />
-          </label>
+          // Build 15, 7H — Camera is the primary one-tap action; Library is one tap away. The
+          // single input used to pop the iOS source sheet (Camera/Library/Files) on every add.
+          <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
+            <label style={{ flex: 2, display: "flex", alignItems: "center", justifyContent: "center", gap: 9, padding: "16px 14px", borderRadius: 12, border: "none", background: T.primary, cursor: "pointer", color: "#fff", fontSize: 14, fontWeight: 800 }}>
+              <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+              {busy ? "Adding…" : "Take Photo"}
+              <input type="file" accept="image/*,image/heic,image/heif" capture="environment" multiple onChange={e => addPhotos(e, "General")} style={{ display: "none" }} />
+            </label>
+            <label style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "16px 12px", borderRadius: 12, border: `2px dashed ${hexA(T.primary, 0.5)}`, background: T.surface, cursor: "pointer", color: T.primary, fontSize: 13, fontWeight: 800 }}>
+              <svg viewBox="0 0 24 24" width={17} height={17} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+              Library
+              <input type="file" accept="image/*,image/heic,image/heif" multiple onChange={e => addPhotos(e, "General")} style={{ display: "none" }} />
+            </label>
+          </div>
         )}
       </div>
 
@@ -7233,7 +7284,9 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", onClose }) {
   const [expanded, setExpanded] = useState(false);
   const firstName = client && client.name ? client.name.split(" ")[0] : (stop.client || "there");
   const phone = ((client && (client.phone || client.contactPhone || "")) || "").replace(/[^\d+]/g, "");
-  const addr = stop.address || "";
+  // Build 15, 7D — fall back to the client's address when the stop's was empty at creation
+  // (e.g. the client's address was added later), so "Head Here" always has a destination.
+  const addr = stop.address || (client && client.address) || "";
   // This quick "Head here" flow has no ETA picker, so use the same sensible default as the
   // full On-My-Way modal (15 min) and a real clock time — never "a few minutes minutes"
   // or "(around soon)". {eta} is the number (template already adds "minutes"); {arrival} is the time.
@@ -7500,13 +7553,16 @@ function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, o
   // When client changes, auto-fill frequency from their tier and preferred day
   const handleClientChange = (clientId) => {
     set("clientId", clientId);
+    // Build 15, 7F — auto-fill frequency/day ONLY when creating a NEW assignment. In edit mode
+    // this used to re-fill from the client's tier on every change, overwriting a manually-set
+    // frequency and locking it to the tier default (e.g. weekly) so it could never be moved to
+    // biweekly/monthly. Editing now leaves the user's frequency/day choices intact.
+    if (!isAdd) return;
     const c = (clients||[]).find(cl => String(cl.id) === String(clientId));
     if (!c) return;
-    // Auto-fill frequency from tier
     const tierFreqMap = { "Weekly": "weekly", "Bi-Weekly": "biweekly", "Monthly": "monthly" };
     const tierFreq = TIER_FREQ[c.plan];
     if (tierFreq && tierFreqMap[tierFreq]) set("frequency", tierFreqMap[tierFreq]);
-    // Auto-fill day from client's preferred day
     if (c.preferredDay) set("dayOfWeek", c.preferredDay);
   };
 
@@ -8244,7 +8300,7 @@ function StopEditModal({ stop, dayDate, clients, catalog, team, T, onSave, onClo
   );
 }
 
-function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, me, onClientSelect, seedClientIds, clearSeed, focusStop, clearFocus, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {}, arrivals = {}, onArrived }) {
+function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, me, onClientSelect, seedClientIds, clearSeed, focusStop, clearFocus, stopDrafts = {}, setStopDrafts, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {}, arrivals = {}, onArrived }) {
   const { T, perms } = useApp();
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
   const compact = cfg.density === "compact";
@@ -8703,7 +8759,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                 {/* Active-stop actions: Head Here (directions + On My Way) + arrival.
                     Delete now lives quietly in the status line above. */}
                 {!isComplete && (
-                  <div style={{ display: "flex", gap: 8 }}>
+                  <div style={{ display: "flex", gap: 8, overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
                     <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: s, client: c }); }}
                       style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "12px 10px", fontSize: 13.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
                       <Icon name="map" size={15} /> Head Here
@@ -9067,6 +9123,9 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           clients={clients}
           dayDate={completeModal.dayDate}
           arrivedAt={arrivals[completeModal.stop.sid]}
+          draft={stopDrafts[completeModal.stop.sid]}
+          onSaveDraft={setStopDrafts ? (sid, d) => setStopDrafts(prev => ({ ...(prev || {}), [sid]: d })) : null}
+          onClearDraft={setStopDrafts ? (sid) => setStopDrafts(prev => { const n = { ...(prev || {}) }; delete n[sid]; return n; }) : null}
           onComplete={onComplete}
           onUpdateStop={completeModal.dayDate ? (changes) => updateStop(completeModal.dayDate, completeModal.stop.sid, changes) : null}
           onClose={() => setCompleteModal(null)}
@@ -10686,7 +10745,7 @@ function CatalogManager({ catalog, setCatalog }) {
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
                 <button onClick={() => adjustInv(-1)} style={{ width: 34, height: 34, borderRadius: 10, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 18, cursor: "pointer", fontFamily: "inherit" }}>−</button>
                 <div style={{ position: "relative", flex: 1 }}>
-                  <input type="text" inputMode="decimal" value={txModal.data.inventoryOz} onChange={e => setTxModal(m => ({ ...m, data: { ...m.data, inventoryOz: e.target.value.replace(/[^\d.]/g, "") } }))}
+                  <input type="text" inputMode="text" value={txModal.data.inventoryOz} onChange={e => setTxModal(m => ({ ...m, data: { ...m.data, inventoryOz: e.target.value.replace(/[^\d.\-]/g, "") } }))}
                     style={{ width: "100%", padding: "10px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 16, fontWeight: 800, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "center" }} />
                   <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>oz</span>
                 </div>
@@ -10700,7 +10759,7 @@ function CatalogManager({ catalog, setCatalog }) {
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <div style={{ position: "relative", flex: 1 }}>
-                  <input type="text" inputMode="decimal" value={txModal.addOz} onChange={e => setTxModal(m => ({ ...m, addOz: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="Custom amount" style={{ width: "100%", padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
+                  <input type="text" inputMode="text" value={txModal.addOz} onChange={e => setTxModal(m => ({ ...m, addOz: e.target.value.replace(/[^\d.\-]/g, "") }))} placeholder="Custom amount (− to subtract)" style={{ width: "100%", padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
                 </div>
                 <Btn sm onClick={addInvAmount} style={{ padding: "9px 16px" }}>Add</Btn>
               </div>
@@ -22154,6 +22213,9 @@ export default function App({ authEmail = "", onSignOut }) {
   // Feature 3B: arrival timestamps per stop ({ [sid]: ISO }). Set when the tech taps
   // "I'm here"; the job clock runs from here until the stop is completed.
   const [arrivals, setArrivals, larr] = useStoredState("sps_arrivals", {});
+  // Build 15, 7A — per-stop in-progress draft of the CompleteStopModal inputs, so a lock /
+  // rotate / background / remount never loses the tech's work. Keyed by sid; cleared on finish.
+  const [stopDrafts, setStopDrafts] = useStoredState("sps_stop_drafts", {});
   const vp = useViewport();
   // Desktop fill is driven by ENVIRONMENT, not platform alone. A real desktop browser
   // — or the Mac app, which reports getPlatform()==='ios' but a 'Macintosh' user-agent
@@ -23399,7 +23461,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {selectedClient && <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>}
         </>
       ))}
-      {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} />}
+      {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} />}
       {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} />}
       {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
