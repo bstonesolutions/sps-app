@@ -2256,7 +2256,10 @@ function StatCard({ label, value, sub, accent, onClick }) {
 
 function Collapsible({ title, subtitle, children, defaultOpen = false }) {
   const { T } = useApp();
-  const [open, setOpen] = useState(defaultOpen);
+  // Build 15, 7G — every collapsible/dropdown starts CLOSED on each mount, no exceptions. They
+  // already defaulted closed and remount (re-close) on tab re-entry; this hard-locks it so
+  // nothing can ever initialize one open. Tap to expand.
+  const [open, setOpen] = useState(false);
   return (
     <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, overflow: "hidden", marginBottom: 14 }}>
       <button onClick={() => setOpen(o => !o)}
