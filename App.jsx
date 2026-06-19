@@ -22611,12 +22611,21 @@ export default function App({ authEmail = "", onSignOut }) {
 
   const [dbError, setDbError] = useState(null);
   useEffect(() => {
+    let pending = null;
     const onStatus = (e) => {
-      if (e.detail.type === "error") setDbError(e.detail.msg);
-      else setDbError(null);
+      if (e.detail.type === "error") {
+        // Debounce: a single transient blip (cellular hiccup / token-refresh race) self-heals on
+        // the next save, so don't alarm immediately — only show if it's still unresolved after ~5s.
+        if (pending) return;
+        const msg = e.detail.msg;
+        pending = setTimeout(() => { pending = null; setDbError(msg); }, 5000);
+      } else {
+        if (pending) { clearTimeout(pending); pending = null; }
+        setDbError(null);
+      }
     };
     document.addEventListener("sps-db-status", onStatus);
-    return () => document.removeEventListener("sps-db-status", onStatus);
+    return () => { if (pending) clearTimeout(pending); document.removeEventListener("sps-db-status", onStatus); };
   }, []);
 
   // Track unread message count for nav badge
@@ -22888,8 +22897,10 @@ export default function App({ authEmail = "", onSignOut }) {
       }
     });
 
-    // Update clients with QB IDs
-    setClients(updatedClients);
+    // Update clients with QB IDs — but ONLY when tagging actually changed something. Previously this
+    // wrote sps_clients on every app open (always a fresh array), fanning a redundant realtime read
+    // to every connected device for nothing.
+    if (JSON.stringify(updatedClients) !== JSON.stringify(currentClients)) setClients(updatedClients);
 
     // Map QB invoices to SPS format with clientId resolved
     const newInvoices = qbInvoices.map(qi => {
