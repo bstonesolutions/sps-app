@@ -22856,22 +22856,30 @@ export default function App({ authEmail = "", onSignOut }) {
     // Build client lookup maps from current clients snapshot
     const currentClients = clients || [];
 
-    // Build map: qbCustomerId -> spsClientId, matching by NAME only. Email is intentionally NOT a
-    // match key — multiple clients can legitimately share an email (e.g. the owner's, to receive a
-    // copy), which would cross-attribute their invoices to one client. QB customers map 1:1 by name.
+    // Match QB customers to clients by NAME, with email as a SECONDARY key ONLY for emails that are
+    // UNIQUE to one client. A shared email (e.g. the owner's, set on several clients to receive a
+    // copy) is NOT a match key — it would cross-attribute their invoices to one client. So a unique
+    // email still links a client whose QB name differs slightly, while shared emails fall to name.
     const qbIdToClientId = {};
     const nameToClientId = {};
-
-    // Index SPS clients by name for fast lookup
+    const emailToClientId = {};
+    const emailCounts = {};
+    currentClients.forEach(c => {
+      const e = (c.email || "").toLowerCase().trim();
+      if (e) emailCounts[e] = (emailCounts[e] || 0) + 1;
+    });
     currentClients.forEach(c => {
       if (c.name) nameToClientId[c.name.toLowerCase().trim()] = c.id;
+      const e = (c.email || "").toLowerCase().trim();
+      if (e && emailCounts[e] === 1) emailToClientId[e] = c.id; // unique emails only
     });
 
     // Match QB customers to SPS clients
     const updatedClients = currentClients.map(c => ({ ...c }));
     (qbCustomers || []).forEach(qc => {
-      const nameKey = (qc.name || "").toLowerCase().trim();
-      const matchId = nameToClientId[nameKey];
+      const nameKey  = (qc.name  || "").toLowerCase().trim();
+      const emailKey = (qc.email || "").toLowerCase().trim();
+      const matchId  = nameToClientId[nameKey] || emailToClientId[emailKey];
       if (matchId) {
         qbIdToClientId[qc.qbId] = matchId;
         // Tag the matching client with their QB ID
