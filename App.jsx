@@ -22856,22 +22856,22 @@ export default function App({ authEmail = "", onSignOut }) {
     // Build client lookup maps from current clients snapshot
     const currentClients = clients || [];
 
-    // Build map: qbCustomerId -> spsClientId, using name + email matching
+    // Build map: qbCustomerId -> spsClientId, matching by NAME only. Email is intentionally NOT a
+    // match key — multiple clients can legitimately share an email (e.g. the owner's, to receive a
+    // copy), which would cross-attribute their invoices to one client. QB customers map 1:1 by name.
     const qbIdToClientId = {};
     const nameToClientId = {};
 
-    // Index SPS clients by name and email for fast lookup
+    // Index SPS clients by name for fast lookup
     currentClients.forEach(c => {
-      if (c.name)  nameToClientId[c.name.toLowerCase().trim()]  = c.id;
-      if (c.email) nameToClientId[c.email.toLowerCase().trim()] = c.id;
+      if (c.name) nameToClientId[c.name.toLowerCase().trim()] = c.id;
     });
 
     // Match QB customers to SPS clients
     const updatedClients = currentClients.map(c => ({ ...c }));
     (qbCustomers || []).forEach(qc => {
-      const nameKey  = (qc.name  || "").toLowerCase().trim();
-      const emailKey = (qc.email || "").toLowerCase().trim();
-      const matchId  = nameToClientId[nameKey] || nameToClientId[emailKey];
+      const nameKey = (qc.name || "").toLowerCase().trim();
+      const matchId = nameToClientId[nameKey];
       if (matchId) {
         qbIdToClientId[qc.qbId] = matchId;
         // Tag the matching client with their QB ID
