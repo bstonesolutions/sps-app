@@ -23162,6 +23162,15 @@ export default function App({ authEmail = "", onSignOut }) {
 
   const handleOfficeAlert = (a) => setOfficeAlerts(list => [{ id: Date.now(), resolved: false, ...a }, ...list]);
   const handleResolveAlert = (id) => setOfficeAlerts(list => list.filter(a => a.id !== id));
+  // Server-mediated client write (Step 2): once app_state is locked to staff-only, client actions
+  // must NOT write whole arrays from the device — route them through api/portal-action, which
+  // applies a targeted, ownership-checked change with the service-role key. clientServerMode() is
+  // true when the portal is running off the scoped server slice (portalData) rather than the arrays.
+  const clientServerMode = () => !!(portalData && portalData.client);
+  const portalAction = (action, payload) =>
+    authHeaders({ "Content-Type": "application/json" }).then(h =>
+      fetch(`${PROD_URL}/api/portal-action`, { method: "POST", headers: h, body: JSON.stringify({ action, payload }) })
+    ).catch(() => {});
 
   // Email the owner for an Owner-Alerts event, if that event's email channel is on
   // (Settings > Business > Owner Alerts). The in-app alert is the durable record,
@@ -23200,7 +23209,8 @@ export default function App({ authEmail = "", onSignOut }) {
 
   // client service requests land as office alerts so staff see them on the dashboard
   const handleServiceRequest = (req) => {
-    handleOfficeAlert({ title: `Service Request: ${req.clientName}`, body: `${req.type}${req.dates ? " · " + req.dates : ""}${req.notes ? " — " + req.notes : ""}`, type: "request", clientId: req.clientId });
+    const alert = { title: `Service Request: ${req.clientName}`, body: `${req.type}${req.dates ? " · " + req.dates : ""}${req.notes ? " — " + req.notes : ""}`, type: "request", clientId: req.clientId };
+    if (clientServerMode()) portalAction("officeAlert", { alert }); else handleOfficeAlert(alert);
     notifyOwnerEmail("service_request", {
       subject: `Service request: ${req.clientName}`,
       heading: `${req.clientName} requested service`,
@@ -23215,17 +23225,22 @@ export default function App({ authEmail = "", onSignOut }) {
   // Store a client's service rating on their most recent visit, and route low
   // ratings (private feedback) straight to the office so Brandon can make it right.
   const handleRateVisit = ({ clientId, visitDate, rating, feedback }) => {
-    setClients(prev => (prev || []).map(c => {
-      if (String(c.id) !== String(clientId)) return c;
-      const hist = (c.history || []).slice();
-      const idx = visitDate ? hist.findIndex(h => h.date === visitDate) : 0;
-      const at = idx >= 0 ? idx : 0;
-      if (hist[at]) hist[at] = { ...hist[at], clientRating: rating, clientFeedback: feedback || "", ratedAt: Date.now() };
-      return { ...c, history: hist };
-    }));
+    if (clientServerMode()) {
+      portalAction("rateVisit", { visitDate, rating, feedback });
+    } else {
+      setClients(prev => (prev || []).map(c => {
+        if (String(c.id) !== String(clientId)) return c;
+        const hist = (c.history || []).slice();
+        const idx = visitDate ? hist.findIndex(h => h.date === visitDate) : 0;
+        const at = idx >= 0 ? idx : 0;
+        if (hist[at]) hist[at] = { ...hist[at], clientRating: rating, clientFeedback: feedback || "", ratedAt: Date.now() };
+        return { ...c, history: hist };
+      }));
+    }
     if (rating && rating <= 3) {
-      const c = (clients || []).find(x => String(x.id) === String(clientId));
-      handleOfficeAlert({ title: `Service Feedback: ${c?.name || "Client"}`, body: `${rating}★${feedback ? ` — ${feedback}` : ""}`, type: "feedback", clientId });
+      const c = clientServerMode() ? portalData.client : (clients || []).find(x => String(x.id) === String(clientId));
+      const fbAlert = { title: `Service Feedback: ${c?.name || "Client"}`, body: `${rating}★${feedback ? ` — ${feedback}` : ""}`, type: "feedback", clientId };
+      if (clientServerMode()) portalAction("officeAlert", { alert: fbAlert }); else handleOfficeAlert(fbAlert);
       notifyOwnerEmail("low_rating", {
         subject: `Low rating (${rating}★): ${c?.name || "Client"}`,
         heading: `${c?.name || "A client"} left a ${rating}★ rating`,
@@ -23270,7 +23285,7 @@ export default function App({ authEmail = "", onSignOut }) {
   };
 
   const handleUpgradeRequest = (req) => {
-    handleOfficeAlert({
+    const alert = {
       title: `Upgrade Request: ${req.clientName}`,
       body: req.message || "No additional message.",
       type: "upgrade_request",
@@ -23281,7 +23296,8 @@ export default function App({ authEmail = "", onSignOut }) {
       submittedAt: req.submittedAt,
       upgradeStep: 0,
       date: new Date().toLocaleDateString("en-US"),
-    });
+    };
+    if (clientServerMode()) portalAction("officeAlert", { alert }); else handleOfficeAlert(alert);
     notifyOwnerEmail("upgrade_request", {
       subject: `Upgrade request: ${req.clientName} → ${req.requestedPlan}`,
       heading: `${req.clientName} wants to upgrade`,
@@ -23453,7 +23469,10 @@ export default function App({ authEmail = "", onSignOut }) {
       <SPSClientPortal
         client={portalClient}
         estimates={sData ? sData.estimates : estimatesRaw}
-        onApproveEstimate={(id, status) => setEstimatesRaw(prev => (prev||[]).map(e => String(e.id) === String(id) ? { ...e, status } : e))}
+        onApproveEstimate={(id, status) => {
+          if (clientServerMode()) { setPortalData(pd => ({ ...pd, estimates: (pd.estimates||[]).map(e => String(e.id)===String(id) ? {...e, status} : e) })); portalAction("approveEstimate", { id, status }); }
+          else setEstimatesRaw(prev => (prev||[]).map(e => String(e.id) === String(id) ? { ...e, status } : e));
+        }}
         schedule={sData ? sData.schedule : schedule}
         invoices={sData ? sData.invoices : invoices}
         invoicing={sData ? (sData.invoicing || invoicing) : invoicing}
@@ -23473,7 +23492,11 @@ export default function App({ authEmail = "", onSignOut }) {
           message: (body ? `"${body}"\n\n` : "") + `Open the app to reply: ${PROD_URL}`,
           rows: [["Client", portalClient.name]],
         })}
-        onSavePrefs={(notifyPrefs) => { _lastLocalPrefWriteAt = Date.now(); setClients(cs => (cs || []).map(c => String(c.id) === String(portalClient.id) ? { ...c, notifyPrefs } : c)); }}
+        onSavePrefs={(notifyPrefs) => {
+          _lastLocalPrefWriteAt = Date.now();
+          if (clientServerMode()) { setPortalData(pd => ({ ...pd, client: { ...pd.client, notifyPrefs } })); portalAction("savePrefs", { notifyPrefs }); }
+          else setClients(cs => (cs || []).map(c => String(c.id) === String(portalClient.id) ? { ...c, notifyPrefs } : c));
+        }}
       />
     );
   }
