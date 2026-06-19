@@ -2893,6 +2893,7 @@ function ClockInOut({ me, T }) {
 function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onOpenAlert, onOpenStop, onNav, catalog, onConfirmUpgrade, userName, me, scheduleCfg, reminderLog, vp = {} }) {
   const { T, perms } = useApp();
   const [editing, setEditing] = useState(false);
+  const [statPicker, setStatPicker] = useState(false);
 
   // Find the schedule entry that matches today's actual date (not just the first row)
   const todayKey = fmtMDY(new Date());
@@ -2904,6 +2905,40 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
   const outstandingClients = (clients || []).map(c => ({ c, owed: clientOutstanding(c, invoices) })).filter(x => x.owed > 0);
   const outstandingTotal = outstandingClients.reduce((s, x) => s + x.owed, 0);
   const money = (n) => `$${Math.round(n).toLocaleString()}`;
+
+  // Customizable Home stat tiles — a catalog of metrics the owner can pick from (perms-gated).
+  const _now = new Date(), curM = _now.getMonth(), curY = _now.getFullYear();
+  const inCurMonth = (ds) => { const [mm, , yy] = (ds || "").split("/").map(Number); return mm - 1 === curM && yy === curY; };
+  const stopsMonth = (schedule || []).reduce((n, d) => inCurMonth(d.date) ? n + (d.stops || []).length : n, 0);
+  const collectedMonth = (invoices || []).reduce((s, iv) => {
+    if (iv.status !== "Paid" && effectiveStatus(iv) !== "Paid") return s;
+    const pd = iv.paidDate || iv.date; let d = null;
+    if (pd) { if (pd.includes("/")) { const [mm, dd, yy] = pd.split("/").map(Number); d = new Date(yy, mm - 1, dd); } else d = new Date(pd); }
+    return (d && d.getMonth() === curM && d.getFullYear() === curY) ? s + invoiceTotals(iv).total : s;
+  }, 0);
+  const laborMonth = (clients || []).reduce((s, c) => s + (c.history || []).reduce((a, h) => (h.breakdown && inCurMonth(h.date)) ? a + (Number(h.breakdown.labor) || 0) : a, 0), 0);
+  const STAT_CATALOG = {
+    activeClients:  { label: "Active Clients",  value: clients.length, sub: "All divisions", accent: T.primary, onClick: () => onNav("clients", {}) },
+    stopsToday:     { label: "Stops Today",     value: today.stops.length, sub: "Tap to view", accent: T.primary, onClick: () => onNav("schedule") },
+    stopsMonth:     { label: "Stops (mo)",      value: stopsMonth, sub: "This month", accent: T.primary, onClick: () => onNav("schedule") },
+    jobsMonth:      { label: "Jobs (mo)",       value: ma.jobs, sub: "Completed", accent: T.accent, onClick: (perms.seeReportsPnl || perms.isAdmin) ? () => onNav("reports") : undefined },
+    outstanding:    { label: "Outstanding",     value: money(outstandingTotal), sub: `${outstandingClients.length} ${outstandingClients.length === 1 ? "client" : "clients"}`, accent: outstandingTotal > 0 ? T.warning : T.accent, onClick: () => onNav("invoices", { invoiceFilter: "Overdue" }), perm: "seeBalances" },
+    collectedMonth: { label: "Collected (mo)",  value: money(collectedMonth), sub: "Cash in", accent: T.accent, perm: "seeBalances" },
+    revenueMonth:   { label: "Revenue (mo)",    value: money(ma.revenue), sub: "Job revenue", accent: T.text, perm: "seeProfit" },
+    costsMonth:     { label: "Costs (mo)",      value: money(ma.cost), sub: "Job costs", accent: T.textMuted, perm: "seeProfit" },
+    profitMonth:    { label: "Profit (mo)",     value: money(ma.profit), sub: `${ma.jobs} jobs`, accent: ma.profit >= 0 ? T.accent : "#C0392B", onClick: (perms.seeReportsPnl || perms.isAdmin) ? () => onNav("reports") : undefined, perm: "seeProfit" },
+    laborMonth:     { label: "Labor (mo)",      value: money(laborMonth), sub: "Payroll cost", accent: T.textMuted, perm: "seeProfit" },
+  };
+  const STAT_ORDER = ["activeClients", "stopsToday", "stopsMonth", "jobsMonth", "outstanding", "collectedMonth", "revenueMonth", "costsMonth", "profitMonth", "laborMonth"];
+  const DEFAULT_STAT_TILES = ["activeClients", "stopsToday", "outstanding", "profitMonth"];
+  const canSeeMetric = (mid) => { const p = STAT_CATALOG[mid] && STAT_CATALOG[mid].perm; return !p || perms[p]; };
+  const statTiles = (((home && home.statTiles) || DEFAULT_STAT_TILES).filter(mid => STAT_CATALOG[mid] && canSeeMetric(mid))).slice(0, 4);
+  const shownTiles = statTiles.length ? statTiles : DEFAULT_STAT_TILES.filter(canSeeMetric).slice(0, 4);
+  const toggleStatTile = (mid) => {
+    const cur = shownTiles;
+    if (cur.includes(mid)) setHome({ ...home, statTiles: cur.filter(x => x !== mid) });
+    else if (cur.length < 4) setHome({ ...home, statTiles: [...cur, mid] });
+  };
 
   // Due appointment reminders (in-app surfacing)
   const remCfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
@@ -2925,37 +2960,16 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
 
   const widget = (id) => {
     if (id === "stats") {
-      const tiles = [
-        {
-          label: "Active Clients", value: clients.length,
-          sub: "All divisions", accent: T.primary,
-          onClick: () => onNav("clients", {}),
-        },
-        {
-          label: "Stops Today", value: today.stops.length,
-          sub: today.stops.length === 1 ? "Tap to view" : "Tap to view schedule", accent: T.primary,
-          onClick: () => onNav("schedule"),
-        },
-      ];
-      if (perms.seeBalances) tiles.push({
-        label: "Outstanding", value: money(outstandingTotal),
-        sub: `${outstandingClients.length} ${outstandingClients.length === 1 ? "client" : "clients"} · tap to view`,
-        accent: outstandingTotal > 0 ? T.warning : T.accent,
-        onClick: () => onNav("invoices", { invoiceFilter: "Overdue" }),
-      });
-      if (perms.seeProfit) tiles.push({
-        label: "Profit (mo)", value: money(ma.profit),
-        sub: (perms.seeReportsPnl || perms.isAdmin) ? `${ma.jobs} jobs · tap for reports` : `${ma.jobs} jobs this month`, accent: ma.profit >= 0 ? T.accent : "#C0392B",
-        onClick: (perms.seeReportsPnl || perms.isAdmin) ? () => onNav("reports") : undefined,
-      });
-      else tiles.push({
-        label: "Jobs (mo)", value: ma.jobs,
-        sub: (perms.seeReportsPnl || perms.isAdmin) ? "Tap to view reports" : "This month", accent: T.accent,
-        onClick: (perms.seeReportsPnl || perms.isAdmin) ? () => onNav("reports") : undefined,
-      });
       return (
-        <div key="stats" style={{ display: "grid", gridTemplateColumns: vp.isDesktop ? "repeat(4, 1fr)" : vp.isTablet ? "repeat(3, 1fr)" : "1fr 1fr", gap: 12, marginBottom: 16 }}>
-          {tiles.map(t => <StatCard key={t.label} label={t.label} value={t.value} sub={t.sub} accent={t.accent} onClick={t.onClick} />)}
+        <div key="stats" style={{ marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }}>
+            <button onClick={() => setStatPicker(true)} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4, padding: 2 }}>
+              <Icon name="edit" size={12} /> Customize
+            </button>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: vp.isDesktop ? "repeat(4, 1fr)" : vp.isTablet ? "repeat(3, 1fr)" : "1fr 1fr", gap: 12 }}>
+            {shownTiles.map(mid => { const t = STAT_CATALOG[mid]; return <StatCard key={mid} label={t.label} value={t.value} sub={t.sub} accent={t.accent} onClick={t.onClick} />; })}
+          </div>
         </div>
       );
     }
@@ -3175,6 +3189,34 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
           }}
           onClose={() => setUpgradeModal(null)}
         />
+      )}
+      {/* Customize the Home stat tiles */}
+      {statPicker && (
+        <Modal title="Customize home tiles" onClose={() => setStatPicker(false)}>
+          <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 14, lineHeight: 1.5 }}>
+            Pick up to 4 to show at the top of Home. ({shownTiles.length}/4 selected)
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {STAT_ORDER.filter(canSeeMetric).map(mid => {
+              const on = shownTiles.includes(mid);
+              const full = !on && shownTiles.length >= 4;
+              const t = STAT_CATALOG[mid];
+              return (
+                <button key={mid} onClick={() => { if (!full) toggleStatTile(mid); }} disabled={full}
+                  style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "12px 14px", borderRadius: 12, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.08) : T.surface, cursor: full ? "default" : "pointer", fontFamily: "inherit", opacity: full ? 0.5 : 1, textAlign: "left" }}>
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{t.label}</div>
+                    <div style={{ fontSize: 12, color: T.textMuted }}>{t.sub}</div>
+                  </div>
+                  <div style={{ width: 22, height: 22, borderRadius: "50%", border: `2px solid ${on ? T.primary : T.border}`, background: on ? T.primary : "transparent", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    {on && <Icon name="check" size={13} />}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <Btn onClick={() => setStatPicker(false)} block style={{ marginTop: 18 }}>Done</Btn>
+        </Modal>
       )}
     </div>
   );
