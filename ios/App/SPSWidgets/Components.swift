@@ -6,17 +6,26 @@ import SwiftUI
 import WidgetKit
 
 struct LogoMark: View {
-    // Build 15, Item 2 — the brand mark. Slightly larger + rounder so it reads clearly at the
-    // top of every widget; a fixed frame keeps it from being clipped or shifted by the row.
+    // The real brand logo from the app: render the decoded image when present, else the company
+    // monogram in the crimson square. A fixed 22×22 frame keeps the header row consistent.
+    @Environment(\.spsLogo) var logo
     var body: some View {
-        RoundedRectangle(cornerRadius: 6, style: .continuous)
-            .fill(Brand.crimson)
-            .frame(width: 22, height: 22)
-            .overlay(
-                Text("S")
-                    .font(.system(size: 16, weight: .black, design: .rounded))
-                    .foregroundColor(.white)
-            )
+        if let ui = sps_decodeLogo(logo.imageB64) {
+            Image(uiImage: ui)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: 22, height: 22)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        } else {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Brand.crimson)
+                .frame(width: 22, height: 22)
+                .overlay(
+                    Text(logo.mono.isEmpty ? "S" : logo.mono)
+                        .font(.system(size: 16, weight: .black, design: .rounded))
+                        .foregroundColor(.white)
+                )
+        }
     }
 }
 

@@ -41,6 +41,7 @@ struct ClientScheduleView: View {
         }
         .sps_widgetBackground(Brand.surface)
         .environment(\.spsFontDesign, fontDesign)
+        .environment(\.spsLogo, SPSLogo(imageB64: p?.logoImage, mono: p?.logoMono ?? "S"))
         .widgetURL(URL(string: "spsway://schedule"))
     }
 

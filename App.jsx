@@ -22453,6 +22453,26 @@ export default function App({ authEmail = "", onSignOut }) {
   // window today (auto-share — no clock-in needed once location's been allowed once).
   useStaffLocationTracking({ staffId: currentUser ? currentUser.id : null, stops: myTodayStops });
 
+  // Resolve the brand logo to a base64 the native widget can render: a data: URL passes through; a
+  // bundled path (e.g. /icon-192.png) is fetched + encoded. Skipped if it's too large to keep the
+  // App Group payload lean — the widget then falls back to the company-initial monogram.
+  const [widgetLogo, setWidgetLogo] = useState("");
+  useEffect(() => {
+    let alive = true;
+    const li = branding.logoType === "image" ? (branding.logoImage || "") : "";
+    const accept = (u) => { if (alive) setWidgetLogo(typeof u === "string" && u.startsWith("data:") && u.length < 180000 ? u : ""); };
+    if (!li) { setWidgetLogo(""); return; }
+    if (li.startsWith("data:")) { accept(li); return () => { alive = false; }; }
+    (async () => {
+      try {
+        const r = await fetch(li); const blob = await r.blob();
+        const u = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(blob); });
+        accept(u);
+      } catch (_) { if (alive) setWidgetLogo(""); }
+    })();
+    return () => { alive = false; };
+  }, [branding.logoType, branding.logoImage]);
+
   // ── Native iOS home-screen widgets ───────────────────────────────────────────
   // Push a small OWNER snapshot into the App Group shared store so the WidgetKit
   // extension renders with no network + no secrets. Owner only — limited staff never
@@ -22548,6 +22568,8 @@ export default function App({ authEmail = "", onSignOut }) {
         role: "owner",
         updated_at: now.toISOString(),
         app_font: branding.appFont, // widgets render in the app's chosen font (rounded/system/grotesk)
+        logo_image: widgetLogo,                 // the real brand logo (base64) for the widget header
+        logo_mono: logoInitial(branding),       // monogram fallback when there's no image
         profit_week: r2(wk.profit),
         profit_month: r2(mo.profit),
         outstanding_total: r2(outstanding),
@@ -22571,7 +22593,7 @@ export default function App({ authEmail = "", onSignOut }) {
     };
     registerWidgetPush(pushNow);
     pushNow();
-  }, [hydrated, currentUser, clients, invoices, schedule, team, completedSids, branding.appFont]);
+  }, [hydrated, currentUser, clients, invoices, schedule, team, completedSids, branding.appFont, widgetLogo]);
 
   // CLIENT widget snapshot — when a client is signed into the native app, push their
   // next visit + balance so the Service Schedule + Balance Due widgets render (no network,
@@ -22606,7 +22628,7 @@ export default function App({ authEmail = "", onSignOut }) {
           .filter(iv => !["Paid", "paid"].includes(effectiveStatus(iv)) && iv.status !== "Draft" && iv.status !== "draft")
           .sort((a, b) => ((parseMDY(a.dueDate) || 0) - (parseMDY(b.dueDate) || 0)));
 
-        const payload = { role: "client", updated_at: new Date().toISOString(), app_font: branding.appFont };
+        const payload = { role: "client", updated_at: new Date().toISOString(), app_font: branding.appFont, logo_image: widgetLogo, logo_mono: logoInitial(branding) };
         if (nextV) {
           payload.next_visit_at = toISO(nextV.date, nextV.stop.time);
           payload.next_visit_service = nextV.stop.type || "Service Visit";
@@ -22625,7 +22647,7 @@ export default function App({ authEmail = "", onSignOut }) {
     };
     registerWidgetPush(pushClient);
     pushClient();
-  }, [hydrated, currentUser, clientUser, schedule, invoices, completedSids, team, branding.appFont]);
+  }, [hydrated, currentUser, clientUser, schedule, invoices, completedSids, team, branding.appFont, widgetLogo]);
   // Smart reopen on a warm resume (the app wasn't killed):
   //  • backgrounded ~30 min or more  → land on Home with the full splash (fresh start)
   //  • backgrounded under ~30 min     → stay exactly where I left off (no disruption)

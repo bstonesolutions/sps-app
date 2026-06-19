@@ -11,6 +11,8 @@ struct WidgetPayload: Codable {
     var role: String?
     var updatedAt: String?
     var appFont: String?   // the app's chosen font key (rounded/system/grotesk) — widgets match it
+    var logoImage: String? // the brand logo as a base64 data: URL — rendered in the widget header
+    var logoMono: String?  // monogram (company initial) fallback when there's no image logo
 
     // Owner
     var profitWeek: Double?
@@ -42,6 +44,8 @@ struct WidgetPayload: Codable {
         case role
         case updatedAt        = "updated_at"
         case appFont          = "app_font"
+        case logoImage        = "logo_image"
+        case logoMono         = "logo_mono"
         case profitWeek       = "profit_week"
         case profitMonth      = "profit_month"
         case avgEffectiveRate = "avg_effective_rate"

@@ -4,6 +4,7 @@
 
 import SwiftUI
 import WidgetKit
+import UIKit
 
 enum Brand {
     static let crimson      = Color(red: 0xAF / 255.0, green: 0x01 / 255.0, blue: 0x1A / 255.0) // #AF011A
@@ -49,6 +50,28 @@ extension EnvironmentValues {
     var spsFontDesign: Font.Design {
         get { self[SPSFontDesignKey.self] }
         set { self[SPSFontDesignKey.self] = newValue }
+    }
+}
+
+// Brand logo for the widget header: the app passes the logo as a base64 data: URL (logo_image) plus
+// a company-initial monogram (logo_mono). Decode + show the image when present, else the monogram.
+struct SPSLogo {
+    let imageB64: String?
+    let mono: String
+}
+func sps_decodeLogo(_ s: String?) -> UIImage? {
+    guard var str = s, !str.isEmpty else { return nil }
+    if str.hasPrefix("data:"), let comma = str.firstIndex(of: ",") { str = String(str[str.index(after: comma)...]) }
+    guard let data = Data(base64Encoded: str) else { return nil }
+    return UIImage(data: data)
+}
+private struct SPSLogoKey: EnvironmentKey {
+    static let defaultValue = SPSLogo(imageB64: nil, mono: "S")
+}
+extension EnvironmentValues {
+    var spsLogo: SPSLogo {
+        get { self[SPSLogoKey.self] }
+        set { self[SPSLogoKey.self] = newValue }
     }
 }
 
