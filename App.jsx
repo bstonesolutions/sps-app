@@ -1828,19 +1828,36 @@ function monthActuals(clients, when = new Date(), invoices = []) {
   const m = when.getMonth(), y = when.getFullYear();
   let revenue = 0, cost = 0, jobs = 0;
 
-  // JOB-BASED profit: revenue AND cost both come from the SAME completed jobs (the post-job
-  // breakdown a tech logs per stop), so margin is internally consistent and reflects true field
-  // profit. QuickBooks invoices carry NO cost data, so they are intentionally not the basis here —
-  // "Collected (mo)" reports cash collected separately. Only jobs with a logged breakdown count.
+  // Profit from what's IN THE APP: REVENUE = invoices marked Paid this month (their totals now come
+  // straight from QuickBooks), COST = what's logged on completed-job breakdowns (+ any invoice line
+  // costs). So the number moves with money collected. Falls back to logged-job revenue only when no
+  // invoice has been paid yet this month.
   (clients || []).forEach(c => (c.history || []).forEach(h => {
     if (!h.breakdown) return;
     const [mm, dd, yy] = (h.date || "").split("/").map(Number);
-    if (mm - 1 === m && yy === y) {
-      revenue += h.breakdown.revenue || 0;
-      cost    += h.breakdown.total   || 0;
-      jobs    += 1;
-    }
+    if (mm - 1 === m && yy === y) { cost += h.breakdown.total || 0; jobs += 1; }
   }));
+  (invoices || []).forEach(iv => {
+    if (iv.status !== "Paid" && effectiveStatus(iv) !== "Paid") return;
+    const paidDate = iv.paidDate || iv.date;
+    let d = null;
+    if (paidDate) {
+      if (paidDate.includes("/")) { const [mm, dd, yy] = paidDate.split("/").map(Number); d = new Date(yy, mm - 1, dd); }
+      else d = new Date(paidDate);
+    }
+    if (d && d.getMonth() === m && d.getFullYear() === y) {
+      const t = invoiceTotals(iv);
+      revenue += t.total;
+      if (t.cost) cost += t.cost;
+    }
+  });
+  if (revenue === 0) {
+    (clients || []).forEach(c => (c.history || []).forEach(h => {
+      if (!h.breakdown) return;
+      const [mm, dd, yy] = (h.date || "").split("/").map(Number);
+      if (mm - 1 === m && yy === y) revenue += h.breakdown.revenue || 0;
+    }));
+  }
 
   return { revenue, cost, profit: revenue - cost, jobs };
 }
@@ -22466,14 +22483,17 @@ export default function App({ authEmail = "", onSignOut }) {
       // the weekly figure is computed the same way as the monthly one.
       const rangeProfit = (start, end) => {
         let revenue = 0, cost = 0, jobs = 0;
-        // Job-based (matches monthActuals): revenue + cost both from the SAME completed jobs, so the
-        // widget profit is a true field margin and isn't inflated by QB invoices that carry no cost.
+        // Matches monthActuals: cost from logged job breakdowns, revenue from invoices PAID in range.
         (clients || []).forEach((c) => (c.history || []).forEach((h) => {
-          if (h.breakdown && inRange(h.date, start, end)) {
-            revenue += h.breakdown.revenue || 0;
-            cost    += h.breakdown.total   || 0;
-            jobs    += 1;
-          }
+          if (h.breakdown && inRange(h.date, start, end)) { cost += h.breakdown.total || 0; jobs += 1; }
+        }));
+        (invoices || []).forEach((iv) => {
+          if (iv.status !== "Paid" && effectiveStatus(iv) !== "Paid") return;
+          if (!inRange(iv.paidDate || iv.date, start, end)) return;
+          const t = invoiceTotals(iv); revenue += t.total; if (t.cost) cost += t.cost;
+        });
+        if (revenue === 0) (clients || []).forEach((c) => (c.history || []).forEach((h) => {
+          if (h.breakdown && inRange(h.date, start, end)) revenue += h.breakdown.revenue || 0;
         }));
         return { profit: revenue - cost, jobs };
       };
