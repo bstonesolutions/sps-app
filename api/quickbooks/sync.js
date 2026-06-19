@@ -115,6 +115,8 @@ export default async function handler(req, res) {
         date:         inv.TxnDate,
         dueDate:      inv.DueDate,
         total:        inv.TotalAmt,
+        taxAmount:    totalTax,                                   // QB's authoritative sales tax (TxnTaxDetail.TotalTax)
+        subTotal:     (parseFloat(inv.TotalAmt) || 0) - totalTax, // QB Invoice has no SubTotal field — derive
         balance:      inv.Balance,
         taxRate,
         source:       'quickbooks',

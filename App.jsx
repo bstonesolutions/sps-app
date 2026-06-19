@@ -1964,11 +1964,16 @@ const addDaysMDY = (s, days) => { const dt = parseMDY(s) || new Date(); dt.setDa
 
 const invoiceTotals = (inv) => {
   const n = (v) => parseFloat(v) || 0;
-  // QB-imported invoices with no editable line items store a pre-calculated total.
-  // App-created invoices (even after pushing to QB) always compute from their line items.
-  if (inv.source === "quickbooks" && (!inv.lineItems || inv.lineItems.length === 0)) {
+  // QuickBooks-synced invoices: trust QB's AUTHORITATIVE TotalAmt / TotalTax / Balance — do NOT
+  // recompute from line items (qty*unitPrice + a re-derived rate drifts from QB on rounding and
+  // multi-rate tax). So every report reads the same revenue + sales tax QuickBooks shows. App-made
+  // invoices — and a QB invoice the owner edits in-app (locallyEdited) — still recompute below.
+  if (inv.source === "quickbooks" && inv.total != null && inv.locallyEdited !== true) {
     const total = n(inv.total);
-    return { subtotal: total, grossSubtotal: total, taxableBase: 0, tax: 0, total, discountTotal: 0, lineDiscountTotal: 0, invDiscount: 0, cost: 0, profit: 0, margin: 0 };
+    const tax = n(inv.taxAmount);
+    const subtotal = inv.subTotal != null ? n(inv.subTotal) : Math.max(0, total - tax);
+    const balance = inv.balance != null ? n(inv.balance) : total;
+    return { subtotal, grossSubtotal: subtotal, taxableBase: subtotal, tax, total, balance, discountTotal: 0, lineDiscountTotal: 0, invDiscount: 0, cost: 0, profit: 0, margin: 0 };
   }
   const items = inv.lineItems || [];
   // Per-line: gross = qty * unitPrice, then subtract the line discount (flat $ or %)
@@ -2006,7 +2011,7 @@ const invoiceTotals = (inv) => {
   const profit = subtotal - cost;
   const margin = subtotal > 0 ? (profit / subtotal) * 100 : 0;
 
-  return { subtotal, grossSubtotal, taxableBase, tax, total: subtotal + tax, discountTotal, lineDiscountTotal, invDiscount, cost, profit, margin };
+  return { subtotal, grossSubtotal, taxableBase, tax, total: subtotal + tax, balance: inv.balance != null ? n(inv.balance) : (subtotal + tax), discountTotal, lineDiscountTotal, invDiscount, cost, profit, margin };
 };
 // a Sent invoice past its due date reads as Overdue
 const effectiveStatus = (inv) => {
@@ -2096,7 +2101,7 @@ const clientOutstanding = (client, invoices) => {
     const isPaidStatus = (iv) => ["Paid","paid"].includes(effectiveStatus(iv));
     return list
       .filter(iv => !isPaidStatus(iv) && iv.status !== "Draft" && iv.status !== "draft")
-      .reduce((s, iv) => s + invoiceTotals(iv).total, 0);
+      .reduce((s, iv) => s + invoiceTotals(iv).balance, 0); // remaining owed (QB Balance for synced), not full total
   }
   return parseFloat((client.balance || "").replace(/[^\d.]/g, "")) || 0;
 };
@@ -18876,6 +18881,8 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
   };
 
   const ivTotal = (iv) => invoiceTotals(iv).total;
+  const ivBalance = (iv) => invoiceTotals(iv).balance;   // what's still owed (QB Balance for synced)
+  const ivTax = (iv) => invoiceTotals(iv).tax;            // QB's actual sales tax for synced invoices
 
   const ivDate = (iv) => parseDate(iv.paidDate || iv.date) || new Date(iv.createdAt || 0);
 
@@ -18886,9 +18893,10 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
   const openInvoices  = allInvoices.filter(iv => !isPaid(iv) && iv.status !== "Draft" && iv.status !== "draft");
 
   const sumTotal = (arr) => arr.reduce((s, iv) => s + ivTotal(iv), 0);
-  const revenue   = sumTotal(periodPaid);
-  const pipeline  = sumTotal(openInvoices);
+  const revenue   = sumTotal(periodPaid);                                  // straight from QB TotalAmt
+  const pipeline  = openInvoices.reduce((s, iv) => s + ivBalance(iv), 0);  // owed = balance, not full total
   const allRevenue = sumTotal(allInvoices.filter(isPaid));
+  const salesTaxCollected = periodPaid.reduce((s, iv) => s + ivTax(iv), 0); // QB sales tax on paid invoices
 
   // ── Jobs ──
   const allHistory = (clients||[]).flatMap(c => (c.history||[]).map(h => ({ ...h, clientId: c.id, division: c.division })));
@@ -19124,6 +19132,7 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
           {[
             { label: "Collected", value: money(revenue), sub: `${periodPaid.length} invoices`, color: T.accent },
             { label: "Outstanding", value: money(pipeline), sub: `${openInvoices.length} open`, color: T.warning },
+            { label: "Sales Tax", value: money(salesTaxCollected), sub: "Collected · from QuickBooks", color: T.text },
           ].map(s => (
             <div key={s.label} style={{ background: T.surface, borderRadius: 16, padding: "16px 16px", border: `1px solid ${T.border}` }}>
               <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>{s.label}</div>
@@ -22943,6 +22952,8 @@ export default function App({ authEmail = "", onSignOut }) {
         ...(qi.lateFeeAppliedAt ? { lateFeeAppliedAt: qi.lateFeeAppliedAt } : {}),
         total:      String(qi.total),
         balance:    qi.balance,
+        taxAmount:  qi.taxAmount,   // QB's authoritative sales tax + subtotal so reports match QB
+        subTotal:   qi.subTotal,
         // Build 15, Item 3 — richer QB reporting fields (sent/paid dates, email state, partial).
         qbEmailStatus:  qi.qbEmailStatus || "NotSet",
         sentDate:       qi.sentDate || null,
@@ -22987,6 +22998,8 @@ export default function App({ authEmail = "", onSignOut }) {
           status:   qi.status  || iv.status,
           total:    qi.total   != null ? qi.total   : iv.total,
           balance:  qi.balance != null ? qi.balance : iv.balance,
+          taxAmount: qi.taxAmount != null ? qi.taxAmount : iv.taxAmount,
+          subTotal:  qi.subTotal  != null ? qi.subTotal  : iv.subTotal,
           dueDate:  qi.dueDate || iv.dueDate,
           paymentLink: iv.paymentLink || qi.paymentLink,
           // Build 15, Item 3 — refresh QB reporting; keep a manually-recorded paidDate if set.
