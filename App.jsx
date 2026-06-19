@@ -1083,14 +1083,18 @@ function validateTeamWrite(next, prev) {
   const prevOwnerHadEmail = prevOwners.some(m => (m.email || "").trim());
   const nextOwnerHasEmail = owners.some(m => (m.email || "").trim());
   if (prevOwnerHadEmail && !nextOwnerHasEmail) return prevArr;
-  // Actor fence (Build 15, Item 1): a non-owner may never change a role, the owner identity,
-  // or who is on the team — blocks every silent-promotion path, from any screen or action.
-  const roleSig = a => JSON.stringify(a.map(m => [String(m.id), m.role || ""]).sort());
-  const idSig = a => JSON.stringify(a.map(m => String(m.id)).sort());
-  if (!ACTOR_IS_OWNER && prevArr.length && (roleSig(next) !== roleSig(prevArr) || idSig(next) !== idSig(prevArr))) return prevArr;
+  // Actor fence (Build 15, Item 1, refined): a non-owner may never change WHO the owner is — the
+  // only real silent-promotion vector. The earlier version also reverted ANY role/membership
+  // change, which could silently undo the OWNER's own legit edits whenever owner-detection was
+  // momentarily off (e.g. a flaky load left currentUser null). Routine staff-role/info edits are
+  // already admin-gated, so only the owner identity is fenced here.
+  const ownerSig = a => a.filter(m => m.role === "owner").map(m => String(m.id)).sort().join(",");
+  if (!ACTOR_IS_OWNER && prevArr.length && ownerSig(next) !== ownerSig(prevArr)) {
+    try { console.warn("[team-guard] blocked owner-identity change by a non-owner actor", { from: ownerSig(prevArr), to: ownerSig(next) }); } catch (_) {}
+    return prevArr;
+  }
   // Guardrail snapshot — before a write that changes WHO the owner is, stash the previous
   // team so an accidental change is revertable and the diff is visible.
-  const ownerSig = a => a.filter(m => m.role === "owner").map(m => String(m.id)).sort().join(",");
   if (ownerSig(next) !== ownerSig(prevArr)) {
     try { localStorage.setItem("sps_team_prev", JSON.stringify({ at: new Date().toISOString(), team: prevArr })); } catch (_) {}
     try { console.warn("[team-guard] owner identity change", { from: ownerSig(prevArr), to: ownerSig(next), byOwner: ACTOR_IS_OWNER }); } catch (_) {}
@@ -22646,6 +22650,25 @@ export default function App({ authEmail = "", onSignOut }) {
     };
     document.addEventListener("sps-db-status", onStatus);
     return () => { if (pending) clearTimeout(pending); document.removeEventListener("sps-db-status", onStatus); };
+  }, []);
+
+  // Recover from a FAILED initial database read. supabaseClient's _init serves an EMPTY cache on a
+  // failed first SELECT (every useStoredState then falls back to its DEFAULT — the "team reset to
+  // seeded Brandon+David" / "nothing saved" symptom) and never retries within the session. So when
+  // the init-failure signal fires, reset the cache + reload to re-fetch the real data — capped to a
+  // few attempts so a genuine outage can't loop, and cleared the moment a load succeeds.
+  useEffect(() => {
+    const onStatus = (e) => {
+      if (e.detail.type === "ok") { try { sessionStorage.removeItem("sps_init_retry"); } catch (_) {} return; }
+      if (e.detail.type !== "error" || !/reach the database/i.test(e.detail.msg || "")) return; // only the _init read failure
+      let n = 0; try { n = parseInt(sessionStorage.getItem("sps_init_retry") || "0", 10) || 0; } catch (_) {}
+      if (n >= 3) return; // give up auto-retry; the on-screen Retry button + banner take over
+      try { sessionStorage.setItem("sps_init_retry", String(n + 1)); } catch (_) {}
+      try { store.reset(); } catch (_) {}
+      setTimeout(() => { try { window.location.reload(); } catch (_) {} }, 1200 * (n + 1));
+    };
+    document.addEventListener("sps-db-status", onStatus);
+    return () => document.removeEventListener("sps-db-status", onStatus);
   }, []);
 
   // Track unread message count for nav badge
