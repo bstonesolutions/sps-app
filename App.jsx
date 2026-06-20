@@ -78,6 +78,30 @@ async function authHeaders(extra = {}) {
 // When THIS device saves a client's own comm prefs, note the time so the sps_clients realtime
 // merge won't momentarily revert the in-flight edit before its save lands (diagnostic L1).
 let _lastLocalPrefWriteAt = 0;
+
+// True once the initial Supabase read has confirmed real data this session. While it's false — the
+// very FIRST read failed — every useStoredState is sitting on its DEFAULT, so persisting would write
+// that default over the real saved row (the "team reset to seeded Brandon+David" clobber). The save
+// effect refuses to write until this flips true. It only goes false on the _init READ failure; a
+// later WRITE failure ("Save failed") leaves it true (we already loaded real data — edits are valid).
+let DB_READ_OK = false;
+if (typeof document !== "undefined") {
+  document.addEventListener("sps-db-status", (e) => {
+    const d = (e && e.detail) || {};
+    if (d.type === "ok") DB_READ_OK = true;
+    else if (d.type === "error" && /reach the database/i.test(d.msg || "")) DB_READ_OK = false;
+  });
+}
+
+// Reload, but first drain any queued (failed) writes so an edit that was mid-retry isn't lost when
+// the document is torn down. Hard-capped so a stuck flush can never block the reload indefinitely.
+function reloadAfterDrain(delay = 0) {
+  let done = false;
+  const go = () => { if (done) return; done = true; try { window.location.reload(); } catch (_) {} };
+  try { Promise.resolve(store.flush()).then(() => setTimeout(go, delay), () => setTimeout(go, delay)); }
+  catch (_) { setTimeout(go, delay); }
+  setTimeout(go, 2500);
+}
 const qbIsConnected = () => { try { return localStorage.getItem("qb_connected") === "1"; } catch { return false; } };
 const qbSetConnected = (v) => { try { v ? localStorage.setItem("qb_connected", "1") : localStorage.removeItem("qb_connected"); } catch {} };
 const qbCheckStatus = async () => {
@@ -365,12 +389,27 @@ function useStoredState(key, initial) {
   // over real saved data (the remount/failed-read overwrite that lost stops, notes, tasks).
   useEffect(() => {
     if (!loaded) return;
+    // Bug #1 — refuse to persist while the initial read FAILED. The cache is empty, so `value` is
+    // this key's DEFAULT; writing it would clobber the real saved row. The auto-retry reload will
+    // re-fetch real data, after which writes resume normally.
+    if (!DB_READ_OK) return;
     const json = JSON.stringify(value);
     if (json === lastPersisted.current) return;
-    lastPersisted.current = json;
-    store.set(key, json);
-    // Notify App of a save so the sync indicator can pulse
-    if (typeof window.__onSpsSync === "function") window.__onSpsSync();
+    if (typeof window.__onSpsSyncStart === "function") window.__onSpsSyncStart();
+    let cancelled = false;
+    (async () => {
+      const res = await store.set(key, json);
+      if (cancelled) return;
+      if (res && res.ok) {
+        // Bug #2 — advance the fence ONLY after a CONFIRMED save. On failure the value is queued for
+        // durable retry and lastPersisted stays put, so the next edit (or a reconnect flush) re-sends it.
+        lastPersisted.current = json;
+        if (typeof window.__onSpsSync === "function") window.__onSpsSync();
+      } else if (typeof window.__onSpsSyncFail === "function") {
+        window.__onSpsSyncFail();
+      }
+    })();
+    return () => { cancelled = true; };
   }, [key, value, loaded]);
   return [value, setValue, loaded];
 }
@@ -2693,9 +2732,15 @@ function useStaffLocationTracking(opts) {
 
     const sync = () => {
       const shift = readShift();
-      const shiftWant = shift && shift.staffId && shift.track !== false ? String(shift.staffId) : null;
-      // Respect an explicit per-shift opt-out; otherwise fall back to auto-share.
-      const optedOut = shift && shift.track === false;
+      // Only honor a shift that belongs to the SIGNED-IN user. On a shared crew device, a previous
+      // tech's leftover shift must NEVER make this device broadcast the new signer's GPS to the old
+      // tech's location row. Match the stable email key first (staffId is a fallback for old shifts).
+      const myKey = (optsRef.current && optsRef.current.meKey) || "";
+      const myId = optsRef.current && optsRef.current.staffId != null ? String(optsRef.current.staffId) : "";
+      const shiftMine = !!(shift && shift.startTime && (shift.userKey ? shift.userKey === myKey : String(shift.staffId) === myId));
+      const shiftWant = shiftMine && shift.staffId && shift.track !== false ? String(shift.staffId) : null;
+      // Respect an explicit per-shift opt-out (only for MY shift); otherwise fall back to auto-share.
+      const optedOut = shiftMine && shift.track === false;
       const want = shiftWant || (optedOut ? null : autoShareWant());
       if (want) {
         if (activeId !== want) { if (activeId) stop(activeId); activeId = want; start(want); }
@@ -2710,6 +2755,9 @@ function useStaffLocationTracking(opts) {
     return () => {
       window.removeEventListener("sps-shift-changed", sync);
       clearInterval(iv);
+      // Flip the live-location row inactive on unmount/sign-out so a stale row can't keep showing
+      // "active" (or get hijacked by the next signer) after this user leaves.
+      if (activeId) { try { stop(activeId); } catch (_) {} activeId = null; }
       if (watchId != null && navigator.geolocation) { try { navigator.geolocation.clearWatch(watchId); } catch (_) {} }
     };
   }, []);
@@ -2727,6 +2775,10 @@ const ClockGlyph = ({ size = 20, color = "currentColor" }) => (
 // ─────────────────────────────────────────────
 function ClockInOut({ me, T }) {
   const staffId = me?.id != null ? String(me.id) : "";
+  // Stable identity for the running shift: the signed-in EMAIL never changes, whereas me.id is a
+  // team-array id that shifts when the roster is re-seeded/edited — which used to orphan a live
+  // shift (it showed "clocked out" though the shift was still saved). Match on email first.
+  const meKey = (me?.email || "").trim().toLowerCase();
   const gustoUuid = (me?.gustoEmployeeId || "").trim();
 
   // Restore an active shift that belongs to THIS staff member (ignore another
@@ -2736,7 +2788,10 @@ function ClockInOut({ me, T }) {
       const raw = localStorage.getItem(ACTIVE_SHIFT_KEY);
       if (!raw) return null;
       const s = JSON.parse(raw);
-      if (s && s.startTime && String(s.staffId) === staffId) return s;
+      // Prefer the stable email key; fall back to the legacy staffId match for shifts saved
+      // before userKey existed, so an in-progress shift survives this upgrade.
+      const mine = s && (s.userKey ? s.userKey === meKey : String(s.staffId) === staffId);
+      if (s && s.startTime && mine) return s;
     } catch (_) {}
     return null;
   });
@@ -2772,7 +2827,7 @@ function ClockInOut({ me, T }) {
   const finishClockIn = (track) => {
     setAskLoc(false);
     setResult(null);
-    const s = { startTime: new Date().toISOString(), employeeUuid: gustoUuid, staffId, track: !!track };
+    const s = { startTime: new Date().toISOString(), employeeUuid: gustoUuid, staffId, userKey: meKey, track: !!track };
     try { localStorage.setItem(ACTIVE_SHIFT_KEY, JSON.stringify(s)); } catch (_) {}
     setShift(s);
     try { window.dispatchEvent(new Event("sps-shift-changed")); } catch (_) {}
@@ -15641,7 +15696,7 @@ function BackupRestore() {
           const json = JSON.stringify(await rebuild(refData[key], cur[key]));
           // Build 15, Item 1 — never restore a corrupted team (no owner); it would drop the owner.
           if (!restoreTeamGuard(key, json)) { console.warn("[team-guard] skipped restoring sps_team with no owner"); fail++; continue; }
-          await store.set(key, json); ok++;
+          const r = await store.set(key, json); if (r && r.ok) ok++; else fail++;  // count only confirmed writes
         }
         catch (e) { fail++; console.warn("Restore key failed:", key, e.message); }
       }
@@ -22451,7 +22506,7 @@ export default function App({ authEmail = "", onSignOut }) {
   }, [schedule, currentUser && currentUser.id]);
   // Broadcast staff location while clocked in OR during the tech's scheduled route
   // window today (auto-share — no clock-in needed once location's been allowed once).
-  useStaffLocationTracking({ staffId: currentUser ? currentUser.id : null, stops: myTodayStops });
+  useStaffLocationTracking({ staffId: currentUser ? currentUser.id : null, meKey: currentUser ? (currentUser.email || "").trim().toLowerCase() : "", stops: myTodayStops });
 
   // Resolve the brand logo to a base64 the native widget can render: a data: URL passes through; a
   // bundled path (e.g. /icon-192.png) is fetched + encoded. Skipped if it's too large to keep the
@@ -22569,7 +22624,8 @@ export default function App({ authEmail = "", onSignOut }) {
         updated_at: now.toISOString(),
         app_font: branding.appFont, // widgets render in the app's chosen font (rounded/system/grotesk)
         logo_image: widgetLogo,                 // the real brand logo (base64) for the widget header
-        logo_mono: logoInitial(branding),       // monogram fallback when there's no image
+        logo_name: branding.companyName || "",  // full business name — shown when there's no clean logo
+        logo_mono: logoInitial(branding),       // single-letter monogram, last-resort fallback
         profit_week: r2(wk.profit),
         profit_month: r2(mo.profit),
         outstanding_total: r2(outstanding),
@@ -22628,7 +22684,7 @@ export default function App({ authEmail = "", onSignOut }) {
           .filter(iv => !["Paid", "paid"].includes(effectiveStatus(iv)) && iv.status !== "Draft" && iv.status !== "draft")
           .sort((a, b) => ((parseMDY(a.dueDate) || 0) - (parseMDY(b.dueDate) || 0)));
 
-        const payload = { role: "client", updated_at: new Date().toISOString(), app_font: branding.appFont, logo_image: widgetLogo, logo_mono: logoInitial(branding) };
+        const payload = { role: "client", updated_at: new Date().toISOString(), app_font: branding.appFont, logo_image: widgetLogo, logo_name: branding.companyName || "", logo_mono: logoInitial(branding) };
         if (nextV) {
           payload.next_visit_at = toISO(nextV.date, nextV.stop.time);
           payload.next_visit_service = nextV.stop.type || "Service Visit";
@@ -22668,7 +22724,7 @@ export default function App({ authEmail = "", onSignOut }) {
         sessionStorage.removeItem("sps_splashed");
         Object.keys(sessionStorage).forEach(k => { if (k.indexOf("sps_cp_page_") === 0) sessionStorage.removeItem(k); });
       } catch (_) {}
-      window.location.reload();
+      reloadAfterDrain();
     };
     markActive();
     document.addEventListener("visibilitychange", onVis);
@@ -22694,6 +22750,20 @@ export default function App({ authEmail = "", onSignOut }) {
     return () => { if (pending) clearTimeout(pending); document.removeEventListener("sps-db-status", onStatus); };
   }, []);
 
+  // Drain any queued (failed) writes as soon as connectivity comes back — on the browser's "online"
+  // event and when the tab becomes visible again — so a save that failed offline lands without
+  // needing a reload. (store.set already queues failures durably; this just nudges the retry.)
+  useEffect(() => {
+    const drain = () => { try { store.flush(); } catch (_) {} };
+    const onVis = () => { if (!document.hidden) drain(); };
+    window.addEventListener("online", drain);
+    document.addEventListener("visibilitychange", onVis);
+    // Periodic safety drain: some recoveries (transient 5xx, RLS/JWT hiccup, captive portal) never fire
+    // an "online" event, so retry queued writes on a timer too. No-op when the queue is empty.
+    const iv = setInterval(drain, 20000);
+    return () => { window.removeEventListener("online", drain); document.removeEventListener("visibilitychange", onVis); clearInterval(iv); };
+  }, []);
+
   // Recover from a FAILED initial database read. supabaseClient's _init serves an EMPTY cache on a
   // failed first SELECT (every useStoredState then falls back to its DEFAULT — the "team reset to
   // seeded Brandon+David" / "nothing saved" symptom) and never retries within the session. So when
@@ -22707,7 +22777,7 @@ export default function App({ authEmail = "", onSignOut }) {
       if (n >= 3) return; // give up auto-retry; the on-screen Retry button + banner take over
       try { sessionStorage.setItem("sps_init_retry", String(n + 1)); } catch (_) {}
       try { store.reset(); } catch (_) {}
-      setTimeout(() => { try { window.location.reload(); } catch (_) {} }, 1200 * (n + 1));
+      setTimeout(() => reloadAfterDrain(), 1200 * (n + 1));
     };
     document.addEventListener("sps-db-status", onStatus);
     return () => document.removeEventListener("sps-db-status", onStatus);
@@ -22752,13 +22822,22 @@ export default function App({ authEmail = "", onSignOut }) {
     triggerSync();
     // Flag so the sync strip reappears after the reload instead of a splash.
     try { sessionStorage.setItem("sps_resyncing", "1"); } catch (_) {}
-    setTimeout(() => window.location.reload(), 300);
+    setTimeout(() => reloadAfterDrain(), 300);
   };
 
-  // Register global sync hook so useStoredState can notify us
+  // Register global sync hooks so useStoredState can drive the indicator HONESTLY:
+  //  • start   → "syncing" when a write begins
+  //  • success → "saved" only after the write is CONFIRMED (never claims saved on failure)
+  //  • fail    → back to idle; the dbError banner ("Save failed") surfaces the real problem
   useEffect(() => {
-    window.__onSpsSync = triggerSync;
-    return () => { window.__onSpsSync = null; };
+    window.__onSpsSyncStart = () => { clearTimeout(syncTimer.current); setSyncState("syncing"); };
+    window.__onSpsSync = () => {
+      clearTimeout(syncTimer.current);
+      setSyncState("saved");
+      syncTimer.current = setTimeout(() => setSyncState("idle"), 2000);
+    };
+    window.__onSpsSyncFail = () => { clearTimeout(syncTimer.current); setSyncState("idle"); };
+    return () => { window.__onSpsSync = null; window.__onSpsSyncStart = null; window.__onSpsSyncFail = null; };
   }, []);
 
   // Personalize the single load screen (the boot splash from index.html): sync ONLY the
@@ -22843,6 +22922,10 @@ export default function App({ authEmail = "", onSignOut }) {
   const handleSignOut = () => { setPage("dashboard"); setSelectedClient(null); setAdding(false); if (onSignOut) onSignOut(); };
   // first real sign-in (no emails assigned yet) claims the owner account automatically
   useEffect(() => {
+    // Don't touch the team while the initial read failed — `team` is the seeded DEFAULT_TEAM right
+    // now, and stamping the owner email onto it is exactly what used to persist Brandon+David over
+    // the real roster. Resume once a good read lands (the auto-retry reload re-fetches real data).
+    if (!DB_READ_OK) return;
     if (!ltm || !emailKey || currentUser || anyEmail) return;
     setTeamSafe(list => {
       const arr = Array.isArray(list) ? list.slice() : [];
