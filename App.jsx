@@ -2800,10 +2800,16 @@ function ClockInOut({ me, T }) {
   const [result, setResult] = useState(null); // { hours, ok, error, noGusto } after clock-out
   const [askLoc, setAskLoc] = useState(false); // showing the location-consent message
 
-  // Tick every second while mounted so the live clock + elapsed time stay current.
+  // Tick every second while mounted so the live clock + elapsed time stay current. The elapsed time
+  // and submitted hours are computed from the saved start TIMESTAMP (not by counting ticks), so a
+  // locked screen never loses time — it only pauses this display interval. Snap the display back to
+  // the correct value the instant the screen/app resumes, so it never looks frozen on unlock.
   useEffect(() => {
-    const iv = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(iv);
+    const tick = () => setNow(Date.now());
+    const iv = setInterval(tick, 1000);
+    const onVis = () => { if (!document.hidden) tick(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { clearInterval(iv); document.removeEventListener("visibilitychange", onVis); };
   }, []);
 
   const fmtClock = (d) => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
@@ -5998,21 +6004,20 @@ function PhotoStrip({ photos, size = 56 }) {
 // ─────────────────────────────────────────────
 // SERVICE WORKSPACE (perform & log a stop, with profitability)
 // ─────────────────────────────────────────────
-function CompleteStopModal({ stop, client, email, catalog, costs, team, clients, dayDate, arrivedAt, draft, onSaveDraft, onClearDraft, onComplete, onUpdateStop, onClose, onViewClient, onOfficeAlert }) {
+function CompleteStopModal({ stop, client, email, catalog, costs, team, clients, dayDate, arrivedAt, enRouteAt, draft, onSaveDraft, onClearDraft, onComplete, onUpdateStop, onClose, onViewClient, onOfficeAlert }) {
   const { T, branding, perms } = useApp();
   const todayStr = new Date().toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" });
   const firstName = client?.name?.split(" ")[0] || "there";
   const phone = client?.phone?.replace(/\D/g, "") || "";
 
   // visit data
-  const [minutes, setMinutes] = useState(parseInt(stop.duration) || 60);
-  const [timerOn, setTimerOn] = useState(false);
-  const [elapsed, setElapsed] = useState(0); // seconds
-  // Feature 3B: actual hours worked, for profitability. Seeded from the "I'm Here" arrival
-  // clock (arrival → now) when the tech tapped it; otherwise a manual fallback they fill in.
+  // Per-stop time is AUTO-tracked: from when the tech kicked off the stop ("On My Way" / Head Here)
+  // to now, falling back to the "I'm Here" arrival clock, then a manual entry. Drives internal
+  // profitability only (effective rate + labor cost) — never the client's bill. No manual stopwatch.
+  const startAt = enRouteAt || arrivedAt;
   const [actualHours, setActualHours] = useState(() => {
-    if (!arrivedAt) return "";
-    const h = Math.max(0, (Date.now() - new Date(arrivedAt).getTime()) / 3600000);
+    if (!startAt) return "";
+    const h = Math.max(0, (Date.now() - new Date(startAt).getTime()) / 3600000);
     return String(Math.round(h * 100) / 100);
   });
   const [readings, setReadings] = useState({});
@@ -6064,12 +6069,24 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
     } catch (_) {}
     return "";
   })();
-  // Services on this stop (editable price per stop). Blank prices default to the client's
-  // maintenance rate; a stop added with just a type seeds one service at that rate.
+  // Maintenance pricing is stored as a MONTHLY plan rate, but a stop is one VISIT. For clients
+  // serviced more than once a month (weekly / bi-weekly), seed each stop with the per-visit SLICE of
+  // the month — monthly ÷ visits-per-month — so the per-stop price, the client balance, the profit
+  // roll-ups, and the effective $/hr are all honest (not the full month on every visit). Monthly /
+  // one-off clients keep the full rate (÷1). Always editable per stop.
+  const visitFreq = String(client?.preferredFreq || client?.routeFreq || client?.planFreq || "").toLowerCase().replace(/[^a-z]/g, "");
+  const visitsPerMonth = ({ weekly: 52 / 12, biweekly: 26 / 12 })[visitFreq] || 1;  // weekly≈4.33, bi-weekly≈2.17, else 1
+  const monthlyMaint = parseFloat(clientMaintRate) || 0;
+  const perVisitMaintRate = (monthlyMaint > 0 && visitsPerMonth > 1)
+    ? String(Math.round((monthlyMaint / visitsPerMonth) * 100) / 100)
+    : clientMaintRate;
+  const isProrated = perVisitMaintRate !== clientMaintRate;
+  // Services on this stop (editable price per stop). Blank prices default to the per-visit rate;
+  // a stop added with just a type seeds one service at that rate.
   const initServices = (() => {
     const fromStop = (stop.services || []).map(s => typeof s === "string" ? { name: s, price: "" } : { name: s.name, price: s.price || "" });
-    if (fromStop.length) return fromStop.map(s => ({ ...s, price: s.price || clientMaintRate }));
-    if (clientMaintRate || stop.type) return [{ name: stop.type || "Service", price: clientMaintRate }];
+    if (fromStop.length) return fromStop.map(s => ({ ...s, price: s.price || perVisitMaintRate }));
+    if (perVisitMaintRate || stop.type) return [{ name: stop.type || "Service", price: perVisitMaintRate }];
     return [];
   })();
   const [svcList, setSvcList] = useState(initServices);
@@ -6130,7 +6147,6 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
       if (d.usageLoc) setUsageLoc(d.usageLoc);
       if (Array.isArray(d.svcList)) setSvcList(d.svcList);
       if (d.actualHours != null) setActualHours(d.actualHours);
-      if (d.minutes != null) setMinutes(d.minutes);
     }
     draftRestored.current = true;
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -6141,17 +6157,10 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
       || Object.keys(partsUsed).length || Object.keys(productsQty).length || (notesClient || "").trim()
       || (notesOffice || "").trim() || officeFlag || (photos || []).length;
     if (!hasContent) return;
-    const t = setTimeout(() => onSaveDraft(stop.sid, { checklist, readings, tx, partsUsed, partBill, productsQty, productBill, notesClient, notesOffice, officeFlag, officeFlagMsg, photos, usageLoc, svcList, actualHours, minutes }), 700);
+    const t = setTimeout(() => onSaveDraft(stop.sid, { checklist, readings, tx, partsUsed, partBill, productsQty, productBill, notesClient, notesOffice, officeFlag, officeFlagMsg, photos, usageLoc, svcList, actualHours }), 700);
     return () => clearTimeout(t);
-  }, [checklist, readings, tx, partsUsed, partBill, productsQty, productBill, notesClient, notesOffice, officeFlag, officeFlagMsg, photos, usageLoc, svcList, actualHours, minutes]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [checklist, readings, tx, partsUsed, partBill, productsQty, productBill, notesClient, notesOffice, officeFlag, officeFlagMsg, photos, usageLoc, svcList, actualHours]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // timer
-  useEffect(() => {
-    if (!timerOn) return;
-    const id = setInterval(() => setElapsed(e => e + 1), 1000);
-    return () => clearInterval(id);
-  }, [timerOn]);
-  const stopTimer = () => { setTimerOn(false); setMinutes(Math.max(1, Math.round(elapsed / 60))); };
 
   const num = (v) => parseFloat(v) || 0;
   const tests = catalog.tests || [];
@@ -6167,7 +6176,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
   }, [locations, usageLoc]);
 
   // cost math
-  const laborCost = (num(minutes) / 60) * num(hourlyRate);
+  const laborCost = num(actualHours) * num(hourlyRate);  // actual time on the stop × the tech's cost rate
   const treatmentCost = treatments.reduce((sum, t) => sum + num(tx[t.id]) * num(t.costPerOz), 0);
   const treatmentRetail = treatments.reduce((sum, t) => sum + num(tx[t.id]) * num(t.retailPerOz), 0);
   // Parts: billed ones add retail value to the job; all parts cost us their cost basis
@@ -6259,7 +6268,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
     target_hourly_rate: snapshotTarget,
     arrivedAt: arrivedAt || null,
     breakdown: {
-      revenue: num(revenue), minutes: num(minutes), hourlyRate: num(hourlyRate),
+      revenue: num(revenue), minutes: Math.round(num(actualHours) * 60), hourlyRate: num(hourlyRate),
       labor: laborCost, treatment: treatmentCost, treatmentRetail, parts: partsCost, partsBilledRetail, product: productCost, productBilledRetail: productsBilledRetail,
       gas: num(gas), insurance: num(insurance), equipment: num(equipment), overhead: num(overhead),
       total: totalCost, effectiveRevenue, profit, margin,
@@ -6517,7 +6526,9 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
               </div>
             ))}
           </div>
-          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>Prices feed the amount charged below. Edit any line for this stop.</div>
+          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>
+            {isProrated ? `Per-visit share of the $${monthlyMaint.toLocaleString()}/mo plan — about ${visitsPerMonth.toFixed(1)} visits/mo. ` : ""}Prices feed the amount charged below. Edit any line for this stop.
+          </div>
         </div>
       )}
 
@@ -6604,25 +6615,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
         </div>
       </div>
 
-      {/* Time on site */}
-      <div style={sectionGap}>
-        <label style={labelStyle}>Time on Site</label>
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <div style={{ position: "relative", flex: 1 }}>
-            <input type="text" inputMode="numeric" value={minutes} onChange={e => setMinutes(e.target.value.replace(/\D/g, ""))} style={{ ...smallInput, textAlign: "left", paddingRight: 40 }} />
-            <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>min</span>
-          </div>
-          {!timerOn ? (
-            <button onClick={() => { setElapsed(0); setTimerOn(true); }} style={{ background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 14px", fontSize: 13, fontWeight: 700, color: T.text, cursor: "pointer", fontFamily: "inherit" }}>▶ Start timer</button>
-          ) : (
-            <button onClick={stopTimer} style={{ background: T.primary, border: "none", borderRadius: 10, padding: "9px 14px", fontSize: 13, fontWeight: 700, color: "#fff", cursor: "pointer", fontFamily: "inherit" }}>
-              ⏸ {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, "0")}
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Feature 3B — actual hours worked + live effective hourly rate vs target */}
+      {/* Feature 3B — actual hours worked (auto from On My Way → now) + live effective hourly rate */}
       <div style={sectionGap}>
         <label style={labelStyle}>Actual Hours Worked</label>
         <div style={{ display: "flex", gap: 10, alignItems: "stretch" }}>
@@ -6649,7 +6642,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
           </div>
         </div>
         <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>
-          {arrivedAt ? "Auto-filled from your “I'm Here” clock — adjust if needed." : "No arrival clock for this stop — enter hours worked. Revenue ÷ hours = your effective rate."}
+          {startAt ? "Auto-timed from your “On My Way” start — adjust if needed." : "No start clock for this stop — enter hours worked. Revenue ÷ hours = your effective rate."}
         </div>
       </div>
 
@@ -8444,7 +8437,7 @@ function StopEditModal({ stop, dayDate, clients, catalog, team, T, onSave, onClo
   );
 }
 
-function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, me, onClientSelect, seedClientIds, clearSeed, focusStop, clearFocus, stopDrafts = {}, setStopDrafts, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {}, arrivals = {}, onArrived }) {
+function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, me, onClientSelect, seedClientIds, clearSeed, focusStop, clearFocus, stopDrafts = {}, setStopDrafts, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {}, arrivals = {}, onArrived, enRoute = {}, onEnRoute }) {
   const { T, perms } = useApp();
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
   const compact = cfg.density === "compact";
@@ -8904,7 +8897,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                     Delete now lives quietly in the status line above. */}
                 {!isComplete && (
                   <div style={{ display: "flex", gap: 8, overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
-                    <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: s, client: c }); }}
+                    <button onClick={e => { e.stopPropagation(); onEnRoute && onEnRoute(s.sid); setHeadHereModal({ stop: s, client: c }); }}
                       style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "12px 10px", fontSize: 13.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
                       <Icon name="map" size={15} /> Head Here
                     </button>
@@ -9101,7 +9094,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           // The next stop's client, so the big "Head to next" button can launch the full
           // flow (On My Way text + directions in the tech's preferred app), not just a link.
           const nextStopClient = nextStop ? clients.find(x => String(x.id) === String(nextStop.clientId ?? nextStop.id)) : null;
-          const headToNext = () => nextStop && setHeadHereModal({ stop: nextStop, client: nextStopClient });
+          const headToNext = () => { if (!nextStop) return; onEnRoute && onEnRoute(nextStop.sid); setHeadHereModal({ stop: nextStop, client: nextStopClient }); };
           return (
             <div style={{ paddingBottom: vp.isDesktop ? 0 : (nextStop ? 80 : 0) }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 0 12px" }}>
@@ -9267,6 +9260,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           clients={clients}
           dayDate={completeModal.dayDate}
           arrivedAt={arrivals[completeModal.stop.sid]}
+          enRouteAt={enRoute[completeModal.stop.sid]}
           draft={stopDrafts[completeModal.stop.sid]}
           onSaveDraft={setStopDrafts ? (sid, d) => setStopDrafts(prev => ({ ...(prev || {}), [sid]: d })) : null}
           onClearDraft={setStopDrafts ? (sid) => setStopDrafts(prev => { const n = { ...(prev || {}) }; delete n[sid]; return n; }) : null}
@@ -22359,6 +22353,9 @@ export default function App({ authEmail = "", onSignOut }) {
   // Feature 3B: arrival timestamps per stop ({ [sid]: ISO }). Set when the tech taps
   // "I'm here"; the job clock runs from here until the stop is completed.
   const [arrivals, setArrivals, larr] = useStoredState("sps_arrivals", {});
+  // When a tech kicks off a stop ("On My Way" / Head Here) we stamp the start time here, so each
+  // stop's time auto-runs from On My Way → Complete (no manual on-site stopwatch).
+  const [enRoute, setEnRoute, lenr] = useStoredState("sps_enroute", {});
   // Build 15, 7A — per-stop in-progress draft of the CompleteStopModal inputs, so a lock /
   // rotate / background / remount never loses the tech's work. Keyed by sid; cleared on finish.
   const [stopDrafts, setStopDrafts] = useStoredState("sps_stop_drafts", {});
@@ -23551,6 +23548,8 @@ export default function App({ authEmail = "", onSignOut }) {
   // Feature 3B: record arrival (tech tapped "I'm here") — starts the job clock. Keeps the
   // first timestamp if tapped again, so the running clock isn't reset.
   const handleArrived = (sid) => setArrivals(a => ({ ...a, [sid]: a[sid] || new Date().toISOString() }));
+  // Stamp the "On My Way"/Head Here start once per stop (first-wins, so re-opening doesn't reset it).
+  const handleEnRoute = (sid) => { if (!sid) return; setEnRoute(a => (a[sid] ? a : { ...a, [sid]: new Date().toISOString() })); };
 
   // mark a stop complete: prepend the visit to the client's history (with photos)
   const handleCompleteStop = (clientId, entry, sid) => {
@@ -23784,7 +23783,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {selectedClient && <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>}
         </>
       ))}
-      {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} />}
+      {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} enRoute={enRoute} onEnRoute={handleEnRoute} />}
       {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} />}
       {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
