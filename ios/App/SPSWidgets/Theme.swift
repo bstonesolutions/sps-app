@@ -53,11 +53,14 @@ extension EnvironmentValues {
     }
 }
 
-// Brand logo for the widget header: the app passes the logo as a base64 data: URL (logo_image) plus
-// a company-initial monogram (logo_mono). Decode + show the image when present, else the monogram.
+// Brand logo for the widget header: the app passes the logo as a base64 data: URL (logo_image), the
+// full business name (logo_name), and a single-letter monogram (logo_mono). Header shows the decoded
+// image when present; otherwise the business name (a "complicated" logo just falls back to the name);
+// the monogram is only the last resort when there's no name either.
 struct SPSLogo {
     let imageB64: String?
     let mono: String
+    var name: String = ""
 }
 func sps_decodeLogo(_ s: String?) -> UIImage? {
     guard var str = s, !str.isEmpty else { return nil }

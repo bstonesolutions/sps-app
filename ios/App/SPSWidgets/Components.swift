@@ -30,20 +30,45 @@ struct LogoMark: View {
 }
 
 struct Header: View {
+    @Environment(\.spsLogo) var logo
     let title: String
     var body: some View {
-        // Build 15, Item 2 — logo + title pinned to the top, vertically centered, never wrapping.
-        // Each widget insets it from the top edge with its own padding; this row stays consistent.
+        // Logo + title pinned to the top, vertically centered, never wrapping. Each widget insets it
+        // from the top edge with its own padding; this row stays consistent.
+        //  • A clean logo decodes  → image + the section title.
+        //  • No clean logo, a name → the business name owns the row (a "complicated" logo just shows
+        //    the name instead of cramming an unreadable image into 22pt).
+        //  • No name at all        → the single-letter monogram square + the section title.
         HStack(alignment: .center, spacing: 8) {
-            LogoMark()
-            Text(title)
-                .font(.system(size: 14.5, weight: .bold))
-                .tracking(0.5)
-                .foregroundColor(Brand.muted)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
+            if let ui = sps_decodeLogo(logo.imageB64) {
+                Image(uiImage: ui)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 22, height: 22)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                sectionTitle
+            } else if !logo.name.isEmpty {
+                Text(logo.name)
+                    .font(.system(size: 14.5, weight: .heavy))
+                    .tracking(0.2)
+                    .foregroundColor(Brand.crimson)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.55)
+            } else {
+                LogoMark()
+                sectionTitle
+            }
             Spacer(minLength: 0)
         }
+    }
+
+    private var sectionTitle: some View {
+        Text(title)
+            .font(.system(size: 14.5, weight: .bold))
+            .tracking(0.5)
+            .foregroundColor(Brand.muted)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
     }
 }
 
