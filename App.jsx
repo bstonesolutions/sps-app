@@ -645,6 +645,73 @@ const geocodeAddress = async (addr, cache) => {
   } catch {}
   return null;
 };
+// ── Weather-aware scheduling (free, no API key) — Open-Meteo daily forecast for the service area.
+// Geocodes the business address once (Nominatim, cached in localStorage), fetches ~16 days, caches
+// ~3h in sessionStorage, and maps each day (MM/DD/YYYY) to a forecast so the schedule can flag
+// rain/severe days. WMO weather codes → icon/label/severe. ──
+const WX_CODE = (code, precip) => {
+  const c = Number(code);
+  let icon = "☀️", label = "Clear", severe = false;
+  if (c === 0) { /* clear */ }
+  else if (c <= 3) { icon = "⛅"; label = "Partly cloudy"; }
+  else if (c === 45 || c === 48) { icon = "🌫️"; label = "Fog"; }
+  else if (c >= 51 && c <= 57) { icon = "🌦️"; label = "Drizzle"; }
+  else if ((c >= 61 && c <= 67) || (c >= 80 && c <= 82)) { icon = "🌧️"; label = "Rain"; severe = true; }
+  else if ((c >= 71 && c <= 77) || c === 85 || c === 86) { icon = "❄️"; label = "Snow"; severe = true; }
+  else if (c >= 95) { icon = "⛈️"; label = "Storms"; severe = true; }
+  if (!severe && Number(precip) >= 70) severe = true;   // high rain chance even if the code is mild
+  return { icon, label, severe };
+};
+function useAreaWeather(address) {
+  const [wx, setWx] = useState({});
+  useEffect(() => {
+    const addr = (address || "").trim();
+    if (!addr) return;
+    let alive = true;
+    (async () => {
+      try {
+        let coord = null;
+        try { const c = JSON.parse(localStorage.getItem("sps_area_geo") || "null"); if (c && c.addr === addr && c.lat != null) coord = c; } catch (_) {}
+        if (!coord) {
+          const g = await geocodeAddress(addr, {});
+          if (!g) return;
+          coord = { lat: g.lat, lng: g.lng, addr };
+          try { localStorage.setItem("sps_area_geo", JSON.stringify(coord)); } catch (_) {}
+        }
+        let map = null;
+        try { const cc = JSON.parse(sessionStorage.getItem("sps_weather") || "null"); if (cc && cc.lat === coord.lat && (Date.now() - cc.at) < 3 * 3600 * 1000) map = cc.map; } catch (_) {}
+        if (!map) {
+          const url = `https://api.open-meteo.com/v1/forecast?latitude=${coord.lat}&longitude=${coord.lng}&daily=weathercode,precipitation_probability_max,temperature_2m_max,temperature_2m_min&temperature_unit=fahrenheit&timezone=auto&forecast_days=16`;
+          const r = await fetch(url);
+          if (!r.ok) return;
+          const j = await r.json();
+          const d = j.daily || {};
+          map = {};
+          (d.time || []).forEach((iso, i) => {
+            const [y, m, dd] = String(iso).split("-");
+            if (y && m && dd) map[`${m}/${dd}/${y}`] = { code: d.weathercode && d.weathercode[i], precip: d.precipitation_probability_max && d.precipitation_probability_max[i], tMax: d.temperature_2m_max && d.temperature_2m_max[i], tMin: d.temperature_2m_min && d.temperature_2m_min[i] };
+          });
+          try { sessionStorage.setItem("sps_weather", JSON.stringify({ lat: coord.lat, at: Date.now(), map })); } catch (_) {}
+        }
+        if (alive) setWx(map);
+      } catch (_) {}
+    })();
+    return () => { alive = false; };
+  }, [address]);
+  return wx;
+}
+// Inline forecast chip for a given date (MM/DD/YYYY). Renders nothing until the forecast loads.
+function WeatherFlag({ wx, date, T, compact }) {
+  const w = wx && wx[date];
+  if (!w || w.code == null) return null;
+  const m = WX_CODE(w.code, w.precip);
+  return (
+    <span title={`${m.label}${w.precip != null ? ` · ${w.precip}% precip` : ""}${w.tMax != null ? ` · ${Math.round(w.tMax)}°/${Math.round(w.tMin)}°` : ""}`}
+      style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11.5, fontWeight: m.severe ? 800 : 600, color: m.severe ? "#C0392B" : T.textMuted, background: m.severe ? hexA("#C0392B", 0.1) : "transparent", padding: m.severe ? "2px 8px" : 0, borderRadius: 100, whiteSpace: "nowrap" }}>
+      <span style={{ fontSize: 13 }}>{m.icon}</span>{m.label}{w.precip != null ? ` ${w.precip}%` : ""}{m.severe && !compact ? " · consider rescheduling" : ""}
+    </span>
+  );
+}
 // Straight-line distance between two coords in miles (haversine)
 const haversineMiles = (a, b) => {
   if (!a || !b) return Infinity;
@@ -1851,6 +1918,22 @@ const warrantyInfo = (eq) => {
   return { active, monthsLeft, label };
 };
 
+// Replacement / service-life schedule for a piece of equipment: next-due = (last replaced, else
+// installed) + the replace-every interval (months). Returns null until both exist (never invented).
+// status: ok | soon (within 60 days) | overdue. Powers the due badge + owner alerts (e.g. UV yearly).
+const equipmentDue = (eq) => {
+  if (!eq) return null;
+  const every = parseFloat(eq.replaceEveryMonths);
+  if (!every || every <= 0) return null;
+  const base = parseEqDate(eq.lastReplaced || eq.installed);
+  if (!base) return null;
+  const due0 = new Date(base.date); due0.setMonth(due0.getMonth() + Math.round(every)); due0.setHours(0, 0, 0, 0);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const days = Math.round((due0 - today) / 86400000);
+  const status = days < 0 ? "overdue" : days <= 60 ? "soon" : "ok";
+  return { due: due0, days, status, label: due0.toLocaleDateString("en-US", { month: "short", year: "numeric" }) };
+};
+
 // Shared client-name comparator + the canonical list for ANY client picker:
 // active clients only (inactive excluded), sorted A–Z by name. Status/name come
 // straight from existing client data — nothing hardcoded. Use this everywhere a
@@ -1906,7 +1989,12 @@ function deriveAlerts(clients, invoices, catalog) {
   const alerts = [];
   (clients || []).forEach(c => {
     (c.equipment || []).forEach(e => {
-      if (e.status && e.status !== "Good") alerts.push({ icon: "warning", title: `${c.name} — ${e.name}`, sub: `Marked "${e.status}"` });
+      if (e.status && e.status !== "Good") alerts.push({ icon: "warning", title: `${c.name} — ${e.name}`, sub: `Marked "${e.status}"`, type: "equipment" });
+      const due = equipmentDue(e);
+      if (due && due.status === "overdue") alerts.push({ icon: "warning", title: `${c.name} — ${e.name}`, sub: `Replacement overdue (was due ${due.label})`, type: "equipment" });
+      else if (due && due.status === "soon") alerts.push({ icon: "warning", title: `${c.name} — ${e.name}`, sub: `Replacement due ${due.label}`, type: "equipment" });
+      const w = warrantyInfo(e);
+      if (w && w.active && w.monthsLeft <= 2) alerts.push({ icon: "warning", title: `${c.name} — ${e.name}`, sub: `Warranty expires ${w.label}`, type: "equipment" });
     });
     const owed = clientOutstanding(c, invoices);
     if (owed > 0) alerts.push({ icon: "dollar", title: `${c.name} — $${owed.toFixed(2)} outstanding`, sub: "Open balance" });
@@ -2125,6 +2213,42 @@ const nextInvoiceNumber = (invoices, cfg) => {
   const max = nums.length ? Math.max(...nums) : start - 1;
   return Math.max(max + 1, start);
 };
+// Recurring maintenance billing: build the DRAFT invoices missing for the current calendar month —
+// one per client who has Auto-Invoice on (any non-Off setting) and a monthly rate, at that monthly
+// rate. Deduped by client+period (autoPeriod) AND by a stable id so re-runs never duplicate. Drafts
+// only — the owner reviews + sends. Never invents an amount (skips clients with no monthly rate).
+function buildRecurringDrafts(clients, invoices, invoicing, when) {
+  const cfg = { ...DEFAULT_INVOICING, ...(invoicing || {}) };
+  const prefix = (cfg.numberPrefix != null) ? cfg.numberPrefix : "INV-";
+  const now = when || new Date();
+  const period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`; // e.g. "2026-06"
+  const periodLabel = now.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  const existing = new Set(
+    (invoices || []).filter(iv => iv.autoPeriod && iv.clientId != null).map(iv => `${iv.clientId}|${iv.autoPeriod}`)
+  );
+  let num = nextInvoiceNumber(invoices, cfg);
+  const drafts = [];
+  (clients || []).forEach(c => {
+    const auto = String(c.autoInvoice || "").trim().toLowerCase();
+    if (!auto || auto === "off") return;                       // not opted in
+    if ((c.status || "Active") === "Inactive") return;          // skip inactive
+    const rate = parseFloat(String(c.monthlyRate || "").replace(/[^\d.]/g, "")) || 0;
+    if (rate <= 0) return;                                      // never invent an amount
+    if (existing.has(`${c.id}|${period}`)) return;              // already drafted this month
+    drafts.push({
+      id: `auto_${period}_${c.id}`,                             // stable → id-upsert also prevents dupes
+      number: `${prefix}${num++}`,
+      clientId: c.id, clientName: c.name || "", clientEmail: c.email || "", clientAddress: c.address || "",
+      date: todayMDY(), dueDate: addDaysMDY(todayMDY(), cfg.dueDays), status: "Draft",
+      autoPeriod: period, autoGenerated: true,                  // markers: dedup + "this was auto-made"
+      lineItems: [{ id: `l_${c.id}_${period}`, desc: `Monthly service — ${periodLabel}`, qty: "1", unitPrice: rate.toFixed(2), taxable: false, kind: "service" }],
+      taxRate: parseFloat(cfg.taxRate) || 0,
+      notes: cfg.terms || "",
+      createdAt: when ? when.getTime() : Date.now(),
+    });
+  });
+  return drafts;
+}
 // Sort invoices: highest invoice number first, fall back to most recent date
 const sortInvoices = (arr) => [...arr].sort((a, b) => {
   const na = parseInt((String(a.number || "0")).replace(/[^0-9]/g, "")) || 0;
@@ -2419,7 +2543,7 @@ function UpgradeWorkflowModal({ alert: a, clients, T, onConfirm, onClose }) {
     const newCount = Math.max(completedSteps, stepIdx + 1);
     const updated = { ...a, upgradeStep: newCount, contactNote, contractNote, signedDoc: uploadedDoc };
     if (stepIdx === 3) updated.fullyComplete = true;
-    onConfirm(updated, client ? { ...client, plan: a.requestedPlan } : null);
+    onConfirm(updated, client ? applyClientPlan(client, a.requestedPlan, client.division) : null);
     if (stepIdx < 3) setActiveStep(stepIdx + 1);
   };
 
@@ -3399,6 +3523,23 @@ const effectiveTier = (c) => {
   return "";
 };
 
+// Apply a service plan/tier to a client for a division, keeping BOTH stores in sync: the per-division
+// map c.plans[division] (which effectiveTier reads FIRST) AND the legacy flat c.plan/planFreq (used
+// when the division is the client's primary). Route every plan change through this so a change always
+// reflects in the Hub — fixes paths (e.g. upgrade approval) that wrote only the flat field and left
+// effectiveTier showing the stale per-division value. plan "" = None.
+const applyClientPlan = (client, plan, division) => {
+  if (!client) return client;
+  const div = division || client.division || "Pond";
+  const p = plan || "";
+  const next = { ...client, plans: { ...(client.plans || {}), [div]: p } };
+  if (div === (client.division || "Pond")) {
+    next.plan = p;
+    next.planFreq = p ? (TIER_FREQ[p] || client.planFreq || "") : "";
+  }
+  return next;
+};
+
 // Dense, sortable, full-width clients table — desktop "Table" view (Phase 3).
 function ClientsTable({ items, clientSpend, tiers, onSelect, T }) {
   const [sort, setSort] = useState({ key: "name", dir: "asc" });
@@ -3890,12 +4031,13 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
   const { T, tiers, perms } = useApp();
   const [form, setForm] = useState(() => {
     const base = { ...client };
-    // backfill address parts: use stored components if present, else parse the address string
-    if (base.street == null && base.city == null && base.state == null && base.zip == null) {
-      Object.assign(base, splitAddress(base.address || ""));
-    } else {
-      base.street = base.street || ""; base.city = base.city || ""; base.state = base.state || ""; base.zip = base.zip || "";
-    }
+    // Backfill the structured parts from the combined address whenever they're all EMPTY (not just
+    // null) and an address string exists. Otherwise a client whose parts were saved blank — or set
+    // by QB sync / import, which only fill `address` — opens the editor with empty fields even though
+    // the card clearly shows the address. Re-splitting keeps Edit matching the card.
+    base.street = base.street || ""; base.city = base.city || ""; base.state = base.state || ""; base.zip = base.zip || "";
+    const hasParts = !!(base.street.trim() || base.city.trim() || base.state.trim() || base.zip.trim());
+    if (!hasParts && (base.address || "").trim()) Object.assign(base, splitAddress(base.address));
     // Reconcile the service plan with the app's source of truth (effectiveTier) so the
     // editor shows the SAME tier the Hub does, the primary division's plan is explicit
     // (so "None" sticks instead of snapping back to Essential), and a Save persists it
@@ -4489,7 +4631,9 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
 
           {/* Address + services */}
           <div style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 12.5, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{client.address}</div>
+            {client.address
+              ? <CopyLine icon="location" value={client.address} prominent />
+              : <div style={{ fontSize: 12.5, color: T.textMuted }}>No address</div>}
             <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3, display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
               {clientServices(client, tiers).map((s, i) => (
                 <span key={i} style={{ display:"inline-flex", alignItems:"center", gap:3 }}>
@@ -4502,8 +4646,8 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
 
           {/* Contact info row */}
           <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px" }}>
-            {client.phone && <span style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color:T.textMuted }}><Icon name="phone" size={12} />{client.phone}</span>}
-            {client.email && <span style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color:T.textMuted }}><Icon name="mail" size={12} />{client.email}</span>}
+            <CopyLine icon="phone" value={client.phone} />
+            <CopyLine icon="mail" value={client.email} />
             {(() => { const ns = nextServiceFor(client, schedule); return ns && <span style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color:T.textMuted }}><Icon name="calendar" size={12} />Next: {ns}</span>; })()}
             {client.preferredDay && <span style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color: client.preferredDayOverride ? T.primary : T.textMuted, fontWeight: client.preferredDayOverride ? 700 : 400 }}><Icon name="calendar" size={12} />{client.preferredDay}{client.preferredDayOverride ? " (client request)" : " (route day)"}</span>}
             {perms.seeBalances && <span style={{ display:"flex", alignItems:"center", gap:4, fontSize:12, fontWeight:700, color: owed <= 0 ? T.accent : T.warning }}><Icon name="dollar" size={12} />${owed.toFixed(2)}{owed > 0 ? " due" : " balance"}</span>}
@@ -4973,6 +5117,11 @@ function ClientEquipment({ client, invoices, onChange }) {
                       {w.active ? `Under warranty · ${w.monthsLeft} mo left` : "Warranty expired"}
                     </span>
                   ) : null; })()}
+                  {(() => { const d = equipmentDue(eq); return d ? (
+                    <span title={`Replacement due ${d.label}`} style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 100, background: d.status === "overdue" ? hexA("#C0392B", 0.1) : d.status === "soon" ? hexA("#d97706", 0.14) : hexA(T.accent, 0.12), color: d.status === "overdue" ? "#C0392B" : d.status === "soon" ? "#d97706" : T.accent }}>
+                      {d.status === "overdue" ? `Replace overdue · ${d.label}` : d.status === "soon" ? `Replace due ${d.label}` : `Next replace ${d.label}`}
+                    </span>
+                  ) : null; })()}
                 </div>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -4998,6 +5147,12 @@ function ClientEquipment({ client, invoices, onChange }) {
                   maxPhotos={12}
                   allowCaptions={true}
                 />
+
+                {perms.editClients && equipmentDue(eq) && (
+                  <Btn sm variant="outline" onClick={() => { const now = new Date(); const mdy = `${String(now.getMonth() + 1).padStart(2, "0")}/${now.getFullYear()}`; onChange(equipment.map((e2, j) => j === i ? { ...e2, lastReplaced: mdy } : e2)); }} style={{ alignSelf: "flex-start", gap: 5 }}>
+                    <Icon name="refresh" size={13} /> Mark replaced today
+                  </Btn>
+                )}
 
                 {/* Condition notes */}
                 <div>
@@ -5135,6 +5290,25 @@ function ClientEquipment({ client, invoices, onChange }) {
               ); })()}
             </div>
 
+            {/* Replacement / service-life schedule — "replace every N months" (e.g. UV bulb yearly) */}
+            <div>
+              <label style={lbl}>Replace Every <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <div style={{ position: "relative" }}>
+                  <input type="text" inputMode="numeric" style={{ ...field, paddingRight: 60 }} value={modal.data.replaceEveryMonths || ""} onChange={e => setD("replaceEveryMonths", e.target.value.replace(/[^0-9]/g, ""))} placeholder="e.g. 12" />
+                  <span style={{ position: "absolute", right: 13, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>months</span>
+                </div>
+                <input type="text" inputMode="numeric" style={field} value={modal.data.lastReplaced || ""} onChange={e => setD("lastReplaced", e.target.value)} placeholder="Last replaced MM/YYYY" />
+              </div>
+              {(() => { const d = equipmentDue(modal.data); return d ? (
+                <div style={{ fontSize: 11.5, marginTop: 7, fontWeight: 600, color: d.status === "overdue" ? "#C0392B" : d.status === "soon" ? "#d97706" : T.accent }}>
+                  Next replacement: {d.label}{d.status === "overdue" ? " · overdue" : d.status === "soon" ? " · due soon" : ""}
+                </div>
+              ) : (
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 7 }}>Set an interval (e.g. 12 = yearly, like a UV bulb each spring) + an install or last-replaced date to track when it's due.</div>
+              ); })()}
+            </div>
+
             {/* Notes */}
             <div>
               <label style={lbl}>Notes</label>
@@ -5178,6 +5352,7 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
   const [notes, setNotes] = useState(entry.notes || "");
   const [officeNotes, setOfficeNotes] = useState(entry.officeNotes || "");
   const [readings, setReadings] = useState(initReadings);
+  const [readingStatus, setReadingStatus] = useState(entry.readingStatus || {});
   const [photos, setPhotos] = useState(entry.photos || []);
   const [busy, setBusy] = useState(false);
   // Service type, tech, services performed, products used — to mirror the full stop view
@@ -5214,7 +5389,7 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
       ...entry,
       type: type || entry.type, tech,
       services: svcList.filter(s => s.name), products: prodList,
-      notes, officeNotes, readings, photos,
+      notes, officeNotes, readings, readingStatus, photos,
       invoice: revenue ? `$${revenue}` : "$0",
       ph: readings["pH"] || "—", ammonia: readings["Ammonia"] || "—", nitrite: readings["Nitrite"] || "—", temp: readings["Temperature"] || "—",
       breakdown: { ...b, revenue: num(revenue), labor: num(labor), treatment: num(treatment), product: num(product), gas: num(gas), insurance: num(insurance), equipment: num(equipment), overhead: num(overhead), total, profit, margin },
@@ -5299,12 +5474,26 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
           <div>
             <label style={labelStyle}>Readings</label>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-              {Object.entries(readings).map(([k, v]) => (
-                <div key={k}>
-                  <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textAlign: "center", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{k}</div>
-                  <input type="text" inputMode="decimal" value={v} onChange={e => setReadings(r => ({ ...r, [k]: e.target.value }))} style={{ width: "100%", padding: "9px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "center" }} />
-                </div>
-              ))}
+              {Object.entries(readings).map(([k, v]) => {
+                const st = readingStatus[k] || "";
+                return (
+                  <div key={k}>
+                    <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textAlign: "center", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{k}</div>
+                    <input type="text" inputMode="decimal" value={v} onChange={e => setReadings(r => ({ ...r, [k]: e.target.value }))} style={{ width: "100%", padding: "9px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "center" }} />
+                    <div style={{ display: "flex", gap: 3, marginTop: 4 }}>
+                      {["good", "attention", "treated"].map(s => {
+                        const m = READING_STATUS[s]; const on = st === s;
+                        return (
+                          <button key={s} type="button" title={m.label} onClick={() => setReadingStatus(r => ({ ...r, [k]: on ? "" : s }))}
+                            style={{ flex: 1, padding: "3px 0", borderRadius: 6, border: `1.5px solid ${on ? m.color : T.border}`, background: on ? hexA(m.color, 0.14) : T.surface, color: on ? m.color : T.textMuted, fontWeight: 800, fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>
+                            {m.label[0]}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
@@ -5381,6 +5570,7 @@ function ClientHistory({ client, catalog, team, onChange }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <WaterQualityTrends clients={[client]} clientId={client.id} T={T} />
       {history.length === 0 && (
         <div style={{ textAlign: "center", padding: "36px 20px", color: T.textMuted }}>
           <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="clipboard" size={26} /></div>
@@ -5424,12 +5614,16 @@ function ClientHistory({ client, catalog, team, onChange }) {
                 <div style={{ marginTop: 4 }}>
                   <div style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>Water Tests</div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-                    {readingPairs.map(([k, v]) => (
-                      <div key={k} style={{ background: T.surfaceAlt, borderRadius: 10, padding: "8px 6px", textAlign: "center" }}>
-                        <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{k}</div>
-                        <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginTop: 2 }}>{v}</div>
-                      </div>
-                    ))}
+                    {readingPairs.map(([k, v]) => {
+                      const m = READING_STATUS[(h.readingStatus && h.readingStatus[k]) || ""];
+                      return (
+                        <div key={k} style={{ background: T.surfaceAlt, borderRadius: 10, padding: "8px 6px", textAlign: "center", border: `1.5px solid ${m ? hexA(m.color, 0.45) : "transparent"}` }}>
+                          <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{k}</div>
+                          <div style={{ fontSize: 15, fontWeight: 800, color: m ? m.color : T.text, marginTop: 2 }}>{v}</div>
+                          {m && <div style={{ fontSize: 8.5, fontWeight: 800, color: m.color, textTransform: "uppercase", letterSpacing: "0.03em", marginTop: 1 }}>{m.label}</div>}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -6021,6 +6215,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
     return String(Math.round(h * 100) / 100);
   });
   const [readings, setReadings] = useState({});
+  const [readingStatus, setReadingStatus] = useState({}); // testName -> "good" | "attention" | "treated"
   const [tx, setTx] = useState({});       // treatmentId -> oz
   const [partsUsed, setPartsUsedState] = useState({}); // partId -> qty
   const [partBill, setPartBill] = useState({}); // partId -> bool (bill to client?)
@@ -6134,6 +6329,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
     if (d && typeof d === "object") {
       if (Array.isArray(d.checklist)) setChecklist(d.checklist);
       if (d.readings) setReadings(d.readings);
+      if (d.readingStatus) setReadingStatus(d.readingStatus);
       if (d.tx) setTx(d.tx);
       if (d.partsUsed) setPartsUsedState(d.partsUsed);
       if (d.partBill) setPartBill(d.partBill);
@@ -6157,7 +6353,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
       || Object.keys(partsUsed).length || Object.keys(productsQty).length || (notesClient || "").trim()
       || (notesOffice || "").trim() || officeFlag || (photos || []).length;
     if (!hasContent) return;
-    const t = setTimeout(() => onSaveDraft(stop.sid, { checklist, readings, tx, partsUsed, partBill, productsQty, productBill, notesClient, notesOffice, officeFlag, officeFlagMsg, photos, usageLoc, svcList, actualHours }), 700);
+    const t = setTimeout(() => onSaveDraft(stop.sid, { checklist, readings, readingStatus, tx, partsUsed, partBill, productsQty, productBill, notesClient, notesOffice, officeFlag, officeFlagMsg, photos, usageLoc, svcList, actualHours }), 700);
     return () => clearTimeout(t);
   }, [checklist, readings, tx, partsUsed, partBill, productsQty, productBill, notesClient, notesOffice, officeFlag, officeFlagMsg, photos, usageLoc, svcList, actualHours]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -6254,6 +6450,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
     services: svcList,
     checklist,
     readings,
+    readingStatus,
     // legacy fields for older history cards
     ph: readings["pH"] || "—", ammonia: readings["Ammonia"] || "—", nitrite: readings["Nitrite"] || "—", temp: readings["Temperature"] || "—",
     invoice: revenue ? `$${revenue}` : "$0",
@@ -6646,17 +6843,41 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
         </div>
       </div>
 
-      {/* Tests */}
+      {/* Tests — value + a status marker per reading (good / needs attention / treated) */}
       {tests.length > 0 && (
         <div style={sectionGap}>
           <label style={labelStyle}>Water Tests</label>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-            {tests.map(t => (
-              <div key={t}>
-                <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textAlign: "center", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t}</div>
-                <input type="text" inputMode="decimal" value={readings[t] || ""} onChange={e => setReadings(r => ({ ...r, [t]: e.target.value }))} style={smallInput} placeholder="—" />
-              </div>
-            ))}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {tests.map(t => {
+              const range = WATER_RANGES[t];
+              const val = parseFloat(readings[t]);
+              const hasVal = readings[t] !== "" && readings[t] != null && !isNaN(val);
+              const outOfRange = !!(range && hasVal && (val < range.min || val > range.max));
+              const st = readingStatus[t] || "";
+              return (
+                <div key={t} style={{ background: T.surfaceAlt, borderRadius: 12, padding: "9px 11px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 700, color: T.text }}>{t}</div>
+                      {range && <div style={{ fontSize: 10, color: outOfRange ? "#dc2626" : T.textMuted }}>ideal {range.ideal}{range.unit ? ` ${range.unit}` : ""}{outOfRange ? " · out of range" : ""}</div>}
+                    </div>
+                    <input type="text" inputMode="decimal" value={readings[t] || ""} onChange={e => setReadings(r => ({ ...r, [t]: e.target.value }))} placeholder="—"
+                      style={{ width: 80, padding: "8px", border: `1.5px solid ${outOfRange ? "#dc2626" : T.border}`, borderRadius: 8, fontSize: 15, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
+                  </div>
+                  <div style={{ display: "flex", gap: 5, marginTop: 7 }}>
+                    {["good", "attention", "treated"].map(s => {
+                      const m = READING_STATUS[s]; const on = st === s;
+                      return (
+                        <button key={s} type="button" onClick={() => setReadingStatus(r => ({ ...r, [t]: on ? "" : s }))}
+                          style={{ flex: 1, padding: "6px 4px", borderRadius: 8, border: `1.5px solid ${on ? m.color : T.border}`, background: on ? hexA(m.color, 0.12) : T.surface, color: on ? m.color : T.textMuted, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>
+                          {m.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -8438,7 +8659,8 @@ function StopEditModal({ stop, dayDate, clients, catalog, team, T, onSave, onClo
 }
 
 function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, me, onClientSelect, seedClientIds, clearSeed, focusStop, clearFocus, stopDrafts = {}, setStopDrafts, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {}, arrivals = {}, onArrived, enRoute = {}, onEnRoute }) {
-  const { T, perms } = useApp();
+  const { T, perms, branding } = useApp();
+  const wx = useAreaWeather((branding && branding.companyAddress) || "");  // service-area forecast for weather flags
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
   const compact = cfg.density === "compact";
   const [omwModal, setOmwModal] = useState(null);
@@ -9103,8 +9325,9 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                   : <button onClick={() => setViewTech(null)} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
                       <Icon name="back" size={14} /> All routes
                     </button>}
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                   <span style={{ fontSize: 12, color: T.textMuted, fontWeight: 600 }}>{stripDate(selectedDate)}{isToday ? " · Today" : ""}</span>
+                  <WeatherFlag wx={wx} date={selectedDate} T={T} />
                   {/* Both admin and staff can optimize their own route (display-only). */}
                   {stops.length > 1 && (
                     <button onClick={() => !optimizing && optimizeRoute(selectedDate, viewTech, stops)} disabled={optimizing}
@@ -16787,6 +17010,34 @@ function Icon({ name, size = 22, filled = false }) {
   return <svg {...common}>{paths[name] || null}</svg>;
 }
 
+// Tap-to-copy line — shows an icon + value and copies the RAW value to the clipboard on tap (for
+// pasting outside the app), briefly flipping to a check. Uses the async clipboard API on https /
+// native, with a hidden-textarea fallback. Returns null for an empty value. `prominent` makes it
+// the larger, dark, wrapping treatment used for the client's address.
+function CopyLine({ icon, value, prominent = false }) {
+  const { T } = useApp();
+  const [copied, setCopied] = useState(false);
+  const timer = useRef(null);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  if (!value) return null;
+  const copy = async (e) => {
+    e.stopPropagation();
+    let ok = false;
+    try { await navigator.clipboard.writeText(String(value)); ok = true; } catch (_) {}
+    if (!ok) { try { const ta = document.createElement("textarea"); ta.value = String(value); ta.style.position = "fixed"; ta.style.opacity = "0"; document.body.appendChild(ta); ta.focus(); ta.select(); document.execCommand("copy"); document.body.removeChild(ta); } catch (_) {} }
+    setCopied(true); clearTimeout(timer.current); timer.current = setTimeout(() => setCopied(false), 1400);
+  };
+  return (
+    <button type="button" onClick={copy} title="Tap to copy"
+      style={{ display: "inline-flex", alignItems: "center", gap: 5, maxWidth: "100%", background: "none", border: "none", padding: 0, margin: 0, cursor: "pointer", fontFamily: "inherit", textAlign: "left",
+        fontSize: prominent ? 14.5 : 12, fontWeight: prominent ? 600 : 400, color: copied ? T.accent : (prominent ? T.text : T.textMuted) }}>
+      {icon && <span style={{ display: "inline-flex", flexShrink: 0, opacity: 0.85 }}><Icon name={icon} size={prominent ? 14 : 12} /></span>}
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: prominent ? "normal" : "nowrap", wordBreak: prominent ? "break-word" : "normal" }}>{copied ? "Copied!" : value}</span>
+      <span style={{ display: "inline-flex", flexShrink: 0, opacity: copied ? 1 : 0.4 }}><Icon name={copied ? "check" : "clipboard"} size={prominent ? 13 : 11} /></span>
+    </button>
+  );
+}
+
 // ─────────────────────────────────────────────
 // MESSAGING SYSTEM
 // Two-way chat between staff and clients.
@@ -17492,6 +17743,120 @@ function RemindersScreen({ schedule, clients, scheduleCfg, setScheduleCfg, email
   );
 }
 
+// Session inventory activity — every change appends here (capped, sessionStorage). The owner sees
+// ONE running summary per session in the Inventory screen, instead of a notification per change.
+const INV_LOG_KEY = "sps_inv_session";
+const logInvChange = (e) => {
+  try {
+    const arr = JSON.parse(sessionStorage.getItem(INV_LOG_KEY) || "[]");
+    arr.unshift({ at: Date.now(), ...e });
+    sessionStorage.setItem(INV_LOG_KEY, JSON.stringify(arr.slice(0, 200)));
+    if (typeof window !== "undefined") window.dispatchEvent(new Event("sps-inv-activity"));
+  } catch (_) {}
+};
+const readInvLog = () => { try { return JSON.parse(sessionStorage.getItem(INV_LOG_KEY) || "[]"); } catch (_) { return []; } };
+
+// Add/Edit inventory item modal — its OWN component with LOCAL draft state, so typing a name/price
+// never re-renders the (heavy, O(items×locations)) InventoryScreen. That render cliff is what made
+// the Add button feel dead once a tech had a few hundred items. It commits only on Save.
+function InventoryItemModal({ mode, kind, initial, locations = [], categories = [], canSeeCost, costField, retailField, onSave, onDelete, onClose }) {
+  const { T } = useApp();
+  const [data, setData] = useState(initial);
+  const set = (patch) => setData(d => ({ ...d, ...patch }));
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
+  const unitFallback = kind === "treatment" ? "oz" : kind === "product" ? "each" : "pieces";
+  const unitWord = data.unit || unitFallback;
+  return (
+    <Modal title={mode === "add" ? `Add ${kind === "part" ? "Part" : kind === "product" ? "Product" : "Treatment"}` : (data.name || "Edit")} onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div>
+          <label style={lbl}>Name</label>
+          <input type="text" style={field} value={data.name || ""} onChange={e => set({ name: e.target.value })} placeholder={kind === "part" ? "e.g. PVC Union (1.5in)" : "e.g. Beneficial Bacteria"} autoFocus />
+        </div>
+        <div>
+          <label style={lbl}>Category <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
+          <input type="text" style={field} list="inv-cats" value={data.category || ""} onChange={e => set({ category: e.target.value })} placeholder={kind === "part" ? "e.g. Pumps, Plumbing, Filtration" : "e.g. Bacteria, Algae, Clarifiers"} />
+          <datalist id="inv-cats">{categories.map(cat => <option key={cat} value={cat} />)}</datalist>
+        </div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <div style={{ flex: 1 }}>
+            <label style={lbl}>Unit</label>
+            <select value={data.unit || unitFallback} onChange={e => set({ unit: e.target.value })} style={field}>
+              {INV_UNITS.map(u => <option key={u} value={u}>{u}</option>)}
+            </select>
+          </div>
+          <div style={{ flex: 1 }}>
+            <label style={lbl}>Low stock at</label>
+            <input type="text" inputMode="decimal" style={field} value={kind === "treatment" ? "32" : (data.lowAt ?? "")} disabled={kind === "treatment"} onChange={e => set({ lowAt: e.target.value.replace(/[^0-9.]/g, "") })} placeholder={kind === "treatment" ? "32" : "e.g. 6"} />
+          </div>
+        </div>
+        {canSeeCost && (<>
+          <div style={{ display: "flex", gap: 10 }}>
+            <div style={{ flex: 1 }}>
+              <label style={lbl}>Cost per {unitWord}</label>
+              <input type="text" inputMode="decimal" style={field} value={data[costField] ?? ""} onChange={e => set({ [costField]: e.target.value.replace(/[^0-9.]/g, "") })} placeholder="0.00" />
+              <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 4 }}>What you pay</div>
+            </div>
+            <div style={{ flex: 1 }}>
+              <label style={lbl}>Retail per {unitWord}</label>
+              <input type="text" inputMode="decimal" style={field} value={data[retailField] ?? ""} onChange={e => set({ [retailField]: e.target.value.replace(/[^0-9.]/g, "") })} placeholder="0.00" />
+              <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 4 }}>What you charge</div>
+            </div>
+          </div>
+          {(() => {
+            const c = parseFloat(data[costField]) || 0;
+            const r = parseFloat(data[retailField]) || 0;
+            if (c <= 0 || r <= 0) return null;
+            const margin = ((r - c) / r) * 100, markup = ((r - c) / c) * 100;
+            return (
+              <div style={{ background: hexA(margin >= 0 ? "#16a34a" : "#E5484D", 0.08), borderRadius: 12, padding: "10px 14px", fontSize: 12.5, color: margin >= 0 ? "#15803D" : "#E5484D", fontWeight: 600 }}>
+                ${(r - c).toFixed(2)} profit per {unitWord} · {margin.toFixed(0)}% margin · {markup.toFixed(0)}% markup
+              </div>
+            );
+          })()}
+        </>)}
+        {kind === "product" && (<>
+          <div>
+            <label style={lbl}>Purchased From <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(vendor / source)</span></label>
+            <input type="text" style={field} value={data.vendor || ""} onChange={e => set({ vendor: e.target.value })} placeholder="e.g. Practical Garden Ponds" />
+          </div>
+          <div>
+            <label style={lbl}>Product Link <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(vendor product page)</span></label>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input type="url" inputMode="url" style={{ ...field, flex: 1, minWidth: 0 }} value={data.sourceUrl || ""} onChange={e => set({ sourceUrl: e.target.value })} placeholder="https://…" />
+              {/^https?:\/\//i.test((data.sourceUrl || "").trim()) && (
+                <button type="button" onClick={() => openExternalBrowser(data.sourceUrl.trim())} style={{ flexShrink: 0, background: hexA(T.primary, 0.1), color: T.primary, border: "none", borderRadius: 11, padding: "0 16px", fontWeight: 800, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Open ↗</button>
+              )}
+            </div>
+            <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 4 }}>Opens in your browser (where you're signed in for contractor pricing) so you can check current pricing, then update Cost / Retail above.</div>
+          </div>
+        </>)}
+        <div>
+          <label style={lbl}>Stock by location</label>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {locations.map(loc => (
+              <div key={loc.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ flex: 1, fontSize: 13, color: T.text, fontWeight: 600 }}>{loc.name}</span>
+                <input type="text" inputMode="decimal" style={{ ...field, width: 90, flex: "none", textAlign: "center" }} value={data.stockByLoc?.[loc.id] ?? ""} onChange={e => { const v = e.target.value.replace(/[^0-9.]/g, ""); setData(d => ({ ...d, stockByLoc: { ...(d.stockByLoc || {}), [loc.id]: v } })); }} placeholder="0" />
+                <span style={{ fontSize: 12, color: T.textMuted, width: 44 }}>{unitWord}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+        <Btn onClick={() => onSave(data)} block lg disabled={!(data.name || "").trim()}>
+          {mode === "add" ? "Add Item" : "Save Changes"}
+        </Btn>
+        {mode === "edit" && (
+          <button onClick={onDelete} style={{ background: "none", border: "none", color: "#E5484D", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit", padding: "4px" }}>
+            Delete {kind === "part" ? "Part" : kind === "product" ? "Product" : "Treatment"}
+          </button>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canEdit = true, T }) {
   const locations = catalog.locations || [];
   const treatments = catalog.treatments || [];
@@ -17572,6 +17937,11 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
   // Low items for the current tab
   const lowItems = items.filter(it => invTotal(it) < lowThreshold(it, kind));
 
+  // Per-session inventory activity (added / used / restocked / moved / removed) — one running summary.
+  const [invLog, setInvLog] = useState(() => readInvLog());
+  const [showActivity, setShowActivity] = useState(false);
+  useEffect(() => { const h = () => setInvLog(readInvLog()); window.addEventListener("sps-inv-activity", h); return () => window.removeEventListener("sps-inv-activity", h); }, []);
+
   // Overall valuation
   const tabValue = items.reduce((s, it) => {
     const cost = parseFloat(it[costFieldFor(kind)]) || 0;
@@ -17598,6 +17968,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
       ...cat,
       [catKey]: (cat[catKey] || []).map(it => it.id === adjustModal.item.id ? setStockAtLoc(it, adjustLoc, newAmt) : it),
     }));
+    logInvChange({ action: adjustModal.mode === "restock" ? "Restocked" : "Used", item: adjustModal.item.name, kind, qty: Math.abs(amt), unit: adjustModal.item.unit || "", loc: (locations.find(l => l.id === adjustLoc) || {}).name || "" });
     setAdjustModal(null); setAdjustAmt(""); setAdjustNote(""); setAdjustLoc("");
   };
 
@@ -17626,20 +17997,22 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
         return next;
       }),
     }));
+    logInvChange({ action: "Moved", item: transferModal.item.name, kind, qty: amt, unit: transferModal.item.unit || "", loc: `${(locations.find(l => l.id === transferFrom) || {}).name || "?"} → ${(locations.find(l => l.id === transferTo) || {}).name || "?"}` });
     setTransferModal(null); setTransferAmt("");
   };
 
   // ── Item add / edit / delete ──
+  const newId = (p) => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); // collision-proof (Date.now() alone could repeat on rapid adds → silent overwrite)
   const blankItem = () => kind === "part"
-    ? { id: "pt" + Date.now(), name: "", category: "", unit: "pieces", costPer: "", lowAt: "", stockByLoc: {} }
+    ? { id: newId("pt"), name: "", category: "", unit: "pieces", costPer: "", lowAt: "", stockByLoc: {} }
     : kind === "product"
-    ? { id: "p" + Date.now(), name: "", category: "", unit: "each", cost: "", price: "", sku: "", vendor: "", sourceUrl: "", purchaseDate: "", lowAt: "", stockByLoc: {} }
-    : { id: "t" + Date.now(), name: "", category: "", unit: "oz", costPerOz: "", inventoryOz: "0", stockByLoc: {} };
+    ? { id: newId("p"), name: "", category: "", unit: "each", cost: "", price: "", sku: "", vendor: "", sourceUrl: "", purchaseDate: "", lowAt: "", stockByLoc: {} }
+    : { id: newId("t"), name: "", category: "", unit: "oz", costPerOz: "", inventoryOz: "0", stockByLoc: {} };
   const openAddItem = () => { if (!canEdit) return; setItemModal({ mode: "add", kind, data: blankItem() }); };
   const openEditItem = (item) => { if (!canEdit) return; setItemModal({ mode: "edit", kind, data: { ...item, stockByLoc: { ...(item.stockByLoc || {}) } } }); };
-  const saveItem = () => {
-    const d = itemModal.data;
-    if (!d.name.trim()) return;
+  const saveItem = (d) => {
+    if (!d || !(d.name || "").trim()) return;
+    const isNew = !((catalog[catKey] || []).some(x => x.id === d.id));
     setCatalog(cat => {
       const list = cat[catKey] || [];
       const exists = list.some(x => x.id === d.id);
@@ -17648,10 +18021,13 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
       const clean = { ...d, inventoryOz: String(total) };
       return { ...cat, [catKey]: exists ? list.map(x => x.id === d.id ? clean : x) : [...list, clean] };
     });
+    if (isNew) logInvChange({ action: "Added", item: d.name, kind });
     setItemModal(null);
   };
   const deleteItem = () => {
+    const removed = (catalog[catKey] || []).find(x => x.id === itemModal.data.id);
     setCatalog(cat => ({ ...cat, [catKey]: (cat[catKey] || []).filter(x => x.id !== itemModal.data.id) }));
+    if (removed) logInvChange({ action: "Removed", item: removed.name, kind });
     setItemModal(null);
   };
 
@@ -17725,6 +18101,34 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
         </div>
         <Btn sm variant="ghost" onClick={() => setShowLocs(s => !s)}>Locations</Btn>
       </div>
+
+      {/* Per-session activity summary — one running rollup instead of a ping per change */}
+      {invLog.length > 0 && (
+        <div style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+          <button onClick={() => setShowActivity(s => !s)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "12px 14px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>Activity this session</div>
+              <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2 }}>
+                {(() => { const by = {}; invLog.forEach(e => { by[e.action] = (by[e.action] || 0) + 1; }); return Object.entries(by).map(([a, n]) => `${n} ${a.toLowerCase()}`).join(" · ") || "—"; })()}
+              </div>
+            </div>
+            <span style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+              <span style={{ fontSize: 11, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "2px 9px" }}>{invLog.length}</span>
+              <span style={{ color: T.textMuted, transform: showActivity ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}><Icon name="chevronD" size={16} /></span>
+            </span>
+          </button>
+          {showActivity && (
+            <div style={{ borderTop: `1px solid ${T.border}`, maxHeight: 280, overflowY: "auto" }}>
+              {invLog.slice(0, 80).map((e, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, padding: "9px 14px", borderBottom: i < Math.min(invLog.length, 80) - 1 ? `1px solid ${hexA(T.border, 0.6)}` : "none" }}>
+                  <span style={{ fontSize: 12.5, color: T.text }}><b style={{ fontWeight: 700 }}>{e.action}</b> {e.qty != null ? `${e.qty}${e.unit ? " " + e.unit : ""} ` : ""}{e.item}{e.loc ? ` · ${e.loc}` : ""}{e.note ? ` · ${e.note}` : ""}</span>
+                  <span style={{ fontSize: 11, color: T.textMuted, flexShrink: 0 }}>{new Date(e.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Quick action row — value/reorder visible only to those who can see cost */}
       {canSeeCost && (
@@ -18097,129 +18501,21 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
         </Modal>
       )}
 
-      {/* Item add/edit modal */}
+      {/* Item add/edit modal — isolated component with local draft state (keystrokes don't re-render the list) */}
       {itemModal && (
-        <Modal title={itemModal.mode === "add" ? `Add ${itemModal.kind === "part" ? "Part" : itemModal.kind === "product" ? "Product" : "Treatment"}` : itemModal.data.name} onClose={() => setItemModal(null)}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <div>
-              <label style={lbl}>Name</label>
-              <input type="text" style={field} value={itemModal.data.name}
-                onChange={e => setItemModal(m => ({ ...m, data: { ...m.data, name: e.target.value } }))}
-                placeholder={itemModal.kind === "part" ? "e.g. PVC Union (1.5in)" : "e.g. Beneficial Bacteria"} autoFocus />
-            </div>
-            <div>
-              <label style={lbl}>Category <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
-              <input type="text" style={field} list="inv-cats" value={itemModal.data.category || ""}
-                onChange={e => setItemModal(m => ({ ...m, data: { ...m.data, category: e.target.value } }))}
-                placeholder={itemModal.kind === "part" ? "e.g. Pumps, Plumbing, Filtration" : "e.g. Bacteria, Algae, Clarifiers"} />
-              <datalist id="inv-cats">{Array.from(new Set(allItems.map(it => (it.category || "").trim()).filter(Boolean))).map(cat => <option key={cat} value={cat} />)}</datalist>
-            </div>
-            <div style={{ display: "flex", gap: 10 }}>
-              <div style={{ flex: 1 }}>
-                <label style={lbl}>Unit</label>
-                <select value={itemModal.data.unit || (itemModal.kind === "treatment" ? "oz" : itemModal.kind === "product" ? "each" : "pieces")}
-                  onChange={e => setItemModal(m => ({ ...m, data: { ...m.data, unit: e.target.value } }))} style={field}>
-                  {INV_UNITS.map(u => <option key={u} value={u}>{u}</option>)}
-                </select>
-              </div>
-              <div style={{ flex: 1 }}>
-                <label style={lbl}>Low stock at</label>
-                <input type="text" inputMode="decimal" style={field}
-                  value={itemModal.kind === "treatment" ? "32" : (itemModal.data.lowAt ?? "")}
-                  disabled={itemModal.kind === "treatment"}
-                  onChange={e => setItemModal(m => ({ ...m, data: { ...m.data, lowAt: e.target.value.replace(/[^0-9.]/g, "") } }))}
-                  placeholder={itemModal.kind === "treatment" ? "32" : "e.g. 6"} />
-              </div>
-            </div>
-
-            {/* Cost + Retail pricing — owner only */}
-            {canSeeCost && (<>
-            <div style={{ display: "flex", gap: 10 }}>
-              <div style={{ flex: 1 }}>
-                <label style={lbl}>Cost per {itemModal.data.unit || (itemModal.kind === "treatment" ? "oz" : itemModal.kind === "product" ? "each" : "piece")}</label>
-                <input type="text" inputMode="decimal" style={field}
-                  value={itemModal.data[costFieldFor(itemModal.kind)] ?? ""}
-                  onChange={e => { const v = e.target.value.replace(/[^0-9.]/g, ""); setItemModal(m => ({ ...m, data: { ...m.data, [costFieldFor(itemModal.kind)]: v } })); }}
-                  placeholder="0.00" />
-                <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 4 }}>What you pay</div>
-              </div>
-              <div style={{ flex: 1 }}>
-                <label style={lbl}>Retail per {itemModal.data.unit || (itemModal.kind === "treatment" ? "oz" : itemModal.kind === "product" ? "each" : "piece")}</label>
-                <input type="text" inputMode="decimal" style={field}
-                  value={itemModal.data[retailFieldFor(itemModal.kind)] ?? ""}
-                  onChange={e => { const v = e.target.value.replace(/[^0-9.]/g, ""); setItemModal(m => ({ ...m, data: { ...m.data, [retailFieldFor(itemModal.kind)]: v } })); }}
-                  placeholder="0.00" />
-                <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 4 }}>What you charge</div>
-              </div>
-            </div>
-            {/* Margin preview */}
-            {(() => {
-              const c = parseFloat(itemModal.data[costFieldFor(itemModal.kind)]) || 0;
-              const r = parseFloat(itemModal.data[retailFieldFor(itemModal.kind)]) || 0;
-              if (c <= 0 || r <= 0) return null;
-              const margin = ((r - c) / r) * 100;
-              const markup = ((r - c) / c) * 100;
-              return (
-                <div style={{ background: hexA(margin >= 0 ? "#16a34a" : "#E5484D", 0.08), borderRadius: 12, padding: "10px 14px", fontSize: 12.5, color: margin >= 0 ? "#15803D" : "#E5484D", fontWeight: 600 }}>
-                  ${(r - c).toFixed(2)} profit per {itemModal.data.unit || "unit"} · {margin.toFixed(0)}% margin · {markup.toFixed(0)}% markup
-                </div>
-              );
-            })()}
-            </>)}
-
-            {/* Product sourcing — where you buy it + a tappable link to the vendor's page */}
-            {itemModal.kind === "product" && (<>
-              <div>
-                <label style={lbl}>Purchased From <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(vendor / source)</span></label>
-                <input type="text" style={field} value={itemModal.data.vendor || ""}
-                  onChange={e => setItemModal(m => ({ ...m, data: { ...m.data, vendor: e.target.value } }))}
-                  placeholder="e.g. Practical Garden Ponds" />
-              </div>
-              <div>
-                <label style={lbl}>Product Link <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(vendor product page)</span></label>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <input type="url" inputMode="url" style={{ ...field, flex: 1, minWidth: 0 }} value={itemModal.data.sourceUrl || ""}
-                    onChange={e => setItemModal(m => ({ ...m, data: { ...m.data, sourceUrl: e.target.value } }))}
-                    placeholder="https://…" />
-                  {/^https?:\/\//i.test((itemModal.data.sourceUrl || "").trim()) && (
-                    <button type="button" onClick={() => openExternalBrowser(itemModal.data.sourceUrl.trim())}
-                      style={{ flexShrink: 0, background: hexA(T.primary, 0.1), color: T.primary, border: "none", borderRadius: 11, padding: "0 16px", fontWeight: 800, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
-                      Open ↗
-                    </button>
-                  )}
-                </div>
-                <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 4 }}>Opens in your browser (where you're signed in for contractor pricing) so you can check current pricing, then update Cost / Retail above.</div>
-              </div>
-            </>)}
-
-            {/* Per-location starting stock */}
-            <div>
-              <label style={lbl}>Stock by location</label>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {locations.map(loc => (
-                  <div key={loc.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <span style={{ flex: 1, fontSize: 13, color: T.text, fontWeight: 600 }}>{loc.name}</span>
-                    <input type="text" inputMode="decimal"
-                      style={{ ...field, width: 90, flex: "none", textAlign: "center" }}
-                      value={itemModal.data.stockByLoc?.[loc.id] ?? ""}
-                      onChange={e => { const v = e.target.value.replace(/[^0-9.]/g, ""); setItemModal(m => ({ ...m, data: { ...m.data, stockByLoc: { ...(m.data.stockByLoc || {}), [loc.id]: v } } })); }}
-                      placeholder="0" />
-                    <span style={{ fontSize: 12, color: T.textMuted, width: 44 }}>{itemModal.data.unit || "oz"}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <Btn onClick={saveItem} block lg disabled={!itemModal.data.name.trim()}>
-              {itemModal.mode === "add" ? "Add Item" : "Save Changes"}
-            </Btn>
-            {itemModal.mode === "edit" && (
-              <button onClick={deleteItem} style={{ background: "none", border: "none", color: "#E5484D", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit", padding: "4px" }}>
-                Delete {itemModal.kind === "part" ? "Part" : itemModal.kind === "product" ? "Product" : "Treatment"}
-              </button>
-            )}
-          </div>
-        </Modal>
+        <InventoryItemModal
+          mode={itemModal.mode}
+          kind={itemModal.kind}
+          initial={itemModal.data}
+          locations={locations}
+          categories={Array.from(new Set(allItems.map(it => (it.category || "").trim()).filter(Boolean))).sort()}
+          canSeeCost={canSeeCost}
+          costField={costFieldFor(itemModal.kind)}
+          retailField={retailFieldFor(itemModal.kind)}
+          onSave={saveItem}
+          onDelete={deleteItem}
+          onClose={() => setItemModal(null)}
+        />
       )}
 
       {/* Location add/edit modal */}
@@ -18336,8 +18632,21 @@ const WATER_RANGES = {
   "Temp":        { min: 40,  max: 85,   unit: "°F",  ideal: "40–85",    label: "Temp" },
 };
 
-function WaterQualityTrends({ clients, T }) {
-  const [selectedClient, setSelectedClient] = useState("");
+// Per-reading status the tech marks beside each water test: good (in range), needs attention (off),
+// or attention + treated (was off, addressed on this visit). Drives the colored markers in the stop
+// report, client history, and the water-quality trend.
+const READING_STATUS = {
+  good:      { label: "Good",      color: "#16a34a" },
+  attention: { label: "Attention", color: "#dc2626" },
+  treated:   { label: "Treated",   color: "#2563eb" },
+};
+
+function WaterQualityTrends({ clients, T, clientId }) {
+  // clientId locks the view to one client (embedded in the Client Hub) — hides the picker/header
+  // and renders nothing until that client has readings. Without it, it's the full Reports view.
+  const locked = clientId != null && String(clientId) !== "";
+  const [picked, setPicked] = useState("");
+  const selectedClient = locked ? String(clientId) : picked;
   const [selectedParam, setSelectedParam] = useState("pH");
 
   // Get clients that have water readings
@@ -18365,7 +18674,7 @@ function WaterQualityTrends({ clients, T }) {
       }
       if (val !== null && !isNaN(val) && h.date) {
         const [mm, dd, yy] = (h.date || "").split("/").map(Number);
-        points.push({ date: h.date, val, ts: new Date(yy, mm - 1, dd).getTime() });
+        points.push({ date: h.date, val, ts: new Date(yy, mm - 1, dd).getTime(), status: (h.readingStatus && h.readingStatus[param]) || "" });
       }
     });
     return points.sort((a, b) => a.ts - b.ts);
@@ -18461,14 +18770,17 @@ function WaterQualityTrends({ clients, T }) {
 
         {/* Data points */}
         {points.map((p, i) => {
+          const sm = p.status ? READING_STATUS[p.status] : null;  // the tech's marker wins the color
           const bad = outOfRange(p.val);
+          const dotColor = sm ? sm.color : (bad ? "#E5484D" : lineColor);
+          const ring = sm ? sm.color : (bad ? "#E5484D" : null);
           return (
             <g key={i}>
-              <circle cx={xOf(i)} cy={yOf(p.val)} r={bad ? 5 : 4}
-                fill={bad ? "#E5484D" : lineColor}
+              <circle cx={xOf(i)} cy={yOf(p.val)} r={(sm || bad) ? 5 : 4}
+                fill={dotColor}
                 stroke={T.surface} strokeWidth={2}
               />
-              {bad && <circle cx={xOf(i)} cy={yOf(p.val)} r={8} fill="none" stroke={hexA("#E5484D", 0.3)} strokeWidth={1.5} />}
+              {ring && <circle cx={xOf(i)} cy={yOf(p.val)} r={8} fill="none" stroke={hexA(ring, 0.3)} strokeWidth={1.5} />}
             </g>
           );
         })}
@@ -18507,21 +18819,28 @@ function WaterQualityTrends({ clients, T }) {
     );
   };
 
+  if (locked && availableParams.length === 0) return null;  // embedded in the hub — nothing to show yet
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <div>
-        <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Water Quality</div>
-        <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>Trending readings per client over time</div>
-      </div>
+    <div style={{ display: "flex", flexDirection: "column", gap: locked ? 12 : 20 }}>
+      {locked ? (
+        <div style={{ fontSize: 13, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted }}>Water Quality Trends</div>
+      ) : (
+        <>
+          <div>
+            <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Water Quality</div>
+            <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>Trending readings per client over time</div>
+          </div>
 
-      {/* Client picker */}
-      <select value={selectedClient} onChange={e => { setSelectedClient(e.target.value); setSelectedParam("pH"); }}
-        style={{ width: "100%", padding: "12px 14px", border: `1.5px solid ${T.border}`, borderRadius: 14, fontSize: 15, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", appearance: "none", WebkitAppearance: "none" }}>
-        <option value="">Select a client...</option>
-        {clientsWithReadings.sort((a,b) => (a.name||"").localeCompare(b.name||"")).map(c => (
-          <option key={c.id} value={String(c.id)}>{c.name}</option>
-        ))}
-      </select>
+          {/* Client picker */}
+          <select value={selectedClient} onChange={e => { setPicked(e.target.value); setSelectedParam("pH"); }}
+            style={{ width: "100%", padding: "12px 14px", border: `1.5px solid ${T.border}`, borderRadius: 14, fontSize: 15, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", appearance: "none", WebkitAppearance: "none" }}>
+            <option value="">Select a client...</option>
+            {clientsWithReadings.sort((a,b) => (a.name||"").localeCompare(b.name||"")).map(c => (
+              <option key={c.id} value={String(c.id)}>{c.name}</option>
+            ))}
+          </select>
+        </>
+      )}
 
       {clientsWithReadings.length === 0 && (
         <div style={{ textAlign: "center", padding: "48px 20px" }}>
@@ -19016,6 +19335,24 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
   const profHours   = profJobs.reduce((s, p) => s + p.hours, 0);
   const avgEffRate  = profCount ? profJobs.reduce((s, p) => s + p.rate, 0) / profCount : 0;
   const underCount  = profJobs.filter(p => p.status === "low").length;
+
+  // ── Tech performance — per-tech roll-up from completed jobs this period, attributed via the saved
+  // assignee/tech on each visit. Revenue/profit/hours summed; effective $/hr = revenue ÷ logged hours. ──
+  const techStats = (() => {
+    const map = {};
+    periodJobs.forEach(h => {
+      const name = (h.tech || "").trim() || "Unassigned";
+      const m = map[name] || (map[name] = { name, jobs: 0, revenue: 0, profit: 0, hours: 0 });
+      const b = h.breakdown || {};
+      m.jobs += 1;
+      m.revenue += (parseFloat(h.quoted_price) || parseFloat(b.revenue) || 0);
+      m.profit  += (parseFloat(b.profit) || 0);
+      m.hours   += (parseFloat(h.actual_hours) || 0);
+    });
+    return Object.values(map)
+      .map(m => ({ ...m, rate: m.hours > 0 ? m.revenue / m.hours : 0, avg: m.jobs ? m.revenue / m.jobs : 0 }))
+      .sort((a, b) => b.revenue - a.revenue);
+  })();
   const avgTreatmentPerStop = jobsWithTreatment > 0 ? totalTreatmentCost / jobsWithTreatment : 0;
 
   // ── Consolidated P&L (owner oversight) ──
@@ -19309,6 +19646,30 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
           </>
         )}
       </Section>
+
+      {techStats.length > 0 && (
+        <Section title="Tech Performance">
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {techStats.map(t => (
+              <div key={t.name} style={{ background: T.surface, borderRadius: 14, border: `1px solid ${T.border}`, padding: "12px 14px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+                  <span style={{ fontSize: 14.5, fontWeight: 800, color: T.text }}>{t.name}</span>
+                  <span style={{ fontSize: 12, color: T.textMuted }}>{t.jobs} job{t.jobs !== 1 ? "s" : ""} · {t.hours.toFixed(1)}h</span>
+                </div>
+                <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+                  {[["Revenue", money(t.revenue), T.text], ["Profit", money(t.profit), t.profit >= 0 ? "#16a34a" : "#E5484D"], ["Eff. $/hr", money(t.rate), T.text], ["Avg / job", money(t.avg), T.text]].map(([k, v, col]) => (
+                    <div key={k}>
+                      <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: T.textMuted }}>{k}</div>
+                      <div style={{ fontSize: 17, fontWeight: 800, color: col, letterSpacing: "-0.02em", marginTop: 2 }}>{v}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 11, color: T.textMuted, lineHeight: 1.5, marginTop: 10 }}>Per tech, from completed jobs in the selected period (attributed by the assignee on each visit). Effective $/hr = revenue ÷ logged hours.</div>
+        </Section>
+      )}
 
       {/* Treatment / Material Usage */}
       {treatmentRows.length > 0 && (
@@ -21514,6 +21875,25 @@ function CPInvoices({ client, invoices, branding, T, vp = {}, initialSel = null,
   // Open a specific invoice when deep-linked from a portal message ("here" link).
   useEffect(() => { if (initialSel != null) setSel(initialSel); }, [initialSel]);
 
+  // Pay now — always through QuickBooks, in the in-app browser (stays in the app, Done button to
+  // return). App-created invoices already carry a paymentLink; QB-created/synced ones don't, so we
+  // fetch that invoice's QuickBooks pay link on demand. Never another payment service.
+  const [paying, setPaying] = useState(false);
+  const [payErr, setPayErr] = useState("");
+  const payInvoice = async (iv) => {
+    setPayErr("");
+    if (iv.paymentLink) { openInAppBrowser(iv.paymentLink); return; }
+    if (!iv.qbId) { setPayErr("This invoice isn't in QuickBooks yet — no pay link available."); return; }
+    setPaying(true);
+    try {
+      const r = await fetch(`${QB_API}/invoice-link?id=${encodeURIComponent(iv.qbId)}`, { headers: await authHeaders() });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && d.link) openInAppBrowser(d.link);
+      else setPayErr(d.error || "Couldn't load the QuickBooks pay page — try again.");
+    } catch (_) { setPayErr("Couldn't reach QuickBooks — try again."); }
+    finally { setPaying(false); }
+  };
+
   // Normalize status — handles both "Paid" and "paid", "Overdue"/"overdue" etc.
   const normStatus = (iv) => {
     const s = effectiveStatus(iv) || iv.status || "";
@@ -21574,15 +21954,15 @@ function CPInvoices({ client, invoices, branding, T, vp = {}, initialSel = null,
           </div>
         )}
 
-        {iv.paymentLink && !isPaidSt && (
+        {!isPaidSt && (iv.paymentLink || iv.qbId) && (
           <>
-            <a href={iv.paymentLink} target="_blank" rel="noopener noreferrer"
-              onClick={(e) => { e.preventDefault(); openInAppBrowser(iv.paymentLink); }}
-              style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:9, background:"#2CA01C", color:"#fff", borderRadius:14, padding:"16px 18px", fontWeight:800, fontSize:16, textDecoration:"none", boxShadow:"0 6px 18px rgba(44,160,28,0.3)" }}>
+            <button type="button" onClick={() => payInvoice(iv)} disabled={paying}
+              style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:9, background:"#2CA01C", color:"#fff", border:"none", borderRadius:14, padding:"16px 18px", fontWeight:800, fontSize:16, fontFamily:"inherit", width:"100%", cursor: paying ? "default" : "pointer", opacity: paying ? 0.85 : 1, boxShadow:"0 6px 18px rgba(44,160,28,0.3)" }}>
               <svg viewBox="0 0 24 24" width={19} height={19} fill="none" stroke="#fff" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>
-              Pay ${(tot.total||0).toFixed(2)} Now
-            </a>
+              {paying ? "Loading QuickBooks…" : `Pay $${(tot.total||0).toFixed(2)} Now`}
+            </button>
             <div style={{ fontSize:11.5, color:T.textMuted, textAlign:"center", marginTop:-4 }}>Secure payment via QuickBooks · opens right in the app</div>
+            {payErr && <div style={{ fontSize:11.5, color:"#C0392B", textAlign:"center", fontWeight:600 }}>{payErr}</div>}
           </>
         )}
       </div>
@@ -23013,6 +23393,26 @@ export default function App({ authEmail = "", onSignOut }) {
     run();
   }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Recurring maintenance invoicing: once per month (per session), create any missing DRAFT
+  // invoices for the current month — clients with Auto-Invoice on + a monthly rate. Drafts only;
+  // the owner reviews + sends them from Invoices. Never auto-sent. Gated on a confirmed DB read so
+  // it can't generate off seeded defaults. ──
+  useEffect(() => {
+    if (!hydrated || !DB_READ_OK) return;
+    const now = new Date();
+    const period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const flag = `sps_autodraft_${period}`;
+    try { if (sessionStorage.getItem(flag)) return; } catch (_) {}
+    try { sessionStorage.setItem(flag, "1"); } catch (_) {}
+    const drafts = buildRecurringDrafts(clients, invoices, invoicing, now);
+    if (!drafts.length) return;
+    setInvoices(list => {
+      const have = new Set((list || []).map(iv => iv.id));
+      const add = drafts.filter(d => !have.has(d.id));
+      return add.length ? [...add, ...(list || [])] : list;
+    });
+  }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Late fees: auto-apply once after data is ready (silent, never blocks load) ──
   const lateFeeRan = useRef(false);
   useEffect(() => {
@@ -23604,6 +24004,12 @@ export default function App({ authEmail = "", onSignOut }) {
           }),
         };
       });
+      // Fold job-stock usage into the per-session inventory activity summary (one rollup, not a ping).
+      const locNm = (id) => ((catalog.locations || []).find(l => l.id === id) || {}).name || "";
+      const clientNm = ((clients || []).find(c => c.id === clientId) || {}).name || "";
+      txUsed.forEach(u => { if (u && (u.oz || 0) > 0) logInvChange({ action: "Used (job)", item: u.name, kind: "treatment", qty: u.oz, unit: u.unit || "oz", loc: locNm(u.locId || entry.usageLoc), note: clientNm }); });
+      ptUsed.forEach(u => { if (u && (u.qty || 0) > 0) logInvChange({ action: "Used (job)", item: u.name, kind: "part", qty: u.qty, unit: u.unit || "", loc: locNm(u.locId || entry.usageLoc), note: clientNm }); });
+      prUsed.forEach(u => { if (u && (u.qty || 0) > 0) logInvChange({ action: "Used (job)", item: u.name, kind: "product", qty: u.qty, unit: u.unit || "", loc: locNm(u.locId || entry.usageLoc), note: clientNm }); });
     }
     if (sid) setCompletedSids(m => ({ ...m, [sid]: true }));
   };
@@ -23785,7 +24191,7 @@ export default function App({ authEmail = "", onSignOut }) {
       ))}
       {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} enRoute={enRoute} onEnRoute={handleEnRoute} />}
       {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
-      {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} />}
+      {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <SectionErrorBoundary key="inventory"><InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} /></SectionErrorBoundary>}
       {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
       {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetScreen budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} />}
