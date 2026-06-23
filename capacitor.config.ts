@@ -2,7 +2,7 @@ import { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
   appId: 'com.stonepropertysolutions.app',
-  appName: 'Stone Property Solutions',
+  appName: 'SPS Way',
   webDir: 'dist',
   server: {
     androidScheme: 'https'
