@@ -21886,7 +21886,7 @@ function CPInvoices({ client, invoices, branding, T, vp = {}, initialSel = null,
     if (!iv.qbId) { setPayErr("This invoice isn't in QuickBooks yet — no pay link available."); return; }
     setPaying(true);
     try {
-      const r = await fetch(`${QB_API}/invoice-link?id=${encodeURIComponent(iv.qbId)}`, { headers: await authHeaders() });
+      const r = await fetch(`${QB_API}/sync?invoiceLink=${encodeURIComponent(iv.qbId)}`, { headers: await authHeaders() });
       const d = await r.json().catch(() => ({}));
       if (r.ok && d.link) openInAppBrowser(d.link);
       else setPayErr(d.error || "Couldn't load the QuickBooks pay page — try again.");

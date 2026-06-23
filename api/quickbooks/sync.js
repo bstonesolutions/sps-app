@@ -26,6 +26,25 @@ export default async function handler(req, res) {
     'Accept':        'application/json',
   };
 
+  // On-demand single-invoice pay link (folded in here rather than its own /api file, to avoid
+  // adding another Vercel Serverless Function). Client portal calls /api/quickbooks/sync?invoiceLink=<id>
+  // when a client taps "Pay now" on a QB-created invoice that has no stored paymentLink.
+  // include=invoiceLink → Invoice.InvoiceLink (QB's hosted pay page; needs online payments enabled).
+  if (req.query && req.query.invoiceLink) {
+    const rawId = String(req.query.invoiceLink).replace(/^qb_/, "");
+    try {
+      const lr = await fetch(`${base}/invoice/${encodeURIComponent(rawId)}?include=invoiceLink&minorversion=65`, { headers });
+      if (lr.status === 401) return res.status(401).json({ error: 'Token expired', action: 'reconnect' });
+      if (!lr.ok) return res.status(502).json({ error: 'QuickBooks error ' + lr.status });
+      const ld = await lr.json().catch(() => ({}));
+      const link = ld && ld.Invoice && ld.Invoice.InvoiceLink;
+      if (!link) return res.status(404).json({ error: 'No pay link yet — enable online payments for this invoice in QuickBooks.' });
+      return res.status(200).json({ link });
+    } catch (e) {
+      return res.status(500).json({ error: (e && e.message) || 'Failed to fetch the pay link.' });
+    }
+  }
+
   try {
     const invoiceQuery = encodeURIComponent(
       "SELECT * FROM Invoice ORDER BY MetaData.LastUpdatedTime DESC MAXRESULTS 1000"
