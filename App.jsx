@@ -1865,6 +1865,40 @@ function compressImage(file, maxDim = 1600) {
   });
 }
 
+// ── Photo storage ─────────────────────────────────────────────────────────────
+// Photos live in Supabase Storage (bucket `client-media`), not inline in the DB. Inline base64
+// bloated app_state until reads/writes timed out (the 2026-06-24 outage). We store the public URL;
+// <img src> renders it the same. Every helper falls back gracefully so a photo is never lost.
+async function uploadToStorage(dataUrl) {
+  try {
+    if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) return dataUrl; // already a URL / empty
+    const blob = await (await fetch(dataUrl)).blob();
+    const type = blob.type || "image/jpeg";
+    const ext = (type.split("/")[1] || "jpg").replace("jpeg", "jpg").replace(/\+xml$/, "");
+    const path = `media/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
+    const { error } = await supabase.storage.from("client-media").upload(path, blob, { contentType: type, upsert: false });
+    if (error) { console.warn("[storage] upload failed, keeping inline:", error.message); return dataUrl; } // fallback: inline
+    return supabase.storage.from("client-media").getPublicUrl(path).data.publicUrl || dataUrl;
+  } catch (e) { console.warn("[storage] upload error, keeping inline:", e && e.message); return dataUrl; }
+}
+// Compress a captured file, then move it to Storage. Returns a Storage URL (or an inline data-URL
+// fallback if the upload failed), or "" if the file couldn't be decoded (e.g. HEIC) — caller skips "".
+async function compressAndUpload(file, maxDim = 1280) {
+  const dataUrl = await compressImage(file, maxDim);
+  if (!dataUrl || !dataUrl.startsWith("data:image")) return "";
+  return uploadToStorage(dataUrl);
+}
+// Resolve any photo src (inline data URL OR Storage URL) to a base64 data URL — for places that must
+// embed the actual bytes (e.g. email). Returns "" on failure so the caller skips it.
+async function toDataUrl(src) {
+  if (!src || typeof src !== "string") return "";
+  if (src.startsWith("data:")) return src;
+  try {
+    const blob = await (await fetch(src)).blob();
+    return await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.onerror = () => r(""); fr.readAsDataURL(blob); });
+  } catch (_) { return ""; }
+}
+
 // ─────────────────────────────────────────────
 const planMeta = (plan, T, tiers, div) => {
   if (!plan) return { bg: T.surfaceAlt, text: T.textMuted, color: T.textMuted, label: "No tier" };
@@ -4716,8 +4750,8 @@ function PhotoPicker({ photos = [], onChange, label = "Photos", maxPhotos = 10, 
     const slice = Array.from(files).slice(0, maxPhotos - normalised.length);
     const results = [];
     for (const file of slice) {
-      const src = await compressImage(file, 1280);
-      if (src && src.startsWith("data:image")) results.push({ src, caption: "" });
+      const src = await compressAndUpload(file, 1280);
+      if (src) results.push({ src, caption: "" });
     }
     if (results.length) onChange([...normalised, ...results]);
   };
@@ -5385,7 +5419,7 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
     if (!files.length) return;
     setBusy(true);
     const out = [];
-    for (const f of files) { const src = await compressImage(f); if (src && src.startsWith("data:image")) out.push({ src, label: "General", takenAt: Date.now() }); } // skip a failed/undecodable (e.g. HEIC) result
+    for (const f of files) { const src = await compressAndUpload(f); if (src) out.push({ src, label: "General", takenAt: Date.now() }); } // "" = failed/undecodable (e.g. HEIC) — skip
     setPhotos(p => [...p, ...out]);
     setBusy(false);
   };
@@ -6403,8 +6437,8 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
     setBusy(true);
     const compressed = [];
     for (const f of files.slice(0, remaining)) {
-      const src = await compressImage(f);
-      if (src && src.startsWith("data:image")) compressed.push({ src, label: defaultLabel, takenAt: Date.now() }); // skip a failed/undecodable (e.g. HEIC) result
+      const src = await compressAndUpload(f);
+      if (src) compressed.push({ src, label: defaultLabel, takenAt: Date.now() }); // "" = failed/undecodable (e.g. HEIC) — skip
     }
     setPhotos(p => [...p, ...compressed]);
     setBusy(false);
@@ -6510,7 +6544,8 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
     try {
       let budget = 3_800_000; // ~base64 char budget to keep the POST under Vercel's ~4.5MB limit
       for (const ph of (photos || []).slice(0, 12)) {
-        const src = typeof ph === "string" ? ph : (ph && ph.src) || "";
+        const raw = typeof ph === "string" ? ph : (ph && ph.src) || "";
+        const src = await toDataUrl(raw);   // fetch Storage URLs back to base64 so they embed in the email
         if (!src.startsWith("data:image")) continue;
         const small = await shrinkForEmail(src);
         if (small.length > budget) break;
