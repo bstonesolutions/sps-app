@@ -2458,16 +2458,17 @@ function Btn({ children, onClick, href, variant = "primary", sm, lg, block, disa
   return <button onClick={onClick} disabled={disabled} style={css}>{children}</button>;
 }
 
-function StatCard({ label, value, sub, accent, onClick }) {
+function StatCard({ label, value, sub, accent, onClick, icon, trend }) {
   const { T } = useApp();
   const clickable = !!onClick;
+  const ac = accent && accent !== T.surface ? accent : T.primary;
   return (
     <div onClick={onClick}
       style={{
         background: T.surface,
         border: `1px solid ${clickable ? hexA(accent || T.primary, 0.25) : T.border}`,
         borderRadius: 20,
-        padding: "18px 18px",
+        padding: "16px 18px",
         boxShadow: "0 1px 3px rgba(0,0,0,0.04), 0 4px 16px rgba(0,0,0,0.05)",
         cursor: clickable ? "pointer" : "default",
         transition: "box-shadow 0.15s, transform 0.1s",
@@ -2479,15 +2480,19 @@ function StatCard({ label, value, sub, accent, onClick }) {
       onTouchStart={e => { if (clickable) e.currentTarget.style.transform = "scale(0.97)"; }}
       onTouchEnd={e => { if (clickable) e.currentTarget.style.transform = "scale(1)"; }}
     >
-      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.04em", color: T.textMuted, textTransform: "uppercase", marginBottom: 10, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        {label}
-        {clickable && (
-          <svg viewBox="0 0 24 24" width={13} height={13} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.5 }}>
-            <path d="m9 18 6-6-6-6"/>
-          </svg>
-        )}
+      {/* Top row: metric icon (left) + trend chip or chevron (right) */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 11, minHeight: 30 }}>
+        {icon
+          ? <div style={{ width: 30, height: 30, borderRadius: 9, background: hexA(ac, 0.12), color: ac, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name={icon} size={16} /></div>
+          : <span />}
+        {trend
+          ? <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 10.5, fontWeight: 800, padding: "3px 8px", borderRadius: 100, background: hexA(trend.good ? "#16a34a" : "#E5484D", 0.12), color: trend.good ? "#16a34a" : "#E5484D" }}>{trend.dir === "up" ? "▲" : "▼"} {trend.text}</span>
+          : clickable
+            ? <svg viewBox="0 0 24 24" width={13} height={13} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.5 }}><path d="m9 18 6-6-6-6"/></svg>
+            : <span />}
       </div>
-      <div style={{ fontSize: 30, fontWeight: 800, color: accent && accent !== T.surface ? accent : T.text, lineHeight: 1, letterSpacing: "-0.03em" }}>{value}</div>
+      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.04em", color: T.textMuted, textTransform: "uppercase", marginBottom: 7 }}>{label}</div>
+      <div style={{ fontSize: 28, fontWeight: 800, color: accent && accent !== T.surface ? accent : T.text, lineHeight: 1, letterSpacing: "-0.03em" }}>{value}</div>
       {sub && <div style={{ fontSize: 12, color: T.textMuted, marginTop: 6 }}>{sub}</div>}
     </div>
   );
@@ -3181,17 +3186,27 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
     return (d && d.getMonth() === curM && d.getFullYear() === curY) ? s + invoiceTotals(iv).total : s;
   }, 0);
   const laborMonth = (clients || []).reduce((s, c) => s + (c.history || []).reduce((a, h) => (h.breakdown && inCurMonth(h.date)) ? a + (Number(h.breakdown.labor) || 0) : a, 0), 0);
+  // Month-over-month trend chips, computed where there's a meaningful prior-period number
+  // (revenue / costs / profit / jobs). Hidden elsewhere — no fabricated comparisons.
+  const lastMA = monthActuals(clients, new Date(curY, curM - 1, 15), invoices);
+  const trendOf = (cur, prev, higherIsBetter = true) => {
+    if (prev == null || prev === 0 || !isFinite(prev)) return null;
+    const dp = Math.round(((cur - prev) / Math.abs(prev)) * 100);
+    if (dp === 0) return null;
+    const up = dp > 0;
+    return { dir: up ? "up" : "down", text: `${Math.abs(dp)}%`, good: higherIsBetter ? up : !up };
+  };
   const STAT_CATALOG = {
-    activeClients:  { label: "Active Clients",  value: clients.length, sub: "All divisions", accent: T.primary, onClick: () => onNav("clients", {}) },
-    stopsToday:     { label: "Stops Today",     value: today.stops.length, sub: "Tap to view", accent: T.primary, onClick: () => onNav("schedule") },
-    stopsMonth:     { label: "Stops (mo)",      value: stopsMonth, sub: "This month", accent: T.primary, onClick: () => onNav("schedule") },
-    jobsMonth:      { label: "Jobs (mo)",       value: ma.jobs, sub: "Completed", accent: T.accent, onClick: (perms.seeReportsPnl || perms.isAdmin) ? () => onNav("reports") : undefined },
-    outstanding:    { label: "Outstanding",     value: money(outstandingTotal), sub: `${outstandingClients.length} ${outstandingClients.length === 1 ? "client" : "clients"}`, accent: outstandingTotal > 0 ? T.warning : T.accent, onClick: () => onNav("invoices", { invoiceFilter: "Overdue" }), perm: "seeBalances" },
-    collectedMonth: { label: "Collected (mo)",  value: money(collectedMonth), sub: "Cash in", accent: T.accent, perm: "seeBalances" },
-    revenueMonth:   { label: "Revenue (mo)",    value: money(ma.revenue), sub: "Job revenue", accent: T.text, perm: "seeProfit" },
-    costsMonth:     { label: "Costs (mo)",      value: money(ma.cost), sub: "Job costs", accent: T.textMuted, perm: "seeProfit" },
-    profitMonth:    { label: "Profit (mo)",     value: money(ma.profit), sub: `${ma.jobs} jobs`, accent: ma.profit >= 0 ? T.accent : "#C0392B", onClick: (perms.seeReportsPnl || perms.isAdmin) ? () => onNav("reports") : undefined, perm: "seeProfit" },
-    laborMonth:     { label: "Labor (mo)",      value: money(laborMonth), sub: "Payroll cost", accent: T.textMuted, perm: "seeProfit" },
+    activeClients:  { label: "Active Clients",  value: clients.length, sub: "All divisions", accent: T.primary, icon: "clients", onClick: () => onNav("clients", {}) },
+    stopsToday:     { label: "Stops Today",     value: today.stops.length, sub: "Tap to view", accent: T.primary, icon: "calendar", onClick: () => onNav("schedule") },
+    stopsMonth:     { label: "Stops (mo)",      value: stopsMonth, sub: "This month", accent: T.primary, icon: "calendar", onClick: () => onNav("schedule") },
+    jobsMonth:      { label: "Jobs (mo)",       value: ma.jobs, sub: "Completed", accent: T.accent, icon: "check", trend: trendOf(ma.jobs, lastMA.jobs, true), onClick: (perms.seeReportsPnl || perms.isAdmin) ? () => onNav("reports") : undefined },
+    outstanding:    { label: "Outstanding",     value: money(outstandingTotal), sub: `${outstandingClients.length} ${outstandingClients.length === 1 ? "client" : "clients"}`, accent: outstandingTotal > 0 ? T.warning : T.accent, icon: "invoice", onClick: () => onNav("invoices", { invoiceFilter: "Overdue" }), perm: "seeBalances" },
+    collectedMonth: { label: "Collected (mo)",  value: money(collectedMonth), sub: "Cash in", accent: T.accent, icon: "dollar", perm: "seeBalances" },
+    revenueMonth:   { label: "Revenue (mo)",    value: money(ma.revenue), sub: "Job revenue", accent: T.text, icon: "dollar", trend: trendOf(ma.revenue, lastMA.revenue, true), perm: "seeProfit" },
+    costsMonth:     { label: "Costs (mo)",      value: money(ma.cost), sub: "Job costs", accent: T.textMuted, icon: "chart", trend: trendOf(ma.cost, lastMA.cost, false), perm: "seeProfit" },
+    profitMonth:    { label: "Profit (mo)",     value: money(ma.profit), sub: `${ma.jobs} jobs`, accent: ma.profit >= 0 ? T.accent : "#C0392B", icon: "chart", trend: trendOf(ma.profit, lastMA.profit, true), onClick: (perms.seeReportsPnl || perms.isAdmin) ? () => onNav("reports") : undefined, perm: "seeProfit" },
+    laborMonth:     { label: "Labor (mo)",      value: money(laborMonth), sub: "Payroll cost", accent: T.textMuted, icon: "clients", perm: "seeProfit" },
   };
   const STAT_ORDER = ["activeClients", "stopsToday", "stopsMonth", "jobsMonth", "outstanding", "collectedMonth", "revenueMonth", "costsMonth", "profitMonth", "laborMonth"];
   const DEFAULT_STAT_TILES = ["activeClients", "stopsToday", "outstanding", "profitMonth"];
@@ -3232,7 +3247,7 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
             </button>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: vp.isDesktop ? "repeat(4, 1fr)" : vp.isTablet ? "repeat(3, 1fr)" : "1fr 1fr", gap: 12 }}>
-            {shownTiles.map(mid => { const t = STAT_CATALOG[mid]; return <StatCard key={mid} label={t.label} value={t.value} sub={t.sub} accent={t.accent} onClick={t.onClick} />; })}
+            {shownTiles.map(mid => { const t = STAT_CATALOG[mid]; return <StatCard key={mid} label={t.label} value={t.value} sub={t.sub} accent={t.accent} icon={t.icon} trend={t.trend} onClick={t.onClick} />; })}
           </div>
         </div>
       );
@@ -3253,12 +3268,23 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
       </Card>
       );
     }
-    if (id === "todayRoute") return (
+    if (id === "todayRoute") {
+      const next = today.stops[0];
+      const rest = today.stops.slice(1);
+      return (
       <Card key="todayRoute" style={{ marginBottom: 16 }}>
         <CardHeader title="Today's Route" action={<Btn variant="text" sm onClick={() => onNav("schedule")}>View All</Btn>} />
         {today.stops.length === 0 && <div style={{ padding: 18, fontSize: 13, color: T.textMuted }}>No stops scheduled today.</div>}
-        {today.stops.map((s, i) => (
-          <div key={i} onClick={() => onOpenStop && onOpenStop(s, today.date)} style={{ padding: "14px 18px", borderBottom: i < today.stops.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", gap: 14, alignItems: "center", cursor: onOpenStop ? "pointer" : "default" }}>
+        {/* Lead with a prominent "head to the next stop" CTA → jumps to the schedule's route */}
+        {next && (
+          <div onClick={() => onNav("schedule")} role="button"
+            style={{ margin: "12px 16px", background: T.primary, color: "#fff", borderRadius: 12, padding: "11px 14px", cursor: "pointer", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.15)" }}>
+            <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.08em", opacity: 0.82 }}>NEXT · {next.time}</div>
+            <div style={{ fontSize: 13.5, fontWeight: 800, marginTop: 2, display: "flex", alignItems: "center", gap: 5 }}><Icon name="map" size={14} /> Head to {next.client} ›</div>
+          </div>
+        )}
+        {rest.map((s, i) => (
+          <div key={i} onClick={() => onOpenStop && onOpenStop(s, today.date)} style={{ padding: "13px 18px", borderTop: `1px solid ${T.border}`, display: "flex", gap: 14, alignItems: "center", cursor: onOpenStop ? "pointer" : "default" }}>
             <div style={{ background: T.surfaceAlt, borderRadius: 10, padding: "7px 10px", textAlign: "center", minWidth: 58, flexShrink: 0 }}>
               <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{s.time.split(" ")[1]}</div>
               <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>{s.time.split(" ")[0]}</div>
@@ -3274,7 +3300,8 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
           </div>
         ))}
       </Card>
-    );
+      );
+    }
     if (id === "alerts") return (
       <Card key="alerts" style={{ marginBottom: 16 }}>
         <CardHeader title="Alerts" />
@@ -3386,6 +3413,31 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
             </div>
           </div>
           <Icon name="chevronD" size={16} style={{ transform: "rotate(-90deg)", color: T.primary, flexShrink: 0 }} />
+        </div>
+      )}
+
+      {/* Hero — the day's headline (stops to run) + profit, with a route shortcut */}
+      {!editing && (
+        <div onClick={() => onNav("schedule")} role="button"
+          style={{ background: T.primary, color: "#fff", borderRadius: 20, padding: "18px 20px", marginBottom: 16, cursor: "pointer", boxShadow: "0 10px 30px rgba(0,0,0,0.16), inset 0 1px 0 rgba(255,255,255,0.15)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+            <div>
+              <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.1em", opacity: 0.82 }}>TODAY</div>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginTop: 5 }}>
+                <span style={{ fontSize: 42, fontWeight: 800, lineHeight: 1, letterSpacing: "-0.03em" }}>{today.stops.length}</span>
+                <span style={{ fontSize: 14, fontWeight: 700, opacity: 0.92 }}>{today.stops.length === 1 ? "stop to run" : "stops to run"}</span>
+              </div>
+            </div>
+            {perms.seeProfit && (
+              <div style={{ textAlign: "right", flexShrink: 0 }}>
+                <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.08em", opacity: 0.8 }}>PROFIT (MO)</div>
+                <div style={{ fontSize: 17, fontWeight: 800, marginTop: 3 }}>{money(ma.profit)}</div>
+              </div>
+            )}
+          </div>
+          <div style={{ marginTop: 16, display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.2)", borderRadius: 100, padding: "8px 15px", fontSize: 12.5, fontWeight: 800 }}>
+            View route <span style={{ fontSize: 15, lineHeight: 1 }}>›</span>
+          </div>
         </div>
       )}
 
