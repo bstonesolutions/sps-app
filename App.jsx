@@ -3160,7 +3160,7 @@ function ClockInOut({ me, T }) {
 }
 
 function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onOpenAlert, onOpenStop, onNav, catalog, onConfirmUpgrade, userName, me, scheduleCfg, reminderLog, vp = {} }) {
-  const { T, perms } = useApp();
+  const { T, perms, branding } = useApp();
   const [editing, setEditing] = useState(false);
   const [statPicker, setStatPicker] = useState(false);
 
@@ -3416,27 +3416,37 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
         </div>
       )}
 
-      {/* Hero — the day's headline (stops to run) + profit, with a route shortcut */}
+      {/* Hero — the day's headline + profit/revenue, with the company logo ghosted into the
+          background (like the branded link card), and a route shortcut. */}
       {!editing && (
         <div onClick={() => onNav("schedule")} role="button"
-          style={{ background: T.primary, color: "#fff", borderRadius: 20, padding: "18px 20px", marginBottom: 16, cursor: "pointer", boxShadow: "0 10px 30px rgba(0,0,0,0.16), inset 0 1px 0 rgba(255,255,255,0.15)" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
-            <div>
-              <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.1em", opacity: 0.82 }}>TODAY</div>
-              <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginTop: 5 }}>
-                <span style={{ fontSize: 42, fontWeight: 800, lineHeight: 1, letterSpacing: "-0.03em" }}>{today.stops.length}</span>
-                <span style={{ fontSize: 14, fontWeight: 700, opacity: 0.92 }}>{today.stops.length === 1 ? "stop to run" : "stops to run"}</span>
-              </div>
+          style={{ position: "relative", overflow: "hidden", background: T.primary, color: "#fff", borderRadius: 20, padding: "18px 20px", marginBottom: 16, cursor: "pointer", boxShadow: "0 10px 30px rgba(0,0,0,0.16), inset 0 1px 0 rgba(255,255,255,0.15)" }}>
+          {/* Logo watermark — soft-light blend ghosts it into the crimson, like the SMS card */}
+          {branding && branding.logoType === "image" && branding.logoImage && (
+            <img src={branding.logoImage} alt="" aria-hidden="true"
+              style={{ position: "absolute", right: -34, top: "50%", transform: "translateY(-50%) rotate(-8deg)", width: 184, height: 184, objectFit: "contain", opacity: 0.16, mixBlendMode: "soft-light", pointerEvents: "none" }} />
+          )}
+          <div style={{ position: "relative", zIndex: 1 }}>
+            <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.1em", opacity: 0.82 }}>TODAY</div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginTop: 5 }}>
+              <span style={{ fontSize: 42, fontWeight: 800, lineHeight: 1, letterSpacing: "-0.03em" }}>{today.stops.length}</span>
+              <span style={{ fontSize: 14, fontWeight: 700, opacity: 0.92 }}>{today.stops.length === 1 ? "stop to run" : "stops to run"}</span>
             </div>
             {perms.seeProfit && (
-              <div style={{ textAlign: "right", flexShrink: 0 }}>
-                <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.08em", opacity: 0.8 }}>PROFIT (MO)</div>
-                <div style={{ fontSize: 17, fontWeight: 800, marginTop: 3 }}>{money(ma.profit)}</div>
+              <div style={{ display: "flex", alignItems: "flex-end", gap: 26, marginTop: 16 }}>
+                <div>
+                  <div style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.08em", opacity: 0.82 }}>PROFIT (MO)</div>
+                  <div style={{ fontSize: 26, fontWeight: 800, lineHeight: 1.05, letterSpacing: "-0.02em", marginTop: 3 }}>{money(ma.profit)}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.08em", opacity: 0.82 }}>REVENUE (MO)</div>
+                  <div style={{ fontSize: 16, fontWeight: 800, opacity: 0.95, marginTop: 4 }}>{money(ma.revenue)}</div>
+                </div>
               </div>
             )}
-          </div>
-          <div style={{ marginTop: 16, display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.2)", borderRadius: 100, padding: "8px 15px", fontSize: 12.5, fontWeight: 800 }}>
-            View route <span style={{ fontSize: 15, lineHeight: 1 }}>›</span>
+            <div style={{ marginTop: 16, display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.2)", borderRadius: 100, padding: "8px 15px", fontSize: 12.5, fontWeight: 800 }}>
+              View route <span style={{ fontSize: 15, lineHeight: 1 }}>›</span>
+            </div>
           </div>
         </div>
       )}
