@@ -9050,13 +9050,23 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
     return cells;
   })();
 
-  // On first load, scroll the day strip so TODAY is centered (it now extends ~2 months back).
+  // On first load, scroll the day strip so TODAY is centered (it now extends ~2 months back). Wait for
+  // the strip to actually have width (on desktop it's laid out a frame late) so the centering math is
+  // correct — otherwise it parks today just off the left edge.
   useEffect(() => {
-    if (stripScrolled.current || !stripRef.current) return;
-    const el = stripRef.current.querySelector('[data-today="1"]') || stripRef.current.querySelector('[data-sel="1"]');
-    if (!el) return;
-    stripScrolled.current = true;
-    try { const c = stripRef.current, cr = c.getBoundingClientRect(), er = el.getBoundingClientRect(); c.scrollLeft += (er.left - cr.left) - (cr.width - er.width) / 2; } catch (_) {}
+    if (stripScrolled.current) return;
+    let tries = 0;
+    const place = () => {
+      const c = stripRef.current;
+      if (!c || !c.clientWidth) return false; // layout not ready yet
+      const el = c.querySelector('[data-today="1"]') || c.querySelector('[data-sel="1"]');
+      if (!el) return false;
+      stripScrolled.current = true;
+      try { const cr = c.getBoundingClientRect(), er = el.getBoundingClientRect(); c.scrollLeft += (er.left - cr.left) - (c.clientWidth - el.clientWidth) / 2; } catch (_) {}
+      return true;
+    };
+    const tick = () => { if (place() || ++tries > 15) return; requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
   }, [schedule.length, selectMode]);
 
   // Tech's preferred maps app (saved per-tech in Customize → Team; falls back to the device's
