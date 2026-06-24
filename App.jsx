@@ -15318,7 +15318,12 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
   // keep per-division plans in c.plans; single-division falls back to the flat c.plan.
   // Every count below uses this one resolver so the tier buckets + None always sum
   // to the full client list (no Essential-counts-one-way / None-counts-another drift).
-  const planForDiv = (c) => (c.plans && c.plans[activeDivision]) || (c.division === activeDivision ? c.plan : null);
+  const planForDiv = (c) => {
+    // An explicit entry for the active division wins — even "" (None) — so a client moved to None
+    // can't short-circuit to a stale flat c.plan and get re-bucketed into another tier (e.g. Premium).
+    if (c.plans && Object.prototype.hasOwnProperty.call(c.plans, activeDivision)) return c.plans[activeDivision] || null;
+    return c.division === activeDivision ? (c.plan || null) : null;
+  };
 
   // Clients on this tier (or no tier when __none__ is selected)
   const tierClients = (clients || []).filter(c => {
