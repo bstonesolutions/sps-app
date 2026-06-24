@@ -22824,6 +22824,26 @@ export default function App({ authEmail = "", onSignOut }) {
     return DEFAULT_BRANDING.staffDefaultPage || "dashboard";
   });
   useEffect(() => { try { localStorage.setItem("sps_page", page); } catch (_) {} }, [page]);
+
+  // Remember the open client + tab so a resume/sync returns you to it, not the bare list.
+  useEffect(() => {
+    try {
+      if (selectedClient && selectedClient.id != null) { localStorage.setItem("sps_sel_client", String(selectedClient.id)); localStorage.setItem("sps_sel_tab", clientOpenTab || ""); }
+      else { localStorage.removeItem("sps_sel_client"); localStorage.removeItem("sps_sel_tab"); }
+    } catch (_) {}
+  }, [selectedClient, clientOpenTab]);
+  // On load, reopen the client you had open (once data is in) — keeps a resume/sync from dumping you on the list.
+  const selRestored = useRef(false);
+  useEffect(() => {
+    if (selRestored.current) return;
+    if (page !== "clients") { selRestored.current = true; return; }  // only the Clients detail restores
+    if (!Array.isArray(clients) || !clients.length) return;          // wait for data
+    selRestored.current = true;
+    try {
+      const id = localStorage.getItem("sps_sel_client");
+      if (id) { const c = clients.find(x => String(x.id) === String(id)); if (c) { setSelectedClient(c); const t = localStorage.getItem("sps_sel_tab"); if (t) setClientOpenTab(t); } }
+    } catch (_) {}
+  }, [clients, page]);
   const [invoiceFilter, setInvoiceFilter] = useState("All"); // deep-link from dashboard tiles
   const [schedule, setSchedule, ls] = useStoredState("sps_schedule", DEFAULT_SCHEDULE);
   const [catalog, setCatalog, lcat] = useStoredState("sps_catalog", DEFAULT_CATALOG);
@@ -23222,12 +23242,9 @@ export default function App({ authEmail = "", onSignOut }) {
     const onVis = () => {
       if (document.hidden) { markActive(); return; }
       if (Date.now() - lastActive < IDLE_MS) return; // quick return → leave everything as-is
-      // Long idle → reset to Home + full splash for every user, with freshly loaded data.
-      try {
-        localStorage.removeItem("sps_page");
-        sessionStorage.removeItem("sps_splashed");
-        Object.keys(sessionStorage).forEach(k => { if (k.indexOf("sps_cp_page_") === 0) sessionStorage.removeItem(k); });
-      } catch (_) {}
+      // Long idle → refresh data but RETURN TO WHERE YOU WERE: keep the page + open client, and show
+      // the sync strip instead of a full splash. (Was: wipe the page and reset to Home.)
+      try { sessionStorage.setItem("sps_resyncing", "1"); } catch (_) {}
       reloadAfterDrain();
     };
     markActive();
