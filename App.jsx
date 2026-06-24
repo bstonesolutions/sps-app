@@ -5401,6 +5401,8 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
   const [tech, setTech] = useState(entry.tech || "");
   const [svcList, setSvcList] = useState((entry.services || []).map(s => typeof s === "string" ? { name: s, price: "" } : { name: s.name, price: s.price || "" }));
   const [prodList, setProdList] = useState((entry.products || []).map(p => typeof p === "string" ? p : p.name));
+  const [productsOpen, setProductsOpen] = useState(false); // collapsed by default, like the live picker
+  const [productSearch, setProductSearch] = useState("");
   const [revenue, setRevenue] = useState(String(b.revenue ?? (entry.invoice || "").replace(/[^\d.]/g, "")));
   const [labor, setLabor] = useState(String(b.labor ?? 0));
   const [treatment, setTreatment] = useState(String(b.treatment ?? 0));
@@ -5492,21 +5494,43 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
         </div>
 
         {/* Products purchased (past visit — name list only) */}
-        {(catalog?.products || []).length > 0 && (
-          <div>
-            <label style={labelStyle}>Products Purchased</label>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-              {(catalog.products || []).map(p => {
-                const name = typeof p === "string" ? p : p.name;
-                const on = prodList.includes(name);
-                return (
-                  <button key={name} onClick={() => setProdList(l => on ? l.filter(x => x !== name) : [...l, name])}
-                    style={{ padding: "8px 13px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.08) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>{name}</button>
-                );
-              })}
+        {(catalog?.products || []).length > 0 && (() => {
+          // Collapsible + searchable + category-grouped, to match the live complete-stop picker.
+          const q = productSearch.trim().toLowerCase();
+          const filtered = (catalog.products || []).filter(p => { const n = (typeof p === "string" ? p : p.name) || ""; return !q || n.toLowerCase().includes(q); });
+          const map = {};
+          filtered.forEach(p => { const cat = ((typeof p === "object" && p.category) || "").trim() || "Other"; (map[cat] = map[cat] || []).push(p); });
+          const groups = Object.keys(map).sort((a, b) => a === "Other" ? 1 : b === "Other" ? -1 : a.localeCompare(b)).map(cat => ({ cat, items: map[cat] }));
+          const multiCat = groups.length > 1;
+          const chip = (p) => {
+            const name = typeof p === "string" ? p : p.name;
+            const on = prodList.includes(name);
+            return (
+              <button key={name} type="button" onClick={() => setProdList(l => on ? l.filter(x => x !== name) : [...l, name])}
+                style={{ padding: "8px 13px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.08) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>{name}</button>
+            );
+          };
+          return (
+            <div>
+              <button type="button" onClick={() => setProductsOpen(o => !o)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit" }}>
+                <label style={{ ...labelStyle, marginBottom: 0, cursor: "pointer" }}>Products Purchased{prodList.length ? ` · ${prodList.length} selected` : ""}</label>
+                <span style={{ color: T.textMuted, fontSize: 16, transform: productsOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
+              </button>
+              {productsOpen && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 8 }}>
+                  <input value={productSearch} onChange={e => setProductSearch(e.target.value)} placeholder="Search products…" style={{ width: "100%", padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
+                  {groups.map(g => (
+                    <div key={g.cat}>
+                      {multiCat && <div style={{ fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.04em", color: T.textMuted, margin: "2px 0 6px" }}>{g.cat}</div>}
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>{g.items.map(chip)}</div>
+                    </div>
+                  ))}
+                  {filtered.length === 0 && <div style={{ fontSize: 12, color: T.textMuted }}>No products match "{productSearch}".</div>}
+                </div>
+              )}
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         <div><label style={labelStyle}>Notes to Client</label><textarea rows={2} value={notes} onChange={e => setNotes(e.target.value)} style={ta} /></div>
         <div><label style={labelStyle}>Notes to Office (internal)</label><textarea rows={2} value={officeNotes} onChange={e => setOfficeNotes(e.target.value)} style={ta} /></div>
