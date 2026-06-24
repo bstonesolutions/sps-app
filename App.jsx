@@ -6271,8 +6271,13 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
   const [officeFlagMsg, setOfficeFlagMsg] = useState("");
   // Unified photos: each entry is { src, label } — label is editable per photo
   const [photos, setPhotos] = useState([]); // [{ src, label }]
-  const [partsOpen, setPartsOpen] = useState(false); // Parts collapsed by default (Build 9); treatments stay open
-  const [productsOpen, setProductsOpen] = useState(false); // Products Purchased collapsed by default (Build 9)
+  // All three inventory sections (Treatments / Products / Parts) are collapsed by default and
+  // each has its own search box that shows whenever the section is open. Keeps the complete
+  // sheet short — tap a section to expand, search to find an item fast.
+  const [txOpen, setTxOpen] = useState(false);            // Treatments collapsed by default
+  const [partsOpen, setPartsOpen] = useState(false);      // Parts collapsed by default
+  const [productsOpen, setProductsOpen] = useState(false); // Products Purchased collapsed by default
+  const [txSearch, setTxSearch] = useState("");           // filter the treatments list
   const [partSearch, setPartSearch] = useState("");       // filter the parts list (big catalogs)
   const [productSearch, setProductSearch] = useState("");  // filter the products list
   const [catCollapsed, setCatCollapsed] = useState({});    // `${kind}:${category}` -> collapsed (parts/treatments grouping)
@@ -6676,6 +6681,9 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
     return Object.keys(map).sort((a, b) => a === "Uncategorized" ? 1 : b === "Uncategorized" ? -1 : a.localeCompare(b)).map(cat => ({ cat, items: map[cat] }));
   };
   const catHeaderStyle = { display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: T.surfaceAlt, border: "none", borderRadius: 8, padding: "7px 12px", cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em" };
+  // Shared look for the collapsible Treatments / Products / Parts section headers + their search boxes.
+  const invHeaderStyle = { display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit" };
+  const invSearchStyle = { width: "100%", padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
   // Render rows flat (one/no category, or while searching) or as collapsible category groups.
   const renderByCategory = (items, kind, renderRow, flat) => {
     const groups = groupByCat(items);
@@ -6942,12 +6950,16 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
         </div>
       )}
 
-      {/* Treatments */}
+      {/* Treatments — collapsible (collapsed by default), with its own search */}
       {treatments.length > 0 && (
         <div style={sectionGap}>
-          <label style={labelStyle}>Treatments Applied</label>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {renderByCategory(treatments, "tx", (t) => {
+          <button type="button" onClick={() => setTxOpen(o => !o)} style={invHeaderStyle}>
+            <label style={{ ...labelStyle, marginBottom: 0, cursor: "pointer" }}>Treatments Applied{treatments.filter(t => num(tx[t.id]) > 0).length ? ` · ${treatments.filter(t => num(tx[t.id]) > 0).length} selected` : ""}</label>
+            <span style={{ color: T.textMuted, fontSize: 16, transform: txOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
+          </button>
+          <div style={{ display: txOpen ? "flex" : "none", flexDirection: "column", gap: 8, marginTop: 8 }}>
+            <input value={txSearch} onChange={e => setTxSearch(e.target.value)} placeholder="Search treatments…" style={invSearchStyle} />
+            {renderByCategory(treatments.filter(t => { const s = txSearch.trim().toLowerCase(); return !s || (t.name || "").toLowerCase().includes(s); }), "tx", (t) => {
               const here = usageLoc ? invAtLoc(t, usageLoc) : invTotal(t);
               const over = num(tx[t.id]) > here;
               const unit = t.unit || "oz";
@@ -6964,7 +6976,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
                   <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: num(tx[t.id]) > 0 ? T.text : T.textMuted }}>{money(num(tx[t.id]) * num(t.costPerOz))}</div>
                 </div>
               );
-            }, false)}
+            }, !!txSearch.trim())}
           </div>
         </div>
       )}
@@ -6978,7 +6990,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
             <span style={{ color: T.textMuted, fontSize: 16, transform: partsOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
           </button>
           <div style={{ display: partsOpen ? "flex" : "none", flexDirection: "column", gap: 8, marginTop: 8 }}>
-            {parts.length > 6 && <input value={partSearch} onChange={e => setPartSearch(e.target.value)} placeholder="Search parts…" style={{ width: "100%", padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />}
+            <input value={partSearch} onChange={e => setPartSearch(e.target.value)} placeholder="Search parts…" style={invSearchStyle} />
             {renderByCategory(parts.filter(p => { const s = partSearch.trim().toLowerCase(); return !s || (p.name || "").toLowerCase().includes(s); }), "part", (p) => {
               const here = usageLoc ? invAtLoc(p, usageLoc) : invTotal(p);
               const qty = num(partsUsed[p.id]);
@@ -7027,8 +7039,8 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
             <span style={{ color: T.textMuted, fontSize: 16, transform: productsOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
           </button>
           <div style={{ display: productsOpen ? "flex" : "none", flexDirection: "column", gap: 8, marginTop: 8 }}>
-            {products.length > 6 && <input value={productSearch} onChange={e => setProductSearch(e.target.value)} placeholder="Search products…" style={{ width: "100%", padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />}
-            {products.filter(p => { const s = productSearch.trim().toLowerCase(); return !s || (p.name || "").toLowerCase().includes(s); }).map(p => {
+            <input value={productSearch} onChange={e => setProductSearch(e.target.value)} placeholder="Search products…" style={invSearchStyle} />
+            {renderByCategory(products.filter(p => { const s = productSearch.trim().toLowerCase(); return !s || (p.name || "").toLowerCase().includes(s); }), "product", (p) => {
               const qty = num(productsQty[p.id]);
               const willBill = productBill[p.id] !== false; // default: billed to client
               return (
@@ -7057,7 +7069,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
                   )}
                 </div>
               );
-            })}
+            }, !!productSearch.trim())}
           </div>
         </div>
       )}
@@ -9078,12 +9090,18 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   const catChip = (s) => { const c = clients.find(x => String(x.id) === String(s.clientId ?? s.id)); return (c && c.division) || s.type; };
 
   // one stop card, reused by the bulk-select list and the per-tech route
-  const renderStopCard = (s, dayDate, displayNum, isToday) => {
+  const renderStopCard = (s, dayDate, displayNum, isToday, isNext = null) => {
     // Resolve the live client type-tolerantly (ids can be strings) and clientId-first,
     // so the row shows the CURRENT client name even if the saved snapshot was generic.
     const c = clients.find(x => String(x.id) === String(s.clientId ?? s.id));
     const sent = sentStops[s.sid];
     const arrived = arrivals[s.sid];
+    // "Headed" = we've kicked off this stop (tapped Head Here OR the big "Head to next" bar —
+    // both stamp enRoute), so the Head Here button shows a pressed/"Heading" state.
+    const headed = !!(enRoute && enRoute[s.sid]);
+    // isNext is true/false in the ordered route view, null when there's no order context
+    // (the multi-day list). Only warn about going out of order when we KNOW it isn't next.
+    const outOfOrder = isNext === false;
     const isSel = !!selected[s.sid];
     const isComplete = completedSids && completedSids[s.sid];
     const emp = (team || []).find(e => e.id === s.assigneeId);
@@ -9180,27 +9198,44 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
               <div style={{ padding: "8px 12px 12px" }}>
                 {isComplete ? (
                   perms.completeStops && (
+                    /* Completed — pressed/"done" look. Tap to re-open (with confirm). */
                     <button onClick={e => { e.stopPropagation(); if (confirm("Re-open this stop? This removes its completed record so you can redo it.")) onUncomplete(s.id, s.sid); }}
-                      style={{ width: "100%", background: hexA(T.accent, 0.1), color: T.accent, border: `1.5px solid ${hexA(T.accent, 0.3)}`, borderRadius: 11, padding: "10px", fontSize: 13, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
-                      <Icon name="refresh" size={15} /> Re-open Stop
+                      title="Tap to re-open this stop"
+                      style={{ width: "100%", background: hexA(T.accent, 0.12), color: T.accent, border: `1px solid ${hexA(T.accent, 0.3)}`, borderRadius: 11, padding: "10px", fontSize: 13, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+                      <Icon name="check" size={15} /> Completed
                     </button>
                   )
                 ) : (
                   <div style={{ display: "flex", gap: 7 }}>
-                    {/* Head Here — sends the On My Way text + opens directions (full behavior, not just a map) */}
-                    <button onClick={e => { e.stopPropagation(); onEnRoute && onEnRoute(s.sid); setHeadHereModal({ stop: s, client: c }); }}
-                      style={{ flex: 1, minWidth: 0, background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "10px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
-                      <Icon name="map" size={14} /> Head Here
-                    </button>
-                    {/* I'm Here — logs arrival (also starts the job clock) */}
+                    {/* Head Here — fires the On My Way text + directions (onEnRoute + modal).
+                        Two states:
+                          • not headed → solid red "Head Here". If this isn't the next stop on
+                            the route, confirm first (going out of order).
+                          • headed (tapped here OR via the bottom "Head to next" bar) → pressed/
+                            "blanked" look saying "Heading". Still tappable to re-open directions. */}
+                    {!headed ? (
+                      <button onClick={e => { e.stopPropagation(); if (outOfOrder && !confirm(`Head to ${c?.name || "this stop"} now? It isn't the next stop on your route.`)) return; onEnRoute && onEnRoute(s.sid); setHeadHereModal({ stop: s, client: c }); }}
+                        style={{ flex: 1, minWidth: 0, background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "10px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
+                        <Icon name="map" size={14} /> Head Here
+                      </button>
+                    ) : (
+                      <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: s, client: c }); }}
+                        title="Heading here — tap for directions again"
+                        style={{ flex: 1, minWidth: 0, background: hexA(T.primary, 0.1), color: T.primary, border: `1px solid ${hexA(T.primary, 0.3)}`, borderRadius: 10, padding: "10px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
+                        <Icon name="check" size={13} /> Heading
+                      </button>
+                    )}
+                    {/* I'm Here — logs arrival (also starts the job clock); flips to pressed "Arrived" */}
                     <button onClick={e => { e.stopPropagation(); if (!arrived) setArrivedModal({ stop: s, client: c, key: s.sid }); }}
                       style={{ flex: 1, minWidth: 0, background: arrived ? hexA("#16a34a", 0.12) : T.surface, color: arrived ? "#16a34a" : T.text, border: `1px solid ${arrived ? hexA("#16a34a", 0.4) : T.border}`, borderRadius: 10, padding: "10px 6px", fontSize: 12.5, fontWeight: 700, cursor: arrived ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap" }}>
                       {arrived ? <><Icon name="check" size={13} /> Arrived</> : "I'm Here"}
                     </button>
-                    {/* Complete — opens the report sheet (tapping the card body does too) */}
+                    {/* Complete — opens the report sheet (tapping the card body does too).
+                        Solid green ACTION button (not a tinted pill) so it reads as a button
+                        still to be tapped, not an already-completed state. */}
                     {perms.completeStops && (
                       <button onClick={e => { e.stopPropagation(); setCompleteModal({ stop: s, client: c, dayDate }); }}
-                        style={{ flex: 1, minWidth: 0, background: hexA(T.accent, 0.12), color: T.accent, border: `1px solid ${hexA(T.accent, 0.3)}`, borderRadius: 10, padding: "10px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap" }}>
+                        style={{ flex: 1, minWidth: 0, background: T.accent, color: "#fff", border: "none", borderRadius: 10, padding: "10px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap" }}>
                         <Icon name="check" size={14} /> Complete
                       </button>
                     )}
@@ -9448,7 +9483,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {orderedStops.map((s, i) => (
                   <div key={s.sid} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {renderStopCard(s, selectedDate, i + 1, isToday)}
+                    {renderStopCard(s, selectedDate, i + 1, isToday, !!nextStop && String(s.sid) === String(nextStop.sid))}
                     {optActive && i < orderedStops.length - 1 && routeOpt.legs[s.sid] && (
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 5, fontSize: 11, fontWeight: 700, color: T.textMuted }}>
                         <Icon name="map" size={11} /> {routeOpt.legs[s.sid]} drive to next
