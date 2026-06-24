@@ -8714,6 +8714,12 @@ function StopEditModal({ stop, dayDate, clients, catalog, team, T, onSave, onClo
   );
 }
 
+// Remembers the Schedule view (selected day + tech) across in-session tab switches, so
+// leaving Schedule and coming back lands you where you left off. Module-level on purpose: it
+// survives the screen unmounting when you visit another section, but resets on a full app
+// reload / resync / close (the module re-initializes then). Cleared on a Schedule re-tap.
+let SCHED_VIEW = { date: null, tech: null };
+
 function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, me, onClientSelect, seedClientIds, clearSeed, focusStop, clearFocus, stopDrafts = {}, setStopDrafts, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {}, arrivals = {}, onArrived, enRoute = {}, onEnRoute }) {
   const { T, perms, branding } = useApp();
   const wx = useAreaWeather((branding && branding.companyAddress) || "");  // service-area forecast for weather flags
@@ -8975,8 +8981,10 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   };
 
   // ── Route-dashboard state + helpers ──
-  const [selectedDate, setSelectedDate] = useState(() => todayMDY());
-  const [viewTech, setViewTech] = useState(null); // null = dashboard; else assignee key / "__un" / "__all"
+  const [selectedDate, setSelectedDate] = useState(() => SCHED_VIEW.date || todayMDY());
+  const [viewTech, setViewTech] = useState(() => SCHED_VIEW.tech ?? null); // null = dashboard; else assignee key / "__un" / "__all"
+  // Remember the current view so returning to Schedule lands where you left off (see SCHED_VIEW).
+  useEffect(() => { SCHED_VIEW = { date: selectedDate, tech: viewTech }; }, [selectedDate, viewTech]);
   // The day strip now reaches ~2 months back, so center it on TODAY on first load (otherwise it
   // opens scrolled all the way left, on April).
   const stripRef = useRef(null);
@@ -9495,21 +9503,28 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                 ))}
               </div>
 
-              {nextStop && (vp.isDesktop ? (
-                <div onClick={headToNext} role="button" style={{ display: "block", cursor: "pointer", marginTop: 14 }}>
-                  <div style={{ background: T.primary, color: "#fff", borderRadius: 14, padding: "13px 16px", textAlign: "center", boxShadow: "0 6px 24px rgba(0,0,0,0.2)" }}>
-                    <div style={{ fontSize: 14, fontWeight: 800 }}>Head to {nextStop.client} ›</div>
-                    <div style={{ fontSize: 11.5, opacity: 0.9, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>On My Way text + directions · {nextStop.address}</div>
+              {nextStop && (() => {
+                // Modernized "next stop" action bar: leading nav icon, eyebrow + name + address,
+                // trailing chevron — instead of the old flat centered text block.
+                const bar = (
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, background: T.primary, color: "#fff", borderRadius: 18, padding: "11px 13px", boxShadow: "0 10px 30px rgba(0,0,0,0.26), inset 0 1px 0 rgba(255,255,255,0.16)" }}>
+                    <div style={{ width: 40, height: 40, borderRadius: 13, background: "rgba(255,255,255,0.18)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      <Icon name="map" size={20} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0, textAlign: "left" }}>
+                      <div style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.1em", textTransform: "uppercase", opacity: 0.82 }}>Next stop</div>
+                      <div style={{ fontSize: 15, fontWeight: 800, letterSpacing: "-0.01em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Head to {nextStop.client}</div>
+                      <div style={{ fontSize: 11, opacity: 0.85, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>On My Way text + directions · {nextStop.address}</div>
+                    </div>
+                    <div style={{ width: 32, height: 32, borderRadius: "50%", background: "rgba(255,255,255,0.2)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 17, fontWeight: 800, lineHeight: 1, paddingBottom: 2 }}>›</div>
                   </div>
-                </div>
-              ) : (
-                <div onClick={headToNext} role="button" style={{ position: "fixed", bottom: "calc(74px + env(safe-area-inset-bottom))", left: 0, right: 0, zIndex: 95, maxWidth: 740, margin: "0 auto", cursor: "pointer" }}>
-                  <div style={{ margin: "0 16px", background: T.primary, color: "#fff", borderRadius: 14, padding: "13px 16px", textAlign: "center", boxShadow: "0 6px 24px rgba(0,0,0,0.25)" }}>
-                    <div style={{ fontSize: 14, fontWeight: 800 }}>Head to {nextStop.client} ›</div>
-                    <div style={{ fontSize: 11.5, opacity: 0.9, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>On My Way text + directions · {nextStop.address}</div>
-                  </div>
-                </div>
-              ))}
+                );
+                return vp.isDesktop ? (
+                  <div onClick={headToNext} role="button" style={{ display: "block", cursor: "pointer", marginTop: 14 }}>{bar}</div>
+                ) : (
+                  <div onClick={headToNext} role="button" style={{ position: "fixed", bottom: "calc(74px + env(safe-area-inset-bottom))", left: 0, right: 0, zIndex: 95, maxWidth: 740, margin: "0 auto", padding: "0 16px", boxSizing: "border-box", cursor: "pointer" }}>{bar}</div>
+                );
+              })()}
             </div>
           );
         };
@@ -22961,6 +22976,7 @@ export default function App({ authEmail = "", onSignOut }) {
     } catch (_) {}
   }, [clients, page]);
   const [invoiceFilter, setInvoiceFilter] = useState("All"); // deep-link from dashboard tiles
+  const [schedNonce, setSchedNonce] = useState(0); // bump to force-remount Schedule (re-tap reset)
   const [schedule, setSchedule, ls] = useStoredState("sps_schedule", DEFAULT_SCHEDULE);
   const [catalog, setCatalog, lcat] = useStoredState("sps_catalog", DEFAULT_CATALOG);
   const [email, setEmail, lem] = useStoredState("sps_email", DEFAULT_EMAIL);
@@ -23870,10 +23886,13 @@ export default function App({ authEmail = "", onSignOut }) {
       setSelectedClient(null);
       setAdding(false);
       setInvoiceFilter("All");
+      // Schedule keeps its day/tech in a module cache; clear it and remount so a re-tap
+      // returns to today's overview (matches how re-tapping Clients returns to the list).
+      if (id === "schedule") { SCHED_VIEW = { date: null, tech: null }; setSchedNonce(n => n + 1); }
       window.scrollTo({ top: 0, behavior: "instant" });
       return;
     }
-    // Switching sections → just change page; leave sub-state (open client, etc.) intact.
+    // Switching sections → just change page; leave sub-state (open client, Schedule day/tech) intact.
     setPage(id);
     window.scrollTo({ top: 0, behavior: "instant" });
   };
@@ -24467,7 +24486,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {selectedClient && <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>}
         </>
       ))}
-      {page === "schedule" && <SectionErrorBoundary key="schedule"><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
+      {page === "schedule" && <SectionErrorBoundary key={"schedule-" + schedNonce}><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
       {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <SectionErrorBoundary key="inventory"><InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} /></SectionErrorBoundary>}
       {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
