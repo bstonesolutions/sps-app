@@ -4031,13 +4031,17 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
   const { T, tiers, perms } = useApp();
   const [form, setForm] = useState(() => {
     const base = { ...client };
-    // Backfill the structured parts from the combined address whenever they're all EMPTY (not just
-    // null) and an address string exists. Otherwise a client whose parts were saved blank — or set
-    // by QB sync / import, which only fill `address` — opens the editor with empty fields even though
-    // the card clearly shows the address. Re-splitting keeps Edit matching the card.
+    // Make Edit match the card. Many records store the STREET LINE in `address`, leave the `street`
+    // column null, and keep city/state/zip in their own fields — so the Street box opened blank even
+    // though the card showed the address. Fix: whenever `street` is empty but `address` has content,
+    // pull the street out of `address`. If city/state/zip are already filled, the street is just the
+    // first line of `address`; if NOTHING is filled, split the whole combined address into all parts.
     base.street = base.street || ""; base.city = base.city || ""; base.state = base.state || ""; base.zip = base.zip || "";
-    const hasParts = !!(base.street.trim() || base.city.trim() || base.state.trim() || base.zip.trim());
-    if (!hasParts && (base.address || "").trim()) Object.assign(base, splitAddress(base.address));
+    const addr = (base.address || "").trim();
+    if (!base.street.trim() && addr) {
+      if (base.city.trim() || base.state.trim() || base.zip.trim()) base.street = addr.split(",")[0].trim();
+      else Object.assign(base, splitAddress(addr));
+    }
     // Reconcile the service plan with the app's source of truth (effectiveTier) so the
     // editor shows the SAME tier the Hub does, the primary division's plan is explicit
     // (so "None" sticks instead of snapping back to Essential), and a Save persists it
@@ -4705,15 +4709,17 @@ function PhotoPicker({ photos = [], onChange, label = "Photos", maxPhotos = 10, 
   // Normalise: ensure every item is { src, caption }
   const normalised = photos.map(p => typeof p === "string" ? { src: p, caption: "" } : p);
 
-  const addPhotos = (files) => {
-    const readers = Array.from(files).slice(0, maxPhotos - normalised.length).map(file =>
-      new Promise(res => {
-        const r = new FileReader();
-        r.onload = e => res({ src: e.target.result, caption: "" });
-        r.readAsDataURL(file);
-      })
-    );
-    Promise.all(readers).then(results => onChange([...normalised, ...results]));
+  const addPhotos = async (files) => {
+    // Compress on capture. Previously stored the FULL-resolution file as base64 — a handful of
+    // photos = 15 MB, which timed out the database (the 2026-06-24 outage). Use the same compressor
+    // the stop-photo + report paths already use. Skips a failed/undecodable (e.g. HEIC) result.
+    const slice = Array.from(files).slice(0, maxPhotos - normalised.length);
+    const results = [];
+    for (const file of slice) {
+      const src = await compressImage(file, 1280);
+      if (src && src.startsWith("data:image")) results.push({ src, caption: "" });
+    }
+    if (results.length) onChange([...normalised, ...results]);
   };
 
   const remove = (idx) => onChange(normalised.filter((_, i) => i !== idx));
