@@ -9107,7 +9107,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
     const emp = (team || []).find(e => e.id === s.assigneeId);
     const accentLeft = isComplete ? T.accent : (isToday ? T.primary : T.textMuted);
     return (
-      <div key={s.sid} style={{ background: T.surface, border: `1px solid ${isSel ? T.primary : isComplete ? hexA(T.accent, 0.3) : T.border}`, borderRadius: 20, overflow: "hidden", opacity: isComplete ? 0.88 : 1, boxShadow: isComplete ? "none" : "0 2px 12px rgba(0,0,0,0.06)", display: "flex" }}>
+      <div key={s.sid} style={{ background: isComplete ? hexA(T.accent, 0.06) : T.surface, border: `1px solid ${isSel ? T.primary : isComplete ? hexA(T.accent, 0.3) : T.border}`, borderRadius: 20, overflow: "hidden", boxShadow: isComplete ? "none" : "0 2px 12px rgba(0,0,0,0.06)", display: "flex" }}>
         {/* Number bar */}
         {!selectMode && displayNum != null && (
           <div style={{ width: 44, flexShrink: 0, background: isComplete ? hexA(T.accent, 0.12) : hexA(accentLeft, 0.1), color: isComplete ? T.accent : accentLeft, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 900 }}>{displayNum}</div>
@@ -9122,7 +9122,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
               if (isComplete) { const entry = (c?.history || []).find(h => String(h.sid) === String(s.sid)); if (entry) return setHistoryEdit({ entry, clientId: c.id }); }
               if (perms.completeStops) setCompleteModal({ stop: s, client: c, dayDate });
             }}
-            style={{ padding: compact ? "11px 14px" : "14px 16px", cursor: (selectMode || perms.completeStops || isComplete) ? "pointer" : "default", display: "flex", gap: 12, alignItems: "center" }}
+            style={{ padding: compact ? "9px 14px" : "11px 16px", cursor: (selectMode || perms.completeStops || isComplete) ? "pointer" : "default", display: "flex", gap: 12, alignItems: "center" }}
           >
             {selectMode && <Checkbox checked={isSel} onChange={() => toggle(s.sid)} />}
 
@@ -9166,82 +9166,84 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
             </div>
           </div>
 
-          {/* Action bar — full width, no overflow */}
+          {/* Action bar */}
           {!selectMode && (
-            <div style={{ borderTop: `1px solid ${T.border}`, background: isComplete ? hexA(T.accent, 0.06) : T.surfaceAlt }}>
-              {/* Status line — with a quiet delete tucked top-right (no longer a clunky boxed button) */}
-              <div style={{ padding: "8px 16px 0", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
-                {isComplete ? (
-                  <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: T.accent, fontWeight: 700 }}>
-                    <Icon name="check" size={12} /> Completed · Report saved
+            <div style={{ borderTop: `1px solid ${isComplete ? hexA(T.accent, 0.18) : T.border}`, background: isComplete ? "transparent" : T.surfaceAlt }}>
+              {isComplete ? (
+                /* Completed — ONE consolidated row (no duplicate label, no big button).
+                   Tap "Re-open" to undo; tapping the card body opens the saved report. */
+                <div style={{ padding: "9px 12px 9px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: T.accent, fontWeight: 800, minWidth: 0 }}>
+                    <Icon name="check" size={14} />
+                    Completed
+                    <span style={{ fontWeight: 600, color: T.textMuted, fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>· Report saved</span>
                   </div>
-                ) : sent ? (
-                  <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: T.primary, fontWeight: 700 }}>
-                    <Icon name="check" size={12} /> Client notified
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+                    {perms.completeStops && (
+                      <button onClick={e => { e.stopPropagation(); if (confirm("Re-open this stop? This removes its completed record so you can redo it.")) onUncomplete(s.id, s.sid); }}
+                        style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", padding: 2, display: "flex", alignItems: "center", gap: 4 }}>
+                        <Icon name="refresh" size={12} /> Re-open
+                      </button>
+                    )}
+                    {perms.scheduleAddRemove && (
+                      <button onClick={e => { e.stopPropagation(); if (confirm(`Delete this stop for ${c?.name || "this client"}? This can't be undone.`)) deleteStop(dayDate, s.sid); }}
+                        title="Delete stop" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 2, display: "flex", alignItems: "center", opacity: 0.55 }}>
+                        <Icon name="trash" size={14} />
+                      </button>
+                    )}
                   </div>
-                ) : (
-                  <div style={{ fontSize: 11, color: T.textMuted }}>Not yet started</div>
-                )}
-                {perms.scheduleAddRemove && (
-                  <button onClick={e => { e.stopPropagation(); if (confirm(`Delete this stop for ${c?.name || "this client"}? This can't be undone.`)) deleteStop(dayDate, s.sid); }}
-                    title="Delete stop" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 2, display: "flex", alignItems: "center", opacity: 0.55, flexShrink: 0 }}>
-                    <Icon name="trash" size={14} />
-                  </button>
-                )}
-              </div>
+                </div>
+              ) : (
+                <>
+                  {/* Status line — quiet delete tucked top-right */}
+                  <div style={{ padding: "6px 14px 0", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                    {sent ? (
+                      <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: T.primary, fontWeight: 700 }}>
+                        <Icon name="check" size={12} /> Client notified
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 11, color: T.textMuted }}>Not yet started</div>
+                    )}
+                    {perms.scheduleAddRemove && (
+                      <button onClick={e => { e.stopPropagation(); if (confirm(`Delete this stop for ${c?.name || "this client"}? This can't be undone.`)) deleteStop(dayDate, s.sid); }}
+                        title="Delete stop" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 2, display: "flex", alignItems: "center", opacity: 0.55, flexShrink: 0 }}>
+                        <Icon name="trash" size={14} />
+                      </button>
+                    )}
+                  </div>
 
-              {/* Actions — compact single-row toolbar (Option B). All three actions sit on one
-                  slim row so the card is short and you can see more stops per screen.
-                  NOTE: "Head Here" keeps its FULL behavior — it fires the On My Way text +
-                  directions (onEnRoute + Head Here modal), so it is deliberately NOT renamed
-                  to "Directions"; it does more than open a map. */}
-              <div style={{ padding: "8px 12px 12px" }}>
-                {isComplete ? (
-                  perms.completeStops && (
-                    /* Completed — pressed/"done" look. Tap to re-open (with confirm). */
-                    <button onClick={e => { e.stopPropagation(); if (confirm("Re-open this stop? This removes its completed record so you can redo it.")) onUncomplete(s.id, s.sid); }}
-                      title="Tap to re-open this stop"
-                      style={{ width: "100%", background: hexA(T.accent, 0.12), color: T.accent, border: `1px solid ${hexA(T.accent, 0.3)}`, borderRadius: 11, padding: "10px", fontSize: 13, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
-                      <Icon name="check" size={15} /> Completed
-                    </button>
-                  )
-                ) : (
-                  <div style={{ display: "flex", gap: 7 }}>
-                    {/* Head Here — fires the On My Way text + directions (onEnRoute + modal).
-                        Two states:
-                          • not headed → solid red "Head Here". If this isn't the next stop on
-                            the route, confirm first (going out of order).
-                          • headed (tapped here OR via the bottom "Head to next" bar) → pressed/
-                            "blanked" look saying "Heading". Still tappable to re-open directions. */}
+                  {/* Actions — compact single-row toolbar. Head Here keeps its FULL behavior
+                      (fires the On My Way text + directions), so it is NOT renamed "Directions". */}
+                  <div style={{ padding: "6px 10px 10px", display: "flex", gap: 7 }}>
+                    {/* Head Here — not headed → solid red (confirm first if out of order);
+                        headed (tapped here OR via the bottom "Head to next" bar) → pressed "Heading". */}
                     {!headed ? (
                       <button onClick={e => { e.stopPropagation(); if (outOfOrder && !confirm(`Head to ${c?.name || "this stop"} now? It isn't the next stop on your route.`)) return; onEnRoute && onEnRoute(s.sid); setHeadHereModal({ stop: s, client: c }); }}
-                        style={{ flex: 1, minWidth: 0, background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "10px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
+                        style={{ flex: 1, minWidth: 0, background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
                         <Icon name="map" size={14} /> Head Here
                       </button>
                     ) : (
                       <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: s, client: c }); }}
                         title="Heading here — tap for directions again"
-                        style={{ flex: 1, minWidth: 0, background: hexA(T.primary, 0.1), color: T.primary, border: `1px solid ${hexA(T.primary, 0.3)}`, borderRadius: 10, padding: "10px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
+                        style={{ flex: 1, minWidth: 0, background: hexA(T.primary, 0.1), color: T.primary, border: `1px solid ${hexA(T.primary, 0.3)}`, borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
                         <Icon name="check" size={13} /> Heading
                       </button>
                     )}
                     {/* I'm Here — logs arrival (also starts the job clock); flips to pressed "Arrived" */}
                     <button onClick={e => { e.stopPropagation(); if (!arrived) setArrivedModal({ stop: s, client: c, key: s.sid }); }}
-                      style={{ flex: 1, minWidth: 0, background: arrived ? hexA("#16a34a", 0.12) : T.surface, color: arrived ? "#16a34a" : T.text, border: `1px solid ${arrived ? hexA("#16a34a", 0.4) : T.border}`, borderRadius: 10, padding: "10px 6px", fontSize: 12.5, fontWeight: 700, cursor: arrived ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap" }}>
+                      style={{ flex: 1, minWidth: 0, background: arrived ? hexA("#16a34a", 0.12) : T.surface, color: arrived ? "#16a34a" : T.text, border: `1px solid ${arrived ? hexA("#16a34a", 0.4) : T.border}`, borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 700, cursor: arrived ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap" }}>
                       {arrived ? <><Icon name="check" size={13} /> Arrived</> : "I'm Here"}
                     </button>
-                    {/* Complete — opens the report sheet (tapping the card body does too).
-                        Solid green ACTION button (not a tinted pill) so it reads as a button
-                        still to be tapped, not an already-completed state. */}
+                    {/* Complete — solid green action button; opens the report sheet */}
                     {perms.completeStops && (
                       <button onClick={e => { e.stopPropagation(); setCompleteModal({ stop: s, client: c, dayDate }); }}
-                        style={{ flex: 1, minWidth: 0, background: T.accent, color: "#fff", border: "none", borderRadius: 10, padding: "10px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap" }}>
+                        style={{ flex: 1, minWidth: 0, background: T.accent, color: "#fff", border: "none", borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap" }}>
                         <Icon name="check" size={14} /> Complete
                       </button>
                     )}
                   </div>
-                )}
-              </div>
+                </>
+              )}
             </div>
           )}
         </div>
