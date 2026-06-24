@@ -1740,9 +1740,9 @@ const DEFAULT_EMAIL = {
   // Staff invite email ({name} = staff member, {company} = your company, {link} = secure sign-in link)
   staffInviteSubject: "You're invited to the {company} team app",
   staffInviteBody: "Hi {name},\n\nYou've been added to the {company} team app. Tap the secure link below to sign in — no password needed.\n\n{link}\n\nSee you inside,\nThe {company} Team",
-  // Client magic-link email ({first}/{name} = client, {company} = your company, {link} = portal link)
-  clientMagicSubject: "Your {company} client portal link",
-  clientMagicBody: "Hi {first},\n\nHere's your secure link to your {company} client portal. Tap below to view your service history, invoices, and photos — no password required.\n\n{link}\n\nThank you for being a valued client,\nThe {company} Team",
+  // Client account setup email ({first}/{name} = client, {company} = your company, {link} = secure setup link)
+  clientMagicSubject: "Set up your {company} account",
+  clientMagicBody: "Hi {first},\n\nWelcome to your {company} account. Tap the secure link below to open it and set your password. After that, you'll sign in any time with your email and password — no link needed.\n\n{link}\n\nThank you for being a valued client,\nThe {company} Team",
   notify: DEFAULT_NOTIFY,
   // Test/launch safety — while ON, nothing reaches real clients. "redirect" sends every
   // client email/text to you instead (tagged [TEST]); "hold" sends nothing. Off = live.
@@ -24438,7 +24438,7 @@ export default function App({ authEmail = "", onSignOut }) {
         <div style={{ textAlign: "center", maxWidth: 360 }}>
           <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 14px" }}><Icon name="lock" size={32} /></div>
           <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 8 }}>We couldn't find your account</div>
-          <div style={{ fontSize: 14, color: T.textMuted, marginBottom: 20, lineHeight: 1.5 }}>We couldn't match <b>{authEmail}</b> to a team member. This can happen if your account is still syncing — tap retry. If it keeps happening, ask the owner to add this email under Team &amp; Logins.</div>
+          <div style={{ fontSize: 14, color: T.textMuted, marginBottom: 20, lineHeight: 1.5 }}>There's no account for <b>{authEmail}</b>. Make sure you're signing in with the exact email address your account was set up under. If your account is still syncing, tap retry — otherwise contact us to confirm your email.</div>
           <button onClick={() => window.location.reload()} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "12px 20px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit", width: "100%", marginBottom: 10 }}>Retry</button>
           <button onClick={onSignOut} style={{ background: "none", color: T.textMuted, border: "none", borderRadius: 12, padding: "8px 20px", fontWeight: 700, fontSize: 13.5, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button>
         </div>
