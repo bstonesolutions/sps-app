@@ -6125,11 +6125,18 @@ function ArrivedModal({ stop, client, email, onClose, onArrived }) {
   const phone = client?.phone?.replace(/\D/g, "") || "";
   const message = (() => {
     const tpl = (email && email.smsArrived) || DEFAULT_EMAIL.smsArrived;
-    return tpl
+    let m = tpl
       .replace(/\{first\}/g, firstName)
       .replace(/\{sender\}/g, (email && email.senderName) || (email && email.fromName) || branding.companyName)
       .replace(/\{company\}/g, branding.companyName)
       .replace(/\{service\}/g, stop?.type || "service");
+    // Live "on site" link (browser; opens the app once universal links are configured). If the
+    // template has a {track} slot use it, otherwise append the labeled line so it always shows.
+    const trackUrl = (stop && stop.trackToken) ? stopTrackLink(stop.trackToken) : ((email && email.trackLink) || "");
+    const linkLine = ((email && email.liveTrackingEnabled !== false) && trackUrl) ? `See the live update here: ${trackUrl}` : "";
+    if (/\{track\}/.test(tpl)) m = m.replace(/\{track\}/g, linkLine);
+    else if (linkLine) m += `\n\n${linkLine}`;
+    return m;
   })();
   const [sending, setSending] = useState(false);
   const [sendErr, setSendErr] = useState("");
@@ -6584,11 +6591,16 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
     if (!phone) { setReportSend({ busy: "", msg: { ok: false, text: "No phone number on file for this client." } }); return; }
     setReportSend({ busy: "text", msg: null });
     const tpl = (email && email.smsReport) || DEFAULT_EMAIL.smsReport;
-    const short = tpl
+    let short = tpl
       .replace(/\{first\}/g, firstName)
       .replace(/\{service\}/g, stop.type || "service")
       .replace(/\{company\}/g, branding.companyName)
       .replace(/\{sender\}/g, (email && email.senderName) || branding.companyName);
+    // Portal link so the client can open the full report + photos (browser link; opens the app
+    // once universal links are configured). Use {link} if the template has it, else append.
+    const portalUrl = PROD_URL;
+    if (/\{link\}/.test(tpl)) short = short.replace(/\{link\}/g, portalUrl);
+    else short += `\n\nView your full report and photos here: ${portalUrl}`;
     const r = await sendSms(phone, short); // business Quo line ONLY
     if (r.ok) postReportToPortal();   // mirror the full report into the in-app portal thread
     const txtMsg = r.held ? "Test Mode (hold) — text NOT sent."
@@ -7707,11 +7719,17 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", onClose }) {
   const arrivalStr = new Date(Date.now() + etaMin * 60000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   const msg = (() => {
     const tpl = (email && email.smsOnMyWay) || DEFAULT_EMAIL.smsOnMyWay;
-    const track = email && email.trackLink ? `Track: ${email.trackLink} ` : "";
+    // Per-stop live-tracking link (browser link; once the client app + universal links are
+    // set up it opens the app instead, falling back to browser). Falls back to the owner's
+    // static trackLink if a stop token isn't available. Mirrors the full On-My-Way modal —
+    // this is the path the Schedule "Head Here" button uses, so the link now actually sends.
+    const trackUrl = (stop && stop.trackToken) ? stopTrackLink(stop.trackToken) : ((email && email.trackLink) || "");
+    const trackingOn = (email && email.liveTrackingEnabled !== false) && !!trackUrl;
     return (tpl || "")
       .replace(/{first}/g, firstName).replace(/{sender}/g, (email && email.senderName) || branding.companyName)
       .replace(/{company}/g, branding.companyName).replace(/{eta}/g, String(etaMin))
-      .replace(/{arrival}/g, arrivalStr).replace(/{track}/g, track);
+      .replace(/{arrival}/g, arrivalStr)
+      .replace(/{track}/g, trackingOn ? `Track my live location here: ${trackUrl} — ` : "");
   })();
   const [omw, setOmw] = useState({ busy: false, msg: null });
   // Send via the business Quo line ONLY — never open the device Messages app.
@@ -9226,19 +9244,19 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                     {/* Head Here — not headed → solid red (confirm first if out of order);
                         headed (tapped here OR via the bottom "Head to next" bar) → pressed "Heading". */}
                     {!headed ? (
-                      <button onClick={e => { e.stopPropagation(); if (outOfOrder && !confirm(`Head to ${c?.name || "this stop"} now? It isn't the next stop on your route.`)) return; onEnRoute && onEnRoute(s.sid); setHeadHereModal({ stop: s, client: c }); }}
+                      <button onClick={e => { e.stopPropagation(); if (outOfOrder && !confirm(`Head to ${c?.name || "this stop"} now? It isn't the next stop on your route.`)) return; onEnRoute && onEnRoute(s.sid); setHeadHereModal({ stop: { ...s, trackToken: ensureTrackToken(s) }, client: c }); }}
                         style={{ flex: 1, minWidth: 0, background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
                         <Icon name="map" size={14} /> Head Here
                       </button>
                     ) : (
-                      <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: s, client: c }); }}
+                      <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: { ...s, trackToken: ensureTrackToken(s) }, client: c }); }}
                         title="Heading here — tap for directions again"
                         style={{ flex: 1, minWidth: 0, background: hexA(T.primary, 0.1), color: T.primary, border: `1px solid ${hexA(T.primary, 0.3)}`, borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
                         <Icon name="check" size={13} /> Heading
                       </button>
                     )}
                     {/* I'm Here — logs arrival (also starts the job clock); flips to pressed "Arrived" */}
-                    <button onClick={e => { e.stopPropagation(); if (!arrived) setArrivedModal({ stop: s, client: c, key: s.sid }); }}
+                    <button onClick={e => { e.stopPropagation(); if (!arrived) setArrivedModal({ stop: { ...s, trackToken: ensureTrackToken(s) }, client: c, key: s.sid }); }}
                       style={{ flex: 1, minWidth: 0, background: arrived ? hexA("#16a34a", 0.12) : T.surface, color: arrived ? "#16a34a" : T.text, border: `1px solid ${arrived ? hexA("#16a34a", 0.4) : T.border}`, borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 700, cursor: arrived ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap" }}>
                       {arrived ? <><Icon name="check" size={13} /> Arrived</> : "I'm Here"}
                     </button>
