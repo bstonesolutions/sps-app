@@ -6211,11 +6211,13 @@ function PhotoViewer({ photos, index, onClose }) {
 function PhotoStrip({ photos, size = 56 }) {
   const { T } = useApp();
   const [viewer, setViewer] = useState(null);
-  if (!photos || photos.length === 0) return null;
+  // Tolerate malformed entries (null / missing src) so one bad photo can't white-screen the whole stop.
+  const valid = (photos || []).filter(p => p && (typeof p === "string" ? p : p.src));
+  if (!valid.length) return null;
   return (
     <>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        {photos.map((p, i) => {
+        {valid.map((p, i) => {
           const src = typeof p === "string" ? p : p.src;
           const label = typeof p === "string" ? "" : p.label;
           const lc = label === "Before" ? "#F59E0B" : label === "After" ? "#16a34a" : null;
@@ -6230,7 +6232,7 @@ function PhotoStrip({ photos, size = 56 }) {
           );
         })}
       </div>
-      {viewer !== null && <PhotoViewer photos={photos} index={viewer} onClose={() => setViewer(null)} />}
+      {viewer !== null && <PhotoViewer photos={valid} index={viewer} onClose={() => setViewer(null)} />}
     </>
   );
 }
@@ -9035,7 +9037,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   const dayCells = (() => {
     const base = new Date(); base.setHours(0, 0, 0, 0);
     const cells = [];
-    for (let i = -3; i <= 24; i++) {
+    for (let i = -60; i <= 24; i++) {   // ~2 months back so past stops are reachable, ~3.5 weeks ahead
       const dt = new Date(base); dt.setDate(base.getDate() + i);
       const ds = mdy(dt);
       const dayObj = schedule.find(d => d.date === ds);
