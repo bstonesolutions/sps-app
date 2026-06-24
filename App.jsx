@@ -3420,11 +3420,12 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
           background (like the branded link card), and a route shortcut. */}
       {!editing && (
         <div onClick={() => onNav("schedule")} role="button"
-          style={{ position: "relative", overflow: "hidden", background: T.primary, color: "#fff", borderRadius: 20, padding: "18px 20px", marginBottom: 16, cursor: "pointer", boxShadow: "0 10px 30px rgba(0,0,0,0.16), inset 0 1px 0 rgba(255,255,255,0.15)" }}>
-          {/* Logo watermark — soft-light blend ghosts it into the crimson, like the SMS card */}
+          style={{ position: "relative", overflow: "hidden", background: "#AE0019", color: "#fff", borderRadius: 20, padding: "18px 20px", marginBottom: 16, cursor: "pointer", boxShadow: "0 10px 30px rgba(0,0,0,0.16), inset 0 1px 0 rgba(255,255,255,0.15)" }}>
+          {/* Logo watermark — the card uses the logo's exact background red (#AE0019) so the red
+              blends away and only the white hexagon ghosts through. Straight, not rotated. */}
           {branding && branding.logoType === "image" && branding.logoImage && (
             <img src={branding.logoImage} alt="" aria-hidden="true"
-              style={{ position: "absolute", right: -34, top: "50%", transform: "translateY(-50%) rotate(-8deg)", width: 190, height: 190, objectFit: "contain", opacity: 0.38, mixBlendMode: "soft-light", pointerEvents: "none" }} />
+              style={{ position: "absolute", right: -30, top: "50%", transform: "translateY(-50%)", width: 188, height: 188, objectFit: "contain", opacity: 0.45, pointerEvents: "none" }} />
           )}
           <div style={{ position: "relative", zIndex: 1 }}>
             <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.1em", opacity: 0.82 }}>TODAY</div>
