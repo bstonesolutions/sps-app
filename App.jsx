@@ -17972,12 +17972,14 @@ function InventoryItemModal({ mode, kind, initial, locations = [], categories = 
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
   const unitFallback = kind === "treatment" ? "oz" : kind === "product" ? "each" : "pieces";
   const unitWord = data.unit || unitFallback;
+  // A price must be set on purpose. Blank = not allowed; "0" is fine (free/internal items).
+  const retailMissing = String(data[retailField] ?? "").trim() === "";
   return (
     <Modal title={mode === "add" ? `Add ${kind === "part" ? "Part" : kind === "product" ? "Product" : "Treatment"}` : (data.name || "Edit")} onClose={onClose}>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div>
           <label style={lbl}>Name</label>
-          <input type="text" style={field} value={data.name || ""} onChange={e => set({ name: e.target.value })} placeholder={kind === "part" ? "e.g. PVC Union (1.5in)" : "e.g. Beneficial Bacteria"} autoFocus />
+          <input type="text" style={field} value={data.name || ""} onChange={e => set({ name: e.target.value })} placeholder={kind === "part" ? "e.g. PVC Union (1.5in)" : "e.g. Beneficial Bacteria"} autoFocus={mode === "add"} />
         </div>
         <div>
           <label style={lbl}>Category <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
@@ -18004,9 +18006,9 @@ function InventoryItemModal({ mode, kind, initial, locations = [], categories = 
               <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 4 }}>What you pay</div>
             </div>
             <div style={{ flex: 1 }}>
-              <label style={lbl}>Retail per {unitWord}</label>
-              <input type="text" inputMode="decimal" style={field} value={data[retailField] ?? ""} onChange={e => set({ [retailField]: e.target.value.replace(/[^0-9.]/g, "") })} placeholder="0.00" />
-              <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 4 }}>What you charge</div>
+              <label style={lbl}>Retail per {unitWord} <span style={{ color: "#E5484D" }}>*</span></label>
+              <input type="text" inputMode="decimal" autoFocus={mode === "edit" && retailMissing} style={{ ...field, ...(retailMissing ? { border: `1.5px solid #E5484D` } : {}) }} value={data[retailField] ?? ""} onChange={e => set({ [retailField]: e.target.value.replace(/[^0-9.]/g, "") })} placeholder="0.00" />
+              <div style={{ fontSize: 10.5, color: retailMissing ? "#E5484D" : T.textMuted, marginTop: 4, fontWeight: retailMissing ? 700 : 400 }}>{retailMissing ? "Required — enter a price (use 0 if free/internal)" : "What you charge"}</div>
             </div>
           </div>
           {(() => {
@@ -18049,9 +18051,12 @@ function InventoryItemModal({ mode, kind, initial, locations = [], categories = 
             ))}
           </div>
         </div>
-        <Btn onClick={() => onSave(data)} block lg disabled={!(data.name || "").trim()}>
+        <Btn onClick={() => onSave(data)} block lg disabled={!(data.name || "").trim() || (canSeeCost && retailMissing)}>
           {mode === "add" ? "Add Item" : "Save Changes"}
         </Btn>
+        {canSeeCost && retailMissing && (
+          <div style={{ fontSize: 11.5, color: "#E5484D", fontWeight: 600, textAlign: "center", marginTop: -4 }}>Enter a retail price to save (use 0 if it's free or internal).</div>
+        )}
         {mode === "edit" && (
           <button onClick={onDelete} style={{ background: "none", border: "none", color: "#E5484D", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit", padding: "4px" }}>
             Delete {kind === "part" ? "Part" : kind === "product" ? "Product" : "Treatment"}
@@ -18124,6 +18129,9 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
     if (total < low) return { label: "Low Stock", color: "#F59E0B", bg: hexA("#F59E0B", 0.1) };
     return { label: "In Stock", color: "#16a34a", bg: hexA("#16a34a", 0.1) };
   };
+  // An item "needs a price" when its retail/sale price was never set (truly blank). A typed 0
+  // counts as a deliberate price, so it does NOT flag — the owner has to enter something.
+  const needsPrice = (item, k) => String(item[retailFieldFor(k)] ?? "").trim() === "";
 
   const items = tab === "treatments" ? treatments : tab === "products" ? products : parts;
   const kind = tab === "treatments" ? "treatment" : tab === "products" ? "product" : "part";
@@ -18141,6 +18149,8 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
 
   // Low items for the current tab
   const lowItems = items.filter(it => invTotal(it) < lowThreshold(it, kind));
+  // Items on this tab missing a price — surfaced in a review banner so none slip through.
+  const pricelessItems = items.filter(it => needsPrice(it, kind));
 
   // Per-session inventory activity (added / used / restocked / moved / removed) — one running summary.
   const [invLog, setInvLog] = useState(() => readInvLog());
@@ -18512,6 +18522,27 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
         </div>
       )}
 
+      {/* Needs-a-price review — forces missing prices to be addressed so billing is never $0 by accident */}
+      {pricelessItems.length > 0 && (
+        <div style={{ background: hexA("#E5484D", 0.07), border: `1px solid ${hexA("#E5484D", 0.28)}`, borderRadius: 16, padding: "14px 16px" }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#B42318", marginBottom: 4, display: "flex", alignItems: "center", gap: 6 }}>
+            <Icon name="warning" size={15} /> {pricelessItems.length} item{pricelessItems.length !== 1 ? "s" : ""} need{pricelessItems.length === 1 ? "s" : ""} a price
+          </div>
+          <div style={{ fontSize: 11.5, color: T.textMuted, marginBottom: 10, lineHeight: 1.4 }}>Set a price so these bill correctly. Use $0 if an item is free or internal — but it has to be set on purpose.</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {pricelessItems.map(it => (
+              <div key={it.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 13, color: T.text, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.name}</span>
+                {canEdit && <button onClick={() => openEditItem(it)}
+                  style={{ flexShrink: 0, background: "#E5484D", color: "#fff", border: "none", borderRadius: 8, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                  Set price
+                </button>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Add item button */}
       {canEdit && (
         <button onClick={openAddItem}
@@ -18565,9 +18596,16 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
                       {canSeeCost ? <>${cost.toFixed(2)}/{unit}{last && <span> · Last used {last}</span>}</> : <>{last ? `Last used ${last}` : `Tracked in ${unit}`}</>}
                     </div>
                   </div>
-                  <span style={{ fontSize: 11, fontWeight: 700, padding: "4px 12px", borderRadius: 100, background: status.bg, color: status.color, flexShrink: 0, marginLeft: 10 }}>
-                    {status.label}
-                  </span>
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5, flexShrink: 0, marginLeft: 10 }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, padding: "4px 12px", borderRadius: 100, background: status.bg, color: status.color }}>
+                      {status.label}
+                    </span>
+                    {needsPrice(it, kind) && (
+                      <span style={{ fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 100, background: hexA("#E5484D", 0.12), color: "#E5484D", display: "flex", alignItems: "center", gap: 3, whiteSpace: "nowrap" }}>
+                        <Icon name="warning" size={10} /> No price
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {/* Stock amount */}
@@ -23822,6 +23860,24 @@ export default function App({ authEmail = "", onSignOut }) {
     window.scrollTo({ top: 0, behavior: "instant" });
   };
 
+  // Bottom-bar / sidebar / menu navigation. Switching to a DIFFERENT section keeps that
+  // section where you left it (e.g. the client you had open) for the rest of the session.
+  // Tapping the section you're ALREADY on resets it to its root (back to the client list).
+  // Everything resets naturally on app close / resync (state isn't persisted past that).
+  const handleTabNav = (id) => {
+    if (id === page) {
+      // Re-tap the active tab → back to the section's root view.
+      setSelectedClient(null);
+      setAdding(false);
+      setInvoiceFilter("All");
+      window.scrollTo({ top: 0, behavior: "instant" });
+      return;
+    }
+    // Switching sections → just change page; leave sub-state (open client, etc.) intact.
+    setPage(id);
+    window.scrollTo({ top: 0, behavior: "instant" });
+  };
+
   // Consume in-app deep links (spsway://alerts / schedule / invoices). Owner-email "Open
   // in the SPS app" buttons and the widgets land here. Handles a warm app (event) and a
   // cold start (target stashed in localStorage by main.jsx before React mounted).
@@ -24435,7 +24491,7 @@ export default function App({ authEmail = "", onSignOut }) {
       <AppCtx.Provider value={{ T, branding, perms, email, tiers: serviceTiers || DEFAULT_TIERS }}>
         <div style={{ fontFamily: fontStack, background: T.bg, position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden", display: "flex", flexDirection: "row", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ["--ring"]: hexA(T.primary, 0.22), ["--ringBorder"]: T.primary }}>
           {shellCss}
-          <DesktopSidebar page={page} perms={perms} navUnread={navUnread} reminderDue={reminderDueCount} onNav={handleNav} onSignOut={handleSignOut} currentUser={currentUser} branding={branding} syncState={syncState} onSync={manualSync} T={T} vp={vp} />
+          <DesktopSidebar page={page} perms={perms} navUnread={navUnread} reminderDue={reminderDueCount} onNav={handleTabNav} onSignOut={handleSignOut} currentUser={currentUser} branding={branding} syncState={syncState} onSync={manualSync} T={T} vp={vp} />
           <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
             <div style={{ height: 2, flexShrink: 0, zIndex: 99, background: syncState === "syncing" ? T.primary : syncState === "saved" ? "#16a34a" : "transparent", transition: "background 0.3s", animation: syncState === "syncing" ? "syncPulse 0.8s ease-in-out" : "none" }} />
             {dbError && (
@@ -24562,7 +24618,7 @@ export default function App({ authEmail = "", onSignOut }) {
           const docked = dockIds.slice(0, 4);
           const primary = docked.map(id => {
             const n = ALL_NAV.find(x => x.id === id);
-            return n ? { id: n.id, label: n.label, icon: n.icon, onClick: () => handleNav(n.id) } : null;
+            return n ? { id: n.id, label: n.label, icon: n.icon, onClick: () => handleTabNav(n.id) } : null;
           }).filter(Boolean);
           const dockedSet = new Set(docked);
           const menuBadge = (dockedSet.has("messages") ? 0 : navUnread) + (dockedSet.has("reminders") ? 0 : reminderDueCount);
@@ -24597,7 +24653,7 @@ export default function App({ authEmail = "", onSignOut }) {
             reminderDue={reminderDueCount}
             navDock={navDock}
             setNavDock={setNavDock}
-            onNav={handleNav}
+            onNav={handleTabNav}
             onSignOut={handleSignOut}
             currentUser={currentUser}
             T={T}
