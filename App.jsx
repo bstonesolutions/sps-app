@@ -6278,6 +6278,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
   const [officeFlagMsg, setOfficeFlagMsg] = useState("");
   // Unified photos: each entry is { src, label } — label is editable per photo
   const [photos, setPhotos] = useState([]); // [{ src, label }]
+  const [customLabelIdx, setCustomLabelIdx] = useState(null); // which photo's custom-label field is open
   // All three inventory sections (Treatments / Products / Parts) are collapsed by default and
   // each has its own search box that shows whenever the section is open. Keeps the complete
   // sheet short — tap a section to expand, search to find an item fast.
@@ -6806,16 +6807,37 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
               <div key={i} style={{ display: "flex", gap: 10, alignItems: "center", background: T.surface, borderRadius: 12, padding: "8px 10px" }}>
                 <img src={ph.src} alt="" style={{ width: 56, height: 56, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-                    {PHOTO_LABELS.map(lbl => (
-                      <button key={lbl} type="button" onClick={() => relabelPhoto(i, lbl)}
-                        style={{ padding: "4px 10px", borderRadius: 20, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit",
-                          background: ph.label === lbl ? T.primary : T.surfaceAlt,
-                          color: ph.label === lbl ? "#fff" : T.textMuted }}>
-                        {lbl}
-                      </button>
-                    ))}
-                  </div>
+                  {(() => {
+                    // A label that isn't one of the presets is a custom one the tech typed.
+                    const isCustom = !!ph.label && !PHOTO_LABELS.includes(ph.label);
+                    const showCustomInput = customLabelIdx === i || isCustom;
+                    return (
+                      <>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                          {PHOTO_LABELS.map(lbl => (
+                            <button key={lbl} type="button" onClick={() => { relabelPhoto(i, lbl); setCustomLabelIdx(null); }}
+                              style={{ padding: "4px 10px", borderRadius: 20, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit",
+                                background: ph.label === lbl ? T.primary : T.surfaceAlt,
+                                color: ph.label === lbl ? "#fff" : T.textMuted }}>
+                              {lbl}
+                            </button>
+                          ))}
+                          {/* Custom — type your own label. Styled identically to the preset chips. */}
+                          <button type="button" onClick={() => setCustomLabelIdx(i)}
+                            style={{ padding: "4px 10px", borderRadius: 20, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit",
+                              background: (isCustom || customLabelIdx === i) ? T.primary : T.surfaceAlt,
+                              color: (isCustom || customLabelIdx === i) ? "#fff" : T.textMuted }}>
+                            + Custom
+                          </button>
+                        </div>
+                        {showCustomInput && (
+                          <input type="text" autoFocus={customLabelIdx === i} value={isCustom ? ph.label : ""} maxLength={40}
+                            onChange={e => relabelPhoto(i, e.target.value)} placeholder="Type a label…"
+                            style={{ marginTop: 7, width: "100%", padding: "9px 10px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 12.5, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
                 <button onClick={() => removePhoto(i)}
                   style={{ background: "none", border: "none", color: T.textMuted, fontSize: 18, cursor: "pointer", lineHeight: 1, flexShrink: 0, padding: "0 4px" }}>×</button>
