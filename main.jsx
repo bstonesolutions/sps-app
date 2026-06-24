@@ -226,9 +226,6 @@ function Login() {
             <div style={{ textAlign: "center", marginTop: 12 }}>
               <button type="button" style={linkBtn} onClick={sendReset} disabled={busy}>Forgot password?</button>
             </div>
-            <div style={{ textAlign: "center", marginTop: 10, paddingTop: 10, borderTop: "1px solid #f1f5f9" }}>
-              <button type="button" style={linkBtn} onClick={() => { setMode("magic"); setErr(""); }}>Client? Sign in with email link</button>
-            </div>
           </form>
         )}
       </div>
