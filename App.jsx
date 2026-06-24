@@ -8967,6 +8967,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   // The day strip now reaches ~2 months back, so center it on TODAY on first load (otherwise it
   // opens scrolled all the way left, on April).
   const stripRef = useRef(null);
+  const todayCellRef = useRef(null);
   const stripScrolled = useRef(false);
 
   // Bulk add: group the batch by date and reuse the EXISTING addStops/setSchedule
@@ -9055,18 +9056,18 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   // correct — otherwise it parks today just off the left edge.
   useEffect(() => {
     if (stripScrolled.current) return;
-    let tries = 0;
-    const place = () => {
-      const c = stripRef.current;
-      if (!c || !c.clientWidth) return false; // layout not ready yet
-      const el = c.querySelector('[data-today="1"]') || c.querySelector('[data-sel="1"]');
-      if (!el) return false;
+    const go = () => {
+      const el = todayCellRef.current;
+      if (!el || !el.offsetParent) return false; // not laid out / not visible yet
       stripScrolled.current = true;
-      try { const cr = c.getBoundingClientRect(), er = el.getBoundingClientRect(); c.scrollLeft += (er.left - cr.left) - (c.clientWidth - el.clientWidth) / 2; } catch (_) {}
+      try { el.scrollIntoView({ inline: "center", block: "nearest" }); }
+      catch (_) { try { const c = stripRef.current; if (c) c.scrollLeft = el.offsetLeft - c.clientWidth / 2; } catch (_) {} }
       return true;
     };
-    const tick = () => { if (place() || ++tries > 15) return; requestAnimationFrame(tick); };
-    requestAnimationFrame(tick);
+    if (go()) return;
+    let n = 0;
+    const id = setInterval(() => { if (go() || ++n > 25) clearInterval(id); }, 80);
+    return () => clearInterval(id);
   }, [schedule.length, selectMode]);
 
   // Tech's preferred maps app (saved per-tech in Customize → Team; falls back to the device's
@@ -9275,7 +9276,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
             const on = cell.ds === selectedDate;
             const isToday = cell.ds === todayMDY();
             return (
-              <button key={cell.ds} data-today={isToday ? "1" : undefined} data-sel={on ? "1" : undefined} onClick={() => { setSelectedDate(cell.ds); setViewTech(null); }}
+              <button key={cell.ds} ref={isToday ? todayCellRef : undefined} data-today={isToday ? "1" : undefined} data-sel={on ? "1" : undefined} onClick={() => { setSelectedDate(cell.ds); setViewTech(null); }}
                 style={{ flexShrink: 0, width: 54, paddingTop: 10, paddingBottom: 10, borderRadius: 16, border: isToday && !on ? `2px solid ${hexA(T.primary, 0.4)}` : "none", cursor: "pointer", fontFamily: "inherit", textAlign: "center", transition: "background 0.15s, transform 0.1s",
                   background: on ? T.primary : T.surfaceAlt,
                   color: on ? "#fff" : T.textMuted,
