@@ -4223,7 +4223,7 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
                 <div>
                   <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 }}>Service Plans</label>
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                    {[form.division, ...getDivisions(tiers).filter(d => d !== form.division && form["service" + d])].map(div => {
+                    {[(form.division || "Pond"), ...getDivisions(tiers).filter(d => d !== (form.division || "Pond") && form["service" + d])].map(div => {
                       // Use the explicit per-division value when set (incl. "" = None, so it sticks);
                       // otherwise seed the primary division from effectiveTier so it matches the Hub.
                       const hasPlan = form.plans && Object.prototype.hasOwnProperty.call(form.plans, div);
@@ -4240,9 +4240,10 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
                                   onClick={() => {
                                     const newPlans = { ...(form.plans || {}), [div]: planVal };
                                     set("plans", newPlans);
-                                    if (div === form.division) {
+                                    if (div === (form.division || "Pond")) {
                                       set("plan", planVal);
                                       set("planFreq", planVal ? (TIER_FREQ[planVal] || form.planFreq) : "");
+                                      if (!form.division) set("division", "Pond"); // null-division clients: claim the primary
                                     }
                                   }}
                                   style={{ flex: 1, padding: "9px 4px", borderRadius: 10,
