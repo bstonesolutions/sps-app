@@ -3544,15 +3544,15 @@ function Modal({ title, children, onClose }) {
 // client's plan for their own division, fall back to the legacy c.plan.
 const effectiveTier = (c) => {
   if (!c) return "";
-  // Prefer the plan for the client's own division.
-  if (c.division && c.plans && Object.prototype.hasOwnProperty.call(c.plans, c.division) && c.plans[c.division]) {
-    return c.plans[c.division];
-  }
+  const div = c.division || "Pond";
+  // An EXPLICIT entry for the client's OWN division wins — even "" (None). This is what makes setting
+  // a tier to None stick, instead of falling through and surfacing another division's plan (e.g. a
+  // Pool Premium plan showing up the moment the Pond tier is set to None).
+  if (c.plans && Object.prototype.hasOwnProperty.call(c.plans, div)) return c.plans[div] || "";
   // Legacy flat field (kept in sync when the edited division is the client's primary one).
   if (c.plan) return c.plan;
-  // Last resort: any division that carries a non-empty plan, so a tier assigned in the
-  // bulk editor for a non-primary (or post-restore) division still surfaces in the Hub
-  // instead of showing "No tier". Display-only fallback — never hides an explicit tier.
+  // Last resort: any division that carries a non-empty plan, so a tier assigned in the bulk editor
+  // for a non-primary (or post-restore) division still surfaces in the Hub instead of "No tier".
   if (c.plans) { for (const k in c.plans) if (c.plans[k]) return c.plans[k]; }
   return "";
 };
