@@ -8964,6 +8964,10 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   // ── Route-dashboard state + helpers ──
   const [selectedDate, setSelectedDate] = useState(() => todayMDY());
   const [viewTech, setViewTech] = useState(null); // null = dashboard; else assignee key / "__un" / "__all"
+  // The day strip now reaches ~2 months back, so center it on TODAY on first load (otherwise it
+  // opens scrolled all the way left, on April).
+  const stripRef = useRef(null);
+  const stripScrolled = useRef(false);
 
   // Bulk add: group the batch by date and reuse the EXISTING addStops/setSchedule
   // save for each date (no new Supabase call). Existing sorting handles order.
@@ -9045,6 +9049,15 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
     }
     return cells;
   })();
+
+  // On first load, scroll the day strip so TODAY is centered (it now extends ~2 months back).
+  useEffect(() => {
+    if (stripScrolled.current || !stripRef.current) return;
+    const el = stripRef.current.querySelector('[data-today="1"]') || stripRef.current.querySelector('[data-sel="1"]');
+    if (!el) return;
+    stripScrolled.current = true;
+    try { const c = stripRef.current, cr = c.getBoundingClientRect(), er = el.getBoundingClientRect(); c.scrollLeft += (er.left - cr.left) - (cr.width - er.width) / 2; } catch (_) {}
+  }, [schedule.length, selectMode]);
 
   // Tech's preferred maps app (saved per-tech in Customize → Team; falls back to the device's
   // last choice). Empty => the default web directions, so behavior is unchanged when unset.
@@ -9247,12 +9260,12 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
       {/* Day strip */}
       {!selectMode && schedule.length > 0 && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 18 }}>
-          <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", flex: 1 }}>
+          <div ref={stripRef} style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", flex: 1 }}>
           {dayCells.map(cell => {
             const on = cell.ds === selectedDate;
             const isToday = cell.ds === todayMDY();
             return (
-              <button key={cell.ds} onClick={() => { setSelectedDate(cell.ds); setViewTech(null); }}
+              <button key={cell.ds} data-today={isToday ? "1" : undefined} data-sel={on ? "1" : undefined} onClick={() => { setSelectedDate(cell.ds); setViewTech(null); }}
                 style={{ flexShrink: 0, width: 54, paddingTop: 10, paddingBottom: 10, borderRadius: 16, border: isToday && !on ? `2px solid ${hexA(T.primary, 0.4)}` : "none", cursor: "pointer", fontFamily: "inherit", textAlign: "center", transition: "background 0.15s, transform 0.1s",
                   background: on ? T.primary : T.surfaceAlt,
                   color: on ? "#fff" : T.textMuted,
@@ -24335,7 +24348,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {selectedClient && <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>}
         </>
       ))}
-      {page === "schedule" && <Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} enRoute={enRoute} onEnRoute={handleEnRoute} />}
+      {page === "schedule" && <SectionErrorBoundary key="schedule"><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
       {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <SectionErrorBoundary key="inventory"><InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} /></SectionErrorBoundary>}
       {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
