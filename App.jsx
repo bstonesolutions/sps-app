@@ -15827,6 +15827,91 @@ function fmtBytes(b) {
   return Math.max(1, Math.round(b / 1e3)) + " KB";
 }
 
+// ── One-time: move existing photos out of the backup into Supabase Storage ──────
+// Reads the photo-bearing backup (sps_backups), uploads every photo to the client-media bucket, and
+// links them back into the live clients (matched by client id, then by position). Owner-only, safe to
+// re-run (already-Storage photos pass through; a failed upload stays inline so nothing is lost), and
+// it snapshots the current clients to sps_backups before saving.
+function PhotoMigration() {
+  const { T } = useApp();
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);     // { type, text }
+  const [progress, setProgress] = useState("");
+  const deepParse = (v) => { let x = v; for (let i = 0; i < 3 && typeof x === "string"; i++) { try { x = JSON.parse(x); } catch { break; } } return x; };
+
+  const run = async () => {
+    if (busy) return;
+    setBusy(true); setMsg(null); setProgress("Reading your photo backup…");
+    try {
+      const { data: backups, error: be } = await supabase.from("sps_backups").select("key, value");
+      if (be) throw new Error(be.message);
+      const cands = (backups || []).filter(b => String(b.key).startsWith("sps_clients"));
+      if (!cands.length) throw new Error("No client backup found in sps_backups.");
+      cands.sort((a, b) => (b.value || "").length - (a.value || "").length); // the one with photos is biggest
+      const backupClients = deepParse(cands[0].value);
+      if (!Array.isArray(backupClients)) throw new Error("Backup couldn't be read as a client list.");
+
+      const liveRaw = await store.get("sps_clients");
+      const liveClients = deepParse(liveRaw && liveRaw.value);
+      if (!Array.isArray(liveClients)) throw new Error("Current clients couldn't be read.");
+
+      const bById = {}; backupClients.forEach(c => { if (c && c.id != null) bById[c.id] = c; });
+      let uploaded = 0, failed = 0; const cache = new Map();
+      const up = async (src) => {
+        if (!src || typeof src !== "string" || !src.startsWith("data:")) return src; // already a URL / empty → leave
+        if (cache.has(src)) return cache.get(src);
+        const url = await uploadToStorage(src);
+        if (url && !url.startsWith("data:")) { uploaded++; cache.set(src, url); setProgress(`Uploaded ${uploaded} photo${uploaded === 1 ? "" : "s"}…`); return url; }
+        failed++; return src; // upload failed → keep inline, never lose it
+      };
+      const upArr = async (arr) => { if (!Array.isArray(arr)) return arr; const out = []; for (const p of arr) { if (typeof p === "string") out.push(await up(p)); else if (p && p.src) out.push({ ...p, src: await up(p.src) }); else out.push(p); } return out; };
+      // Prefer the live photos (newer) if present, else the backup's; then ensure all are in Storage.
+      const fix = async (livePhotos, backupPhotos) => upArr((Array.isArray(livePhotos) && livePhotos.length) ? livePhotos : backupPhotos);
+
+      const merged = [];
+      for (const lc of liveClients) {
+        const bc = bById[lc && lc.id];
+        if (!bc) { merged.push(lc); continue; }
+        const nc = { ...lc };
+        nc.sitePhotos = await fix(lc.sitePhotos, bc.sitePhotos);
+        nc.siteVideos = await fix(lc.siteVideos, bc.siteVideos);
+        if (Array.isArray(lc.history)) {
+          nc.history = [];
+          for (let i = 0; i < lc.history.length; i++) { const lh = lc.history[i]; const bh = (bc.history || [])[i]; nc.history.push(lh ? { ...lh, photos: await fix(lh.photos, bh && bh.photos) } : lh); }
+        }
+        if (Array.isArray(lc.equipment)) {
+          nc.equipment = [];
+          for (let i = 0; i < lc.equipment.length; i++) { const le = lc.equipment[i]; const bo = (bc.equipment || [])[i]; nc.equipment.push(le ? { ...le, photos: await fix(le.photos, bo && bo.photos) } : le); }
+        }
+        merged.push(nc);
+      }
+
+      setProgress("Saving…");
+      try { await supabase.from("sps_backups").insert({ key: `sps_clients_premigrate_${Date.now()}`, value: JSON.stringify(liveClients) }); } catch (_) {}
+      const res = await store.set("sps_clients", JSON.stringify(merged));
+      if (!res || !res.ok) throw new Error("Couldn't save — your changes are queued; try again in a moment.");
+      setMsg({ type: "ok", text: `Restored ${uploaded} photo${uploaded === 1 ? "" : "s"} to Storage${failed ? ` (${failed} kept inline — re-run to retry)` : ""}. Reloading…` });
+      setProgress(""); setTimeout(() => window.location.reload(), 1800);
+    } catch (e) {
+      setMsg({ type: "error", text: (e && e.message) || "Migration failed — nothing was changed." });
+      setProgress("");
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ padding: "0 18px 18px" }}>
+      <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+        <div>
+          <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text }}>Restore photos to cloud Storage</div>
+          <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 3, lineHeight: 1.5 }}>One-time: pulls your existing photos out of the backup, uploads them to Storage, and links them back into your clients. Safe to re-run; your backup stays intact.</div>
+        </div>
+        {msg && <div style={{ fontSize: 12.5, fontWeight: 600, color: msg.type === "ok" ? "#157a12" : "#C0392B", background: msg.type === "ok" ? hexA("#16a34a", 0.1) : hexA("#E5484D", 0.1), borderRadius: 10, padding: "9px 12px" }}>{msg.text}</div>}
+        <Btn sm onClick={run} disabled={busy} style={{ alignSelf: "flex-start" }}>{busy ? (progress || "Working…") : "Restore photos"}</Btn>
+      </div>
+    </div>
+  );
+}
+
 function BackupRestore() {
   const { T } = useApp();
   const [busy, setBusy] = useState("");       // "" | "everything" | "data" | "restore"
@@ -16543,6 +16628,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
           <SyncStatus T={T} branding={branding} team={team} currentUserId={currentUserId} email={email} />
           <Collapsible title="Backup, Restore & Reset" subtitle="Save/restore a full .zip of all data + media, or reset everything to factory defaults.">
             <BackupRestore />
+            <PhotoMigration />
             <div style={{ padding: "0 18px 18px" }}>
               {!confirmReset ? (
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, borderTop: `1px solid ${T.border}`, paddingTop: 16 }}>
