@@ -3424,7 +3424,7 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
           {/* Logo watermark — soft-light blend ghosts it into the crimson, like the SMS card */}
           {branding && branding.logoType === "image" && branding.logoImage && (
             <img src={branding.logoImage} alt="" aria-hidden="true"
-              style={{ position: "absolute", right: -34, top: "50%", transform: "translateY(-50%) rotate(-8deg)", width: 184, height: 184, objectFit: "contain", opacity: 0.16, mixBlendMode: "soft-light", pointerEvents: "none" }} />
+              style={{ position: "absolute", right: -34, top: "50%", transform: "translateY(-50%) rotate(-8deg)", width: 190, height: 190, objectFit: "contain", opacity: 0.38, mixBlendMode: "soft-light", pointerEvents: "none" }} />
           )}
           <div style={{ position: "relative", zIndex: 1 }}>
             <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.1em", opacity: 0.82 }}>TODAY</div>
@@ -18417,6 +18417,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
   const [adjustLoc, setAdjustLoc] = useState("");
   const [historyModal, setHistoryModal] = useState(null); // { item, kind }
   const [itemModal, setItemModal] = useState(null); // { mode, kind, data }
+  const [priceReviewOpen, setPriceReviewOpen] = useState(false); // "needs a price" list collapsed by default
   const [locModal, setLocModal] = useState(null); // { mode, data }
   const [showLocs, setShowLocs] = useState(false);
   const [showValue, setShowValue] = useState(false);
@@ -18854,21 +18855,29 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
       {/* Needs-a-price review — forces missing prices to be addressed so billing is never $0 by accident */}
       {pricelessItems.length > 0 && (
         <div style={{ background: hexA("#E5484D", 0.07), border: `1px solid ${hexA("#E5484D", 0.28)}`, borderRadius: 16, padding: "14px 16px" }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: "#B42318", marginBottom: 4, display: "flex", alignItems: "center", gap: 6 }}>
-            <Icon name="warning" size={15} /> {pricelessItems.length} item{pricelessItems.length !== 1 ? "s" : ""} need{pricelessItems.length === 1 ? "s" : ""} a price
-          </div>
-          <div style={{ fontSize: 11.5, color: T.textMuted, marginBottom: 10, lineHeight: 1.4 }}>Set a price so these bill correctly. Use $0 if an item is free or internal — but it has to be set on purpose.</div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {pricelessItems.map(it => (
-              <div key={it.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                <span style={{ fontSize: 13, color: T.text, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.name}</span>
-                {canEdit && <button onClick={() => openEditItem(it)}
-                  style={{ flexShrink: 0, background: "#E5484D", color: "#fff", border: "none", borderRadius: 8, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-                  Set price
-                </button>}
+          <button type="button" onClick={() => setPriceReviewOpen(o => !o)}
+            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit" }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: "#B42318", display: "flex", alignItems: "center", gap: 6 }}>
+              <Icon name="warning" size={15} /> {pricelessItems.length} item{pricelessItems.length !== 1 ? "s" : ""} need{pricelessItems.length === 1 ? "s" : ""} a price
+            </span>
+            <span style={{ color: "#B42318", fontSize: 16, transform: priceReviewOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
+          </button>
+          {priceReviewOpen && (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 11.5, color: T.textMuted, marginBottom: 10, lineHeight: 1.4 }}>Set a price so these bill correctly. Use $0 if an item is free or internal — but it has to be set on purpose.</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {pricelessItems.map(it => (
+                  <div key={it.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 13, color: T.text, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.name}</span>
+                    {canEdit && <button onClick={() => openEditItem(it)}
+                      style={{ flexShrink: 0, background: "#E5484D", color: "#fff", border: "none", borderRadius: 8, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                      Set price
+                    </button>}
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            </div>
+          )}
         </div>
       )}
 
