@@ -7107,7 +7107,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
         <div style={{ borderTop: `1px solid ${T.border}`, margin: "10px 0", paddingTop: 10 }} />
 
         {/* computed cost lines */}
-        {[["Labor", money(laborCost), `${minutes} min @ $${num(hourlyRate)}/hr`]].map(([k, v, sub]) => (
+        {[["Labor", money(laborCost), `${Math.round(num(actualHours) * 60)} min @ $${num(hourlyRate)}/hr`]].map(([k, v, sub]) => (
           <div key={k} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
             <span style={{ fontSize: 13, color: T.text }}>{k}{sub && <span style={{ fontSize: 11, color: T.textMuted }}> · {sub}</span>}</span>
             <span style={{ fontSize: 13, color: T.textMuted }}>−{v}</span>
