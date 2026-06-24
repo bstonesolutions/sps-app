@@ -22788,6 +22788,25 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
   const channels = { text: true, email: true, app: true, ...(notify.channels || {}) };
   const toggleChannel = (ch) => { const next = { ...notify, channels: { ...channels, [ch]: !channels[ch] } }; setNotify(next); if (onSavePrefs) onSavePrefs(next); };
 
+  // Change password — the client is already signed in, so update directly (no reset email).
+  const [pwOpen, setPwOpen] = useState(false);
+  const [pw1, setPw1] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [pwBusy, setPwBusy] = useState(false);
+  const [pwMsg, setPwMsg] = useState(null);
+  const pwField = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 11, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const changePassword = async () => {
+    if (pw1.length < 8) { setPwMsg({ ok: false, text: "Use at least 8 characters." }); return; }
+    if (pw1 !== pw2) { setPwMsg({ ok: false, text: "The passwords don't match." }); return; }
+    setPwBusy(true); setPwMsg(null);
+    try {
+      const { error } = await supabase.auth.updateUser({ password: pw1, data: { password_set: true } });
+      setPwBusy(false);
+      if (error) { setPwMsg({ ok: false, text: error.message }); return; }
+      setPwMsg({ ok: true, text: "Password updated." }); setPw1(""); setPw2(""); setTimeout(() => setPwOpen(false), 1300);
+    } catch (e) { setPwBusy(false); setPwMsg({ ok: false, text: "Couldn't update — try again." }); }
+  };
+
   const OptionRow = ({ label, value, options, onChange }) => (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 0", borderBottom: `1px solid ${T.border}` }}>
       <span style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{label}</span>
@@ -22806,7 +22825,7 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
     <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
       <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", marginBottom: 20 }}>Settings</div>
 
-      {/* Appearance */}
+      {/* Appearance + account */}
       <div style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, padding: "4px 18px", marginBottom: 16 }}>
         <OptionRow label="Appearance" value={prefs.appearance || "system"}
           options={[["light","Light"],["dark","Dark"],["system","Auto"]]}
@@ -22814,28 +22833,56 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
         <OptionRow label="Default Screen" value={prefs.defaultPage || branding.portalDefaultPage || "cp_home"}
           options={[["cp_home","Home"],["cp_property","My Property"],["cp_invoices","Invoices"]]}
           onChange={v => set("defaultPage", v)} />
-        <OptionRow label="Text Size" value={prefs.textSize || "normal"}
-          options={[["small","S"],["normal","M"],["large","L"]]}
-          onChange={v => set("textSize", v)} />
-        <div style={{ padding: "14px 0", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span style={{ fontSize: 14, fontWeight: 600, color: T.text }}>Reduce Motion</span>
-          <button onClick={() => set("reduceMotion", !(prefs.reduceMotion))}
-            style={{ width: 48, height: 28, borderRadius: 100, background: prefs.reduceMotion ? T.primary : T.surfaceAlt, border: "none", cursor: "pointer", position: "relative", transition: "background 0.2s" }}>
-            <div style={{ width: 22, height: 22, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: prefs.reduceMotion ? 23 : 3, transition: "left 0.2s", boxShadow: "0 1px 4px rgba(0,0,0,0.2)" }} />
-          </button>
-        </div>
         <div style={{ padding: "14px 0" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ fontSize: 14, fontWeight: 600, color: T.text }}>Account</span>
-            <span style={{ fontSize: 12, color: T.textMuted }}>{client.email}</span>
+            <span style={{ fontSize: 12, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{client.email}</span>
           </div>
           <div style={{ fontSize: 12, color: T.textMuted, marginTop: 4 }}>{client.name}{effectiveTier(client) ? ` · ${effectiveTier(client)} Plan` : ""}</div>
+          {!isStaffPreview && (<>
+            <button onClick={() => { setPwOpen(o => !o); setPwMsg(null); }}
+              style={{ marginTop: 12, background: hexA(T.primary, 0.1), color: T.primary, border: "none", borderRadius: 10, padding: "9px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 6 }}>
+              <Icon name="lock" size={14} /> Change Password
+            </button>
+            {pwOpen && (
+              <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+                <input type="password" autoComplete="new-password" placeholder="New password" value={pw1} onChange={e => setPw1(e.target.value)} style={pwField} />
+                <input type="password" autoComplete="new-password" placeholder="Confirm new password" value={pw2} onChange={e => setPw2(e.target.value)} style={pwField} />
+                {pwMsg && <div style={{ fontSize: 12.5, fontWeight: 700, color: pwMsg.ok ? "#16a34a" : "#E5484D" }}>{pwMsg.text}</div>}
+                <button onClick={changePassword} disabled={pwBusy}
+                  style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 11, padding: "11px", fontSize: 13.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", opacity: pwBusy ? 0.6 : 1 }}>
+                  {pwBusy ? "Saving…" : "Save Password"}
+                </button>
+              </div>
+            )}
+          </>)}
         </div>
       </div>
 
-      {/* Notifications */}
+      {/* Notifications — one card: HOW you hear from us (channels), then WHAT we notify you about */}
       <div style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, padding: "4px 18px", marginBottom: 16 }}>
-        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, padding: "14px 0 2px" }}>Notifications</div>
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, padding: "14px 0 4px" }}>How you hear from us</div>
+        <div style={{ fontSize: 12.5, color: T.textMuted, paddingBottom: 6, lineHeight: 1.45 }}>Pick the ways you'd like {branding.companyName || "us"} to reach you — keep them all on, or just the one you prefer.</div>
+        {[
+          ["text", "Text message", "Alerts, invoices & reminders by SMS"],
+          ["email", "Email", "Invoices and service reports by email"],
+          ["app", "In-app", "Notifications inside this portal"],
+        ].map(([ch, label, hint]) => (
+          <div key={ch} style={{ padding: "13px 0", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{label}</div>
+              <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>{hint}</div>
+            </div>
+            <button onClick={() => toggleChannel(ch)}
+              style={{ width: 48, height: 28, borderRadius: 100, background: channels[ch] ? T.primary : T.surfaceAlt, border: "none", cursor: "pointer", position: "relative", transition: "background 0.2s", flexShrink: 0 }}>
+              <div style={{ width: 22, height: 22, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: channels[ch] ? 23 : 3, transition: "left 0.2s", boxShadow: "0 1px 4px rgba(0,0,0,0.2)" }} />
+            </button>
+          </div>
+        ))}
+        {!channels.text && !channels.email && !channels.app && (
+          <div style={{ fontSize: 12, color: "#C0392B", padding: "10px 0 2px", lineHeight: 1.45 }}>With every channel off, you won't get alerts. We'll still keep everything here in your portal.</div>
+        )}
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, padding: "16px 0 4px" }}>What we notify you about</div>
         {[
           ["serviceReminders", "Service reminders", "Reminders about upcoming visits"],
           ["onMyWay", "On-the-way alerts", `When ${branding.companyName || "we"} are heading over`],
@@ -22852,31 +22899,6 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
             </button>
           </div>
         ))}
-      </div>
-
-      {/* Communication preferences — the client picks which channels reach them (any, or one) */}
-      <div style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, padding: "4px 18px", marginBottom: 16 }}>
-        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, padding: "14px 0 2px" }}>How we reach you</div>
-        <div style={{ fontSize: 12.5, color: T.textMuted, paddingBottom: 6, lineHeight: 1.45 }}>Choose the ways you'd like to hear from {branding.companyName || "us"} — keep them all on, or just the one you prefer.</div>
-        {[
-          ["text", "Text message", "On-the-way alerts, invoices & reminders by SMS"],
-          ["email", "Email", "Invoices and service reports by email"],
-          ["app", "In-app", "Messages and notifications inside this portal"],
-        ].map(([ch, label, hint], i, arr) => (
-          <div key={ch} style={{ padding: "13px 0", borderBottom: i < arr.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{label}</div>
-              <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>{hint}</div>
-            </div>
-            <button onClick={() => toggleChannel(ch)}
-              style={{ width: 48, height: 28, borderRadius: 100, background: channels[ch] ? T.primary : T.surfaceAlt, border: "none", cursor: "pointer", position: "relative", transition: "background 0.2s", flexShrink: 0 }}>
-              <div style={{ width: 22, height: 22, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: channels[ch] ? 23 : 3, transition: "left 0.2s", boxShadow: "0 1px 4px rgba(0,0,0,0.2)" }} />
-            </button>
-          </div>
-        ))}
-        {!channels.text && !channels.email && !channels.app && (
-          <div style={{ fontSize: 12, color: "#C0392B", padding: "0 0 12px", lineHeight: 1.45 }}>With all channels off, you won't receive alerts. We'll still keep everything in your portal.</div>
-        )}
       </div>
 
       {!isStaffPreview && (
@@ -22978,7 +23000,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
   const T = THEMES[themeKey] ? (effectiveMode === "dark" ? THEMES[themeKey].dark : THEMES[themeKey].light) : globalT;
 
   // Text size scaling
-  const textScale = prefs.textSize === "large" ? 1.1 : prefs.textSize === "small" ? 0.9 : 1;
+  const textScale = 1; // Text Size control removed; always render at the standard scale.
 
   // Persist the portal page so a reload / resync keeps clients on the screen they were on.
   const cpPageKey = `sps_cp_page_${client.id}`;
@@ -23077,17 +23099,12 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
             </div>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            {/* Refresh */}
+            {/* Refresh (Settings now lives in the bottom nav) */}
             <button onClick={() => window.location.reload()}
               style={{ width: 34, height: 34, borderRadius: 10, background: T.surfaceAlt, border: "none", color: T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
               <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
               </svg>
-            </button>
-            {/* Settings gear — always visible */}
-            <button onClick={() => setSettingsOpen(s => !s)}
-              style={{ width: 34, height: 34, borderRadius: 10, background: settingsOpen ? hexA(T.primary, 0.12) : T.surfaceAlt, border: "none", color: settingsOpen ? T.primary : T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
-              <Icon name="settings" size={16} />
             </button>
           </div>
         </div>
@@ -23124,10 +23141,18 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
                   <span style={{ position: "absolute", top: -1, right: 1, minWidth: 15, height: 15, borderRadius: 8, background: "#E5484D", color: "#fff", fontSize: 9.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px", border: `2px solid ${T.surface}` }}>{badge}</span>
                 )}
               </span>
-              <span style={{ fontSize: 10, fontWeight: active ? 700 : 500, letterSpacing: "-0.01em" }}>{n.label}</span>
+              <span style={{ fontSize: 10, fontWeight: active ? 700 : 500, letterSpacing: "-0.01em", whiteSpace: "nowrap" }}>{n.label}</span>
             </button>
           );
         })}
+        {/* Settings — moved here from the top-right gear */}
+        <button onClick={() => setSettingsOpen(s => !s)} aria-label="Settings"
+          style={{ flex: 1, border: "none", background: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, color: settingsOpen ? T.primary : T.textMuted, fontFamily: "inherit", WebkitTapHighlightColor: "transparent" }}>
+          <span style={{ width: 40, height: 28, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 100, background: settingsOpen ? hexA(T.primary, 0.12) : "transparent", transition: "background .15s" }}>
+            <svg viewBox="0 0 24 24" width={20} height={20} fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </span>
+          <span style={{ fontSize: 10, fontWeight: settingsOpen ? 700 : 500, letterSpacing: "-0.01em", whiteSpace: "nowrap" }}>Settings</span>
+        </button>
       </nav>
       )}
     </div>
@@ -23311,10 +23336,13 @@ export default function App({ authEmail = "", onSignOut }) {
   // redirect targets with fallbacks: explicit → Owner Alert contacts → company contacts.
   useEffect(() => {
     const tm = email.testMode || {};
-    const redirEmail = tm.email || (email.notify && email.notify.ownerEmail) || branding.companyEmail || "";
+    // Default the redirect targets to the SIGNED-IN owner so "test stuff sends to me" works
+    // even before an explicit redirect email/phone is set: explicit → Owner-Alert contact →
+    // signed-in account → company contact.
+    const redirEmail = tm.email || (email.notify && email.notify.ownerEmail) || (authEmail || "").trim() || branding.companyEmail || "";
     const redirPhone = tm.phone || (email.notify && email.notify.ownerPhone) || branding.companyPhone || "";
     setTestMode({ on: !!tm.on, mode: tm.mode || "redirect", email: redirEmail, phone: redirPhone });
-  }, [email.testMode, email.notify, branding.companyEmail, branding.companyPhone]);
+  }, [email.testMode, email.notify, branding.companyEmail, branding.companyPhone, authEmail]);
   const [costs, setCosts, lco] = useStoredState("sps_costs", DEFAULT_COSTS);
   const [home, setHome, lh] = useStoredState("sps_home", DEFAULT_HOME);
   const [budget, setBudget, lbud] = useStoredState("sps_budget", DEFAULT_BUDGET);
