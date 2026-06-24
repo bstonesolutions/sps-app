@@ -136,6 +136,21 @@ function postToPortalSafe(row) {
   return supabase.from("sps_messages").insert(row);
 }
 
+// Notify a client across EVERY channel they've opted into — the in-app portal thread and/or a
+// text — with the SAME message, so an app-only client and a text-only client each get it (and
+// "all" gets both). Honors commPref + Test Mode (sendSms redirects to the owner in test; portal
+// posts are held). Returns { app, text } with each channel's result (null = channel skipped).
+async function notifyClientChannels(client, message, companyName) {
+  const out = { app: null, text: null };
+  if (client && client.id != null && commPref(client, "app")) {
+    try { await postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: companyName || "", body: message }); out.app = { ok: true }; }
+    catch (_) { out.app = { ok: false }; }
+  }
+  const phone = (client && client.phone) || "";
+  if (phone && commPref(client, "text")) out.text = await sendSms(phone, message);
+  return out;
+}
+
 // Spread into a Resend email body; the server only honors the from-fields on the verified
 // domain. When test mode is on it also carries the redirect instruction the server enforces.
 const senderEmailFields = () => ({
@@ -1728,6 +1743,10 @@ const DEFAULT_EMAIL = {
   smsArrived: "Hi {first}, {sender} with {company} has arrived and is getting started on your service. We'll send a full report when we're done!",
   smsReport: "Hi {first}, your {service} is complete! Your full report is on its way by email, and photos are in your portal. Thanks for choosing {company}!",
   smsReminder: "Hi {first}, a friendly reminder from {company} that your service is scheduled for {date}. Reply here with any questions!",
+  // Reschedule / cancel / running-late notices ({first}, {company}, {sender}, {service}, {reason}, {date})
+  smsReschedule: "Hi {first}, we need to reschedule your {service} with {company} due to {reason}. We've moved it to {date}. Sorry for the change, and thank you for your patience!",
+  smsCancel: "Hi {first}, we have to cancel your upcoming {service} with {company} due to {reason}. We'll reach out to get you rebooked soon. Thank you for understanding!",
+  smsLate: "Hi {first}, quick update from {company} — we're running a little behind today due to {reason}, but we're still on our way. Thanks for your patience!",
   // Invoice notifications ({first}, {company}, {number}, {amount}, {dueDate}, {link})
   smsInvoice: "Hi {first}, your invoice {number} for {amount} from {company} is ready. {link}",
   chatInvoice: "You have a new invoice from {company}.",
@@ -6031,11 +6050,16 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
     setCopied(true); setTimeout(() => setCopied(false), 1800);
   };
   const handleSend = async () => {
-    if (!phone) return;
+    const canApp = !!(client && client.id != null && commPref(client, "app"));
+    if (!phone && !canApp) return;
     setSending(true); setSendErr("");
-    const r = await sendSms(client.phone, message); // business Quo line ONLY — never the device Messages app
-    setSending(false);
-    if (!r.ok) { setSendErr(r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send the text — try again.")); return; }
+    // Mirror the same message into the in-app portal for app-preference clients.
+    if (canApp) postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: message }).then(() => {}, () => {});
+    if (phone) {
+      const r = await sendSms(client.phone, message); // business Quo line ONLY — never the device Messages app
+      setSending(false);
+      if (!r.ok) { setSendErr(r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send the text — try again.")); return; }
+    } else setSending(false);
     onSent();
     onClose();
   };
@@ -7780,10 +7804,14 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", onClose }) {
   const [omw, setOmw] = useState({ busy: false, msg: null });
   // Send via the business Quo line ONLY — never open the device Messages app.
   const sendOmwText = async () => {
-    if (!phone) return;
+    const canApp = !!(client && client.id != null && commPref(client, "app"));
+    if (!phone && !canApp) return;
     setOmw({ busy: true, msg: null });
+    // Mirror the same On-My-Way message into the in-app portal for app-preference clients.
+    if (canApp) postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: msg }).then(() => {}, () => {});
+    if (!phone) { setOmw({ busy: false, msg: { ok: true, text: "Client notified in the app." } }); return; }
     const r = await sendSms(phone, msg);
-    setOmw({ busy: false, msg: r.ok ? { ok: true, text: "On My Way text sent." } : { ok: false, text: r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send — your Quo texting may not be A2P-approved yet.") } });
+    setOmw({ busy: false, msg: r.ok ? { ok: true, text: canApp ? "On My Way sent (text + app)." : "On My Way text sent." } : { ok: false, text: r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send — your Quo texting may not be A2P-approved yet.") } });
   };
   const openMap = (app) => { try { localStorage.setItem("sps_map_app", app); } catch {} setPref(app); };
   const mapApps = [{ key: "apple", label: "Apple Maps", icon: "A" }, { key: "google", label: "Google Maps", icon: "G" }, { key: "waze", label: "Waze", icon: "W" }];
@@ -8778,6 +8806,111 @@ function StopEditModal({ stop, dayDate, clients, catalog, team, T, onSave, onClo
   );
 }
 
+// Reschedule / cancel / running-late a stop. Staff pick the action + a reason, which prefills
+// an EDITABLE client message; sending it goes out on EVERY channel the client opted into (in-app
+// + text). The change is recorded on the stop so it's marked in the system.
+function StopChangeModal({ stop, client, dayDate, email, onReschedule, onCancelStop, onClose }) {
+  const { T, branding } = useApp();
+  const firstName = (client?.name || stop?.client || "there").split(" ")[0];
+  const phone = (client?.phone || "").replace(/[^\d+]/g, "");
+  const service = stop?.type || "service";
+  const company = branding.companyName || "";
+  const sender = (email && email.senderName) || company;
+  const ACTIONS = [
+    { id: "reschedule", label: "Reschedule", tpl: (email && email.smsReschedule) || DEFAULT_EMAIL.smsReschedule },
+    { id: "cancel", label: "Cancel", tpl: (email && email.smsCancel) || DEFAULT_EMAIL.smsCancel },
+    { id: "late", label: "Running late", tpl: (email && email.smsLate) || DEFAULT_EMAIL.smsLate },
+  ];
+  const REASONS = ["a weather delay", "an equipment issue", "a staffing shortage", "an emergency", "a scheduling conflict", "running behind today"];
+  const [action, setAction] = useState("reschedule");
+  const [reason, setReason] = useState(REASONS[0]);
+  const [customReason, setCustomReason] = useState("");
+  const [newDateISO, setNewDateISO] = useState("");
+  const [message, setMessage] = useState("");
+  const [edited, setEdited] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+
+  const isOther = reason === "__other";
+  const effReason = (isOther ? customReason.trim() : reason) || "a scheduling change";
+  const newDateMDY = (() => { const [y, m, d] = (newDateISO || "").split("-"); return (y && m && d) ? `${m}/${d}/${y}` : ""; })();
+  const dateWord = newDateMDY ? `${dayLabel(newDateMDY)}, ${newDateMDY}` : "a new date (we'll confirm)";
+
+  // Prefill the message from the action/reason/date — until the staff edits it themselves.
+  useEffect(() => {
+    if (edited) return;
+    const a = ACTIONS.find(x => x.id === action) || ACTIONS[0];
+    setMessage((a.tpl || "")
+      .replace(/\{first\}/g, firstName).replace(/\{company\}/g, company).replace(/\{sender\}/g, sender)
+      .replace(/\{service\}/g, service).replace(/\{reason\}/g, effReason).replace(/\{date\}/g, dateWord));
+  }, [action, reason, customReason, newDateISO, edited]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const channels = [];
+  if (client?.id != null && commPref(client, "app")) channels.push("In-app");
+  if (phone && commPref(client, "text")) channels.push("Text");
+
+  const send = async () => {
+    if (action === "reschedule" && !newDateMDY) { setResult({ ok: false, text: "Pick the new date first." }); return; }
+    setBusy(true); setResult(null);
+    const recReason = (isOther ? customReason.trim() : reason) || "";
+    await notifyClientChannels(client, message, company);
+    if (action === "reschedule") onReschedule(newDateMDY, recReason, message);
+    else if (action === "cancel") onCancelStop(recReason, message);
+    // "late" makes no schedule change — it's only a heads-up notice.
+    setBusy(false);
+    setResult({ ok: true, text: channels.length ? `Client notified by ${channels.join(" + ").toLowerCase()}.` : "Recorded — this client has no text/in-app channel on file." });
+    setTimeout(onClose, 950);
+  };
+
+  // Matches the app's standard selectable chip (Products Purchased / Assigned To pickers).
+  const chip = (active, label, onClick) => (
+    <button type="button" onClick={onClick} style={{ padding: "8px 14px", borderRadius: 100, border: `1.5px solid ${active ? T.primary : T.border}`, cursor: "pointer", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", background: active ? hexA(T.primary, 0.08) : T.surface, color: active ? T.primary : T.textMuted }}>{label}</button>
+  );
+  const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
+
+  return (
+    <Modal title="Reschedule / Cancel" onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: -6 }}>{client?.name || stop?.client}{stop?.time ? ` · ${stop.time}` : ""}</div>
+        <div>
+          <label style={lbl}>What's happening?</label>
+          <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+            {ACTIONS.map(a => chip(action === a.id, a.label, () => { setAction(a.id); setEdited(false); }))}
+          </div>
+        </div>
+        {action === "reschedule" && (
+          <div>
+            <label style={lbl}>New date</label>
+            <input type="date" value={newDateISO} onChange={e => { setNewDateISO(e.target.value); setEdited(false); }}
+              style={{ width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
+          </div>
+        )}
+        <div>
+          <label style={lbl}>Reason</label>
+          <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+            {REASONS.map(r => chip(reason === r, r, () => { setReason(r); setEdited(false); }))}
+            {chip(isOther, "Other…", () => { setReason("__other"); setEdited(false); })}
+          </div>
+          {isOther && <input type="text" value={customReason} onChange={e => { setCustomReason(e.target.value); setEdited(false); }} placeholder="Type the reason…" maxLength={60}
+            style={{ marginTop: 8, width: "100%", padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />}
+        </div>
+        <div>
+          <label style={lbl}>Message to client <span style={{ textTransform: "none", fontWeight: 400 }}>(editable)</span></label>
+          <textarea rows={4} value={message} onChange={e => { setMessage(e.target.value); setEdited(true); }}
+            style={{ width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical" }} />
+          <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 6, lineHeight: 1.4 }}>
+            {channels.length ? `Sends by ${channels.join(" + ")} — the channels ${firstName} chose.` : `${firstName} has no text or in-app channel on file; the change is still recorded.`}
+          </div>
+        </div>
+        {result && <div style={{ fontSize: 13, fontWeight: 700, color: result.ok ? "#16a34a" : T.accent }}>{result.text}</div>}
+        <Btn onClick={send} disabled={busy} block lg>
+          {busy ? "Sending…" : action === "reschedule" ? "Reschedule & notify" : action === "cancel" ? "Cancel visit & notify" : "Notify client"}
+        </Btn>
+      </div>
+    </Modal>
+  );
+}
+
 // Remembers the Schedule view (selected day + tech) across in-session tab switches, so
 // leaving Schedule and coming back lands you where you left off. Module-level on purpose: it
 // survives the screen unmounting when you visit another section, but resets on a full app
@@ -8793,6 +8926,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   const [arrivedModal, setArrivedModal] = useState(null);
   const [headHereModal, setHeadHereModal] = useState(null);
   const [completeModal, setCompleteModal] = useState(null);
+  const [stopChange, setStopChange] = useState(null); // { stop, client, dayDate } — reschedule/cancel/late
   const [historyEdit, setHistoryEdit] = useState(null); // view/edit a completed stop's saved report ({ entry, clientId })
   const [editStopModal, setEditStopModal] = useState(null); // { stop, dayDate }
   const [sentStops, setSentStops] = useState({});
@@ -8851,6 +8985,24 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
       copy = copy.filter(d => d.stops.length > 0 || d.date === todayMDY());
       return copy;
     });
+  };
+
+  // Reschedule: move a stop to a new date and stamp why. Cancel: mark it cancelled in place
+  // (kept on the schedule, rendered struck-through) so the change stays on the record.
+  const rescheduleStopTo = (stop, fromDate, toDateMDY, reason) => {
+    setSchedule(prev => {
+      let copy = prev.map(d => ({ ...d, stops: d.stops.filter(s => s.sid !== stop.sid) }));
+      const moved = { ...stop, cancelled: false, rescheduledFrom: fromDate, rescheduleReason: reason || "", rescheduledAt: new Date().toISOString() };
+      const existing = copy.find(d => d.date === toDateMDY);
+      if (existing) { existing.stops = [...existing.stops, moved]; if (cfg.sort === "time") existing.stops.sort((a, b) => to24(a.time) - to24(b.time)); }
+      else copy.push({ date: toDateMDY, day: dayLabel(toDateMDY), stops: [moved] });
+      copy = copy.filter(d => d.stops.length > 0 || d.date === todayMDY());
+      copy.sort((a, b) => toDateNum(a.date) - toDateNum(b.date));
+      return copy;
+    });
+  };
+  const cancelStopMark = (stop, reason) => {
+    setSchedule(prev => prev.map(d => ({ ...d, stops: d.stops.map(s => s.sid === stop.sid ? { ...s, cancelled: true, cancelReason: reason || "", cancelledAt: new Date().toISOString() } : s) })));
   };
 
   // open add form automatically if clients were sent over from the Clients tab
@@ -9178,6 +9330,23 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
     const isComplete = completedSids && completedSids[s.sid];
     const emp = (team || []).find(e => e.id === s.assigneeId);
     const accentLeft = isComplete ? T.accent : (isToday ? T.primary : T.textMuted);
+    // Cancelled stop — kept on the schedule as a struck-through record, with a quiet remove.
+    if (s.cancelled && !selectMode) {
+      return (
+        <div key={s.sid} style={{ background: T.surfaceAlt, border: `1px dashed ${T.border}`, borderRadius: 18, padding: compact ? "10px 14px" : "12px 16px", display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 800, color: T.textMuted, textDecoration: "line-through", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c?.name || s.client}</div>
+            <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2 }}>{s.time ? `${s.time} · ` : ""}Cancelled{s.cancelReason ? ` · ${s.cancelReason}` : ""}</div>
+          </div>
+          {perms.scheduleAddRemove && (
+            <button onClick={() => { if (confirm("Remove this cancelled stop from the schedule?")) deleteStop(dayDate, s.sid); }}
+              title="Remove" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 4, display: "flex", alignItems: "center", opacity: 0.6 }}>
+              <Icon name="trash" size={15} />
+            </button>
+          )}
+        </div>
+      );
+    }
     return (
       <div key={s.sid} style={{ background: isComplete ? hexA(T.accent, 0.06) : T.surface, border: `1px solid ${isSel ? T.primary : isComplete ? hexA(T.accent, 0.3) : T.border}`, borderRadius: 20, overflow: "hidden", boxShadow: isComplete ? "none" : "0 2px 12px rgba(0,0,0,0.06)", display: "flex" }}>
         {/* Number bar */}
@@ -9276,12 +9445,20 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                     ) : (
                       <div style={{ fontSize: 11, color: T.textMuted }}>Not yet started</div>
                     )}
-                    {perms.scheduleAddRemove && (
-                      <button onClick={e => { e.stopPropagation(); if (confirm(`Delete this stop for ${c?.name || "this client"}? This can't be undone.`)) deleteStop(dayDate, s.sid); }}
-                        title="Delete stop" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 2, display: "flex", alignItems: "center", opacity: 0.55, flexShrink: 0 }}>
-                        <Icon name="trash" size={14} />
-                      </button>
-                    )}
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+                      {(perms.completeStops || perms.scheduleAddRemove) && (
+                        <button onClick={e => { e.stopPropagation(); setStopChange({ stop: s, client: c, dayDate }); }}
+                          title="Reschedule, cancel, or running late" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 2, fontSize: 11, fontWeight: 700, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4 }}>
+                          <Icon name="calendar" size={12} /> Reschedule
+                        </button>
+                      )}
+                      {perms.scheduleAddRemove && (
+                        <button onClick={e => { e.stopPropagation(); if (confirm(`Delete this stop for ${c?.name || "this client"}? This can't be undone.`)) deleteStop(dayDate, s.sid); }}
+                          title="Delete stop" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 2, display: "flex", alignItems: "center", opacity: 0.55 }}>
+                          <Icon name="trash" size={14} />
+                        </button>
+                      )}
+                    </div>
                   </div>
 
                   {/* Actions — compact single-row toolbar. Head Here keeps its FULL behavior
@@ -9651,6 +9828,17 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
         <ArrivedModal stop={arrivedModal.stop} client={arrivedModal.client} email={email} onClose={() => setArrivedModal(null)} onArrived={() => { onArrived && onArrived(arrivedModal.key); }} />
       )}
       {headHereModal && <HeadHereModal stop={headHereModal.stop} client={headHereModal.client} email={email} defaultMapApp={preferredMapApp} onClose={() => setHeadHereModal(null)} />}
+      {stopChange && (
+        <StopChangeModal
+          stop={stopChange.stop}
+          client={stopChange.client}
+          dayDate={stopChange.dayDate}
+          email={email}
+          onReschedule={(toDateMDY, reason) => { rescheduleStopTo(stopChange.stop, stopChange.dayDate, toDateMDY, reason); }}
+          onCancelStop={(reason) => { cancelStopMark(stopChange.stop, reason); }}
+          onClose={() => setStopChange(null)}
+        />
+      )}
 
       {editStopModal && (
         <StopEditModal

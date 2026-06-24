@@ -14,6 +14,8 @@ These rules always apply and must not be relaxed or forgotten, regardless of the
 
 4. **After editing `App.jsx`, always run `npm run build`** to confirm it compiles successfully before committing.
 
+5. **Match the existing app aesthetic on every change — by default, without being asked.** New UI must reuse the app's established design system: the theme tokens (`T.primary`, `T.surface`, `T.surfaceAlt`, `T.border`, `T.text`, `T.textMuted`, `T.accent`, `hexA(...)`), the standard chip/button/input/label/`Modal` styles already used elsewhere (e.g. the Products Purchased / Assigned To selectable chips, the `Btn` component, the shared `field`/`labelStyle`), matching radii, spacing, font weights, and iconography. Do not introduce a new look, new colors, or one-off styling. When I ask to "tweak" or "change" something, assume I mean an adjustment **within** that aesthetic — usually making it more (or less) prominent, not a redesign — unless I explicitly say otherwise.
+
 ## Environment variables (set in Vercel — never hardcode)
 
 Serverless functions under `api/` read these. None are committed; missing ones make the relevant feature degrade gracefully or return a clear error.
