@@ -6,5 +6,9 @@
 	<array>
 		<string>group.com.stonepropertysolutions.app</string>
 	</array>
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>webcredentials:sps-app-azure.vercel.app</string>
+	</array>
 </dict>
 </plist>

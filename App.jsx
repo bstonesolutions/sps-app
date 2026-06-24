@@ -3656,6 +3656,30 @@ const applyClientPlan = (client, plan, division) => {
   return next;
 };
 
+// The client's ACTIVE service plans — one entry per division that has a tier (not None), each with
+// its own per-service rate (client.planRates[div]) and frequency. Falls back to the single legacy
+// plan + monthlyRate when there's no per-division data, so single-service clients render as before.
+const clientPlanList = (c) => {
+  if (!c) return [];
+  const plans = c.plans || {};
+  const rates = c.planRates || {};
+  const out = [];
+  Object.keys(plans).forEach(div => {
+    const tier = plans[div];
+    if (tier && tier !== "None") out.push({ div, tier, rate: (rates[div] != null && rates[div] !== "") ? String(rates[div]) : "", freq: TIER_FREQ[tier] || c.planFreq || "" });
+  });
+  if (!out.length && c.plan) out.push({ div: c.division || "Pond", tier: c.plan, rate: (c.monthlyRate != null && c.monthlyRate !== "") ? String(c.monthlyRate) : "", freq: TIER_FREQ[c.plan] || c.planFreq || "" });
+  const prim = c.division || "Pond";
+  out.sort((a, b) => (a.div === prim ? -1 : b.div === prim ? 1 : a.div.localeCompare(b.div)));
+  return out;
+};
+const planRateNum = (v) => parseFloat(String(v || "").replace(/[^\d.]/g, "")) || 0;
+// Total monthly across all services: sum of per-service rates, else the single flat monthlyRate.
+const clientPlanTotal = (c) => {
+  const sum = clientPlanList(c).reduce((s, p) => s + planRateNum(p.rate), 0);
+  return sum > 0 ? sum : planRateNum(c && c.monthlyRate);
+};
+
 // Dense, sortable, full-width clients table — desktop "Table" view (Phase 3).
 function ClientsTable({ items, clientSpend, tiers, onSelect, T }) {
   const [sort, setSort] = useState({ key: "name", dir: "asc" });
@@ -4368,12 +4392,58 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
                     <div style={{ fontSize: 11, color: T.textMuted }}>Route default: {form.routeDay}</div>
                   )}
                 </div>
-                <FieldRow label="Monthly Rate">
-                  <div style={{ position: "relative" }}>
-                    <span style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: "#9ca3af" }}>$</span>
-                    <Input value={form.monthlyRate || ""} onChange={e => set("monthlyRate", e.target.value.replace(/[^0-9.]/g, ""))} placeholder="e.g. 150" />
-                  </div>
-                </FieldRow>
+                {(() => {
+                  // Per-service monthly rates — one input per active plan, total auto-sums into
+                  // monthlyRate (kept as the single source for invoicing/auto-invoice).
+                  const planDivs = [(form.division || "Pond"), ...getDivisions(tiers).filter(d => d !== (form.division || "Pond") && form["service" + d])];
+                  const tierOf = (div) => { const hp = form.plans && Object.prototype.hasOwnProperty.call(form.plans, div); return hp ? (form.plans[div] || "") : (div === (form.division || "Pond") ? (effectiveTier(client) || "") : ""); };
+                  const active = planDivs.filter(div => { const t = tierOf(div); return t && t !== "None"; });
+                  const setRate = (div, val) => {
+                    const v = val.replace(/[^0-9.]/g, "");
+                    const nextRates = { ...(form.planRates || {}), [div]: v };
+                    set("planRates", nextRates);
+                    const total = active.reduce((s, d) => s + (parseFloat(nextRates[d]) || 0), 0);
+                    set("monthlyRate", total ? String(total) : "");
+                  };
+                  const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "#6b7280", display: "block", marginBottom: 7 };
+                  if (!active.length) {
+                    return (
+                      <FieldRow label="Monthly Rate">
+                        <div style={{ position: "relative" }}>
+                          <span style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: "#9ca3af" }}>$</span>
+                          <Input value={form.monthlyRate || ""} onChange={e => set("monthlyRate", e.target.value.replace(/[^0-9.]/g, ""))} placeholder="e.g. 150" />
+                        </div>
+                      </FieldRow>
+                    );
+                  }
+                  const total = active.reduce((s, d) => s + (parseFloat((form.planRates || {})[d]) || 0), 0);
+                  return (
+                    <div>
+                      <label style={lbl}>Monthly Rate{active.length > 1 ? " — per service" : ""}</label>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        {active.map(div => (
+                          <div key={div} style={{ display: "flex", alignItems: "center", gap: 10, background: T.surfaceAlt, borderRadius: 12, padding: "8px 12px" }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{div}</div>
+                              <div style={{ fontSize: 11, color: T.textMuted }}>{tierOf(div)} · {TIER_FREQ[tierOf(div)] || "—"}</div>
+                            </div>
+                            <div style={{ position: "relative", width: 112 }}>
+                              <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>$</span>
+                              <input value={(form.planRates || {})[div] || ""} onChange={e => setRate(div, e.target.value)} inputMode="decimal" placeholder="0"
+                                style={{ width: "100%", padding: "9px 10px 9px 22px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      {active.length > 1 && (
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8, padding: "9px 12px", background: hexA(T.primary, 0.06), borderRadius: 10 }}>
+                          <span style={{ fontSize: 12.5, fontWeight: 700, color: T.text }}>Total / month</span>
+                          <span style={{ fontSize: 15, fontWeight: 800, color: T.primary }}>${total.toLocaleString()}</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
                 <div>
                   <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "#6b7280", display: "block", marginBottom: 5 }}>Auto-Invoice</label>
                   <div style={{ display: "flex", gap: 8 }}>
@@ -21533,6 +21603,7 @@ function CPLightbox({ photos, index, onClose, T }) {
 function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeRequest, T, vp = {} }) {
   const { tiers } = useApp();
   const [section, setSection] = useState("property"); // "property" | "plan"
+  const [planDiv, setPlanDiv] = useState(null); // which service's plan detail to open (multi-plan)
   const [detailItem, setDetailItem] = useState(null); // { kind:"visit"|"equipment", data } — full-detail overlay
   const [lightbox, setLightbox] = useState(null); // { photos, index }
   const plan = effectiveTier(client) || "";
@@ -21550,28 +21621,36 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
   const pondLbl = pondLabel(client);
   const m = dMeta(client.division);
 
-  // Service plan card — tappable to switch to plan section
-  const PlanCard = () => (
-    <div onClick={() => setSection("plan")}
-      style={{ background: tier ? `linear-gradient(145deg, ${tierColor} 0%, ${mix(tierColor,"#000",0.28)} 100%)` : T.surfaceAlt, borderRadius: 20, padding: "18px 20px", color: tier ? "#fff" : T.text, cursor: "pointer", boxShadow: tier ? `0 8px 28px ${hexA(tierColor,0.35)}` : "none", position: "relative", overflow: "hidden", border: tier ? "none" : `1px solid ${T.border}` }}>
-      <div style={{ position:"absolute", right:-30, top:-30, width:140, height:140, borderRadius:"50%", background:"rgba(255,255,255,0.06)" }} />
-      <div style={{ position:"relative" }}>
-        <div style={{ fontSize:10, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.1em", opacity:0.7, marginBottom:4 }}>Service Plan</div>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-end" }}>
-          <div>
-            <div style={{ fontSize:22, fontWeight:900, letterSpacing:"-0.02em" }}>{plan || "No tier"}</div>
-            <div style={{ fontSize:12, opacity: tier ? 0.8 : 1, marginTop:3, color: tier ? "inherit" : T.textMuted }}>{plan ? (TIER_FREQ[plan] || client.planFreq || "—") + " service" : "Contact us to set up a plan"}</div>
-          </div>
-          <div style={{ textAlign:"right" }}>
-            {client.monthlyRate && <div style={{ fontSize:20, fontWeight:900 }}>${parseFloat(client.monthlyRate).toLocaleString()}<span style={{ fontSize:11, opacity:0.7 }}>/mo</span></div>}
-            <div style={{ fontSize:11, opacity:0.7, marginTop:2, display:"flex", alignItems:"center", gap:4 }}>
-              {upgradeOptions.length > 0 ? "Tap to view & upgrade →" : "Top tier ✓"}
+  // One service's plan card — its OWN tier color/title/frequency/rate; taps to that service's
+  // plan + upgrade detail. Multiple of these render for a multi-service client.
+  const PlanCard = ({ item }) => {
+    const iPlan = item.tier || "";
+    const iSet = (allTiers[item.div] || allTiers["Pond"] || DEFAULT_TIERS["Pond"]);
+    const iTier = iPlan ? (iSet[iPlan] || iSet["Essential"] || {}) : null;
+    const iColor = iTier?.color || T.primary;
+    const iUp = upgradeList(iSet[iPlan] || iSet["__none__"] || {}).filter(p => p !== iPlan && iSet[p]);
+    return (
+      <div onClick={() => { setPlanDiv(item.div); setSection("plan"); }}
+        style={{ background: iTier ? `linear-gradient(145deg, ${iColor} 0%, ${mix(iColor,"#000",0.28)} 100%)` : T.surfaceAlt, borderRadius: 20, padding: "18px 20px", color: iTier ? "#fff" : T.text, cursor: "pointer", boxShadow: iTier ? `0 8px 28px ${hexA(iColor,0.35)}` : "none", position: "relative", overflow: "hidden", border: iTier ? "none" : `1px solid ${T.border}` }}>
+        <div style={{ position:"absolute", right:-30, top:-30, width:140, height:140, borderRadius:"50%", background:"rgba(255,255,255,0.06)" }} />
+        <div style={{ position:"relative" }}>
+          <div style={{ fontSize:10, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.1em", opacity:0.7, marginBottom:4 }}>{item.div} Plan</div>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-end" }}>
+            <div>
+              <div style={{ fontSize:22, fontWeight:900, letterSpacing:"-0.02em" }}>{iPlan || "No tier"}</div>
+              <div style={{ fontSize:12, opacity: iTier ? 0.8 : 1, marginTop:3, color: iTier ? "inherit" : T.textMuted }}>{iPlan ? (item.freq || TIER_FREQ[iPlan] || "—") + " service" : "Contact us to set up a plan"}</div>
+            </div>
+            <div style={{ textAlign:"right" }}>
+              {item.rate && <div style={{ fontSize:20, fontWeight:900 }}>${parseFloat(item.rate).toLocaleString()}<span style={{ fontSize:11, opacity:0.7 }}>/mo</span></div>}
+              <div style={{ fontSize:11, opacity:0.7, marginTop:2, display:"flex", alignItems:"center", gap:4 }}>
+                {iUp.length > 0 ? "Tap to view & upgrade →" : "Top tier ✓"}
+              </div>
             </div>
           </div>
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   if (section === "plan") {
     return (
@@ -21581,7 +21660,7 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
           ← {pondLbl}
         </button>
         {/* Reuse CPService content inline */}
-        <CPService client={client} branding={branding} onNav={onNav} onUpgradeRequest={onUpgradeRequest} T={T} />
+        <CPService client={client} branding={branding} onNav={onNav} onUpgradeRequest={onUpgradeRequest} T={T} division={planDiv} />
       </div>
     );
   }
@@ -21754,7 +21833,25 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
       <ClientLiveTracking client={client} schedule={schedule} team={team} branding={branding} T={T} onNav={onNav} />
 
       {/* Service plan card — tappable */}
-      <PlanCard />
+      {(() => {
+        const list = clientPlanList(client);
+        const items = list.length ? list : [{ div: clientDiv, tier: plan, rate: client.monthlyRate || "", freq: TIER_FREQ[plan] || client.planFreq || "" }];
+        const total = clientPlanTotal(client);
+        return (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {items.map(item => <PlanCard key={item.div} item={item} />)}
+            {items.length > 1 && (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "14px 18px" }}>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted }}>Total with {branding.companyName || "us"}</div>
+                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{items.length} services</div>
+                </div>
+                <div style={{ fontSize: 24, fontWeight: 900, color: T.primary, letterSpacing: "-0.02em" }}>${total.toLocaleString()}<span style={{ fontSize: 12, color: T.textMuted, fontWeight: 700 }}>/mo</span></div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Next visit — clear, prominent */}
       {(() => {
@@ -21984,12 +22081,13 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
 }
 
 // ── CP SERVICE (My Service Plan) ──
-function CPService({ client, branding, onNav, onUpgradeRequest, T }) {
+function CPService({ client, branding, onNav, onUpgradeRequest, T, division }) {
   const { tiers } = useApp();
-  // Read the client's REAL tier — division-aware, same source of truth as the staff Hub.
-  // Missing/empty means NO tier; never default to Signature (or any tier).
-  const plan = effectiveTier(client) || null;
-  const clientDiv = client.division || "Pond";
+  // Division-aware: when a specific service is selected (multi-plan client), show THAT plan + its
+  // per-service rate; otherwise the client's primary tier. Empty means NO tier (never default one).
+  const clientDiv = division || client.division || "Pond";
+  const plan = (division ? ((client.plans && client.plans[division]) || "") : effectiveTier(client)) || null;
+  const svcRate = (division ? ((client.planRates && client.planRates[division]) || "") : (client.monthlyRate || ""));
   const allTiers = tiers || CP_TIERS;
   const divTierSet = (allTiers[clientDiv] || allTiers["Pond"] || DEFAULT_TIERS["Pond"]);
   const tier = plan ? (divTierSet[plan] || null) : null;   // null when untiered — no fallback tier
@@ -22049,10 +22147,10 @@ function CPService({ client, branding, onNav, onUpgradeRequest, T }) {
           </div>
           {/* Price + frequency pills */}
           <div style={{ marginTop: 16, display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {(client.monthlyRate || tier?.price) && (
+            {(svcRate || tier?.price) && (
               <div style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.2)", borderRadius: 100, padding: "7px 16px", backdropFilter: "blur(8px)" }}>
                 <svg viewBox="0 0 24 24" width={13} height={13} fill="none" stroke="#fff" strokeWidth={2} strokeLinecap="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-                <span style={{ fontSize: 13, fontWeight: 800 }}>{client.monthlyRate ? `$${parseFloat(client.monthlyRate).toLocaleString()}/mo` : tier?.price}</span>
+                <span style={{ fontSize: 13, fontWeight: 800 }}>{svcRate ? `$${parseFloat(svcRate).toLocaleString()}/mo` : tier?.price}</span>
               </div>
             )}
             {plan && (
