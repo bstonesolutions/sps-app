@@ -21277,7 +21277,7 @@ function CPRatingPrompt({ client, branding, onRateVisit, T }) {
   );
 }
 
-function CPHome({ client, schedule, invoices, branding, team, onNav, onRateVisit, T, vp = {} }) {
+function CPHome({ client, schedule, invoices, branding, team, onNav, onRateVisit, T, vp = {}, desktopShell = false }) {
   const wide = vp.isTablet || vp.isDesktop;
   const next = clientNextVisit(schedule, client.id, client.name);
   const myInvoices = sortInvoices((invoices || []).filter(iv => invoiceMatchesClient(iv, client)));
@@ -21433,12 +21433,34 @@ function CPHome({ client, schedule, invoices, branding, team, onNav, onRateVisit
     </div>
   );
 
-  // WIDE: MindBridge-style two-column dashboard. PHONE: original single stack.
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
+  // Greeting + the conditional banners span full width on both layouts.
+  const topBlocks = (
+    <>
       {greetingBlock}
       <ClientLiveTracking client={client} schedule={schedule} team={team} branding={branding} T={T} onNav={onNav} />
       <CPRatingPrompt client={client} branding={branding} onRateVisit={onRateVisit} T={T} />
+    </>
+  );
+  // WIDE (real desktop shell): two-column dashboard — hero/balance/recent on the left, stats +
+  // quick actions on the right. Phone / narrow staff-preview column: the original single stack.
+  return desktopShell ? (
+    <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
+      {topBlocks}
+      <div style={{ display: "grid", gridTemplateColumns: "1.15fr 0.85fr", gap: 22, alignItems: "start" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
+          {heroBlock}
+          {balanceBlock}
+          {recentBlock}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
+          {statsBlock}
+          {quickActionsBlock}
+        </div>
+      </div>
+    </div>
+  ) : (
+    <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
+      {topBlocks}
       {heroBlock}
       {balanceBlock}
       {statsBlock}
@@ -23212,7 +23234,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
       {settingsOpen && (
         <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} onSavePrefs={isStaffPreview ? undefined : onSavePrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
       )}
-      {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} team={team} onNav={setPage} onRateVisit={onRateVisit} T={T} vp={vp} />}
+      {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} team={team} onNav={setPage} onRateVisit={onRateVisit} T={T} vp={vp} desktopShell={isDesktopShell} />}
       {!settingsOpen && page === "cp_property" && <CPProperty client={client} schedule={schedule} branding={branding} team={team} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
       {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} schedule={schedule} branding={branding} team={team} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
       {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} invoicing={invoicing} T={T} vp={vp} initialSel={cpInvoiceSel} desktopShell={isDesktopShell} />}
@@ -23291,7 +23313,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
       {isDesktopShell ? (
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
           <main style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: vp.isTablet ? "24px 22px" : "32px 40px", fontSize: `${textScale}em` }}>
-            <div style={{ maxWidth: vp.isTablet ? 1080 : 1320, margin: "0 auto", width: "100%" }}>{screens}</div>
+            <div style={{ maxWidth: vp.isTablet ? 1040 : ((page === "cp_invoices" || page === "cp_home") ? 1320 : 940), margin: "0 auto", width: "100%" }}>{screens}</div>
           </main>
         </div>
       ) : (
