@@ -22621,7 +22621,7 @@ function CPPond({ client, T }) {
 function CPHistory({ client, T }) { return <CPPond client={client} T={T} />; }
 
 // ── CP INVOICES ──
-function CPInvoices({ client, invoices, branding, T, vp = {}, initialSel = null, invoicing }) {
+function CPInvoices({ client, invoices, branding, T, vp = {}, initialSel = null, invoicing, desktopShell = false }) {
   const cfg = { ...DEFAULT_INVOICING, ...(invoicing || {}) };
   const myInvoices = sortInvoices((invoices || []).filter(iv => invoiceMatchesClient(iv, client)));
   const [sel, setSel] = useState(initialSel);
@@ -22762,8 +22762,10 @@ function CPInvoices({ client, invoices, branding, T, vp = {}, initialSel = null,
       <div style={{ fontSize:26, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>Invoices</div>
       {banner}
 
-      {vp.isDesktop ? (
-        /* Desktop master-detail: list left, full invoice detail docked right */
+      {desktopShell ? (
+        /* Desktop master-detail: list left, full invoice detail docked right — only when the shell is
+           actually wide (a real desktop client). In the narrow staff-preview column it stacks instead,
+           so the invoice document gets full width instead of being crushed into ~200px. */
         <div style={{ display:"flex", gap: vp.isTablet ? 16 : 24, alignItems:"flex-start" }}>
           <div style={{ width: vp.isTablet ? 260 : 360, flexShrink:0 }}>{rows}</div>
           <div style={{ flex:1, minWidth:0, position:"sticky", top:0 }}>
@@ -22782,8 +22784,8 @@ function CPInvoices({ client, invoices, branding, T, vp = {}, initialSel = null,
         </div>
       ) : rows}
 
-      {/* Mobile: full-screen invoice detail */}
-      {!vp.isDesktop && selInv && (
+      {/* Stacked (narrow / staff-preview): full-screen invoice detail */}
+      {!desktopShell && selInv && (
         <div style={{ position:"fixed", inset:0, zIndex:200, background:T.bg, display:"flex", flexDirection:"column" }}>
           <div style={{ height:"env(safe-area-inset-top)" }} />
           <div style={{ display:"flex", alignItems:"center", gap:8, padding:"12px 16px", borderBottom:`1px solid ${T.border}`, flexShrink:0 }}>
@@ -23111,7 +23113,7 @@ function CPDesktopSidebar({ page, settingsOpen, portalUnread, branding, client, 
             <button key={n.id} onClick={() => onNav(n.id)}
               style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 13px", border: "none", borderRadius: 11, background: active ? T.primary : "transparent", color: active ? "#fff" : T.text, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%", fontWeight: active ? 700 : 600, fontSize: 14, letterSpacing: "-0.01em" }}>
               <CIcon name={n.icon} size={19} />
-              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n.label}</span>
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n.id === "cp_property" ? pondLabel(client) : n.label}</span>
               {n.id === "cp_messages" && portalUnread > 0 && <span style={{ minWidth: 18, height: 18, borderRadius: 9, background: active ? "rgba(255,255,255,0.25)" : T.primary, color: "#fff", fontSize: 11, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 5px", flexShrink: 0 }}>{portalUnread}</span>}
             </button>
           );
@@ -23210,7 +23212,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
       {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} team={team} onNav={setPage} onRateVisit={onRateVisit} T={T} vp={vp} />}
       {!settingsOpen && page === "cp_property" && <CPProperty client={client} schedule={schedule} branding={branding} team={team} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
       {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} schedule={schedule} branding={branding} team={team} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
-      {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} invoicing={invoicing} T={T} vp={vp} initialSel={cpInvoiceSel} />}
+      {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} invoicing={invoicing} T={T} vp={vp} initialSel={cpInvoiceSel} desktopShell={isDesktopShell} />}
       {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} onSubmit={onServiceRequest} onClientMessage={isStaffPreview ? undefined : onClientMessage} onOpenInvoice={openInvoice} onOpenService={() => setPage("cp_property")} T={T} vp={vp} />}
       {!settingsOpen && page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
     </SectionErrorBoundary>
@@ -23286,7 +23288,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
       {isDesktopShell ? (
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
           <main style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: vp.isTablet ? "24px 22px" : "32px 40px", fontSize: `${textScale}em` }}>
-            <div style={{ maxWidth: 1080, margin: "0 auto", width: "100%" }}>{screens}</div>
+            <div style={{ maxWidth: vp.isTablet ? 1080 : 1320, margin: "0 auto", width: "100%" }}>{screens}</div>
           </main>
         </div>
       ) : (
@@ -23312,7 +23314,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
                   <span style={{ position: "absolute", top: -1, right: 1, minWidth: 15, height: 15, borderRadius: 8, background: "#E5484D", color: "#fff", fontSize: 9.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px", border: `2px solid ${T.surface}` }}>{badge}</span>
                 )}
               </span>
-              <span style={{ fontSize: 10, fontWeight: active ? 700 : 500, letterSpacing: "-0.01em", whiteSpace: "nowrap" }}>{n.label}</span>
+              <span style={{ fontSize: 10, fontWeight: active ? 700 : 500, letterSpacing: "-0.01em", whiteSpace: "nowrap" }}>{n.id === "cp_property" ? pondLabel(client) : n.label}</span>
             </button>
           );
         })}
