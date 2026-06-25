@@ -3384,7 +3384,7 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
                     <div style={{ fontSize: 12, color: T.textMuted }}>{a.message || a.body}</div>
                     <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{a.date}{onOpenAlert ? " · tap to view the report & photos" : ""}</div>
                   </div>
-                  <button onClick={(e) => { e.stopPropagation(); onResolveAlert && onResolveAlert(a.id); }} style={{ background: "none", border: `1px solid ${T.border}`, borderRadius: 7, padding: "4px 10px", fontSize: 11, fontWeight: 700, color: T.textMuted, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Resolve</button>
+                  <button onClick={(e) => { e.stopPropagation(); onResolveAlert && onResolveAlert(a.id); }} style={{ background: "none", border: `1px solid ${T.border}`, borderRadius: 9, padding: "8px 14px", fontSize: 12, fontWeight: 700, color: T.textMuted, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Resolve</button>
                 </div>
               )}
             </div>
@@ -3491,7 +3491,7 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
                   <button onClick={() => move(i, 1)} disabled={i === items.length - 1} style={{ background: "none", border: "none", cursor: i === items.length - 1 ? "default" : "pointer", color: i === items.length - 1 ? T.border : T.textMuted, fontSize: 12, lineHeight: 1, padding: 0 }}>▼</button>
                 </div>
                 <span style={{ flex: 1, fontSize: 14, fontWeight: 700, color: T.text }}>{HOME_WIDGETS[it.id]}</span>
-                <button onClick={() => removeWidget(it.id)} style={{ background: "none", border: `1px solid ${T.border}`, borderRadius: 7, padding: "4px 10px", fontSize: 11, fontWeight: 700, color: "#C0392B", cursor: "pointer", fontFamily: "inherit" }}>Remove</button>
+                <button onClick={() => removeWidget(it.id)} style={{ background: "none", border: `1px solid ${T.border}`, borderRadius: 9, padding: "8px 14px", fontSize: 12, fontWeight: 700, color: "#C0392B", cursor: "pointer", fontFamily: "inherit" }}>Remove</button>
               </div>
             ))}
             {items.length === 0 && <div style={{ fontSize: 13, color: T.textMuted, padding: "10px 8px" }}>No widgets. Add some below.</div>}
@@ -3586,6 +3586,40 @@ function Checkbox({ checked, onChange, accent }) {
     <div onClick={e => { e.stopPropagation(); onChange(); }}
       style={{ width: 22, height: 22, borderRadius: "50%", border: `2px solid ${checked ? (accent || T.primary) : T.border}`, background: checked ? (accent || T.primary) : T.surface, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, cursor: "pointer", transition: "all 0.15s" }}>
       {checked && <Icon name="check" size={12} />}
+    </div>
+  );
+}
+
+// Swipe-down-to-dismiss for bottom sheets. Spread `handleProps` onto the top grab-bar
+// (a <SheetHandle/>) and `sheetStyle` onto the sheet card: the card tracks the finger,
+// then springs back or closes once dragged past ~90px. Touch-only — harmless elsewhere.
+function useSheetSwipe(onClose) {
+  const [dy, setDy] = useState(0);
+  const startY = useRef(null);
+  const dyRef = useRef(0);
+  const set = (v) => { dyRef.current = v; setDy(v); };
+  const onTouchStart = (e) => { startY.current = e.touches[0].clientY; set(0); };
+  const onTouchMove = (e) => {
+    if (startY.current == null) return;
+    const d = e.touches[0].clientY - startY.current;
+    set(d > 0 ? d : 0);        // only downward drag
+  };
+  const onTouchEnd = () => {
+    const close = dyRef.current > 90;
+    startY.current = null;
+    if (close) onClose(); else set(0);
+  };
+  return {
+    handleProps: { onTouchStart, onTouchMove, onTouchEnd },
+    sheetStyle: { transform: dy ? `translateY(${dy}px)` : undefined, transition: dy ? "none" : "transform 0.26s cubic-bezier(.22,1,.36,1)" },
+  };
+}
+
+// The grab bar at the top of a bottom sheet — also the swipe-to-dismiss touch target.
+function SheetHandle({ handleProps, T }) {
+  return (
+    <div {...handleProps} style={{ touchAction: "none", cursor: "grab", display: "flex", justifyContent: "center", padding: "11px 0 13px", flexShrink: 0 }}>
+      <div style={{ width: 40, height: 5, borderRadius: 100, background: T.border }} />
     </div>
   );
 }
@@ -6248,13 +6282,15 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
   };
 
   const QUICK_MINS = [10, 15, 20, 30, 45, 60];
+  const { handleProps, sheetStyle } = useSheetSwipe(onClose);
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={onClose}>
       <div onClick={e => e.stopPropagation()}
-        style={{ background: T.surface, borderRadius: "22px 22px 0 0", width: "100%", maxWidth: 600, padding: "20px 20px calc(28px + env(safe-area-inset-bottom))", boxShadow: "0 -8px 40px rgba(0,0,0,0.2)" }}>
+        style={{ background: T.surface, borderRadius: "22px 22px 0 0", width: "100%", maxWidth: 600, padding: "4px 20px calc(28px + env(safe-area-inset-bottom))", boxShadow: "0 -8px 40px rgba(0,0,0,0.2)", ...sheetStyle }}>
 
-        <div style={{ width: 36, height: 4, background: T.border, borderRadius: 2, margin: "0 auto 20px" }} />
+        <SheetHandle handleProps={handleProps} T={T} />
+        <div style={{ height: 12 }} />
 
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
           <div>
@@ -6388,10 +6424,12 @@ function ArrivedModal({ stop, client, email, onClose, onArrived }) {
     }
     onClose();
   };
+  const { handleProps, sheetStyle } = useSheetSwipe(onClose);
   return createPortal(
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 250, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={onClose}>
-      <div onClick={e => e.stopPropagation()} style={{ background: T.surface, borderRadius: "22px 22px 0 0", width: "100%", maxWidth: 600, padding: "20px 20px calc(28px + env(safe-area-inset-bottom))", boxShadow: "0 -8px 40px rgba(0,0,0,0.2)" }}>
-        <div style={{ width: 36, height: 4, background: T.border, borderRadius: 2, margin: "0 auto 20px" }} />
+      <div onClick={e => e.stopPropagation()} style={{ background: T.surface, borderRadius: "22px 22px 0 0", width: "100%", maxWidth: 600, padding: "4px 20px calc(28px + env(safe-area-inset-bottom))", boxShadow: "0 -8px 40px rgba(0,0,0,0.2)", ...sheetStyle }}>
+        <SheetHandle handleProps={handleProps} T={T} />
+        <div style={{ height: 12 }} />
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
           <div>
             <div style={{ fontWeight: 800, fontSize: 17, color: T.text, letterSpacing: "-0.02em" }}>I'm Here</div>
@@ -7047,7 +7085,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
                         <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
                           {PHOTO_LABELS.map(lbl => (
                             <button key={lbl} type="button" onClick={() => { relabelPhoto(i, lbl); setCustomLabelIdx(null); }}
-                              style={{ padding: "4px 10px", borderRadius: 20, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit",
+                              style={{ padding: "7px 12px", borderRadius: 20, border: "none", cursor: "pointer", fontSize: 11.5, fontWeight: 700, fontFamily: "inherit",
                                 background: ph.label === lbl ? T.primary : T.surfaceAlt,
                                 color: ph.label === lbl ? "#fff" : T.textMuted }}>
                               {lbl}
@@ -7055,7 +7093,7 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
                           ))}
                           {/* Custom — type your own label. Styled identically to the preset chips. */}
                           <button type="button" onClick={() => setCustomLabelIdx(i)}
-                            style={{ padding: "4px 10px", borderRadius: 20, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit",
+                            style={{ padding: "7px 12px", borderRadius: 20, border: "none", cursor: "pointer", fontSize: 11.5, fontWeight: 700, fontFamily: "inherit",
                               background: (isCustom || customLabelIdx === i) ? T.primary : T.surfaceAlt,
                               color: (isCustom || customLabelIdx === i) ? "#fff" : T.textMuted }}>
                             + Custom
@@ -7070,8 +7108,8 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
                     );
                   })()}
                 </div>
-                <button onClick={() => removePhoto(i)}
-                  style={{ background: "none", border: "none", color: T.textMuted, fontSize: 18, cursor: "pointer", lineHeight: 1, flexShrink: 0, padding: "0 4px" }}>×</button>
+                <button onClick={() => removePhoto(i)} aria-label="Remove photo"
+                  style={{ background: "none", border: "none", color: T.textMuted, fontSize: 22, cursor: "pointer", lineHeight: 1, flexShrink: 0, width: 40, height: 40, display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}>×</button>
               </div>
             ))}
           </div>
@@ -13309,10 +13347,12 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
   };
 
   const cell = { width: "100%", padding: "10px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const { handleProps, sheetStyle } = useSheetSwipe(onClose);
 
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 300, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: T.bg, borderRadius: "20px 20px 0 0", width: "100%", maxWidth: 600, maxHeight: "85vh", display: "flex", flexDirection: "column", paddingBottom: "env(safe-area-inset-bottom)" }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: T.bg, borderRadius: "20px 20px 0 0", width: "100%", maxWidth: 600, maxHeight: "85vh", display: "flex", flexDirection: "column", paddingBottom: "env(safe-area-inset-bottom)", ...sheetStyle }}>
+        <SheetHandle handleProps={handleProps} T={T} />
         {/* Header */}
         <div style={{ padding: "16px 18px 10px", borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -20664,12 +20704,13 @@ function DockEditor({ navDock, setNavDock, perms, T }) {
 function NavSheet({ page, perms, navUnread, reminderDue, navDock, setNavDock, onNav, onSignOut, currentUser, T, onClose }) {
   const items = ALL_NAV.filter(n => isTabVisible(n, perms));
   const [editDock, setEditDock] = useState(false);
+  const { handleProps, sheetStyle } = useSheetSwipe(onClose);
   return (
     <>
       <style>{`@keyframes sheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }`}</style>
       <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 200, background: "rgba(0,0,0,0.45)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)" }} />
-      <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 201, background: T.surface, borderRadius: "22px 22px 0 0", boxShadow: "0 -8px 40px rgba(0,0,0,0.22)", maxHeight: "82dvh", display: "flex", flexDirection: "column", paddingBottom: "max(16px, env(safe-area-inset-bottom))", animation: "sheetUp 0.28s cubic-bezier(.22,1,.36,1)" }}>
-        <div style={{ padding: "10px 0 2px", display: "flex", justifyContent: "center", flexShrink: 0 }}><div style={{ width: 38, height: 5, borderRadius: 100, background: T.border }} /></div>
+      <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 201, background: T.surface, borderRadius: "22px 22px 0 0", boxShadow: "0 -8px 40px rgba(0,0,0,0.22)", maxHeight: "82dvh", display: "flex", flexDirection: "column", paddingBottom: "max(16px, env(safe-area-inset-bottom))", animation: "sheetUp 0.28s cubic-bezier(.22,1,.36,1)", ...sheetStyle }}>
+        <SheetHandle handleProps={handleProps} T={T} />
         <div style={{ padding: "6px 20px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
           <div style={{ fontWeight: 800, fontSize: 19, color: T.text, letterSpacing: "-0.02em" }}>Menu</div>
           <button onClick={onClose} aria-label="Close" style={{ width: 32, height: 32, borderRadius: "50%", border: "none", background: T.surfaceAlt, color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}><Icon name="close" size={16} /></button>
