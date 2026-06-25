@@ -5774,20 +5774,30 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
         {Object.keys(readings).length > 0 && (
           <div>
             <label style={labelStyle}>Readings</label>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {Object.entries(readings).map(([k, v]) => {
                 const st = readingStatus[k] || "";
+                const range = WATER_RANGES[k];
+                const val = parseFloat(v);
+                const hasVal = v !== "" && v != null && !isNaN(val);
+                const outOfRange = !!(range && hasVal && (val < range.min || val > range.max));
                 return (
-                  <div key={k}>
-                    <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textAlign: "center", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{k}</div>
-                    <input type="text" inputMode="decimal" value={v} onChange={e => setReadings(r => ({ ...r, [k]: e.target.value }))} style={{ width: "100%", padding: "9px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "center" }} />
-                    <div style={{ display: "flex", gap: 3, marginTop: 4 }}>
+                  <div key={k} style={{ background: T.surfaceAlt, borderRadius: 12, padding: "9px 11px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 12.5, fontWeight: 700, color: T.text }}>{k}</div>
+                        {range && <div style={{ fontSize: 10, color: outOfRange ? "#dc2626" : T.textMuted }}>ideal {range.ideal}{range.unit ? ` ${range.unit}` : ""}{outOfRange ? " · out of range" : ""}</div>}
+                      </div>
+                      <input type="text" inputMode="decimal" value={v} onChange={e => setReadings(r => ({ ...r, [k]: e.target.value }))} placeholder="—"
+                        style={{ width: 80, padding: "8px", border: `1.5px solid ${outOfRange ? "#dc2626" : T.border}`, borderRadius: 8, fontSize: 15, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
+                    </div>
+                    <div style={{ display: "flex", gap: 5, marginTop: 7 }}>
                       {["good", "attention", "treated"].map(s => {
                         const m = READING_STATUS[s]; const on = st === s;
                         return (
-                          <button key={s} type="button" title={m.label} onClick={() => setReadingStatus(r => ({ ...r, [k]: on ? "" : s }))}
-                            style={{ flex: 1, padding: "3px 0", borderRadius: 6, border: `1.5px solid ${on ? m.color : T.border}`, background: on ? hexA(m.color, 0.14) : T.surface, color: on ? m.color : T.textMuted, fontWeight: 800, fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>
-                            {m.label[0]}
+                          <button key={s} type="button" onClick={() => setReadingStatus(r => ({ ...r, [k]: on ? "" : s }))}
+                            style={{ flex: 1, padding: "6px 4px", borderRadius: 8, border: `1.5px solid ${on ? m.color : T.border}`, background: on ? hexA(m.color, 0.12) : T.surface, color: on ? m.color : T.textMuted, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>
+                            {m.label}
                           </button>
                         );
                       })}
@@ -19362,7 +19372,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
 
 // Healthy ranges for common pond water parameters
 const WATER_RANGES = {
-  "pH":          { min: 6.8, max: 8.2,  unit: "",    ideal: "6.8–8.2",  label: "pH" },
+  "pH":          { min: 7,   max: 8.5,  unit: "",    ideal: "7–8.5",    label: "pH" },
   "Ammonia":     { min: 0,   max: 0.25, unit: "ppm", ideal: "0–0.25",   label: "NH₃" },
   "Nitrite":     { min: 0,   max: 0.5,  unit: "ppm", ideal: "0–0.5",    label: "NO₂" },
   "Nitrate":     { min: 0,   max: 40,   unit: "ppm", ideal: "0–40",     label: "NO₃" },
