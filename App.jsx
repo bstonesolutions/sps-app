@@ -18021,6 +18021,7 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
   const { messages, loading, send, markRead } = useMessages(clientId);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  const [sendErr, setSendErr] = useState("");
   const bottomRef = useRef(null);
 
   // Scroll to bottom on new messages
@@ -18037,11 +18038,11 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
   const handleSend = async () => {
     if (!draft.trim() || sending) return;
     const body = draft.trim();
-    setSending(true);
+    setSending(true); setSendErr("");
     const ok = await send(draft, sender, senderName);
-    setDraft("");
     setSending(false);
-    if (ok && onSent) onSent(body);
+    if (ok) { setDraft(""); if (onSent) onSent(body); }   // only clear the box once it's actually sent
+    else setSendErr("Message didn't send — check your connection and try again.");
   };
 
   if (loading) {
@@ -18092,6 +18093,10 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
         <div ref={bottomRef} />
       </div>
 
+      {sendErr && (
+        <div style={{ fontSize: 12.5, fontWeight: 600, color: "#dc2626", background: hexA("#dc2626", 0.08), borderRadius: 10, padding: "8px 12px", margin: "0 2px 8px" }}>{sendErr}</div>
+      )}
+
       {/* Input */}
       <div style={{ borderTop: `1px solid ${T.border}`, padding: "12px 0 0", display: "flex", gap: 10, alignItems: "flex-end" }}>
         <textarea
@@ -18103,8 +18108,10 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
           style={{ flex: 1, padding: "11px 14px", border: `1.5px solid ${T.border}`, borderRadius: 14, fontSize: 14, fontFamily: "inherit", resize: "none", outline: "none", color: T.text, background: T.surface, lineHeight: 1.5, maxHeight: 120, overflowY: "auto" }}
         />
         <button onClick={handleSend} disabled={!draft.trim() || sending}
-          style={{ width: 42, height: 42, borderRadius: 13, background: draft.trim() ? T.primary : T.surfaceAlt, border: "none", color: draft.trim() ? "#fff" : T.textMuted, cursor: draft.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "background 0.15s" }}>
-          <svg viewBox="0 0 24 24" width={18} height={18} fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+          style={{ width: 42, height: 42, borderRadius: 13, background: draft.trim() ? T.primary : T.surfaceAlt, border: "none", color: draft.trim() ? "#fff" : T.textMuted, cursor: (draft.trim() && !sending) ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "background 0.15s" }}>
+          {sending
+            ? <div style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.5)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />
+            : <svg viewBox="0 0 24 24" width={18} height={18} fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>}
         </button>
       </div>
     </div>
