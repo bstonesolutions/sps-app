@@ -3693,6 +3693,10 @@ const clientPlanList = (c) => {
   const rates = c.planRates || {};
   const out = [];
   Object.keys(plans).forEach(div => {
+    // Ignore plans keyed to a lost/blank division ("undefined"/"null" string keys) — these are
+    // data artifacts from the old null-division era, not real services. They'd otherwise render a
+    // ghost plan card with no division and inflate the service count/total.
+    if (!div || div === "undefined" || div === "null") return;
     const tier = plans[div];
     if (tier && tier !== "None") out.push({ div, tier, rate: (rates[div] != null && rates[div] !== "") ? String(rates[div]) : "", freq: TIER_FREQ[tier] || c.planFreq || "" });
   });
