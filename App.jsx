@@ -7755,6 +7755,10 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
   const [svcPrices, setSvcPrices] = useState({});     // id -> override price string
   const [selProducts, setSelProducts] = useState({});
   const [assigneeId, setAssigneeId] = useState("");   // "" = unassigned
+  const [servicesOpen, setServicesOpen] = useState(false);  // collapsed by default, like the live picker
+  const [serviceSearch, setServiceSearch] = useState("");
+  const [productsOpen, setProductsOpen] = useState(false);
+  const [productSearch, setProductSearch] = useState("");
 
   const q = clientSearch.toLowerCase();
   const filteredClients = selectableClients(clients).filter(c => (c.name || "").toLowerCase().includes(q));
@@ -7814,6 +7818,9 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
 
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
   const nativeInput = { width: "100%", padding: "12px 14px", minHeight: 46, border: `1px solid ${T.border}`, borderRadius: 11, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", cursor: "pointer" };
+  const pickSearch = { width: "100%", padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const pickHeader = { display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit" };
+  const pickChip = (on) => ({ padding: "8px 13px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.08) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" });
 
   return (
     <Modal title="New Service Stop" onClose={onClose}>
@@ -7890,47 +7897,90 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
         </div>
       )}
 
-      {/* Services — tap to add; price is editable per stop */}
+      {/* Services — collapsible + searchable, matching the complete-stop picker */}
       <div style={{ marginBottom: 18 }}>
-        <label style={labelStyle}>Services</label>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginBottom: selClientIds.length || true ? 0 : 0 }}>
-          {catalog.services.map(s => (
-            <button key={s.id} onClick={() => toggleService(s.id)}
-              style={{ padding: "7px 13px", borderRadius: 20, border: `1.5px solid ${selServices[s.id] ? T.primary : T.border}`, background: selServices[s.id] ? T.navActiveBg : T.surface, color: selServices[s.id] ? T.primary : T.text, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-              {s.name}{s.price ? ` · $${s.price}` : ""}
-            </button>
-          ))}
-        </div>
-        {/* editable prices for the chosen services */}
-        {catalog.services.filter(s => selServices[s.id]).length > 0 && (
-          <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
-            {catalog.services.filter(s => selServices[s.id]).map(s => (
-              <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 8, background: T.surfaceAlt, borderRadius: 9, padding: "7px 10px" }}>
-                <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: T.text }}>{s.name}</span>
-                <span style={{ fontSize: 11, color: T.textMuted }}>price</span>
-                <div style={{ position: "relative", width: 90 }}>
-                  <span style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
-                  <input type="text" inputMode="decimal" value={svcPrices[s.id] ?? s.price ?? ""} onChange={e => setSvcPrices(p => ({ ...p, [s.id]: e.target.value.replace(/[^\d.]/g, "") }))}
-                    style={{ width: "100%", padding: "6px 8px 6px 20px", border: `1px solid ${T.border}`, borderRadius: 7, fontSize: 13, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
+        {(() => {
+          const selected = catalog.services.filter(s => selServices[s.id]);
+          const sq = serviceSearch.trim().toLowerCase();
+          const filtered = catalog.services.filter(s => !sq || (s.name || "").toLowerCase().includes(sq));
+          return (
+            <>
+              <button type="button" onClick={() => setServicesOpen(o => !o)} style={pickHeader}>
+                <label style={{ ...labelStyle, marginBottom: 0, cursor: "pointer" }}>Services{selected.length ? ` · ${selected.length} selected` : ""}</label>
+                <span style={{ color: T.textMuted, fontSize: 16, transform: servicesOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
+              </button>
+              {servicesOpen && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 8 }}>
+                  <input value={serviceSearch} onChange={e => setServiceSearch(e.target.value)} placeholder="Search services…" style={pickSearch} />
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+                    {filtered.map(s => (
+                      <button key={s.id} type="button" onClick={() => toggleService(s.id)} style={pickChip(!!selServices[s.id])}>
+                        {s.name}{s.price ? ` · $${s.price}` : ""}
+                      </button>
+                    ))}
+                    {filtered.length === 0 && <div style={{ fontSize: 12, color: T.textMuted }}>No services match "{serviceSearch}".</div>}
+                  </div>
                 </div>
-              </div>
-            ))}
-            <div style={{ fontSize: 11, color: T.textMuted }}>Prices default to your catalog but can be changed for this stop.</div>
-          </div>
-        )}
+              )}
+              {/* editable prices for the chosen services — always visible so you can adjust per stop */}
+              {selected.length > 0 && (
+                <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+                  {selected.map(s => (
+                    <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 8, background: T.surfaceAlt, borderRadius: 9, padding: "7px 10px" }}>
+                      <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: T.text }}>{s.name}</span>
+                      <span style={{ fontSize: 11, color: T.textMuted }}>price</span>
+                      <div style={{ position: "relative", width: 90 }}>
+                        <span style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
+                        <input type="text" inputMode="decimal" value={svcPrices[s.id] ?? s.price ?? ""} onChange={e => setSvcPrices(p => ({ ...p, [s.id]: e.target.value.replace(/[^\d.]/g, "") }))}
+                          style={{ width: "100%", padding: "6px 8px 6px 20px", border: `1px solid ${T.border}`, borderRadius: 7, fontSize: 13, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
+                      </div>
+                    </div>
+                  ))}
+                  <div style={{ fontSize: 11, color: T.textMuted }}>Prices default to your catalog but can be changed for this stop.</div>
+                </div>
+              )}
+            </>
+          );
+        })()}
       </div>
 
-      {/* Products */}
+      {/* Products — collapsible + searchable + category-grouped, pulled from your inventory */}
       <div style={{ marginBottom: 18 }}>
-        <label style={labelStyle}>Products</label>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-          {catalog.products.map(p => (
-            <button key={p.id} onClick={() => toggleProduct(p.id)}
-              style={{ padding: "7px 13px", borderRadius: 20, border: `1.5px solid ${selProducts[p.id] ? T.primary : T.border}`, background: selProducts[p.id] ? T.navActiveBg : T.surface, color: selProducts[p.id] ? T.primary : T.text, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-              {p.name}{p.price ? ` · $${p.price}` : ""}
-            </button>
-          ))}
-        </div>
+        {(() => {
+          const selCount = catalog.products.filter(p => selProducts[p.id]).length;
+          const pq = productSearch.trim().toLowerCase();
+          const filtered = catalog.products.filter(p => !pq || (p.name || "").toLowerCase().includes(pq));
+          const map = {};
+          filtered.forEach(p => { const cat = ((p.category || "").trim()) || "Other"; (map[cat] = map[cat] || []).push(p); });
+          const groups = Object.keys(map).sort((a, b) => a === "Other" ? 1 : b === "Other" ? -1 : a.localeCompare(b)).map(cat => ({ cat, items: map[cat] }));
+          const multiCat = groups.length > 1;
+          return (
+            <>
+              <button type="button" onClick={() => setProductsOpen(o => !o)} style={pickHeader}>
+                <label style={{ ...labelStyle, marginBottom: 0, cursor: "pointer" }}>Products{selCount ? ` · ${selCount} selected` : ""}</label>
+                <span style={{ color: T.textMuted, fontSize: 16, transform: productsOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
+              </button>
+              {productsOpen && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 8 }}>
+                  <input value={productSearch} onChange={e => setProductSearch(e.target.value)} placeholder="Search products…" style={pickSearch} />
+                  {groups.map(g => (
+                    <div key={g.cat}>
+                      {multiCat && <div style={{ fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.04em", color: T.textMuted, margin: "2px 0 6px" }}>{g.cat}</div>}
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+                        {g.items.map(p => (
+                          <button key={p.id} type="button" onClick={() => toggleProduct(p.id)} style={pickChip(!!selProducts[p.id])}>
+                            {p.name}{p.price ? ` · $${p.price}` : ""}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                  {filtered.length === 0 && <div style={{ fontSize: 12, color: T.textMuted }}>No products match "{productSearch}".</div>}
+                </div>
+              )}
+            </>
+          );
+        })()}
       </div>
 
       <Btn onClick={handleSave} style={{ width: "100%", padding: "13px", fontSize: 14, borderRadius: 12, opacity: canSave ? 1 : 0.5, pointerEvents: canSave ? "auto" : "none" }}>
