@@ -371,6 +371,141 @@ function generateStatementPDF(client, invoices, branding) {
   });
 }
 
+// Full client dossier — contact, plan, property, equipment, service history, financials, notes.
+// A printable record for a new tech, a client meeting, or the file. Reuses the same branded look.
+function generateClientProfilePDF(client, invoices, branding, tiers) {
+  return loadJsPDF().then(JsPDF => {
+    const doc = new JsPDF({ unit: "pt", format: "letter" });
+    const primary = branding?.accentColor || "#B81D24";
+    const W = doc.internal.pageSize.getWidth();
+    const H = doc.internal.pageSize.getHeight();
+    const M = 40;
+    let y = 0;
+
+    const ensure = (need) => { if (y + need > H - 48) { doc.addPage(); y = 50; } };
+    const section = (title) => {
+      ensure(46); y += 14;
+      doc.setFont("helvetica", "bold"); doc.setFontSize(11.5); doc.setTextColor(primary);
+      doc.text(String(title).toUpperCase(), M, y); y += 7;
+      doc.setDrawColor(primary); doc.setLineWidth(1.1); doc.line(M, y, W - M, y); y += 16;
+    };
+    const kv = (label, value) => {
+      if (value == null || value === "") return;
+      const lines = doc.splitTextToSize(String(value), W - M - (M + 130));
+      ensure(14 + (lines.length - 1) * 13);
+      doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor("#6B7280");
+      doc.text(String(label).toUpperCase(), M, y);
+      doc.setFont("helvetica", "normal"); doc.setFontSize(10.5); doc.setTextColor("#1D1D1F");
+      doc.text(lines, M + 130, y); y += 13 + (lines.length - 1) * 13;
+    };
+    const row = (cols, opts = {}) => {
+      ensure(16);
+      doc.setFont("helvetica", opts.bold ? "bold" : "normal"); doc.setFontSize(opts.size || 10);
+      doc.setTextColor(opts.color || "#1D1D1F");
+      cols.forEach(([txt, x, align]) => doc.text(String(txt), x, y, align ? { align } : undefined));
+      y += opts.gap || 16;
+    };
+
+    // Header band
+    doc.setFillColor(primary); doc.rect(0, 0, W, 70, "F");
+    doc.setTextColor("#ffffff"); doc.setFont("helvetica", "bold"); doc.setFontSize(20);
+    doc.text(branding?.companyName || "Stone Property Solutions", M, 38);
+    doc.setFont("helvetica", "normal"); doc.setFontSize(10);
+    doc.text("Client Profile", M, 56);
+    doc.text(new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }), W - M, 56, { align: "right" });
+    y = 96;
+
+    // Name + plan
+    doc.setTextColor("#1D1D1F"); doc.setFont("helvetica", "bold"); doc.setFontSize(18);
+    doc.text(client.name || "Client", M, y);
+    const eTier = effectiveTier(client);
+    if (eTier || client.status === "Inactive") {
+      doc.setFont("helvetica", "normal"); doc.setFontSize(10.5); doc.setTextColor("#6B7280");
+      doc.text([eTier ? `${eTier} plan` : "", client.status === "Inactive" ? "Inactive" : ""].filter(Boolean).join("  ·  "), M, y + 16);
+    }
+    y += 24;
+
+    // Contact & account
+    section("Contact & Account");
+    kv("Address", client.address);
+    kv("Phone", client.phone);
+    kv("Email", client.email);
+    if (client.preferredDay) kv("Preferred day", client.preferredDay + (client.preferredDayOverride ? " (client request)" : " (route day)"));
+    if (client.referredBy) kv("Referred by", client.referredBy);
+    kv("Status", client.status || "Active");
+
+    // Service plan & property
+    section("Service Plan & Property");
+    (clientServices(client, tiers) || []).forEach(s => {
+      const m = dMeta(s.div);
+      kv(m.siteLabel || `${s.div}`, [s.type, s.size].filter(Boolean).join("  ·  ") || "—");
+    });
+    (clientPlanList(client) || []).forEach(p => kv(`${p.div} plan`, `${p.tier}${p.freq ? "  ·  " + p.freq : ""}${p.rate ? "  ·  $" + p.rate + "/mo" : ""}`));
+    const planTotal = clientPlanTotal(client);
+    if (planTotal) kv("Monthly total", `$${planTotal.toLocaleString()}/mo`);
+
+    // Equipment
+    const equipment = client.equipment || [];
+    if (equipment.length) {
+      section(`Equipment (${equipment.length})`);
+      equipment.forEach(eq => {
+        ensure(34);
+        doc.setFont("helvetica", "bold"); doc.setFontSize(10.5); doc.setTextColor("#1D1D1F");
+        doc.text(eq.name || "Equipment", M, y); y += 13;
+        const w = warrantyInfo(eq);
+        const bits = [
+          eq.installed ? `Installed ${fmtEqDate(eq.installed)}` : null,
+          eq.status || null,
+          w ? (w.active ? `Warranty to ${w.label}` : "Warranty expired") : null,
+        ].filter(Boolean).join("   ·   ");
+        doc.setFont("helvetica", "normal"); doc.setFontSize(9.5); doc.setTextColor("#6B7280");
+        if (bits) { doc.text(bits, M, y); y += 13; }
+        if (eq.notes) { doc.setTextColor("#1D1D1F"); doc.splitTextToSize(String(eq.notes), W - 2 * M).forEach(ln => { ensure(13); doc.text(ln, M, y); y += 13; }); }
+        y += 8;
+      });
+    }
+
+    // Service history
+    const history = client.history || [];
+    if (history.length) {
+      section(`Service History (${history.length})`);
+      row([["DATE", M], ["SERVICE", M + 95], ["TECH", M + 300], ["AMOUNT", W - M, "right"]], { bold: true, size: 9, color: "#6B7280", gap: 6 });
+      doc.setDrawColor("#E5E7EB"); doc.line(M, y, W - M, y); y += 14;
+      history.slice(0, 60).forEach(h => {
+        const svc = doc.splitTextToSize(String(h.type || "Service"), 195)[0];
+        row([[h.date || "", M], [svc, M + 95], [h.tech || "", M + 300], [h.invoice || "", W - M, "right"]]);
+      });
+    }
+
+    // Financial summary
+    section("Financial Summary");
+    row([["INVOICE #", M], ["DATE", M + 95], ["STATUS", M + 210], ["AMOUNT", W - M, "right"]], { bold: true, size: 9, color: "#6B7280", gap: 6 });
+    doc.setDrawColor("#E5E7EB"); doc.line(M, y, W - M, y); y += 14;
+    let paid = 0, open = 0;
+    (invoices || []).forEach(iv => {
+      const amt = parseFloat(String(iv.total || "0").replace(/[^0-9.-]/g, "")) || 0;
+      const isPaid = String(iv.status || "").toLowerCase() === "paid";
+      if (isPaid) paid += amt; else open += amt;
+      row([[String(iv.number || iv.id || ""), M], [String(iv.date || ""), M + 95], [isPaid ? "Paid" : "Outstanding", M + 210], [`$${amt.toFixed(2)}`, W - M, "right"]], { color: isPaid ? "#6B7280" : "#1D1D1F" });
+    });
+    if (!(invoices || []).length) { doc.setFont("helvetica", "normal"); doc.setFontSize(10); doc.setTextColor("#6B7280"); ensure(16); doc.text("No invoices on file.", M, y); y += 16; }
+    y += 6; ensure(36);
+    doc.setFont("helvetica", "bold"); doc.setFontSize(10); doc.setTextColor("#6B7280");
+    doc.text(`Total paid: $${paid.toFixed(2)}`, W - M, y, { align: "right" }); y += 17;
+    doc.setTextColor(primary); doc.setFontSize(12.5);
+    doc.text(`Balance due: $${open.toFixed(2)}`, W - M, y, { align: "right" });
+
+    // Notes
+    if (client.notes) {
+      section("Notes");
+      doc.setFont("helvetica", "normal"); doc.setFontSize(10); doc.setTextColor("#1D1D1F");
+      doc.splitTextToSize(String(client.notes), W - 2 * M).forEach(ln => { ensure(14); doc.text(ln, M, y); y += 14; });
+    }
+
+    doc.save(`client-profile-${(client.name || "client").replace(/\s+/g, "-").toLowerCase()}.pdf`);
+  });
+}
+
 // ─────────────────────────────────────────────
 // PERSISTENT STORAGE
 // Keeps app data across reloads and updates so nothing resets.
@@ -1946,8 +2081,18 @@ const parseEqDate = (s) => {
   if ((m = v.match(/^(\d{1,2})\/(\d{4})$/)))            return { date: new Date(+m[2], +m[1] - 1, 1), hasDay: false };
   if ((m = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/))) return { date: new Date(+m[3], +m[1] - 1, +m[2]), hasDay: true };
   if ((m = v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)))   return { date: new Date(+m[1], +m[2] - 1, +m[3]), hasDay: true };
+  if ((m = v.match(/^(\d{2})(\d{4})$/)))                return { date: new Date(+m[2], +m[1] - 1, 1), hasDay: false }; // MMYYYY typed without a slash, e.g. "012024"
+  // A bare digit run (e.g. "012024") must NOT fall through to new Date(): some engines (iOS
+  // WKWebView) misread it as a year far in the future, which blew up warranty math.
+  if (/^\d+$/.test(v)) return null;
   const d = new Date(v);
   return isNaN(d) ? null : { date: d, hasDay: true };
+};
+// Display a stored equipment date nicely ("Jan 2024") when we can parse it; else show it raw.
+const fmtEqDate = (s) => {
+  const p = parseEqDate(s);
+  if (!p) return s || "";
+  return p.date.toLocaleDateString("en-US", p.hasDay ? { month: "short", day: "numeric", year: "numeric" } : { month: "short", year: "numeric" });
 };
 
 // Equipment warranty: expiration = (purchase or install date) + length. Returns null
@@ -4889,11 +5034,9 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
           <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 10 }}>
             <Badge label={eTier || "No tier"} bg={pm.bg} color={pm.color || pm.text} />
             <div style={{ flex: 1 }} />
-            {perms.canInvoice && (invoices||[]).filter(iv => invoiceMatchesClient(iv, client)).length > 0 && (
-              <Btn variant="ghost" sm onClick={() => generateStatementPDF(client, sortInvoices((invoices||[]).filter(iv => invoiceMatchesClient(iv, client))), branding)} style={{ display:"flex", alignItems:"center", gap:5 }}>
-                <Icon name="download" size={13} /> PDF
-              </Btn>
-            )}
+            <Btn variant="ghost" sm onClick={() => generateClientProfilePDF(client, sortInvoices((invoices||[]).filter(iv => invoiceMatchesClient(iv, client))), branding, tiers)} style={{ display:"flex", alignItems:"center", gap:5 }}>
+              <Icon name="download" size={13} /> PDF
+            </Btn>
             {perms.editClients && (
               <Btn variant="ghost" sm
                 onClick={() => update({ status: client.status === "Inactive" ? "Active" : "Inactive" })}
@@ -5385,7 +5528,7 @@ function ClientEquipment({ client, invoices, onChange }) {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 700, fontSize: 14, color: T.text }}>{eq.name}</div>
                 <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  {eq.installed && <span>Installed {eq.installed}</span>}
+                  {eq.installed && <span>Installed {fmtEqDate(eq.installed)}</span>}
                   {eq.serialNumber && <span>S/N: {eq.serialNumber}</span>}
                   {photos.length > 0 && <span style={{ color: T.primary }}>{photos.length} photo{photos.length > 1 ? "s" : ""}</span>}
                   {eq.origin === "Pre-existing (before SPS)" && <span style={{ color: T.textMuted, fontSize: 10, fontWeight: 700, background: T.surfaceAlt, padding: "2px 7px", borderRadius: 100 }}>Pre-SPS</span>}
