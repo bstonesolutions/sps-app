@@ -3663,7 +3663,7 @@ const effectiveTier = (c) => {
   if (c.plan) return c.plan;
   // Last resort: any division that carries a non-empty plan, so a tier assigned in the bulk editor
   // for a non-primary (or post-restore) division still surfaces in the Hub instead of "No tier".
-  if (c.plans) { for (const k in c.plans) if (c.plans[k]) return c.plans[k]; }
+  if (c.plans) { for (const k in c.plans) if (k && k !== "undefined" && k !== "null" && c.plans[k]) return c.plans[k]; }
   return "";
 };
 
@@ -4235,6 +4235,66 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
     return next;
   });
   const combined = assembleAddress({ street: form.street, city: form.city, state: form.state, zip: form.zip });
+
+  // ── Per-division service plan helpers ──────────────────────────────────────
+  // The plan a division currently carries ("" = None). Explicit form.plans[div] wins (so None
+  // sticks); the primary division falls back to effectiveTier so it matches the Hub on open.
+  const tierOf = (div) => {
+    const hp = form.plans && Object.prototype.hasOwnProperty.call(form.plans, div);
+    return hp ? (form.plans[div] || "") : (div === (form.division || "Pond") ? (effectiveTier(client) || "") : "");
+  };
+  // Color a division's tier from the OWNER-CONFIGURED tiers (Service Tiers settings), so the editor
+  // reflects whatever colors they set per service + per tier — same source the portal cards use.
+  const tierColor = (div, tier) => {
+    if (!tier) return T.textMuted;
+    const tierSet = (tiers && (tiers[div] || tiers.Pond)) || {};
+    return (tierSet[tier] && tierSet[tier].color) || T.primary;
+  };
+  // Re-sum the single monthlyRate (source for invoicing) from a form state: the rate of every division
+  // that is ON (primary or service-toggled) AND carries a real tier. Called by EVERY mutation that can
+  // change which divisions are billable (tier change, on/off toggle, rate edit) so it never goes stale.
+  const recalcMonthly = (f) => {
+    const total = getDivisions(tiers).filter(d => {
+      const on = !!(f[`service${d}`] || (f.division || "Pond") === d);
+      const hp = f.plans && Object.prototype.hasOwnProperty.call(f.plans, d);
+      const t = hp ? (f.plans[d] || "") : (d === (f.division || "Pond") ? (effectiveTier(client) || "") : "");
+      return on && t && t !== "None";
+    }).reduce((s, d) => s + (parseFloat((f.planRates || {})[d]) || 0), 0);
+    return total ? String(total) : "";
+  };
+  // Set a division's tier atomically. plans[div] is the source of truth; the primary division also
+  // syncs the legacy flat plan/planFreq. div ALWAYS comes from getDivisions(), so a tier can never be
+  // keyed to a blank/undefined division again (the old ghost-card root cause).
+  const setTier = (div, planVal) => setForm(f => {
+    const next = { ...f, plans: { ...(f.plans || {}), [div]: planVal } };
+    if (div === (f.division || "Pond")) {
+      next.plan = planVal;
+      next.planFreq = planVal ? (TIER_FREQ[planVal] || f.planFreq) : "";
+      if (!f.division) next.division = "Pond";
+    }
+    next.monthlyRate = recalcMonthly(next);
+    return next;
+  });
+  // Turn a (non-primary) service on/off, then re-sum monthlyRate so an off service drops from the total.
+  const toggleService = (div) => setForm(f => {
+    if ((f.division || "Pond") === div) return f; // primary stays on — change the primary picker instead
+    const next = { ...f, [`service${div}`]: !f[`service${div}`] };
+    next.monthlyRate = recalcMonthly(next);
+    return next;
+  });
+  // Divisions that are ON (primary or service-toggled) AND carry a real tier — these are billed.
+  const activeRateDivs = () => getDivisions(tiers).filter(div => {
+    const on = !!(form[`service${div}`] || (form.division || "Pond") === div);
+    const t = tierOf(div);
+    return on && t && t !== "None";
+  });
+  // Set a per-division rate and re-sum monthlyRate, off the freshest form state.
+  const setDivRate = (div, val) => setForm(f => {
+    const next = { ...f, planRates: { ...(f.planRates || {}), [div]: String(val).replace(/[^0-9.]/g, "") } };
+    next.monthlyRate = recalcMonthly(next);
+    return next;
+  });
+
   const halfInput = { width: "100%", padding: "11px 14px", border: `1px solid ${T.border}`, borderRadius: 11, fontSize: 15, fontFamily: "inherit", boxSizing: "border-box", outline: "none", color: T.text, background: T.surface };
 
   return (
@@ -4299,53 +4359,82 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
                   <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>Sets the label in their client portal (My Pond / My Pool / My Property).</div>
                 </FieldRow>
 
-                {/* Active services — can have multiple */}
+                {/* Services & plans — one card per division: toggle it on, pick the tier (colored from
+                    your Service Tiers settings), set the rate, and the pond/pool/property details. */}
                 <div>
-                  <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 }}>Services</label>
+                  <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 }}>Services &amp; Plans</label>
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                     {getDivisions(tiers).map(div => {
                       const m = dMeta(div);
-                      const serviceKey = `service${div}`; // e.g. servicePond, servicePool, serviceSeasonal
+                      const serviceKey = `service${div}`;
                       const detailKey  = `${div.toLowerCase()}Type`;
                       const sizeKey    = `${div.toLowerCase()}Size`;
-                      const isOn = !!(form[serviceKey] || form.division === div);
+                      const isPrimary = (form.division || "Pond") === div;
+                      const isOn = !!(form[serviceKey] || isPrimary);
+                      const curTier = tierOf(div);
+                      const accent = curTier ? tierColor(div, curTier) : T.primary;
                       return (
-                        <div key={div} style={{ background: isOn ? hexA(T.primary, 0.04) : T.surfaceAlt, border: `1.5px solid ${isOn ? hexA(T.primary, 0.25) : T.border}`, borderRadius: 14, overflow: "hidden", transition: "all 0.15s" }}>
-                          {/* Toggle row */}
+                        <div key={div} style={{ background: isOn ? T.surface : T.surfaceAlt, border: `1.5px solid ${isOn ? hexA(accent, 0.45) : T.border}`, borderRadius: 14, overflow: "hidden", transition: "all 0.15s" }}>
+                          {/* Header — division name + primary badge + on/off */}
                           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px" }}>
-                            <div>
-                              <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{div} Services</div>
-                              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{div === "Pond" ? "Ponds, water features, waterfalls" : div === "Pool" ? "In-ground, above-ground, spas" : "Leaf removal, gutters, snow"}</div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <div style={{ fontSize: 14.5, fontWeight: 800, color: isOn ? T.text : T.textMuted }}>{div}</div>
+                              {isPrimary && <span style={{ fontSize: 10, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "2px 8px", textTransform: "uppercase", letterSpacing: "0.04em" }}>Primary</span>}
                             </div>
-                            <button type="button" onClick={() => {
-                              if (isOn && form.division !== div) {
-                                // turning off a secondary service
-                                set(serviceKey, false);
-                              } else if (!isOn) {
-                                set(serviceKey, true);
-                              }
-                              // Can't turn off primary division service directly — change primary division instead
-                            }}
-                              style={{ width: 44, height: 26, borderRadius: 100, background: isOn ? T.primary : T.surfaceAlt, border: "none", cursor: form.division === div ? "default" : "pointer", position: "relative", flexShrink: 0, transition: "background 0.2s", opacity: form.division === div ? 0.6 : 1 }}>
+                            <button type="button" onClick={() => toggleService(div)}
+                              style={{ width: 44, height: 26, borderRadius: 100, background: isOn ? accent : T.surfaceAlt, border: "none", cursor: isPrimary ? "default" : "pointer", position: "relative", flexShrink: 0, transition: "background 0.2s", opacity: isPrimary ? 0.6 : 1 }}>
                               <div style={{ width: 20, height: 20, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: isOn ? 21 : 3, transition: "left 0.2s", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />
                             </button>
                           </div>
-                          {/* Detail fields when on */}
                           {isOn && (
-                            <div style={{ padding: "0 14px 14px", display: "flex", flexDirection: "column", gap: 10, borderTop: `1px solid ${hexA(T.primary, 0.1)}`, paddingTop: 12 }}>
+                            <div style={{ padding: "0 14px 14px", borderTop: `1px solid ${T.border}`, paddingTop: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+                              {/* Tier pills — active fills with the tier's own configured color */}
                               <div>
-                                <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.04em" }}>{m.typeLabel}</label>
-                                <select value={form[detailKey] || ""} onChange={e => set(detailKey, e.target.value)}
-                                  style={{ width: "100%", padding: "10px 13px", border: `1.5px solid ${T.border}`, borderRadius: 11, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", appearance: "none", WebkitAppearance: "none" }}>
-                                  <option value="">Select…</option>
-                                  {m.typeOptions.map(o => <option key={o} value={o}>{o}</option>)}
-                                </select>
+                                <label style={{ fontSize: 10.5, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.04em" }}>Plan</label>
+                                <div style={{ display: "flex", gap: 6 }}>
+                                  {["Essential","Signature","Premium","None"].map(p => {
+                                    const planVal = p === "None" ? "" : p;
+                                    const active  = (curTier || "") === planVal;
+                                    const pc = p === "None" ? T.textMuted : tierColor(div, p);
+                                    return (
+                                      <button key={p} type="button" onClick={() => setTier(div, planVal)}
+                                        style={{ flex: 1, padding: "9px 4px", borderRadius: 10, border: `1.5px solid ${active ? pc : T.border}`, background: active ? pc : T.surface, color: active ? "#fff" : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                                        {p}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
                               </div>
-                              <div>
-                                <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.04em" }}>{m.sizeLabel}</label>
-                                <input type="text" value={form[sizeKey] || ""} onChange={e => set(sizeKey, e.target.value)}
-                                  placeholder={div === "Pond" ? "e.g. 3,200 gal" : div === "Pool" ? "e.g. 15,000 gal" : "e.g. 2 acres"}
-                                  style={{ width: "100%", padding: "10px 13px", border: `1.5px solid ${T.border}`, borderRadius: 11, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
+                              {/* Frequency + this division's monthly rate */}
+                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                                <span style={{ fontSize: 12, color: T.textMuted }}>{curTier ? `${TIER_FREQ[curTier] || "—"} service` : "Pick a plan to set a rate"}</span>
+                                {curTier && (
+                                  <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                                    <div style={{ position: "relative", width: 110 }}>
+                                      <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>$</span>
+                                      <input value={(form.planRates || {})[div] || ""} onChange={e => setDivRate(div, e.target.value)} inputMode="decimal" placeholder="0"
+                                        style={{ width: "100%", padding: "9px 10px 9px 22px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
+                                    </div>
+                                    <span style={{ fontSize: 11, color: T.textMuted }}>/mo</span>
+                                  </div>
+                                )}
+                              </div>
+                              {/* Pond / pool / property details */}
+                              <div style={{ display: "flex", gap: 10 }}>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <label style={{ fontSize: 10.5, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.04em" }}>{m.typeLabel}</label>
+                                  <select value={form[detailKey] || ""} onChange={e => set(detailKey, e.target.value)}
+                                    style={{ width: "100%", padding: "9px 11px", border: `1.5px solid ${T.border}`, borderRadius: 10, fontSize: 13.5, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", appearance: "none", WebkitAppearance: "none" }}>
+                                    <option value="">Select…</option>
+                                    {m.typeOptions.map(o => <option key={o} value={o}>{o}</option>)}
+                                  </select>
+                                </div>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <label style={{ fontSize: 10.5, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.04em" }}>{m.sizeLabel}</label>
+                                  <input type="text" value={form[sizeKey] || ""} onChange={e => set(sizeKey, e.target.value)}
+                                    placeholder={div === "Pond" ? "3,200 gal" : div === "Pool" ? "15,000 gal" : "2 acres"}
+                                    style={{ width: "100%", padding: "9px 11px", border: `1.5px solid ${T.border}`, borderRadius: 10, fontSize: 13.5, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
+                                </div>
                               </div>
                             </div>
                           )}
@@ -4353,53 +4442,21 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
                       );
                     })}
                   </div>
-                  <div style={{ fontSize: 11, color: T.textMuted, marginTop: 8 }}>Enable all services this client receives. Primary division sets their portal label.</div>
+                  {(() => {
+                    const active = activeRateDivs();
+                    if (active.length < 2) return null;
+                    const total = active.reduce((s, d) => s + (parseFloat((form.planRates || {})[d]) || 0), 0);
+                    return (
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10, padding: "11px 14px", background: hexA(T.primary, 0.06), borderRadius: 12 }}>
+                        <span style={{ fontSize: 12.5, fontWeight: 700, color: T.text }}>Total / month</span>
+                        <span style={{ fontSize: 16, fontWeight: 800, color: T.primary }}>${total.toLocaleString()}<span style={{ fontSize: 11, color: T.textMuted, fontWeight: 700 }}> · {active.length} services</span></span>
+                      </div>
+                    );
+                  })()}
+                  <div style={{ fontSize: 11, color: T.textMuted, marginTop: 8 }}>Turn on every service this client receives, then set each one's plan and rate. The primary sets their portal name.</div>
                 </div>
               </>}
               {si === 2 && <>
-                {/* Per-division plan assignments */}
-                <div>
-                  <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 }}>Service Plans</label>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                    {[(form.division || "Pond"), ...getDivisions(tiers).filter(d => d !== (form.division || "Pond") && form["service" + d])].map(div => {
-                      // Use the explicit per-division value when set (incl. "" = None, so it sticks);
-                      // otherwise seed the primary division from effectiveTier so it matches the Hub.
-                      const hasPlan = form.plans && Object.prototype.hasOwnProperty.call(form.plans, div);
-                      const currentPlan = hasPlan ? (form.plans[div] || "") : (div === (form.division || "Pond") ? (effectiveTier(client) || "") : "");
-                      return (
-                        <div key={div} style={{ background: T.surfaceAlt, borderRadius: 14, padding: "12px 14px" }}>
-                          <div style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>{div}</div>
-                          <div style={{ display: "flex", gap: 6 }}>
-                            {["Essential","Signature","Premium","None"].map(p => {
-                              const planVal = p === "None" ? "" : p;
-                              const active  = (currentPlan || "") === planVal;
-                              return (
-                                <button key={p} type="button"
-                                  onClick={() => {
-                                    const newPlans = { ...(form.plans || {}), [div]: planVal };
-                                    set("plans", newPlans);
-                                    if (div === (form.division || "Pond")) {
-                                      set("plan", planVal);
-                                      set("planFreq", planVal ? (TIER_FREQ[planVal] || form.planFreq) : "");
-                                      if (!form.division) set("division", "Pond"); // null-division clients: claim the primary
-                                    }
-                                  }}
-                                  style={{ flex: 1, padding: "9px 4px", borderRadius: 10,
-                                    border: `1.5px solid ${active ? (p === "None" ? T.textMuted : T.primary) : T.border}`,
-                                    background: active ? (p === "None" ? hexA(T.textMuted, 0.08) : hexA(T.primary, 0.08)) : T.surface,
-                                    color: active ? (p === "None" ? T.textMuted : T.primary) : T.textMuted,
-                                    fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-                                  {p}
-                                </button>
-                              );
-                            })}
-                          </div>
-                          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>{currentPlan ? (TIER_FREQ[currentPlan] || "—") + " service" : "No tier assigned"}</div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
                 <FieldRow label="Next Service"><Input value={form.nextService} onChange={e => set("nextService", e.target.value)} placeholder="MM/DD/YYYY" /></FieldRow>
                 {/* Preferred service day — set by route default, overridable per client */}
                 <div>
@@ -4424,58 +4481,16 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
                     <div style={{ fontSize: 11, color: T.textMuted }}>Route default: {form.routeDay}</div>
                   )}
                 </div>
-                {(() => {
-                  // Per-service monthly rates — one input per active plan, total auto-sums into
-                  // monthlyRate (kept as the single source for invoicing/auto-invoice).
-                  const planDivs = [(form.division || "Pond"), ...getDivisions(tiers).filter(d => d !== (form.division || "Pond") && form["service" + d])];
-                  const tierOf = (div) => { const hp = form.plans && Object.prototype.hasOwnProperty.call(form.plans, div); return hp ? (form.plans[div] || "") : (div === (form.division || "Pond") ? (effectiveTier(client) || "") : ""); };
-                  const active = planDivs.filter(div => { const t = tierOf(div); return t && t !== "None"; });
-                  const setRate = (div, val) => {
-                    const v = val.replace(/[^0-9.]/g, "");
-                    const nextRates = { ...(form.planRates || {}), [div]: v };
-                    set("planRates", nextRates);
-                    const total = active.reduce((s, d) => s + (parseFloat(nextRates[d]) || 0), 0);
-                    set("monthlyRate", total ? String(total) : "");
-                  };
-                  const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "#6b7280", display: "block", marginBottom: 7 };
-                  if (!active.length) {
-                    return (
-                      <FieldRow label="Monthly Rate">
-                        <div style={{ position: "relative" }}>
-                          <span style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: "#9ca3af" }}>$</span>
-                          <Input value={form.monthlyRate || ""} onChange={e => set("monthlyRate", e.target.value.replace(/[^0-9.]/g, ""))} placeholder="e.g. 150" />
-                        </div>
-                      </FieldRow>
-                    );
-                  }
-                  const total = active.reduce((s, d) => s + (parseFloat((form.planRates || {})[d]) || 0), 0);
-                  return (
-                    <div>
-                      <label style={lbl}>Monthly Rate{active.length > 1 ? " — per service" : ""}</label>
-                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                        {active.map(div => (
-                          <div key={div} style={{ display: "flex", alignItems: "center", gap: 10, background: T.surfaceAlt, borderRadius: 12, padding: "8px 12px" }}>
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{div}</div>
-                              <div style={{ fontSize: 11, color: T.textMuted }}>{tierOf(div)} · {TIER_FREQ[tierOf(div)] || "—"}</div>
-                            </div>
-                            <div style={{ position: "relative", width: 112 }}>
-                              <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>$</span>
-                              <input value={(form.planRates || {})[div] || ""} onChange={e => setRate(div, e.target.value)} inputMode="decimal" placeholder="0"
-                                style={{ width: "100%", padding: "9px 10px 9px 22px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                      {active.length > 1 && (
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8, padding: "9px 12px", background: hexA(T.primary, 0.06), borderRadius: 10 }}>
-                          <span style={{ fontSize: 12.5, fontWeight: 700, color: T.text }}>Total / month</span>
-                          <span style={{ fontSize: 15, fontWeight: 800, color: T.primary }}>${total.toLocaleString()}</span>
-                        </div>
-                      )}
+                {/* Flat monthly rate — only when no division carries a tiered plan. Each tiered service
+                    now sets its own rate in the Services & Plans card above, which auto-sums monthlyRate. */}
+                {activeRateDivs().length === 0 && (
+                  <FieldRow label="Monthly Rate">
+                    <div style={{ position: "relative" }}>
+                      <span style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: "#9ca3af" }}>$</span>
+                      <Input value={form.monthlyRate || ""} onChange={e => set("monthlyRate", e.target.value.replace(/[^0-9.]/g, ""))} placeholder="e.g. 150" />
                     </div>
-                  );
-                })()}
+                  </FieldRow>
+                )}
                 <div>
                   <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "#6b7280", display: "block", marginBottom: 5 }}>Auto-Invoice</label>
                   <div style={{ display: "flex", gap: 8 }}>
