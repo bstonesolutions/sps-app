@@ -3843,8 +3843,12 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
   };
   const exitSelect = () => { setSelectMode(false); setSelected({}); };
 
-  const applyDivision = (div) => { onBatchUpdate(selectedIds, { division: div }); setModal(null); exitSelect(); };
-  const applyPlan = (plan) => { onBatchUpdate(selectedIds, { plan }); setModal(null); exitSelect(); };
+  // Bulk-set the primary division AND carry each client's current tier into it, so Service Tiers / the
+  // Hub stay consistent (no "None" just because plans[newDiv] was never written).
+  const applyDivision = (div) => { onBatchUpdate(selectedIds, (c) => applyClientPlan({ ...c, division: div }, (c.plans && c.plans[div]) || effectiveTier(c) || "", div)); setModal(null); exitSelect(); };
+  // Bulk-set the tier in each client's PRIMARY division, writing plans[div] + the legacy flat field
+  // through the same safe path the editor uses (no drift, and never a blank/undefined division key).
+  const applyPlan = (plan) => { const t = plan === "None" ? "" : plan; onBatchUpdate(selectedIds, (c) => applyClientPlan(c, t, c.division || "Pond")); setModal(null); exitSelect(); };
   const doDelete = () => { onBatchDelete(selectedIds); setModal(null); exitSelect(); };
   const doSchedule = () => { onBatchSchedule(selectedIds); exitSelect(); };
   const doMarkInactive = () => { onBatchUpdate(selectedIds, { status: "Inactive" }); setModal(null); exitSelect(); };
@@ -4117,6 +4121,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
       {/* Division modal */}
       {modal === "division" && (
         <Modal title={`Change Division (${selCount})`} onClose={() => setModal(null)}>
+          <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 12, lineHeight: 1.5 }}>Sets each client's primary division and carries their current tier into it.</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {(tiers ? getDivisions(tiers) : DIVISIONS).map(d => (
               <button key={d} onClick={() => applyDivision(d)}
@@ -4130,18 +4135,16 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
 
       {/* Plan modal */}
       {modal === "plan" && (
-        <Modal title={`Change Maintenance Plan (${selCount})`} onClose={() => setModal(null)}>
+        <Modal title={`Set Service Plan (${selCount})`} onClose={() => setModal(null)}>
+          <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 12, lineHeight: 1.5 }}>Sets the tier in each client's primary division. For per-division plans, use the client editor.</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {PLANS.map(p => {
-              const pm = planMeta(p, T, tiers);
-              return (
-                <button key={p} onClick={() => applyPlan(p)}
-                  style={{ padding: "14px 16px", border: `1px solid ${T.border}`, borderRadius: 12, background: T.surface, color: T.text, fontWeight: 700, fontSize: 15, cursor: "pointer", fontFamily: "inherit", textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  {p}
-                  <Badge label={p} bg={pm.bg} color={pm.color || pm.text} sm />
-                </button>
-              );
-            })}
+            {[...PLANS, "None"].map(p => (
+              <button key={p} onClick={() => applyPlan(p)}
+                style={{ padding: "14px 16px", border: `1px solid ${T.border}`, borderRadius: 12, background: T.surface, color: p === "None" ? T.textMuted : T.text, fontWeight: 700, fontSize: 15, cursor: "pointer", fontFamily: "inherit", textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                {p}
+                {p !== "None" && (() => { const pm = planMeta(p, T, tiers); return <Badge label={p} bg={pm.bg} color={pm.color || pm.text} sm />; })()}
+              </button>
+            ))}
           </div>
         </Modal>
       )}
@@ -24524,8 +24527,11 @@ export default function App({ authEmail = "", onSignOut }) {
 
   // batch client operations
   const handleBatchUpdate = (ids, changes) => {
-    setClients(cs => cs.map(c => ids.includes(c.id) ? { ...c, ...changes } : c));
-    setSelectedClient(sc => sc && ids.includes(sc.id) ? { ...sc, ...changes } : sc);
+    // `changes` can be a plain object (flat merge) OR a function (c) => partialClient — so bulk plan /
+    // division edits run per-client through applyClientPlan instead of blindly spreading a flat field.
+    const apply = typeof changes === "function" ? changes : () => changes;
+    setClients(cs => cs.map(c => ids.includes(c.id) ? { ...c, ...apply(c) } : c));
+    setSelectedClient(sc => sc && ids.includes(sc.id) ? { ...sc, ...apply(sc) } : sc);
   };
   const handleBatchDelete = (ids) =>
     setClients(cs => cs.filter(c => !ids.includes(c.id)));
