@@ -3159,7 +3159,7 @@ function ClockInOut({ me, T }) {
   );
 }
 
-function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onOpenAlert, onOpenStop, onNav, catalog, onConfirmUpgrade, userName, me, scheduleCfg, reminderLog, vp = {} }) {
+function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onOpenAlert, onOpenStop, onNav, catalog, onConfirmUpgrade, userName, me, scheduleCfg, reminderLog, completedSids = {}, vp = {} }) {
   const { T, perms, branding } = useApp();
   const [editing, setEditing] = useState(false);
   const [statPicker, setStatPicker] = useState(false);
@@ -3167,6 +3167,9 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
   // Find the schedule entry that matches today's actual date (not just the first row)
   const todayKey = fmtMDY(new Date());
   const today = (schedule || []).find(d => d.date === todayKey) || { stops: [], date: todayKey };
+  // Live completion progress for today (drives the hero "X / N done" + Today's Route state).
+  const isStopDone = (s) => !!(completedSids && s && completedSids[s.sid]);
+  const doneToday = (today.stops || []).filter(isStopDone).length;
   const [upgradeModal, setUpgradeModal] = useState(null); // alert object being confirmed
   const ma = monthActuals(clients, new Date(), invoices);
   const derived = deriveAlerts(clients, invoices, catalog).filter(a => perms.seeBalances || !/outstanding/i.test(a.title || ""));
@@ -3269,36 +3272,50 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
       );
     }
     if (id === "todayRoute") {
-      const next = today.stops[0];
-      const rest = today.stops.slice(1);
+      const stops = today.stops || [];
+      // The NEXT bar follows the FIRST stop that isn't completed yet, so it advances through the
+      // day instead of being stuck on stop #1. Completed stops stay listed (greyed + checked) so
+      // the card reads as a running overview of the day.
+      const next = stops.find(s => !isStopDone(s)) || null;
       return (
       <Card key="todayRoute" style={{ marginBottom: 16 }}>
         <CardHeader title="Today's Route" action={<Btn variant="text" sm onClick={() => onNav("schedule")}>View All</Btn>} />
-        {today.stops.length === 0 && <div style={{ padding: 18, fontSize: 13, color: T.textMuted }}>No stops scheduled today.</div>}
-        {/* Lead with a prominent "head to the next stop" CTA → jumps to the schedule's route */}
+        {stops.length === 0 && <div style={{ padding: 18, fontSize: 13, color: T.textMuted }}>No stops scheduled today.</div>}
+        {/* Lead with a prominent "head to the next incomplete stop" CTA → opens that stop in the schedule */}
         {next && (
-          <div onClick={() => onNav("schedule")} role="button"
+          <div onClick={() => onOpenStop ? onOpenStop(next, today.date) : onNav("schedule")} role="button"
             style={{ margin: "12px 16px", background: T.primary, color: "#fff", borderRadius: 12, padding: "11px 14px", cursor: "pointer", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.15)" }}>
             <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.08em", opacity: 0.82 }}>NEXT · {next.time}</div>
             <div style={{ fontSize: 13.5, fontWeight: 800, marginTop: 2, display: "flex", alignItems: "center", gap: 5 }}><Icon name="map" size={14} /> Head to {next.client} ›</div>
           </div>
         )}
-        {rest.map((s, i) => (
-          <div key={i} onClick={() => onOpenStop && onOpenStop(s, today.date)} style={{ padding: "13px 18px", borderTop: `1px solid ${T.border}`, display: "flex", gap: 14, alignItems: "center", cursor: onOpenStop ? "pointer" : "default" }}>
-            <div style={{ background: T.surfaceAlt, borderRadius: 10, padding: "7px 10px", textAlign: "center", minWidth: 58, flexShrink: 0 }}>
+        {next == null && stops.length > 0 && (
+          <div style={{ margin: "12px 16px", background: hexA(T.accent, 0.12), color: T.accent, borderRadius: 12, padding: "11px 14px", fontSize: 13, fontWeight: 800, display: "flex", alignItems: "center", gap: 6 }}>
+            <Icon name="check" size={15} /> All stops complete — nice work.
+          </div>
+        )}
+        {stops.map((s, i) => {
+          const done = isStopDone(s);
+          const isNext = next && (s.sid != null ? s.sid === next.sid : s === next);
+          return (
+          <div key={s.sid || i} onClick={() => onOpenStop && onOpenStop(s, today.date)} style={{ padding: "13px 18px", borderTop: `1px solid ${T.border}`, display: "flex", gap: 14, alignItems: "center", cursor: onOpenStop ? "pointer" : "default", background: isNext ? hexA(T.primary, 0.05) : "transparent", opacity: done ? 0.62 : 1 }}>
+            <div style={{ background: done ? hexA(T.accent, 0.12) : T.surfaceAlt, borderRadius: 10, padding: "7px 10px", textAlign: "center", minWidth: 58, flexShrink: 0 }}>
               <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{s.time.split(" ")[1]}</div>
               <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>{s.time.split(" ")[0]}</div>
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 700, fontSize: 14, color: T.text }}>{s.client}</div>
+              <div style={{ fontWeight: 700, fontSize: 14, color: T.text, display: "flex", alignItems: "center", gap: 6, textDecoration: done ? "line-through" : "none" }}>
+                {done && <Icon name="check" size={13} style={{ color: T.accent, flexShrink: 0 }} />}{s.client}
+              </div>
               <div style={{ fontSize: 12, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.address}</div>
             </div>
             <div style={{ textAlign: "right", flexShrink: 0 }}>
               <div style={{ fontSize: 12, color: T.text, fontWeight: 600 }}>{s.type}</div>
-              <div style={{ fontSize: 11, color: T.textMuted }}>{s.duration}</div>
+              <div style={{ fontSize: 11, color: done ? T.accent : T.textMuted, fontWeight: done ? 700 : 400 }}>{done ? "Done" : s.duration}</div>
             </div>
           </div>
-        ))}
+          );
+        })}
       </Card>
       );
     }
@@ -3430,9 +3447,20 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
           <div style={{ position: "relative", zIndex: 1 }}>
             <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.1em", opacity: 0.82 }}>TODAY</div>
             <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginTop: 5 }}>
-              <span style={{ fontSize: 42, fontWeight: 800, lineHeight: 1, letterSpacing: "-0.03em" }}>{today.stops.length}</span>
-              <span style={{ fontSize: 14, fontWeight: 700, opacity: 0.92 }}>{today.stops.length === 1 ? "stop to run" : "stops to run"}</span>
+              {today.stops.length === 0 ? (
+                <span style={{ fontSize: 28, fontWeight: 800, lineHeight: 1.12, letterSpacing: "-0.02em" }}>No stops today</span>
+              ) : (
+                <>
+                  <span style={{ fontSize: 42, fontWeight: 800, lineHeight: 1, letterSpacing: "-0.03em" }}>{doneToday}<span style={{ fontSize: 23, fontWeight: 800, opacity: 0.72 }}> / {today.stops.length}</span></span>
+                  <span style={{ fontSize: 14, fontWeight: 700, opacity: 0.92 }}>{doneToday >= today.stops.length ? "all done ✓" : "stops done"}</span>
+                </>
+              )}
             </div>
+            {today.stops.length > 0 && (
+              <div style={{ height: 5, borderRadius: 100, background: "rgba(255,255,255,0.22)", marginTop: 10, overflow: "hidden" }}>
+                <div style={{ height: "100%", borderRadius: 100, background: "rgba(255,255,255,0.92)", width: `${Math.round((doneToday / today.stops.length) * 100)}%`, transition: "width 0.35s ease" }} />
+              </div>
+            )}
             {perms.seeProfit && (
               <div style={{ display: "flex", alignItems: "flex-end", gap: 26, marginTop: 16 }}>
                 <div>
@@ -21241,6 +21269,7 @@ function CPHome({ client, schedule, invoices, branding, team, onNav, onRateVisit
   // CP_TIERS is keyed by division ({ Pond, Pool, Seasonal }), so resolve the tier object
   // through the client's division, not by tier-name directly (which never matched).
   const eTier = effectiveTier(client);
+  const planList = clientPlanList(client); // all active plans across divisions (for the multi-plan hero chips)
   const _cpDivSet = (CP_TIERS && (CP_TIERS[client.division || "Pond"] || CP_TIERS["Pond"])) || {};
   const tier = eTier ? (_cpDivSet[eTier] || null) : null;
   const tierColor = tier?.color || T.surfaceAlt;
@@ -21262,12 +21291,27 @@ function CPHome({ client, schedule, invoices, branding, team, onNav, onRateVisit
       <div style={{ position: "absolute", right: -30, top: -30, width: 160, height: 160, borderRadius: "50%", background: "rgba(255,255,255,0.06)", pointerEvents: "none" }} />
       <div style={{ position: "absolute", right: 30, bottom: -50, width: 120, height: 120, borderRadius: "50%", background: "rgba(255,255,255,0.04)", pointerEvents: "none" }} />
       <div style={{ position: "absolute", left: -20, bottom: -20, width: 80, height: 80, borderRadius: "50%", background: "rgba(255,255,255,0.03)", pointerEvents: "none" }} />
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
-        <div style={{ background: "rgba(255,255,255,0.18)", borderRadius: 100, padding: "5px 14px", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)" }}>
-          <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase" }}>{eTier ? `${eTier} Plan` : "No Service Tier"}</span>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20, gap: 8 }}>
+        {/* One chip per active plan, color-dotted by division — so a multi-service client sees ALL
+            their plans, not just the primary one. Falls back to a single "No Service Tier" pill. */}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, minWidth: 0 }}>
+          {planList.length > 0 ? planList.map((p, i) => {
+            const dot = (((CP_TIERS && CP_TIERS[p.div]) || (CP_TIERS && CP_TIERS["Pond"]) || {})[p.tier] || {}).color || "#fff";
+            const dLabel = (p.div && p.div !== "undefined") ? p.div : "Service";
+            return (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.18)", borderRadius: 100, padding: "5px 12px", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)" }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: dot, flexShrink: 0, boxShadow: "0 0 0 1.5px rgba(255,255,255,0.5)" }} />
+                <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.04em" }}>{dLabel} · {p.tier}</span>
+              </div>
+            );
+          }) : (
+            <div style={{ background: "rgba(255,255,255,0.18)", borderRadius: 100, padding: "5px 14px", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)" }}>
+              <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase" }}>No Service Tier</span>
+            </div>
+          )}
         </div>
-        <button onClick={() => onNav("cp_service")}
-          style={{ background: "rgba(255,255,255,0.15)", border: "none", borderRadius: 100, padding: "5px 14px", color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)" }}>
+        <button onClick={() => onNav("cp_property")}
+          style={{ background: "rgba(255,255,255,0.15)", border: "none", borderRadius: 100, padding: "5px 14px", color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)", flexShrink: 0 }}>
           Details →
         </button>
       </div>
@@ -21619,7 +21663,6 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
   const upgradePlan = upgradeOptions[0] || null;
   const upgradeTier = upgradePlan ? divTierSet[upgradePlan] : null;
   const pondLbl = pondLabel(client);
-  const m = dMeta(client.division);
 
   // One service's plan card — its OWN tier color/title/frequency/rate; taps to that service's
   // plan + upgrade detail. Multiple of these render for a multi-service client.
@@ -21634,7 +21677,7 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
         style={{ background: iTier ? `linear-gradient(145deg, ${iColor} 0%, ${mix(iColor,"#000",0.28)} 100%)` : T.surfaceAlt, borderRadius: 20, padding: "18px 20px", color: iTier ? "#fff" : T.text, cursor: "pointer", boxShadow: iTier ? `0 8px 28px ${hexA(iColor,0.35)}` : "none", position: "relative", overflow: "hidden", border: iTier ? "none" : `1px solid ${T.border}` }}>
         <div style={{ position:"absolute", right:-30, top:-30, width:140, height:140, borderRadius:"50%", background:"rgba(255,255,255,0.06)" }} />
         <div style={{ position:"relative" }}>
-          <div style={{ fontSize:10, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.1em", opacity:0.7, marginBottom:4 }}>{item.div} Plan</div>
+          <div style={{ fontSize:10, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.1em", opacity:0.7, marginBottom:4 }}>{(item.div && item.div !== "undefined") ? `${item.div} Plan` : "Service Plan"}</div>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-end" }}>
             <div>
               <div style={{ fontSize:22, fontWeight:900, letterSpacing:"-0.02em" }}>{iPlan || "No tier"}</div>
@@ -21826,8 +21869,36 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
       {/* Page title */}
       <div>
         <div style={{ fontSize:26, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>{pondLabel(client, true)}</div>
-        <div style={{ fontSize:14, color:T.textMuted, marginTop:3 }}>{client.pondType || m.typeOptions[0]}</div>
       </div>
+
+      {/* Property overview — the pond/pool details up top, an at-a-glance summary of what we care for */}
+      {(() => {
+        const svcs = clientServices(client, tiers).filter(s => s.type || s.size);
+        if (!svcs.length) return null;
+        return (
+          <div style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, padding:"16px 18px" }}>
+            <div style={{ fontSize:11, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.07em", color:T.textMuted, marginBottom:12 }}>Property</div>
+            <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+              {svcs.map((svc, si) => {
+                const sm = dMeta(svc.div);
+                return (
+                  <div key={si}>
+                    {svcs.length > 1 && <div style={{ fontSize:12, fontWeight:800, color:T.text, marginBottom:6 }}>{sm.siteLabel}</div>}
+                    <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+                      {[[sm.typeLabel, svc.type],[sm.sizeLabel, svc.size]].filter(([,v])=>v).map(([k,v]) => (
+                        <div key={k}>
+                          <div style={{ fontSize:10, color:T.textMuted, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:3 }}>{k}</div>
+                          <div style={{ fontSize:14, fontWeight:600, color:T.text }}>{v}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Live tracking — appears only while the assigned tech is en route to this property */}
       <ClientLiveTracking client={client} schedule={schedule} team={team} branding={branding} T={T} onNav={onNav} />
@@ -21839,6 +21910,7 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
         const total = clientPlanTotal(client);
         return (
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ fontSize:11, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.07em", color:T.textMuted }}>Service Plans</div>
             {items.map(item => <PlanCard key={item.div} item={item} />)}
             {items.length > 1 && (
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "14px 18px" }}>
@@ -21912,24 +21984,6 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
           </div>
         ))}
       </div>
-
-      {/* All active service sections */}
-      {clientServices(client, tiers).map((svc, si) => {
-        const sm = dMeta(svc.div);
-        return (
-          <div key={si} style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, padding:"16px 18px" }}>
-            <div style={{ fontSize:13, fontWeight:800, color:T.text, marginBottom:12 }}>{svc.div} Details</div>
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
-              {[[sm.typeLabel, svc.type],[sm.sizeLabel, svc.size]].filter(([,v])=>v).map(([k,v]) => (
-                <div key={k}>
-                  <div style={{ fontSize:10, color:T.textMuted, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:3 }}>{k}</div>
-                  <div style={{ fontSize:14, fontWeight:600, color:T.text }}>{v}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        );
-      })}
 
       {/* Site photos */}
       {sitePhotos.length > 0 && (
@@ -24903,7 +24957,7 @@ export default function App({ authEmail = "", onSignOut }) {
   );
   const pageBody = (
     <>
-      {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onOpenAlert={handleOpenAlert} onOpenStop={handleOpenStop} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} vp={vp} />}
+      {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onOpenAlert={handleOpenAlert} onOpenStop={handleOpenStop} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} completedSids={completedSids} vp={vp} />}
       {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
       {page === "clients" && !adding && (vp.isDesktop ? (
         clientsView === "table" ? (

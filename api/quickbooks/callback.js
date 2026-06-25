@@ -4,6 +4,29 @@
 // or reach the client. Then we show a simple "connected, return to the app" page;
 // the app polls /api/quickbooks/status to detect the connection.
 import { saveTokens } from "./qb-store.js";
+import crypto from "crypto";
+
+// Same key + format as auth.js makeState(). The state is base64url("<nonce>.<ts>.<hmac>"),
+// the HMAC signed over "<nonce>.<ts>". Verifying the signature (no cookie, no server store)
+// is what lets reconnect survive in-app browsers that drop the qb_state cookie.
+// No committed fallback (see auth.js): with no secret we fail closed so a public constant can't
+// be used to forge a valid state — CSRF then relies on the cookie check below.
+const STATE_SECRET = process.env.QB_STATE_SECRET || process.env.QB_CLIENT_SECRET || "";
+
+function verifyState(state) {
+  if (!state || !STATE_SECRET) return false;
+  let decoded;
+  try { decoded = Buffer.from(String(state), "base64url").toString("utf8"); } catch { return false; }
+  const parts = decoded.split(".");
+  if (parts.length !== 3) return false;
+  const [nonce, ts, sig] = parts;
+  const expect = crypto.createHmac("sha256", STATE_SECRET).update(`${nonce}.${ts}`).digest("hex");
+  let ok = false;
+  try { ok = sig.length === expect.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expect)); } catch { ok = false; }
+  if (!ok) return false;
+  const age = Date.now() - Number(ts);
+  return age >= -60000 && age < 10 * 60 * 1000; // within the last 10 min (60s skew tolerance)
+}
 
 function page(title, message, ok) {
   return `<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -24,13 +47,14 @@ export default async function handler(req, res) {
   if (error)             return res.status(200).send(page("QuickBooks not connected", "Authorization was cancelled or denied. You can close this window and try again.", false));
   if (!code || !realmId) return res.status(200).send(page("QuickBooks not connected", "Missing authorization code. Please close this window and try again.", false));
 
-  // CSRF: the state we set in the qb_state cookie (auth.js) must match the state Intuit echoes
-  // back, BEFORE we exchange the code or bind any tokens to this realm. Then clear the cookie.
+  // CSRF, BEFORE we exchange the code or bind any tokens: accept the state Intuit echoes back
+  // if it carries a valid signature (cookie-free — survives in-app browsers that drop cookies),
+  // OR matches the qb_state cookie (plain-browser fallback). Then clear the cookie.
   const cookieState = (req.headers.cookie || "").split(/;\s*/).find(c => c.startsWith("qb_state="))?.slice("qb_state=".length);
-  if (!state || !cookieState || state !== cookieState) {
+  if (!verifyState(state) && !(state && cookieState && state === cookieState)) {
     return res.status(200).send(page("QuickBooks not connected", "Security check failed. Please close this window and try connecting again.", false));
   }
-  res.setHeader("Set-Cookie", "qb_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+  res.setHeader("Set-Cookie", "qb_state=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0");
 
   const clientId     = process.env.QB_CLIENT_ID;
   const clientSecret = process.env.QB_CLIENT_SECRET;
