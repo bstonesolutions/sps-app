@@ -5631,6 +5631,7 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
   const [readings, setReadings] = useState(initReadings);
   const [readingStatus, setReadingStatus] = useState(entry.readingStatus || {});
   const [photos, setPhotos] = useState(entry.photos || []);
+  const [viewer, setViewer] = useState(null);
   const [busy, setBusy] = useState(false);
   // Service type, tech, services performed, products used — to mirror the full stop view
   const [type, setType] = useState(entry.type || "");
@@ -5814,13 +5815,13 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
             {photos.map((p, i) => (
               <div key={i} style={{ position: "relative" }}>
-                <img src={typeof p === "string" ? p : p.src} alt="" style={{ width: 60, height: 60, borderRadius: 10, objectFit: "cover" }} />
+                <img src={typeof p === "string" ? p : p.src} alt="" onClick={() => setViewer(i)} style={{ width: 88, height: 88, borderRadius: 12, objectFit: "cover", cursor: "pointer" }} />
                 <button onClick={() => setPhotos(ps => ps.filter((_, idx) => idx !== i))} style={{ position: "absolute", top: -6, right: -6, background: "#C0392B", color: "#fff", border: "none", borderRadius: "50%", width: 20, height: 20, fontSize: 12, cursor: "pointer", lineHeight: 1 }}>×</button>
               </div>
             ))}
-            <label style={{ width: 60, height: 60, borderRadius: 10, border: `2px dashed ${T.border}`, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, color: T.textMuted, cursor: "pointer" }}>
-              {busy ? <span style={{ fontSize: 18 }}>…</span> : <Icon name="plus" size={18} />}
-              <span style={{ fontSize: 7, fontWeight: 700, letterSpacing: "0.02em" }}>ADD</span>
+            <label style={{ width: 88, height: 88, borderRadius: 12, border: `2px dashed ${T.border}`, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, color: T.textMuted, cursor: "pointer" }}>
+              {busy ? <span style={{ fontSize: 20 }}>…</span> : <Icon name="plus" size={22} />}
+              <span style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: "0.04em" }}>ADD</span>
               <input type="file" accept="image/*,image/heic,image/heif" multiple onChange={addPhotos} style={{ display: "none" }} />
             </label>
           </div>
@@ -5852,6 +5853,7 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
 
         <Btn onClick={save} style={{ width: "100%", padding: "12px", borderRadius: 12 }}>Save Changes</Btn>
       </div>
+      {viewer !== null && <PhotoViewer photos={photos} index={viewer} onClose={() => setViewer(null)} />}
     </Modal>
   );
 }
@@ -22027,6 +22029,10 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
         );
       })()}
 
+      {/* Desktop: two columns (visits + property assets); mobile keeps the single stacked flow, same order */}
+      <div style={vp.isDesktop ? { display:"grid", gridTemplateColumns:"1fr 1fr", gap:20, alignItems:"start" } : { display:"flex", flexDirection:"column", gap:20 }}>
+        <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+
       {/* Next visit — clear, prominent */}
       {(() => {
         const nv = clientNextVisit(schedule, client.id, client.name);
@@ -22106,6 +22112,9 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
           </div>
         </div>
       )}
+
+        </div>
+        <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
 
       {/* Site videos — the client's own property videos */}
       {siteVideos.length > 0 && (
@@ -22216,6 +22225,9 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
           })}
         </div>
       )}
+
+        </div>
+      </div>
 
       {/* Welcoming empty state for brand-new clients */}
       {history.length === 0 && equipment.length === 0 && sitePhotos.length === 0 && siteVideos.length === 0 && (client.documents || []).length === 0 && (
@@ -23383,7 +23395,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
       {isDesktopShell ? (
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", ...(isStaffPreview ? {} : { overflow: "hidden" }) }}>
           <main style={{ flex: 1, ...(isStaffPreview ? {} : { minHeight: 0, overflowY: "auto" }), padding: vp.isTablet ? "24px 22px" : "32px 40px", fontSize: `${textScale}em` }}>
-            <div style={{ maxWidth: vp.isTablet ? 1040 : ((page === "cp_invoices" || page === "cp_home") ? 1320 : 940), margin: "0 auto", width: "100%" }}>{screens}</div>
+            <div style={{ maxWidth: vp.isTablet ? 1040 : ((page === "cp_invoices" || page === "cp_home" || page === "cp_property") ? 1320 : 940), margin: "0 auto", width: "100%" }}>{screens}</div>
           </main>
         </div>
       ) : (
