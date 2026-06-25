@@ -4974,6 +4974,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
   const [client, setClient] = useState(init);
   const [tab, setTab] = useState(initialTab || "overview");
   const [editing, setEditing] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
   // Division-aware tier — same source of truth as the Service Tiers screen + clients list,
   // so a tier set in the bulk editor links here even when c.plan is stale (post-restore /
   // non-primary division). Don't read the flat client.plan directly for display.
@@ -5071,23 +5072,36 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
             {perms.seeBalances && <span style={{ display:"flex", alignItems:"center", gap:4, fontSize:12, fontWeight:700, color: owed <= 0 ? T.accent : T.warning }}><Icon name="dollar" size={12} />${owed.toFixed(2)}{owed > 0 ? " due" : " balance"}</span>}
           </div>
 
-          {/* Quick contact — one-tap Call / Email. (Texting still goes through the business line in the notify flows, never device SMS.) */}
-          {(client.phone || client.email) && (
-            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-              {client.phone && (
-                <a href={`tel:${String(client.phone).replace(/[^\d+]/g, "")}`}
-                  style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "11px", borderRadius: 12, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 13, fontWeight: 700, textDecoration: "none", fontFamily: "inherit" }}>
-                  <Icon name="phone" size={14} /> Call
-                </a>
-              )}
-              {client.email && (
-                <a href={`mailto:${client.email}`}
-                  style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "11px", borderRadius: 12, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 13, fontWeight: 700, textDecoration: "none", fontFamily: "inherit" }}>
-                  <Icon name="mail" size={14} /> Email
-                </a>
-              )}
-            </div>
-          )}
+          {/* Quick contact. Call / Text use YOUR phone (device dialer + Messages). "Chat in app" is
+              the in-app thread with the client — it lands in their portal and is logged here. */}
+          <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+            {(client.phone || client.email) && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {client.phone && (
+                  <a href={`tel:${String(client.phone).replace(/[^\d+]/g, "")}`}
+                    style={{ flex: "1 1 0", minWidth: 64, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "11px", borderRadius: 12, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 13, fontWeight: 700, textDecoration: "none", fontFamily: "inherit" }}>
+                    <Icon name="phone" size={14} /> Call
+                  </a>
+                )}
+                {client.phone && (
+                  <a href={`sms:${String(client.phone).replace(/[^\d+]/g, "")}`}
+                    style={{ flex: "1 1 0", minWidth: 64, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "11px", borderRadius: 12, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 13, fontWeight: 700, textDecoration: "none", fontFamily: "inherit" }}>
+                    <Icon name="message" size={14} /> Text
+                  </a>
+                )}
+                {client.email && (
+                  <a href={`mailto:${client.email}`}
+                    style={{ flex: "1 1 0", minWidth: 64, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "11px", borderRadius: 12, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 13, fontWeight: 700, textDecoration: "none", fontFamily: "inherit" }}>
+                    <Icon name="mail" size={14} /> Email
+                  </a>
+                )}
+              </div>
+            )}
+            <button onClick={() => setChatOpen(true)}
+              style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "12px", borderRadius: 12, border: "none", background: T.primary, color: "#fff", fontSize: 13.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}>
+              <Icon name="message" size={15} /> Chat in app
+            </button>
+          </div>
         </div>
       </Card>
 
@@ -5122,6 +5136,14 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
       {tab === "invoices" && (perms.canInvoice || perms.viewInvoices) && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={onSaveInvoice} onDelete={onDeleteInvoice} />}
       {tab === "docs"    && <ClientDocuments client={client} onChange={docs => update({ documents: docs })} />}
       {tab === "portal" && <ClientPortal client={client} invoices={invoices} invoicing={invoicing} schedule={schedule} branding={branding} email={email} onPreviewClient={onPreviewClient} />}
+
+      {chatOpen && (
+        <Modal title={`Chat — ${client.name}`} onClose={() => setChatOpen(false)}>
+          <div style={{ height: "min(60vh, 540px)", display: "flex", flexDirection: "column" }}>
+            <ChatThread clientId={client.id} sender="staff" senderName={branding?.companyName || "SPS"} T={T} />
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
