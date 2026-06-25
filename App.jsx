@@ -22695,7 +22695,14 @@ function CPInvoices({ client, invoices, branding, T, vp = {}, initialSel = null,
           <div style={{ width: vp.isTablet ? 260 : 360, flexShrink:0 }}>{rows}</div>
           <div style={{ flex:1, minWidth:0, position:"sticky", top:0 }}>
             {selInv ? (
-              <div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:20, padding:"20px 22px" }}>{detail(selInv)}</div>
+              <div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:20, padding:"20px 22px" }}>
+                <div style={{ display:"flex", justifyContent:"flex-end", marginBottom:4 }}>
+                  <button onClick={() => setSel(null)} aria-label="Close" style={{ width:32, height:32, borderRadius:"50%", border:"none", background:T.surfaceAlt, color:T.textMuted, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                    <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                  </button>
+                </div>
+                {detail(selInv)}
+              </div>
             ) : (
               <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", textAlign:"center", gap:12, padding:"60px 40px", background:T.surface, border:`1px solid ${T.border}`, borderRadius:20, color:T.textMuted }}>
                 <div style={{ width:60, height:60, borderRadius:18, background:hexA(T.primary,0.08), color:T.primary, display:"flex", alignItems:"center", justifyContent:"center" }}>
@@ -22713,10 +22720,13 @@ function CPInvoices({ client, invoices, branding, T, vp = {}, initialSel = null,
       {!vp.isDesktop && selInv && (
         <div style={{ position:"fixed", inset:0, zIndex:200, background:T.bg, display:"flex", flexDirection:"column" }}>
           <div style={{ height:"env(safe-area-inset-top)" }} />
-          <div style={{ display:"flex", alignItems:"center", gap:8, padding:"12px 16px", borderBottom:`1px solid ${T.border}`, flexShrink:0 }}>
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, padding:"12px 16px", borderBottom:`1px solid ${T.border}`, flexShrink:0 }}>
             <button onClick={() => setSel(null)} style={{ background:"none", border:"none", color:T.primary, fontWeight:700, fontSize:14, cursor:"pointer", fontFamily:"inherit", display:"flex", alignItems:"center", gap:4, padding:0 }}>
               <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
               Invoices
+            </button>
+            <button onClick={() => setSel(null)} aria-label="Close" style={{ width:32, height:32, borderRadius:"50%", border:"none", background:T.surfaceAlt, color:T.textMuted, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+              <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
             </button>
           </div>
           <div style={{ flex:1, minHeight:0, overflowY:"auto", WebkitOverflowScrolling:"touch", padding:"18px 18px calc(24px + env(safe-area-inset-bottom))" }}>
