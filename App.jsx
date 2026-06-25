@@ -23117,7 +23117,7 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
 // so a client on a computer gets the same upgraded navigation experience.
 function CPDesktopSidebar({ page, settingsOpen, portalUnread, branding, client, isStaffPreview, T, vp = {}, onNav, onOpenSettings, onRefresh, onSignOut }) {
   return (
-    <aside style={{ width: vp?.isTablet ? 208 : 244, flexShrink: 0, height: "100%", background: T.surface, borderRight: `1px solid ${T.border}`, display: "flex", flexDirection: "column" }}>
+    <aside style={{ width: vp?.isTablet ? 208 : 244, flexShrink: 0, height: isStaffPreview ? "auto" : "100%", alignSelf: "stretch", background: T.surface, borderRight: `1px solid ${T.border}`, display: "flex", flexDirection: "column" }}>
       {/* Logo + portal name */}
       <div style={{ padding: "20px 18px 16px", display: "flex", alignItems: "center", gap: 11, borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
         <div style={{ width: 38, height: 38, borderRadius: 11, background: T.primary, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, boxShadow: `0 2px 8px ${hexA(T.primary, 0.35)}` }}>
@@ -23222,10 +23222,12 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
   }, [client.id]);
   const vp = useViewport();
   const wide = vp.isTablet || vp.isDesktop;
-  // On a real client's desktop browser, render the upgraded sidebar shell (same as the
-  // staff side). Staff "Preview Portal as X" stays in the phone layout so its fixed
-  // overlay isn't disturbed.
-  const isDesktopShell = vp.isDesktop && !isStaffPreview;
+  // Render the upgraded sidebar shell on any desktop-width viewport — INCLUDING staff "Preview
+  // Portal as X", so the owner sees the real desktop client experience. Preview's wrapper is
+  // position:relative (not the fixed full-screen of a real client), so the desktop <main> below
+  // flows (the page scrolls) instead of using a fixed-height internal scroller, and the sidebar
+  // stretches to the content instead of forcing height:100% against an unbounded parent.
+  const isDesktopShell = vp.isDesktop;
 
   // The portal screens — extracted so both the mobile (header + bottom nav) and the
   // desktop (sidebar) shells render them without duplication.
@@ -23311,8 +23313,8 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
 
       {/* Main content — desktop docks beside the sidebar; on mobile <main> is the only scroller */}
       {isDesktopShell ? (
-        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-          <main style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: vp.isTablet ? "24px 22px" : "32px 40px", fontSize: `${textScale}em` }}>
+        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", ...(isStaffPreview ? {} : { overflow: "hidden" }) }}>
+          <main style={{ flex: 1, ...(isStaffPreview ? {} : { minHeight: 0, overflowY: "auto" }), padding: vp.isTablet ? "24px 22px" : "32px 40px", fontSize: `${textScale}em` }}>
             <div style={{ maxWidth: vp.isTablet ? 1040 : ((page === "cp_invoices" || page === "cp_home") ? 1320 : 940), margin: "0 auto", width: "100%" }}>{screens}</div>
           </main>
         </div>
