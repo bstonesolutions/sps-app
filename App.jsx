@@ -7127,20 +7127,14 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
           </div>
         )}
         {photos.length < MAX_PHOTOS && (
-          // Build 15, 7H — Camera is the primary one-tap action; Library is one tap away. The
-          // single input used to pop the iOS source sheet (Camera/Library/Files) on every add.
-          <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
-            <label style={{ flex: 2, display: "flex", alignItems: "center", justifyContent: "center", gap: 9, padding: "16px 14px", borderRadius: 12, border: "none", background: T.primary, cursor: "pointer", color: "#fff", fontSize: 14, fontWeight: 800 }}>
-              <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-              {busy ? "Adding…" : "Take Photo"}
-              <input type="file" accept="image/*,image/heic,image/heif" capture="environment" multiple onChange={e => addPhotos(e, "General")} style={{ display: "none" }} />
-            </label>
-            <label style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "16px 12px", borderRadius: 12, border: `2px dashed ${hexA(T.primary, 0.5)}`, background: T.surface, cursor: "pointer", color: T.primary, fontSize: 13, fontWeight: 800 }}>
-              <svg viewBox="0 0 24 24" width={17} height={17} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
-              Library
-              <input type="file" accept="image/*,image/heic,image/heif" multiple onChange={e => addPhotos(e, "General")} style={{ display: "none" }} />
-            </label>
-          </div>
+          // Camera-only: tapping opens the camera directly (capture="environment"). Techs always
+          // shoot on-site, so the Library/upload option was removed to cut the extra source-picker
+          // step. On desktop browsers capture is ignored, so staff there still get a file picker.
+          <label style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 9, padding: "16px 14px", borderRadius: 12, border: "none", background: T.primary, cursor: "pointer", color: "#fff", fontSize: 14, fontWeight: 800 }}>
+            <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            {busy ? "Adding…" : "Take Photo"}
+            <input type="file" accept="image/*,image/heic,image/heif" capture="environment" multiple onChange={e => addPhotos(e, "General")} style={{ display: "none" }} />
+          </label>
         )}
       </div>
 
@@ -9593,7 +9587,9 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
               if (selectMode) return toggle(s.sid);
               // A finished stop opens its SAVED report (photos/readings/services/notes),
               // not a blank complete form. Falls back to the complete form if no record.
-              if (isComplete) { const entry = (c?.history || []).find(h => String(h.sid) === String(s.sid)); if (entry) return setHistoryEdit({ entry, clientId: c.id }); }
+              // Completed → always open the SAVED report (editable). Never fall through to a
+              // blank complete form, which would let a re-completion overwrite the saved record.
+              if (isComplete) { const entry = (c?.history || []).find(h => String(h.sid) === String(s.sid)); if (entry) setHistoryEdit({ entry, clientId: c.id }); return; }
               if (perms.completeStops) setCompleteModal({ stop: s, client: c, dayDate });
             }}
             style={{ padding: compact ? "9px 14px" : "11px 16px", cursor: (selectMode || perms.completeStops || isComplete) ? "pointer" : "default", display: "flex", gap: 12, alignItems: "center" }}
@@ -9654,7 +9650,14 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
                     {perms.completeStops && (
-                      <button onClick={e => { e.stopPropagation(); if (confirm("Re-open this stop? This removes its completed record so you can redo it.")) onUncomplete(s.id, s.sid); }}
+                      <button onClick={e => { e.stopPropagation(); const entry = (c?.history || []).find(h => String(h.sid) === String(s.sid)); if (entry) setHistoryEdit({ entry, clientId: c.id }); }}
+                        title="Edit this visit's saved report — keeps everything you entered"
+                        style={{ background: "none", border: "none", color: T.primary, fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", padding: 2, display: "flex", alignItems: "center", gap: 4 }}>
+                        <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg> Edit
+                      </button>
+                    )}
+                    {perms.completeStops && (
+                      <button onClick={e => { e.stopPropagation(); if (confirm("Re-open this stop? This REMOVES its completed record so you can redo it from scratch. To just change a detail, use Edit instead.")) onUncomplete(s.id, s.sid); }}
                         style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", padding: 2, display: "flex", alignItems: "center", gap: 4 }}>
                         <Icon name="refresh" size={12} /> Re-open
                       </button>
