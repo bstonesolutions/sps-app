@@ -21912,7 +21912,7 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
     <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
       {/* Page title */}
       <div>
-        <div style={{ fontSize:26, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>{pondLabel(client, true)}</div>
+        <div style={{ fontSize:26, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>My Property Care</div>
       </div>
 
       {/* Property overview — the pond/pool details up top, an at-a-glance summary of what we care for */}
@@ -22378,7 +22378,7 @@ function CPPond({ client, T }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
       {/* Page header */}
       <div style={{ paddingTop: 4 }}>
-        <div style={{ fontSize: 26, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>{pondLabel(client, true)}</div>
+        <div style={{ fontSize: 26, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>My Property Care</div>
         {client.pondSize && <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>{client.pondSize}{client.pondType ? ` · ${client.pondType}` : ""}</div>}
         {client.pondGallons && <div style={{ fontSize: 13, color: T.primary, fontWeight: 700, marginTop: 2 }}>{parseInt(client.pondGallons).toLocaleString()} gallons</div>}
       </div>
@@ -23138,7 +23138,7 @@ function CPDesktopSidebar({ page, settingsOpen, portalUnread, branding, client, 
             <button key={n.id} onClick={() => onNav(n.id)}
               style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 13px", border: "none", borderRadius: 11, background: active ? T.primary : "transparent", color: active ? "#fff" : T.text, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%", fontWeight: active ? 700 : 600, fontSize: 14, letterSpacing: "-0.01em" }}>
               <CIcon name={n.icon} size={19} />
-              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n.id === "cp_property" ? pondLabel(client) : n.label}</span>
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n.label}</span>
               {n.id === "cp_messages" && portalUnread > 0 && <span style={{ minWidth: 18, height: 18, borderRadius: 9, background: active ? "rgba(255,255,255,0.25)" : T.primary, color: "#fff", fontSize: 11, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 5px", flexShrink: 0 }}>{portalUnread}</span>}
             </button>
           );
@@ -23341,7 +23341,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
                   <span style={{ position: "absolute", top: -1, right: 1, minWidth: 15, height: 15, borderRadius: 8, background: "#E5484D", color: "#fff", fontSize: 9.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px", border: `2px solid ${T.surface}` }}>{badge}</span>
                 )}
               </span>
-              <span style={{ fontSize: 10, fontWeight: active ? 700 : 500, letterSpacing: "-0.01em", whiteSpace: "nowrap" }}>{n.id === "cp_property" ? pondLabel(client) : n.label}</span>
+              <span style={{ fontSize: 10, fontWeight: active ? 700 : 500, letterSpacing: "-0.01em", whiteSpace: "nowrap" }}>{n.label}</span>
             </button>
           );
         })}
