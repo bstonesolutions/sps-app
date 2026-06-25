@@ -5070,6 +5070,24 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
             {client.preferredDay && <span style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color: client.preferredDayOverride ? T.primary : T.textMuted, fontWeight: client.preferredDayOverride ? 700 : 400 }}><Icon name="calendar" size={12} />{client.preferredDay}{client.preferredDayOverride ? " (client request)" : " (route day)"}</span>}
             {perms.seeBalances && <span style={{ display:"flex", alignItems:"center", gap:4, fontSize:12, fontWeight:700, color: owed <= 0 ? T.accent : T.warning }}><Icon name="dollar" size={12} />${owed.toFixed(2)}{owed > 0 ? " due" : " balance"}</span>}
           </div>
+
+          {/* Quick contact — one-tap Call / Email. (Texting still goes through the business line in the notify flows, never device SMS.) */}
+          {(client.phone || client.email) && (
+            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+              {client.phone && (
+                <a href={`tel:${String(client.phone).replace(/[^\d+]/g, "")}`}
+                  style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "11px", borderRadius: 12, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 13, fontWeight: 700, textDecoration: "none", fontFamily: "inherit" }}>
+                  <Icon name="phone" size={14} /> Call
+                </a>
+              )}
+              {client.email && (
+                <a href={`mailto:${client.email}`}
+                  style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "11px", borderRadius: 12, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 13, fontWeight: 700, textDecoration: "none", fontFamily: "inherit" }}>
+                  <Icon name="mail" size={14} /> Email
+                </a>
+              )}
+            </div>
+          )}
         </div>
       </Card>
 
@@ -5098,7 +5116,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
         ))}
       </div>
 
-      {tab === "overview" && <ClientOverview client={client} invoices={invoices} onUpdate={onUpdate} />}
+      {tab === "overview" && <ClientOverview client={client} invoices={invoices} schedule={schedule} onUpdate={onUpdate} />}
       {tab === "equipment" && <ClientEquipment client={client} invoices={invoices} onChange={eq => update({ equipment: eq })} />}
       {tab === "history" && <ClientHistory client={client} catalog={catalog} team={team} onChange={hist => update({ history: hist })} />}
       {tab === "invoices" && (perms.canInvoice || perms.viewInvoices) && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={onSaveInvoice} onDelete={onDeleteInvoice} />}
@@ -5196,7 +5214,7 @@ function PhotoPicker({ photos = [], onChange, label = "Photos", maxPhotos = 10, 
   );
 }
 
-function ClientOverview({ client, onUpdate }) {
+function ClientOverview({ client, invoices = [], schedule = [], onUpdate }) {
   const { T, perms } = useApp();
   const h = client.history?.[0];
   const m = dMeta(client.division);
@@ -5268,6 +5286,36 @@ function ClientOverview({ client, onUpdate }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+
+      {/* At a glance — the gist of this client without hopping tabs */}
+      {(() => {
+        const next = nextServiceFor(client, schedule);
+        const bal = clientOutstanding(client, invoices);
+        const equip = client.equipment || [];
+        const needAttn = equip.filter(e => e.status && e.status !== "Good").length;
+        const freq = TIER_FREQ[eTier] || client.planFreq || "";
+        const tiles = [
+          { label: "Plan", value: eTier || "No plan", sub: eTier ? freq : "" },
+          { label: "Next visit", value: next || "Not scheduled" },
+          ...(perms.seeBalances ? [{ label: "Balance", value: `$${bal.toFixed(2)}`, color: bal > 0 ? T.warning : T.accent, sub: bal > 0 ? "due" : "paid up" }] : []),
+          { label: "Last service", value: h ? (h.date || "—") : "—", sub: h ? (h.type || "") : "no visits yet" },
+          { label: "Equipment", value: String(equip.length), sub: needAttn ? `${needAttn} need attention` : (equip.length ? "all good" : "none on file") },
+        ];
+        return (
+          <Card>
+            <CardHeader title="At a glance" />
+            <div style={{ padding: "14px 16px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              {tiles.map(t => (
+                <div key={t.label} style={{ background: T.surfaceAlt, borderRadius: 14, padding: "12px 14px" }}>
+                  <div style={{ fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 4 }}>{t.label}</div>
+                  <div style={{ fontSize: 16, fontWeight: 800, color: t.color || T.text, letterSpacing: "-0.01em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.value}</div>
+                  {t.sub && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.sub}</div>}
+                </div>
+              ))}
+            </div>
+          </Card>
+        );
+      })()}
 
       {/* Site Media — photos + videos consolidated into one prominent card */}
       <Card>
