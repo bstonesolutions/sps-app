@@ -17483,35 +17483,9 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
   if (perms.isAdmin) tabs.push(["sync", "Sync"]);
   // if the current tab isn't available (e.g. switched to employee view), fall back to the first one
   const activeTab = tabs.some(([id]) => id === tab) ? tab : (tabs[0] ? tabs[0][0] : null);
+  const wide = vp.isDesktop || vp.isTablet;
 
-  return (
-    <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h2 style={{ margin: 0, fontSize: 26, fontWeight: 700, color: T.text, letterSpacing: "-0.03em" }}>Customize</h2>
-        {activeTab === "branding" && <SaveBar ctl={brandCtl} T={T} />}
-      </div>
-
-      {tabs.length === 0 ? (
-        <Card>
-          <div style={{ padding: 28, textAlign: "center" }}>
-            <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="lock" size={26} /></div>
-            <div style={{ fontSize: 15, fontWeight: 700, color: T.text, marginBottom: 6 }}>Nothing to customize</div>
-            <div style={{ fontSize: 13, color: T.textMuted }}>Your access doesn't include any settings. Ask your admin if you need changes.</div>
-          </div>
-        </Card>
-      ) : (<>
-      <div style={{ display: "flex", gap: 6, marginBottom: 18, overflowX: "auto", paddingBottom: 4, WebkitOverflowScrolling: "touch" }}>
-        {tabs.map(([id, label]) => (
-          <button key={id} onClick={() => setTab(id)} style={{
-            flexShrink: 0, padding: "9px 16px", border: "none", borderRadius: 100,
-            fontSize: 13, fontWeight: 600, cursor: "pointer",
-            background: activeTab === id ? T.primary : T.surfaceAlt,
-            color: activeTab === id ? "#fff" : T.textMuted,
-            fontFamily: "inherit", letterSpacing: "-0.01em",
-          }}>{label}</button>
-        ))}
-      </div>
-
+  const tabContent = (<>
       {activeTab === "services" && (
         <div key="services-tab">
           {perms.editCatalog && (
@@ -18019,7 +17993,53 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
       </Collapsible>
 
       </>}
-      </>)}
+  </>);
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: 26, fontWeight: 700, color: T.text, letterSpacing: "-0.03em" }}>Customize</h2>
+        {activeTab === "branding" && <SaveBar ctl={brandCtl} T={T} />}
+      </div>
+
+      {tabs.length === 0 ? (
+        <Card>
+          <div style={{ padding: 28, textAlign: "center" }}>
+            <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="lock" size={26} /></div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: T.text, marginBottom: 6 }}>Nothing to customize</div>
+            <div style={{ fontSize: 13, color: T.textMuted }}>Your access doesn't include any settings. Ask your admin if you need changes.</div>
+          </div>
+        </Card>
+      ) : wide ? (
+        <div style={{ display: "grid", gridTemplateColumns: vp.isTablet ? "184px 1fr" : "212px 1fr", gap: 22, alignItems: "start" }}>
+          <nav style={{ display: "flex", flexDirection: "column", gap: 4, position: "sticky", top: 0 }}>
+            {tabs.map(([id, label]) => (
+              <button key={id} onClick={() => setTab(id)} style={{
+                textAlign: "left", padding: "10px 14px", border: "none", borderRadius: 10,
+                fontSize: 14, fontWeight: activeTab === id ? 700 : 600, cursor: "pointer",
+                background: activeTab === id ? T.primary : "transparent",
+                color: activeTab === id ? "#fff" : T.text, fontFamily: "inherit", letterSpacing: "-0.01em",
+              }}>{label}</button>
+            ))}
+          </nav>
+          <div style={{ minWidth: 0 }}>{tabContent}</div>
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 6, marginBottom: 18, overflowX: "auto", paddingBottom: 4, WebkitOverflowScrolling: "touch" }}>
+            {tabs.map(([id, label]) => (
+              <button key={id} onClick={() => setTab(id)} style={{
+                flexShrink: 0, padding: "9px 16px", border: "none", borderRadius: 100,
+                fontSize: 13, fontWeight: 600, cursor: "pointer",
+                background: activeTab === id ? T.primary : T.surfaceAlt,
+                color: activeTab === id ? "#fff" : T.textMuted,
+                fontFamily: "inherit", letterSpacing: "-0.01em",
+              }}>{label}</button>
+            ))}
+          </div>
+          {tabContent}
+        </>
+      )}
     </div>
   );
 }
