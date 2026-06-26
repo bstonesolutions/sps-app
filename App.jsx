@@ -3788,7 +3788,7 @@ function useKeyboardInset() {
   return inset;
 }
 
-function Modal({ title, children, onClose }) {
+function Modal({ title, children, onClose, maxWidth = 600 }) {
   const { T } = useApp();
   const kb = useKeyboardInset();
   // When a field is focused, bring it into the visible (above-keyboard) area.
@@ -3809,7 +3809,7 @@ function Modal({ title, children, onClose }) {
     // as a backup. The CLOSE BUTTON lives in the card's own fixed header, so it's
     // always inside the white card and never clipped by the app header or notch.
     <div onClick={onClose} style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 200, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", paddingTop: "max(14px, env(safe-area-inset-top))", paddingLeft: 14, paddingRight: 14, paddingBottom: kb > 0 ? kb + 14 : "max(14px, env(safe-area-inset-bottom))", transition: "padding-bottom 0.18s ease", overscrollBehavior: "contain" }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: T.surface, borderRadius: 24, width: "100%", maxWidth: 600, flex: "0 1 auto", minHeight: 0, maxHeight: `calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 28px - ${kb}px)`, display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: T.shadowLg, border: `1px solid ${T.border}`, animation: "spsModalIn 0.22s cubic-bezier(0.16, 1, 0.3, 1)" }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: T.surface, borderRadius: 24, width: "100%", maxWidth: maxWidth, flex: "0 1 auto", minHeight: 0, maxHeight: `calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 28px - ${kb}px)`, display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: T.shadowLg, border: `1px solid ${T.border}`, animation: "spsModalIn 0.22s cubic-bezier(0.16, 1, 0.3, 1)" }}>
         {/* Fixed header INSIDE the card: title + close X. flexShrink:0 keeps it pinned
             to the card's top-right while the body scrolls. */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "15px 14px 13px 22px", flexShrink: 0, borderBottom: `1px solid ${T.border}` }}>
@@ -5835,6 +5835,8 @@ function ClientEquipment({ client, invoices, onChange }) {
 
 function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
   const { T } = useApp();
+  const vp = useViewport();
+  const wide = vp.isDesktop || vp.isTablet; // desktop/iPad → two-column layout
   const num = (v) => parseFloat(v) || 0;
   const b = entry.breakdown || {};
   const legacy = { pH: entry.ph, Ammonia: entry.ammonia, Nitrite: entry.nitrite, Temperature: entry.temp };
@@ -5905,10 +5907,7 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
     </div>
   );
 
-  return (
-    <Modal title={`Edit Service — ${entry.date}`} onClose={onClose}>
-      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        {/* Service type + tech */}
+  const typeTechBlock = (
         <div style={{ display: "flex", gap: 10 }}>
           <div style={{ flex: 1 }}>
             <label style={labelStyle}>Service Type</label>
@@ -5927,8 +5926,9 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
             </select>
           </div>
         </div>
+  );
 
-        {/* Services performed */}
+  const servicesBlock = (
         <div>
           <label style={labelStyle}>Services Performed</label>
           <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
@@ -5945,9 +5945,9 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
             <button onClick={() => setSvcList(l => [...l, { name: "", price: "" }])} style={{ alignSelf: "flex-start", background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4, padding: "2px 0" }}><Icon name="plus" size={13} /> Add service</button>
           </div>
         </div>
+  );
 
-        {/* Products purchased (past visit — name list only) */}
-        {(catalog?.products || []).length > 0 && (() => {
+  const productsBlock = (catalog?.products || []).length > 0 ? (() => {
           // Collapsible + searchable + category-grouped, to match the live complete-stop picker.
           const q = productSearch.trim().toLowerCase();
           const filtered = (catalog.products || []).filter(p => { const n = (typeof p === "string" ? p : p.name) || ""; return !q || n.toLowerCase().includes(q); });
@@ -5983,12 +5983,12 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
               )}
             </div>
           );
-        })()}
+        })() : null;
 
-        <div><label style={labelStyle}>Notes to Client</label><textarea rows={2} value={notes} onChange={e => setNotes(e.target.value)} style={ta} /></div>
-        <div><label style={labelStyle}>Notes to Office (internal)</label><textarea rows={2} value={officeNotes} onChange={e => setOfficeNotes(e.target.value)} style={ta} /></div>
+  const notesClientBlock = <div><label style={labelStyle}>Notes to Client</label><textarea rows={2} value={notes} onChange={e => setNotes(e.target.value)} style={ta} /></div>;
+  const notesOfficeBlock = <div><label style={labelStyle}>Notes to Office (internal)</label><textarea rows={2} value={officeNotes} onChange={e => setOfficeNotes(e.target.value)} style={ta} /></div>;
 
-        {Object.keys(readings).length > 0 && (
+  const readingsBlock = Object.keys(readings).length > 0 ? (
           <div>
             <label style={labelStyle}>Readings</label>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -6024,8 +6024,9 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
               })}
             </div>
           </div>
-        )}
+  ) : null;
 
+  const photosBlock = (
         <div>
           <label style={labelStyle}>Photos</label>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
@@ -6042,7 +6043,9 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
             </label>
           </div>
         </div>
+  );
 
+  const financialsBlock = (
         <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: 14 }}>
           <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 12 }}>Financials</div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
@@ -6066,9 +6069,29 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
             <span style={{ fontSize: 16, fontWeight: 800, color: profit >= 0 ? T.accent : "#C0392B" }}>{money(Math.abs(profit))} <span style={{ fontSize: 12, color: T.textMuted }}>({margin.toFixed(0)}%)</span></span>
           </div>
         </div>
+  );
 
-        <Btn onClick={save} style={{ width: "100%", padding: "12px", borderRadius: 12 }}>Save Changes</Btn>
-      </div>
+  const saveBtn = <Btn onClick={save} style={{ width: "100%", padding: "12px", borderRadius: 12 }}>Save Changes</Btn>;
+
+  return (
+    <Modal title={`Edit Service — ${entry.date}`} onClose={onClose} maxWidth={wide ? 940 : 600}>
+      {wide ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, alignItems: "start" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              {typeTechBlock}{servicesBlock}{productsBlock}{notesClientBlock}{notesOfficeBlock}{photosBlock}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              {readingsBlock}{financialsBlock}
+            </div>
+          </div>
+          {saveBtn}
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {typeTechBlock}{servicesBlock}{productsBlock}{notesClientBlock}{notesOfficeBlock}{readingsBlock}{photosBlock}{financialsBlock}{saveBtn}
+        </div>
+      )}
       {viewer !== null && <PhotoViewer photos={photos} index={viewer} onClose={() => setViewer(null)} />}
     </Modal>
   );
