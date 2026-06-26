@@ -373,7 +373,7 @@ function generateStatementPDF(client, invoices, branding) {
 
 // Full client dossier — contact, plan, property, equipment, service history, financials, notes.
 // A printable record for a new tech, a client meeting, or the file. Reuses the same branded look.
-function generateClientProfilePDF(client, invoices, branding, tiers) {
+function generateClientProfilePDF(client, invoices, branding, tiers, opts = {}) {
   return loadJsPDF().then(JsPDF => {
     const doc = new JsPDF({ unit: "pt", format: "letter" });
     const primary = branding?.accentColor || "#B81D24";
@@ -477,7 +477,9 @@ function generateClientProfilePDF(client, invoices, branding, tiers) {
       });
     }
 
-    // Financial summary
+    // Financial summary — omitted for roles without balance/invoice access (e.g. Field Crew),
+    // so a printable profile can't leak AR that the on-screen UI already hides from them.
+    if (opts.showFinancials) {
     section("Financial Summary");
     row([["INVOICE #", M], ["DATE", M + 95], ["STATUS", M + 210], ["AMOUNT", W - M, "right"]], { bold: true, size: 9, color: "#6B7280", gap: 6 });
     doc.setDrawColor("#E5E7EB"); doc.line(M, y, W - M, y); y += 14;
@@ -494,6 +496,7 @@ function generateClientProfilePDF(client, invoices, branding, tiers) {
     doc.text(`Total paid: $${paid.toFixed(2)}`, W - M, y, { align: "right" }); y += 17;
     doc.setTextColor(primary); doc.setFontSize(12.5);
     doc.text(`Balance due: $${open.toFixed(2)}`, W - M, y, { align: "right" });
+    }
 
     // Notes
     if (client.notes) {
@@ -5035,7 +5038,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
           <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 10 }}>
             <Badge label={eTier || "No tier"} bg={pm.bg} color={pm.color || pm.text} />
             <div style={{ flex: 1 }} />
-            <Btn variant="ghost" sm onClick={() => generateClientProfilePDF(client, sortInvoices((invoices||[]).filter(iv => invoiceMatchesClient(iv, client))), branding, tiers)} style={{ display:"flex", alignItems:"center", gap:5 }}>
+            <Btn variant="ghost" sm onClick={() => generateClientProfilePDF(client, sortInvoices((invoices||[]).filter(iv => invoiceMatchesClient(iv, client))), branding, tiers, { showFinancials: perms.seeBalances })} style={{ display:"flex", alignItems:"center", gap:5 }}>
               <Icon name="download" size={13} /> PDF
             </Btn>
             {perms.editClients && (
@@ -18307,10 +18310,16 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
     if (!draft.trim() || sending) return;
     const body = draft.trim();
     setSending(true); setSendErr("");
-    const ok = await send(draft, sender, senderName);
-    setSending(false);
-    if (ok) { setDraft(""); if (onSent) onSent(body); }   // only clear the box once it's actually sent
-    else setSendErr("Message didn't send — check your connection and try again.");
+    try {
+      const ok = await send(draft, sender, senderName);
+      if (ok) { setDraft(""); if (onSent) onSent(body); }   // only clear the box once it's actually sent
+      else setSendErr("Message didn't send — check your connection and try again.");
+    } catch {
+      // A thrown rejection (dead connection / aborted fetch) must NOT leave the spinner stuck.
+      setSendErr("Message didn't send — check your connection and try again.");
+    } finally {
+      setSending(false);
+    }
   };
 
   if (loading) {
