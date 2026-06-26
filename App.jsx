@@ -12179,8 +12179,9 @@ function CatalogManager({ catalog, setCatalog }) {
 // ─────────────────────────────────────────────
 // BUDGET MANAGER (admin: money in/out, projected vs actual)
 // ─────────────────────────────────────────────
-function BudgetManager({ budget, setBudget, clients, costs, invoices, embedded = false }) {
+function BudgetManager({ budget, setBudget, clients, costs, invoices, embedded = false, vp = {} }) {
   const { T } = useApp();
+  const wide = vp.isDesktop || vp.isTablet; // desktop/iPad → two columns (the only render site is the full Budget page)
   const money = (n) => `$${Math.round(n).toLocaleString()}`;
   const num = (v) => parseFloat(v) || 0;
 
@@ -12232,11 +12233,7 @@ function BudgetManager({ budget, setBudget, clients, costs, invoices, embedded =
     </Card>
   );
 
-  return (
-    <>
-      {!embedded && <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 14 }}>Admin only. Set your expected monthly money in and out, then compare against what's actually been completed this month.</div>}
-
-      {/* Projected net */}
+  const projectedCard = (
       <Card style={{ marginBottom: 14 }}>
         <div style={{ padding: 18 }}>
           <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 12 }}>Projected Monthly</div>
@@ -12250,11 +12247,9 @@ function BudgetManager({ budget, setBudget, clients, costs, invoices, embedded =
           </div>
         </div>
       </Card>
+  );
 
-      {section("income", "Expected Income", T.accent)}
-      {section("expenses", "Expected Expenses", T.warning)}
-
-      {/* Actuals this month */}
+  const actualCard = (
       <Card>
         <CardHeader title="Actual — This Month" />
         <div style={{ padding: 18 }}>
@@ -12279,9 +12274,9 @@ function BudgetManager({ budget, setBudget, clients, costs, invoices, embedded =
           </div>
         </div>
       </Card>
+  );
 
-      {/* Take-home after taxes */}
-      {(() => {
+  const takeHomeBlock = (() => {
         const taxCfg = { ...DEFAULT_COSTS.tax, ...((costs && costs.tax) || {}) };
         if (!taxCfg.enabled) return null;
         // Annualize the monthly net so federal brackets apply sensibly, then divide back to monthly
@@ -12342,7 +12337,32 @@ function BudgetManager({ budget, setBudget, clients, costs, invoices, embedded =
             </div>
           </Card>
         );
-      })()}
+      })();
+
+  return (
+    <>
+      {!embedded && <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 14 }}>Admin only. Set your expected monthly money in and out, then compare against what's actually been completed this month.</div>}
+      {wide ? (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, alignItems: "start" }}>
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            {section("income", "Expected Income", T.accent)}
+            {section("expenses", "Expected Expenses", T.warning)}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            {projectedCard}
+            {actualCard}
+            {takeHomeBlock}
+          </div>
+        </div>
+      ) : (
+        <>
+          {projectedCard}
+          {section("income", "Expected Income", T.accent)}
+          {section("expenses", "Expected Expenses", T.warning)}
+          {actualCard}
+          {takeHomeBlock}
+        </>
+      )}
     </>
   );
 }
@@ -20927,7 +20947,7 @@ function BudgetScreen({ budget, setBudget, clients, costs, invoices, onNav, T, v
       </div>
 
       {/* The full budget detail — targets, actuals, P&L, take-home */}
-      <BudgetManager budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} embedded />
+      <BudgetManager budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} embedded vp={vp} />
     </div>
   );
 }
