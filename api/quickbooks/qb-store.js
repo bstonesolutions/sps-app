@@ -21,7 +21,10 @@ const ROW_ID = "default"; // single-business app → one token row
 export function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  // Authorization is required: native (capacitor://localhost) calls these endpoints cross-origin and
+  // attaches a Bearer token, which forces a CORS preflight. Omitting it here makes the browser block
+  // every authenticated QB call (sync, create/update-invoice) on native while same-origin web works.
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
 const sbHeaders = () => ({
