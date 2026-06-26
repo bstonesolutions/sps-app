@@ -3,7 +3,7 @@
 // SERVER-SIDE and store them in the qb_tokens table — tokens never travel in a URL
 // or reach the client. Then we show a simple "connected, return to the app" page;
 // the app polls /api/quickbooks/status to detect the connection.
-import { saveTokens } from "./qb-store.js";
+import { saveTokens, getTokens } from "./qb-store.js";
 import crypto from "crypto";
 
 // Same key + format as auth.js makeState(). The state is base64url("<nonce>.<ts>.<hmac>"),
@@ -89,6 +89,17 @@ export default async function handler(req, res) {
       refresh_token: tokens.refresh_token,
       expires_in:    tokens.expires_in,
     });
+
+    // Read-after-write: confirm the token actually PERSISTED and is readable (with a realm_id) before
+    // we tell the user "connected". Without this, a misconfigured token store — a missing/wrong
+    // qb_tokens table, a null realm_id, or a Supabase URL/key mismatch — can make saveTokens NOT throw
+    // yet leave nothing for /status to read, which is exactly the "connects in the browser but reloads
+    // as not connected / Load failed" bug. Surfacing it here stops the false "connected" page.
+    const saved = await getTokens().catch(() => null);
+    if (!saved || !saved.access_token || !saved.realm_id) {
+      console.error("QB save verification failed — token not readable after save:", { hasRow: !!saved, realm: saved && saved.realm_id, hasAccess: !!(saved && saved.access_token) });
+      return res.status(200).send(page("QuickBooks not connected", "We reached QuickBooks, but the app couldn't save the connection. This is a server setup issue — the qb_tokens table is likely missing or misconfigured. Tell your developer: “QB token save verification failed”, then reconnect once it's fixed.", false));
+    }
 
     return res.status(200).send(page("QuickBooks connected", "You're all set. Close this window and return to the SPS app — it will show as connected.", true));
   } catch (err) {

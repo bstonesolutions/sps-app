@@ -49,6 +49,22 @@ To turn it on safely:
 These are used via the existing `supabase` client (we never modify `supabaseClient.js`):
 
 ```sql
+-- QuickBooks OAuth tokens — ONE row (id='default'), upserted by api/quickbooks/* with the SERVICE_ROLE
+-- key. saveTokens posts with ?on_conflict=id, so `id` MUST be the primary key / unique. If this table
+-- is missing or `id` isn't unique, the OAuth callback "connects" in the browser but the token never
+-- persists → /status reads "not connected" / "Load failed" forever. (This was undocumented and is a
+-- known cause of that exact bug — create it before connecting QuickBooks.)
+CREATE TABLE IF NOT EXISTS public.qb_tokens (
+  id            text PRIMARY KEY,
+  realm_id      text,
+  access_token  text,
+  refresh_token text,
+  expires_at    timestamptz,
+  updated_at    timestamptz DEFAULT now()
+);
+ALTER TABLE public.qb_tokens ENABLE ROW LEVEL SECURITY;
+-- No policies needed: only the server's SERVICE_ROLE key touches it (bypasses RLS); the anon key gets nothing.
+
 -- Live staff location while clocked in (one row per staff member, upserted).
 CREATE TABLE IF NOT EXISTS public.staff_locations (
   staff_id   text PRIMARY KEY,
