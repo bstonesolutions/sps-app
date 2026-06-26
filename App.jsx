@@ -15616,7 +15616,14 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
     try {
       // Tokens + refresh are handled server-side; the app sends none.
       const res = await fetch(`${QB_API}/sync`, { headers: await authHeaders() });
-      if (res.status === 401) { qbSetConnected(false); setQbSyncMsg("QuickBooks session expired. Reconnect under Customize."); return; }
+      if (res.status === 401) {
+        const d401 = await res.json().catch(() => ({}));
+        qbSetConnected(false);
+        const why = d401.reason ? ` (${d401.reason})` : (d401.detail ? ` — ${String(d401.detail).slice(0, 140)}` : "");
+        setQbSyncMsg("QuickBooks session expired" + why + ". Reconnect under Customize.");
+        setTimeout(() => setQbSyncMsg(""), 8000);
+        return;
+      }
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       if (onSyncData && data.invoices) onSyncData(data.invoices, data.customers);

@@ -17,7 +17,10 @@ export default async function handler(req, res) {
   try {
     ({ access_token, realm_id } = await getValidAccessToken());
   } catch (e) {
-    return res.status(401).json({ error: 'Not connected to QuickBooks', reconnect: true });
+    // Surface WHY (e.g. "refresh_failed" = token expired + refresh rejected by Intuit, vs "not_connected"
+    // = no usable token). Without this the UI just says "Load failed" and the real cause is invisible.
+    console.error("QB sync getValidAccessToken failed:", (e && e.message) || e);
+    return res.status(401).json({ error: 'Not connected to QuickBooks', reason: (e && e.message) || String(e), reconnect: true });
   }
 
   const base = `${QB_API_BASE}/v3/company/${realm_id}`;
@@ -65,10 +68,15 @@ export default async function handler(req, res) {
     ]);
 
     if (invoiceRes.status === 401) {
-      return res.status(401).json({ error: 'Token expired', action: 'reconnect' });
+      const body401 = await invoiceRes.text().catch(() => "");
+      console.error("QB sync 401 from QuickBooks API:", body401);
+      return res.status(401).json({ error: 'Token expired', action: 'reconnect', detail: body401.slice(0, 400) });
     }
     if (!invoiceRes.ok || !customerRes.ok) {
-      throw new Error('QB API error ' + invoiceRes.status);
+      const bad = invoiceRes.ok ? customerRes : invoiceRes;
+      const errBody = await bad.text().catch(() => "");
+      console.error("QB sync API error:", "invoice", invoiceRes.status, "customer", customerRes.status, errBody);
+      throw new Error('QB API error (invoice ' + invoiceRes.status + ', customer ' + customerRes.status + ')' + (errBody ? ': ' + errBody.slice(0, 300) : ''));
     }
 
     const invoiceData  = await invoiceRes.json();
