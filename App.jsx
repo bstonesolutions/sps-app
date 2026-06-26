@@ -13889,8 +13889,9 @@ function QBConnect({ onSyncData }) {
   );
 }
 
-function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyncData }) {
+function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyncData, vp = {} }) {
   const { T } = useApp();
+  const wide = vp.isDesktop || vp.isTablet; // desktop/iPad → two columns
   const cfg = { ...DEFAULT_INVOICING, ...(invoicing || {}) };
   const set = (k, v) => setInvoicing({ ...cfg, [k]: v });
   const setB = (k, v) => setBranding(b => ({ ...b, [k]: v }));
@@ -13906,8 +13907,7 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyn
     </div>
   );
 
-  return (
-    <>
+  const defaultsCard = (
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Invoice Defaults" />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
@@ -13932,7 +13932,9 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyn
           <div><label style={labelStyle}>Default Terms / Notes</label><textarea style={{ ...field, resize: "vertical" }} rows={2} value={cfg.terms} onChange={e => set("terms", e.target.value)} /></div>
         </div>
       </Card>
+  );
 
+  const paymentMethodsCard = (
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Online Payment Methods" />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 16 }}>
@@ -13952,7 +13954,9 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyn
           )}
         </div>
       </Card>
+  );
 
+  const lateFeesCard = (
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Late Fees" />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 16 }}>
@@ -13990,7 +13994,9 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyn
           )}
         </div>
       </Card>
+  );
 
+  const whatShowsCard = (
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="What Shows on Invoices" />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 16 }}>
@@ -14000,7 +14006,9 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyn
           <div><label style={labelStyle}>Invoice Footer <span style={{ textTransform: "none", color: T.textMuted, fontWeight: 400 }}>(small print)</span></label><input style={field} value={cfg.footer || ""} onChange={e => set("footer", e.target.value)} placeholder="Make checks payable to Stone Property Solutions" /></div>
         </div>
       </Card>
+  );
 
+  const accentColorCard = (
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Accent Color" />
         <div style={{ padding: 18 }}>
@@ -14016,8 +14024,10 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyn
           </div>
         </div>
       </Card>
+  );
 
-      {/* ── TEMPLATE DESIGNER ── */}
+  // ── TEMPLATE DESIGNER ──
+  const invoiceLayoutCard = (
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Invoice Layout" />
         <div style={{ padding: "0 18px", marginTop: -6, fontSize: 12, color: T.textMuted }}>Design exactly how client invoices look.</div>
@@ -14101,12 +14111,43 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyn
           )}
         </div>
       </Card>
+  );
 
-      {/* ── QUICKBOOKS ── */}
+  // ── QUICKBOOKS ──
+  const quickbooksCard = (
       <Card style={{ marginTop: 14 }}>
         <CardHeader title="QuickBooks" />
         <QBConnect onSyncData={onSyncData} />
       </Card>
+  );
+
+  return (
+    <>
+      {wide ? (
+        <div style={{ display: "grid", gridTemplateColumns: "1.05fr 0.95fr", gap: 16, alignItems: "start" }}>
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            {defaultsCard}
+            {paymentMethodsCard}
+            {lateFeesCard}
+            {whatShowsCard}
+            {accentColorCard}
+            {quickbooksCard}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            {invoiceLayoutCard}
+          </div>
+        </div>
+      ) : (
+        <>
+          {defaultsCard}
+          {paymentMethodsCard}
+          {lateFeesCard}
+          {whatShowsCard}
+          {accentColorCard}
+          {invoiceLayoutCard}
+          {quickbooksCard}
+        </>
+      )}
     </>
   );
 }
@@ -17401,7 +17442,7 @@ function SyncStatus({ T, branding, team, currentUserId, email = {} }) {
   );
 }
 
-function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEmail, costs, setCosts, budget, setBudget, clients, setClients, invoices, scheduleCfg, setScheduleCfg, team, setTeam, invoicing, setInvoicing, currentUserId, onResetData, serviceTiers, setServiceTiers, onSyncData, onNav, navDock, setNavDock }) {
+function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEmail, costs, setCosts, budget, setBudget, clients, setClients, invoices, scheduleCfg, setScheduleCfg, team, setTeam, invoicing, setInvoicing, currentUserId, onResetData, serviceTiers, setServiceTiers, onSyncData, onNav, navDock, setNavDock, vp = {} }) {
   const { T, perms } = useApp();
   const fileRef = useRef();
   const [tab, setTab] = useState("branding");
@@ -17494,7 +17535,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
           {(perms.editSettings || perms.canInvoice) && (
             <Collapsible title="Invoicing" subtitle="Invoice numbering, tax rate, payment terms, and QuickBooks link.">
               <SaveBar ctl={invCtl} T={T} />
-              <InvoiceSettings invoicing={invCtl.draft} setInvoicing={invCtl.update} branding={brandCtl.draft} setBranding={brandCtl.update} onSyncData={onSyncData} />
+              <InvoiceSettings invoicing={invCtl.draft} setInvoicing={invCtl.update} branding={brandCtl.draft} setBranding={brandCtl.update} onSyncData={onSyncData} vp={vp} />
             </Collapsible>
           )}
           {/* Merged: client message/email templates + sending identity + staff invite/login emails */}
@@ -25456,7 +25497,7 @@ export default function App({ authEmail = "", onSignOut }) {
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
       {page === "duplicates" && perms.canImport && <DuplicatesScreen clients={clients} invoices={invoices} schedule={schedule} onMerge={handleMergeClients} onGoToClients={() => handleNav("clients")} />}
-      {page === "settings" && <AppSettings onNav={handleNav} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeamSafe} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} navDock={navDock} setNavDock={setNavDock} />}
+      {page === "settings" && <AppSettings onNav={handleNav} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeamSafe} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} navDock={navDock} setNavDock={setNavDock} vp={vp} />}
     </>
   );
 
