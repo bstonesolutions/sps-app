@@ -112,9 +112,11 @@ export default async function handler(req, res) {
       DueDate:      invoice.dueDate || existing.DueDate,
       Line:         lineItems,
       BillEmail:    invoice.clientEmail ? { Address: invoice.clientEmail } : existing.BillEmail,
-      // Online payment methods offered on the pay link — controlled in app settings (default on).
-      AllowOnlineCreditCardPayment: invoice.allowCard !== false,
-      AllowOnlineACHPayment: invoice.allowACH !== false,
+      // Online payment methods: ONLY override QuickBooks' account-level settings when the app
+      // explicitly passes a boolean. Otherwise leave these undefined (dropped from the JSON request)
+      // so QuickBooks shows every method enabled on the account — Card, ACH, PayPal, Venmo, Affirm.
+      AllowOnlineCreditCardPayment: typeof invoice.allowCard === "boolean" ? invoice.allowCard : undefined,
+      AllowOnlineACHPayment: typeof invoice.allowACH === "boolean" ? invoice.allowACH : undefined,
     };
 
     const updRes = await fetch(`${base}/invoice?minorversion=65`, {

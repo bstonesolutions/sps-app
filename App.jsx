@@ -13270,8 +13270,8 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     // Tax rate so QuickBooks can apply sales tax to the taxable lines.
     taxRate: parseFloat(inv.taxRate) || 0,
     // Which online payment methods to offer on the QB pay link (default on).
-    allowCard: invoicing?.qbAllowCard !== false,
-    allowACH: invoicing?.qbAllowACH !== false,
+    allowCard: invoicing?.qbManagePayments === false ? (invoicing?.qbAllowCard !== false) : undefined,
+    allowACH: invoicing?.qbManagePayments === false ? (invoicing?.qbAllowACH !== false) : undefined,
     lineItems: (inv.lineItems || []).map(l => {
       const gross = (parseFloat(l.qty) || 0) * (parseFloat(l.unitPrice) || 0);
       let disc = 0;
@@ -13916,14 +13916,20 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyn
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Online Payment Methods" />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 16 }}>
-          <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: -2, lineHeight: 1.5 }}>
-            Choose which online payment options appear on the QuickBooks pay link when you send an invoice.
-          </div>
-          {row("Credit / Debit Card", "AllowOnlineCreditCardPayment", cfg.qbAllowCard !== false, v => set("qbAllowCard", v))}
-          {row("Bank Transfer (ACH)", "AllowOnlineACHPayment", cfg.qbAllowACH !== false, v => set("qbAllowACH", v))}
-          <div style={{ fontSize: 11.5, color: T.textMuted, background: hexA(T.primary, 0.06), borderRadius: 10, padding: "9px 11px", lineHeight: 1.5 }}>
-            These only take effect if the method is also turned on in your <b>QuickBooks Payments</b> account. QuickBooks won't show a method a client can't actually use, even if it's enabled here. Card and Bank Transfer (ACH) are the methods QuickBooks exposes for invoices via the API.
-          </div>
+          {row("Let QuickBooks manage payment methods", "Recommended — show every method enabled on your QuickBooks Payments account", cfg.qbManagePayments !== false, v => set("qbManagePayments", v))}
+          {cfg.qbManagePayments !== false ? (
+            <div style={{ fontSize: 11.5, color: T.textMuted, background: hexA(T.primary, 0.06), borderRadius: 10, padding: "9px 11px", lineHeight: 1.5 }}>
+              Payment options on the pay link are controlled entirely by your <b>QuickBooks Payments</b> account — Card, Bank Transfer, PayPal, Venmo, Affirm, whatever you've enabled there. The app won't override it.
+            </div>
+          ) : (
+            <>
+              <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: -2, lineHeight: 1.5 }}>
+                Override which options appear. Only Card and Bank Transfer (ACH) can be set per-invoice through the QuickBooks API — turning these off restricts each invoice and hides PayPal/Venmo/Affirm too.
+              </div>
+              {row("Credit / Debit Card", "AllowOnlineCreditCardPayment", cfg.qbAllowCard !== false, v => set("qbAllowCard", v))}
+              {row("Bank Transfer (ACH)", "AllowOnlineACHPayment", cfg.qbAllowACH !== false, v => set("qbAllowACH", v))}
+            </>
+          )}
         </div>
       </Card>
 
@@ -15354,7 +15360,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
   const qbPayload = (iv, c) => ({
     number: iv.number, date: toISO(iv.date) || toISO(todayMDY()), dueDate: toISO(iv.dueDate),
     clientName: c.name || "", clientEmail: c.email || "", clientPhone: c.phone || "", qbCustomerId: c.qbCustomerId || null, qbId: null,
-    taxRate: parseFloat(iv.taxRate) || 0, allowCard: cfg.qbAllowCard !== false, allowACH: cfg.qbAllowACH !== false,
+    taxRate: parseFloat(iv.taxRate) || 0, allowCard: cfg.qbManagePayments === false ? (cfg.qbAllowCard !== false) : undefined, allowACH: cfg.qbManagePayments === false ? (cfg.qbAllowACH !== false) : undefined,
     lineItems: (iv.lineItems || []).map(l => { const qty = parseFloat(l.qty) || 1; const up = parseFloat(l.unitPrice) || 0; return { description: l.desc || "Service", qty: String(qty), unitPrice: up.toFixed(2), kind: l.kind || "custom", taxable: !!l.taxable, isLateFee: false }; }),
     invoiceDiscountType: "", invoiceDiscount: "",
   });
