@@ -21433,23 +21433,47 @@ function ClientStopProgress({ stage, T }) {
 
 // Build 15, Item 8 — the scheduled / arrived / complete status card (the en-route stage uses
 // the live map card instead). Crimson + slate, matches the rest of the portal.
-function ClientStopStatusCard({ stage, stop, tech, client, branding, T, onNav }) {
-  const techFirst = ((tech && tech.name) || "Your technician").split(" ")[0];
-  const dotColor = stage === "complete" ? "#16a34a" : T.primary;
+function ClientStopStatusCard({ stage, stop, tech, client, branding, T, onNav, routePos, arrivedAt }) {
+  const hasTechName = !!(tech && tech.name && tech.name.trim());
+  const techFirst = hasTechName ? tech.name.trim().split(" ")[0] : "Your tech";
+  const techInitials = hasTechName
+    ? tech.name.trim().split(/\s+/).filter(Boolean).map(w => w[0]).slice(0, 2).join("").toUpperCase()
+    : "";
+  const dotColor = (stage === "complete" || stage === "arrived") ? "#16a34a" : T.primary;
+  const arr = arrivedAt ? new Date(arrivedAt) : null;
+  const arrivedStr = (arr && !isNaN(arr.getTime())) ? arr.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
   const headline = stage === "complete" ? "Service complete"
     : stage === "arrived" ? `${techFirst} has arrived`
     : `Scheduled today${stop.time ? ` · ${stop.time}` : ""}`;
   const sub = stage === "complete" ? "Your full report is saved in Service History."
-    : stage === "arrived" ? `${techFirst} is on site — service is underway.`
-    : `${(branding && branding.companyName) || "We"}'ll be on the way soon — you'll see live tracking here.`;
+    : stage === "arrived" ? "On site now — your service is underway."
+    : `${(branding && branding.companyName) ? `${branding.companyName} will` : "We'll"} be on the way soon — you'll see live tracking here.`;
+  // Scheduled state: introduce the tech + show where this client falls in the day so the wait feels known.
+  const showTechRow = stage === "scheduled" && (hasTechName || (routePos && routePos.total > 1));
+  const posLine = (routePos && routePos.total > 1)
+    ? `You're stop ${routePos.position} of ${routePos.total} today${hasTechName ? ` — we'll text you when ${techFirst} heads your way` : ""}`
+    : (hasTechName ? `We'll text you the moment ${techFirst} heads your way` : "");
+
   return (
     <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 22, overflow: "hidden", boxShadow: "0 6px 22px rgba(0,0,0,0.08)" }}>
       <div style={{ padding: "16px 18px 12px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
           <span style={{ width: 9, height: 9, borderRadius: "50%", background: dotColor, flexShrink: 0, boxShadow: `0 0 0 4px ${hexA(dotColor, 0.18)}` }} />
           <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{headline}</div>
+          {stage === "arrived" && arrivedStr && <div style={{ marginLeft: "auto", fontSize: 12.5, color: T.textMuted, fontWeight: 600 }}>{arrivedStr}</div>}
         </div>
         <div style={{ fontSize: 13.5, color: T.textMuted, marginTop: 4 }}>{sub}</div>
+        {showTechRow && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 13 }}>
+            {hasTechName && (
+              <div style={{ width: 38, height: 38, borderRadius: "50%", background: hexA(T.primary, 0.12), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 14, flexShrink: 0 }}>{techInitials}</div>
+            )}
+            <div style={{ minWidth: 0 }}>
+              {hasTechName && <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{techFirst} is your tech today</div>}
+              {posLine && <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 1, lineHeight: 1.4 }}>{posLine}</div>}
+            </div>
+          </div>
+        )}
       </div>
       <div style={{ padding: "0 14px 16px" }}>
         <ClientStopProgress stage={stage} T={T} />
@@ -21477,6 +21501,17 @@ function ClientLiveTracking({ client, schedule, team, branding, T, onNav }) {
   const tech = useMemo(() => (todayStop && todayStop.assigneeId)
     ? (team || []).find(m => String(m.id) === String(todayStop.assigneeId)) || null
     : null, [todayStop, team]);
+
+  // Where this client falls in the tech's day, so the scheduled card can say "stop N of M today".
+  const routePos = useMemo(() => {
+    if (!tech || !todayStop) return null;
+    const day = (schedule || []).find(d => d.date === fmtMDY(new Date()));
+    if (!day) return null;
+    const mine = to24(todayStop.time);
+    const techStops = (day.stops || []).filter(s => String(s.assigneeId) === String(tech.id));
+    const ahead = techStops.filter(s => s.sid !== todayStop.sid && to24(s.time) < mine).length;
+    return { position: ahead + 1, total: techStops.length };
+  }, [schedule, tech, todayStop]);
 
   const sid = todayStop && todayStop.sid;
   const [loc, setLoc] = useState(null);
@@ -21507,7 +21542,7 @@ function ClientLiveTracking({ client, schedule, team, branding, T, onNav }) {
           supabase.from("app_state").select("value").eq("key", "sps_completed").maybeSingle(),
         ]);
         if (!alive) return;
-        try { setArrived(!!JSON.parse(a?.data?.value || "{}")[sid]); } catch (_) {}
+        try { const av = JSON.parse(a?.data?.value || "{}")[sid]; setArrived(av || false); } catch (_) {}
         try { setComplete(!!JSON.parse(c?.data?.value || "{}")[sid]); } catch (_) {}
       } catch (_) {}
     };
@@ -21539,7 +21574,7 @@ function ClientLiveTracking({ client, schedule, team, branding, T, onNav }) {
       </div>
     );
   }
-  return <ClientStopStatusCard stage={stage} stop={todayStop} tech={tech} client={client} branding={branding} T={T} onNav={onNav} />;
+  return <ClientStopStatusCard stage={stage} stop={todayStop} tech={tech} client={client} branding={branding} T={T} onNav={onNav} routePos={routePos} arrivedAt={typeof arrived === "string" ? arrived : null} />;
 }
 
 function ClientTrackingCard({ client, todayStop, tech, loc, schedule, branding, T, nowTs }) {
@@ -21552,7 +21587,7 @@ function ClientTrackingCard({ client, todayStop, tech, loc, schedule, branding, 
   const [mapFailed, setMapFailed] = useState(false);
   const [mapReady, setMapReady] = useState(false);
 
-  const techFirst = (tech.name || "Your technician").split(" ")[0];
+  const techFirst = (tech.name && tech.name.trim()) ? tech.name.trim().split(" ")[0] : "Your tech";
   const destAddr = todayStop.address || client.address || "";
   const lat = Number(loc.lat), lng = Number(loc.lng);
 
@@ -21617,6 +21652,9 @@ function ClientTrackingCard({ client, todayStop, tech, loc, schedule, branding, 
         <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
           <span style={{ width: 9, height: 9, borderRadius: "50%", background: "#16a34a", boxShadow: "0 0 0 4px rgba(22,163,74,0.18)", flexShrink: 0 }} />
           <div style={{ fontSize: 19, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{techFirst} is on the way</div>
+          <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 800, color: "#16a34a", background: "rgba(22,163,74,0.12)", padding: "3px 9px 3px 7px", borderRadius: 999, flexShrink: 0 }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#16a34a" }} />Live
+          </span>
         </div>
         <div style={{ fontSize: 13.5, color: T.textMuted, marginTop: 4 }}>Heading to your property now</div>
       </div>
@@ -21818,9 +21856,9 @@ function CPHome({ client, schedule, invoices, branding, team, onNav, onRateVisit
   const statsBlock = (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
       {[
-        { label: "Visits", value: (client.history||[]).length, page: "cp_pond" },
-        { label: "Invoices", value: myInvoices.length, page: "cp_invoices" },
-        { label: "Equipment", value: (client.equipment||[]).length, page: "cp_property" },
+        { label: (client.history||[]).length === 1 ? "Visit" : "Visits", value: (client.history||[]).length, page: "cp_pond" },
+        { label: myInvoices.length === 1 ? "Invoice" : "Invoices", value: myInvoices.length, page: "cp_invoices" },
+        { label: (client.equipment||[]).length === 1 ? "Item" : "Items", value: (client.equipment||[]).length, page: "cp_property" },
       ].map(s => (
         <button key={s.label} onClick={() => s.page && onNav(s.page)}
           style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "16px 10px", textAlign: "center", cursor: s.page ? "pointer" : "default", fontFamily: "inherit" }}>
