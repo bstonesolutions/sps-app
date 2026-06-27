@@ -65,6 +65,25 @@ CREATE TABLE IF NOT EXISTS public.qb_tokens (
 ALTER TABLE public.qb_tokens ENABLE ROW LEVEL SECURITY;
 -- No policies needed: only the server's SERVICE_ROLE key touches it (bypasses RLS); the anon key gets nothing.
 
+-- Owner-side audit log of automated outbound texts (on-my-way, invoice, reminder, …). Kept OUT of the
+-- client conversation (sps_messages) so the chat stays clean — surfaced as a collapsed "Sent texts"
+-- strip in each client's chat. Append-only; the app reads the latest ~80 per client. Best-effort:
+-- sendSms() logs here via logComm() but never blocks/fails a send, and the feature no-ops until this
+-- table exists. (sps_messages has a CHECK(sender in ('staff','client')), so the log can't live there.)
+CREATE TABLE IF NOT EXISTS public.sps_comms_log (
+  id          bigserial PRIMARY KEY,
+  client_id   text NOT NULL,
+  type        text NOT NULL DEFAULT 'Text',
+  channel     text NOT NULL DEFAULT 'sms',
+  body        text NOT NULL DEFAULT '',
+  ok          boolean DEFAULT true,
+  created_at  timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS sps_comms_log_client_idx ON public.sps_comms_log(client_id, created_at DESC);
+ALTER TABLE public.sps_comms_log ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "comms_log read"   ON public.sps_comms_log FOR SELECT TO authenticated USING (true);
+CREATE POLICY "comms_log insert" ON public.sps_comms_log FOR INSERT TO authenticated WITH CHECK (true);
+
 -- Live staff location while clocked in (one row per staff member, upserted).
 CREATE TABLE IF NOT EXISTS public.staff_locations (
   staff_id   text PRIMARY KEY,
