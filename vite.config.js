@@ -8,7 +8,7 @@ export default defineConfig({
     {
       name: "copy-root-assets",
       writeBundle() {
-        const files = ["icon-180.png","icon-180-dark.png","icon-192.png","icon-512.png","favicon.png","manifest.webmanifest"];
+        const files = ["icon.svg","icon-180.png","icon-180-dark.png","icon-192.png","icon-512.png","favicon.png","manifest.webmanifest"];
         files.forEach(f => { if (existsSync(f)) copyFileSync(f, "dist/" + f); });
         // Apple App Site Association — enables iOS password autofill (webcredentials)
         // for the native app. Must be served at /.well-known/apple-app-site-association.
