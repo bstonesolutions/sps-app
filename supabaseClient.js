@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { idb } from "./idbStore";
 
 const SUPABASE_URL = "https://ysqarusrewceezckawlo.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlzcWFydXNyZXdjZWV6Y2thd2xvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2MjkzODEsImV4cCI6MjA5NjIwNTM4MX0.GCX-Bt3sSoDaaF-XT2xeu4h6wR4tXO2hqOydQUkl_CQ";
@@ -24,6 +25,49 @@ let _flushing = false;
 // its upsert, so a slow/failed earlier write can never physically land AFTER a newer one (last-issued
 // wins). Different keys still write concurrently.
 const _chains = {};
+
+// ── Offline-first READ cache (fast boot) ───────────────────────────────────────────────────────
+// A local IndexedDB snapshot of app_state lets the app paint from last-known-good INSTANTLY instead
+// of waiting on the network SELECT of every key (dominated by the multi-MB sps_clients). Supabase
+// stays the source of truth; the durable write QUEUE above is unchanged; writes still wait for a
+// confirmed network read (DB_READ_OK). The snapshot is namespaced by signed-in user id so a shared
+// device never serves another account's data, and every IDB op degrades to a no-op (idbStore) so
+// this can never throw into the storage path — on failure we just fall back to network-first.
+let _uid = null;
+const SNAP_KEY = "snapshot";
+let _cacheReadyState = { ready: false, hasData: false };
+let _ensureHydratePromise = null;
+
+function _notifyCache(hasData) {
+  _cacheReadyState = { ready: true, hasData: !!hasData };
+  try { document.dispatchEvent(new CustomEvent("sps-cache-ready", { detail: { hasData: !!hasData } })); } catch {}
+}
+
+// Pull the last saved snapshot into _cache, filling ONLY keys we don't already hold (the durable
+// pending queue, primed synchronously at module load, always wins). Serves ONLY a snapshot stamped
+// with the CURRENT uid — never cross-account; if uid is unknown we stay network-first.
+async function _hydrateFromIDB() {
+  try {
+    if (!_uid) return;
+    const snap = await idb.get(SNAP_KEY);
+    if (!snap || snap.uid !== _uid || !snap.data) return;
+    for (const k in snap.data) {
+      if (Object.prototype.hasOwnProperty.call(snap.data, k) && _cache[k] === undefined) _cache[k] = snap.data[k];
+    }
+  } catch (_) {}
+}
+
+function _ensureHydrate() {
+  if (_ensureHydratePromise) return _ensureHydratePromise;
+  _ensureHydratePromise = _hydrateFromIDB().then(() => { _notifyCache(Object.keys(_cache).length > 0); });
+  return _ensureHydratePromise;
+}
+
+// Persist the current _cache as the snapshot for the next cold boot (uid-stamped, fire-and-forget,
+// off the hot path). Pending values are part of _cache, so an offline optimistic edit is captured too.
+function _saveSnapshot() {
+  try { if (_uid) idb.set(SNAP_KEY, { uid: _uid, at: Date.now(), data: { ..._cache } }); } catch (_) {}
+}
 
 function _loadPending() {
   try { const raw = localStorage.getItem(PENDING_KEY); if (raw) _pending = JSON.parse(raw) || {}; } catch (_) { _pending = {}; }
@@ -101,9 +145,16 @@ async function _init() {
   _loadPromise = supabase.from("app_state").select("key, value").then(({ data, error }) => {
     if (error) { console.error("store.init failed:", error.message); _notify("error", "Cannot reach the database."); }
     // Don't let the DB row overwrite a key that still has a pending (newer, not-yet-saved) write.
-    else { if (data) data.forEach(row => { if (_pending[row.key] === undefined) _cache[row.key] = row.value; }); _notify("ok", "Connected"); _flush(); }
+    else {
+      if (data) data.forEach(row => { if (_pending[row.key] === undefined) _cache[row.key] = row.value; });
+      _notify("ok", "Connected"); _flush();
+      _saveSnapshot();   // refresh the cold-boot snapshot with confirmed data
+      // Tell cache-first screens fresh values landed so they can reconcile CLEAN keys (App.jsx skips
+      // any key with an unsaved local edit — never clobbers an in-progress change).
+      try { document.dispatchEvent(new CustomEvent("sps-reconciled")); } catch {}
+    }
     _loaded = true;
-  });
+  }).catch((e) => { try { console.error("store.init error:", e && e.message); } catch (_) {} _loaded = true; });
   return _loadPromise;
 }
 
@@ -126,7 +177,21 @@ async function _doSet(key, value) {
 }
 
 export const store = {
-  async get(key) { await _init(); const val = _cache[key]; return val !== undefined ? { value: val } : null; },
+  // Namespace the read cache to the signed-in user. MUST be called (from main.jsx, right after auth
+  // resolves) BEFORE the first get(), so a snapshot is only ever served to the account that wrote it.
+  setUser(uid) { _uid = uid || null; },
+  // Has the local snapshot finished hydrating, and did it actually contain data? The boot splash uses
+  // this to lift early ONLY when there's real cached data to show (never blank-then-wrong).
+  cacheReady() { return _cacheReadyState; },
+  // Cache-first read: serve the local snapshot instantly, kick the network read in the BACKGROUND
+  // (not awaited) so first paint doesn't wait on the multi-MB app_state SELECT. The network result
+  // reconciles in via the 'sps-reconciled' event; writes still wait for DB_READ_OK as before.
+  async get(key) {
+    await _ensureHydrate();
+    _init();
+    const val = _cache[key];
+    return val !== undefined ? { value: val } : null;
+  },
   // Returns { ok: true } on a confirmed save, or { ok: false, error } when the write could not be
   // persisted (it's been queued for durable retry). Callers MUST NOT treat a save as landed until ok.
   // Serialized per key: this set waits for the previous set of the SAME key, so an older write can
@@ -142,8 +207,12 @@ export const store = {
   async remove(key) {
     delete _cache[key];
     if (_pending[key] !== undefined) { delete _pending[key]; _savePending(); }  // don't resurrect a removed key
+    _saveSnapshot();  // and don't let the snapshot resurrect it on the next cold boot
     await supabase.from("app_state").delete().eq("key", key);
     return { ok: true };
   },
-  reset() { _cache = {}; _loaded = false; _loadPromise = null; },
+  // Wipe the on-disk snapshot (e.g. on sign-out, so a shared device never serves the prior account's
+  // cached data). Leaves the durable pending QUEUE intact — unflushed writes are still owed.
+  async clearCache() { _cacheReadyState = { ready: false, hasData: false }; _ensureHydratePromise = null; try { await idb.del(SNAP_KEY); } catch (_) {} },
+  reset() { _cache = {}; _loaded = false; _loadPromise = null; _ensureHydratePromise = null; _cacheReadyState = { ready: false, hasData: false }; },
 };

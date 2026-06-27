@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
-import { supabase } from "./supabaseClient";
+import { supabase, store } from "./supabaseClient";
 import { PROD_URL } from "./config";
 import { Capacitor } from "@capacitor/core";
 import App, { LiveTrack } from "./App.jsx";
@@ -283,8 +283,16 @@ function Root() {
   const [pwdDone, setPwdDone] = useState(false);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    supabase.auth.getSession().then(({ data }) => {
+      const s = data.session;
+      if (s && s.user) { try { store.setUser(s.user.id); } catch (_) {} }  // namespace the read cache BEFORE <App> mounts
+      setSession(s);
+    });
     const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
+      // Clear the on-disk cache ONLY on a real sign-out (not TOKEN_REFRESHED/USER_UPDATED), so a shared
+      // device never serves the prior account's cached data; otherwise keep the cache uid-namespaced.
+      if (_e === "SIGNED_OUT") { try { store.clearCache(); } catch (_) {} }
+      else if (s && s.user) { try { store.setUser(s.user.id); } catch (_) {} }
       setSession(s);
       if (s && window.location.hash.includes("access_token")) {
         window.history.replaceState(null, "", window.location.pathname);

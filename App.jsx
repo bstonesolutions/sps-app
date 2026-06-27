@@ -581,6 +581,27 @@ function useStoredState(key, initial) {
     })();
     return () => { cancelled = true; };
   }, [key, value, loaded]);
+  // Cache-first reconcile: when the background network read CONFIRMS (sps-reconciled), adopt the fresh
+  // value for THIS key ONLY if it isn't locally dirty (no unsaved edit) — never clobber an in-progress
+  // change. If the key IS dirty (e.g. edited during the brief cache-first window before the read landed),
+  // push that edit through now that the read is confirmed. Mirrors _init's pending-precedence rule.
+  useEffect(() => {
+    if (!loaded) return;
+    const onReconciled = async () => {
+      const localJson = JSON.stringify(value);
+      if (localJson !== lastPersisted.current) {
+        const r = await store.set(key, localJson);   // flush the in-flight local edit; keep it on screen
+        if (r && r.ok) lastPersisted.current = localJson;
+        return;
+      }
+      const res = await store.get(key);               // clean key → take the freshly-read DB value
+      if (res && res.value != null && res.value !== lastPersisted.current) {
+        try { const parsed = JSON.parse(res.value); lastPersisted.current = res.value; setValue(parsed); } catch (_) {}
+      }
+    };
+    document.addEventListener("sps-reconciled", onReconciled);
+    return () => document.removeEventListener("sps-reconciled", onReconciled);
+  }, [key, value, loaded]);
   return [value, setValue, loaded];
 }
 // Debounced auto-save for a Customize section. Edits update a local draft
@@ -24623,6 +24644,18 @@ export default function App({ authEmail = "", onSignOut }) {
   const SPLASH_MIN_MS = 1300;   // keep the load screen up at least this long (no flash)
   const GREETING_HOLD_MS = 850; // once ready, linger this long so the welcome is seen
 
+  // Cache-first boot: lift the splash as soon as the local snapshot has painted REAL cached data —
+  // not only after the full network hydrate (which waits on the multi-MB app_state SELECT). A fresh
+  // install with no snapshot reports hasData=false, so we fall back to `hydrated` (no blank-then-wrong).
+  const [cacheReady, setCacheReady] = useState(false);
+  useEffect(() => {
+    try { const cur = store.cacheReady && store.cacheReady(); if (cur && cur.ready && cur.hasData) { setCacheReady(true); return; } } catch (_) {}
+    const onCache = (e) => { if (e && e.detail && e.detail.hasData) setCacheReady(true); };
+    document.addEventListener("sps-cache-ready", onCache);
+    return () => document.removeEventListener("sps-cache-ready", onCache);
+  }, []);
+  const bootReady = cacheReady || hydrated;
+
   // Trigger a visible sync pulse whenever any stored state saves
   const triggerSync = () => {
     setSyncState("syncing");
@@ -24680,7 +24713,7 @@ export default function App({ authEmail = "", onSignOut }) {
   // (hydrated) — but never less than SPLASH_MIN_MS so it doesn't flash — then fade
   // it out and remove it, landing straight on the app. This is max(1.3s, app-ready).
   useEffect(() => {
-    if (!hydrated) return;            // not ready yet — keep the boot splash up
+    if (!bootReady) return;          // not ready yet — keep the boot splash up
     if (splashRemoved.current) return;
     splashRemoved.current = true;
     // max(1.3s total, ready + 0.85s) — never flashes AND the welcome stays readable.
@@ -24693,7 +24726,7 @@ export default function App({ authEmail = "", onSignOut }) {
       setTimeout(() => { const el = document.getElementById("boot-splash"); if (el) el.remove(); }, 460);
     }, wait);
     return () => clearTimeout(t);
-  }, [hydrated]);
+  }, [bootReady]);
 
   // After a manual sync (which reloads), show the subtle sync strip rather than a splash.
   useEffect(() => {
