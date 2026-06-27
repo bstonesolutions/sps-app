@@ -3,26 +3,45 @@
 // Run: node scripts/generate-sps-icon.js   (requires `npm i sharp --no-save`)
 import sharp from "sharp";
 
-const SRC = "ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png";
-const OUT_MASTER = "/tmp/sps-icon-master.png";
-const OUT_PREVIEW = "/tmp/sps-icon-preview.png";
+const DARK = process.argv.includes("--dark");
+const SRC = process.env.ICON_SRC || "ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png";
+const NAME = process.env.NAME || (DARK ? "dark" : "light");
+const OUT_MASTER  = `/tmp/sps-icon-${NAME}-master.png`;
+const OUT_PREVIEW = `/tmp/sps-icon-${NAME}-preview.png`;
 
-// Shadow tuning — easy to tweak.
-const S_SCALE = 1.09;             // enlarge the S within the tile (1.0 = original size)
-const SHADOW_LEN_FRAC = 0.55;     // length as a fraction of the icon size
-const SH_NEAR = [82, 6, 14];     // shadow color right at the glyph (darker than the crimson bg)
-const SH_FAR  = [126, 12, 24];    // shadow color out toward the corner (fades lighter)
+// Every color is overridable via env ("r,g,b") so we can render many variants without editing this file.
+const rgb = (s, d) => { if (!s) return d; const p = String(s).split(",").map(Number); return (p.length === 3 && p.every(n => !isNaN(n))) ? p : d; };
+const S_SCALE = Number(process.env.S_SCALE || 1.09);            // S size within the tile (1.0 = original)
+const SHADOW_LEN_FRAC = Number(process.env.SHADOW_LEN || 0.55); // shadow length / icon size
+// Light default = dark-red shadow on the crimson tile. Dark default = a crimson trail on a charcoal tile.
+const BG_OVERRIDE = rgb(process.env.BG, DARK ? [22, 22, 25] : null);            // null = sample source tile
+const SH_NEAR = rgb(process.env.SH_NEAR, DARK ? [184, 29, 36] : [82, 6, 14]);   // trail color at the glyph
+const SH_FAR  = rgb(process.env.SH_FAR,  DARK ? [80, 12, 18]  : [126, 12, 24]); // trail color at the corner
+const S_COLOR = rgb(process.env.S_COLOR, [255, 255, 255]);     // the letter color
 
 (async () => {
   // Enlarge the S: scale the whole 1024 tile up by S_SCALE, then center-crop back to 1024 (the crimson
   // bg is uniform, so cropping just makes the S bigger). Then read raw pixels of the result.
   const meta = await sharp(SRC).metadata();
   const base = meta.width || 1024;
-  const up = Math.round(base * S_SCALE), off = Math.round((up - base) / 2);
-  const scaled = await sharp(SRC).resize(up, up).extract({ left: off, top: off, width: base, height: base }).png().toBuffer();
+  const up = Math.round(base * S_SCALE);
+  let scaled;
+  if (up >= base) {
+    const off = Math.round((up - base) / 2);
+    scaled = await sharp(SRC).resize(up, up).extract({ left: off, top: off, width: base, height: base }).png().toBuffer();
+  } else {
+    // Shrinking the S (more padding, e.g. for a small favicon): scale down, then pad back to `base`
+    // with the tile color so there's just extra breathing room around a smaller S.
+    const c = await sharp(SRC).extract({ left: 0, top: 0, width: 1, height: 1 }).raw().toBuffer();
+    const tile = BG_OVERRIDE || [c[0], c[1], c[2]];
+    const p0 = Math.round((base - up) / 2), p1 = base - up - p0;
+    scaled = await sharp(SRC).resize(up, up)
+      .extend({ top: p0, bottom: p1, left: p0, right: p1, background: { r: tile[0], g: tile[1], b: tile[2], alpha: 1 } })
+      .png().toBuffer();
+  }
   const { data, info } = await sharp(scaled).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const W = info.width, H = info.height, C = info.channels;
-  const bg = [data[0], data[1], data[2]];                 // sample the existing crimson tile color
+  const bg = BG_OVERRIDE || [data[0], data[1], data[2]];  // dark variant overrides; else sample the tile color
   const N = Math.round(W * SHADOW_LEN_FRAC);
 
   // Per-pixel "whiteness" (the S is white; crimson bg has low G/B) → smooth alpha that keeps the AA edge.
@@ -61,9 +80,9 @@ const SH_FAR  = [126, 12, 24];    // shadow color out toward the corner (fades l
       ];
     }
     const wa = whiteA[i];
-    out[i * 4]     = Math.round(base[0] * (1 - wa) + 255 * wa);
-    out[i * 4 + 1] = Math.round(base[1] * (1 - wa) + 255 * wa);
-    out[i * 4 + 2] = Math.round(base[2] * (1 - wa) + 255 * wa);
+    out[i * 4]     = Math.round(base[0] * (1 - wa) + S_COLOR[0] * wa);
+    out[i * 4 + 1] = Math.round(base[1] * (1 - wa) + S_COLOR[1] * wa);
+    out[i * 4 + 2] = Math.round(base[2] * (1 - wa) + S_COLOR[2] * wa);
     out[i * 4 + 3] = 255;
   }
 
