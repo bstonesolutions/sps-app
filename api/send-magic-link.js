@@ -17,7 +17,7 @@
 //   RESEND_FROM      - defaults to the verified-domain sender
 //   PUBLIC_APP_URL   - app origin used for the logo + default redirect
 
-const APP_URL = process.env.PUBLIC_APP_URL || "https://sps-app-azure.vercel.app";
+const APP_URL = process.env.PUBLIC_APP_URL || "https://spsway.app";
 const LOGO_URL = `${APP_URL}/icon-192.png`;
 
 const COMPANY = "Stone Property Solutions";

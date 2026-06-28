@@ -84,7 +84,7 @@ export default async function handler(req, res) {
   const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
   const RESEND_KEY   = process.env.RESEND_API_KEY;
   const FROM         = resolveFrom(req.body, process.env.RESEND_FROM || "Stone Property Solutions <noreply@stonepropertysolutions.com>");
-  const APP_URL      = process.env.PUBLIC_APP_URL || "https://sps-app-azure.vercel.app";
+  const APP_URL      = process.env.PUBLIC_APP_URL || "https://spsway.app";
 
   // Open-redirect guard (LOW#6): only allow redirect_to values we trust. Anything else
   // (including a missing/unknown value) falls back to the prod app URL.
