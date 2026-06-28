@@ -3365,8 +3365,16 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
   const ma = monthActuals(clients, new Date(), invoices);
   const derived = deriveAlerts(clients, invoices, catalog).filter(a => perms.seeBalances || !/outstanding/i.test(a.title || ""));
   const flags = (officeAlerts || []).filter(a => !a.resolved);
-  const outstandingClients = (clients || []).map(c => ({ c, owed: clientOutstanding(c, invoices) })).filter(x => x.owed > 0);
-  const outstandingTotal = outstandingClients.reduce((s, x) => s + x.owed, 0);
+  // Outstanding mirrors the Invoices page EXACTLY: same filter (not Paid, not Draft) and the same
+  // invoiceTotals(iv).total it sums there — so the home tile and the Invoices screen always agree.
+  // (The old per-client version summed each invoice's remaining .balance AND fell back to a manual
+  // client.balance field for clients with no invoice, which inflated this tile above the real total.)
+  const outstandingInvoices = (invoices || []).filter(iv => effectiveStatus(iv) !== "Paid" && iv.status !== "Draft");
+  const outstandingTotal = outstandingInvoices.reduce((s, iv) => s + invoiceTotals(iv).total, 0);
+  const outstandingClients = Array.from(new Set(outstandingInvoices.map(iv => {
+    const c = (clients || []).find(cc => invoiceMatchesClient(iv, cc));
+    return c ? c.id : (iv.clientId ?? iv.clientName ?? iv.id);
+  })));
   const money = (n) => `$${Math.round(n).toLocaleString()}`;
 
   // Customizable Home stat tiles — a catalog of metrics the owner can pick from (perms-gated).
