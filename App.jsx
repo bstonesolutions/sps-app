@@ -21570,9 +21570,11 @@ function ClientStopStatusCard({ stage, stop, tech, client, branding, T, onNav, r
   const arrivedStr = (arr && !isNaN(arr.getTime())) ? arr.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
   const headline = stage === "complete" ? "Service complete"
     : stage === "arrived" ? `${techFirst} has arrived`
+    : stage === "enroute" ? `${techFirst} is on the way`
     : `Scheduled today${stop.time ? ` · ${stop.time}` : ""}`;
   const sub = stage === "complete" ? "Your full report is saved in Service History."
     : stage === "arrived" ? "On site now — your service is underway."
+    : stage === "enroute" ? "Heading to your property now — live tracking will appear here."
     : `${(branding && branding.companyName) ? `${branding.companyName} will` : "We'll"} be on the way soon — you'll see live tracking here.`;
   // Scheduled state: introduce the tech + show where this client falls in the day so the wait feels known.
   const showTechRow = stage === "scheduled" && (hasTechName || (routePos && routePos.total > 1));
@@ -21643,6 +21645,7 @@ function ClientLiveTracking({ client, schedule, team, branding, T, onNav }) {
   const [loc, setLoc] = useState(null);
   const [arrived, setArrived] = useState(false);
   const [complete, setComplete] = useState(false);
+  const [onWay, setOnWay] = useState(false); // staff stamped "On My Way" (sps_enroute) — drives the on-the-way step even before a live GPS fix
   const [nowTs, setNowTs] = useState(() => Date.now());
 
   // Tech live location — realtime subscription + 60s poll fallback.
@@ -21659,17 +21662,19 @@ function ClientLiveTracking({ client, schedule, team, branding, T, onNav }) {
 
   // Arrived / complete — realtime on the app_state keys + 60s poll fallback.
   useEffect(() => {
-    if (!sid) { setArrived(false); setComplete(false); return; }
+    if (!sid) { setArrived(false); setComplete(false); setOnWay(false); return; }
     let alive = true;
     const load = async () => {
       try {
-        const [a, c] = await Promise.all([
+        const [a, c, e] = await Promise.all([
           supabase.from("app_state").select("value").eq("key", "sps_arrivals").maybeSingle(),
           supabase.from("app_state").select("value").eq("key", "sps_completed").maybeSingle(),
+          supabase.from("app_state").select("value").eq("key", "sps_enroute").maybeSingle(),
         ]);
         if (!alive) return;
         try { const av = JSON.parse(a?.data?.value || "{}")[sid]; setArrived(av || false); } catch (_) {}
         try { setComplete(!!JSON.parse(c?.data?.value || "{}")[sid]); } catch (_) {}
+        try { setOnWay(!!JSON.parse(e?.data?.value || "{}")[sid]); } catch (_) {}
       } catch (_) {}
     };
     load();
@@ -21678,6 +21683,7 @@ function ClientLiveTracking({ client, schedule, team, branding, T, onNav }) {
       ch = supabase.channel(`sps-stop-${sid}`)
         .on("postgres_changes", { event: "*", schema: "public", table: "app_state", filter: "key=eq.sps_arrivals" }, load)
         .on("postgres_changes", { event: "*", schema: "public", table: "app_state", filter: "key=eq.sps_completed" }, load)
+        .on("postgres_changes", { event: "*", schema: "public", table: "app_state", filter: "key=eq.sps_enroute" }, load)
         .subscribe();
     } catch (_) {}
     const iv = setInterval(load, 60000);
@@ -21691,9 +21697,11 @@ function ClientLiveTracking({ client, schedule, team, branding, T, onNav }) {
 
   const updatedMs = loc && loc.updated_at ? new Date(loc.updated_at).getTime() : 0;
   const fresh = loc && loc.is_active && updatedMs && (nowTs - updatedMs < 5 * 60 * 1000);
-  const stage = complete ? "complete" : arrived ? "arrived" : (fresh && tech) ? "enroute" : "scheduled";
+  const stage = complete ? "complete" : arrived ? "arrived" : ((fresh || onWay) && tech) ? "enroute" : "scheduled";
 
-  if (stage === "enroute" && tech) {
+  // Live map only with a fresh GPS fix; otherwise the staff's "On My Way" stamp still drives the
+  // status card to the "On the way" step (instead of skipping straight from Scheduled to Arrived).
+  if (stage === "enroute" && tech && fresh) {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         <ClientTrackingCard client={client} todayStop={todayStop} tech={tech} loc={loc} schedule={schedule} branding={branding} T={T} nowTs={nowTs} />
