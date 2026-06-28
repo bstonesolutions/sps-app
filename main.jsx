@@ -105,10 +105,14 @@ function useKeyboardInset() {
   }, []);
   return inset;
 }
-// When the keyboard is up, pin the centered card to the top and reserve the keyboard's
+// When the keyboard is up, pin the centered card to the TOP and reserve the keyboard's
 // height at the bottom, so the active field + primary button stay visible above it.
-const kbLift = (kb) => kb > 0
-  ? { justifyContent: "flex-start", paddingTop: "max(16px, env(safe-area-inset-top))", paddingBottom: kb + 12 }
+// Use alignItems (the cross/VERTICAL axis) — NOT justifyContent — otherwise on a wide
+// screen (iPad) this row-flex container shoves the narrow card to the LEFT instead of up.
+// And ignore tiny insets (the iPad password-autofill bar, ~80px) so the card doesn't lift
+// or hop just because that suggestion bar flickers; only a real keyboard (≳150px) lifts it.
+const kbLift = (kb) => kb > 150
+  ? { alignItems: "flex-start", paddingTop: "max(16px, env(safe-area-inset-top))", paddingBottom: kb + 12 }
   : null;
 
 function Login() {
