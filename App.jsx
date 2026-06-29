@@ -958,63 +958,76 @@ const stopTrackLink = (token) => `${PROD_URL}/?track=${token}`;
 export function LiveTrack({ token }) {
   const [phase, setPhase] = useState("loading"); // loading | notfound | nokey | map
   const [brand, setBrand] = useState({});
-  const [active, setActive] = useState(false);
+  const [status, setStatus] = useState("scheduled"); // scheduled | enroute | arrived | complete
+  const [active, setActive] = useState(false); // a fresh GPS fix is live
   const [eta, setEta] = useState("");
   const [clientName, setClientName] = useState("");
   const mapEl = useRef(null);
   const ctx = useRef({});
 
   useEffect(() => {
-    let alive = true, timer = null;
-    (async () => {
-      try {
-        const [sched, br] = await Promise.all([
-          supabase.from("app_state").select("value").eq("key", "sps_schedule").maybeSingle(),
-          supabase.from("app_state").select("value").eq("key", "sps_branding").maybeSingle(),
-        ]);
-        if (!alive) return;
-        try { if (br?.data?.value) setBrand(JSON.parse(br.data.value)); } catch (_) {}
-        let stop = null;
-        try { const days = JSON.parse(sched?.data?.value || "[]"); for (const d of (days || [])) for (const s of (d.stops || [])) if (s.trackToken === token) stop = s; } catch (_) {}
-        if (!stop) { setPhase("notfound"); return; }
-        setClientName((stop.client || "").split(" ")[0] || "there");
-        if (!hasGoogleMaps()) { setPhase("nokey"); return; }
-        const maps = await loadGoogleMaps().catch(() => null);
-        if (!alive || !maps || !mapEl.current) { setPhase("nokey"); return; }
-        setPhase("map");
-        const c = ctx.current; c.maps = maps;
-        c.map = new maps.Map(mapEl.current, { zoom: 11, center: { lat: 40.0, lng: -75.8 }, disableDefaultUI: true, zoomControl: true, gestureHandling: "greedy" });
-        c.dm = new maps.DistanceMatrixService();
-        if (stop.address) new maps.Geocoder().geocode({ address: stop.address }, (res, st) => {
-          if (st === "OK" && res[0]) {
-            c.dest = res[0].geometry.location;
-            c.destMarker = new maps.Marker({ position: c.dest, map: c.map, title: stop.client || "Destination",
-              icon: { path: maps.SymbolPath.BACKWARD_CLOSED_ARROW, scale: 5, fillColor: "#16a34a", fillOpacity: 1, strokeColor: "#fff", strokeWeight: 1.5, rotation: 0 } });
-            if (!c.tech) { c.map.setCenter(c.dest); c.map.setZoom(13); }
-          }
+    let alive = true, timer = null, retry = null, tries = 0;
+    // Read this link's own tiny record (sps_track_<token>) — never the whole schedule.
+    const readRecord = async () => {
+      const r = await supabase.from("app_state").select("value").eq("key", "sps_track_" + token).maybeSingle();
+      try { return r?.data?.value ? JSON.parse(r.data.value) : null; } catch (_) { return null; }
+    };
+    const poll = async () => {
+      if (!alive) return;
+      const c = ctx.current, rec = c.rec || {};
+      const [loc, latest] = await Promise.all([
+        supabase.from("staff_locations").select("*").eq("staff_id", String(rec.assigneeId || "")).maybeSingle(),
+        readRecord(), // re-read so the status (enroute → arrived) keeps up while the page is open
+      ]);
+      if (!alive) return;
+      if (latest && latest.status) { c.rec = latest; setStatus(latest.status); }
+      const data = loc.data;
+      const fresh = !!(data && data.is_active && data.lat != null && (Date.now() - new Date(data.updated_at || 0).getTime() < 6 * 60000));
+      setActive(fresh);
+      if (!fresh) { setEta(""); return; }
+      const m = c.maps, pos = { lat: Number(data.lat), lng: Number(data.lng) };
+      if (!c.tech) c.tech = new m.Marker({ position: pos, map: c.map, title: "Your technician", zIndex: 99,
+        icon: { path: m.SymbolPath.CIRCLE, scale: 9, fillColor: "#B81D24", fillOpacity: 1, strokeColor: "#fff", strokeWeight: 3 } });
+      else c.tech.setPosition(pos);
+      if (c.dest) {
+        const b = new m.LatLngBounds(); b.extend(pos); b.extend(c.dest); c.map.fitBounds(b, 64);
+        c.dm.getDistanceMatrix({ origins: [pos], destinations: [c.dest], travelMode: m.TravelMode.DRIVING }, (r, st) => {
+          const el = st === "OK" && r && r.rows && r.rows[0] && r.rows[0].elements && r.rows[0].elements[0];
+          if (el && el.status === "OK") setEta(el.duration.text);
         });
-        const poll = async () => {
-          if (!alive) return;
-          const { data } = await supabase.from("staff_locations").select("*").eq("staff_id", String(stop.assigneeId || "")).maybeSingle();
-          const fresh = !!(data && data.is_active && data.lat != null && (Date.now() - new Date(data.updated_at || 0).getTime() < 6 * 60000));
-          setActive(fresh);
-          if (!fresh) { setEta(""); return; }
-          const pos = { lat: Number(data.lat), lng: Number(data.lng) };
-          if (!c.tech) c.tech = new maps.Marker({ position: pos, map: c.map, title: "Your technician", zIndex: 99,
-            icon: { path: maps.SymbolPath.CIRCLE, scale: 9, fillColor: "#B81D24", fillOpacity: 1, strokeColor: "#fff", strokeWeight: 3 } });
-          else c.tech.setPosition(pos);
-          if (c.dest) {
-            const b = new maps.LatLngBounds(); b.extend(pos); b.extend(c.dest); c.map.fitBounds(b, 64);
-            c.dm.getDistanceMatrix({ origins: [pos], destinations: [c.dest], travelMode: maps.TravelMode.DRIVING }, (r, st) => {
-              const el = st === "OK" && r && r.rows && r.rows[0] && r.rows[0].elements && r.rows[0].elements[0];
-              if (el && el.status === "OK") setEta(el.duration.text);
-            });
-          } else c.map.setCenter(pos);
-        };
-        poll(); timer = setInterval(poll, 15000);
-      } catch (_) { if (alive) setPhase("notfound"); }
-    })();
-    return () => { alive = false; if (timer) clearInterval(timer); };
+      } else c.map.setCenter(pos);
+    };
+    const start = async (rec) => {
+      const c = ctx.current; c.rec = rec;
+      setClientName(rec.client || "there");
+      setStatus(rec.status || "scheduled");
+      if (!hasGoogleMaps()) { setPhase("nokey"); return; }
+      const maps = await loadGoogleMaps().catch(() => null);
+      if (!alive || !maps || !mapEl.current) { setPhase("nokey"); return; }
+      setPhase("map");
+      c.maps = maps;
+      c.map = new maps.Map(mapEl.current, { zoom: 11, center: { lat: 40.0, lng: -75.8 }, disableDefaultUI: true, zoomControl: true, gestureHandling: "greedy" });
+      c.dm = new maps.DistanceMatrixService();
+      if (rec.address) new maps.Geocoder().geocode({ address: rec.address }, (res, st) => {
+        if (st === "OK" && res[0]) {
+          c.dest = res[0].geometry.location;
+          c.destMarker = new maps.Marker({ position: c.dest, map: c.map, title: rec.client || "Destination",
+            icon: { path: maps.SymbolPath.BACKWARD_CLOSED_ARROW, scale: 5, fillColor: "#16a34a", fillOpacity: 1, strokeColor: "#fff", strokeWeight: 1.5, rotation: 0 } });
+          if (!c.tech) { c.map.setCenter(c.dest); c.map.setZoom(13); }
+        }
+      });
+      poll(); timer = setInterval(poll, 15000);
+    };
+    // The record syncs a beat after the tech taps Head Here, so retry briefly before declaring the
+    // link dead — a freshly-shared link shouldn't read "unavailable" purely from propagation lag.
+    const boot = async () => {
+      const rec = await readRecord();
+      if (!alive) return;
+      if (!rec) { tries++; if (tries < 6) { retry = setTimeout(boot, 3000); return; } setPhase("notfound"); return; }
+      start(rec);
+    };
+    boot();
+    return () => { alive = false; if (timer) clearInterval(timer); if (retry) clearTimeout(retry); };
   }, [token]);
 
   const company = brand.companyName || "Stone Property Solutions";
@@ -1029,7 +1042,10 @@ export function LiveTrack({ token }) {
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 16, fontWeight: 800, letterSpacing: "-0.01em" }}>{company}</div>
           <div style={{ fontSize: 13, opacity: 0.92, marginTop: 2 }}>
-            {active ? <>Your technician is on the way{eta ? <> · about <b>{eta}</b></> : ""}</> : <>Hang tight, {clientName} — we'll be moving shortly.</>}
+            {status === "complete" ? <>Service complete — thank you for choosing {company}.</>
+              : status === "arrived" ? <>Your technician has arrived.</>
+              : (status === "enroute" || active) ? <>Your technician is on the way{eta ? <> · about <b>{eta}</b></> : ""}</>
+              : <>Hang tight, {clientName} — we'll be moving shortly.</>}
           </div>
         </div>
         {/* Tappable here (browser context) — opens the SPS app straight to live tracking if installed.
@@ -1038,7 +1054,11 @@ export function LiveTrack({ token }) {
       </div>
       <div ref={mapEl} style={{ flex: 1, minHeight: 0, width: "100%" }} />
       <div style={{ flexShrink: 0, padding: "10px 16px max(12px, env(safe-area-inset-bottom))", fontSize: 11.5, color: "#6b7280", textAlign: "center", background: "#fff", borderTop: "1px solid #eef0f2" }}>
-        {active ? "Live location updates automatically." : "Live location will appear once your technician is en route."}
+        {status === "complete" ? "This visit is complete."
+          : status === "arrived" ? "Your technician is on site."
+          : active ? "Live location updates automatically."
+          : status === "enroute" ? "Live location will appear as your technician shares it."
+          : "Live location will appear once your technician is en route."}
       </div>
     </div>
   );
@@ -9622,11 +9642,32 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   };
   const exitSelect = () => { setSelectMode(false); setSelected({}); };
 
-  // Per-stop live-tracking link: ensure the stop has a token, persist it, return it.
-  const ensureTrackToken = (stop) => {
-    if (stop.trackToken) return stop.trackToken;
-    const token = genTrackToken();
-    setSchedule(days => (days || []).map(d => ({ ...d, stops: (d.stops || []).map(s => s.sid === stop.sid ? { ...s, trackToken: token } : s) })));
+  // Per-stop live-tracking link. Two things happen here:
+  //  1. ensure the stop carries an unguessable token (persisted on the stop in sps_schedule), and
+  //  2. write a SMALL record under the token's own key (sps_track_<token>) holding only that one
+  //     stop's essentials + status. The public /?track= page reads ONLY that key — so it never has
+  //     to read the whole schedule (which RLS rightly hides from the anonymous client), and a client
+  //     can never see anything but their own stop. `status` advances scheduled → enroute → arrived.
+  const writeTrackRecord = (stop, status) => {
+    if (!stop || !stop.trackToken) return;
+    try {
+      store.set("sps_track_" + stop.trackToken, JSON.stringify({
+        sid: stop.sid,
+        assigneeId: stop.assigneeId || "",
+        client: (stop.client || "").split(" ")[0] || "there", // first name only — no full name / PII
+        address: stop.address || "",
+        status: status || "scheduled",
+        at: new Date().toISOString(),
+      }));
+    } catch (_) {}
+  };
+  const ensureTrackToken = (stop, status) => {
+    let token = stop.trackToken;
+    if (!token) {
+      token = genTrackToken();
+      setSchedule(days => (days || []).map(d => ({ ...d, stops: (d.stops || []).map(s => s.sid === stop.sid ? { ...s, trackToken: token } : s) })));
+    }
+    writeTrackRecord({ ...stop, trackToken: token }, status);
     return token;
   };
 
@@ -10073,19 +10114,19 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                     {/* Head Here — not headed → solid red (confirm first if out of order);
                         headed (tapped here OR via the bottom "Head to next" bar) → pressed "Heading". */}
                     {!headed ? (
-                      <button onClick={e => { e.stopPropagation(); if (outOfOrder && !confirm(`Head to ${c?.name || "this stop"} now? It isn't the next stop on your route.`)) return; onEnRoute && onEnRoute(s.sid); setHeadHereModal({ stop: { ...s, trackToken: ensureTrackToken(s) }, client: c }); }}
+                      <button onClick={e => { e.stopPropagation(); if (outOfOrder && !confirm(`Head to ${c?.name || "this stop"} now? It isn't the next stop on your route.`)) return; onEnRoute && onEnRoute(s.sid); setHeadHereModal({ stop: { ...s, trackToken: ensureTrackToken(s, "enroute") }, client: c }); }}
                         style={{ flex: 1, minWidth: 0, background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
                         <Icon name="map" size={14} /> Head Here
                       </button>
                     ) : (
-                      <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: { ...s, trackToken: ensureTrackToken(s) }, client: c }); }}
+                      <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: { ...s, trackToken: ensureTrackToken(s, "enroute") }, client: c }); }}
                         title="Heading here — tap for directions again"
                         style={{ flex: 1, minWidth: 0, background: hexA(T.primary, 0.1), color: T.primary, border: `1px solid ${hexA(T.primary, 0.3)}`, borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
                         <Icon name="check" size={13} /> Heading
                       </button>
                     )}
                     {/* I'm Here — logs arrival (also starts the job clock); flips to pressed "Arrived" */}
-                    <button onClick={e => { e.stopPropagation(); if (!arrived) setArrivedModal({ stop: { ...s, trackToken: ensureTrackToken(s) }, client: c, key: s.sid }); }}
+                    <button onClick={e => { e.stopPropagation(); if (!arrived) setArrivedModal({ stop: { ...s, trackToken: ensureTrackToken(s, "arrived") }, client: c, key: s.sid }); }}
                       style={{ flex: 1, minWidth: 0, background: arrived ? hexA("#16a34a", 0.12) : T.surface, color: arrived ? "#16a34a" : T.text, border: `1px solid ${arrived ? hexA("#16a34a", 0.4) : T.border}`, borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 700, cursor: arrived ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap" }}>
                       {arrived ? <><Icon name="check" size={13} /> Arrived</> : "I'm Here"}
                     </button>
