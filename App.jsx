@@ -1347,6 +1347,7 @@ const DEFAULT_SCHEDULE_CFG = {
   winBackOn: false,              // re-engage clients with no recent completed visit
   winBackAfterDays: 60,          // "lapsed" = no completed visit in this many days
   autoCooldownHours: 20,         // guardrail: never send a client the same auto-type twice within this window
+  schedulerOn: false,            // MASTER switch — the cron sends NOTHING unless this is true
 };
 
 // Roles & access — admin configures exactly what employees can see, change, and do
@@ -18809,6 +18810,18 @@ function CommunicationsHub({ scheduleCfg, setScheduleCfg, email, setEmail, brand
     alert(res && res.ok ? "Test sent ✓" : `Couldn't send: ${(res && res.error) || "unknown error"}`);
   };
 
+  // Dry-run: ask the scheduler what it WOULD send right now (it sends nothing on a dry run).
+  const [preview, setPreview] = useState(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const runPreview = async () => {
+    setPreviewBusy(true); setPreview(null);
+    try {
+      const r = await fetch(`${PROD_URL}/api/cron-automations?dryRun=1`, { headers: await authHeaders() });
+      setPreview(await r.json());
+    } catch (e) { setPreview({ error: e.message || "Couldn't reach the server" }); }
+    setPreviewBusy(false);
+  };
+
   const seqs = [
     { key: "postVisit", onKey: "postVisitOn", tplKey: "smsReport", icon: "check",
       title: "Post-visit summary", desc: "Text the client a friendly recap right after you complete a visit.",
@@ -18833,6 +18846,38 @@ function CommunicationsHub({ scheduleCfg, setScheduleCfg, email, setEmail, brand
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14, borderTop: `1px solid ${T.border}`, paddingTop: 16 }}>
+      {/* MASTER switch + dry-run preview — the big on/off for the whole engine */}
+      <div style={{ background: cfg.schedulerOn ? hexA("#16a34a", 0.08) : T.surfaceAlt, border: `1.5px solid ${cfg.schedulerOn ? hexA("#16a34a", 0.4) : T.border}`, borderRadius: 14, padding: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>Automatic sending {cfg.schedulerOn ? "is ON" : "is off"}</div>
+            <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.45 }}>The master switch. Off = nothing ever sends on its own. On = the sequences you enable below fire on schedule — honoring opt-outs, your cooldown, and Test Mode.</div>
+          </div>
+          <Toggle on={!!cfg.schedulerOn} onChange={v => setCfg("schedulerOn", v)} />
+        </div>
+        <div style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+          <button onClick={runPreview} disabled={previewBusy} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "9px 16px", fontSize: 12.5, fontWeight: 800, cursor: previewBusy ? "default" : "pointer", fontFamily: "inherit", opacity: previewBusy ? 0.6 : 1 }}>{previewBusy ? "Checking…" : "Preview what would send now"}</button>
+          <span style={{ fontSize: 11.5, color: T.textMuted }}>Shows exactly who'd get a message — sends nothing.</span>
+        </div>
+        {preview && (
+          <div style={{ marginTop: 12, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: 12 }}>
+            {preview.error ? <div style={{ fontSize: 12.5, color: "#C0392B" }}>{preview.error}</div>
+             : preview.master === false ? <div style={{ fontSize: 12.5, color: T.textMuted }}>Automatic sending is off — flip the master switch on to preview a live run.</div>
+             : (<>
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: T.text, marginBottom: 8 }}>
+                  {(preview.counts?.wouldSend || 0)} would send right now{preview.testMode?.on ? " — all redirected to you (Test Mode)" : ""}.
+                </div>
+                {(preview.wouldSend || []).slice(0, 12).map((m, i) => (
+                  <div key={i} style={{ fontSize: 11.5, color: T.textMuted, padding: "6px 0", borderTop: i ? `1px solid ${T.border}` : "none", lineHeight: 1.45 }}>
+                    <b style={{ color: T.text }}>{m.type}</b> → {m.client}<br />{m.message}
+                  </div>
+                ))}
+                {!(preview.wouldSend || []).length && <div style={{ fontSize: 11.5, color: T.textMuted }}>Nothing is due to send right now.</div>}
+                {(preview.counts?.cooledDown || 0) > 0 && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>{preview.counts.cooledDown} held back by the cooldown.</div>}
+              </>)}
+          </div>
+        )}
+      </div>
       <div>
         <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Automated Messages</div>
         <div style={{ fontSize: 12, color: T.textMuted }}>The messages clients get on their own. Turn each on, tweak the wording, and text yourself a test first.</div>
@@ -18877,7 +18922,7 @@ function CommunicationsHub({ scheduleCfg, setScheduleCfg, email, setEmail, brand
         </div>
       </div>
       <div style={{ background: hexA(T.primary, 0.06), borderRadius: 12, padding: "12px 14px", fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>
-        Set these up now — they start sending on their own once the scheduler is switched on (the next step). Until then nothing goes out automatically. Every message respects each client's opt-out and Test Mode.
+        Recommended first run: turn the master switch on with <b>Test Mode ON</b> — every auto-message redirects to you, tagged [TEST], so you can watch a few fire safely before a real client gets anything. Each message also respects the client's opt-out and your cooldown. Flip Test Mode off when you're confident.
       </div>
     </div>
   );

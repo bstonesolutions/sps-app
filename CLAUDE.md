@@ -26,6 +26,8 @@ Serverless functions under `api/` read these. None are committed; missing ones m
 - `GUSTO_COMPANY_UUID` — Gusto company UUID. From the Gusto API or the company URL.
 - `GUSTO_API_BASE` *(optional)* — Gusto API origin. Defaults to the **demo/sandbox** host `https://api.gusto-demo.com`. Set to `https://api.gusto.com` once production Gusto credentials are confirmed live.
 - `VITE_GOOGLE_MAPS_API_KEY` — Google Maps key for staff location tracking, client live map + ETA, and route optimization. **Client-side** (Vite `VITE_` prefix, so it ships in the bundle — restrict it by HTTP referrer in the Google Cloud console). Enable: Maps JavaScript API, Directions API, Geocoding API, Distance Matrix API.
+- `QUO_API_KEY`, `QUO_PHONE_NUMBER` — Quo (ex-OpenPhone) API key + the business texting number (E.164). Power every outbound SMS (`api/send-sms.js` and the automation cron).
+- `CRON_SECRET` — **required to ACTIVATE automated sending.** The `api/cron-automations` scheduler (Vercel cron, hourly per `vercel.json`) only performs REAL sends when the request carries `Authorization: Bearer <CRON_SECRET>` — which Vercel attaches automatically once this env var is set. Without it, the cron 401s on real runs (so nothing sends) while the app's **dry-run preview** (`?dryRun=1`) still works. Set any long random string. The whole engine is *also* gated by the in-app master switch (`sps_schedule_cfg.schedulerOn`) + Test Mode, so setting this alone does not send anything until the owner turns it on.
 
 Optional: `SUPABASE_URL`, `RESEND_FROM`, `PUBLIC_APP_URL`, `QB_CLIENT_ID`, `QB_CLIENT_SECRET`.
 
@@ -100,6 +102,20 @@ CREATE POLICY "staff_locations insert (authenticated)"
   ON public.staff_locations FOR INSERT TO authenticated WITH CHECK (true);
 CREATE POLICY "staff_locations update (authenticated)"
   ON public.staff_locations FOR UPDATE TO authenticated USING (true) WITH CHECK (true);
+
+-- Public NO-LOGIN live-tracking page (/?track=<token>, the LiveTrack component) reads as the ANON
+-- client. Without these two policies it gets NULL on everything → every link shows "Tracking link
+-- unavailable" and the moving dot never appears. Expose ONLY the minimum (added 2026-06-29):
+--   1) per-link records keyed sps_track_<unguessable token> in app_state — a client can read its own
+--      stop ONLY (it can't list keys or reach sps_clients / sps_invoices / sps_schedule), and
+--   2) actively-broadcasting tech locations (NOT the whole table).
+-- The staff side writes the sps_track_<token> record in App.jsx ensureTrackToken() on Head Here / I'm
+-- Here, with status scheduled→enroute→arrived. NOTE #2 makes an on-the-clock tech's live GPS readable
+-- by anyone holding the (public) anon key — inherent to no-login tracking; limited to is_active rows.
+CREATE POLICY "anon read tracking tokens"
+  ON public.app_state FOR SELECT TO anon USING (key LIKE 'sps_track_%');
+CREATE POLICY "anon read active staff locations"
+  ON public.staff_locations FOR SELECT TO anon USING (is_active = true);
 ```
 
 ## Supabase Realtime (run once in the SQL editor)
