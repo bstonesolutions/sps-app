@@ -6859,7 +6859,7 @@ function PhotoStrip({ photos, size = 56 }) {
 // ─────────────────────────────────────────────
 // SERVICE WORKSPACE (perform & log a stop, with profitability)
 // ─────────────────────────────────────────────
-function CompleteStopModal({ stop, client, email, catalog, costs, team, clients, dayDate, arrivedAt, enRouteAt, draft, onSaveDraft, onClearDraft, onComplete, onUpdateStop, onClose, onViewClient, onOfficeAlert }) {
+function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, team, clients, dayDate, arrivedAt, enRouteAt, draft, onSaveDraft, onClearDraft, onComplete, onUpdateStop, onClose, onViewClient, onOfficeAlert }) {
   const { T, branding, perms } = useApp();
   const todayStr = new Date().toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" });
   const firstName = client?.name?.split(" ")[0] || "there";
@@ -7146,6 +7146,13 @@ function CompleteStopModal({ stop, client, email, catalog, costs, team, clients,
       onOfficeAlert({ client: client?.name || "Client", clientId: client?.id, sid: stop?.sid, message: officeFlagMsg.trim(), date: todayStr });
     }
     setDone(true);
+    // Post-visit summary — fire the recap text automatically when the owner has it on. Gated by the
+    // master switch + the post-visit toggle, the client's text channel, and their per-type opt-out;
+    // sendText() itself honors Test Mode (so a [TEST] run reaches the owner, not the client).
+    const acfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
+    if (acfg.schedulerOn && acfg.postVisitOn && phone && commPref(client, "text") && !(client && client.notifyPrefs && client.notifyPrefs.reportSummary === false)) {
+      sendText();
+    }
   };
 
   const [reportSend, setReportSend] = useState({ busy: "", msg: null });
@@ -10522,6 +10529,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           stop={completeModal.stop}
           client={completeModal.client}
           email={email}
+          scheduleCfg={scheduleCfg}
           catalog={catalog}
           costs={costs}
           team={team}
