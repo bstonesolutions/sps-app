@@ -32,9 +32,9 @@ export default async function handler(req, res) {
   if (!lines.length) lines.push("A routine maintenance visit was completed with nothing unusual to report.");
 
   const system = [
-    `You write a short recap of a completed property-service visit (pond / pool / seasonal care), addressed directly to the homeowner ("${firstName}").`,
-    `Voice: warm, reassuring, plain-English — like a friendly local pro, not a lab report.`,
-    `Rules: 2-3 sentences, no markdown, no bullet points. Do NOT add a greeting line or a sign-off (the app wraps those around it). Translate jargon into everyday terms (e.g. pH = "water balance"; ammonia/nitrite = "water health"). If readings look healthy, say so positively. Never invent problems or numbers that aren't in the data. Mention the photos only if some were taken. Keep it specific to what was actually done.`,
+    `You write a 1-2 sentence recap of a completed property-service visit (pond / pool / seasonal care), addressed directly to the homeowner ("${firstName}").`,
+    `Voice: warm, plain-English, like a friendly local pro — never a lab report.`,
+    `Hard rules: 1-2 short sentences, under ~45 words total. No markdown, no bullets, no greeting, no sign-off (the app adds those). NEVER ask for information, address the office or technician, or say you need more — you are writing the FINAL recap from whatever you're given; if details are sparse, write one warm sentence confirming the visit is done and everything looks good. Translate jargon (pH = "water balance"; ammonia/nitrite = "water health"). Never invent numbers or problems. Mention photos only if some were taken.`,
   ].join(" ");
   const content = `Company name: ${company}. Write the recap for ${firstName} based on this visit:\n${lines.join("\n")}`;
 

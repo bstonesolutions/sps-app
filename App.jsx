@@ -7246,6 +7246,8 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     setAiBusy(b => ({ ...b, recap: false }));
   };
   const genDiag = async () => {
+    const hasReadings = readings && Object.values(readings).some(v => v !== "" && v != null && v !== "—");
+    if (!hasReadings) { setAiDiag(null); setAiErr("Enter your water test readings first — the water check reads those to flag issues."); return; }
     setAiBusy(b => ({ ...b, diag: true })); setAiErr("");
     try {
       const hist = Array.isArray(client?.history) ? client.history.slice(0, 5).map(h => ({ date: h.date, readings: h.readings })) : [];

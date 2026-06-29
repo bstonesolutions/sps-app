@@ -31,10 +31,10 @@ export default async function handler(req, res) {
     trend ? `RECENT readings (newest first), to judge trends:\n${trend}` : `No prior readings available — judge from the current values only.`,
     catalog ? `\nTreatments/products available to recommend (with retail price): ${catalog}` : ``,
     ``,
-    `Assess water health, flag any problems (out-of-range values, worsening trends, and — if photos are included — visible algae, cloudiness, or equipment issues). Recommend specific treatments from the list above where they'd genuinely help (these double as upsells), with a one-line plain-English reason the client would understand. Be conservative: do not invent problems; if the water looks healthy, say so.`,
+    `Assess the water and be TERSE and POINTED — a tech reads this on a phone between stops, so every line must earn its place. Flag ONLY real problems (out-of-range values, worsening trends, or — if photos are included — visible algae/cloudiness/equipment issues). If the water is healthy, say so in one line and return no issues. For each issue: a 3-5 word title + ONE short line (the key number + why it matters to the fish or water), never a paragraph. Recommend treatments from the list ONLY where they genuinely help (these double as upsells), each with a one-clause reason. Never invent problems or numbers.`,
     ``,
-    `Reply with ONLY a JSON object, no prose, in this exact shape:`,
-    `{"healthy": boolean, "summary": "one friendly sentence for the owner", "issues": [{"title": "short", "detail": "plain-English explanation", "severity": "low|medium|high"}], "recommendations": [{"name": "treatment/product name from the list if possible", "reason": "why, in one line"}]}`,
+    `Reply with ONLY this JSON, no prose:`,
+    `{"healthy": boolean, "summary": "one bottom-line sentence", "issues": [{"title": "3-5 words", "detail": "one short line", "severity": "low|medium|high"}], "recommendations": [{"name": "name from the list", "reason": "one short clause"}]}`,
   ].join("\n");
 
   // Vision: attach up to 3 photos — either uploaded URLs or fresh on-device base64 data URLs.
