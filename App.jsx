@@ -7228,6 +7228,45 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     setReportSend({ busy: "", msg: r.ok ? { ok: true, text: txtMsg } : { ok: false, text: r.error || (r.missingEnv ? "Texting isn't set up yet." : "Text failed to send.") } });
   };
 
+  // ── AI assist — optional; degrades to a clear "add your key" message until ANTHROPIC_API_KEY is set ──
+  const [aiBusy, setAiBusy] = useState({ recap: false, diag: false });
+  const [aiRecap, setAiRecap] = useState(null);
+  const [aiDiag, setAiDiag] = useState(null);
+  const [aiErr, setAiErr] = useState("");
+  const aiNotReady = "AI isn't connected yet — add your ANTHROPIC_API_KEY in Vercel to turn this on.";
+  const genRecap = async () => {
+    setAiBusy(b => ({ ...b, recap: true })); setAiErr("");
+    try {
+      const r = await fetch(`${PROD_URL}/api/ai-summarize`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ serviceType: stop.type, readings, treatments: treatmentsUsed, parts: partsUsedArr, notes: notesClient, photoCount: photos.length, clientFirst: firstName, company: branding.companyName }) });
+      const d = await r.json().catch(() => ({}));
+      if (d && d.summary) setAiRecap(d.summary);
+      else setAiErr(d && d.missingEnv ? aiNotReady : ((d && d.error) || "Couldn't generate the recap."));
+    } catch (_) { setAiErr("Couldn't reach the AI service."); }
+    setAiBusy(b => ({ ...b, recap: false }));
+  };
+  const genDiag = async () => {
+    setAiBusy(b => ({ ...b, diag: true })); setAiErr("");
+    try {
+      const hist = Array.isArray(client?.history) ? client.history.slice(0, 5).map(h => ({ date: h.date, readings: h.readings })) : [];
+      const cat = ((catalog && catalog.treatments) || []).map(t => ({ name: t.name, retail: t.retailPerOz ?? t.retail, unit: t.unit }));
+      const photoUrls = photos.map(p => p.src).filter(s => typeof s === "string" && /^https?:\/\//.test(s)); // only uploaded URLs (skip fat base64)
+      const r = await fetch(`${PROD_URL}/api/ai-water-diagnosis`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ serviceType: stop.type, readings, history: hist, photoUrls, catalog: cat, division: client?.division, clientFirst: firstName }) });
+      const d = await r.json().catch(() => ({}));
+      if (d && d.ok) setAiDiag(d);
+      else setAiErr(d && d.missingEnv ? aiNotReady : ((d && d.error) || "Couldn't analyze the water."));
+    } catch (_) { setAiErr("Couldn't reach the AI service."); }
+    setAiBusy(b => ({ ...b, diag: false }));
+  };
+  const textAiRecap = async () => {
+    if (!phone) { setReportSend({ busy: "", msg: { ok: false, text: "No phone number on file for this client." } }); return; }
+    setReportSend({ busy: "text", msg: null });
+    const r = await sendSms(phone, `${aiRecap}\n\nView your full report and photos here: ${PROD_URL}`, { clientId: stop?.clientId, type: "Service report" });
+    if (r.ok) { try { postReportToPortal(); } catch (_) {} }
+    setReportSend({ busy: "", msg: r.ok ? { ok: true, text: r.held ? "Test Mode (hold) — not sent." : TEST_MODE.on ? "Test Mode — recap sent to you, tagged [TEST]." : `Recap texted to ${client?.name || "the client"}.` } : { ok: false, text: r.error || "Text failed to send." } });
+  };
+
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
   const smallInput = { width: "100%", padding: "9px 10px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "center" };
   const sectionGap = { marginBottom: 18 };
@@ -7298,6 +7337,37 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
           </div>
           {(!commPref(client, "email") || !commPref(client, "text")) && <div style={{ fontSize: 11.5, color: T.textMuted, marginBottom: 8, lineHeight: 1.4 }}>Dimmed = the client opted out of that channel. Sending still works if you need to reach them.</div>}
           {reportSend.msg && <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 10, color: reportSend.msg.ok ? "#16a34a" : T.accent }}>{reportSend.msg.text}</div>}
+          {/* ✨ AI assist — a personalized recap + a water check, generated from this visit's data */}
+          <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 4, paddingTop: 12, marginBottom: 12 }}>
+            <div style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>✨ AI assist</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <Btn variant="ghost" onClick={genRecap} disabled={aiBusy.recap} style={{ flex: 1, minWidth: 130, padding: "10px", borderRadius: 12 }}>{aiBusy.recap ? "Writing…" : "Write client recap"}</Btn>
+              <Btn variant="ghost" onClick={genDiag} disabled={aiBusy.diag} style={{ flex: 1, minWidth: 130, padding: "10px", borderRadius: 12 }}>{aiBusy.diag ? "Analyzing…" : "Water check"}</Btn>
+            </div>
+            {aiErr && <div style={{ fontSize: 12, color: T.accent, marginTop: 8, lineHeight: 1.45 }}>{aiErr}</div>}
+            {aiRecap != null && (
+              <div style={{ marginTop: 10 }}>
+                <label style={labelStyle}>Client recap — edit if you like</label>
+                <textarea rows={3} value={aiRecap} onChange={e => setAiRecap(e.target.value)} style={{ width: "100%", padding: "10px 12px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 13.5, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical", lineHeight: 1.5 }} />
+                <Btn onClick={textAiRecap} disabled={!!reportSend.busy} style={{ marginTop: 8, padding: "10px 14px", borderRadius: 12, display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="message" size={13} /> Text this recap</Btn>
+              </div>
+            )}
+            {aiDiag && (
+              <div style={{ marginTop: 10, background: T.surfaceAlt, borderRadius: 12, padding: 12 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: T.text, lineHeight: 1.45 }}>{aiDiag.healthy ? "✓ " : "⚠️ "}{aiDiag.summary}</div>
+                {(aiDiag.issues || []).map((is, i) => (
+                  <div key={i} style={{ fontSize: 11.5, color: T.textMuted, marginTop: 7, lineHeight: 1.45 }}><b style={{ color: is.severity === "high" ? T.accent : T.text }}>{is.title}</b> — {is.detail}</div>
+                ))}
+                {(aiDiag.recommendations || []).length > 0 && (<>
+                  <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginTop: 11, marginBottom: 4 }}>Recommend to client</div>
+                  {(aiDiag.recommendations || []).map((rc, i) => (
+                    <div key={i} style={{ fontSize: 11.5, color: T.text, marginTop: 4, lineHeight: 1.45 }}>• <b>{rc.name}</b> — {rc.reason}</div>
+                  ))}
+                </>)}
+                <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 10, fontStyle: "italic" }}>AI suggestion — use your judgment.</div>
+              </div>
+            )}
+          </div>
           <button onClick={onClose} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 8, fontFamily: "inherit" }}>Done</button>
         </div>
       </Modal>

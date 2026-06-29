@@ -28,8 +28,9 @@ Serverless functions under `api/` read these. None are committed; missing ones m
 - `VITE_GOOGLE_MAPS_API_KEY` — Google Maps key for staff location tracking, client live map + ETA, and route optimization. **Client-side** (Vite `VITE_` prefix, so it ships in the bundle — restrict it by HTTP referrer in the Google Cloud console). Enable: Maps JavaScript API, Directions API, Geocoding API, Distance Matrix API.
 - `QUO_API_KEY`, `QUO_PHONE_NUMBER` — Quo (ex-OpenPhone) API key + the business texting number (E.164). Power every outbound SMS (`api/send-sms.js` and the automation cron).
 - `CRON_SECRET` — **required to ACTIVATE automated sending.** The `api/cron-automations` scheduler (Vercel cron, hourly per `vercel.json`) only performs REAL sends when the request carries `Authorization: Bearer <CRON_SECRET>` — which Vercel attaches automatically once this env var is set. Without it, the cron 401s on real runs (so nothing sends) while the app's **dry-run preview** (`?dryRun=1`) still works. Set any long random string. The whole engine is *also* gated by the in-app master switch (`sps_schedule_cfg.schedulerOn`) + Test Mode, so setting this alone does not send anything until the owner turns it on.
+- `ANTHROPIC_API_KEY` — **the ONLY thing needed to turn on the AI features.** Powers the AI helpers in `api/_ai.js` → `api/ai-summarize.js` (client visit recap) and `api/ai-water-diagnosis.js` (water-test analysis + treatment/upsell suggestions), surfaced on the stop-completion screen's "✨ AI assist". Until it's set, the AI buttons show a clean "AI isn't connected yet — add your key" message and nothing else breaks. Get it at console.anthropic.com. Optional `ANTHROPIC_MODEL` overrides the default `claude-sonnet-4-6`.
 
-Optional: `SUPABASE_URL`, `RESEND_FROM`, `PUBLIC_APP_URL`, `QB_CLIENT_ID`, `QB_CLIENT_SECRET`.
+Optional: `SUPABASE_URL`, `RESEND_FROM`, `PUBLIC_APP_URL`, `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `ANTHROPIC_MODEL`.
 
 ### `API_AUTH_ENFORCED` — turning on endpoint auth (two-step, safe rollout)
 
