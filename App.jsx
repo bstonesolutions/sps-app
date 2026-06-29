@@ -1335,6 +1335,18 @@ const DEFAULT_SCHEDULE_CFG = {
   // Seasonal reminders — Brandon-defined nudges to schedule seasonal services.
   // Each: { id, name, month (1-12), day, division ("All"|Pond|Pool|Seasonal), message }.
   seasonalReminders: [],      // starts empty — nothing hardcoded
+  // ── Automated client messages (configured in the Communications hub; the scheduler fires them) ──
+  // Each turns on independently; a global cooldown stops a client getting the same auto-message twice
+  // in the window. Templates live in DEFAULT_EMAIL (smsReport / smsPaymentNudge / smsWinBack); per-client
+  // opt-outs live on client.notifyPrefs. Until the scheduler is wired, these are configuration only.
+  postVisitOn: false,            // auto-text the client a recap right after a stop is completed (uses smsReport)
+  paymentNudgeOn: false,         // nudge clients about past-due invoices
+  paymentNudgeAfterDays: 3,      // first nudge once an invoice is this many days past due
+  paymentNudgeRepeatDays: 7,     // re-nudge every N days while still unpaid
+  paymentNudgeMax: 3,            // stop after this many nudges per invoice
+  winBackOn: false,              // re-engage clients with no recent completed visit
+  winBackAfterDays: 60,          // "lapsed" = no completed visit in this many days
+  autoCooldownHours: 20,         // guardrail: never send a client the same auto-type twice within this window
 };
 
 // Roles & access — admin configures exactly what employees can see, change, and do
@@ -1951,6 +1963,10 @@ const DEFAULT_EMAIL = {
   // Invoice notifications ({first}, {company}, {number}, {amount}, {dueDate}, {link})
   smsInvoice: "Hi {first}, your invoice {number} for {amount} from {company} is ready. {link}",
   chatInvoice: "You have a new invoice from {company}.",
+  // Automated payment nudge — past-due invoice reminder ({first}, {company}, {number}, {amount}, {dueDate}, {link})
+  smsPaymentNudge: "Hi {first}, a friendly reminder from {company}: invoice {number} for {amount} is past due. You can take care of it here: {link}. Thank you!",
+  // Automated win-back — re-engage a lapsed client ({first}, {company}, {service})
+  smsWinBack: "Hi {first}, we've missed taking care of your {service}! It's been a little while — just reply here and we'll get you right back on the {company} schedule.",
   // Invoice EMAIL wording (the rest of the invoice — line items/totals/pay button — is
   // structural). Tags: {number} {company} {first} {amount} {dueDate}.
   invoiceEmailSubject: "Invoice {number} from {company}",
@@ -17649,11 +17665,12 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
               {(perms.editSettings || perms.canInvoice || perms.isAdmin) && <InviteEmailSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} />}
             </Collapsible>
           )}
-          {/* Merged: owner alerts + appointment reminders */}
+          {/* Communications hub: owner alerts + appointment/seasonal reminders + automated client messages */}
           {(perms.editNotifications || perms.editSchedule) && (
-            <Collapsible title="Alerts & Reminders" subtitle="Which client events notify you, plus appointment reminders sent to clients.">
+            <Collapsible title="Communications & Automations" subtitle="Owner alerts, appointment + seasonal reminders, and the automated messages your clients get.">
               {perms.editNotifications && <><SaveBar ctl={emailCtl} T={T} /><NotificationSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} /></>}
               <ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />
+              <CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />
             </Collapsible>
           )}
           {perms.editCosts && (
@@ -18765,6 +18782,107 @@ function CPMessages({ client, branding, onSubmit, onClientMessage, onOpenInvoice
 
 // Reminder & messaging settings — moved into the Customize > Business tab. Same
 // settings, labels, and (immediate) save behavior as before; only relocated.
+// ── Communications hub — control center for the automated client messages ────────────────────
+// One card per sequence: turn it on, time it, edit the wording with a live preview, and text
+// yourself a test. The toggles + templates are the control surface; the scheduler (next phase) is
+// what fires them — until then this is configuration and nothing reaches a client automatically.
+// Every send still respects the client's per-type opt-out (notifyPrefs) and Test Mode.
+function CommunicationsHub({ scheduleCfg, setScheduleCfg, email, setEmail, branding, T }) {
+  const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
+  const setCfg = (k, v) => setScheduleCfg({ ...cfg, [k]: v });
+  const em = email || {};
+  const setTpl = (k, v) => setEmail && setEmail(e => ({ ...e, [k]: v }));
+  const CO = (branding && branding.companyName) || "Stone Property Solutions";
+  const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const num = { ...field, width: 76, textAlign: "center" };
+  const numWrap = { display: "flex", alignItems: "center", gap: 6 };
+  const numHint = { fontSize: 12.5, color: T.textMuted };
+  const fill = (tpl, vars) => Object.entries(vars).reduce((s, [k, v]) => s.split(`{${k}}`).join(v), String(tpl || ""));
+  const numOnly = (v, max) => v.replace(/\D/g, "").slice(0, max);
+
+  const testSend = async (tpl, vars) => {
+    const def = (em.testMode && em.testMode.phone) || "";
+    const to = window.prompt("Send a test of this message to which phone number?", def);
+    if (!to || !to.trim()) return;
+    const res = await sendSms(to.trim(), fill(tpl, vars), null);
+    alert(res && res.ok ? "Test sent ✓" : `Couldn't send: ${(res && res.error) || "unknown error"}`);
+  };
+
+  const seqs = [
+    { key: "postVisit", onKey: "postVisitOn", tplKey: "smsReport", icon: "check",
+      title: "Post-visit summary", desc: "Text the client a friendly recap right after you complete a visit.",
+      vars: { first: "Sarah", company: CO, service: "Pond Service" }, timing: null },
+    { key: "paymentNudge", onKey: "paymentNudgeOn", tplKey: "smsPaymentNudge", icon: "mail",
+      title: "Payment nudge", desc: "Gently remind clients about past-due invoices, on a schedule.",
+      vars: { first: "Sarah", company: CO, number: "#1043", amount: "$650.00", link: "spsway.app/pay/…", dueDate: "Jun 13" },
+      timing: () => (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
+          <div><label style={lbl}>First nudge</label><div style={numWrap}><input type="text" inputMode="numeric" value={cfg.paymentNudgeAfterDays} onChange={e => setCfg("paymentNudgeAfterDays", Number(numOnly(e.target.value, 2)) || 0)} style={num} /><span style={numHint}>days past due</span></div></div>
+          <div><label style={lbl}>Repeat every</label><div style={numWrap}><input type="text" inputMode="numeric" value={cfg.paymentNudgeRepeatDays} onChange={e => setCfg("paymentNudgeRepeatDays", Number(numOnly(e.target.value, 2)) || 0)} style={num} /><span style={numHint}>days</span></div></div>
+          <div><label style={lbl}>Stop after</label><div style={numWrap}><input type="text" inputMode="numeric" value={cfg.paymentNudgeMax} onChange={e => setCfg("paymentNudgeMax", Number(numOnly(e.target.value, 1)) || 0)} style={num} /><span style={numHint}>nudges</span></div></div>
+        </div>
+      ) },
+    { key: "winBack", onKey: "winBackOn", tplKey: "smsWinBack", icon: "refresh",
+      title: "Win-back", desc: "Re-engage clients who haven't had a visit in a while.",
+      vars: { first: "Sarah", company: CO, service: "pond" },
+      timing: () => (
+        <div><label style={lbl}>Consider a client lapsed after</label><div style={numWrap}><input type="text" inputMode="numeric" value={cfg.winBackAfterDays} onChange={e => setCfg("winBackAfterDays", Number(numOnly(e.target.value, 3)) || 0)} style={num} /><span style={numHint}>days with no completed visit</span></div></div>
+      ) },
+  ];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14, borderTop: `1px solid ${T.border}`, paddingTop: 16 }}>
+      <div>
+        <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Automated Messages</div>
+        <div style={{ fontSize: 12, color: T.textMuted }}>The messages clients get on their own. Turn each on, tweak the wording, and text yourself a test first.</div>
+      </div>
+      {seqs.map(seq => {
+        const on = !!cfg[seq.onKey];
+        const tpl = em[seq.tplKey] ?? DEFAULT_EMAIL[seq.tplKey];
+        return (
+          <div key={seq.key} style={{ background: T.surfaceAlt, borderRadius: 14, padding: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+                <div style={{ width: 30, height: 30, borderRadius: 9, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name={seq.icon} size={15} /></div>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text }}>{seq.title}</div>
+                  <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.4 }}>{seq.desc}</div>
+                </div>
+              </div>
+              <Toggle on={on} onChange={v => setCfg(seq.onKey, v)} />
+            </div>
+            {on && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 14 }}>
+                {seq.timing && seq.timing()}
+                <div>
+                  <label style={lbl}>Message</label>
+                  <textarea rows={3} value={tpl} onChange={e => setTpl(seq.tplKey, e.target.value)} style={{ ...field, resize: "vertical" }} />
+                  <div style={{ marginTop: 10 }}>
+                    <label style={lbl}>Preview</label>
+                    <div style={{ background: hexA(T.primary, 0.1), borderRadius: 14, borderTopLeftRadius: 4, padding: "11px 14px", fontSize: 13, color: T.text, lineHeight: 1.5 }}>{fill(tpl, seq.vars)}</div>
+                  </div>
+                  <button onClick={() => testSend(tpl, seq.vars)} style={{ marginTop: 10, background: T.surface, border: `1.5px solid ${T.border}`, color: T.text, borderRadius: 10, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="mail" size={13} /> Send a test to my phone</button>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      <div>
+        <label style={lbl}>Anti-spam cooldown</label>
+        <div style={numWrap}>
+          <input type="text" inputMode="numeric" value={cfg.autoCooldownHours} onChange={e => setCfg("autoCooldownHours", Number(numOnly(e.target.value, 3)) || 0)} style={num} />
+          <span style={numHint}>hours — never send a client the same automated message twice within this window</span>
+        </div>
+      </div>
+      <div style={{ background: hexA(T.primary, 0.06), borderRadius: 12, padding: "12px 14px", fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>
+        Set these up now — they start sending on their own once the scheduler is switched on (the next step). Until then nothing goes out automatically. Every message respects each client's opt-out and Test Mode.
+      </div>
+    </div>
+  );
+}
+
 function ReminderSettings({ scheduleCfg, setScheduleCfg, email, setEmail, branding, T }) {
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
   const setCfg = (k, v) => setScheduleCfg({ ...cfg, [k]: v });
@@ -23663,7 +23781,7 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
   const pondLbl = pondLabel(client);
   // Notification preferences live on the client record (sps_clients) so they persist
   // in app_state across devices/builds and the office can honor them. Opt-out model.
-  const NOTIFY_DEFAULTS = { serviceReminders: true, onMyWay: true, invoiceReady: true };
+  const NOTIFY_DEFAULTS = { serviceReminders: true, onMyWay: true, invoiceReady: true, reportSummary: true, paymentNudges: true, winBack: true };
   const [notify, setNotify] = useState(() => ({ ...NOTIFY_DEFAULTS, ...(client.notifyPrefs || {}) }));
   const toggleNotify = (k) => { const next = { ...notify, [k]: !notify[k] }; setNotify(next); if (onSavePrefs) onSavePrefs(next); };
   // Communication channels the client wants reached on (text / email / in-app). Opt-out: all on
@@ -23769,7 +23887,10 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
         {[
           ["serviceReminders", "Service reminders", "Reminders about upcoming visits"],
           ["onMyWay", "On-the-way alerts", `When ${branding.companyName || "we"} are heading over`],
+          ["reportSummary", "Visit summaries", "A recap text after each completed visit"],
           ["invoiceReady", "Invoice ready", "When a new invoice is available"],
+          ["paymentNudges", "Payment reminders", "Gentle nudges about past-due invoices"],
+          ["winBack", "Check-ins", "Occasional notes if it's been a while"],
         ].map(([k, label, hint], i, arr) => (
           <div key={k} style={{ padding: "13px 0", borderBottom: i < arr.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
             <div>
