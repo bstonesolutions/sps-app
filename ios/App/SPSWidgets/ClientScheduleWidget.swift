@@ -77,7 +77,7 @@ struct ClientScheduleView: View {
                     .foregroundColor(Brand.ink)
                     .lineLimit(1)
                 if let d = nextDate {
-                    Text("\(SPSDate.dayLabel(d)) · \(SPSDate.timeLabel(d))")
+                    Text(p?.nextVisitUntimed == true ? SPSDate.dayLabel(d) : "\(SPSDate.dayLabel(d)) · \(SPSDate.timeLabel(d))")
                         .font(.system(size: 15, weight: .medium))
                         .foregroundColor(Brand.slate)
                         .lineLimit(1)

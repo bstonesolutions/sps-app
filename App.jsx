@@ -7358,21 +7358,34 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
                 <Btn onClick={textAiRecap} disabled={!!reportSend.busy} style={{ marginTop: 8, padding: "10px 14px", borderRadius: 12, display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="message" size={13} /> Text this recap</Btn>
               </div>
             )}
-            {aiDiag && (
-              <div style={{ marginTop: 10, background: T.surfaceAlt, borderRadius: 12, padding: 12 }}>
-                <div style={{ fontSize: 12.5, fontWeight: 700, color: T.text, lineHeight: 1.45 }}>{aiDiag.healthy ? "✓ " : "⚠️ "}{aiDiag.summary}</div>
-                {(aiDiag.issues || []).filter(is => is && is.title).map((is, i) => (
-                  <div key={i} style={{ fontSize: 11.5, color: T.textMuted, marginTop: 7, lineHeight: 1.45 }}><b style={{ color: is.severity === "high" ? T.accent : T.text }}>{is.title}</b>{is.detail ? ` — ${is.detail}` : ""}</div>
-                ))}
-                {(aiDiag.recommendations || []).length > 0 && (<>
-                  <div style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginTop: 11, marginBottom: 4 }}>Recommend to client</div>
-                  {(aiDiag.recommendations || []).filter(rc => rc && rc.name).map((rc, i) => (
-                    <div key={i} style={{ fontSize: 11.5, color: T.text, marginTop: 4, lineHeight: 1.45 }}>• <b>{rc.name}</b>{rc.reason ? ` — ${rc.reason}` : ""}</div>
+            {aiDiag && (() => {
+              const dIssues = (aiDiag.issues || []).filter(is => is && is.title);
+              const dRecs = (aiDiag.recommendations || []).filter(rc => rc && rc.name);
+              // All-clear → a tidy green "all good" pill instead of a sparse card.
+              if (aiDiag.healthy && dIssues.length === 0 && dRecs.length === 0) {
+                return (
+                  <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 9, background: hexA("#16a34a", 0.1), border: `1px solid ${hexA("#16a34a", 0.3)}`, borderRadius: 12, padding: "11px 13px" }}>
+                    <span style={{ color: "#16a34a", flexShrink: 0, display: "flex" }}><Icon name="check" size={16} /></span>
+                    <div style={{ fontSize: 12.5, fontWeight: 700, color: T.text, lineHeight: 1.4 }}>{aiDiag.summary || "Water looks healthy — nothing to flag."}</div>
+                  </div>
+                );
+              }
+              return (
+                <div style={{ marginTop: 10, background: T.surfaceAlt, borderRadius: 12, padding: 12 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: T.text, lineHeight: 1.45 }}>{aiDiag.healthy ? "✓ " : "⚠️ "}{aiDiag.summary}</div>
+                  {dIssues.map((is, i) => (
+                    <div key={i} style={{ fontSize: 11.5, color: T.textMuted, marginTop: 7, lineHeight: 1.45 }}><b style={{ color: is.severity === "high" ? T.accent : T.text }}>{is.title}</b>{is.detail ? ` — ${is.detail}` : ""}</div>
                   ))}
-                </>)}
-                <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 10, fontStyle: "italic" }}>AI suggestion — use your judgment.</div>
-              </div>
-            )}
+                  {dRecs.length > 0 && (<>
+                    <div style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginTop: 11, marginBottom: 4 }}>Recommend to client</div>
+                    {dRecs.map((rc, i) => (
+                      <div key={i} style={{ fontSize: 11.5, color: T.text, marginTop: 4, lineHeight: 1.45 }}>• <b>{rc.name}</b>{rc.reason ? ` — ${rc.reason}` : ""}</div>
+                    ))}
+                  </>)}
+                  <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 10, fontStyle: "italic" }}>AI suggestion — use your judgment.</div>
+                </div>
+              );
+            })()}
           </div>
           <button onClick={onClose} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 8, fontFamily: "inherit" }}>Done</button>
         </div>
@@ -17768,10 +17781,11 @@ function SyncStatus({ T, branding, team, currentUserId, email = {} }) {
   );
 }
 
-function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEmail, costs, setCosts, budget, setBudget, clients, setClients, invoices, scheduleCfg, setScheduleCfg, team, setTeam, invoicing, setInvoicing, currentUserId, onResetData, serviceTiers, setServiceTiers, onSyncData, onNav, navDock, setNavDock, vp = {} }) {
+function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEmail, costs, setCosts, budget, setBudget, clients, setClients, invoices, scheduleCfg, setScheduleCfg, team, setTeam, invoicing, setInvoicing, currentUserId, onResetData, serviceTiers, setServiceTiers, onSyncData, onNav, initialTab, navDock, setNavDock, vp = {} }) {
   const { T, perms } = useApp();
   const fileRef = useRef();
-  const [tab, setTab] = useState("branding");
+  const [tab, setTab] = useState(initialTab || "branding");
+  useEffect(() => { if (initialTab) setTab(initialTab); }, [initialTab]); // deep-link from elsewhere (e.g. the header Test pill)
   // Debounced auto-save controllers — one per Customize settings slice.
   const brandCtl = useSectionAutosave(branding, setBranding);
   const emailCtl = useSectionAutosave(email, setEmail);
@@ -24557,6 +24571,7 @@ export default function App({ authEmail = "", onSignOut }) {
     } catch (_) {}
   }, [clients, page]);
   const [invoiceFilter, setInvoiceFilter] = useState("All"); // deep-link from dashboard tiles
+  const [settingsTab, setSettingsTab] = useState(null); // deep-link into a Customize sub-tab (e.g. the Test pill → Business)
   const [schedNonce, setSchedNonce] = useState(0); // bump to force-remount Schedule (re-tap reset)
   const [schedule, setSchedule, ls] = useStoredState("sps_schedule", DEFAULT_SCHEDULE);
   const [catalog, setCatalog, lcat] = useStoredState("sps_catalog", DEFAULT_CATALOG);
@@ -24928,6 +24943,7 @@ export default function App({ authEmail = "", onSignOut }) {
         const payload = { role: "client", updated_at: new Date().toISOString(), app_font: branding.appFont, logo_image: widgetLogo, logo_name: branding.companyName || "", logo_mono: logoInitial(branding) };
         if (nextV) {
           payload.next_visit_at = toISO(nextV.date, nextV.stop.time);
+          if (!nextV.stop.time) payload.next_visit_untimed = true; // widget shows the day only — no fake clock time
           payload.next_visit_service = nextV.stop.type || "Service Visit";
           const emp = (team || []).find(e => e.id === nextV.stop.assigneeId);
           if (emp) payload.next_visit_tech = emp.name;
@@ -25470,6 +25486,7 @@ export default function App({ authEmail = "", onSignOut }) {
     setSelectedClient(null);
     setAdding(false);
     setInvoiceFilter(opts.invoiceFilter || "All");
+    setSettingsTab(opts.settingsTab || null);
     window.scrollTo({ top: 0, behavior: "instant" });
   };
 
@@ -25483,6 +25500,7 @@ export default function App({ authEmail = "", onSignOut }) {
       setSelectedClient(null);
       setAdding(false);
       setInvoiceFilter("All");
+      setSettingsTab(null);
       // Schedule keeps its day/tech in a module cache; clear it and remount so a re-tap
       // returns to today's overview (matches how re-tapping Clients returns to the list).
       if (id === "schedule") { SCHED_VIEW = { date: null, tech: null }; setSchedNonce(n => n + 1); }
@@ -25491,6 +25509,7 @@ export default function App({ authEmail = "", onSignOut }) {
     }
     // Switching sections → just change page; leave sub-state (open client, Schedule day/tech) intact.
     setPage(id);
+    setSettingsTab(null); // clear any Customize deep-link so a normal Customize tap opens its default tab
     window.scrollTo({ top: 0, behavior: "instant" });
   };
 
@@ -26097,7 +26116,7 @@ export default function App({ authEmail = "", onSignOut }) {
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
       {page === "duplicates" && perms.canImport && <DuplicatesScreen clients={clients} invoices={invoices} schedule={schedule} onMerge={handleMergeClients} onGoToClients={() => handleNav("clients")} />}
-      {page === "settings" && <AppSettings onNav={handleNav} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeamSafe} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} navDock={navDock} setNavDock={setNavDock} vp={vp} />}
+      {page === "settings" && <AppSettings onNav={handleNav} initialTab={settingsTab} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeamSafe} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} navDock={navDock} setNavDock={setNavDock} vp={vp} />}
     </>
   );
 
@@ -26197,8 +26216,9 @@ export default function App({ authEmail = "", onSignOut }) {
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: "-0.02em", lineHeight: 1.15, color: T.text }}>{branding.companyName}</div>
                 {email?.testMode?.on && (
-                  <span title={`Test mode is on — client ${email.testMode.mode === "hold" ? "emails & texts are held" : "emails & texts go to you"}`}
-                    style={{ fontSize: 8.5, fontWeight: 800, letterSpacing: "0.06em", color: "#B45309", background: hexA("#F59E0B", 0.16), padding: "1.5px 6px", borderRadius: 100, textTransform: "uppercase", whiteSpace: "nowrap" }}>Test</span>
+                  <span onClick={() => handleNav("settings", { settingsTab: "business" })} role="button"
+                    title="Test mode is on — tap to manage it in Customize → Business"
+                    style={{ fontSize: 8.5, fontWeight: 800, letterSpacing: "0.06em", color: "#B45309", background: hexA("#F59E0B", 0.16), padding: "1.5px 6px", borderRadius: 100, textTransform: "uppercase", whiteSpace: "nowrap", cursor: "pointer" }}>Test</span>
                 )}
               </div>
               <div style={{ fontSize: 10.5, color: T.textMuted, letterSpacing: "0.01em", lineHeight: 1.2 }}>{branding.division}</div>

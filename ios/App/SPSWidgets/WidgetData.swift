@@ -37,6 +37,7 @@ struct WidgetPayload: Codable {
     var nextVisitAt: String?
     var nextVisitService: String?
     var nextVisitTech: String?
+    var nextVisitUntimed: Bool?
     var upcoming: [String]?
     var balanceDue: Double?
     var balanceDueDate: String?
@@ -63,6 +64,7 @@ struct WidgetPayload: Codable {
         case nextVisitAt      = "next_visit_at"
         case nextVisitService = "next_visit_service"
         case nextVisitTech    = "next_visit_tech"
+        case nextVisitUntimed = "next_visit_untimed"
         case upcoming
         case balanceDue       = "balance_due"
         case balanceDueDate   = "balance_due_date"
