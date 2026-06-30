@@ -2668,7 +2668,7 @@ function Btn({ children, onClick, href, variant = "primary", sm, lg, block, disa
     padding: lg ? "14px 24px" : sm ? "7px 14px" : "10px 18px",
     fontSize: lg ? 15 : sm ? 12 : 13.5,
     fontWeight: 700,
-    cursor: disabled ? "default" : "pointer",
+    cursor: disabled ? "not-allowed" : "pointer",
     opacity: disabled ? 0.45 : 1,
     fontFamily: "inherit",
     letterSpacing: "-0.01em",
@@ -7361,13 +7361,13 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
             {aiDiag && (
               <div style={{ marginTop: 10, background: T.surfaceAlt, borderRadius: 12, padding: 12 }}>
                 <div style={{ fontSize: 12.5, fontWeight: 700, color: T.text, lineHeight: 1.45 }}>{aiDiag.healthy ? "✓ " : "⚠️ "}{aiDiag.summary}</div>
-                {(aiDiag.issues || []).map((is, i) => (
-                  <div key={i} style={{ fontSize: 11.5, color: T.textMuted, marginTop: 7, lineHeight: 1.45 }}><b style={{ color: is.severity === "high" ? T.accent : T.text }}>{is.title}</b> — {is.detail}</div>
+                {(aiDiag.issues || []).filter(is => is && is.title).map((is, i) => (
+                  <div key={i} style={{ fontSize: 11.5, color: T.textMuted, marginTop: 7, lineHeight: 1.45 }}><b style={{ color: is.severity === "high" ? T.accent : T.text }}>{is.title}</b>{is.detail ? ` — ${is.detail}` : ""}</div>
                 ))}
                 {(aiDiag.recommendations || []).length > 0 && (<>
-                  <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginTop: 11, marginBottom: 4 }}>Recommend to client</div>
-                  {(aiDiag.recommendations || []).map((rc, i) => (
-                    <div key={i} style={{ fontSize: 11.5, color: T.text, marginTop: 4, lineHeight: 1.45 }}>• <b>{rc.name}</b> — {rc.reason}</div>
+                  <div style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginTop: 11, marginBottom: 4 }}>Recommend to client</div>
+                  {(aiDiag.recommendations || []).filter(rc => rc && rc.name).map((rc, i) => (
+                    <div key={i} style={{ fontSize: 11.5, color: T.text, marginTop: 4, lineHeight: 1.45 }}>• <b>{rc.name}</b>{rc.reason ? ` — ${rc.reason}` : ""}</div>
                   ))}
                 </>)}
                 <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 10, fontStyle: "italic" }}>AI suggestion — use your judgment.</div>
@@ -9593,12 +9593,13 @@ function StopChangeModal({ stop, client, dayDate, email, onReschedule, onCancelS
     if (action === "reschedule" && !newDateMDY) { setResult({ ok: false, text: "Pick the new date first." }); return; }
     setBusy(true); setResult(null);
     const recReason = (isOther ? customReason.trim() : reason) || "";
-    if (notifyClient) await notifyClientChannels(client, message, company); // toggled off → reschedule/cancel quietly, no client notice
+    const willNotify = notifyClient || action === "late"; // "late" IS the notice — it always notifies
+    if (willNotify) await notifyClientChannels(client, message, company); // toggled off → reschedule/cancel quietly, no client notice
     if (action === "reschedule") onReschedule(newDateMDY, recReason, message);
     else if (action === "cancel") onCancelStop(recReason, message);
     // "late" makes no schedule change — it's only a heads-up notice.
     setBusy(false);
-    setResult({ ok: true, text: !notifyClient ? "Done — the client was not notified." : channels.length ? `Client notified by ${channels.join(" + ").toLowerCase()}.` : "Recorded — this client has no text/in-app channel on file." });
+    setResult({ ok: true, text: !willNotify ? "Done — the client was not notified." : channels.length ? `Client notified by ${channels.join(" + ").toLowerCase()}.` : "Recorded — this client has no text/in-app channel on file." });
     setTimeout(onClose, 950);
   };
 
@@ -9642,16 +9643,18 @@ function StopChangeModal({ stop, client, dayDate, email, onReschedule, onCancelS
             {channels.length ? `Sends by ${channels.join(" + ")} — the channels ${firstName} chose.` : `${firstName} has no text or in-app channel on file; the change is still recorded.`}
           </div>
         </div>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, borderTop: `1px solid ${T.border}`, paddingTop: 14 }}>
-          <div>
-            <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text }}>Notify the client</div>
-            <div style={{ fontSize: 11.5, color: T.textMuted }}>Off = make the change quietly — no text or in-app message.</div>
+        {action !== "late" && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, borderTop: `1px solid ${T.border}`, paddingTop: 14 }}>
+            <div>
+              <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text }}>Notify the client</div>
+              <div style={{ fontSize: 11.5, color: T.textMuted }}>Off = make the change quietly — no text or in-app message.</div>
+            </div>
+            <Toggle on={notifyClient} onChange={setNotifyClient} />
           </div>
-          <Toggle on={notifyClient} onChange={setNotifyClient} />
-        </div>
+        )}
         {result && <div style={{ fontSize: 13, fontWeight: 700, color: result.ok ? "#16a34a" : T.accent }}>{result.text}</div>}
         <Btn onClick={send} disabled={busy} block lg>
-          {busy ? "Saving…" : notifyClient
+          {busy ? "Saving…" : (notifyClient || action === "late")
             ? (action === "reschedule" ? "Reschedule & notify" : action === "cancel" ? "Cancel visit & notify" : "Notify client")
             : (action === "reschedule" ? "Reschedule — no notice" : action === "cancel" ? "Cancel visit — no notice" : "Done")}
         </Btn>
@@ -10112,7 +10115,8 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
     const emp = (team || []).find(e => e.id === s.assigneeId);
     const accentLeft = isComplete ? T.accent : (isToday ? T.primary : T.textMuted);
     // Cancelled stop — kept on the schedule as a struck-through record, with a quiet remove.
-    if (s.cancelled && !selectMode) {
+    // Always render this view (even in select mode) so a cancelled record can't be bulk-selected.
+    if (s.cancelled) {
       return (
         <div key={s.sid} style={{ background: T.surfaceAlt, border: `1px dashed ${T.border}`, borderRadius: 18, padding: compact ? "10px 14px" : "12px 16px", display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
@@ -10248,7 +10252,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                       <div style={{ fontSize: 11, color: T.textMuted }}>Not yet started</div>
                     )}
                     <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
-                      {(perms.completeStops || perms.scheduleAddRemove) && (
+                      {(perms.completeStops || perms.scheduleAddRemove) && !headed && !arrived && (
                         <button onClick={e => { e.stopPropagation(); setEditStopModal({ stop: s, dayDate }); }}
                           title="Edit time, service, tech, or date — saves without completing the stop" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 2, fontSize: 11, fontWeight: 700, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4 }}>
                           <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg> Edit
@@ -19014,7 +19018,7 @@ function CommunicationsHub({ scheduleCfg, setScheduleCfg, email, setEmail, brand
       ) },
     { key: "winBack", onKey: "winBackOn", tplKey: "smsWinBack", icon: "refresh",
       title: "Win-back", desc: "Re-engage clients who haven't had a visit in a while.",
-      vars: { first: "Sarah", company: CO, service: "pond" },
+      vars: { first: "Sarah", company: CO, service: "service" },
       timing: () => (
         <div><label style={lbl}>Consider a client lapsed after</label><div style={numWrap}><input type="text" inputMode="numeric" value={cfg.winBackAfterDays} onChange={e => setCfg("winBackAfterDays", Number(numOnly(e.target.value, 3)) || 0)} style={num} /><span style={numHint}>days with no completed visit</span></div></div>
       ) },
@@ -19187,7 +19191,7 @@ function ReminderSettings({ scheduleCfg, setScheduleCfg, email, setEmail, brandi
                   {DIVISIONS.map(d => <option key={d} value={d}>{d}</option>)}
                 </select>
               </div>
-              <textarea rows={2} value={r.message || ""} onChange={e => upd({ message: e.target.value })} placeholder="Message — e.g. Hi {first}, time to schedule your pond closing! — {company}" style={{ ...field, resize: "vertical" }} />
+              <textarea rows={2} value={r.message || ""} onChange={e => upd({ message: e.target.value })} placeholder="Message — e.g. Hi {first}, time to schedule your next service! — {company}" style={{ ...field, resize: "vertical" }} />
             </div>
           );
         })}
@@ -24900,6 +24904,7 @@ export default function App({ authEmail = "", onSignOut }) {
           const d = parseMDY(mdy); if (!d) return mdy;
           const mt = /(\d+):(\d+)\s*(AM|PM)?/i.exec(timeStr || "");
           if (mt) { let h = (+mt[1]) % 12; if (/pm/i.test(mt[3] || "")) h += 12; d.setHours(h, +mt[2], 0, 0); }
+          else { d.setHours(9, 0, 0, 0); } // untimed stop → anchor to 9 AM so the widget never shows a midnight "12:00 AM" slot
           return d.toISOString();
         };
         const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -24912,7 +24917,7 @@ export default function App({ authEmail = "", onSignOut }) {
             upcoming.push({ day: dd, date: d.date, stop: s });
           });
         });
-        upcoming.sort((a, b) => a.day - b.day);
+        upcoming.sort((a, b) => a.day - b.day || to24(a.stop.time) - to24(b.stop.time)); // timed stops before untimed on the same day
         const nextV = upcoming[0];
 
         const bal = clientOutstanding(c, invoices);
