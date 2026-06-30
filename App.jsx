@@ -3521,7 +3521,7 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
         {next && (
           <div onClick={() => onOpenStop ? onOpenStop(next, today.date) : onNav("schedule")} role="button"
             style={{ margin: "12px 16px", background: T.primary, color: "#fff", borderRadius: 12, padding: "11px 14px", cursor: "pointer", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.15)" }}>
-            <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.08em", opacity: 0.82 }}>NEXT · {next.time}</div>
+            <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.08em", opacity: 0.82 }}>NEXT{next.time ? ` · ${next.time}` : ""}</div>
             <div style={{ fontSize: 13.5, fontWeight: 800, marginTop: 2, display: "flex", alignItems: "center", gap: 5 }}><Icon name="map" size={14} /> Head to {next.client} ›</div>
           </div>
         )}
@@ -3536,8 +3536,12 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
           return (
           <div key={s.sid || i} onClick={() => onOpenStop && onOpenStop(s, today.date)} style={{ padding: "13px 18px", borderTop: `1px solid ${T.border}`, display: "flex", gap: 14, alignItems: "center", cursor: onOpenStop ? "pointer" : "default", background: isNext ? hexA(T.primary, 0.05) : "transparent", opacity: done ? 0.62 : 1 }}>
             <div style={{ background: done ? hexA(T.accent, 0.12) : T.surfaceAlt, borderRadius: 10, padding: "7px 10px", textAlign: "center", minWidth: 58, flexShrink: 0 }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{s.time.split(" ")[1]}</div>
-              <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>{s.time.split(" ")[0]}</div>
+              {s.time ? (<>
+                <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{s.time.split(" ")[1]}</div>
+                <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>{s.time.split(" ")[0]}</div>
+              </>) : (
+                <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, lineHeight: 1.2 }}>Any<br />time</div>
+              )}
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontWeight: 700, fontSize: 14, color: T.text, display: "flex", alignItems: "center", gap: 6, textDecoration: done ? "line-through" : "none" }}>
@@ -7987,7 +7991,7 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
     return { time: `${h}:${String(m).padStart(2, "0")}`, ampm };
   };
 
-  const canSave = selClientIds.length > 0 && dateISO && timeISO;
+  const canSave = selClientIds.length > 0 && dateISO; // time is optional — an untimed stop rides the day's route order
 
   const handleSave = () => {
     const { time, ampm } = to12h(timeISO);
@@ -8003,7 +8007,7 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
         client: c?.name || "Client",  // name snapshot for display
         address: c?.address || "",
         type: stopType,
-        time: `${time} ${ampm}`,
+        time: time ? `${time} ${ampm}` : "",
         duration: `${duration} min`,
         services, products,
         assigneeId: assigneeId || "",
@@ -8182,7 +8186,7 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
       <Btn onClick={handleSave} style={{ width: "100%", padding: "13px", fontSize: 14, borderRadius: 12, opacity: canSave ? 1 : 0.5, pointerEvents: canSave ? "auto" : "none" }}>
         {selClientIds.length > 1 ? `Create ${selClientIds.length} Stops` : "Create Stop"}
       </Btn>
-      {!canSave && <div style={{ fontSize: 11, color: T.textMuted, textAlign: "center", marginTop: 8 }}>Pick at least one client, a date, and a time.</div>}
+      {!canSave && <div style={{ fontSize: 11, color: T.textMuted, textAlign: "center", marginTop: 8 }}>Pick at least one client and a date. Time is optional.</div>}
     </Modal>
   );
 }
@@ -8196,7 +8200,7 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
 // ─────────────────────────────────────────────
 const BULK_MAX_STOPS = 20;
 
-function BulkAddStops({ clients, catalog, onAdd, onClose, T }) {
+function BulkAddStops({ clients, catalog, team, onAdd, onClose, T }) {
   const [step, setStep] = useState(1);       // 1 select · 2 assign · 3 confirm · 4 done
   const [search, setSearch] = useState("");
   const [sel, setSel] = useState({});         // { [clientId]: true }
@@ -8204,6 +8208,7 @@ function BulkAddStops({ clients, catalog, onAdd, onClose, T }) {
   const [defDate, setDefDate] = useState("");
   const [defTime, setDefTime] = useState("");
   const [defService, setDefService] = useState("");
+  const [defAssigneeId, setDefAssigneeId] = useState("");
   const [showErrors, setShowErrors] = useState(false);
   const [addedCount, setAddedCount] = useState(0);
 
@@ -8229,23 +8234,25 @@ function BulkAddStops({ clients, catalog, onAdd, onClose, T }) {
   const updateCard = (id, patch) => setCards(c => ({ ...c, [id]: { ...c[id], ...patch } }));
 
   const goAssign = () => {
-    setCards(prev => { const next = {}; selIds.forEach(id => { next[id] = prev[id] || { service: "", dateISO: "", timeISO: "" }; }); return next; });
+    setCards(prev => { const next = {}; selIds.forEach(id => { next[id] = prev[id] || { service: "", dateISO: "", timeISO: "", assigneeId: "" }; }); return next; });
     setStep(2);
   };
   const applyToAll = () => setCards(prev => {
     const next = { ...prev };
     selIds.forEach(id => {
-      const cur = next[id] || { service: "", dateISO: "", timeISO: "" };
+      const cur = next[id] || { service: "", dateISO: "", timeISO: "", assigneeId: "" };
       next[id] = {
         service: defService || cur.service || "",
         dateISO: defDate || cur.dateISO || "",
         timeISO: defTime || cur.timeISO || "",
+        assigneeId: defAssigneeId || cur.assigneeId || "",
       };
     });
     return next;
   });
 
-  const invalidIds = selIds.filter(id => { const c = cards[id] || {}; return !c.service || !c.dateISO || !c.timeISO; });
+  // Time is optional — only service + date are required to add a stop.
+  const invalidIds = selIds.filter(id => { const c = cards[id] || {}; return !c.service || !c.dateISO; });
   const allValid = selIds.length > 0 && invalidIds.length === 0;
 
   const goConfirm = () => { if (!allValid) { setShowErrors(true); return; } setShowErrors(false); setStep(3); };
@@ -8267,7 +8274,7 @@ function BulkAddStops({ clients, catalog, onAdd, onClose, T }) {
           duration: "60 min",
           services: [],
           products: [],
-          assigneeId: "",
+          assigneeId: card.assigneeId || "",
         },
       };
     });
@@ -8280,6 +8287,13 @@ function BulkAddStops({ clients, catalog, onAdd, onClose, T }) {
   const field = { width: "100%", padding: "11px 14px", border: `1px solid ${T.border}`, borderRadius: 11, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
   const selBox = { ...field, appearance: "none", WebkitAppearance: "none", cursor: "pointer" };
   const RED = "#C0392B";
+  const miniChip = (on) => ({ padding: "7px 12px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.08) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" });
+  const assigneePicker = (value, onPick) => (team || []).length > 0 ? (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+      <button type="button" onClick={() => onPick("")} style={miniChip(!value)}>Unassigned</button>
+      {team.map(e => <button type="button" key={e.id} onClick={() => onPick(e.id)} style={miniChip(value === e.id)}>{e.name}</button>)}
+    </div>
+  ) : null;
 
   return (
     <Modal title="Bulk Add Stops" onClose={onClose}>
@@ -8350,6 +8364,12 @@ function BulkAddStops({ clients, catalog, onAdd, onClose, T }) {
               <option value="">Choose a service…</option>
               {serviceOptions.map(o => <option key={o} value={o}>{o}</option>)}
             </select>
+            {(team || []).length > 0 && (
+              <div style={{ marginTop: 12 }}>
+                <label style={labelStyle}>Assign to <span style={{ textTransform: "none", fontWeight: 400 }}>(optional)</span></label>
+                {assigneePicker(defAssigneeId, setDefAssigneeId)}
+              </div>
+            )}
             <Btn variant="ghost" sm block onClick={applyToAll} style={{ marginTop: 12 }}>Apply to all {selCount} stop{selCount !== 1 ? "s" : ""}</Btn>
           </div>
 
@@ -8374,17 +8394,23 @@ function BulkAddStops({ clients, catalog, onAdd, onClose, T }) {
                       <input type="date" value={card.dateISO || ""} onChange={e => updateCard(id, { dateISO: e.target.value })} style={{ ...field, cursor: "pointer", borderColor: (showErrors && !card.dateISO) ? RED : T.border }} />
                     </div>
                     <div style={{ flex: 1 }}>
-                      <label style={labelStyle}>Time</label>
-                      <input type="time" step={300} value={card.timeISO || ""} onChange={e => updateCard(id, { timeISO: e.target.value })} style={{ ...field, cursor: "pointer", borderColor: (showErrors && !card.timeISO) ? RED : T.border }} />
+                      <label style={labelStyle}>Time <span style={{ textTransform: "none", fontWeight: 400 }}>(optional)</span></label>
+                      <input type="time" step={300} value={card.timeISO || ""} onChange={e => updateCard(id, { timeISO: e.target.value })} style={{ ...field, cursor: "pointer" }} />
                     </div>
                   </div>
+                  {(team || []).length > 0 && (
+                    <div style={{ marginTop: 10 }}>
+                      <label style={labelStyle}>Assign to</label>
+                      {assigneePicker(card.assigneeId || "", v => updateCard(id, { assigneeId: v }))}
+                    </div>
+                  )}
                   {missingService && <div style={{ fontSize: 11, color: RED, fontWeight: 600, marginTop: 8 }}>Pick a service for this stop.</div>}
                 </div>
               );
             })}
           </div>
 
-          {showErrors && !allValid && <div style={{ fontSize: 12, color: RED, fontWeight: 600, marginTop: 12, textAlign: "center" }}>Every stop needs a service, date, and time.</div>}
+          {showErrors && !allValid && <div style={{ fontSize: 12, color: RED, fontWeight: 600, marginTop: 12, textAlign: "center" }}>Every stop needs a service and a date.</div>}
 
           <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
             <Btn variant="ghost" onClick={() => setStep(1)} style={{ flex: 1 }}>← Back</Btn>
@@ -8398,7 +8424,7 @@ function BulkAddStops({ clients, catalog, onAdd, onClose, T }) {
         <>
           <div style={{ textAlign: "center", padding: "6px 0 18px" }}>
             <div style={{ fontSize: 17, fontWeight: 800, color: T.text }}>Adding {selCount} stop{selCount !== 1 ? "s" : ""} to your schedule</div>
-            <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 4 }}>Each with its assigned service, date, and time.</div>
+            <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 4 }}>Each with its service and date — time is optional.</div>
           </div>
           <div style={{ border: `1px solid ${T.border}`, borderRadius: 12, overflow: "hidden", marginBottom: 16 }}>
             {selIds.map((id, i) => {
@@ -8408,7 +8434,7 @@ function BulkAddStops({ clients, catalog, onAdd, onClose, T }) {
                 <div key={id} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "10px 14px", borderBottom: i < selIds.length - 1 ? `1px solid ${T.border}` : "none" }}>
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontSize: 13, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c ? c.name : "Client"}</div>
-                    <div style={{ fontSize: 11, color: T.textMuted }}>{card.service}</div>
+                    <div style={{ fontSize: 11, color: T.textMuted }}>{card.service}{card.assigneeId ? ` · ${(team || []).find(e => e.id === card.assigneeId)?.name || "Assigned"}` : ""}</div>
                   </div>
                   <div style={{ fontSize: 11, color: T.textMuted, textAlign: "right", flexShrink: 0, lineHeight: 1.5 }}>{toMMDDYYYY(card.dateISO)}<br />{to12h(card.timeISO)}</div>
                 </div>
@@ -9421,7 +9447,7 @@ function ClientCombobox({ clients, value, onChange, T, placeholder = "Search cli
 }
 
 function StopEditModal({ stop, dayDate, clients, catalog, team, T, onSave, onClose }) {
-  const [time, setTime] = useState(stop.time || "9:00 AM");
+  const [time, setTime] = useState(stop.time || ""); // empty = untimed (rides the day's route order)
   const [type, setType] = useState(stop.type || (catalog?.stopTypes?.[0]) || "Service");
   const [duration, setDuration] = useState(String(stop.duration || "60").replace(/[^\d]/g, ""));
   const [assigneeId, setAssigneeId] = useState(stop.assigneeId || "");
@@ -9468,18 +9494,26 @@ function StopEditModal({ stop, dayDate, clients, catalog, team, T, onSave, onClo
         </div>
 
         <div>
-          <label style={lbl}>Time</label>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <input type="number" min="1" max="12" value={parsed.h} onChange={e => setTimeparts(e.target.value || "9", parsed.min, parsed.ap)} style={{ ...field, width: 70 }} />
-            <span style={{ fontWeight: 800, color: T.textMuted }}>:</span>
-            <input type="number" min="0" max="59" value={parsed.min} onChange={e => setTimeparts(parsed.h, e.target.value || "00", parsed.ap)} style={{ ...field, width: 70 }} />
-            <div style={{ display: "flex", gap: 4 }}>
-              {["AM", "PM"].map(ap => (
-                <button key={ap} onClick={() => setTimeparts(parsed.h, parsed.min, ap)}
-                  style={{ padding: "10px 14px", borderRadius: 10, border: `1.5px solid ${parsed.ap === ap ? T.primary : T.border}`, background: parsed.ap === ap ? hexA(T.primary, 0.08) : T.surface, color: parsed.ap === ap ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>{ap}</button>
-              ))}
+          <label style={lbl}>Time <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
+          {(!time || !time.trim()) ? (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "10px 13px", border: `1.5px dashed ${T.border}`, borderRadius: 12 }}>
+              <span style={{ fontSize: 13, color: T.textMuted }}>Any time — rides the day's route order</span>
+              <button onClick={() => setTime("9:00 AM")} style={{ background: hexA(T.primary, 0.08), color: T.primary, border: `1.5px solid ${T.primary}`, borderRadius: 10, padding: "8px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>Set a time</button>
             </div>
-          </div>
+          ) : (
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <input type="number" min="1" max="12" value={parsed.h} onChange={e => setTimeparts(e.target.value || "9", parsed.min, parsed.ap)} style={{ ...field, width: 70 }} />
+              <span style={{ fontWeight: 800, color: T.textMuted }}>:</span>
+              <input type="number" min="0" max="59" value={parsed.min} onChange={e => setTimeparts(parsed.h, e.target.value || "00", parsed.ap)} style={{ ...field, width: 70 }} />
+              <div style={{ display: "flex", gap: 4 }}>
+                {["AM", "PM"].map(ap => (
+                  <button key={ap} onClick={() => setTimeparts(parsed.h, parsed.min, ap)}
+                    style={{ padding: "10px 14px", borderRadius: 10, border: `1.5px solid ${parsed.ap === ap ? T.primary : T.border}`, background: parsed.ap === ap ? hexA(T.primary, 0.08) : T.surface, color: parsed.ap === ap ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>{ap}</button>
+                ))}
+              </div>
+              <button onClick={() => setTime("")} title="Clear the time" style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>Any time</button>
+            </div>
+          )}
         </div>
 
         <div>
@@ -9535,6 +9569,7 @@ function StopChangeModal({ stop, client, dayDate, email, onReschedule, onCancelS
   const [edited, setEdited] = useState(false);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
+  const [notifyClient, setNotifyClient] = useState(true);
 
   const isOther = reason === "__other";
   const effReason = (isOther ? customReason.trim() : reason) || "a scheduling change";
@@ -9558,12 +9593,12 @@ function StopChangeModal({ stop, client, dayDate, email, onReschedule, onCancelS
     if (action === "reschedule" && !newDateMDY) { setResult({ ok: false, text: "Pick the new date first." }); return; }
     setBusy(true); setResult(null);
     const recReason = (isOther ? customReason.trim() : reason) || "";
-    await notifyClientChannels(client, message, company);
+    if (notifyClient) await notifyClientChannels(client, message, company); // toggled off → reschedule/cancel quietly, no client notice
     if (action === "reschedule") onReschedule(newDateMDY, recReason, message);
     else if (action === "cancel") onCancelStop(recReason, message);
     // "late" makes no schedule change — it's only a heads-up notice.
     setBusy(false);
-    setResult({ ok: true, text: channels.length ? `Client notified by ${channels.join(" + ").toLowerCase()}.` : "Recorded — this client has no text/in-app channel on file." });
+    setResult({ ok: true, text: !notifyClient ? "Done — the client was not notified." : channels.length ? `Client notified by ${channels.join(" + ").toLowerCase()}.` : "Recorded — this client has no text/in-app channel on file." });
     setTimeout(onClose, 950);
   };
 
@@ -9607,9 +9642,18 @@ function StopChangeModal({ stop, client, dayDate, email, onReschedule, onCancelS
             {channels.length ? `Sends by ${channels.join(" + ")} — the channels ${firstName} chose.` : `${firstName} has no text or in-app channel on file; the change is still recorded.`}
           </div>
         </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, borderTop: `1px solid ${T.border}`, paddingTop: 14 }}>
+          <div>
+            <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text }}>Notify the client</div>
+            <div style={{ fontSize: 11.5, color: T.textMuted }}>Off = make the change quietly — no text or in-app message.</div>
+          </div>
+          <Toggle on={notifyClient} onChange={setNotifyClient} />
+        </div>
         {result && <div style={{ fontSize: 13, fontWeight: 700, color: result.ok ? "#16a34a" : T.accent }}>{result.text}</div>}
         <Btn onClick={send} disabled={busy} block lg>
-          {busy ? "Sending…" : action === "reschedule" ? "Reschedule & notify" : action === "cancel" ? "Cancel visit & notify" : "Notify client"}
+          {busy ? "Saving…" : notifyClient
+            ? (action === "reschedule" ? "Reschedule & notify" : action === "cancel" ? "Cancel visit & notify" : "Notify client")
+            : (action === "reschedule" ? "Reschedule — no notice" : action === "cancel" ? "Cancel visit — no notice" : "Done")}
         </Btn>
       </div>
     </Modal>
@@ -9639,6 +9683,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   const [showBulkAdd, setShowBulkAdd] = useState(false);
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState({}); // { sid: true }
+  const [reassignOpen, setReassignOpen] = useState(false); // bulk-reassign tech picker
   const [assignFilter, setAssignFilter] = useState(""); // "" all | id | "__un" unassigned
 
   // order stops within a day: by time, or in stored (manual) order
@@ -9661,13 +9706,17 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   const updateStop = (origDate, sid, changes) => {
     setSchedule(prev => {
       let copy = prev.map(d => ({ ...d, stops: [...d.stops] }));
-      const fromDay = copy.find(d => d.date === origDate);
+      // Find the stop by its sid across ALL days — never rely on origDate matching, which can go stale
+      // after a background sync and silently drop the edit (the old "save does nothing" bug). origDate
+      // is only a fallback hint.
+      const fromDay = copy.find(d => d.stops.some(s => s.sid === sid)) || copy.find(d => d.date === origDate);
       if (!fromDay) return prev;
       const idx = fromDay.stops.findIndex(s => s.sid === sid);
       if (idx < 0) return prev;
+      const curDate = fromDay.date;
       const updated = { ...fromDay.stops[idx], ...changes };
-      const newDate = changes.date || origDate;
-      if (newDate !== origDate) {
+      const newDate = changes.date || curDate;
+      if (newDate !== curDate) {
         // moving to another day
         fromDay.stops.splice(idx, 1);
         let toDay = copy.find(d => d.date === newDate);
@@ -9789,6 +9838,12 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
       .map(d => ({ ...d, stops: d.stops.filter(s => !selected[s.sid]) }))
       .filter(d => d.stops.length > 0)
     );
+    exitSelect();
+  };
+  // Bulk-reassign every selected stop to one tech (or Unassigned) at once.
+  const reassignSelectedTo = (techId) => {
+    setSchedule(prev => prev.map(d => ({ ...d, stops: d.stops.map(s => selected[s.sid] ? { ...s, assigneeId: techId } : s) })));
+    setReassignOpen(false);
     exitSelect();
   };
 
@@ -10097,8 +10152,12 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
 
             {/* Time */}
             <div style={{ textAlign: "center", minWidth: 44, flexShrink: 0 }}>
-              <div style={{ fontSize: 15, fontWeight: 900, color: T.text, letterSpacing: "-0.03em", lineHeight: 1 }}>{s.time.split(" ")[0]}</div>
-              <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 700, letterSpacing: "0.06em", marginTop: 2 }}>{s.time.split(" ")[1]}</div>
+              {s.time ? (<>
+                <div style={{ fontSize: 15, fontWeight: 900, color: T.text, letterSpacing: "-0.03em", lineHeight: 1 }}>{s.time.split(" ")[0]}</div>
+                <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 700, letterSpacing: "0.06em", marginTop: 2 }}>{s.time.split(" ")[1]}</div>
+              </>) : (
+                <div style={{ fontSize: 9.5, color: T.textMuted, fontWeight: 700, lineHeight: 1.25 }}>Any<br />time</div>
+              )}
             </div>
 
             {/* Client + details */}
@@ -10189,6 +10248,12 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                       <div style={{ fontSize: 11, color: T.textMuted }}>Not yet started</div>
                     )}
                     <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+                      {(perms.completeStops || perms.scheduleAddRemove) && (
+                        <button onClick={e => { e.stopPropagation(); setEditStopModal({ stop: s, dayDate }); }}
+                          title="Edit time, service, tech, or date — saves without completing the stop" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 2, fontSize: 11, fontWeight: 700, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4 }}>
+                          <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg> Edit
+                        </button>
+                      )}
                       {(perms.completeStops || perms.scheduleAddRemove) && (
                         <button onClick={e => { e.stopPropagation(); setStopChange({ stop: s, client: c, dayDate }); }}
                           title="Reschedule, cancel, or running late" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 2, fontSize: 11, fontWeight: 700, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4 }}>
@@ -10535,12 +10600,40 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
       {selectMode && selCount > 0 && (
         <div style={{ position: "fixed", bottom: "calc(74px + env(safe-area-inset-bottom))", left: 0, right: 0, zIndex: 95, padding: "10px 16px", maxWidth: 740, margin: "0 auto" }}>
           <div style={{ background: T.headerBg, borderRadius: 14, padding: "10px 12px", display: "flex", gap: 8, boxShadow: "0 6px 24px rgba(0,0,0,0.25)" }}>
+            {(team || []).length > 0 && (
+              <button onClick={() => setReassignOpen(true)}
+                style={{ flex: 1, background: hexA(T.primary, 0.22), color: "#fff", border: "none", borderRadius: 10, padding: "12px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                <span style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}>
+                  <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                  Assign Tech
+                </span>
+              </button>
+            )}
             <button onClick={deleteSelected}
               style={{ flex: 1, background: "rgba(255,80,80,0.15)", color: "#ff8080", border: "none", borderRadius: 10, padding: "12px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-              <span style={{ display:"flex", alignItems:"center", gap:6 }}><Icon name="trash" size={14} /> Remove {selCount} {selCount === 1 ? "Stop" : "Stops"}</span>
+              <span style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}><Icon name="trash" size={14} /> Remove {selCount} {selCount === 1 ? "Stop" : "Stops"}</span>
             </button>
           </div>
         </div>
+      )}
+
+      {reassignOpen && (
+        <Modal title={`Assign ${selCount} stop${selCount === 1 ? "" : "s"} to`} onClose={() => setReassignOpen(false)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <button onClick={() => reassignSelectedTo("")}
+              style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 12, border: `1.5px solid ${T.border}`, background: T.surface, color: T.text, fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+              <span style={{ width: 28, height: 28, borderRadius: "50%", background: T.surfaceAlt, color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 13 }}>—</span>
+              Unassigned
+            </button>
+            {(team || []).map(emp => (
+              <button key={emp.id} onClick={() => reassignSelectedTo(emp.id)}
+                style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 12, border: `1.5px solid ${T.border}`, background: T.surface, color: T.text, fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+                <span style={{ width: 28, height: 28, borderRadius: "50%", background: hexA(T.primary, 0.14), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 11 }}>{initials(emp.name)}</span>
+                {emp.name}
+              </button>
+            ))}
+          </div>
+        </Modal>
       )}
 
       {showAdd && (
@@ -10558,6 +10651,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
         <BulkAddStops
           clients={clients}
           catalog={catalog}
+          team={team}
           onAdd={handleBulkAdd}
           onClose={() => setShowBulkAdd(false)}
           T={T}
@@ -10646,10 +10740,12 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   );
 }
 const to24 = (t) => {
+  if (!t || !String(t).trim()) return 100000; // untimed stops sort to the end of the day — never NaN
   const [hm, ap] = t.split(" ");
   let [h, m] = hm.split(":").map(Number);
   if (ap === "PM" && h !== 12) h += 12;
   if (ap === "AM" && h === 12) h = 0;
+  if (Number.isNaN(h)) return 100000;
   return h * 60 + (m || 0);
 };
 const toDateNum = (d) => {
