@@ -14,6 +14,11 @@ let _cache = {};
 let _loaded = false;
 let _loadPromise = null;
 let _lastErrorAt = 0;
+// Per-key wall-clock of the last LOCAL write into _cache. A background _init() SELECT that was ISSUED
+// before a local write must NOT overwrite that key with its now-stale row on arrival (the boot-window
+// clobber that made freshly-added products / completed stops revert). Compared against _initSelectAt.
+const _cacheAt = {};
+let _initSelectAt = 0;
 
 // Durable pending-write queue. A write that fails ALL its retries is kept here (and mirrored to
 // localStorage) so it survives a reload/app-close and is re-attempted the moment the connection
@@ -142,11 +147,13 @@ async function _flush() {
 async function _init() {
   if (_loaded) return;
   if (_loadPromise) return _loadPromise;
+  _initSelectAt = Date.now();   // stamp when this SELECT is issued, so its (soon-stale) result can't overwrite a LOCAL write made after it
   _loadPromise = supabase.from("app_state").select("key, value").then(({ data, error }) => {
     if (error) { console.error("store.init failed:", error.message); _notify("error", "Cannot reach the database."); }
-    // Don't let the DB row overwrite a key that still has a pending (newer, not-yet-saved) write.
+    // Don't let the DB row overwrite a key that still has a pending (not-yet-saved) write, OR a key
+    // written LOCALLY after this SELECT was issued (its row is stale — the boot-window clobber).
     else {
-      if (data) data.forEach(row => { if (_pending[row.key] === undefined) _cache[row.key] = row.value; });
+      if (data) data.forEach(row => { if (_pending[row.key] === undefined && !(_cacheAt[row.key] > _initSelectAt)) _cache[row.key] = row.value; });
       _notify("ok", "Connected"); _flush();
       _saveSnapshot();   // refresh the cold-boot snapshot with confirmed data
       // Tell cache-first screens fresh values landed so they can reconcile CLEAN keys (App.jsx skips
@@ -160,7 +167,7 @@ async function _init() {
 
 // The actual write. Wrapped by store.set so calls for the same key run in issue order.
 async function _doSet(key, value) {
-  _cache[key] = value;                 // optimistic — reads stay consistent within the session
+  _cache[key] = value; _cacheAt[key] = Date.now();   // optimistic + stamp the write time (fences a stale in-flight _init)
   const res = await _upsert(key, value);
   if (res.ok) {
     if (res.recovered) _notify("ok", "Saved");
