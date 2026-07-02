@@ -5,9 +5,20 @@ import { PROD_URL } from "./config";
 import { Capacitor } from "@capacitor/core";
 import App, { LiveTrack } from "./App.jsx";
 
-// Remove the static boot splash (in index.html) once a real React screen is up.
-// The React content rendered underneath it is identical, so the handoff is invisible.
-const removeBootSplash = () => { const b = document.getElementById("boot-splash"); if (b) b.remove(); };
+// Remove the static boot splash (in index.html) once a real React screen is up. Hold it at least
+// ~1.8s (matches the app path) so the full welcome motion always plays and it never flashes, then
+// fade out gracefully into the login/app — no abrupt swap.
+const removeBootSplash = () => {
+  const b = document.getElementById("boot-splash");
+  if (!b || b.dataset.leaving) return;
+  b.dataset.leaving = "1";
+  const wait = Math.max(0, 1800 - performance.now());
+  setTimeout(() => {
+    b.style.transition = "opacity 0.42s ease";
+    b.style.opacity = "0";
+    setTimeout(() => { try { b.remove(); } catch (_) {} }, 460);
+  }, wait);
+};
 
 const wrap = { minHeight: "100dvh", display: "flex", alignItems: "center", justifyContent: "center", padding: "max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom)) 24px", background: "#F5F5F7", fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif" };
 const card = { width: "100%", maxWidth: 360, background: "#fff", borderRadius: 22, boxShadow: "0 10px 40px rgba(0,0,0,0.08)", padding: 28 };
