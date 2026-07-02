@@ -19640,6 +19640,51 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
   );
 }
 
+// ── Comms hub ──────────────────────────────────────────────────────────────
+// One owner-only tab that folds the funnel inbox, smart reminders, broadcast, the automation
+// settings, and an activity log into a single section-switched page — a NEW LAYOUT over existing
+// components + data (zero schema changes). Additive for now; the old Leads/Messages/Reminders tabs
+// stay live during rollout. See [[intake-funnel-plan]].
+function CommsScreen({ initialSection, schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, reminderLog, setReminderLog, leads, setLeads, onConvertLead, vp = {} }) {
+  const { T } = useApp();
+  const SECTIONS = [
+    { id: "inbox", label: "Inbox" },
+    { id: "reminders", label: "Reminders" },
+    { id: "broadcast", label: "Broadcast" },
+    { id: "settings", label: "Settings" },
+    { id: "log", label: "Log" },
+  ];
+  const [section, setSection] = useState(SECTIONS.some(s => s.id === initialSection) ? initialSection : "reminders");
+  useEffect(() => { if (SECTIONS.some(s => s.id === initialSection)) setSection(initialSection); }, [initialSection]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const soon = (label, note) => (
+    <div style={{ textAlign: "center", padding: "56px 24px", color: T.textMuted }}>
+      <div style={{ fontSize: 16, fontWeight: 800, color: T.text, marginBottom: 6 }}>{label} — coming next</div>
+      <div style={{ fontSize: 13, lineHeight: 1.55, maxWidth: 360, margin: "0 auto" }}>{note}</div>
+    </div>
+  );
+
+  return (
+    <div style={{ maxWidth: 780, margin: "0 auto" }}>
+      <div style={{ padding: "16px 16px 0" }}>
+        <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", marginBottom: 12 }}>Comms</div>
+        <div style={{ display: "flex", gap: 7, overflowX: "auto", paddingBottom: 12, WebkitOverflowScrolling: "touch" }}>
+          {SECTIONS.map(s => (
+            <button key={s.id} onClick={() => setSection(s.id)} style={{ flexShrink: 0, padding: "8px 16px", borderRadius: 100, border: "none", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: section === s.id ? T.primary : T.surfaceAlt, color: section === s.id ? "#fff" : T.textMuted }}>{s.label}</button>
+          ))}
+        </div>
+      </div>
+      <div style={{ paddingBottom: 90 }}>
+        {section === "reminders" && <div style={{ padding: "0 16px" }}><RemindersScreen schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} /></div>}
+        {section === "inbox" && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={onConvertLead} vp={vp} />}
+        {section === "settings" && <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 18 }}><ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /><CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /></div>}
+        {section === "broadcast" && soon("Broadcast", "Send a text or email to a whole segment of your clients — with AI drafting and a preview before it goes — is the next piece I'm building right here.")}
+        {section === "log" && soon("Activity log", "A running feed of every reminder, broadcast, and reply that's gone out — with who, when, and the channel — lives here.")}
+      </div>
+    </div>
+  );
+}
+
 // Session inventory activity — every change appends here (capped, sessionStorage). The owner sees
 // ONE running summary per session in the Inventory screen, instead of a notification per change.
 const INV_LOG_KEY = "sps_inv_session";
@@ -21817,6 +21862,7 @@ const ALL_NAV = [
   { id: "leads",      label: "Leads",     icon: "funnel",    ownerOnly: true },
   { id: "schedule",   label: "Schedule",  icon: "calendar" },
   { id: "messages",   label: "Messages",  icon: "message" },
+  { id: "comms",      label: "Comms",     icon: "inbox",     ownerOnly: true },
   { id: "invoices",   label: "Invoices",  icon: "invoice",   permAny: ["viewInvoices", "canInvoice"] },
   { id: "estimates",  label: "Estimates", icon: "clipboard", perm: "canInvoice" },
   { id: "inventory",  label: "Inventory", icon: "box",       perm: "seeInventory" },
@@ -26416,6 +26462,7 @@ export default function App({ authEmail = "", onSignOut }) {
       {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
       {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
       {page === "leads" && perms.isAdmin && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={handleConvertLead} vp={vp} />}
+      {page === "comms" && perms.isAdmin && <CommsScreen schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} vp={vp} />}
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
       {page === "duplicates" && perms.canImport && <DuplicatesScreen clients={clients} invoices={invoices} schedule={schedule} onMerge={handleMergeClients} onGoToClients={() => handleNav("clients")} />}
