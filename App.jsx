@@ -25876,11 +25876,16 @@ export default function App({ authEmail = "", onSignOut }) {
   // disconnected (the manual Sync button then surfaces the reconnect prompt).
   const _qbAutoSyncRef = useRef(false);
   useEffect(() => {
-    if (!hydrated || _qbAutoSyncRef.current || !qbIsConnected()) return;
+    if (!hydrated || _qbAutoSyncRef.current) return;
     _qbAutoSyncRef.current = true;
     try { if (Date.now() - (+(localStorage.getItem("qb_autosync_at") || 0)) < 120000) return; } catch (_) {}
     (async () => {
       try {
+        // Ask the SERVER whether QB is connected (the token store is the source of truth) rather than
+        // trusting the cached qb_connected flag, which may not be set yet on a fresh open — that timing
+        // gap is what silently skipped the auto-sync before. qbCheckStatus() refreshes the flag too.
+        const connected = await qbCheckStatus();
+        if (!connected) return;
         const res = await fetch(`${QB_API}/sync`, { headers: await authHeaders() });
         if (res.status === 401) { qbSetConnected(false); return; }
         if (!res.ok) return;
