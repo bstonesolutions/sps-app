@@ -6973,7 +6973,7 @@ function PhotoStrip({ photos, size = 56 }) {
 // ─────────────────────────────────────────────
 // SERVICE WORKSPACE (perform & log a stop, with profitability)
 // ─────────────────────────────────────────────
-function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, team, clients, dayDate, arrivedAt, enRouteAt, draft, onSaveDraft, onClearDraft, onComplete, onUpdateStop, onClose, onViewClient, onOfficeAlert }) {
+function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, team, clients, dayDate, arrivedAt, enRouteAt, draft, onSaveDraft, onClearDraft, onComplete, onUpdateStop, onClose, onViewClient, onOfficeAlert, me }) {
   const { T, branding, perms } = useApp();
   const todayStr = new Date().toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" });
   const firstName = client?.name?.split(" ")[0] || "there";
@@ -7146,11 +7146,17 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
   const parts = catalog.parts || [];
   const locations = catalog.locations || [];
 
-  // Default the usage location to the assignee's truck if matchable, else first location
+  // Default the "pull from" location to the tech's own truck: the signed-in user's default stock
+  // location first (the person physically pulling stock), then the assigned tech's, then the first
+  // location. Each tech sets their default in the staff editor; they can still override per stop.
   useEffect(() => {
     if (usageLoc || locations.length === 0) return;
-    setUsageLoc(locations[0].id);
-  }, [locations, usageLoc]);
+    const has = (id) => id && locations.some(l => l.id === id);
+    const meLoc = me && me.stockLocId;
+    const assignee = (team || []).find(m => String(m.id) === String(stop && stop.assigneeId));
+    const asgLoc = assignee && assignee.stockLocId;
+    setUsageLoc(has(meLoc) ? meLoc : has(asgLoc) ? asgLoc : locations[0].id);
+  }, [locations, usageLoc]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // cost math
   const laborCost = num(actualHours) * num(hourlyRate);  // actual time on the stop × the tech's cost rate
@@ -10826,6 +10832,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           catalog={catalog}
           costs={costs}
           team={team}
+          me={me}
           clients={clients}
           dayDate={completeModal.dayDate}
           arrivedAt={arrivals[completeModal.stop.sid]}
@@ -13182,7 +13189,7 @@ function AdvancedPermsEditor({ member, onChange }) {
   );
 }
 
-function TeamManager({ team, setTeam, currentUserId, email, branding }) {
+function TeamManager({ team, setTeam, currentUserId, email, branding, catalog }) {
   const { T } = useApp();
   const [modal, setModal] = useState(null); // { mode, data }
   const [inviteState, setInviteState] = useState({}); // { [memberId]: "idle"|"sending"|"sent"|"error" }
@@ -13394,6 +13401,26 @@ function TeamManager({ team, setTeam, currentUserId, email, branding }) {
               </div>
               <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>When set, tapping "Head here" opens directions straight in this app — no prompt each time.</div>
             </div>
+
+            {/* Default stock location — the tech's own truck/shed. When set, completing a stop pre-picks
+                this in "Pull Stock From" so their jobs draw from their own inventory (still overridable). */}
+            {(catalog && (catalog.locations || []).length > 0) && (
+              <div>
+                <label style={labelStyle}>Default Stock Location <span style={{ textTransform: "none", fontWeight: 400 }}>(their truck / shed)</span></label>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {[{ id: "", name: "None" }, ...(catalog.locations || [])].map(loc => {
+                    const on = (modal.data.stockLocId || "") === loc.id;
+                    return (
+                      <button key={loc.id || "none"} type="button" onClick={() => setD({ stockLocId: loc.id })}
+                        style={{ display: "flex", alignItems: "center", gap: 5, padding: "9px 14px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.1) : T.surface, color: on ? T.primary : T.text, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+                        {loc.id && <Icon name={loc.type === "vehicle" ? "truck" : "home"} size={13} />}{loc.name}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>When completing a stop, "Pull Stock From" starts on this location so their jobs draw from their own truck. They can still change it per stop.</div>
+              </div>
+            )}
 
             {/* Gusto Employee ID — maps this person to their Gusto record for timesheets */}
             <div>
@@ -18120,7 +18147,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
           )}
         </div>
       )}
-      {activeTab === "team" && perms.isAdmin && <TeamManager team={team} setTeam={setTeam} currentUserId={currentUserId} email={email} branding={branding} />}
+      {activeTab === "team" && perms.isAdmin && <TeamManager team={team} setTeam={setTeam} currentUserId={currentUserId} email={email} branding={branding} catalog={catalog} />}
       {activeTab === "sync" && perms.isAdmin && (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <SyncStatus T={T} branding={branding} team={team} currentUserId={currentUserId} email={email} />
