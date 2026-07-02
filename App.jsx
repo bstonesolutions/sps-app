@@ -1496,8 +1496,10 @@ const PERMISSION_TABS = [
   { id: "invoices",  label: "Invoices",  editable: true,  view: ["viewInvoices"], edit: ["viewInvoices", "canInvoice"] },
   { id: "inventory", label: "Inventory", editable: true,  view: ["seeInventory"], edit: ["seeInventory", "editInventory"] },
   { id: "estimates", label: "Estimates", editable: true,  view: ["canInvoice"], edit: ["canInvoice"] },
-  { id: "messages",  label: "Messages",  editable: false, view: [],            edit: ["sendTexts"] },
-  { id: "reminders", label: "Reminders", editable: false, view: ["editSchedule"], edit: ["editSchedule"] },
+  // Comms is one tab with per-section access (Messages / Inbox / Reminders / Broadcast / Settings /
+  // Log). The tab toggle is the master (Hidden/Visible); which sections show is fine-tuned in the
+  // staff editor's Advanced permissions → Comms sections. Visible grants sendTexts for the composer.
+  { id: "comms",     label: "Comms",     editable: false, view: [],            edit: ["sendTexts"] },
   { id: "reports",   label: "Reports",   editable: false, view: ["seeReportsPnl", "seeProfit", "seeTotalSales"], edit: ["seeReportsPnl", "seeProfit", "seeTotalSales"] },
   { id: "budget",    label: "Budget",    editable: false, view: ["seeCostsBudget"], edit: ["seeCostsBudget"] },
   { id: "settings",  label: "Customize", editable: true,  view: [],            edit: ["editSettings", "editCatalog"] },
@@ -1516,7 +1518,7 @@ const PERM_PRESETS = {
     desc: "Run the schedule; view clients and inventory.",
     build: () => ({
       dashboard: "edit", clients: "view", schedule: "edit", invoices: "hidden",
-      inventory: "view", estimates: "hidden", messages: "edit", reminders: "hidden",
+      inventory: "view", estimates: "hidden", comms: "edit",
       reports: "hidden", budget: "hidden", settings: "hidden",
     }),
   },
@@ -1526,6 +1528,14 @@ const PERM_PRESETS = {
 function normalizeTabAccess(ta) {
   const out = {};
   PERMISSION_TABS.forEach(t => { out[t.id] = (ta && ta[t.id]) ? ta[t.id] : "hidden"; });
+  // The old standalone Messages / Reminders tabs folded into Comms — carry prior access forward so no
+  // staff member silently loses the hub. NB: the tab modes are strings and "hidden" is truthy, so a
+  // plain `ta.messages || ta.reminders` would wrongly pick "hidden" over a real "edit". Rank them and
+  // keep the STRONGEST non-hidden of the two, so the Comms tab shows whenever either was visible.
+  if (ta && !ta.comms && (ta.messages || ta.reminders)) {
+    const rank = { hidden: 0, view: 1, edit: 2 };
+    out.comms = [ta.messages, ta.reminders].filter(Boolean).reduce((a, b) => ((rank[b] || 0) > (rank[a] || 0) ? b : a));
+  }
   return out;
 }
 
@@ -1624,12 +1634,33 @@ function applyFinePerms(out, member) {
   // Schedule actions — default to the coarse "edit schedule" capability.
   out.scheduleAddRemove = g("scheduleAddRemove", out.editSchedule);
   out.scheduleReorder   = g("scheduleReorder",   out.editSchedule);
+  // Comms sections — the hub folds Messages, the Leads inbox, Reminders, Broadcast, automation
+  // Settings, and the activity Log into one tab. The Comms tab toggle (tabAccess.comms) is the
+  // MASTER: when it's Hidden, every section is off (cg gates on commsOn), so a stale fine flag can
+  // never resurrect a hidden hub. When it's Visible, Messages defaults ON (existing staff keep their
+  // message access) and every other section is owner-sensitive → OFF by default (opt-in). A fine
+  // override still fine-tunes any section, and the owner (adm) always gets everything.
+  const commsOn = adm || (out.tabAccess ? out.tabAccess.comms !== "hidden" : true);
+  const cg = (key, base) => adm ? true : (commsOn && g(key, base));
+  out.commsMessages  = cg("commsMessages",  true);
+  out.commsInbox     = cg("commsInbox",     false);
+  out.commsReminders = cg("commsReminders", false);
+  out.commsBroadcast = cg("commsBroadcast", false);
+  out.commsSettings  = cg("commsSettings",  false);
+  out.commsLog       = cg("commsLog",       false);
   return out;
 }
+
+// The Comms hub is visible when the viewer can see at least one of its sections (owner sees all).
+const COMMS_SECTION_FLAGS = ["commsMessages", "commsInbox", "commsReminders", "commsBroadcast", "commsSettings", "commsLog"];
+const canSeeComms = (perms) => !!perms && (perms.isAdmin || COMMS_SECTION_FLAGS.some(f => perms[f]));
 
 // Is a nav tab visible to this permission set?
 function isTabVisible(n, perms) {
   if (!n) return false;
+  // Comms visibility is driven purely by its per-section flags (which already encode the tab master),
+  // so the nav entry appears exactly when the route will render — no separate ownerOnly/tabAccess gate.
+  if (n.id === "comms") return canSeeComms(perms);
   if (n.ownerOnly && !perms.isAdmin) return false;
   if (perms.tabAccess) return perms.tabAccess[n.id] !== "hidden"; // per-tab model is authoritative
   if (n.perm && !perms[n.perm]) return false;
@@ -13108,7 +13139,8 @@ function AdvancedPermsEditor({ member, onChange }) {
       {rows}
     </div>
   );
-  const anyParent = eff.seeInventory || eff.canInvoice || eff.editClients || eff.editSettings || eff.seeCostsBudget || eff.editSchedule;
+  const commsGranted = eff.isAdmin || (eff.tabAccess ? eff.tabAccess.comms !== "hidden" : true);
+  const anyParent = eff.seeInventory || eff.canInvoice || eff.editClients || eff.editSettings || eff.seeCostsBudget || eff.editSchedule || commsGranted;
   return (
     <div style={{ border: `1px solid ${T.border}`, borderRadius: 12, overflow: "hidden", marginTop: 10 }}>
       <button onClick={() => setOpen(o => !o)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", background: T.surfaceAlt, border: "none", cursor: "pointer", fontFamily: "inherit" }}>
@@ -13135,6 +13167,14 @@ function AdvancedPermsEditor({ member, onChange }) {
           {eff.editSchedule && group("Schedule", <>
             {row("scheduleAddRemove", "Add / remove stops", "Add, edit, and delete stops")}
             {row("scheduleReorder", "Reorder & assign routes", "The Route Assignments tab")}
+          </>)}
+          {commsGranted && group("Comms sections", <>
+            {row("commsMessages",  "Messages",            "Two-way texting with clients")}
+            {row("commsInbox",     "Leads inbox",         "New leads coming in from the funnel")}
+            {row("commsReminders", "Reminders",           "Upcoming-service + overdue-payment nudges")}
+            {row("commsBroadcast", "Broadcast",           "Mass-text a whole segment of clients")}
+            {row("commsSettings",  "Automation settings", "Message templates + auto-send config")}
+            {row("commsLog",       "Activity log",        "The running feed of everything sent")}
           </>)}
         </div>
       )}
@@ -18061,12 +18101,15 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
               {(perms.editSettings || perms.canInvoice || perms.isAdmin) && <InviteEmailSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} />}
             </Collapsible>
           )}
-          {/* Communications hub: owner alerts + appointment/seasonal reminders + automated client messages */}
-          {(perms.editNotifications || perms.editSchedule) && (
+          {/* Communications hub: owner alerts + appointment/seasonal reminders + automated client messages.
+              The reminders/automation config here is the SAME as the Comms tab's Settings section, so it's
+              gated by the same commsSettings flag (owner always; staff opt-in) — otherwise a staffer denied
+              Comms→Settings could still reach the identical config here. Owner alerts stay on editNotifications. */}
+          {(perms.isAdmin || perms.commsSettings || perms.editNotifications) && (
             <Collapsible title="Communications & Automations" subtitle="Owner alerts, appointment + seasonal reminders, and the automated messages your clients get.">
               {perms.editNotifications && <><SaveBar ctl={emailCtl} T={T} /><NotificationSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} /></>}
-              <ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />
-              <CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />
+              {(perms.isAdmin || perms.commsSettings) && <ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />}
+              {(perms.isAdmin || perms.commsSettings) && <CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />}
             </Collapsible>
           )}
           {perms.editCosts && (
@@ -19645,17 +19688,138 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
 // settings, and an activity log into a single section-switched page — a NEW LAYOUT over existing
 // components + data (zero schema changes). Additive for now; the old Leads/Messages/Reminders tabs
 // stay live during rollout. See [[intake-funnel-plan]].
-function CommsScreen({ initialSection, schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, reminderLog, setReminderLog, leads, setLeads, onConvertLead, vp = {} }) {
+// Broadcast — text a whole segment of clients at once. AI draft, test-first-N, then send-to-all with
+// throttling so a big blast never trips carrier / Quo rate limits. Reuses sendSms (Test Mode + opt-outs).
+function BroadcastSection({ clients, invoices, email, branding, T }) {
+  const [seg, setSeg] = useState("active");
+  const [msg, setMsg] = useState("");
+  const [testN, setTestN] = useState("2");
+  const [aiBusy, setAiBusy] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [progress, setProgress] = useState(null);
+  const [result, setResult] = useState("");
+  const [err, setErr] = useState("");
+  const [confirmAll, setConfirmAll] = useState(false);
+  const testMode = !!(email && email.testMode && email.testMode.on);
+
+  const SEGS = [{ id: "active", label: "All active" }, { id: "Pond", label: "Pond" }, { id: "Pool", label: "Pool" }, { id: "Seasonal", label: "Seasonal" }, { id: "overdue", label: "Overdue" }];
+  const overdueIds = new Set((invoices || []).filter(iv => effectiveStatus(iv) === "Overdue").map(iv => String(iv.clientId)));
+  const recipients = (clients || []).filter(c => {
+    if (c.status === "Inactive") return false;
+    if (!commPref(c, "text")) return false;
+    if (!(c.phone || "").replace(/\D/g, "")) return false;
+    if (seg === "active") return true;
+    if (seg === "overdue") return overdueIds.has(String(c.id));
+    return (c.division || "Pond") === seg;
+  });
+  const total = recipients.length;
+  const fill = (c) => msg.replace(/{first}/g, (c.name || "there").split(" ")[0]).replace(/{company}/g, branding?.companyName || "");
+
+  const aiDraft = async () => {
+    setAiBusy(true); setErr("");
+    try {
+      const r = await fetch(`${PROD_URL}/api/ai-message`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ kind: "broadcast", draft: msg, channel: "text", context: { company: branding?.companyName || "" } }) });
+      const d = await r.json().catch(() => ({}));
+      if (d && d.message) setMsg(d.message);
+      else setErr(d && d.missingEnv ? "AI isn't connected yet — add your ANTHROPIC_API_KEY in Vercel." : "Couldn't reach the AI.");
+    } catch (_) { setErr("Couldn't reach the AI."); }
+    setAiBusy(false);
+  };
+
+  const send = async (limit) => {
+    const list = limit ? recipients.slice(0, limit) : recipients;
+    if (!list.length || !msg.trim()) return;
+    setSending(true); setConfirmAll(false); setErr(""); setResult(""); setProgress({ done: 0, total: list.length, failed: 0 });
+    let done = 0, failed = 0;
+    for (const c of list) {
+      const r = await sendSms((c.phone || "").replace(/\D/g, ""), fill(c), { clientId: c.id, type: "Broadcast" });
+      if (!r.ok) failed++;
+      done++;
+      setProgress({ done, total: list.length, failed });
+      await new Promise(res => setTimeout(res, 220)); // throttle so a big blast never trips carrier / Quo rate limits
+    }
+    setSending(false);
+    setResult(`Sent to ${done - failed} of ${list.length}${failed ? ` · ${failed} couldn't send` : ""}.${testMode ? " (Test Mode — routed to you.)" : ""}`);
+  };
+
+  const chip = (on, label, onClick) => <button key={label} onClick={onClick} style={{ padding: "8px 15px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.1) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>;
+  const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+
+  return (
+    <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 18 }}>
+      <div style={{ fontSize: 12.5, color: T.textMuted, lineHeight: 1.5 }}>Text a whole group of clients at once. Only clients who allow texts and have a number are included; opt-outs are skipped automatically.</div>
+      <div>
+        <label style={lbl}>Who</label>
+        <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>{SEGS.map(s => chip(seg === s.id, s.label, () => setSeg(s.id)))}</div>
+        <div style={{ fontSize: 13.5, fontWeight: 800, color: T.primary, marginTop: 10 }}>{total} recipient{total !== 1 ? "s" : ""}</div>
+      </div>
+      <div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }}>
+          <label style={{ ...lbl, marginBottom: 0 }}>Message</label>
+          <button onClick={aiDraft} disabled={aiBusy} style={{ background: "none", border: "none", color: T.primary, fontSize: 12.5, fontWeight: 800, cursor: aiBusy ? "default" : "pointer", fontFamily: "inherit" }}>{aiBusy ? "Drafting…" : "✨ Draft with AI"}</button>
+        </div>
+        <textarea rows={4} value={msg} onChange={e => setMsg(e.target.value)} placeholder="Hi {first}, ..." style={{ ...field, resize: "vertical", lineHeight: 1.5 }} />
+        <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>{"{first}"} and {"{company}"} fill in per client · {msg.length} chars{msg.length > 160 ? " (multi-part)" : ""}</div>
+      </div>
+      {testMode && <div style={{ fontSize: 12, fontWeight: 700, color: "#B45309", background: hexA("#F59E0B", 0.12), border: `1px solid ${hexA("#F59E0B", 0.4)}`, borderRadius: 10, padding: "9px 12px" }}>Test Mode is ON — sends route to your phone, not the clients.</div>}
+      {err && <div style={{ fontSize: 12.5, fontWeight: 700, color: T.accent }}>{err}</div>}
+      {progress ? (
+        <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text }}>Sending… {progress.done}/{progress.total}{progress.failed ? ` · ${progress.failed} failed` : ""}</div>
+      ) : result ? (
+        <div style={{ fontSize: 13.5, fontWeight: 700, color: "#16a34a" }}>{result} <button onClick={() => { setResult(""); }} style={{ background: "none", border: "none", color: T.textMuted, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>New broadcast</button></div>
+      ) : (
+        <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <div>
+            <label style={lbl}>Test first</label>
+            <input type="text" inputMode="numeric" value={testN} onChange={e => setTestN(e.target.value.replace(/\D/g, "").slice(0, 3))} style={{ ...field, width: 74 }} />
+          </div>
+          <Btn variant="ghost" disabled={sending || !msg.trim() || !total} onClick={() => send(Math.max(1, Math.min(parseInt(testN) || 1, total)))}>Send test</Btn>
+          <Btn disabled={sending || !msg.trim() || !total} onClick={() => setConfirmAll(true)} style={{ flex: 1, minWidth: 160 }}>Send to all {total}</Btn>
+        </div>
+      )}
+      {confirmAll && (
+        <Modal title="Send broadcast" onClose={() => setConfirmAll(false)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ fontSize: 14, color: T.text, lineHeight: 1.5 }}>Text <b>{total} client{total !== 1 ? "s" : ""}</b>?{testMode ? " (Test Mode is on — they'll route to your phone.)" : ""}</div>
+            <div style={{ fontSize: 13, color: T.textMuted, background: T.surfaceAlt, borderRadius: 10, padding: "10px 12px", lineHeight: 1.5 }}>{fill(recipients[0] || { name: "Client" })}</div>
+            <Btn block lg onClick={() => send(0)}>Send to all {total}</Btn>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function CommsScreen({ initialSection, perms = {}, currentUser, schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, reminderLog, setReminderLog, leads, setLeads, onConvertLead, vp = {} }) {
   const { T } = useApp();
+  const isAdmin = !!perms.isAdmin;
+  // Only the sections this viewer is allowed to see (owner sees all). The old Messages + Reminders
+  // tabs are folded in here, each behind its own per-staff permission flag.
+  const CAN = {
+    messages:  isAdmin || !!perms.commsMessages,
+    inbox:     isAdmin || !!perms.commsInbox,
+    reminders: isAdmin || !!perms.commsReminders,
+    broadcast: isAdmin || !!perms.commsBroadcast,
+    settings:  isAdmin || !!perms.commsSettings,
+    log:       isAdmin || !!perms.commsLog,
+  };
   const SECTIONS = [
+    { id: "messages", label: "Messages" },
     { id: "inbox", label: "Inbox" },
     { id: "reminders", label: "Reminders" },
     { id: "broadcast", label: "Broadcast" },
     { id: "settings", label: "Settings" },
     { id: "log", label: "Log" },
-  ];
-  const [section, setSection] = useState(SECTIONS.some(s => s.id === initialSection) ? initialSection : "reminders");
+  ].filter(s => CAN[s.id]);
+  const firstId = SECTIONS[0] ? SECTIONS[0].id : "messages";
+  const secKey = SECTIONS.map(s => s.id).join(",");
+  const single = SECTIONS.length <= 1;
+  const [section, setSection] = useState(SECTIONS.some(s => s.id === initialSection) ? initialSection : firstId);
   useEffect(() => { if (SECTIONS.some(s => s.id === initialSection)) setSection(initialSection); }, [initialSection]); // eslint-disable-line react-hooks/exhaustive-deps
+  // If the permitted set changes and the current section is no longer allowed, snap to the first.
+  useEffect(() => { if (!SECTIONS.some(s => s.id === section)) setSection(firstId); }, [secKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const soon = (label, note) => (
     <div style={{ textAlign: "center", padding: "56px 24px", color: T.textMuted }}>
@@ -19667,19 +19831,22 @@ function CommsScreen({ initialSection, schedule, clients, invoices, scheduleCfg,
   return (
     <div style={{ maxWidth: 780, margin: "0 auto" }}>
       <div style={{ padding: "16px 16px 0" }}>
-        <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", marginBottom: 12 }}>Comms</div>
-        <div style={{ display: "flex", gap: 7, overflowX: "auto", paddingBottom: 12, WebkitOverflowScrolling: "touch" }}>
-          {SECTIONS.map(s => (
-            <button key={s.id} onClick={() => setSection(s.id)} style={{ flexShrink: 0, padding: "8px 16px", borderRadius: 100, border: "none", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: section === s.id ? T.primary : T.surfaceAlt, color: section === s.id ? "#fff" : T.textMuted }}>{s.label}</button>
-          ))}
-        </div>
+        <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", marginBottom: single ? 6 : 12 }}>{single && SECTIONS[0] ? SECTIONS[0].label : "Comms"}</div>
+        {!single && (
+          <div style={{ display: "flex", gap: 7, overflowX: "auto", paddingBottom: 12, WebkitOverflowScrolling: "touch" }}>
+            {SECTIONS.map(s => (
+              <button key={s.id} onClick={() => setSection(s.id)} style={{ flexShrink: 0, padding: "8px 16px", borderRadius: 100, border: "none", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: section === s.id ? T.primary : T.surfaceAlt, color: section === s.id ? "#fff" : T.textMuted }}>{s.label}</button>
+            ))}
+          </div>
+        )}
       </div>
       <div style={{ paddingBottom: 90 }}>
-        {section === "reminders" && <div style={{ padding: "0 16px" }}><RemindersScreen schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} /></div>}
-        {section === "inbox" && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={onConvertLead} vp={vp} />}
-        {section === "settings" && <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 18 }}><ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /><CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /></div>}
-        {section === "broadcast" && soon("Broadcast", "Send a text or email to a whole segment of your clients — with AI drafting and a preview before it goes — is the next piece I'm building right here.")}
-        {section === "log" && soon("Activity log", "A running feed of every reminder, broadcast, and reply that's gone out — with who, when, and the channel — lives here.")}
+        {section === "messages" && CAN.messages && <div style={{ padding: "0 16px" }}><MessagesScreen clients={clients} currentUser={currentUser} T={T} /></div>}
+        {section === "reminders" && CAN.reminders && <div style={{ padding: "0 16px" }}><RemindersScreen schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} /></div>}
+        {section === "inbox" && CAN.inbox && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={onConvertLead} vp={vp} />}
+        {section === "settings" && CAN.settings && <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 18 }}><ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /><CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /></div>}
+        {section === "broadcast" && CAN.broadcast && <BroadcastSection clients={clients} invoices={invoices} email={email} branding={branding} T={T} />}
+        {section === "log" && CAN.log && soon("Activity log", "A running feed of every reminder, broadcast, and reply that's gone out — with who, when, and the channel — lives here.")}
       </div>
     </div>
   );
@@ -21861,18 +22028,26 @@ const ALL_NAV = [
   { id: "clients",    label: "Clients",   icon: "clients" },
   { id: "leads",      label: "Leads",     icon: "funnel",    ownerOnly: true },
   { id: "schedule",   label: "Schedule",  icon: "calendar" },
-  { id: "messages",   label: "Messages",  icon: "message" },
-  { id: "comms",      label: "Comms",     icon: "inbox",     ownerOnly: true },
+  // Messages folded into Comms. Comms visibility is per-section (see isTabVisible → canSeeComms):
+  // the owner sees every section; staff see only the sections granted in the staff editor.
+  { id: "comms",      label: "Comms",     icon: "inbox" },
   { id: "invoices",   label: "Invoices",  icon: "invoice",   permAny: ["viewInvoices", "canInvoice"] },
   { id: "estimates",  label: "Estimates", icon: "clipboard", perm: "canInvoice" },
   { id: "inventory",  label: "Inventory", icon: "box",       perm: "seeInventory" },
-  { id: "reminders",  label: "Reminders", icon: "message",   perm: "editSchedule" },
   { id: "reports",    label: "Reports",   icon: "dollar",    perm: "seeReportsPnl" },
   { id: "budget",     label: "Budget",    icon: "chart",     perm: "seeCostsBudget" },
   { id: "settings",   label: "Customize", icon: "sliders" },
 ];
 
 const DEFAULT_DOCK = ["dashboard", "clients", "schedule", "invoices"];
+
+// The old standalone Messages / Reminders tabs folded into Comms — map any docked shortcut to it so a
+// staff member who had Messages in their bottom bar keeps a one-tap path (now into Comms), de-duped.
+const dockAlias = (arr) => {
+  const out = [];
+  (arr || DEFAULT_DOCK).forEach(id => { const m = (id === "messages" || id === "reminders") ? "comms" : id; if (!out.includes(m)) out.push(m); });
+  return out;
+};
 
 // Full-navigation bottom sheet, opened by the floating menu button. Lists every
 // destination the user can see (no bottom tab bar), plus account + sign out.
@@ -21881,14 +22056,14 @@ const DEFAULT_DOCK = ["dashboard", "clients", "schedule", "invoices"];
 // the Menu sheet and in Customize → Logo & Identity. Applies immediately (no save bar).
 function DockEditor({ navDock, setNavDock, perms, T }) {
   const MAX = 4;
-  const dock = (navDock || DEFAULT_DOCK).filter(id => isTabVisible(ALL_NAV.find(x => x.id === id), perms));
+  const dock = dockAlias(navDock).filter(id => isTabVisible(ALL_NAV.find(x => x.id === id), perms));
   const available = ALL_NAV.filter(n => isTabVisible(n, perms) && !dock.includes(n.id));
   // ── Drag-to-reorder (pointer events → works on touch + mouse) ──
   const dragId = useRef(null);
   const [dragging, setDragging] = useState(null);
   const rowRefs = useRef({});
   const reorder = (fromId, toId) => {
-    const cur = (navDock || DEFAULT_DOCK).filter(id => isTabVisible(ALL_NAV.find(x => x.id === id), perms));
+    const cur = dockAlias(navDock).filter(id => isTabVisible(ALL_NAV.find(x => x.id === id), perms));
     const from = cur.indexOf(fromId), to = cur.indexOf(toId);
     if (from === -1 || to === -1 || from === to) return;
     const next = [...cur];
@@ -21968,7 +22143,7 @@ function NavSheet({ page, perms, navUnread, reminderDue, navDock, setNavDock, on
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
           {items.map(n => {
             const active = page === n.id;
-            const badge = n.id === "messages" ? navUnread : (n.id === "reminders" ? reminderDue : 0);
+            const badge = n.id === "comms" ? ((perms.isAdmin || perms.commsMessages ? navUnread : 0) + (perms.isAdmin || perms.commsReminders ? reminderDue : 0)) : 0;
             return (
               <button key={n.id} onClick={() => { onNav(n.id); onClose(); }}
                 style={{ display: "flex", alignItems: "center", gap: 11, padding: "15px 14px", border: `1.5px solid ${active ? T.primary : T.border}`, borderRadius: 14, background: active ? hexA(T.primary, 0.08) : T.surface, color: active ? T.primary : T.text, cursor: "pointer", fontFamily: "inherit", textAlign: "left", position: "relative" }}>
@@ -24746,7 +24921,7 @@ function DesktopSidebar({ page, perms, navUnread, reminderDue, onNav, onSignOut,
       <nav style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 3 }}>
         {items.map(n => {
           const active = page === n.id;
-          const badge = n.id === "messages" ? navUnread : (n.id === "reminders" ? reminderDue : 0);
+          const badge = n.id === "comms" ? ((perms.isAdmin || perms.commsMessages ? navUnread : 0) + (perms.isAdmin || perms.commsReminders ? reminderDue : 0)) : 0;
           return (
             <button key={n.id} onClick={() => onNav(n.id)}
               style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 13px", border: "none", borderRadius: 11, background: active ? T.primary : "transparent", color: active ? "#fff" : T.text, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%", fontWeight: active ? 700 : 600, fontSize: 14, letterSpacing: "-0.01em" }}>
@@ -25480,12 +25655,17 @@ export default function App({ authEmail = "", onSignOut }) {
   }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Ensure dock only contains pages the user has permission to see
-  const dockIds = (navDock || DEFAULT_DOCK).filter(id => isTabVisible(ALL_NAV.find(x => x.id === id), perms));
+  const dockIds = dockAlias(navDock).filter(id => isTabVisible(ALL_NAV.find(x => x.id === id), perms));
 
-  // If the current page becomes hidden for this user, fall back to a visible tab.
+  // If the current page becomes hidden for this user, fall back to a visible tab. Uses isTabVisible
+  // (which special-cases Comms) so the redirect matches the nav exactly; messages/reminders are
+  // aliases that render inside Comms, so they resolve against the Comms entry.
   useEffect(() => {
     if (!perms.tabAccess) return;
-    if (perms.tabAccess[page] === "hidden") {
+    const effId = (page === "messages" || page === "reminders") ? "comms" : page;
+    const navEntry = ALL_NAV.find(n => n.id === effId);
+    const hidden = navEntry ? !isTabVisible(navEntry, perms) : (perms.tabAccess[effId] === "hidden");
+    if (hidden) {
       const firstVisible = ALL_NAV.find(n => isTabVisible(n, perms));
       setPage(firstVisible ? firstVisible.id : "dashboard");
     }
@@ -26454,15 +26634,13 @@ export default function App({ authEmail = "", onSignOut }) {
         </>
       ))}
       {page === "schedule" && <SectionErrorBoundary key={"schedule-" + schedNonce}><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
-      {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <SectionErrorBoundary key="inventory"><InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} /></SectionErrorBoundary>}
-      {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
       {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetScreen budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} />}
       {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
       {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
       {page === "leads" && perms.isAdmin && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={handleConvertLead} vp={vp} />}
-      {page === "comms" && perms.isAdmin && <CommsScreen schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} vp={vp} />}
+      {(page === "comms" || page === "reminders" || page === "messages") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : undefined} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} vp={vp} />}
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
       {page === "duplicates" && perms.canImport && <DuplicatesScreen clients={clients} invoices={invoices} schedule={schedule} onMerge={handleMergeClients} onGoToClients={() => handleNav("clients")} />}
@@ -26610,9 +26788,10 @@ export default function App({ authEmail = "", onSignOut }) {
             return n ? { id: n.id, label: n.label, icon: n.icon, onClick: () => handleTabNav(n.id) } : null;
           }).filter(Boolean);
           const dockedSet = new Set(docked);
-          const menuBadge = (dockedSet.has("messages") ? 0 : navUnread) + (dockedSet.has("reminders") ? 0 : reminderDueCount);
+          const commsBadge = (perms.isAdmin || perms.commsMessages ? navUnread : 0) + (perms.isAdmin || perms.commsReminders ? reminderDueCount : 0);
+          const menuBadge = dockedSet.has("comms") ? 0 : commsBadge;
           const tabs = [
-            ...primary.map(t => ({ ...t, active: page === t.id, badge: t.id === "messages" ? navUnread : t.id === "reminders" ? reminderDueCount : 0 })),
+            ...primary.map(t => ({ ...t, active: page === t.id, badge: t.id === "comms" ? commsBadge : 0 })),
             { id: "__menu", label: "Menu", icon: "menu", onClick: () => setMenuOpen(true), active: menuOpen, badge: menuBadge },
           ];
           return (
