@@ -18,7 +18,7 @@ function setCors(res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
-function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = "", actionUrl = "", actionLabel = "" }) {
+function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = "", actionUrl = "", actionLabel = "", footerHtml = "" }) {
   const accent = /^#?[0-9a-fA-F]{3,8}$/.test(branding.accent || "") ? branding.accent : "#B81D24";
   const company = escapeHtml(branding.companyName || "Stone Property Solutions");
   // Monogram (company initial) in the header — matches the app's logo mark for consistent branding.
@@ -50,6 +50,7 @@ function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = ""
       ${actionUrl ? `<div style="margin-top:18px"><a href="${escapeHtml(actionUrl)}" style="display:inline-block;background:${accent};color:#fff;text-decoration:none;font-weight:800;padding:12px 22px;border-radius:10px;font-size:14px">${escapeHtml(actionLabel || "Open in the app")}</a></div>` : ""}
       ${photosHtml || ""}
     </div>
+    ${footerHtml || ""}
   </div>`;
 }
 
@@ -105,16 +106,36 @@ export default async function handler(req, res) {
     });
     const photosHtml = photoBlocks.length ? `<div style="margin-top:16px;border-top:1px solid #eef0f2;padding-top:14px"><div style="font-size:14px;font-weight:800;margin-bottom:10px">Photos</div>${photoBlocks.join("")}</div>` : "";
 
-    const html = buildHtml({ branding, heading: heading || subject, message, rows, photosHtml, actionUrl, actionLabel });
+    // Optional CAN-SPAM unsubscribe footer (broadcasts/marketing). Only present when the caller
+    // passes `unsubscribe: { email, address }` — owner alerts + transactional sends never do, so their
+    // output is unchanged. Renders a plain footer (identity + a working opt-out contact + postal
+    // address) AND sets a List-Unsubscribe mailto header so Gmail/Apple show a native unsubscribe.
+    const unsub = req.body.unsubscribe;
+    let footerHtml = "", listUnsub = "";
+    if (unsub && (unsub.email || unsub.address)) {
+      const uEmail = String(unsub.email || "").trim();
+      const uAddr = String(unsub.address || branding.companyAddress || "").trim();
+      const uCompany = escapeHtml(branding.companyName || "Stone Property Solutions");
+      const optOut = uEmail
+        ? `To stop these updates, reply to this email or contact <a href="mailto:${escapeHtml(uEmail)}?subject=Unsubscribe" style="color:#9ca3af">${escapeHtml(uEmail)}</a>.`
+        : `To stop these updates, reply to this email.`;
+      footerHtml = `<div style="max-width:560px;margin:12px auto 0;padding:0 10px;font-size:11px;color:#9ca3af;line-height:1.55;text-align:center">
+        You're receiving this because you're a customer of ${uCompany}.<br>${optOut}${uAddr ? `<br>${escapeHtml(uAddr)}` : ""}
+      </div>`;
+      if (uEmail) listUnsub = `<mailto:${uEmail}?subject=Unsubscribe>`;
+    }
+
+    const html = buildHtml({ branding, heading: heading || subject, message, rows, photosHtml, actionUrl, actionLabel, footerHtml });
     const textLines = [heading || subject, "", message || ""];
     (rows || []).filter(Boolean).forEach(([k, v]) => textLines.push(`${k}: ${v}`));
     if (attachments.length) textLines.push("", `(${attachments.length} photo${attachments.length > 1 ? "s" : ""} attached)`);
+    if (unsub && (unsub.email || unsub.address)) textLines.push("", `To stop these updates, reply to this email${unsub.email ? ` or contact ${unsub.email}` : ""}.`);
     const text = textLines.join("\n");
 
     const sendRes = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { "Authorization": `Bearer ${RESEND_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: FROM, to: [recipient], subject: subjectPrefix + subject, html, text, ...(attachments.length ? { attachments } : {}) }),
+      body: JSON.stringify({ from: FROM, to: [recipient], subject: subjectPrefix + subject, html, text, ...(attachments.length ? { attachments } : {}), ...(listUnsub ? { headers: { "List-Unsubscribe": listUnsub } } : {}) }),
     });
     const sendData = await sendRes.json().catch(() => ({}));
     if (!sendRes.ok) {

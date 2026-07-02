@@ -19691,7 +19691,9 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
 // Broadcast — text a whole segment of clients at once. AI draft, test-first-N, then send-to-all with
 // throttling so a big blast never trips carrier / Quo rate limits. Reuses sendSms (Test Mode + opt-outs).
 function BroadcastSection({ clients, invoices, email, branding, T }) {
+  const [channel, setChannel] = useState("text"); // "text" | "email"
   const [seg, setSeg] = useState("active");
+  const [subject, setSubject] = useState("");
   const [msg, setMsg] = useState("");
   const [testN, setTestN] = useState("2");
   const [aiBusy, setAiBusy] = useState(false);
@@ -19701,25 +19703,31 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
   const [err, setErr] = useState("");
   const [confirmAll, setConfirmAll] = useState(false);
   const testMode = !!(email && email.testMode && email.testMode.on);
+  const isEmail = channel === "email";
 
   const SEGS = [{ id: "active", label: "All active" }, { id: "Pond", label: "Pond" }, { id: "Pool", label: "Pool" }, { id: "Seasonal", label: "Seasonal" }, { id: "overdue", label: "Overdue" }];
   const overdueIds = new Set((invoices || []).filter(iv => effectiveStatus(iv) === "Overdue").map(iv => String(iv.clientId)));
+  // Recipients depend on the channel: has the contact detail, allows that channel, and hasn't opted
+  // out of broadcasts. Inactive clients are always excluded. Opt-outs are honored automatically.
   const recipients = (clients || []).filter(c => {
     if (c.status === "Inactive") return false;
-    if (!commPref(c, "text")) return false;
-    if (!(c.phone || "").replace(/\D/g, "")) return false;
+    if (c.notifyPrefs && c.notifyPrefs.broadcasts === false) return false;
+    if (isEmail) { if (!commPref(c, "email") || !/.+@.+\..+/.test(c.email || "")) return false; }
+    else { if (!commPref(c, "text") || !(c.phone || "").replace(/\D/g, "")) return false; }
     if (seg === "active") return true;
     if (seg === "overdue") return overdueIds.has(String(c.id));
     return (c.division || "Pond") === seg;
   });
   const total = recipients.length;
-  const fill = (c) => msg.replace(/{first}/g, (c.name || "there").split(" ")[0]).replace(/{company}/g, branding?.companyName || "");
+  const fillOne = (str, c) => String(str || "").replace(/{first}/g, (c.name || "there").split(" ")[0]).replace(/{company}/g, branding?.companyName || "");
+  const fill = (c) => fillOne(msg, c);
+  const ready = isEmail ? (!!msg.trim() && !!subject.trim()) : !!msg.trim();
 
   const aiDraft = async () => {
     setAiBusy(true); setErr("");
     try {
       const r = await fetch(`${PROD_URL}/api/ai-message`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ kind: "broadcast", draft: msg, channel: "text", context: { company: branding?.companyName || "" } }) });
+        body: JSON.stringify({ kind: "broadcast", draft: msg, channel, context: { company: branding?.companyName || "" } }) });
       const d = await r.json().catch(() => ({}));
       if (d && d.message) setMsg(d.message);
       else setErr(d && d.missingEnv ? "AI isn't connected yet — add your ANTHROPIC_API_KEY in Vercel." : "Couldn't reach the AI.");
@@ -19727,17 +19735,30 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
     setAiBusy(false);
   };
 
+  const sendEmailTo = async (c) => {
+    try {
+      const r = await fetch(`${PROD_URL}/api/send-notification`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          ...senderEmailFields(),
+          to: c.email, subject: fillOne(subject, c), heading: fillOne(subject, c), message: fill(c),
+          branding: { companyName: branding?.companyName || "", companyEmail: branding?.companyEmail || "", companyPhone: branding?.companyPhone || "", companyAddress: branding?.companyAddress || "", accent: T.primary },
+          unsubscribe: { email: branding?.companyEmail || "", address: branding?.companyAddress || "" },
+        }) });
+      return { ok: r.ok };
+    } catch (_) { return { ok: false }; }
+  };
+
   const send = async (limit) => {
     const list = limit ? recipients.slice(0, limit) : recipients;
-    if (!list.length || !msg.trim()) return;
+    if (!list.length || !ready) return;
     setSending(true); setConfirmAll(false); setErr(""); setResult(""); setProgress({ done: 0, total: list.length, failed: 0 });
     let done = 0, failed = 0;
     for (const c of list) {
-      const r = await sendSms((c.phone || "").replace(/\D/g, ""), fill(c), { clientId: c.id, type: "Broadcast" });
+      const r = isEmail ? await sendEmailTo(c) : await sendSms((c.phone || "").replace(/\D/g, ""), fill(c), { clientId: c.id, type: "Broadcast" });
       if (!r.ok) failed++;
       done++;
       setProgress({ done, total: list.length, failed });
-      await new Promise(res => setTimeout(res, 220)); // throttle so a big blast never trips carrier / Quo rate limits
+      await new Promise(res => setTimeout(res, isEmail ? 320 : 220)); // throttle so a big blast never trips carrier / Quo / Resend rate limits
     }
     setSending(false);
     setResult(`Sent to ${done - failed} of ${list.length}${failed ? ` · ${failed} couldn't send` : ""}.${testMode ? " (Test Mode — routed to you.)" : ""}`);
@@ -19746,24 +19767,34 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
   const chip = (on, label, onClick) => <button key={label} onClick={onClick} style={{ padding: "8px 15px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.1) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>;
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
   const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const chanBtn = (id, label) => <button key={id} onClick={() => setChannel(id)} style={{ flex: 1, padding: "9px 4px", borderRadius: 9, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 700, background: channel === id ? T.primary : "transparent", color: channel === id ? "#fff" : T.textMuted, transition: "all 0.12s" }}>{label}</button>;
 
   return (
     <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 18 }}>
-      <div style={{ fontSize: 12.5, color: T.textMuted, lineHeight: 1.5 }}>Text a whole group of clients at once. Only clients who allow texts and have a number are included; opt-outs are skipped automatically.</div>
+      <div style={{ display: "flex", gap: 3, background: T.surfaceAlt, borderRadius: 12, padding: 3 }}>{chanBtn("text", "Text")}{chanBtn("email", "Email")}</div>
+      <div style={{ fontSize: 12.5, color: T.textMuted, lineHeight: 1.5 }}>{isEmail
+        ? "Email a whole group of clients at once. Only clients who allow email and have an address are included; opt-outs are skipped, and every email carries an unsubscribe footer."
+        : "Text a whole group of clients at once. Only clients who allow texts and have a number are included; opt-outs are skipped automatically."}</div>
       <div>
         <label style={lbl}>Who</label>
         <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>{SEGS.map(s => chip(seg === s.id, s.label, () => setSeg(s.id)))}</div>
         <div style={{ fontSize: 13.5, fontWeight: 800, color: T.primary, marginTop: 10 }}>{total} recipient{total !== 1 ? "s" : ""}</div>
       </div>
+      {isEmail && (
+        <div>
+          <label style={lbl}>Subject</label>
+          <input type="text" value={subject} onChange={e => setSubject(e.target.value)} placeholder="A quick note from {company}" style={field} />
+        </div>
+      )}
       <div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }}>
-          <label style={{ ...lbl, marginBottom: 0 }}>Message</label>
+          <label style={{ ...lbl, marginBottom: 0 }}>{isEmail ? "Body" : "Message"}</label>
           <button onClick={aiDraft} disabled={aiBusy} style={{ background: "none", border: "none", color: T.primary, fontSize: 12.5, fontWeight: 800, cursor: aiBusy ? "default" : "pointer", fontFamily: "inherit" }}>{aiBusy ? "Drafting…" : "✨ Draft with AI"}</button>
         </div>
-        <textarea rows={4} value={msg} onChange={e => setMsg(e.target.value)} placeholder="Hi {first}, ..." style={{ ...field, resize: "vertical", lineHeight: 1.5 }} />
-        <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>{"{first}"} and {"{company}"} fill in per client · {msg.length} chars{msg.length > 160 ? " (multi-part)" : ""}</div>
+        <textarea rows={isEmail ? 6 : 4} value={msg} onChange={e => setMsg(e.target.value)} placeholder="Hi {first}, ..." style={{ ...field, resize: "vertical", lineHeight: 1.5 }} />
+        <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>{"{first}"} and {"{company}"} fill in per client{isEmail ? " · sent from your branded template" : ` · ${msg.length} chars${msg.length > 160 ? " (multi-part)" : ""}`}</div>
       </div>
-      {testMode && <div style={{ fontSize: 12, fontWeight: 700, color: "#B45309", background: hexA("#F59E0B", 0.12), border: `1px solid ${hexA("#F59E0B", 0.4)}`, borderRadius: 10, padding: "9px 12px" }}>Test Mode is ON — sends route to your phone, not the clients.</div>}
+      {testMode && <div style={{ fontSize: 12, fontWeight: 700, color: "#B45309", background: hexA("#F59E0B", 0.12), border: `1px solid ${hexA("#F59E0B", 0.4)}`, borderRadius: 10, padding: "9px 12px" }}>Test Mode is ON — sends route to you, not the clients.</div>}
       {err && <div style={{ fontSize: 12.5, fontWeight: 700, color: T.accent }}>{err}</div>}
       {progress ? (
         <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text }}>Sending… {progress.done}/{progress.total}{progress.failed ? ` · ${progress.failed} failed` : ""}</div>
@@ -19775,16 +19806,17 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
             <label style={lbl}>Test first</label>
             <input type="text" inputMode="numeric" value={testN} onChange={e => setTestN(e.target.value.replace(/\D/g, "").slice(0, 3))} style={{ ...field, width: 74 }} />
           </div>
-          <Btn variant="ghost" disabled={sending || !msg.trim() || !total} onClick={() => send(Math.max(1, Math.min(parseInt(testN) || 1, total)))}>Send test</Btn>
-          <Btn disabled={sending || !msg.trim() || !total} onClick={() => setConfirmAll(true)} style={{ flex: 1, minWidth: 160 }}>Send to all {total}</Btn>
+          <Btn variant="ghost" disabled={sending || !ready || !total} onClick={() => send(Math.max(1, Math.min(parseInt(testN) || 1, total)))}>Send test</Btn>
+          <Btn disabled={sending || !ready || !total} onClick={() => setConfirmAll(true)} style={{ flex: 1, minWidth: 160 }}>{isEmail ? "Email" : "Text"} all {total}</Btn>
         </div>
       )}
       {confirmAll && (
-        <Modal title="Send broadcast" onClose={() => setConfirmAll(false)}>
+        <Modal title={`Send ${isEmail ? "email" : "text"} broadcast`} onClose={() => setConfirmAll(false)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <div style={{ fontSize: 14, color: T.text, lineHeight: 1.5 }}>Text <b>{total} client{total !== 1 ? "s" : ""}</b>?{testMode ? " (Test Mode is on — they'll route to your phone.)" : ""}</div>
-            <div style={{ fontSize: 13, color: T.textMuted, background: T.surfaceAlt, borderRadius: 10, padding: "10px 12px", lineHeight: 1.5 }}>{fill(recipients[0] || { name: "Client" })}</div>
-            <Btn block lg onClick={() => send(0)}>Send to all {total}</Btn>
+            <div style={{ fontSize: 14, color: T.text, lineHeight: 1.5 }}>{isEmail ? "Email" : "Text"} <b>{total} client{total !== 1 ? "s" : ""}</b>?{testMode ? " (Test Mode is on — they'll route to you.)" : ""}</div>
+            {isEmail && subject.trim() && <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{fillOne(subject, recipients[0] || { name: "Client" })}</div>}
+            <div style={{ fontSize: 13, color: T.textMuted, background: T.surfaceAlt, borderRadius: 10, padding: "10px 12px", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{fill(recipients[0] || { name: "Client" })}</div>
+            <Btn block lg onClick={() => send(0)}>{isEmail ? "Email" : "Text"} all {total}</Btn>
           </div>
         </Modal>
       )}
@@ -24509,7 +24541,7 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
   const pondLbl = pondLabel(client);
   // Notification preferences live on the client record (sps_clients) so they persist
   // in app_state across devices/builds and the office can honor them. Opt-out model.
-  const NOTIFY_DEFAULTS = { serviceReminders: true, onMyWay: true, invoiceReady: true, reportSummary: true, paymentNudges: true, winBack: true };
+  const NOTIFY_DEFAULTS = { serviceReminders: true, onMyWay: true, invoiceReady: true, reportSummary: true, paymentNudges: true, winBack: true, broadcasts: true };
   const [notify, setNotify] = useState(() => ({ ...NOTIFY_DEFAULTS, ...(client.notifyPrefs || {}) }));
   const toggleNotify = (k) => { const next = { ...notify, [k]: !notify[k] }; setNotify(next); if (onSavePrefs) onSavePrefs(next); };
   // Communication channels the client wants reached on (text / email / in-app). Opt-out: all on
@@ -24619,6 +24651,7 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
           ["invoiceReady", "Invoice ready", "When a new invoice is available"],
           ["paymentNudges", "Payment reminders", "Gentle nudges about past-due invoices"],
           ["winBack", "Check-ins", "Occasional notes if it's been a while"],
+          ["broadcasts", "News & offers", "Occasional announcements, tips, or promotions"],
         ].map(([k, label, hint], i, arr) => (
           <div key={k} style={{ padding: "13px 0", borderBottom: i < arr.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
             <div>
