@@ -1132,6 +1132,46 @@ function buildReminderQueue(schedule, clients, cfg, reminderLog, now = new Date(
   return { due, upcoming, sent };
 }
 
+// ── Payment reminders ──
+// Overdue-invoice nudges — the "who owes you" queue that sits alongside service reminders in Comms.
+// Reuses the existing payment-nudge config (paymentNudgeOn / AfterDays / RepeatDays / Max) + the
+// per-client paymentNudges opt-out; dedup by reminderLog (same ledger as service reminders).
+function buildInvoiceReminderQueue(invoices, clients, cfg, reminderLog, now = new Date()) {
+  if (!cfg || !cfg.paymentNudgeOn) return { due: [], upcoming: [], sent: [] };
+  const afterDays = parseInt(cfg.paymentNudgeAfterDays) || 3;
+  const repeatDays = Math.max(1, parseInt(cfg.paymentNudgeRepeatDays) || 7);
+  const maxNudges = parseInt(cfg.paymentNudgeMax) || 3;
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const due = [], sent = [];
+  (invoices || []).forEach(iv => {
+    if (effectiveStatus(iv) !== "Overdue") return;              // only genuinely overdue (excludes Paid / Draft / Void)
+    const client = (clients || []).find(c => String(c.id) === String(iv.clientId));
+    if (!client) return;
+    if (client.notifyPrefs && client.notifyPrefs.paymentNudges === false) return; // opted out of payment nudges
+    if (!commPref(client, "text")) return;
+    const dd = parseMDY(iv.dueDate);
+    if (!dd) return;
+    const daysOverdue = Math.floor((today - dd) / 86400000);
+    if (daysOverdue < afterDays) return;                        // not yet in the nudge window
+    const cohort = Math.floor((daysOverdue - afterDays) / repeatDays); // which repeat this is (0,1,2,…)
+    if (cohort >= maxNudges) return;                            // hit the per-invoice cap
+    const t = invoiceTotals(iv);
+    const entry = {
+      sid: `inv_${iv.id}_${cohort}`,                            // one per invoice per repeat-cohort (dedup)
+      kind: "payment", invoice: iv, client,
+      phone: (client.phone || "").replace(/\D/g, ""),
+      date: iv.dueDate, daysOverdue,
+      amount: `$${(Number(t.balance != null ? t.balance : t.total) || 0).toFixed(2)}`,
+      number: iv.number || "", link: iv.paymentLink || "",
+    };
+    const already = reminderLog && reminderLog[entry.sid];
+    if (already) sent.push({ ...entry, sentAt: already.sentAt });
+    else due.push(entry);
+  });
+  due.sort((a, b) => b.daysOverdue - a.daysOverdue);            // most overdue first
+  return { due, upcoming: [], sent };
+}
+
 // Seasonal reminders that are coming due: for each configured reminder whose
 // trigger date (this year) is within the lead window, emit one entry per ELIGIBLE
 // active client (matching its division). Reuses the same reminderLog so each
@@ -1757,6 +1797,45 @@ const BLANK_CLIENT = {
 };
 
 const DIVISIONS = ["Pond", "Pool", "Seasonal"];
+
+// ── Intake leads (the funnel) ───────────────────────────────────────────────
+// A lead is a prospect from any channel (website form today; text/email later) that hasn't become a
+// client yet. Stored in app_state key `sps_leads` (same pattern as sps_clients). One-tap convert builds
+// a BLANK_CLIENT-shaped form and runs the normal new-client save. Owner-only for now (the Leads nav tab
+// is ownerOnly); `assignedTo` + the delegation path are scaffolded. See [[intake-funnel-plan]].
+const LEAD_STAGES = [
+  { id: "new",       label: "New" },
+  { id: "contacted", label: "Contacted" },
+  { id: "qualified", label: "Qualified" },
+  { id: "won",       label: "Won" },
+  { id: "lost",      label: "Lost" },
+];
+const LEAD_SOURCE_LABEL = { website: "Website", sms: "Text", email: "Email", phone: "Phone", walkin: "Walk-in", manual: "Manual", import: "Import" };
+const leadDivisionFromService = (service) => {
+  const s = String(service || "").toLowerCase();
+  if (/pool|spa|hot ?tub/.test(s)) return "Pool";
+  if (/leaf|gutter|snow|seasonal|property/.test(s)) return "Seasonal";
+  if (/pond|koi|water/.test(s)) return "Pond";
+  return null;
+};
+const BLANK_LEAD = {
+  id: "", srcId: null, source: "manual", sourceDetail: "",
+  name: "", phone: "", email: "", street: "", city: "", state: "", zip: "",
+  service: "", mappedDivision: null, message: "", consent: false,
+  status: "new", assignedTo: null, timeline: [],
+  createdAt: "", updatedAt: "", convertedClientId: null,
+};
+// Build a new-client form from a lead (near-identity spread onto BLANK_CLIENT).
+function leadToClientForm(lead) {
+  return {
+    ...BLANK_CLIENT,
+    name: lead.name || "", phone: lead.phone || "", email: lead.email || "",
+    street: lead.street || "", city: lead.city || "", state: lead.state || "", zip: lead.zip || "",
+    address: [lead.street, lead.city, lead.state, lead.zip].filter(Boolean).join(", "),
+    division: lead.mappedDivision || "Pond",
+    referralSource: lead.source === "website" ? "Website" : (LEAD_SOURCE_LABEL[lead.source] || ""),
+  };
+}
 
 // Returns the "My ___" label for the client portal tab based on division
 function pondLabel(client, withCare = false) {
@@ -17781,6 +17860,128 @@ function SyncStatus({ T, branding, team, currentUserId, email = {} }) {
   );
 }
 
+// ── Leads (intake funnel) — the owner's pipeline of prospects → one-tap convert to client. ──
+// Owner-only (the nav entry is ownerOnly). Reads/writes the sps_leads app_state collection.
+function LeadsScreen({ leads, setLeads, clients, onConvert, vp = {} }) {
+  const { T } = useApp();
+  const [filter, setFilter] = useState("active"); // active | all | <stage>
+  const [selId, setSelId] = useState(null);
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState({ ...BLANK_LEAD });
+
+  const norm = (s) => String(s || "").replace(/[^\d]/g, "").slice(-10);
+  const lcs = (s) => String(s || "").trim().toLowerCase();
+  const sorted = [...(leads || [])].sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  const counts = LEAD_STAGES.reduce((m, st) => { m[st.id] = sorted.filter(l => l.status === st.id).length; return m; }, {});
+  const activeCount = sorted.filter(l => !["won", "lost"].includes(l.status)).length;
+  const shown = sorted.filter(l => filter === "all" ? true : filter === "active" ? !["won", "lost"].includes(l.status) : l.status === filter);
+  const sel = sorted.find(l => l.id === selId) || null;
+
+  const updateLead = (id, patch, note) => setLeads(ls => (ls || []).map(l => l.id === id ? { ...l, ...patch, updatedAt: new Date().toISOString(), timeline: note ? [...(l.timeline || []), { at: new Date().toISOString(), by: "owner", kind: "note", text: note }] : (l.timeline || []) } : l));
+  const setStatus = (lead, status) => updateLead(lead.id, { status }, `Moved to ${LEAD_STAGES.find(s => s.id === status)?.label || status}`);
+  const removeLead = (id) => { if (confirm("Delete this lead? This can't be undone.")) { setLeads(ls => (ls || []).filter(l => l.id !== id)); setSelId(null); } };
+  const dupClient = (lead) => (clients || []).find(c => (lead.phone && norm(c.phone) && norm(c.phone) === norm(lead.phone)) || (lead.email && lcs(c.email) && lcs(c.email) === lcs(lead.email)));
+
+  const convert = (lead) => {
+    const dup = dupClient(lead);
+    if (dup && !confirm(`${lead.name || "This lead"} matches an existing client (${dup.name}). Convert anyway as a new client?`)) return;
+    onConvert(lead); setSelId(null);
+  };
+  const addManual = () => {
+    if (!form.name && !form.phone && !form.email) return;
+    const now = new Date().toISOString();
+    const lead = { ...BLANK_LEAD, ...form, id: `lead_m${Date.now()}`, source: "manual", mappedDivision: leadDivisionFromService(form.service), status: "new", createdAt: now, updatedAt: now, timeline: [{ at: now, by: "owner", kind: "captured", text: "Added manually" }] };
+    setLeads(ls => [lead, ...(ls || [])]); setForm({ ...BLANK_LEAD }); setAdding(false);
+  };
+  const ago = (iso) => { const t = Date.parse(iso || ""); if (!t) return ""; const d = (Date.now() - t) / 86400000; if (d < 1) return "today"; if (d < 2) return "yesterday"; return `${Math.floor(d)}d ago`; };
+
+  const STATUS_COLOR = { new: T.primary, contacted: "#2563EB", qualified: "#7c3aed", won: "#16a34a", lost: T.textMuted };
+  const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const chip = (on, label, onClick, color) => (
+    <button type="button" onClick={onClick} style={{ padding: "7px 13px", borderRadius: 100, border: `1.5px solid ${on ? (color || T.primary) : T.border}`, background: on ? hexA(color || T.primary, 0.1) : T.surface, color: on ? (color || T.primary) : T.textMuted, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+  );
+
+  return (
+    <div style={{ maxWidth: 760, margin: "0 auto", padding: "0 0 90px" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 16px 10px" }}>
+        <div>
+          <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Leads</div>
+          <div style={{ fontSize: 12.5, color: T.textMuted }}>{activeCount} active · {sorted.length} total</div>
+        </div>
+        <Btn sm onClick={() => { setForm({ ...BLANK_LEAD }); setAdding(true); }}>+ Add lead</Btn>
+      </div>
+
+      <div style={{ display: "flex", gap: 7, flexWrap: "wrap", padding: "0 16px 12px" }}>
+        {chip(filter === "active", "Active", () => setFilter("active"))}
+        {LEAD_STAGES.map(st => chip(filter === st.id, `${st.label}${counts[st.id] ? ` ${counts[st.id]}` : ""}`, () => setFilter(st.id), STATUS_COLOR[st.id]))}
+        {chip(filter === "all", "All", () => setFilter("all"))}
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "0 16px" }}>
+        {shown.length === 0 && <div style={{ textAlign: "center", color: T.textMuted, fontSize: 13.5, padding: "40px 16px", lineHeight: 1.5 }}>No leads here yet. Website leads will appear automatically once the funnel's connected — or add one manually.</div>}
+        {shown.map(l => (
+          <div key={l.id} onClick={() => setSelId(l.id)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "13px 15px", cursor: "pointer", display: "flex", alignItems: "center", gap: 12, boxShadow: "0 2px 10px rgba(0,0,0,0.04)" }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ fontSize: 15.5, fontWeight: 800, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.name || l.phone || l.email || "New lead"}</div>
+                <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", textTransform: "uppercase", color: T.textMuted, background: T.surfaceAlt, padding: "2px 7px", borderRadius: 100, flexShrink: 0 }}>{LEAD_SOURCE_LABEL[l.source] || l.source}</span>
+              </div>
+              <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{[l.service, l.message].filter(Boolean).join(" — ") || "No details"}</div>
+            </div>
+            <div style={{ textAlign: "right", flexShrink: 0 }}>
+              <span style={{ fontSize: 10.5, fontWeight: 800, color: STATUS_COLOR[l.status] || T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em" }}>{LEAD_STAGES.find(s => s.id === l.status)?.label || l.status}</span>
+              <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 2 }}>{ago(l.createdAt)}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {sel && (
+        <Modal title="Lead" onClose={() => setSelId(null)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div>
+              <div style={{ fontSize: 19, fontWeight: 800, color: T.text }}>{sel.name || "New lead"}</div>
+              <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>From {LEAD_SOURCE_LABEL[sel.source] || sel.source}{sel.sourceDetail ? ` · ${sel.sourceDetail}` : ""} · {ago(sel.createdAt)}</div>
+            </div>
+            {(() => { const dup = dupClient(sel); return dup ? <div style={{ fontSize: 12, fontWeight: 700, color: "#B45309", background: hexA("#F59E0B", 0.12), border: `1px solid ${hexA("#F59E0B", 0.4)}`, borderRadius: 10, padding: "9px 12px" }}>Possible match: existing client <b>{dup.name}</b>. Check before converting.</div> : null; })()}
+            <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+              {sel.phone && <div style={{ fontSize: 13.5 }}><span style={{ color: T.textMuted }}>Phone: </span><a href={`tel:${sel.phone}`} style={{ color: T.primary, fontWeight: 700, textDecoration: "none" }}>{sel.phone}</a></div>}
+              {sel.email && <div style={{ fontSize: 13.5 }}><span style={{ color: T.textMuted }}>Email: </span><a href={`mailto:${sel.email}`} style={{ color: T.primary, fontWeight: 700, textDecoration: "none" }}>{sel.email}</a></div>}
+              {sel.service && <div style={{ fontSize: 13.5, color: T.text }}><span style={{ color: T.textMuted }}>Service: </span>{sel.service}</div>}
+              {sel.message && <div style={{ fontSize: 13.5, color: T.text, lineHeight: 1.5, background: T.surfaceAlt, borderRadius: 10, padding: "10px 12px" }}>{sel.message}</div>}
+            </div>
+            <div>
+              <label style={lbl}>Stage</label>
+              <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+                {LEAD_STAGES.map(st => chip(sel.status === st.id, st.label, () => setStatus(sel, st.id), STATUS_COLOR[st.id]))}
+              </div>
+            </div>
+            {sel.status !== "won" && <Btn block lg onClick={() => convert(sel)}>Convert to client →</Btn>}
+            {sel.status === "won" && <div style={{ fontSize: 13, fontWeight: 700, color: "#16a34a", textAlign: "center" }}>✓ Converted to a client</div>}
+            <button onClick={() => removeLead(sel.id)} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", padding: 6 }}>Delete lead</button>
+          </div>
+        </Modal>
+      )}
+
+      {adding && (
+        <Modal title="Add Lead" onClose={() => setAdding(false)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div><label style={lbl}>Name</label><input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} style={field} placeholder="Name" /></div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ flex: 1 }}><label style={lbl}>Phone</label><input value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))} style={field} placeholder="(555) 555-5555" inputMode="tel" /></div>
+              <div style={{ flex: 1 }}><label style={lbl}>Email</label><input value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} style={field} placeholder="name@email.com" inputMode="email" /></div>
+            </div>
+            <div><label style={lbl}>Service interest</label><input value={form.service} onChange={e => setForm(f => ({ ...f, service: e.target.value }))} style={field} placeholder="e.g. Pond cleaning" /></div>
+            <div><label style={lbl}>Notes</label><textarea rows={3} value={form.message} onChange={e => setForm(f => ({ ...f, message: e.target.value }))} style={{ ...field, resize: "vertical" }} placeholder="What do they need?" /></div>
+            <Btn block lg onClick={addManual} style={{ opacity: (form.name || form.phone || form.email) ? 1 : 0.5, pointerEvents: (form.name || form.phone || form.email) ? "auto" : "none" }}>Add lead</Btn>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEmail, costs, setCosts, budget, setBudget, clients, setClients, invoices, scheduleCfg, setScheduleCfg, team, setTeam, invoicing, setInvoicing, currentUserId, onResetData, serviceTiers, setServiceTiers, onSyncData, onNav, initialTab, navDock, setNavDock, vp = {} }) {
   const { T, perms } = useApp();
   const fileRef = useRef();
@@ -19221,67 +19422,98 @@ function ReminderSettings({ scheduleCfg, setScheduleCfg, email, setEmail, brandi
   );
 }
 
-function RemindersScreen({ schedule, clients, scheduleCfg, setScheduleCfg, email, setEmail, branding, reminderLog, setReminderLog, T }) {
+function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, reminderLog, setReminderLog, T }) {
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
   const setCfg = (k, v) => setScheduleCfg({ ...cfg, [k]: v });
   const now = new Date();
   const queue = buildReminderQueue(schedule, clients, cfg, reminderLog, now);
   const seasonal = buildSeasonalQueue(cfg, clients, reminderLog, now);
+  const payments = buildInvoiceReminderQueue(invoices, clients, cfg, reminderLog, now);
 
   const tpl = (email && email.smsReminder) || DEFAULT_EMAIL.smsReminder;
+  const payTpl = (email && email.smsPaymentNudge) || DEFAULT_EMAIL.smsPaymentNudge;
   const buildMsg = (entry) => {
     const first = (entry.client?.name || "there").split(" ")[0];
-    // Seasonal entries carry their own message template; appointment ones use the shared one.
-    const raw = (entry.message != null && entry.message !== "") ? entry.message : tpl;
+    const company = branding?.companyName || "Stone Property Solutions";
+    // Payment entries use the payment template; seasonal carry their own; service use the shared one.
+    const raw = entry.kind === "payment" ? payTpl : (entry.message != null && entry.message !== "") ? entry.message : tpl;
     return raw
-      .replace(/{first}/g, first)
-      .replace(/{company}/g, branding?.companyName || "Stone Property Solutions")
-      .replace(/{date}/g, entry.date || "");
+      .replace(/{first}/g, first).replace(/{company}/g, company).replace(/{date}/g, entry.date || "")
+      .replace(/{number}/g, entry.number || "").replace(/{amount}/g, entry.amount || "").replace(/{link}/g, entry.link || "");
   };
 
   const [reminderErr, setReminderErr] = useState("");
+  const [review, setReview] = useState(null);       // the entry being reviewed in the send modal
+  const [reviewMsg, setReviewMsg] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+  const [sendBusy, setSendBusy] = useState(false);
   const markSent = (sid, method) => setReminderLog(m => ({ ...m, [sid]: { sentAt: new Date().toISOString(), method } }));
   const undoSent = (sid) => setReminderLog(m => { const n = { ...m }; delete n[sid]; return n; });
 
-  const sendOne = async (entry) => {
-    const msg = buildMsg(entry);
-    if (entry.phone) {
-      const r = await sendSms(entry.phone, msg, { clientId: entry.client?.id, type: "Reminder" }); // business Quo line ONLY — never the device Messages app
-      if (!r.ok) { setReminderErr(r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send the reminder text.")); return; }
+  const openReview = (entry) => { setReview(entry); setReviewMsg(buildMsg(entry)); setReminderErr(""); };
+
+  const aiImprove = async () => {
+    if (!review) return;
+    setAiBusy(true);
+    try {
+      const r = await fetch(`${PROD_URL}/api/ai-message`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ kind: review.kind === "payment" ? "payment" : "reminder", draft: reviewMsg, channel: "text",
+          context: { clientFirst: (review.client?.name || "there").split(" ")[0], company: branding?.companyName || "", service: review.stop?.type, date: review.date, amount: review.amount, invoiceNumber: review.number, division: review.client?.division } }) });
+      const d = await r.json().catch(() => ({}));
+      if (d && d.message) setReviewMsg(d.message);
+      else setReminderErr(d && d.missingEnv ? "AI isn't connected yet — add your ANTHROPIC_API_KEY in Vercel." : "Couldn't reach the AI just now.");
+    } catch (_) { setReminderErr("Couldn't reach the AI just now."); }
+    setAiBusy(false);
+  };
+
+  const sendReview = async () => {
+    if (!review) return;
+    setSendBusy(true);
+    if (review.phone) {
+      const r = await sendSms(review.phone, reviewMsg, { clientId: review.client?.id, type: review.kind === "payment" ? "Payment reminder" : "Reminder" }); // business Quo line ONLY
+      if (!r.ok) { setReminderErr(r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send the text.")); setSendBusy(false); return; }
     } else {
-      navigator.clipboard?.writeText(msg); // no phone on file — copy so it can be sent manually
+      navigator.clipboard?.writeText(reviewMsg); // no phone on file — copy so it can be sent manually
     }
-    setReminderErr("");
-    markSent(entry.sid, "manual");
+    markSent(review.sid, "manual"); setSendBusy(false); setReview(null);
   };
 
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
   const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
 
-  const card = (entry, isDue) => (
-    <div key={entry.sid} style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12 }}>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{entry.client?.name || entry.stop.client || "Client"}</div>
-        <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>
-          {entry.stop.type || "Service"} · {entry.date}{entry.stop.time ? ` · ${entry.stop.time}` : ""}
+  const KIND_BADGE = { payment: { label: "Payment", color: "#C0392B" }, seasonal: { label: "Seasonal", color: "#7c3aed" }, service: { label: "Service", color: T.primary } };
+  const card = (entry, isDue) => {
+    const k = entry.kind === "payment" ? "payment" : entry.isSeasonal ? "seasonal" : "service";
+    const badge = KIND_BADGE[k];
+    const sub = entry.kind === "payment"
+      ? `Invoice ${entry.number || "—"} · ${entry.amount} · ${entry.daysOverdue}d overdue`
+      : `${entry.stop?.type || "Service"} · ${entry.date}${entry.stop?.time ? ` · ${entry.stop.time}` : ""}`;
+    return (
+      <div key={entry.sid} onClick={() => isDue && openReview(entry)} style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, padding: "13px 15px", display: "flex", alignItems: "center", gap: 12, cursor: isDue ? "pointer" : "default" }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", textTransform: "uppercase", color: badge.color, background: hexA(badge.color, 0.12), padding: "2px 7px", borderRadius: 100, flexShrink: 0 }}>{badge.label}</span>
+            <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.client?.name || entry.stop?.client || "Client"}</div>
+          </div>
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sub}</div>
+          {!entry.phone && <div style={{ fontSize: 11, color: T.warning, marginTop: 3 }}>No phone — message copies to clipboard</div>}
+          {!isDue && entry.sendTime && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>Sends {entry.sendTime.toLocaleDateString("en-US", { month: "short", day: "numeric" })} at {entry.sendTime.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}</div>}
         </div>
-        {!entry.phone && <div style={{ fontSize: 11, color: T.warning, marginTop: 3 }}>No phone on file — text will copy to clipboard</div>}
-        {!isDue && entry.sendTime && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>Sends {entry.sendTime.toLocaleDateString("en-US", { month: "short", day: "numeric" })} at {entry.sendTime.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}</div>}
+        {isDue ? (
+          <button onClick={(e) => { e.stopPropagation(); openReview(entry); }} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "8px 15px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Review</button>
+        ) : (
+          <span style={{ fontSize: 11, color: T.textMuted, fontWeight: 600, flexShrink: 0 }}>Queued</span>
+        )}
       </div>
-      {isDue ? (
-        <button onClick={() => sendOne(entry)} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "8px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Send</button>
-      ) : (
-        <span style={{ fontSize: 11, color: T.textMuted, fontWeight: 600, flexShrink: 0 }}>Queued</span>
-      )}
-    </div>
-  );
+    );
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
       <div>
         <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Reminders</div>
         <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>
-          {cfg.remindersOn ? `${queue.due.length} due · ${queue.upcoming.length} queued` : "Appointment reminders are off"}
+          {`${queue.due.length + payments.due.length + seasonal.due.length} due now${queue.upcoming.length ? ` · ${queue.upcoming.length} queued` : ""}`}
         </div>
       </div>
 
@@ -19342,6 +19574,18 @@ function RemindersScreen({ schedule, clients, scheduleCfg, setScheduleCfg, email
         )}
       </>)}
 
+      {/* Payment reminders (overdue invoices) — independent of the appointment-reminders toggle */}
+      {payments.due.length > 0 && (
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 10, display: "flex", alignItems: "center", gap: 7 }}>
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#C0392B" }} /> Payment Reminders Due ({payments.due.length})
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {payments.due.map(e => card(e, true))}
+          </div>
+        </div>
+      )}
+
       {/* Seasonal reminders coming due — independent of the appointment-reminders toggle */}
       {seasonal.due.length > 0 && (
         <div>
@@ -19368,6 +19612,29 @@ function RemindersScreen({ schedule, clients, scheduleCfg, setScheduleCfg, email
             ))}
           </div>
         </div>
+      )}
+
+      {review && (
+        <Modal title={review.kind === "payment" ? "Payment reminder" : "Send reminder"} onClose={() => setReview(null)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div>
+              <div style={{ fontSize: 17, fontWeight: 800, color: T.text }}>{review.client?.name || "Client"}</div>
+              <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 3, lineHeight: 1.45 }}>
+                {review.kind === "payment" ? `Invoice ${review.number || "—"} · ${review.amount} · ${review.daysOverdue} days overdue` : `${review.stop?.type || "Service"} · ${review.date}${review.stop?.time ? ` · ${review.stop.time}` : ""}`}
+                <br />{review.phone ? `Texting ${review.client?.phone || ""}` : "No phone on file — the message will copy to your clipboard"}
+              </div>
+            </div>
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }}>
+                <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted }}>Message</label>
+                <button onClick={aiImprove} disabled={aiBusy} style={{ background: "none", border: "none", color: T.primary, fontSize: 12.5, fontWeight: 800, cursor: aiBusy ? "default" : "pointer", fontFamily: "inherit" }}>{aiBusy ? "Improving…" : "✨ Improve with AI"}</button>
+              </div>
+              <textarea rows={4} value={reviewMsg} onChange={e => setReviewMsg(e.target.value)} style={{ width: "100%", padding: "12px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical", lineHeight: 1.5 }} />
+            </div>
+            {reminderErr && <div style={{ fontSize: 12.5, fontWeight: 700, color: T.accent }}>{reminderErr}</div>}
+            <Btn onClick={sendReview} disabled={sendBusy} block lg>{sendBusy ? "Sending…" : review.phone ? "Send text" : "Copy message"}</Btn>
+          </div>
+        </Modal>
       )}
     </div>
   );
@@ -21547,6 +21814,7 @@ function BudgetScreen({ budget, setBudget, clients, costs, invoices, onNav, T, v
 const ALL_NAV = [
   { id: "dashboard",  label: "Home",      icon: "home" },
   { id: "clients",    label: "Clients",   icon: "clients" },
+  { id: "leads",      label: "Leads",     icon: "funnel",    ownerOnly: true },
   { id: "schedule",   label: "Schedule",  icon: "calendar" },
   { id: "messages",   label: "Messages",  icon: "message" },
   { id: "invoices",   label: "Invoices",  icon: "invoice",   permAny: ["viewInvoices", "canInvoice"] },
@@ -24594,6 +24862,7 @@ export default function App({ authEmail = "", onSignOut }) {
   const [home, setHome, lh] = useStoredState("sps_home", DEFAULT_HOME);
   const [budget, setBudget, lbud] = useStoredState("sps_budget", DEFAULT_BUDGET);
   const [officeAlerts, setOfficeAlerts, loa] = useStoredState("sps_officeAlerts", []);
+  const [leads, setLeads, lld] = useStoredState("sps_leads", []); // intake funnel — see [[intake-funnel-plan]]
   const [scheduleCfg, setScheduleCfg, lscfg] = useStoredState("sps_schedule_cfg", DEFAULT_SCHEDULE_CFG);
   const [roles, setRoles, lrol] = useStoredState("sps_roles", DEFAULT_ROLES);
   const [team, setTeam, ltm] = useStoredState("sps_team", DEFAULT_TEAM);
@@ -25061,7 +25330,7 @@ export default function App({ authEmail = "", onSignOut }) {
   // the user never sees two screens on load.
   const splashRemoved = useRef(false);
   const splashStart = useRef(Date.now()); // when the boot splash first became visible
-  const SPLASH_MIN_MS = 1300;   // keep the load screen up at least this long (no flash)
+  const SPLASH_MIN_MS = 1800;   // keep the load screen up at least this long so the full welcome animation plays (no flash)
   const GREETING_HOLD_MS = 850; // once ready, linger this long so the welcome is seen
 
   // Cache-first boot: lift the splash as soon as the local snapshot has painted REAL cached data —
@@ -25315,6 +25584,29 @@ export default function App({ authEmail = "", onSignOut }) {
   }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // QuickBooks sync handler — merges QB invoices into app state and matches customers to clients
+  // Auto-sync QuickBooks once on app open — invoices/payments refresh on launch like everything else,
+  // no manual "Sync" tap needed. Only when QB is connected; silent + non-blocking; throttled across
+  // quick reopens so we don't hammer QuickBooks' API. On an expired session it quietly marks QB
+  // disconnected (the manual Sync button then surfaces the reconnect prompt).
+  const _qbAutoSyncRef = useRef(false);
+  useEffect(() => {
+    if (!hydrated || _qbAutoSyncRef.current || !qbIsConnected()) return;
+    _qbAutoSyncRef.current = true;
+    try { if (Date.now() - (+(localStorage.getItem("qb_autosync_at") || 0)) < 120000) return; } catch (_) {}
+    (async () => {
+      try {
+        const res = await fetch(`${QB_API}/sync`, { headers: await authHeaders() });
+        if (res.status === 401) { qbSetConnected(false); return; }
+        if (!res.ok) return;
+        const data = await res.json().catch(() => ({}));
+        if (data && !data.error && data.invoices) {
+          handleQBSync(data.invoices, data.customers);
+          try { localStorage.setItem("qb_autosync_at", String(Date.now())); } catch (_) {}
+        }
+      } catch (_) { /* best-effort — the manual Sync button remains for the rare failure */ }
+    })();
+  }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleQBSync = (qbInvoices, qbCustomers) => {
     // Build client lookup maps from current clients snapshot
     const currentClients = clients || [];
@@ -25544,6 +25836,16 @@ export default function App({ authEmail = "", onSignOut }) {
     };
     setClients(cs => [...cs, newClient]);
     setAdding(false);
+  };
+
+  // Convert a lead → a real client (the funnel's payoff). Builds a BLANK_CLIENT-shaped form, creates the
+  // client, and stamps the lead won + convertedClientId (the lead is retained for the record).
+  const handleConvertLead = (lead) => {
+    const id = Date.now();
+    const newClient = { ...leadToClientForm(lead), id, status: "Active", balance: "$0.00", equipment: [], history: [] };
+    setClients(cs => [...cs, newClient]);
+    setLeads(ls => (ls || []).map(l => l.id === lead.id ? { ...l, status: "won", convertedClientId: id, updatedAt: new Date().toISOString(), timeline: [...(l.timeline || []), { at: new Date().toISOString(), by: "owner", kind: "converted", text: "Converted to client" }] } : l));
+    return id;
   };
 
   const handleImportClients = async (imported) => { await snapshotState("Before client import"); setClients(cs => [...cs, ...imported]); };
@@ -26108,11 +26410,12 @@ export default function App({ authEmail = "", onSignOut }) {
       {page === "schedule" && <SectionErrorBoundary key={"schedule-" + schedNonce}><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
       {page === "messages"  && <MessagesScreen clients={clients} currentUser={currentUser} T={T} />}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <SectionErrorBoundary key="inventory"><InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} /></SectionErrorBoundary>}
-      {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
+      {page === "reminders"  && (perms.isAdmin || perms.editSchedule) && <RemindersScreen schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} />}
       {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetScreen budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} />}
       {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
       {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
+      {page === "leads" && perms.isAdmin && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={handleConvertLead} vp={vp} />}
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
       {page === "duplicates" && perms.canImport && <DuplicatesScreen clients={clients} invoices={invoices} schedule={schedule} onMerge={handleMergeClients} onGoToClients={() => handleNav("clients")} />}
