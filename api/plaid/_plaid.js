@@ -83,14 +83,14 @@ async function sbGet(key, fallback) {
     return v == null ? fallback : v;
   } catch { return fallback; }
 }
-export async function requireOwner(req, res) {
+export async function requireOwner(req, res, feature = "bank sync") {
   const u = await verifyUser(req);
   const callerEmail = String((u && u.email) || "").toLowerCase();
   const [team, branding, email] = await Promise.all([sbGet("sps_team", []), sbGet("sps_branding", {}), sbGet("sps_email", {})]);
   const ownerEmails = [((team || []).find((m) => m && m.role === "owner") || {}).email, branding.companyEmail, email.ownerEmail]
     .filter(Boolean).map((e) => String(e).toLowerCase());
   if (!callerEmail || ownerEmails.length === 0 || !ownerEmails.includes(callerEmail)) {
-    res.status(403).json({ error: "Owner only. Sign in as the owner (and set a company or owner email in settings) to use bank sync." });
+    res.status(403).json({ error: `Owner only. Sign in as the owner (and set a company or owner email in settings) to use ${feature}.` });
     return null;
   }
   return u;

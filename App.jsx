@@ -74,6 +74,7 @@ async function bankCheckStatus() {
     const d = await r.json().catch(() => null);
     _bankCache.status = d && d.ok ? d : { connected: false, configured: null, unreachable: true };
   } catch (_) { _bankCache.status = _bankCache.status || { connected: false, configured: null, unreachable: true }; }
+  bankNotify();
   return _bankCache.status;
 }
 // Fetch + cache one period's transactions. Returns { r, d }; only real data (not a 202
@@ -83,7 +84,7 @@ async function bankFetchTxns(period = "month") {
   const g = _bankCache.gen;
   const r = await fetch(`${PROD_URL}/api/plaid/transactions?period=${period}`, { headers: await authHeaders() });
   const d = await r.json().catch(() => ({}));
-  if (r.ok && !d.notReady && g === _bankCache.gen) { _bankCache.data = d; _bankCache.period = period; _bankCache.at = Date.now(); }
+  if (r.ok && !d.notReady && g === _bankCache.gen) { _bankCache.data = d; _bankCache.period = period; _bankCache.at = Date.now(); bankNotify(); }
   return { r, d };
 }
 // Full connect flow: link token → Plaid Link (secure popup; we never see credentials) → exchange.
@@ -105,6 +106,7 @@ async function bankLinkFlow() {
           if (!ex.ok) return reject(new Error(ed.error || "Couldn't finish connecting."));
           _bankCache.gen++; _bankCache.data = null; _bankCache.at = 0; // fresh link (maybe a different bank) → old cache is invalid
           _bankCache.status = { ok: true, connected: true, institution: inst, configured: true };
+          bankNotify();
           resolve({ connected: true, institution: inst });
         } catch (_) { reject(new Error("Couldn't finish connecting.")); }
       },
@@ -118,6 +120,60 @@ async function bankDisconnect() {
   _bankCache.gen++; // invalidate any in-flight fetch so it can't re-fill the cache we just cleared
   _bankCache.status = { ...(_bankCache.status || {}), connected: false, institution: null };
   _bankCache.data = null; _bankCache.at = 0;
+  bankNotify();
+}
+
+// ── Shared bank-truth financials ── ONE source for every money summary in the app. Home tiles,
+// Reports, the Budget overview, and the owner widget all read this month's numbers through
+// bankMonthSummary(), so when the bank is connected they can never disagree with the Budget page.
+// Marks/rules live in the owner's budget object; transactions come from the module cache.
+const bankNormName = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
+const bankTxnKey = (t) => t.id || `${t.date}|${t.name}|${t.amount}`;
+const bankMarkOf = (budget, t) => ((budget && budget.txMarks) || {})[bankTxnKey(t)] || ((budget && budget.txRules) || {})[bankNormName(t.name)] || null;
+const bankEffKind = (budget, t) => { const m = bankMarkOf(budget, t); return (m && m.kind) || (t.amount >= 0 ? "income" : "expense"); };
+const bankEffCat = (budget, t) => { const m = bankMarkOf(budget, t); return (m && m.category) || t.category || "Uncategorized"; };
+// Fired whenever the bank cache changes so mounted surfaces (Home, Reports, widget) re-read it.
+const bankNotify = () => { try { document.dispatchEvent(new Event("sps-bank-sync")); } catch (_) {} };
+// Re-render the calling component when the bank cache updates (data landing after app open).
+function useBankSync() {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const f = () => setTick(t => t + 1);
+    document.addEventListener("sps-bank-sync", f);
+    return () => document.removeEventListener("sps-bank-sync", f);
+  }, []);
+}
+// This month's real-money summary, or null when the bank can't speak for the asked month (not
+// connected, nothing cached, or the cached window doesn't cover it — callers then fall back to
+// ops numbers). Respects the owner's marks: income/expense are the P&L kinds; savings transfers
+// and debt payments are broken out (cash out, not operating expense); "ignore" excluded everywhere.
+function bankMonthSummary(budget, when = new Date()) {
+  const st = _bankCache.status;
+  if (!st || !st.connected || !_bankCache.data) return null;
+  if (!["month", "ytd"].includes(_bankCache.period)) return null;
+  const now = new Date();
+  const curYm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const ym = `${when.getFullYear()}-${String(when.getMonth() + 1).padStart(2, "0")}`;
+  if (_bankCache.period === "month" && ym !== curYm) return null;             // month window = current month only
+  if (_bankCache.period === "ytd" && when.getFullYear() !== now.getFullYear()) return null;
+  let inflow = 0, outflow = 0, income = 0, expense = 0, savings = 0, debt = 0, count = 0;
+  (_bankCache.data.transactions || []).forEach(t => {
+    if (!String(t.date || "").startsWith(ym)) return;
+    const k = bankEffKind(budget, t);
+    if (k === "ignore") return;
+    count++;
+    if (t.amount >= 0) inflow += t.amount; else outflow += -t.amount;
+    if (k === "income") income += t.amount;          // signed → refunds net out
+    else if (k === "expense") expense += -t.amount;  // signed → refunds reduce spend
+    else if (k === "savings") savings += -t.amount;  // signed, outflow-positive → a transfer back nets down
+    else if (k === "debt") debt += -t.amount;
+  });
+  const r2 = (n) => Math.round(n * 100) / 100;
+  // Profit from the UNCLAMPED signed sums (a refund-heavy month can net a side negative — profit
+  // must reflect that); income/expense are clamped only for display.
+  const profit = r2(income - expense);
+  income = Math.max(0, r2(income)); expense = Math.max(0, r2(expense));
+  return { inflow: r2(inflow), outflow: r2(outflow), income, expense, savings: Math.max(0, r2(savings)), debt: Math.max(0, r2(debt)), profit, net: r2(inflow - outflow), count };
 }
 
 // Open a URL INSIDE the app on native (Capacitor in-app browser — no logout, with
@@ -2848,6 +2904,8 @@ const DEFAULT_BUDGET = {
   debts: [],   // { id, name, type, balance, apr, monthlyPayment, originalAmount }
   cash: "",    // cash on hand (owner-entered)
   goals: [],   // { id, name, target, saved }  savings goals
+  txMarks: {}, // bank-transaction marks, keyed by Plaid transaction_id → { kind, category?, goalId?, debtId?, amount, date, name }
+  txRules: {}, // per-merchant auto-rules, keyed by normalized name → { kind, category?, goalId?, debtId? }
 };
 
 // ─────────────────────────────────────────────
@@ -3627,7 +3685,7 @@ function ClockInOut({ me, T }) {
   );
 }
 
-function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onOpenAlert, onOpenStop, onNav, catalog, onConfirmUpgrade, userName, me, scheduleCfg, reminderLog, completedSids = {}, vp = {} }) {
+function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onOpenAlert, onOpenStop, onNav, catalog, onConfirmUpgrade, userName, me, scheduleCfg, reminderLog, completedSids = {}, budget = {}, vp = {} }) {
   const { T, perms, branding } = useApp();
   const [editing, setEditing] = useState(false);
   const [statPicker, setStatPicker] = useState(false);
@@ -3668,6 +3726,11 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
   // Month-over-month trend chips, computed where there's a meaningful prior-period number
   // (revenue / costs / profit / jobs). Hidden elsewhere — no fabricated comparisons.
   const lastMA = monthActuals(clients, new Date(curY, curM - 1, 15), invoices);
+  // Bank truth: when connected + loaded, the money tiles show EXACTLY what the Budget page shows
+  // (categorized real transactions) instead of the ops estimate — one source, no disagreements.
+  // Trends are dropped for bank-sourced tiles (last month isn't in the cache; no fabricated deltas).
+  useBankSync();
+  const bankMo = bankMonthSummary(budget);
   const trendOf = (cur, prev, higherIsBetter = true) => {
     if (prev == null || prev === 0 || !isFinite(prev)) return null;
     const dp = Math.round(((cur - prev) / Math.abs(prev)) * 100);
@@ -3682,9 +3745,9 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
     jobsMonth:      { label: "Jobs (mo)",       value: ma.jobs, sub: "Completed", accent: T.accent, icon: "check", trend: trendOf(ma.jobs, lastMA.jobs, true), onClick: (perms.seeReportsPnl || perms.isAdmin) ? () => onNav("reports") : undefined },
     outstanding:    { label: "Outstanding",     value: money(outstandingTotal), sub: `${outstandingClients.length} ${outstandingClients.length === 1 ? "client" : "clients"}`, accent: outstandingTotal > 0 ? T.warning : T.accent, icon: "invoice", onClick: () => onNav("invoices", { invoiceFilter: "Overdue" }), perm: "seeBalances" },
     collectedMonth: { label: "Collected (mo)",  value: money(collectedMonth), sub: "Cash in", accent: T.accent, icon: "dollar", perm: "seeBalances" },
-    revenueMonth:   { label: "Revenue (mo)",    value: money(ma.revenue), sub: "Job revenue", accent: T.text, icon: "dollar", trend: trendOf(ma.revenue, lastMA.revenue, true), perm: "seeProfit" },
-    costsMonth:     { label: "Costs (mo)",      value: money(ma.cost), sub: "Job costs", accent: T.textMuted, icon: "chart", trend: trendOf(ma.cost, lastMA.cost, false), perm: "seeProfit" },
-    profitMonth:    { label: "Profit (mo)",     value: money(ma.profit), sub: `${ma.jobs} jobs`, accent: ma.profit >= 0 ? T.accent : "#C0392B", icon: "chart", trend: trendOf(ma.profit, lastMA.profit, true), onClick: (perms.seeReportsPnl || perms.isAdmin) ? () => onNav("reports") : undefined, perm: "seeProfit" },
+    revenueMonth:   { label: "Revenue (mo)",    value: money(bankMo ? bankMo.income : ma.revenue), sub: bankMo ? "From your bank" : "Job revenue", accent: T.text, icon: "dollar", trend: bankMo ? null : trendOf(ma.revenue, lastMA.revenue, true), onClick: bankMo && (perms.seeCostsBudget || perms.isAdmin) ? () => onNav("budget") : undefined, perm: "seeProfit" },
+    costsMonth:     { label: "Costs (mo)",      value: money(bankMo ? bankMo.expense : ma.cost), sub: bankMo ? "From your bank" : "Job costs", accent: T.textMuted, icon: "chart", trend: bankMo ? null : trendOf(ma.cost, lastMA.cost, false), onClick: bankMo && (perms.seeCostsBudget || perms.isAdmin) ? () => onNav("budget") : undefined, perm: "seeProfit" },
+    profitMonth:    { label: "Profit (mo)",     value: money(bankMo ? bankMo.profit : ma.profit), sub: bankMo ? "Income − expenses" : `${ma.jobs} jobs`, accent: (bankMo ? bankMo.profit : ma.profit) >= 0 ? T.accent : "#C0392B", icon: "chart", trend: bankMo ? null : trendOf(ma.profit, lastMA.profit, true), onClick: bankMo ? ((perms.seeCostsBudget || perms.isAdmin) ? () => onNav("budget") : undefined) : ((perms.seeReportsPnl || perms.isAdmin) ? () => onNav("reports") : undefined), perm: "seeProfit" },
     laborMonth:     { label: "Labor (mo)",      value: money(laborMonth), sub: "Payroll cost", accent: T.textMuted, icon: "clients", perm: "seeProfit" },
   };
   const STAT_ORDER = ["activeClients", "stopsToday", "stopsMonth", "jobsMonth", "outstanding", "collectedMonth", "revenueMonth", "costsMonth", "profitMonth", "laborMonth"];
@@ -3733,17 +3796,20 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
     }
     if (id === "profit") {
       if (!perms.seeProfit) return null;
+      // Bank truth when connected — same numbers as the stat tiles / Budget / Reports; ops fallback.
+      const pRev = bankMo ? bankMo.income : ma.revenue, pCost = bankMo ? bankMo.expense : ma.cost, pProf = bankMo ? bankMo.profit : ma.profit;
       return (
       <Card key="profit" style={{ marginBottom: 16 }}>
-        <CardHeader title="This Month" action={<Btn variant="text" sm onClick={() => onNav("settings")}>Budget →</Btn>} />
-        <div style={{ padding: 18, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
-          {[["Revenue", ma.revenue, T.text],["Costs", ma.cost, T.textMuted],["Profit", ma.profit, ma.profit >= 0 ? T.accent : "#C0392B"]].map(([k, v, col]) => (
+        <CardHeader title="This Month" action={<Btn variant="text" sm onClick={() => onNav("budget")}>Budget →</Btn>} />
+        <div style={{ padding: "18px 18px 6px", display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+          {[["Revenue", pRev, T.text],["Costs", pCost, T.textMuted],["Profit", pProf, pProf >= 0 ? T.accent : "#C0392B"]].map(([k, v, col]) => (
             <div key={k} style={{ background: T.surfaceAlt, borderRadius: 10, padding: "12px 10px", textAlign: "center" }}>
               <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>{k}</div>
               <div style={{ fontSize: 18, fontWeight: 800, color: col, marginTop: 3 }}>{money(v)}</div>
             </div>
           ))}
         </div>
+        <div style={{ padding: "0 18px 14px", fontSize: 11, color: T.textMuted, textAlign: "center" }}>{bankMo ? "From your bank — matches the Budget" : "From completed jobs + paid invoices"}</div>
       </Card>
       );
     }
@@ -21843,10 +21909,14 @@ function ServiceStopsReport({ clients, invoices, T }) {
   );
 }
 
-function ReportsScreen({ clients, invoices, schedule, costs, T }) {
+function ReportsScreen({ clients, invoices, schedule, costs, T, budget = {} }) {
   const [period, setPeriod] = useState("month"); // month | quarter | year | all
 
   const now = new Date();
+  // Bank truth — the same categorized real-money numbers the Budget page (and Home tiles) show.
+  // Rendered as the lead card on the month view so Reports can never disagree with the Budget.
+  useBankSync();
+  const bankMo = bankMonthSummary(budget);
   const periodStart = (() => {
     const d = new Date(now);
     if (period === "month")   { d.setDate(1); d.setHours(0,0,0,0); return d; }
@@ -22071,6 +22141,29 @@ function ReportsScreen({ clients, invoices, schedule, costs, T }) {
           </button>
         ))}
       </div>
+
+      {/* From your bank — the Budget page's numbers, repeated here so every report agrees with it */}
+      {period === "month" && bankMo && (
+        <Section title="From Your Bank">
+          <div style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, padding: 16, marginBottom: 10 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+              {[["Money in", bankMo.inflow, "#16a34a"], ["Money out", bankMo.outflow, T.primary], ["Profit", bankMo.profit, bankMo.profit >= 0 ? "#16a34a" : "#E5484D"]].map(([label, v, color]) => (
+                <div key={label} style={{ background: T.surfaceAlt, borderRadius: 12, padding: "12px 13px" }}>
+                  <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: T.textMuted }}>{label}</div>
+                  <div style={{ fontSize: 20, fontWeight: 800, color, letterSpacing: "-0.02em", marginTop: 3, whiteSpace: "nowrap" }}>${Math.round(v).toLocaleString()}</div>
+                </div>
+              ))}
+            </div>
+            {(bankMo.debt > 0 || bankMo.savings > 0) && (
+              <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12, color: T.textMuted, marginTop: 10 }}>
+                {bankMo.debt > 0 && <span>→ Debt payments <b style={{ color: T.text }}>${Math.round(bankMo.debt).toLocaleString()}</b></span>}
+                {bankMo.savings > 0 && <span>→ Savings <b style={{ color: T.text }}>${Math.round(bankMo.savings).toLocaleString()}</b></span>}
+              </div>
+            )}
+            <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 10, lineHeight: 1.5 }}>Your categorized bank transactions this month — identical to Budget → Bank. Profit = income − expenses (transfers and debt payments broken out). The P&L below is the operations view from completed stops + invoices.</div>
+          </div>
+        </Section>
+      )}
 
       {/* Owner P&L summary */}
       <Section title="Profit & Loss">
@@ -22488,16 +22581,34 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
   const fixedFromCosts = costs ? monthlyFixedCosts(costs) : 0;
   const income = budget.income || [], expenses = budget.expenses || [], debts = budget.debts || [], goals = budget.goals || [];
   const catName = (r) => r.category || r.label || "";
-  const catActual = (r) => { if (!r.src) return null; if (r.src === "revenue") return actuals.revenue; return costA[r.src] != null ? costA[r.src] : null; };
+  // Row actual: ops source (paid invoices / completed-stop costs) wins; otherwise a bank category
+  // with the same name fills it live (bankMoExp/bankMoInc are defined below with the bank block —
+  // referenced lazily at render time, so ordering is fine).
+  const catActual = (r, kind) => {
+    if (r.src === "revenue") return actuals.revenue;
+    if (r.src) return costA[r.src] != null ? costA[r.src] : null;
+    const k = normName(catName(r)); if (!k) return null;
+    const v = kind === "income" ? bankMoInc[k] : bankMoExp[k];
+    return v != null ? v : null;
+  };
 
   const incomeBudget = income.reduce((s, r) => s + num(r.amount), 0);
   const expenseBudget = expenses.reduce((s, r) => s + num(r.amount), 0) + fixedFromCosts;
-  const incomeActual = actuals.revenue;
-  const expenseActual = actuals.cost + fixedFromCosts;
-  const debtMonthly = debts.reduce((s, d) => s + num(d.monthlyPayment), 0);
+  // Bank-first actuals: when the bank speaks for this month (connected + categorized), the SAME
+  // numbers every other surface shows (Home tiles, Reports, widget) drive the overview. Ops numbers
+  // (paid invoices + stop costs) are the fallback. moBank.expense excludes savings transfers + debt
+  // payments (broken out separately), so nothing double-counts against debtMonthly below.
+  const moBank = bankMonthSummary(budget, now);
+  const incomeActual = moBank ? moBank.income : actuals.revenue;
+  const expenseActual = moBank ? moBank.expense : actuals.cost + fixedFromCosts;
+  // Effective monthly payment on a debt: what you actually pay, falling back to the minimum.
+  const debtPay = (d) => num(d.monthlyPayment) || num(d.minPayment);
+  const debtMonthly = debts.reduce((s, d) => s + debtPay(d), 0);
   const debtTotal = debts.reduce((s, d) => s + num(d.balance), 0);
   const cash = num(budget.cash);
-  const netCashFlow = incomeActual - expenseActual - debtMonthly;
+  // Real cash movement when the bank is the source (in − out covers everything, incl. debt+savings);
+  // budgeted approximation otherwise.
+  const netCashFlow = moBank ? moBank.net : incomeActual - expenseActual - debtMonthly;
   const netPosition = cash - debtTotal;
   const taxCfg = { ...DEFAULT_COSTS.tax, ...((costs && costs.tax) || {}) };
   const tx = estimateTaxes((incomeActual - expenseActual) * 12, costs);
@@ -22507,7 +22618,7 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
   const addRow = (kind) => setBudget(b => ({ ...b, [kind]: [...(b[kind] || []), { id: `${kind[0]}${Date.now()}`, category: "", amount: "" }] }));
   const removeRow = (kind, id) => setBudget(b => ({ ...b, [kind]: (b[kind] || []).filter(r => r.id !== id) }));
   const setCash = (v) => setBudget(b => ({ ...b, cash: v.replace(/[^\d.]/g, "") }));
-  const addDebt = () => setBudget(b => ({ ...b, debts: [...(b.debts || []), { id: `d${Date.now()}`, name: "", balance: "", apr: "", monthlyPayment: "", originalAmount: "" }] }));
+  const addDebt = () => setBudget(b => ({ ...b, debts: [...(b.debts || []), { id: `d${Date.now()}`, name: "", balance: "", apr: "", minPayment: "", monthlyPayment: "", termMonths: "", originalAmount: "" }] }));
   const editDebt = (id, field, value) => setBudget(b => ({ ...b, debts: (b.debts || []).map(d => d.id === id ? { ...d, [field]: field === "name" ? value : value.replace(/[^\d.]/g, "") } : d) }));
   const removeDebt = (id) => setBudget(b => ({ ...b, debts: (b.debts || []).filter(d => d.id !== id) }));
   const addGoal = () => setBudget(b => ({ ...b, goals: [...(b.goals || []), { id: `g${Date.now()}`, name: "", target: "", saved: "" }] }));
@@ -22523,6 +22634,7 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
   const [bankBusy, setBankBusy] = useState(false);
   const [bankMsg, setBankMsg] = useState("");
   const bankReqRef = useRef(0); // sequence guard: only the LATEST request may commit state (rapid period taps)
+  useBankSync(); // re-render when the shared bank cache updates (e.g. Customize-card Sync Now)
   const PERIODS = [["month", "This month"], ["lastmonth", "Last month"], ["ytd", "Year to date"]];
   const periodLabel = (p) => (PERIODS.find(([id]) => id === p) || PERIODS[0])[1];
 
@@ -22551,6 +22663,29 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
   };
   useEffect(() => { if (bankStatus && bankStatus.connected) loadBankTxns(bankPeriod); }, [bankStatus && bankStatus.connected, bankPeriod]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // When a PENDING transaction posts, Plaid gives it a NEW id — migrate any mark the owner made on
+  // the pending twin to the posted id (re-stamping amount/date/name from the posted row) so goal /
+  // debt contributions stay correct: no orphaned pending amounts, no double count on a re-mark.
+  // One write per load, and a strict no-op when there's nothing to move.
+  useEffect(() => {
+    const txns = (bankData && bankData.transactions) || [];
+    const marks = budget.txMarks || {};
+    const affected = txns.filter(t => t.pendingId && marks[t.pendingId]);
+    if (!affected.length) return;
+    setBudget(b => {
+      const m2 = { ...(b.txMarks || {}) };
+      let changed = false;
+      affected.forEach(t => {
+        const old = m2[t.pendingId];
+        if (!old) return;
+        if (!m2[t.id]) m2[t.id] = { ...old, amount: t.amount, date: t.date, name: t.name };
+        delete m2[t.pendingId]; // posted twin owns the mark now (or already had its own) — never count both
+        changed = true;
+      });
+      return changed ? { ...b, txMarks: m2 } : b;
+    });
+  }, [bankData]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const connectBank = async () => {
     setBankBusy(true); setBankMsg("");
     try {
@@ -22569,6 +22704,122 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
     setBankData(null); setBankMsg(""); setBankStatus(_bankCache.status);
     setBankBusy(false);
   };
+
+  // ── Bank transaction categorization ── the owner's own labels on top of Plaid's guesses.
+  // Two layers, both stored in `budget` (empty by default — never seeded):
+  //   txMarks — explicit per-transaction marks, keyed by Plaid's transaction_id. Carry amount+date
+  //             so savings/debt contributions stay durable after the txn leaves the fetch window.
+  //   txRules — per-merchant rules ("always treat Shell as Fuel"), applied to future transactions.
+  // Resolution: explicit mark → merchant rule → Plaid's category.
+  const txMarks = budget.txMarks || {}, txRules = budget.txRules || {};
+  // Delegate to the shared module helpers (bankNormName/bankMarkOf/...) — the same resolution the
+  // Home tiles, Reports, and widget use via bankMonthSummary, so every surface agrees.
+  const normName = bankNormName;
+  const txnKey = bankTxnKey;
+  const markOf = (t) => bankMarkOf(budget, t);
+  const effKind = (t) => bankEffKind(budget, t);
+  const effCat = (t) => bankEffCat(budget, t);
+  const markLabel = (t) => {
+    const m = markOf(t); if (!m) return effCat(t);
+    // A merchant RULE labels the row, but only an explicit saved mark adds to a goal/debt (durable
+    // amounts) — surface that so a rule-matched transfer isn't mistaken for a counted one.
+    const ruleOnly = !txMarks[txnKey(t)];
+    if (m.kind === "savings") { const g = goals.find(x => x.id === m.goalId); return `→ Savings${g && g.name ? ` · ${g.name}` : ""}${ruleOnly ? " · tap to count" : ""}`; }
+    if (m.kind === "debt") { const d = debts.find(x => x.id === m.debtId); return `→ Debt${d && d.name ? ` · ${d.name}` : ""}${ruleOnly ? " · tap to count" : ""}`; }
+    if (m.kind === "ignore") return "Ignored";
+    return m.category || effCat(t);
+  };
+
+  // Rollups recomputed client-side so they respect the owner's marks (ignore excluded everywhere).
+  const allTxns = (bankData && bankData.transactions) || [];
+  const liveTxns = allTxns.filter(t => effKind(t) !== "ignore");
+  const bankIn  = liveTxns.filter(t => t.amount >= 0).reduce((s, t) => s + t.amount, 0);
+  const bankOut = liveTxns.filter(t => t.amount < 0).reduce((s, t) => s + (-t.amount), 0);
+  const rollBy = (kindWant, txns) => {
+    const o = {}, disp = {};
+    txns.forEach(t => { if (effKind(t) !== kindWant) return; const c = effCat(t), k = normName(c); disp[k] = disp[k] || c; o[k] = (o[k] || 0) + (kindWant === "expense" ? -t.amount : t.amount); });
+    return Object.entries(o).filter(([, v]) => v > 0.005).map(([k, v]) => ({ key: k, category: disp[k], amount: Math.round(v * 100) / 100 })).sort((a, b) => b.amount - a.amount);
+  };
+  const bankExpCats = rollBy("expense", liveTxns), bankIncCats = rollBy("income", liveTxns);
+  // Signed, outflow-positive (a transfer back nets down); clamped so a net round-trip shows 0, not 2×.
+  const bankSavOut  = Math.max(0, liveTxns.filter(t => effKind(t) === "savings").reduce((s, t) => s + (-t.amount), 0));
+  const bankDebtOut = Math.max(0, liveTxns.filter(t => effKind(t) === "debt").reduce((s, t) => s + (-t.amount), 0));
+
+  // This-calendar-month slices → live bank actuals for the Budget section (matched by category name).
+  const ymPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const moTxns = allTxns.filter(t => String(t.date || "").startsWith(ymPrefix) && effKind(t) !== "ignore");
+  const bankMoExpList = rollBy("expense", moTxns), bankMoIncList = rollBy("income", moTxns);
+  const bankMoExp = Object.fromEntries(bankMoExpList.map(x => [x.key, x.amount]));
+  const bankMoInc = Object.fromEntries(bankMoIncList.map(x => [x.key, x.amount]));
+
+  // Durable contributions — from EXPLICIT marks only (they carry amount+date), so goal progress and
+  // debt payments survive period switches and never double-count across fetch windows.
+  // Signed (outflow = positive contribution, a transfer back nets down); clamped to 0 at use so
+  // bank activity can only ADD to a goal/debt month — it never eats the manually-entered amounts.
+  const goalAuto = (gid) => Math.max(0, Object.values(txMarks).filter(m => m && m.kind === "savings" && m.goalId === gid).reduce((s, m) => s + (-(m.amount) || 0), 0));
+  const debtPaidMo = (did) => Math.max(0, Object.values(txMarks).filter(m => m && m.kind === "debt" && m.debtId === did && String(m.date || "").startsWith(ymPrefix)).reduce((s, m) => s + (-(m.amount) || 0), 0));
+
+  // Editor state + actions
+  const [editTx, setEditTx] = useState(null);   // txnKey of the row being edited
+  const [draft, setDraft] = useState(null);     // { kind, category, goalId, debtId, applyAll }
+  const [txFilter, setTxFilter] = useState("all");
+  // Debt tools: per-debt payoff calculator + the AI payoff strategy
+  const [calcFor, setCalcFor] = useState(null); // debt id with the calculator open
+  const [calcPay, setCalcPay] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiAdvice, setAiAdvice] = useState("");
+  const [aiErr, setAiErr] = useState("");
+  const askDebtAI = async () => {
+    setAiBusy(true); setAiErr("");
+    try {
+      const r = await fetch(`${PROD_URL}/api/ai-debt-advisor`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({
+        debts: debts.map(d => ({ name: d.name, balance: num(d.balance), apr: num(d.apr), minPayment: num(d.minPayment), payment: num(d.monthlyPayment) || num(d.minPayment), termMonths: num(d.termMonths) })),
+        cash: num(budget.cash), monthlyIncome: Math.round(incomeActual), monthlyExpense: Math.round(expenseActual), monthlyNet: Math.round(netCashFlow), fromBank: !!moBank,
+        goals: goals.map(g => ({ name: g.name, target: num(g.target), saved: num(g.saved) + goalAuto(g.id) })),
+      }) });
+      const dta = await r.json().catch(() => ({}));
+      if (r.ok && dta.advice) setAiAdvice(dta.advice);
+      else setAiErr(dta.missingEnv ? "AI isn't connected yet — add your ANTHROPIC_API_KEY in Vercel." : (dta.error || "Couldn't get suggestions."));
+    } catch (_) { setAiErr("Couldn't reach the server."); }
+    setAiBusy(false);
+  };
+  const openEdit = (t) => {
+    const k = txnKey(t);
+    if (editTx === k) { setEditTx(null); return; }
+    const m = markOf(t) || {};
+    // Resolve ids against the CURRENT goals/debts — a mark pointing at a deleted goal/debt re-seeds
+    // to the first live option instead of carrying a dangling id through Save.
+    const goalId = (goals.some(g => g.id === m.goalId) ? m.goalId : (goals[0] && goals[0].id)) || "";
+    const debtId = (debts.some(d0 => d0.id === m.debtId) ? m.debtId : (debts[0] && debts[0].id)) || "";
+    setDraft({ kind: m.kind || (t.amount >= 0 ? "income" : "expense"), category: m.category || t.category || "", goalId, debtId, applyAll: true });
+    setEditTx(k);
+  };
+  const saveMark = (t) => {
+    if (!draft) return;
+    const k = txnKey(t), nk = normName(t.name);
+    const rec = { kind: draft.kind, amount: t.amount, date: t.date, name: t.name };
+    if (draft.kind === "expense" || draft.kind === "income") rec.category = (draft.category || "").trim() || t.category || "Uncategorized";
+    if (draft.kind === "savings") rec.goalId = draft.goalId;
+    if (draft.kind === "debt") rec.debtId = draft.debtId;
+    setBudget(b => {
+      const marks = { ...(b.txMarks || {}), [k]: rec };
+      if (t.pendingId) delete marks[t.pendingId]; // marking the posted twin — retire the pending mark
+      const rules = { ...(b.txRules || {}) };
+      if (draft.applyAll && nk) rules[nk] = { kind: rec.kind, category: rec.category, goalId: rec.goalId, debtId: rec.debtId };
+      return { ...b, txMarks: marks, txRules: rules };
+    });
+    setEditTx(null);
+  };
+  const clearMark = (t) => {
+    const k = txnKey(t), nk = normName(t.name);
+    setBudget(b => {
+      const marks = { ...(b.txMarks || {}) }; delete marks[k];
+      const rules = { ...(b.txRules || {}) }; delete rules[nk];
+      return { ...b, txMarks: marks, txRules: rules };
+    });
+    setEditTx(null);
+  };
+  const catSuggestions = [...new Set([...income.map(catName), ...expenses.map(catName), ...allTxns.map(t => t.category)].filter(Boolean))].sort();
 
   const green = "#16a34a", red = "#E5484D";
   const card = { background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: 16, marginBottom: 14 };
@@ -22590,7 +22841,7 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
   const catRows = (kind, actualColor) => (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       {(budget[kind] || []).map(r => {
-        const act = catActual(r), tgt = num(r.amount);
+        const act = catActual(r, kind === "income" ? "income" : "expense"), tgt = num(r.amount);
         return (
           <div key={r.id}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -22648,13 +22899,23 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
       {section === "overview" && (
         <>
           <div style={{ background: `linear-gradient(150deg, ${T.primary} 0%, ${mix(T.primary, "#000", 0.32)} 100%)`, borderRadius: 20, padding: 20, color: "#fff", marginBottom: 14, boxShadow: `0 10px 36px ${hexA(T.primary, 0.3)}` }}>
-            <div style={{ ...lbl, color: "rgba(255,255,255,0.75)", marginBottom: 10 }}>Net cash flow · this month</div>
+            <div style={{ ...lbl, color: "rgba(255,255,255,0.75)", marginBottom: 10 }}>Net cash flow · this month{moBank ? " · from your bank" : ""}</div>
             <div style={{ fontSize: 34, fontWeight: 800, letterSpacing: "-0.03em", lineHeight: 1 }}>{money(netCashFlow)}</div>
+            {moBank ? (
+              <div style={{ display: "flex", gap: 18, marginTop: 14, flexWrap: "wrap", fontSize: 12.5, alignItems: "baseline" }}>
+                <span>In <b>{money(moBank.inflow)}</b></span><span style={{ opacity: 0.6 }}>−</span>
+                <span>Out <b>{money(moBank.outflow)}</b></span>
+                {(moBank.debt > 0 || moBank.savings > 0) && (
+                  <span style={{ opacity: 0.75 }}>incl.{moBank.debt > 0 ? ` debt ${money(moBank.debt)}` : ""}{moBank.debt > 0 && moBank.savings > 0 ? " ·" : ""}{moBank.savings > 0 ? ` savings ${money(moBank.savings)}` : ""}</span>
+                )}
+              </div>
+            ) : (
             <div style={{ display: "flex", gap: 18, marginTop: 14, flexWrap: "wrap", fontSize: 12.5 }}>
               <span>In <b>{money(incomeActual)}</b></span><span style={{ opacity: 0.6 }}>−</span>
               <span>Out <b>{money(expenseActual)}</b></span><span style={{ opacity: 0.6 }}>−</span>
               <span>Debt <b>{money(debtMonthly)}</b></span>
             </div>
+            )}
           </div>
           {bankStatus && bankStatus.connected && bankData && (
             <div style={{ ...card }}>
@@ -22663,9 +22924,9 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
                 <button onClick={() => setSection("bank")} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit", padding: 0 }}>View all →</button>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
-                {metric("Money in", money(bankData.totalIncome), green)}
-                {metric("Money out", money(bankData.totalExpense), T.primary)}
-                {metric("Net", money(bankData.net), bankData.net >= 0 ? green : red)}
+                {metric("Money in", money(bankIn), green)}
+                {metric("Money out", money(bankOut), T.primary)}
+                {metric("Net", money(bankIn - bankOut), bankIn - bankOut >= 0 ? green : red)}
               </div>
             </div>
           )}
@@ -22680,7 +22941,7 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
           {goals.length > 0 && (
             <div style={card}>
               <div style={{ ...lbl, marginBottom: 12 }}>Savings goals</div>
-              {goals.map(g => { const t = num(g.target), s = num(g.saved), pct = t > 0 ? Math.min(100, (s / t) * 100) : 0; return (
+              {goals.map(g => { const t = num(g.target), s = num(g.saved) + goalAuto(g.id), pct = t > 0 ? Math.min(100, (s / t) * 100) : 0; return (
                 <div key={g.id} style={{ marginBottom: 12 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}><span style={{ fontWeight: 700, color: T.text }}>{g.name || "Goal"}</span><span style={{ color: T.textMuted }}>{money(s)} / {money(t)}</span></div>
                   <div style={{ height: 7, borderRadius: 100, background: T.surfaceAlt, overflow: "hidden", marginTop: 6 }}><div style={{ width: `${pct}%`, height: "100%", borderRadius: 100, background: green }} /></div>
@@ -22741,31 +23002,87 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
 
               {bankData ? (
                 <>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 14 }}>
-                    {metric("Money in", money(bankData.totalIncome), green)}
-                    {metric("Money out", money(bankData.totalExpense), T.primary)}
-                    {metric("Net", money(bankData.net), bankData.net >= 0 ? green : red)}
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: (bankSavOut > 0 || bankDebtOut > 0) ? 8 : 14 }}>
+                    {metric("Money in", money(bankIn), green)}
+                    {metric("Money out", money(bankOut), T.primary)}
+                    {metric("Net", money(bankIn - bankOut), bankIn - bankOut >= 0 ? green : red)}
                   </div>
-                  {(bankData.expense || []).length > 0 && (
-                    <div style={card}><div style={{ ...lbl, marginBottom: 12 }}>Spending by category</div>{catBankRows(bankData.expense, bankData.totalExpense, T.primary)}</div>
+                  {(bankSavOut > 0 || bankDebtOut > 0) && (
+                    <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12, color: T.textMuted, marginBottom: 14, padding: "0 2px" }}>
+                      {bankSavOut > 0 && <span>→ Savings <b style={{ color: T.text }}>{money(bankSavOut)}</b></span>}
+                      {bankDebtOut > 0 && <span>→ Debt payments <b style={{ color: T.text }}>{money(bankDebtOut)}</b></span>}
+                    </div>
                   )}
-                  {(bankData.income || []).length > 0 && (
-                    <div style={card}><div style={{ ...lbl, marginBottom: 12 }}>Income by category</div>{catBankRows(bankData.income, bankData.totalIncome, green)}</div>
+                  {bankExpCats.length > 0 && (
+                    <div style={card}><div style={{ ...lbl, marginBottom: 12 }}>Spending by category</div>{catBankRows(bankExpCats, bankOut, T.primary)}</div>
+                  )}
+                  {bankIncCats.length > 0 && (
+                    <div style={card}><div style={{ ...lbl, marginBottom: 12 }}>Income by category</div>{catBankRows(bankIncCats, bankIn, green)}</div>
                   )}
                   <div style={card}>
-                    {(() => { const shownTxns = (bankData.transactions || []).slice(0, 60); return (<>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}><span style={lbl}>Transactions</span><span style={{ fontSize: 11.5, color: T.textMuted }}>{bankData.count} total{bankData.count > shownTxns.length ? ` · showing ${shownTxns.length}` : ""}</span></div>
+                    {(() => {
+                      const shownTxns = allTxns.slice(0, 250);
+                      const toReview = shownTxns.filter(t => !markOf(t));
+                      const FILTERS = [["all", "All"], ["in", "In"], ["out", "Out"], ["review", `To review${toReview.length ? ` · ${toReview.length}` : ""}`]];
+                      const listTxns = shownTxns.filter(t => txFilter === "in" ? t.amount >= 0 : txFilter === "out" ? t.amount < 0 : txFilter === "review" ? !markOf(t) : true);
+                      const KINDS = [["expense", "Expense"], ["income", "Income"], ["savings", "Savings"], ["debt", "Debt payment"], ["ignore", "Ignore"]];
+                      const chip = (on) => ({ padding: "7px 12px", borderRadius: 100, border: "none", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: on ? T.primary : T.surfaceAlt, color: on ? "#fff" : T.textMuted });
+                      return (<>
+                    <datalist id="sps-bank-cats">{catSuggestions.map(c => <option key={c} value={c} />)}</datalist>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 8, flexWrap: "wrap" }}><span style={lbl}>Transactions</span><span style={{ fontSize: 11.5, color: T.textMuted }}>{bankData.count} total{bankData.count > shownTxns.length ? ` · showing ${shownTxns.length}` : ""}</span></div>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 6 }}>
+                      {FILTERS.map(([id, label]) => <button key={id} onClick={() => setTxFilter(id)} style={chip(txFilter === id)}>{label}</button>)}
+                    </div>
+                    <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 8 }}>Tap a transaction to categorize it — or mark it as savings or a debt payment.</div>
                     <div style={{ display: "flex", flexDirection: "column" }}>
-                      {shownTxns.map((t, i) => (
-                        <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "9px 0", borderTop: i === 0 ? "none" : `1px solid ${T.border}` }}>
-                          <div style={{ minWidth: 0 }}>
-                            <div style={{ fontSize: 13, fontWeight: 600, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.name || "—"}{t.pending && <span style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, marginLeft: 6, letterSpacing: "0.04em" }}>PENDING</span>}</div>
-                            <div style={{ fontSize: 11, color: T.textMuted }}>{t.date} · {t.category}</div>
+                      {listTxns.map((t, i) => {
+                        const k = txnKey(t), m = markOf(t), kind = effKind(t), editing = editTx === k;
+                        return (
+                        <div key={k}>
+                          <div onClick={() => openEdit(t)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "9px 0", borderTop: i === 0 ? "none" : `1px solid ${T.border}`, cursor: "pointer", opacity: kind === "ignore" ? 0.45 : 1 }}>
+                            <div style={{ minWidth: 0 }}>
+                              <div style={{ fontSize: 13, fontWeight: 600, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.name || "—"}{t.pending && <span style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, marginLeft: 6, letterSpacing: "0.04em" }}>PENDING</span>}</div>
+                              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2, display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                                <span style={{ flexShrink: 0 }}>{t.date}</span>
+                                <span style={{ background: m ? hexA(kind === "savings" || kind === "debt" ? green : T.primary, 0.1) : T.surfaceAlt, color: m ? (kind === "savings" || kind === "debt" ? green : T.primary) : T.textMuted, borderRadius: 100, padding: "2px 8px", fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{markLabel(t)}</span>
+                              </div>
+                            </div>
+                            <div style={{ fontSize: 13.5, fontWeight: 800, color: t.amount >= 0 ? green : T.text, whiteSpace: "nowrap", flexShrink: 0 }}>{t.amount >= 0 ? "+" : "−"}{money(Math.abs(t.amount))}</div>
                           </div>
-                          <div style={{ fontSize: 13.5, fontWeight: 800, color: t.amount >= 0 ? green : T.text, whiteSpace: "nowrap", flexShrink: 0 }}>{t.amount >= 0 ? "+" : "−"}{money(Math.abs(t.amount))}</div>
+                          {editing && draft && (
+                            <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: 12, margin: "2px 0 10px" }}>
+                              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+                                {KINDS.map(([id, label]) => <button key={id} onClick={() => setDraft(d => ({ ...d, kind: id }))} style={{ ...chip(draft.kind === id), background: draft.kind === id ? T.primary : T.surface }}>{label}</button>)}
+                              </div>
+                              {(draft.kind === "expense" || draft.kind === "income") && (
+                                <input type="text" list="sps-bank-cats" value={draft.category} onChange={e => setDraft(d => ({ ...d, category: e.target.value }))} placeholder="Category (e.g. Fuel, Supplies)…" style={{ ...nameInput, width: "100%", background: T.surface, marginBottom: 10 }} />
+                              )}
+                              {draft.kind === "savings" && (goals.length ? (
+                                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+                                  {goals.map(g => <button key={g.id} onClick={() => setDraft(d => ({ ...d, goalId: g.id }))} style={{ ...chip(draft.goalId === g.id), background: draft.goalId === g.id ? green : T.surface, color: draft.goalId === g.id ? "#fff" : T.textMuted }}>{g.name || "Goal"}</button>)}
+                                </div>
+                              ) : <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 10 }}>Add a goal under Savings first — then this payment can count toward it.</div>)}
+                              {draft.kind === "debt" && (debts.length ? (
+                                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+                                  {debts.map(d0 => <button key={d0.id} onClick={() => setDraft(d => ({ ...d, debtId: d0.id }))} style={{ ...chip(draft.debtId === d0.id), background: draft.debtId === d0.id ? green : T.surface, color: draft.debtId === d0.id ? "#fff" : T.textMuted }}>{d0.name || "Debt"}</button>)}
+                                </div>
+                              ) : <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 10 }}>Add the debt under Debt first — then payments can count toward it.</div>)}
+                              {t.name && (
+                                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: T.textMuted, marginBottom: 11, cursor: "pointer" }}>
+                                  <input type="checkbox" checked={!!draft.applyAll} onChange={e => setDraft(d => ({ ...d, applyAll: e.target.checked }))} style={{ accentColor: T.primary }} />
+                                  {draft.kind === "ignore" ? <>Always ignore “{t.name}”</> : <>Always apply to “{t.name}”</>}
+                                </label>
+                              )}
+                              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                                <Btn sm onClick={() => saveMark(t)} disabled={(draft.kind === "savings" && !goals.some(g => g.id === draft.goalId)) || (draft.kind === "debt" && !debts.some(d0 => d0.id === draft.debtId))}>Save</Btn>
+                                {(txMarks[k] || txRules[normName(t.name)]) && <Btn sm variant="ghost" onClick={() => clearMark(t)}>Reset to auto</Btn>}
+                                <Btn sm variant="ghost" onClick={() => setEditTx(null)}>Cancel</Btn>
+                              </div>
+                            </div>
+                          )}
                         </div>
-                      ))}
-                      {shownTxns.length === 0 && <div style={{ fontSize: 12.5, color: T.textMuted, textAlign: "center", padding: "10px 0" }}>No transactions in this period.</div>}
+                      ); })}
+                      {listTxns.length === 0 && <div style={{ fontSize: 12.5, color: T.textMuted, textAlign: "center", padding: "10px 0" }}>{shownTxns.length === 0 ? "No transactions in this period." : "Nothing matches this filter."}</div>}
                     </div>
                     </>); })()}
                   </div>
@@ -22778,48 +23095,161 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
         </>
       )}
 
-      {section === "budget" && (
+      {section === "budget" && (() => {
+        // Bank categories (this month) that don't match any budget row yet → one-tap add.
+        const haveInc = new Set(income.map(r => normName(catName(r))).filter(Boolean));
+        const haveExp = new Set(expenses.map(r => normName(catName(r))).filter(Boolean));
+        const unbInc = bankMoIncList.filter(x => !haveInc.has(x.key));
+        const unbExp = bankMoExpList.filter(x => !haveExp.has(x.key));
+        const addFromBank = (kind, x) => setBudget(b => ({ ...b, [kind]: [...(b[kind] || []), { id: `${kind[0]}${Date.now()}`, category: x.category, amount: "" }] }));
+        const suggest = (kind, arr) => arr.length > 0 && (
+          <div style={{ marginTop: 14, borderTop: `1px solid ${T.border}`, paddingTop: 12 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: T.textMuted, marginBottom: 8 }}>From your bank · not budgeted yet</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+              {arr.slice(0, 8).map(x => (
+                <div key={x.key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 12.5, color: T.text, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{x.category} <b style={{ color: T.textMuted, fontWeight: 700 }}>{money(x.amount)}</b></span>
+                  <button onClick={() => addFromBank(kind, x)} style={{ flexShrink: 0, background: "none", border: `1px solid ${T.border}`, borderRadius: 100, padding: "5px 12px", fontSize: 11.5, fontWeight: 700, color: T.primary, cursor: "pointer", fontFamily: "inherit" }}>+ Add</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+        return (
         <>
           <div style={card}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}><span style={{ fontSize: 15, fontWeight: 800, color: T.text }}>Income</span><span style={{ fontSize: 13, fontWeight: 800, color: green }}>{money(incomeActual)} <span style={{ color: T.textMuted, fontWeight: 600 }}>of {money(incomeBudget)}</span></span></div>
             {catRows("income", green)}
+            {suggest("income", unbInc)}
           </div>
           <div style={card}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}><span style={{ fontSize: 15, fontWeight: 800, color: T.text }}>Expenses</span><span style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{money(expenseActual)} <span style={{ color: T.textMuted, fontWeight: 600 }}>of {money(expenseBudget)}</span></span></div>
             {catRows("expenses", T.primary)}
+            {suggest("expenses", unbExp)}
           </div>
-          <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5, padding: "0 4px" }}>Actuals auto-fill from real data: income from paid invoices, and job costs (labor, supplies, gas, equipment) from completed stops. Categories without a live source show your budgeted amount.</div>
+          <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5, padding: "0 4px" }}>Actuals auto-fill from real data: income from paid invoices, job costs (labor, supplies, gas, equipment) from completed stops — and any other category fills live from your bank when its name matches how you categorized the transactions on the Bank tab.</div>
         </>
-      )}
+        );
+      })()}
 
       {section === "debt" && (
         <>
           <div style={{ display: "grid", gridTemplateColumns: vp.isPhone ? "1fr 1fr" : "repeat(3, 1fr)", gap: 10, marginBottom: 14 }}>
             {metric("Total debt", money(debtTotal), debtTotal > 0 ? red : green, `${debts.length} account${debts.length === 1 ? "" : "s"}`)}
             {metric("Monthly payments", money(debtMonthly), T.text, "total debt service")}
-            {metric("Debt-free by", debts.length ? monthsOutLabel(Math.max(0, ...debts.map(d => { const p = debtPayoff(d.balance, d.apr, d.monthlyPayment); return p && isFinite(p.months) ? p.months : 0; }))) : "—", T.text, "at current payments")}
+            {(() => {
+              // Only debts still carrying a balance count; a debt with no payment is UNKNOWN ("—"),
+              // and one whose payment can't cover interest NEVER clears — never claim a date then.
+              const ps = debts.filter(d => num(d.balance) > 0).map(d => debtPayoff(d.balance, d.apr, debtPay(d)));
+              const label = !ps.length ? "—"
+                : ps.some(p => p && p.neverPaysOff) ? "Never"
+                : ps.some(p => p == null) ? "—"
+                : monthsOutLabel(Math.max(0, ...ps.map(p => p.months)));
+              return metric("Debt-free by", label, label === "Never" ? red : T.text, "at current payments");
+            })()}
           </div>
-          {debts.map(d => { const p = debtPayoff(d.balance, d.apr, d.monthlyPayment); const orig = num(d.originalAmount), paidPct = orig > 0 ? Math.min(100, ((orig - num(d.balance)) / orig) * 100) : 0; return (
+          {debts.map(d => {
+            const effPay = debtPay(d);
+            const p = debtPayoff(d.balance, d.apr, effPay);
+            const orig = num(d.originalAmount), paidPct = orig > 0 ? Math.max(0, Math.min(100, ((orig - num(d.balance)) / orig) * 100)) : 0;
+            const belowMin = num(d.monthlyPayment) > 0 && num(d.minPayment) > 0 && num(d.monthlyPayment) < num(d.minPayment);
+            // Loan length → the amortized payment that clears the balance in that term.
+            const termN = Math.round(num(d.termMonths)), B = num(d.balance), r = num(d.apr) / 1200;
+            const termPay = termN > 0 && B > 0 ? (r === 0 ? B / termN : (B * r) / (1 - Math.pow(1 + r, -termN))) : 0;
+            return (
             <div key={d.id} style={card}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
                 <input type="text" value={d.name} onChange={e => editDebt(d.id, "name", e.target.value)} placeholder="e.g. Truck loan, Card…" style={{ ...nameInput, fontWeight: 700 }} />
                 <button onClick={() => removeDebt(d.id)} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", fontSize: 17, flexShrink: 0 }}>×</button>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-                {[["balance", "Balance"], ["apr", "APR %"], ["monthlyPayment", "Payment/mo"]].map(([f, ph]) => (
-                  <div key={f}><div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginBottom: 3 }}>{ph}</div>{dollar(<input type="text" inputMode="decimal" value={d[f]} onChange={e => editDebt(d.id, f, e.target.value)} placeholder="0" style={{ ...amtInput, width: "100%", paddingLeft: f === "apr" ? 8 : 18 }} />)}</div>
-                ))}
+                {[["balance", "Balance", true], ["apr", "APR %", false], ["minPayment", "Min payment", true], ["monthlyPayment", "You pay /mo", true], ["termMonths", "Loan length (mo)", false], ["originalAmount", "Original loan", true]].map(([f, ph, isMoney]) => {
+                  const input = <input type="text" inputMode="decimal" value={d[f] || ""} onChange={e => editDebt(d.id, f, e.target.value)} placeholder="0" style={{ ...amtInput, width: "100%", paddingLeft: isMoney ? 18 : 10 }} />;
+                  return <div key={f}><div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginBottom: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{ph}</div>{isMoney ? dollar(input) : input}</div>;
+                })}
               </div>
               <div style={{ marginTop: 8, fontSize: 12, color: T.textMuted, display: "flex", flexWrap: "wrap", gap: 12 }}>
-                {p == null ? <span>Enter a monthly payment to see payoff.</span>
+                {p == null ? <span>Enter a payment (or minimum) to see payoff.</span>
                   : p.neverPaysOff ? <span style={{ color: red, fontWeight: 700 }}>Payment doesn't cover interest — balance won't drop.</span>
                   : p.paid ? <span style={{ color: green, fontWeight: 700 }}>Paid off 🎉</span>
                   : <><span>Paid off in <b style={{ color: T.text }}>{p.months} mo</b> ({monthsOutLabel(p.months)})</span><span>Interest <b style={{ color: T.text }}>{money(p.totalInterest)}</b></span></>}
               </div>
+              {belowMin && <div style={{ marginTop: 6, fontSize: 12, fontWeight: 700, color: red }}>You're paying below the minimum ({money(num(d.minPayment))}/mo).</div>}
+              {termPay > 0 && <div style={{ marginTop: 6, fontSize: 11.5, color: T.textMuted }}>On schedule: ≈ <b style={{ color: T.text }}>{money(termPay)}/mo</b> clears it in {termN} mo{effPay > 0 && effPay < termPay * 0.99 ? <span style={{ color: red, fontWeight: 700 }}> — you're paying less than that</span> : null}</div>}
+              {(() => { const paidMo = debtPaidMo(d.id); return paidMo > 0 ? (
+                <div style={{ marginTop: 7, fontSize: 12, fontWeight: 700, color: effPay > 0 && paidMo >= effPay ? green : T.text }}>
+                  Paid this month: {money(paidMo)}{effPay > 0 ? <span style={{ color: T.textMuted, fontWeight: 600 }}> of {money(effPay)}</span> : null}{effPay > 0 && paidMo >= effPay ? " ✓" : ""} <span style={{ color: T.textMuted, fontWeight: 600 }}>· from bank</span>
+                </div>
+              ) : null; })()}
+              {(() => { const pays = Object.values(txMarks).filter(m => m && m.kind === "debt" && m.debtId === d.id).sort((a, b) => String(b.date || "").localeCompare(String(a.date || ""))).slice(0, 3); return pays.length ? (
+                <div style={{ marginTop: 7, display: "flex", flexDirection: "column", gap: 4 }}>
+                  {pays.map((m, i) => (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 11.5, color: T.textMuted }}>
+                      <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.date} · {m.name || "Payment"}</span>
+                      <span style={{ fontWeight: 700, color: T.text, flexShrink: 0 }}>{money(Math.abs(m.amount || 0))}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null; })()}
               {orig > 0 && <div style={{ height: 6, borderRadius: 100, background: T.surfaceAlt, overflow: "hidden", marginTop: 8 }}><div style={{ width: `${paidPct}%`, height: "100%", borderRadius: 100, background: green }} /></div>}
+
+              {num(d.balance) > 0 && (
+              <button onClick={() => { if (calcFor === d.id) { setCalcFor(null); } else { setCalcFor(d.id); setCalcPay(String(Math.round(effPay > 0 ? effPay + 100 : 100))); } }}
+                style={{ marginTop: 10, background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit", padding: 0 }}>
+                {calcFor === d.id ? "Hide payoff calculator" : "Payoff calculator →"}
+              </button>
+              )}
+              {num(d.balance) > 0 && calcFor === d.id && (() => {
+                const tryPay = num(calcPay);
+                const alt = tryPay > 0 ? debtPayoff(d.balance, d.apr, tryPay) : null;
+                const cur = effPay > 0 ? p : null;
+                return (
+                <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: 12, marginTop: 8 }}>
+                  <div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 7 }}>What if you paid…</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    {dollar(<input type="text" inputMode="decimal" value={calcPay} onChange={e => setCalcPay(e.target.value.replace(/[^\d.]/g, ""))} placeholder="0" style={{ ...amtInput, width: 100, background: T.surface }} />)}
+                    <span style={{ fontSize: 12, color: T.textMuted }}>/mo</span>
+                    {[50, 100, 250].map(x => (
+                      <button key={x} onClick={() => setCalcPay(String(Math.round((effPay || 0) + x)))} style={{ padding: "6px 10px", borderRadius: 100, border: `1px solid ${T.border}`, background: T.surface, color: T.textMuted, fontSize: 11.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>+${x}</button>
+                    ))}
+                  </div>
+                  <div style={{ marginTop: 10, fontSize: 12, color: T.textMuted, lineHeight: 1.6 }}>
+                    {!alt ? <span>Enter a payment above.</span>
+                      : alt.neverPaysOff ? <span style={{ color: red, fontWeight: 700 }}>That payment doesn't cover the interest.</span>
+                      : (
+                        <>
+                          <div>{money(tryPay)}/mo → paid off in <b style={{ color: T.text }}>{alt.months} mo</b> ({monthsOutLabel(alt.months)}) · interest <b style={{ color: T.text }}>{money(alt.totalInterest)}</b></div>
+                          {cur && !cur.neverPaysOff && !cur.paid && isFinite(cur.months) && tryPay !== effPay && (
+                            <div style={{ marginTop: 3, fontWeight: 700, color: tryPay > effPay ? green : red }}>
+                              {tryPay > effPay
+                                ? <>{Math.max(0, cur.months - alt.months)} months sooner · saves {money(Math.max(0, cur.totalInterest - alt.totalInterest))} in interest</>
+                                : <>{Math.max(0, alt.months - cur.months)} months longer · costs {money(Math.max(0, alt.totalInterest - cur.totalInterest))} more interest</>}
+                            </div>
+                          )}
+                        </>
+                      )}
+                  </div>
+                </div>
+                );
+              })()}
             </div>
           ); })}
           <Btn sm variant="ghost" onClick={addDebt} style={{ alignSelf: "flex-start" }}>+ Add a debt</Btn>
+
+          {debts.some(d => num(d.balance) > 0) && (
+            <div style={{ ...card, marginTop: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", rowGap: 8 }}>
+                <div>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>✨ Payoff strategy</div>
+                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>AI looks at your debts, cash, and real cash flow — and suggests where each dollar does the most.</div>
+                </div>
+                <Btn sm onClick={askDebtAI} disabled={aiBusy}>{aiBusy ? "Thinking…" : aiAdvice ? "Refresh" : "Get suggestions"}</Btn>
+              </div>
+              {aiErr && <div style={{ marginTop: 10, fontSize: 12.5, color: red }}>{aiErr}</div>}
+              {aiAdvice && <div style={{ marginTop: 12, fontSize: 13, color: T.text, lineHeight: 1.65, whiteSpace: "pre-wrap" }}>{aiAdvice}</div>}
+              <div style={{ marginTop: 10, fontSize: 11, color: T.textMuted }}>General guidance using your numbers — not financial advice. Run big moves past your accountant.</div>
+            </div>
+          )}
         </>
       )}
 
@@ -22833,17 +23263,17 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
           <div style={card}>
             <div style={{ ...lbl, marginBottom: 12 }}>Savings goals</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-              {goals.map(g => { const t = num(g.target), s = num(g.saved), pct = t > 0 ? Math.min(100, (s / t) * 100) : 0; return (
+              {goals.map(g => { const t = num(g.target), s = num(g.saved) + goalAuto(g.id), pct = t > 0 ? Math.min(100, (s / t) * 100) : 0; return (
                 <div key={g.id}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <input type="text" value={g.name} onChange={e => editGoal(g.id, "name", e.target.value)} placeholder="e.g. New truck fund" style={{ ...nameInput, fontWeight: 700 }} />
                     <button onClick={() => removeGoal(g.id)} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", fontSize: 17, flexShrink: 0 }}>×</button>
                   </div>
                   <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-                    <div style={{ flex: 1 }}><div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginBottom: 3 }}>Saved</div>{dollar(<input type="text" inputMode="decimal" value={g.saved} onChange={e => editGoal(g.id, "saved", e.target.value)} placeholder="0" style={{ ...amtInput, width: "100%" }} />)}</div>
+                    <div style={{ flex: 1 }}><div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginBottom: 3 }}>Saved{goalAuto(g.id) > 0 ? " (starting amount)" : ""}</div>{dollar(<input type="text" inputMode="decimal" value={g.saved} onChange={e => editGoal(g.id, "saved", e.target.value)} placeholder="0" style={{ ...amtInput, width: "100%" }} />)}{goalAuto(g.id) > 0 && <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 3 }}>+ {money(goalAuto(g.id))} marked from your bank</div>}</div>
                     <div style={{ flex: 1 }}><div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginBottom: 3 }}>Target</div>{dollar(<input type="text" inputMode="decimal" value={g.target} onChange={e => editGoal(g.id, "target", e.target.value)} placeholder="0" style={{ ...amtInput, width: "100%" }} />)}</div>
                   </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.textMuted, marginTop: 6 }}><span>{Math.round(pct)}% funded</span><span>{money(Math.max(0, t - s))} to go</span></div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.textMuted, marginTop: 6 }}><span>{Math.round(pct)}% funded{goalAuto(g.id) > 0 ? ` · ${money(goalAuto(g.id))} from bank` : ""}</span><span>{money(Math.max(0, t - s))} to go</span></div>
                   <div style={{ height: 7, borderRadius: 100, background: T.surfaceAlt, overflow: "hidden", marginTop: 5 }}><div style={{ width: `${pct}%`, height: "100%", borderRadius: 100, background: green }} /></div>
                 </div>
               ); })}
@@ -26205,7 +26635,10 @@ export default function App({ authEmail = "", onSignOut }) {
         logo_name: branding.companyName || "",  // full business name — shown when there's no clean logo
         logo_mono: logoInitial(branding),       // single-letter monogram, last-resort fallback
         profit_week: r2(wk.profit),
-        profit_month: r2(mo.profit),
+        // Bank truth when available — the widget's month profit matches the Budget/Home/Reports
+        // (categorized real transactions); ops profit is the fallback. Week stays ops (the bank
+        // cache is a month window).
+        profit_month: r2((bankMonthSummary(budget) || mo).profit),
         outstanding_total: r2(outstanding),
         unpaid_count: open.length,
         overdue_count: overdue,
@@ -26226,8 +26659,14 @@ export default function App({ authEmail = "", onSignOut }) {
      }
     };
     registerWidgetPush(pushNow);
-    pushNow();
-  }, [hydrated, currentUser, clients, invoices, schedule, team, completedSids, branding.appFont, widgetLogo]);
+    // Debounced: `budget` is in the deps (marks must re-push), but it also changes on every
+    // keystroke in the Budget inputs — the timer coalesces that churn into one payload build.
+    const tid = setTimeout(pushNow, 900);
+    // Re-push when the bank cache lands/changes (the auto-sync usually finishes after this first
+    // push) so the widget's profit matches the in-app numbers without waiting for the next open.
+    document.addEventListener("sps-bank-sync", pushNow);
+    return () => { clearTimeout(tid); document.removeEventListener("sps-bank-sync", pushNow); };
+  }, [hydrated, currentUser, clients, invoices, schedule, team, completedSids, branding.appFont, widgetLogo, budget]);
 
   // CLIENT widget snapshot — when a client is signed into the native app, push their
   // next visit + balance so the Service Schedule + Balance Due widgets render (no network,
@@ -27459,7 +27898,7 @@ export default function App({ authEmail = "", onSignOut }) {
   );
   const pageBody = (
     <>
-      {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onOpenAlert={handleOpenAlert} onOpenStop={handleOpenStop} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} completedSids={completedSids} vp={vp} />}
+      {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onOpenAlert={handleOpenAlert} onOpenStop={handleOpenStop} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} completedSids={completedSids} budget={budget} vp={vp} />}
       {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
       {page === "clients" && !adding && (vp.isDesktop ? (
         clientsView === "table" ? (
@@ -27494,7 +27933,7 @@ export default function App({ authEmail = "", onSignOut }) {
       ))}
       {page === "schedule" && <SectionErrorBoundary key={"schedule-" + schedNonce}><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <SectionErrorBoundary key="inventory"><InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} /></SectionErrorBoundary>}
-      {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
+      {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} budget={budget} />}
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} />}
       {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
       {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}

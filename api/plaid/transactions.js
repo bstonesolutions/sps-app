@@ -40,13 +40,18 @@ export default async function handler(req, res) {
       offset += batch.length;
       if (!batch.length) break;
     }
-    const txns = all.map((t) => ({ date: t.date, name: t.merchant_name || t.name || "", amount: -(t.amount || 0), category: catLabel(t), pending: !!t.pending }));
+    // `id` = Plaid's stable transaction_id — the app keys the owner's category marks off it.
+    // `pendingId` links a POSTED txn back to its pending twin (Plaid re-ids on settle) so the app
+    // can migrate any mark the owner made while it was pending.
+    const txns = all.map((t) => ({ id: t.transaction_id || "", pendingId: t.pending_transaction_id || null, date: t.date, name: t.merchant_name || t.name || "", amount: -(t.amount || 0), category: catLabel(t), pending: !!t.pending }));
     const income = {}, expense = {};
     txns.forEach((t) => { if (t.amount >= 0) income[t.category] = (income[t.category] || 0) + t.amount; else expense[t.category] = (expense[t.category] || 0) + (-t.amount); });
     const toArr = (o) => Object.entries(o).map(([category, amount]) => ({ category, amount: Math.round(amount * 100) / 100 })).sort((a, b) => b.amount - a.amount);
     const totalIncome = txns.filter((t) => t.amount >= 0).reduce((s, t) => s + t.amount, 0);
     const totalExpense = txns.filter((t) => t.amount < 0).reduce((s, t) => s + (-t.amount), 0);
-    return res.status(200).json({ ok: true, period, start, end, count: txns.length, transactions: txns.slice(0, 250), income: toArr(income), expense: toArr(expense), totalIncome, totalExpense, net: totalIncome - totalExpense });
+    // Full list (already bounded by the 2000-txn pagination cap) — the app computes its mark-aware
+    // rollups client-side, so truncating here would silently understate the money tiles.
+    return res.status(200).json({ ok: true, period, start, end, count: txns.length, transactions: txns, income: toArr(income), expense: toArr(expense), totalIncome, totalExpense, net: totalIncome - totalExpense });
   } catch (e) {
     // Plaid needs a moment to pull history right after linking — surface that clearly.
     const code = e.plaid && e.plaid.error_code;
