@@ -42,6 +42,84 @@ async function sendBrandedAuthEmail(payload) {
 // Loaded lazily so it doesn't block initial render
 const loadJsPDF = () => import("jspdf").then(m => m.jsPDF || m.default);
 
+// ── Plaid Link (bank connect) ──
+// Load Plaid's official web SDK on demand (only when the owner taps "Connect bank"), so it never
+// touches the initial bundle. Resolves to window.Plaid (Plaid.create({...}).open()). Cached after
+// the first load; a failed load clears the cache so a retry can re-fetch.
+let _plaidLinkPromise = null;
+const loadPlaidLink = () => {
+  if (typeof window !== "undefined" && window.Plaid) return Promise.resolve(window.Plaid);
+  if (_plaidLinkPromise) return _plaidLinkPromise;
+  _plaidLinkPromise = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "https://cdn.plaid.com/link/v2/stable/link-initialize.js";
+    s.async = true;
+    s.onload = () => (window.Plaid ? resolve(window.Plaid) : reject(new Error("Plaid unavailable")));
+    s.onerror = () => { _plaidLinkPromise = null; reject(new Error("Failed to load Plaid")); };
+    document.head.appendChild(s);
+  });
+  return _plaidLinkPromise;
+};
+
+// Shared bank-sync helpers + module-level cache. Like QuickBooks, the connection lives SERVER-SIDE
+// (plaid_tokens table); the app keeps a light status + the latest transaction rollup here so the
+// app-open auto-sync (next to the QB one), the Budget's Bank tab, and the Customize Bank card all
+// share one copy — Budget then renders instantly from the prefetch instead of loading on open.
+const _bankCache = { status: null, data: null, period: "month", at: 0, gen: 0 };
+// `unreachable` (configured:null) ≠ server-confirmed configured:false — consumers show
+// "couldn't reach the server", NOT the "add your Plaid keys" misconfig message.
+async function bankCheckStatus() {
+  try {
+    const r = await fetch(`${PROD_URL}/api/plaid/status`);
+    const d = await r.json().catch(() => null);
+    _bankCache.status = d && d.ok ? d : { connected: false, configured: null, unreachable: true };
+  } catch (_) { _bankCache.status = _bankCache.status || { connected: false, configured: null, unreachable: true }; }
+  return _bankCache.status;
+}
+// Fetch + cache one period's transactions. Returns { r, d }; only real data (not a 202
+// "still syncing" body) is cached — callers branch on r.status/d.notReady themselves.
+// The gen check drops a response that raced a disconnect/reconnect (stale bank's data).
+async function bankFetchTxns(period = "month") {
+  const g = _bankCache.gen;
+  const r = await fetch(`${PROD_URL}/api/plaid/transactions?period=${period}`, { headers: await authHeaders() });
+  const d = await r.json().catch(() => ({}));
+  if (r.ok && !d.notReady && g === _bankCache.gen) { _bankCache.data = d; _bankCache.period = period; _bankCache.at = Date.now(); }
+  return { r, d };
+}
+// Full connect flow: link token → Plaid Link (secure popup; we never see credentials) → exchange.
+// Resolves { connected, institution } on success, { cancelled } if the owner closes the popup,
+// and rejects with a user-friendly Error otherwise. Used by BudgetHub AND the Customize card.
+async function bankLinkFlow() {
+  const r = await fetch(`${PROD_URL}/api/plaid/create-link-token`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: "{}" });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || !d.link_token) throw new Error(d.missingEnv ? "Bank sync isn't set up yet — add your Plaid keys in Vercel." : (d.error || "Couldn't start bank connect."));
+  const Plaid = await loadPlaidLink();
+  return new Promise((resolve, reject) => {
+    const handler = Plaid.create({
+      token: d.link_token,
+      onSuccess: async (public_token, metadata) => {
+        try {
+          const inst = (metadata && metadata.institution && metadata.institution.name) || null;
+          const ex = await fetch(`${PROD_URL}/api/plaid/exchange`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ public_token, institution: inst }) });
+          const ed = await ex.json().catch(() => ({}));
+          if (!ex.ok) return reject(new Error(ed.error || "Couldn't finish connecting."));
+          _bankCache.gen++; _bankCache.data = null; _bankCache.at = 0; // fresh link (maybe a different bank) → old cache is invalid
+          _bankCache.status = { ok: true, connected: true, institution: inst, configured: true };
+          resolve({ connected: true, institution: inst });
+        } catch (_) { reject(new Error("Couldn't finish connecting.")); }
+      },
+      onExit: (err) => resolve({ connected: false, cancelled: true, message: (err && (err.display_message || err.error_message)) || "" }),
+    });
+    handler.open();
+  });
+}
+async function bankDisconnect() {
+  try { await fetch(`${PROD_URL}/api/plaid/disconnect`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: "{}" }); } catch (_) {}
+  _bankCache.gen++; // invalidate any in-flight fetch so it can't re-fill the cache we just cleared
+  _bankCache.status = { ...(_bankCache.status || {}), connected: false, institution: null };
+  _bankCache.data = null; _bankCache.at = 0;
+}
+
 // Open a URL INSIDE the app on native (Capacitor in-app browser — no logout, with
 // a Done button to return cleanly), or a normal new tab on the web PWA. Used for
 // the QuickBooks payment link so paying clients stay in-app. Dynamic imports keep
@@ -12923,9 +13001,18 @@ function BudgetManager({ budget, setBudget, clients, costs, invoices, embedded =
 // ─────────────────────────────────────────────
 // COST SETTINGS (admin cost assumptions)
 // ─────────────────────────────────────────────
-function CostSettings({ costs, setCosts, clients }) {
+function CostSettings({ costs, setCosts, clients, onNav }) {
   const { T } = useApp();
   const n = (v) => parseFloat(v) || 0;
+  // Metric tile — same visual as the Budget page's Overview tiles, so this section
+  // reads as the "settings side" of that page.
+  const tile = (label, value, sub) => (
+    <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: "13px 14px" }}>
+      <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: T.textMuted }}>{label}</div>
+      <div style={{ fontSize: 21, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginTop: 3, whiteSpace: "nowrap" }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
   const setRate = (v) => setCosts(c => ({ ...c, hourlyRate: v.replace(/[^\d.]/g, "") }));
   const setLine = (key, patch) => setCosts(c => ({ ...c, [key]: { ...costLine(c[key]), ...patch } }));
   const setTax = (key, val) => setCosts(c => ({ ...c, tax: { ...DEFAULT_COSTS.tax, ...(c.tax || {}), [key]: val } }));
@@ -12959,6 +13046,28 @@ function CostSettings({ costs, setCosts, clients }) {
 
   return (
     <>
+      {/* At-a-glance strip — mirrors the Budget page's Overview tiles; these three numbers
+          are exactly what this section feeds into it. */}
+      <Card style={{ marginBottom: 14 }}>
+        <div style={{ padding: 18 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", rowGap: 8, marginBottom: 12 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted }}>What the Budget runs on</div>
+            {onNav && <Btn sm variant="outline" onClick={() => onNav("budget")} style={{ display: "flex", alignItems: "center", gap: 5 }}><Icon name="chart" size={13} /> Open Budget</Btn>}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+            {tile("Labor rate", `$${n(costs.hourlyRate)}/hr`, "billed by time on the job")}
+            {tile("Per-stop overhead", `$${totalPerStop.toFixed(2)}`, "hits each job's profit")}
+            {tile("Fixed monthly", `$${monthlyFixed.toFixed(0)}`, "overhead in the Budget")}
+          </div>
+        </div>
+      </Card>
+
+      {/* Bank connection — the live-data source for Budget → Bank (real income + spending). */}
+      <Card style={{ marginBottom: 14 }}>
+        <CardHeader title="Bank Sync" />
+        <BankConnect />
+      </Card>
+
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Labor" />
         <div style={{ padding: 18, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -14466,6 +14575,96 @@ function QBConnect({ onSyncData }) {
             Reconnect
           </button>
         </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// BANK CONNECT (Plaid) — Customize card, mirrors the QuickBooks card above.
+// Same connection as Budget → Bank (one shared server-side link + module cache).
+// ─────────────────────────────────────────────
+function BankConnect() {
+  const { T } = useApp();
+  const [st, setSt] = useState(_bankCache.status); // null=loading
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => { let alive = true;
+    bankCheckStatus().then((s) => { if (alive) setSt(s); });
+    return () => { alive = false; };
+  }, []);
+
+  const handleConnect = async () => {
+    setBusy(true); setMsg("");
+    try {
+      const out = await bankLinkFlow();
+      if (out.connected) { setSt(_bankCache.status); bankFetchTxns("month").catch(() => {}); }
+      else if (out.message) setMsg(out.message);
+    } catch (e) { setMsg((e && e.message) || "Couldn't open Plaid. Try again."); }
+    setBusy(false);
+  };
+  const handleDisconnect = async () => {
+    if (typeof window !== "undefined" && !window.confirm("Disconnect your bank? Your transaction history will stop syncing.")) return;
+    setBusy(true); setMsg("");
+    await bankDisconnect();
+    setSt(_bankCache.status);
+    setBusy(false);
+  };
+  const handleSyncNow = async () => {
+    setBusy(true); setMsg("");
+    try {
+      const { r, d } = await bankFetchTxns(_bankCache.period || "month");
+      if (r.status === 202 || d.notReady) setMsg(d.error || "Your bank data is still syncing — try again in a minute.");
+      else if (r.ok) setMsg(`Synced — ${d.count} transaction${d.count === 1 ? "" : "s"} this period. See Budget → Bank.`);
+      else setMsg(d.error || "Sync failed.");
+    } catch (_) { setMsg("Couldn't reach the server."); }
+    setBusy(false);
+  };
+
+  return (
+    <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>
+        Securely link your business bank through Plaid to see real income, spending, and categorized transactions in Budget → Bank. Read-only — the app never sees your bank login.
+      </div>
+      {st === null ? (
+        <div style={{ fontSize: 13, color: T.textMuted, textAlign: "center", padding: "8px 0" }}>Checking connection…</div>
+      ) : st.configured === false ? (
+        <div style={{ fontSize: 12.5, color: T.textMuted, lineHeight: 1.55, background: T.surfaceAlt, borderRadius: 12, padding: "11px 14px" }}>
+          Not set up yet — add <b>PLAID_CLIENT_ID</b>, <b>PLAID_SECRET</b> and <b>PLAID_ENV</b> in Vercel → Settings → Environment Variables, then redeploy.
+        </div>
+      ) : st.unreachable && !st.connected ? (
+        <div style={{ fontSize: 12.5, color: T.textMuted, lineHeight: 1.55, background: T.surfaceAlt, borderRadius: 12, padding: "11px 14px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+          <span>Couldn't reach the server — check your connection.</span>
+          <button onClick={() => { setSt(null); bankCheckStatus().then(setSt); }} style={{ background: "none", border: `1px solid ${T.border}`, borderRadius: 9, padding: "7px 12px", fontSize: 12, fontWeight: 700, color: T.text, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Try again</button>
+        </div>
+      ) : !st.connected ? (
+        <button onClick={handleConnect} disabled={busy}
+          style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, background: T.primary, color: "#fff", border: "none", borderRadius: 14, padding: "14px 20px", fontWeight: 800, fontSize: 15, cursor: busy ? "default" : "pointer", fontFamily: "inherit", opacity: busy ? 0.7 : 1, boxShadow: `0 4px 16px ${hexA(T.primary, 0.3)}` }}>
+          <Icon name="dollar" size={18} /> {busy ? "Opening…" : "Connect Bank"}
+        </button>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, background: hexA("#16a34a", 0.08), border: `1px solid ${hexA("#16a34a", 0.2)}`, borderRadius: 12, padding: "10px 14px" }}>
+            <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#16a34a", flexShrink: 0 }} />
+            <span style={{ fontSize: 13, fontWeight: 700, color: "#16a34a" }}>Connected{st.institution ? ` to ${st.institution}` : ""}</span>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={handleSyncNow} disabled={busy}
+              style={{ flex: 1, background: busy ? T.surfaceAlt : T.primary, color: busy ? T.textMuted : "#fff", border: "none", borderRadius: 12, padding: "12px 18px", fontWeight: 700, fontSize: 14, cursor: busy ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+              {busy ? (
+                <><div style={{ width: 16, height: 16, border: `2px solid ${T.textMuted}`, borderTopColor: T.primary, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /> Syncing…</>
+              ) : "Sync Now"}
+            </button>
+            <button onClick={handleDisconnect} disabled={busy}
+              style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 12, padding: "12px 14px", fontWeight: 700, fontSize: 13, cursor: busy ? "default" : "pointer", fontFamily: "inherit" }}>
+              Disconnect
+            </button>
+          </div>
+        </div>
+      )}
+      {msg && (
+        <div style={{ background: hexA(T.warning, 0.1), border: `1px solid ${hexA(T.warning, 0.3)}`, borderRadius: 12, padding: "10px 14px", fontSize: 12.5, color: T.text, lineHeight: 1.5 }}>{msg}</div>
       )}
     </div>
   );
@@ -17862,6 +18061,12 @@ function SyncStatus({ T, branding, team, currentUserId, email = {} }) {
         if (!d) return { status: "down", detail: "Couldn't reach server" };
         return d.connected ? { status: "ok", detail: "Connected" } : { status: "warn", detail: "Not connected" }; },
       fix: { label: "Reconnect QuickBooks", run: () => openInAppBrowser(`${QB_API}/auth`) } },
+    { key: "bank", label: "Bank sync", icon: "dollar", sub: "Plaid — live transactions in Budget",
+      run: async () => { const d = await getJSON(`${PROD_URL}/api/plaid/status`);
+        if (!d) return { status: "down", detail: "Couldn't reach server" };
+        if (!d.configured) return { status: "warn", detail: "Not configured (optional)" };
+        return d.connected ? { status: "ok", detail: d.institution ? `Connected · ${d.institution}` : "Connected" } : { status: "warn", detail: "Not connected" }; },
+      fix: { note: "Connect your bank under Customize → Budget & Costs (Bank Sync card) or Budget → Bank. Keys: PLAID_CLIENT_ID + PLAID_SECRET + PLAID_ENV in Vercel." } },
     { key: "maps", label: "Maps & routing", icon: "map", sub: "Google Maps — live tracking + ETAs",
       run: async () => (hasGoogleMaps() ? { status: "ok", detail: "Key present in app" } : { status: "warn", detail: "No Maps key in this build" }),
       fix: { note: "Add VITE_GOOGLE_MAPS_API_KEY in Vercel → Settings → Environment Variables, then redeploy the app (it ships in the build)." } },
@@ -18244,9 +18449,9 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             </Collapsible>
           )}
           {perms.editCosts && (
-            <Collapsible title="Costs & Labor" subtitle="Hourly rate, overhead, gas, and per-stop cost assumptions.">
+            <Collapsible title="Budget & Costs" subtitle="Bank sync, labor rate, overhead, and taxes — the live inputs behind your Budget tab.">
               <SaveBar ctl={costCtl} T={T} />
-              <CostSettings costs={costCtl.draft} setCosts={costCtl.update} clients={clients} />
+              <CostSettings costs={costCtl.draft} setCosts={costCtl.update} clients={clients} onNav={onNav} />
             </Collapsible>
           )}
         </div>
@@ -22309,6 +22514,62 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
   const editGoal = (id, field, value) => setBudget(b => ({ ...b, goals: (b.goals || []).map(g => g.id === id ? { ...g, [field]: field === "name" ? value : value.replace(/[^\d.]/g, "") } : g) }));
   const removeGoal = (id) => setBudget(b => ({ ...b, goals: (b.goals || []).filter(g => g.id !== id) }));
 
+  // ── Bank sync (Plaid) ── connection + transactions live server-side; the app only holds a light
+  // status flag + the on-demand transaction rollup (seeded from the module cache, which the app-open
+  // auto-sync prefills — so this usually renders instantly). Nothing bank-related persists in `budget`.
+  const [bankStatus, setBankStatus] = useState(_bankCache.status); // null=loading · {connected, institution, configured}
+  const [bankData, setBankData] = useState(_bankCache.data);       // { totalIncome, totalExpense, net, income[], expense[], transactions[] }
+  const [bankPeriod, setBankPeriod] = useState(_bankCache.period);
+  const [bankBusy, setBankBusy] = useState(false);
+  const [bankMsg, setBankMsg] = useState("");
+  const bankReqRef = useRef(0); // sequence guard: only the LATEST request may commit state (rapid period taps)
+  const PERIODS = [["month", "This month"], ["lastmonth", "Last month"], ["ytd", "Year to date"]];
+  const periodLabel = (p) => (PERIODS.find(([id]) => id === p) || PERIODS[0])[1];
+
+  useEffect(() => { let alive = true;
+    bankCheckStatus().then((s) => { if (alive) setBankStatus(s); });
+    return () => { alive = false; };
+  }, []);
+
+  const loadBankTxns = async (period, { force = false } = {}) => {
+    // Fresh cache for this period (≤5 min, e.g. the app-open prefetch) → render it, skip the network.
+    // Bump the sequence ref too, so an older in-flight fetch (other period) can't commit over this.
+    if (!force && _bankCache.data && _bankCache.period === period && Date.now() - _bankCache.at < 300000) {
+      bankReqRef.current++; setBankBusy(false); setBankMsg(""); setBankData(_bankCache.data); return;
+    }
+    const my = ++bankReqRef.current;
+    setBankBusy(true); setBankMsg("");
+    try {
+      const { r, d } = await bankFetchTxns(period);
+      if (my !== bankReqRef.current) return; // superseded by a newer request
+      if (r.status === 202 || d.notReady) setBankMsg(d.error || "Your bank data is still syncing — try again in a minute.");
+      else if (r.ok) setBankData(d);
+      else if (d.connect) setBankStatus(s => ({ ...(s || {}), connected: false }));
+      else setBankMsg(d.error || "Couldn't load transactions.");
+    } catch (_) { if (my === bankReqRef.current) setBankMsg("Couldn't reach the server."); }
+    if (my === bankReqRef.current) setBankBusy(false);
+  };
+  useEffect(() => { if (bankStatus && bankStatus.connected) loadBankTxns(bankPeriod); }, [bankStatus && bankStatus.connected, bankPeriod]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const connectBank = async () => {
+    setBankBusy(true); setBankMsg("");
+    try {
+      const out = await bankLinkFlow();
+      if (out.connected) { setBankStatus(_bankCache.status); loadBankTxns(bankPeriod, { force: true }); }
+      else if (out.message) setBankMsg(out.message);
+    } catch (e) { setBankMsg((e && e.message) || "Couldn't open Plaid. Check your connection and try again."); }
+    setBankBusy(false);
+  };
+
+  const disconnectBank = async () => {
+    if (typeof window !== "undefined" && !window.confirm("Disconnect your bank? Your transaction history will stop syncing.")) return;
+    setBankBusy(true);
+    bankReqRef.current++; // supersede any in-flight transactions fetch so it can't setBankData after this
+    await bankDisconnect();
+    setBankData(null); setBankMsg(""); setBankStatus(_bankCache.status);
+    setBankBusy(false);
+  };
+
   const green = "#16a34a", red = "#E5484D";
   const card = { background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: 16, marginBottom: 14 };
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted };
@@ -22355,7 +22616,22 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
     </div>
   );
 
-  const SECTIONS = [["overview", "Overview"], ["budget", "Budget"], ["debt", "Debt"], ["savings", "Savings"]];
+  // Category rows for real bank data (spending / income by Plaid category) — bar is share of the total.
+  const catBankRows = (arr, total, color) => (
+    <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
+      {arr.map((r, i) => { const pct = total > 0 ? Math.min(100, (r.amount / total) * 100) : 0; return (
+        <div key={i}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, gap: 10 }}>
+            <span style={{ color: T.text, fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.category}</span>
+            <span style={{ color: T.text, fontWeight: 800, flexShrink: 0 }}>{money(r.amount)}</span>
+          </div>
+          <div style={{ height: 6, borderRadius: 100, background: T.surfaceAlt, overflow: "hidden", marginTop: 6 }}><div style={{ width: `${pct}%`, height: "100%", borderRadius: 100, background: color }} /></div>
+        </div>
+      ); })}
+    </div>
+  );
+
+  const SECTIONS = [["overview", "Overview"], ["bank", "Bank"], ["budget", "Budget"], ["debt", "Debt"], ["savings", "Savings"]];
 
   return (
     <div style={{ maxWidth: vp.isPhone ? "100%" : 820, margin: "0 auto", width: "100%" }}>
@@ -22380,6 +22656,19 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
               <span>Debt <b>{money(debtMonthly)}</b></span>
             </div>
           </div>
+          {bankStatus && bankStatus.connected && bankData && (
+            <div style={{ ...card }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 6 }}>
+                <div style={{ ...lbl }}>From your bank · {periodLabel(bankData.period || bankPeriod)}</div>
+                <button onClick={() => setSection("bank")} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit", padding: 0 }}>View all →</button>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+                {metric("Money in", money(bankData.totalIncome), green)}
+                {metric("Money out", money(bankData.totalExpense), T.primary)}
+                {metric("Net", money(bankData.net), bankData.net >= 0 ? green : red)}
+              </div>
+            </div>
+          )}
           <div style={{ display: "grid", gridTemplateColumns: vp.isPhone ? "1fr 1fr" : "repeat(3, 1fr)", gap: 10, marginBottom: 14 }}>
             {metric("Income", money(incomeActual), T.text, `of ${money(incomeBudget)} target`)}
             {metric("Expenses", money(expenseActual), T.text, `of ${money(expenseBudget)} budget`)}
@@ -22398,6 +22687,93 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
                 </div>
               ); })}
             </div>
+          )}
+        </>
+      )}
+
+      {section === "bank" && (
+        <>
+          {bankStatus === null ? (
+            <div style={card}><div style={{ color: T.textMuted, fontSize: 13, textAlign: "center", padding: "18px 0" }}>Checking bank connection…</div></div>
+          ) : bankStatus.configured === false ? (
+            <div style={card}>
+              <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 8 }}>
+                <span style={{ color: T.textMuted }}><Icon name="lock" size={17} /></span>
+                <span style={{ fontSize: 15.5, fontWeight: 800, color: T.text }}>Bank sync isn't set up yet</span>
+              </div>
+              <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.55 }}>Add your Plaid keys (<b>PLAID_CLIENT_ID</b>, <b>PLAID_SECRET</b>, <b>PLAID_ENV</b>) in Vercel → Settings → Environment Variables, then redeploy to turn on secure bank connection.</div>
+            </div>
+          ) : bankStatus.unreachable && !bankStatus.connected ? (
+            <div style={{ ...card, textAlign: "center", padding: "24px 20px" }}>
+              <div style={{ fontSize: 13.5, color: T.textMuted, lineHeight: 1.55 }}>Couldn't reach the server — check your connection.</div>
+              <div style={{ marginTop: 12 }}><Btn sm variant="outline" onClick={() => { setBankStatus(null); bankCheckStatus().then(setBankStatus); }}>Try again</Btn></div>
+            </div>
+          ) : !bankStatus.connected ? (
+            <div style={{ ...card, textAlign: "center", padding: "28px 20px" }}>
+              <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px", color: T.primary }}><Icon name="dollar" size={24} /></div>
+              <div style={{ fontSize: 17, fontWeight: 800, color: T.text }}>Connect your bank</div>
+              <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.55, marginTop: 8, maxWidth: 380, margin: "8px auto 0" }}>Securely link your business account through Plaid to see real income, spending, and categorized transactions — no manual entry. The app never sees your bank login.</div>
+              <div style={{ marginTop: 18 }}><Btn onClick={connectBank} disabled={bankBusy}>{bankBusy ? "Opening…" : "Connect bank"}</Btn></div>
+              {bankMsg && <div style={{ fontSize: 12.5, color: red, marginTop: 12 }}>{bankMsg}</div>}
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 16, display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}><Icon name="lock" size={11} /> Bank-grade encryption · read-only access</div>
+            </div>
+          ) : (
+            <>
+              <div style={{ ...card, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ width: 38, height: 38, borderRadius: 11, background: hexA(green, 0.13), display: "flex", alignItems: "center", justifyContent: "center", color: green }}><Icon name="check" size={18} /></div>
+                  <div>
+                    <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text }}>{bankStatus.institution || "Bank connected"}</div>
+                    <div style={{ fontSize: 11.5, color: T.textMuted }}>Live · read-only</div>
+                  </div>
+                </div>
+                <button onClick={disconnectBank} disabled={bankBusy} style={{ background: "none", border: `1px solid ${T.border}`, borderRadius: 10, padding: "7px 12px", fontSize: 12.5, fontWeight: 700, color: T.textMuted, cursor: "pointer", fontFamily: "inherit", opacity: bankBusy ? 0.6 : 1 }}>Disconnect</button>
+              </div>
+
+              <div style={{ display: "flex", gap: 7, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
+                {PERIODS.map(([id, label]) => (
+                  <button key={id} onClick={() => setBankPeriod(id)} style={{ padding: "7px 14px", borderRadius: 100, border: "none", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: bankPeriod === id ? T.primary : T.surfaceAlt, color: bankPeriod === id ? "#fff" : T.textMuted }}>{label}</button>
+                ))}
+                <button onClick={() => loadBankTxns(bankPeriod)} disabled={bankBusy} style={{ marginLeft: "auto", background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12.5, cursor: bankBusy ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5, opacity: bankBusy ? 0.6 : 1 }}><Icon name="refresh" size={13} /> {bankBusy ? "…" : "Refresh"}</button>
+              </div>
+
+              {bankMsg && <div style={{ ...card, background: hexA(T.warning, 0.1), border: `1px solid ${hexA(T.warning, 0.3)}`, color: T.text, fontSize: 12.5, lineHeight: 1.5 }}>{bankMsg}</div>}
+
+              {bankData ? (
+                <>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 14 }}>
+                    {metric("Money in", money(bankData.totalIncome), green)}
+                    {metric("Money out", money(bankData.totalExpense), T.primary)}
+                    {metric("Net", money(bankData.net), bankData.net >= 0 ? green : red)}
+                  </div>
+                  {(bankData.expense || []).length > 0 && (
+                    <div style={card}><div style={{ ...lbl, marginBottom: 12 }}>Spending by category</div>{catBankRows(bankData.expense, bankData.totalExpense, T.primary)}</div>
+                  )}
+                  {(bankData.income || []).length > 0 && (
+                    <div style={card}><div style={{ ...lbl, marginBottom: 12 }}>Income by category</div>{catBankRows(bankData.income, bankData.totalIncome, green)}</div>
+                  )}
+                  <div style={card}>
+                    {(() => { const shownTxns = (bankData.transactions || []).slice(0, 60); return (<>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}><span style={lbl}>Transactions</span><span style={{ fontSize: 11.5, color: T.textMuted }}>{bankData.count} total{bankData.count > shownTxns.length ? ` · showing ${shownTxns.length}` : ""}</span></div>
+                    <div style={{ display: "flex", flexDirection: "column" }}>
+                      {shownTxns.map((t, i) => (
+                        <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "9px 0", borderTop: i === 0 ? "none" : `1px solid ${T.border}` }}>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.name || "—"}{t.pending && <span style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, marginLeft: 6, letterSpacing: "0.04em" }}>PENDING</span>}</div>
+                            <div style={{ fontSize: 11, color: T.textMuted }}>{t.date} · {t.category}</div>
+                          </div>
+                          <div style={{ fontSize: 13.5, fontWeight: 800, color: t.amount >= 0 ? green : T.text, whiteSpace: "nowrap", flexShrink: 0 }}>{t.amount >= 0 ? "+" : "−"}{money(Math.abs(t.amount))}</div>
+                        </div>
+                      ))}
+                      {shownTxns.length === 0 && <div style={{ fontSize: 12.5, color: T.textMuted, textAlign: "center", padding: "10px 0" }}>No transactions in this period.</div>}
+                    </div>
+                    </>); })()}
+                  </div>
+                </>
+              ) : bankBusy ? (
+                <div style={card}><div style={{ color: T.textMuted, fontSize: 13, textAlign: "center", padding: "18px 0" }}>Loading transactions…</div></div>
+              ) : null}
+            </>
           )}
         </>
       )}
@@ -26294,6 +26670,25 @@ export default function App({ authEmail = "", onSignOut }) {
           try { localStorage.setItem("qb_autosync_at", String(Date.now())); } catch (_) {}
         }
       } catch (_) { /* best-effort — the manual Sync button remains for the rare failure */ }
+    })();
+  }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Bank (Plaid) auto-sync on app open — mirrors the QB auto-sync above: once per open, silent,
+  // throttled across quick reopens. Prefetches the current month's transactions into the module
+  // cache so Budget → Bank (and the Overview strip) render instantly instead of loading on open.
+  // Owner-gated server-side: for staff the transactions call just 403s quietly, nothing breaks.
+  const _bankAutoSyncRef = useRef(false);
+  useEffect(() => {
+    if (!hydrated || _bankAutoSyncRef.current) return;
+    _bankAutoSyncRef.current = true;
+    try { if (Date.now() - (+(localStorage.getItem("plaid_autosync_at") || 0)) < 120000) return; } catch (_) {}
+    (async () => {
+      try {
+        const st = await bankCheckStatus(); // server is the source of truth, same as QB
+        if (!st || !st.connected) return;
+        const { r } = await bankFetchTxns("month");
+        if (r && r.ok) { try { localStorage.setItem("plaid_autosync_at", String(Date.now())); } catch (_) {} }
+      } catch (_) { /* best-effort — Budget → Bank still loads on demand */ }
     })();
   }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
