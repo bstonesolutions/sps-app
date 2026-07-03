@@ -72,7 +72,9 @@ export default async function handler(req, res) {
   const text = `🔔 New website lead: ${name}${bits ? ` — ${bits}` : ""}${msg ? `. “${msg}”` : ""}. It's waiting in SPS → Comms → Leads.`;
 
   const out = {};
-  const toNum = toE164(toPhone), fromNum = toE164(QUO_FROM);
+  // Same "from" resolution as the app's texts (api/send-sms): the configured Sending Identity
+  // texting number first, then the server default — so this alert comes from the same line.
+  const toNum = toE164(toPhone), fromNum = toE164(email.textingNumber) || toE164(QUO_FROM);
   if (QUO_KEY && fromNum && toNum && toNum !== fromNum) {
     try {
       const r = await fetch("https://api.quo.com/v1/messages", {
