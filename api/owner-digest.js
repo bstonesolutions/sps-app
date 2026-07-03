@@ -215,29 +215,29 @@ export function renderEmail(dg, branding) {
       <span style="font-size:13px;font-weight:800;color:${ink}">${title}</span>${right ? `<span style="font-size:12px;font-weight:700;color:${grayT}">${right}</span>` : ""}</div>
     <div style="padding:14px 16px">${inner}</div></div>`;
   const muted = (t) => `<div style="font-size:13px;color:${faint}">${t}</div>`;
-  const metric = (label, value, color, sub) => `<td width="33%" style="padding:5px;vertical-align:top">
-    <div style="background:#f8f9fb;border-radius:12px;padding:12px 13px">
-      <div style="font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:${faint}">${label}</div>
-      <div style="font-size:21px;font-weight:800;color:${color || ink};margin-top:3px;line-height:1.1">${value}</div>
-      ${sub ? `<div style="font-size:11px;color:${faint};margin-top:2px">${sub}</div>` : ""}
+  const metric = (label, value, color, sub) => `<td width="50%" style="padding:5px;vertical-align:top">
+    <div style="background:#f8f9fb;border-radius:12px;padding:12px 15px">
+      <div style="font-size:11px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:${faint};white-space:nowrap">${label}</div>
+      <div style="font-size:23px;font-weight:800;color:${color || ink};margin-top:3px;line-height:1.1;white-space:nowrap">${value}</div>
+      ${sub ? `<div style="font-size:11.5px;color:${faint};margin-top:2px;white-space:nowrap">${sub}</div>` : ""}
     </div></td>`;
 
   const snapshot = `<table style="width:100%;border-collapse:collapse;table-layout:fixed">
-    <tr>${metric(dg.collectedLabel, money0(dg.paymentsTotal), g, `${dg.payments.length} payment${dg.payments.length === 1 ? "" : "s"}`)}
-        ${metric("Outstanding", money0(dg.outstandingTotal), ink, `${dg.outstanding.length} invoice${dg.outstanding.length === 1 ? "" : "s"}`)}
-        ${metric("Overdue", money0(dg.overdueTotal), dg.overdueTotal > 0 ? accent : ink, `${dg.overdue.length} past due`)}</tr>
-    <tr>${metric("Work done", money0(dg.revenueDone), ink, `${dg.jobs} stop${dg.jobs === 1 ? "" : "s"}`)}
-        ${metric("Est. profit", money0(dg.profitDone), dg.profitDone >= 0 ? g : accent, `${dg.marginPct}% margin`)}
+    <tr>${metric("Collected", money0(dg.paymentsTotal), g, `${dg.payments.length} payment${dg.payments.length === 1 ? "" : "s"}`)}
+        ${metric("Outstanding", money0(dg.outstandingTotal), ink, `${dg.outstanding.length} invoice${dg.outstanding.length === 1 ? "" : "s"}`)}</tr>
+    <tr>${metric("Overdue", money0(dg.overdueTotal), dg.overdueTotal > 0 ? accent : ink, `${dg.overdue.length} past due`)}
+        ${metric("Work done", money0(dg.revenueDone), ink, `${dg.jobs} stop${dg.jobs === 1 ? "" : "s"}`)}</tr>
+    <tr>${metric("Est. profit", money0(dg.profitDone), dg.profitDone >= 0 ? g : accent, `${dg.marginPct}% margin`)}
         ${metric("Avg / job", money0(dg.avgTicket), ink, "per stop")}</tr>
   </table>`;
 
-  const mCell = (label, value, color) => `<td width="25%" style="text-align:center;vertical-align:top;padding:0 4px">
-    <div style="font-size:19px;font-weight:800;color:${color || ink};line-height:1.1">${value}</div>
-    <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;color:${faint};margin-top:3px">${label}</div></td>`;
+  const mCell = (label, value, color) => `<td width="25%" style="text-align:center;vertical-align:top;padding:0 3px">
+    <div style="font-size:17px;font-weight:800;color:${color || ink};line-height:1.1;white-space:nowrap">${value}</div>
+    <div style="font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;color:${faint};margin-top:3px;white-space:nowrap">${label}</div></td>`;
   const tallyCard = `<div style="border:1.5px solid ${accent};border-radius:14px;margin-top:14px;overflow:hidden">
     <div style="background:${accent};padding:9px 16px;color:#fff;font-size:12px;font-weight:800;letter-spacing:.03em">${esc(dg.tally.label)}</div>
-    <div style="padding:14px 10px"><table style="width:100%;border-collapse:collapse;table-layout:fixed"><tr>
-      ${mCell("Collected", money0(dg.tally.collected), g)}${mCell("Billed", money0(dg.tally.rev), ink)}${mCell("Est. profit", money0(dg.tally.prof), dg.tally.prof >= 0 ? g : accent)}${mCell("Jobs", String(dg.tally.jobs), ink)}
+    <div style="padding:14px 6px"><table style="width:100%;border-collapse:collapse;table-layout:fixed"><tr>
+      ${mCell("Collected", money0(dg.tally.collected), g)}${mCell("Billed", money0(dg.tally.rev), ink)}${mCell("Profit", money0(dg.tally.prof), dg.tally.prof >= 0 ? g : accent)}${mCell("Jobs", String(dg.tally.jobs), ink)}
     </tr></table></div></div>`;
 
   const agingCells = [["Current", dg.aging.current, ink], ["1–30", dg.aging.d30, ink], ["31–60", dg.aging.d60, "#b45309"], ["61–90", dg.aging.d90, accent], ["90+", dg.aging.d90p, accent]];
@@ -340,6 +340,8 @@ export default async function handler(req, res) {
   const q = req.query || {};
   const dryRun = q.dryRun === "1" || q.dry === "1";
   const test = q.test === "1";
+  const html = q.html === "1"; // rendered HTML for in-app preview / print-to-PDF
+  const period = ["daily", "weekly", "monthly"].includes(q.period) ? q.period : "daily";
 
   const [cfg, email, clients, schedule, invoices, branding, team] = await Promise.all([
     sbGet("sps_schedule_cfg", {}), sbGet("sps_email", {}), sbGet("sps_clients", []),
@@ -350,7 +352,7 @@ export default async function handler(req, res) {
 
   // test + dryRun expose / trigger the owner's financials → OWNER ONLY (verify by email, independent
   // of API_AUTH_ENFORCED). Real cron runs use CRON_SECRET instead.
-  if (dryRun || test) {
+  if (dryRun || test || html) {
     const ownerEmails = [((team || []).find((m) => m && m.role === "owner") || {}).email, branding.companyEmail, email.ownerEmail, od.to].filter(Boolean).map((e) => String(e).toLowerCase());
     const u = await verifyUser(req);
     const callerEmail = (u && u.email || "").toLowerCase();
@@ -363,7 +365,15 @@ export default async function handler(req, res) {
   }
 
   if (dryRun) return res.status(200).json({ ok: true, dryRun: true, daily: buildDigest(state, { period: "daily" }), weekly: buildDigest(state, { period: "weekly" }), monthly: buildDigest(state, { period: "monthly" }) });
-  if (test) { const out = await sendDigest({ period: "daily", state, cfg, email, branding }); return res.status(out.sent ? 200 : 400).json({ ok: out.sent, test: true, ...out }); }
+  if (html) {
+    // Browser-viewable version for preview + print-to-PDF. Use the logo as a data/http URL (cid is
+    // email-only). Wrapped in a minimal page with a print button that auto-opens the print dialog.
+    const logoSrc = (typeof branding.logoImage === "string" && (branding.logoImage.startsWith("data:") || /^https?:\/\//.test(branding.logoImage))) ? branding.logoImage : DEFAULT_LOGO;
+    const body = renderEmail(buildDigest(state, { period }), { ...branding, logoSrc });
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(branding.companyName || "SPS")} report</title><style>@media print{.noprint{display:none}}</style></head><body style="margin:0;background:#f4f5f7">${body}<div class="noprint" style="text-align:center;padding:14px"><button onclick="window.print()" style="background:${/^#?[0-9a-fA-F]{3,8}$/.test(branding.accent||"")?branding.accent:"#B81D24"};color:#fff;border:none;border-radius:10px;padding:11px 22px;font-size:15px;font-weight:800;cursor:pointer;font-family:-apple-system,sans-serif">Print / Save as PDF</button></div></body></html>`);
+  }
+  if (test) { const out = await sendDigest({ period, state, cfg, email, branding }); return res.status(out.sent ? 200 : 400).json({ ok: out.sent, test: true, ...out }); }
 
   // ── real cron run ──
   if (!od.dailyOn && !od.weeklyOn && !od.monthlyOn) return res.status(200).json({ ok: true, note: "Owner report is off." });

@@ -19905,12 +19905,28 @@ function OwnerDigestSettings({ scheduleCfg, setScheduleCfg, email, branding, T }
   const setOD = (patch) => setScheduleCfg(c => ({ ...c, ownerDigest: { ...((c && c.ownerDigest) || {}), ...patch } }));
   const [testMsg, setTestMsg] = useState("");
   const [busy, setBusy] = useState(false);
+  const [testPeriod, setTestPeriod] = useState(od.monthlyOn && !od.dailyOn && !od.weeklyOn ? "monthly" : od.weeklyOn && !od.dailyOn ? "weekly" : "daily");
   const recipient = (od.to || email?.ownerEmail || branding?.companyEmail || "").trim();
+
+  // Open the chosen report as a printable page (browser Print dialog → Save as PDF). Fetches the
+  // authed HTML, then writes it into a new window (a plain new-tab GET can't carry the auth token).
+  const openPrint = async () => {
+    setBusy(true); setTestMsg("");
+    try {
+      const r = await fetch(`${PROD_URL}/api/owner-digest?html=1&period=${testPeriod}`, { headers: await authHeaders() });
+      if (!r.ok) { setTestMsg(r.status === 403 ? "Owner only — set a company/owner email first." : "Couldn't open the report."); setBusy(false); return; }
+      const htmlText = await r.text();
+      const w = window.open("", "_blank");
+      if (w) { w.document.open(); w.document.write(htmlText); w.document.close(); }
+      else setTestMsg("Allow pop-ups to open the printable report.");
+    } catch (_) { setTestMsg("Couldn't open the report."); }
+    setBusy(false);
+  };
 
   const sendTest = async () => {
     setBusy(true); setTestMsg("");
     try {
-      const r = await fetch(`${PROD_URL}/api/owner-digest?test=1`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }) });
+      const r = await fetch(`${PROD_URL}/api/owner-digest?test=1&period=${testPeriod}`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }) });
       const d = await r.json().catch(() => ({}));
       if (d && d.sent) setTestMsg(`Sent to ${d.to}. Check your inbox.`);
       else setTestMsg(d && (d.skipped || d.error) ? `Couldn't send: ${d.skipped || d.error}` : "Couldn't send the test.");
@@ -19964,8 +19980,13 @@ function OwnerDigestSettings({ scheduleCfg, setScheduleCfg, email, branding, T }
         {!od.to && recipient && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>Defaults to {recipient}</div>}
         {!recipient && <div style={{ fontSize: 11, color: T.accent, marginTop: 5 }}>Add an email here (or a company email in settings) so the digest has somewhere to go.</div>}
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        <Btn variant="ghost" disabled={busy || !recipient} onClick={sendTest}>{busy ? "Sending…" : "Send me one now"}</Btn>
+      <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 12, display: "flex", flexDirection: "column", gap: 9 }}>
+        <label style={lbl}>Preview a report</label>
+        <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>{[["daily", "Daily"], ["weekly", "Weekly"], ["monthly", "Monthly"]].map(([id, l]) => chip(testPeriod === id, l, () => setTestPeriod(id)))}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <Btn variant="ghost" disabled={busy || !recipient} onClick={sendTest}>{busy ? "Working…" : "Email it to me"}</Btn>
+          <Btn variant="ghost" disabled={busy || !recipient} onClick={openPrint}>Open / Print (PDF)</Btn>
+        </div>
         {testMsg && <div style={{ fontSize: 12.5, fontWeight: 700, color: testMsg.startsWith("Sent") ? "#16a34a" : T.accent }}>{testMsg}</div>}
       </div>
       <div style={{ fontSize: 11, color: T.textMuted, lineHeight: 1.5, borderTop: `1px solid ${T.border}`, paddingTop: 10 }}>Automatic sending needs <b>CRON_SECRET</b> set in Vercel. "Send me one now" works without it, so you can preview the email anytime.</div>
