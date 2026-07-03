@@ -27782,7 +27782,7 @@ export default function App({ authEmail = "", onSignOut }) {
   // cold start (target stashed in localStorage by main.jsx before React mounted).
   useEffect(() => {
     if (!hydrated) return;
-    const map = { alerts: "dashboard", schedule: "schedule", invoices: "invoices", invoice: "invoices", profit: "dashboard" };
+    const map = { alerts: "dashboard", schedule: "schedule", invoices: "invoices", invoice: "invoices", profit: "dashboard", leads: "leads", comms: "comms", budget: "budget" };
     const go = (section) => {
       const sec = String(section || "").toLowerCase();
       try { localStorage.removeItem("sps_deeplink"); } catch (_) {}

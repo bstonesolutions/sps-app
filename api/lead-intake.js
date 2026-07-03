@@ -69,7 +69,7 @@ export default async function handler(req, res) {
   const toEmail = (cfgAll.ownerDigest && cfgAll.ownerDigest.to) || notify.ownerEmail || email.ownerEmail || branding.companyEmail || "";
 
   const bits = [service, phone, emailAddr].filter(Boolean).join(" · ");
-  const text = `🔔 New website lead: ${name}${bits ? ` — ${bits}` : ""}${msg ? `. “${msg}”` : ""}. It's waiting in SPS → Comms → Leads.`;
+  const text = `🔔 New website lead: ${name}${bits ? ` — ${bits}` : ""}${msg ? `. “${msg}”` : ""}. It's waiting in Comms → Leads.\nOpen in app: spsway://leads\nBrowser: https://spsway.app/?open=leads`;
 
   const out = {};
   // Same "from" resolution as the app's texts (api/send-sms): the configured Sending Identity
@@ -110,7 +110,8 @@ export default async function handler(req, res) {
         ${mediaHtml}
         ${quick ? `<div style="margin-top:14px;font-size:14px;">${quick}</div>` : ""}
       </div>
-      <a href="https://spsway.app/?open=leads" style="display:block;background:#B81D24;color:#ffffff;text-align:center;font-weight:800;font-size:15px;padding:15px 20px;border-radius:12px;text-decoration:none;margin-top:16px;">Open in SPS → Leads</a>
+      <a href="spsway://leads" style="display:block;background:#B81D24;color:#ffffff;text-align:center;font-weight:800;font-size:15px;padding:15px 20px;border-radius:12px;text-decoration:none;margin-top:16px;">📱 Open in the SPS app</a>
+      <a href="https://spsway.app/?open=leads" style="display:block;background:#ffffff;border:1.5px solid #B81D24;color:#B81D24;text-align:center;font-weight:800;font-size:15px;padding:13px 20px;border-radius:12px;text-decoration:none;margin-top:10px;">🌐 Open in the browser</a>
       <div style="font-size:12px;color:#8a857e;margin-top:12px;text-align:center;">Reply fast, win the job.</div>
     </div>`;
     try {
