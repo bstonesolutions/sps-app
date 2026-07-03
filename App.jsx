@@ -18255,6 +18255,11 @@ function SyncStatus({ T, branding, team, currentUserId, email = {} }) {
         if (!d.configured) return { status: "warn", detail: "Not configured (optional)" };
         return d.connected ? { status: "ok", detail: d.institution ? `Connected · ${d.institution}` : "Connected" } : { status: "warn", detail: "Not connected" }; },
       fix: { note: "Connect your bank under Customize → Budget & Costs (Bank Sync card) or Budget → Bank. Keys: PLAID_CLIENT_ID + PLAID_SECRET + PLAID_ENV in Vercel." } },
+    { key: "leadsBridge", label: "Leads bridge", icon: "funnel", sub: "Website quote form → Comms → Leads",
+      run: async () => { const d = await getJSON(`${PROD_URL}/api/leads-sync?check`);
+        if (!d) return { status: "down", detail: "Couldn't reach server" };
+        return d.configured ? { status: "ok", detail: "Bridge connected — imports on app open" } : { status: "warn", detail: "Not configured (optional)" }; },
+      fix: { note: "Set WEBSITE_SUPABASE_URL + WEBSITE_SUPABASE_SERVICE_KEY in Vercel (from the marketing site's Supabase project). Optional instant lead texts: LEAD_WEBHOOK_SECRET + a Database Webhook on the website's leads table (INSERT events only) → /api/lead-intake." } },
     { key: "maps", label: "Maps & routing", icon: "map", sub: "Google Maps — live tracking + ETAs",
       run: async () => (hasGoogleMaps() ? { status: "ok", detail: "Key present in app" } : { status: "warn", detail: "No Maps key in this build" }),
       fix: { note: "Add VITE_GOOGLE_MAPS_API_KEY in Vercel → Settings → Environment Variables, then redeploy the app (it ships in the build)." } },
@@ -18443,7 +18448,14 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, vp = {} }) {
 
   const updateLead = (id, patch, note) => setLeads(ls => (ls || []).map(l => l.id === id ? { ...l, ...patch, updatedAt: new Date().toISOString(), timeline: note ? [...(l.timeline || []), { at: new Date().toISOString(), by: "owner", kind: "note", text: note }] : (l.timeline || []) } : l));
   const setStatus = (lead, status) => updateLead(lead.id, { status }, `Moved to ${LEAD_STAGES.find(s => s.id === status)?.label || status}`);
-  const removeLead = (id) => { if (confirm("Delete this lead? This can't be undone.")) { setLeads(ls => (ls || []).filter(l => l.id !== id)); setSelId(null); } };
+  const removeLead = (id) => {
+    if (!confirm("Delete this lead? This can't be undone.")) return;
+    // A website lead deleted before its import was acknowledged would re-import on every open
+    // ("zombie") — mark it handled at the source too. Best-effort: seen-and-rejected is handled.
+    const lead = (leads || []).find(l => l.id === id);
+    if (lead && lead.srcId) (async () => { try { await fetch(`${PROD_URL}/api/leads-sync`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ imported: [lead.srcId] }) }); } catch (_) {} })();
+    setLeads(ls => (ls || []).filter(l => l.id !== id)); setSelId(null);
+  };
   const dupClient = (lead) => (clients || []).find(c => (lead.phone && norm(c.phone) && norm(c.phone) === norm(lead.phone)) || (lead.email && lcs(c.email) && lcs(c.email) === lcs(lead.email)));
 
   const convert = (lead) => {
@@ -27316,12 +27328,23 @@ export default function App({ authEmail = "", onSignOut }) {
     run();
   }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Reactive mirror of DB_READ_OK. On warm cache-first boots `hydrated` flips while the network
+  // SELECT is still in flight, so effects that sample the module flag once never see it turn true —
+  // this state re-fires them when the confirmed read lands (the sps-db-status "ok" event).
+  const [dbOk, setDbOk] = useState(DB_READ_OK);
+  useEffect(() => {
+    if (DB_READ_OK) { setDbOk(true); return; }
+    const on = (e) => { if ((((e || {}).detail) || {}).type === "ok") setDbOk(true); };
+    document.addEventListener("sps-db-status", on);
+    return () => document.removeEventListener("sps-db-status", on);
+  }, []);
+
   // ── Recurring maintenance invoicing: once per month (per session), create any missing DRAFT
   // invoices for the current month — clients with Auto-Invoice on + a monthly rate. Drafts only;
   // the owner reviews + sends them from Invoices. Never auto-sent. Gated on a confirmed DB read so
-  // it can't generate off seeded defaults. ──
+  // it can't generate off seeded defaults (dbOk is reactive — the flag alone misses warm boots). ──
   useEffect(() => {
-    if (!hydrated || !DB_READ_OK) return;
+    if (!hydrated || !dbOk) return;
     const now = new Date();
     const period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
     const flag = `sps_autodraft_${period}`;
@@ -27334,7 +27357,7 @@ export default function App({ authEmail = "", onSignOut }) {
       const add = drafts.filter(d => !have.has(d.id));
       return add.length ? [...add, ...(list || [])] : list;
     });
-  }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [hydrated, dbOk]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Late fees: auto-apply once after data is ready (silent, never blocks load) ──
   const lateFeeRan = useRef(false);
@@ -27395,6 +27418,64 @@ export default function App({ authEmail = "", onSignOut }) {
       } catch (_) { /* best-effort — Budget → Bank still loads on demand */ }
     })();
   }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Website leads auto-import — once per open, owner only. Pulls new quote-form submissions
+  // from the marketing site's Supabase `leads` table (api/leads-sync) into the in-app funnel
+  // (sps_leads → Comms → Leads). Loss-proof two-phase: a fetched row is merged (deduped by srcId)
+  // this open, and only ACKNOWLEDGED when it's present in the SERVER-CONFIRMED sps_leads row —
+  // a merge that never persisted can't mark the website row imported. Nothing is lost or doubled.
+  const _leadSyncRef = useRef(false);
+  useEffect(() => {
+    if (!hydrated || !dbOk || _leadSyncRef.current) return;
+    if (!currentUser || currentUser.role !== "owner") return;
+    _leadSyncRef.current = true;
+    (async () => {
+      try {
+        const r = await fetch(`${PROD_URL}/api/leads-sync`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: "{}" });
+        if (!r.ok) return; // ships dark until the bridge env vars are set (501) — silent
+        const d = await r.json().catch(() => ({}));
+        const rows = Array.isArray(d.leads) ? d.leads : [];
+        if (!rows.length) return;
+        const have = new Set((leads || []).map(l => l && l.srcId).filter(Boolean));
+        const fresh = rows.filter(row => row && row.id && !have.has(row.id));
+        if (fresh.length) {
+          const mapped = fresh.map(row => {
+            const at = row.created_at || new Date().toISOString();
+            return {
+              ...BLANK_LEAD,
+              id: `lead_w${row.id}`, srcId: row.id, source: "website", sourceDetail: row.source || "",
+              name: row.name || "", phone: row.phone || "", email: row.email || "",
+              service: row.service || "", message: row.message || "",
+              photos: Array.isArray(row.photos) ? row.photos : [], // the form uploads photo URLs now — carry them
+              mappedDivision: leadDivisionFromService(row.service),
+              status: "new", createdAt: at, updatedAt: at,
+              timeline: [{ at, by: "system", kind: "captured", text: `Website form${row.source ? ` (${row.source})` : ""}` }],
+            };
+          }).reverse(); // rows arrive oldest-first → newest ends up on top
+          setLeads(ls => {
+            const cur = ls || [];
+            const haveNow = new Set(cur.map(l => l && l.srcId).filter(Boolean));
+            const add = mapped.filter(m => !haveNow.has(m.srcId));
+            return add.length ? [...add, ...cur] : cur;
+          });
+        }
+        // Acknowledge ONLY rows present in the SERVER-CONFIRMED sps_leads value — not the local
+        // cache (which can serve a queued write that never reached the server). On any read
+        // failure, skip the ack entirely: rows simply re-import next open and dedupe.
+        let confirmed = null;
+        try {
+          const { data } = await supabase.from("app_state").select("value").eq("key", "sps_leads").maybeSingle();
+          const v = data && data.value;
+          const arr = typeof v === "string" ? JSON.parse(v) : (Array.isArray(v) ? v : []);
+          confirmed = new Set((Array.isArray(arr) ? arr : []).map(l => l && l.srcId).filter(Boolean));
+        } catch (_) { confirmed = null; }
+        const ackIds = confirmed ? rows.map(row => row.id).filter(id => id && confirmed.has(id)) : [];
+        if (ackIds.length) {
+          await fetch(`${PROD_URL}/api/leads-sync`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ imported: ackIds }) }).catch(() => {});
+        }
+      } catch (_) { /* best-effort — leads stay safe in the website table until imported */ }
+    })();
+  }, [hydrated, currentUser, dbOk]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleQBSync = (qbInvoices, qbCustomers) => {
     // Build client lookup maps from current clients snapshot
