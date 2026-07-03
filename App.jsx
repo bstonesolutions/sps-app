@@ -28118,20 +28118,29 @@ export default function App({ authEmail = "", onSignOut }) {
   // dead-end for an authenticated owner. An empty/failed/slow team read fails toward RETRY,
   // not toward lockout.
   if (!currentUser) {
+    // Branded splash color for the transient gate states — same look as the boot splash, so the
+    // whole sign-in path is ONE continuous branded screen (these were bare grey pages).
+    const gateBrand = (branding.accentColor && branding.accentColor.trim()) ? branding.accentColor : T.primary;
+    const gateSplash = (branding.splashBgColor && branding.splashBgColor.trim()) ? branding.splashBgColor : gateBrand;
     // 1) Team not loaded yet — still loading OR the read failed (ltm stays false on a thrown
     //    read). Retry, never deny.
     if (!ltm) return (
-      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: fontStack, background: T.bg, color: T.text }}>
+      <div style={{ position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: fontStack, background: gateSplash, zIndex: 9998 }}>
         <div style={{ textAlign: "center", maxWidth: 340 }}>
-          <div style={{ width: 40, height: 40, border: `3px solid ${hexA(T.primary, 0.25)}`, borderTopColor: T.primary, borderRadius: "50%", margin: "0 auto 16px", animation: "spin 0.8s linear infinite" }} />
-          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 6 }}>Loading your account…</div>
-          <div style={{ fontSize: 13.5, color: T.textMuted, marginBottom: 18, lineHeight: 1.5 }}>Taking longer than usual? Tap retry — we'll re-check, never lock you out.</div>
-          <button onClick={() => window.location.reload()} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "12px 20px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Retry</button>
+          <div style={{ width: 26, height: 26, border: "2.5px solid rgba(255,255,255,0.3)", borderTopColor: "#fff", borderRadius: "50%", margin: "0 auto 16px", animation: "spin 0.9s linear infinite" }} />
+          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 6, color: "#fff" }}>Loading your account…</div>
+          <div style={{ fontSize: 13.5, color: "rgba(255,255,255,0.8)", marginBottom: 18, lineHeight: 1.5 }}>Taking longer than usual? Tap retry — we'll re-check, never lock you out.</div>
+          <button onClick={() => window.location.reload()} style={{ background: "rgba(255,255,255,0.16)", color: "#fff", border: "1.5px solid rgba(255,255,255,0.5)", borderRadius: 12, padding: "12px 20px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Retry</button>
         </div>
       </div>
     );
     // 2) Loaded but no emails assigned yet → the first sign-in claims the owner (effect above).
-    if (!anyEmail) return <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: fontStack, background: T.bg, color: T.textMuted, fontSize: 14 }}>Setting up your account…</div>;
+    if (!anyEmail) return (
+      <div style={{ position: "fixed", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16, background: gateSplash, zIndex: 9998, fontFamily: fontStack }}>
+        <div style={{ width: 22, height: 22, border: "2.5px solid rgba(255,255,255,0.3)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.9s linear infinite" }} />
+        <div style={{ color: "rgba(255,255,255,0.85)", fontSize: 13.5, fontWeight: 700, letterSpacing: "0.02em" }}>Setting up your account…</div>
+      </div>
+    );
     // 3) Loaded, emails exist, but this email isn't on the team. Show the message — but never
     //    a Sign-out-only dead-end: Retry (re-read) is the primary action so an owner whose
     //    record is mid-sync is never stranded.
