@@ -18431,12 +18431,13 @@ function SyncStatus({ T, branding, team, currentUserId, email = {} }) {
 
 // ── Leads (intake funnel) — the owner's pipeline of prospects → one-tap convert to client. ──
 // Owner-only (the nav entry is ownerOnly). Reads/writes the sps_leads app_state collection.
-function LeadsScreen({ leads, setLeads, clients, onConvert, vp = {} }) {
+function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, vp = {} }) {
   const { T } = useApp();
   const [filter, setFilter] = useState("active"); // active | all | <stage>
   const [selId, setSelId] = useState(null);
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState({ ...BLANK_LEAD });
+  const [dupModal, setDupModal] = useState(null); // { lead, dup } — convert hit an existing client
 
   const norm = (s) => String(s || "").replace(/[^\d]/g, "").slice(-10);
   const lcs = (s) => String(s || "").trim().toLowerCase();
@@ -18460,7 +18461,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, vp = {} }) {
 
   const convert = (lead) => {
     const dup = dupClient(lead);
-    if (dup && !confirm(`${lead.name || "This lead"} matches an existing client (${dup.name}). Convert anyway as a new client?`)) return;
+    if (dup) { setDupModal({ lead, dup }); return; } // matched an existing client → offer LINK, not a blind duplicate
     onConvert(lead); setSelId(null);
   };
   const addManual = () => {
@@ -18521,11 +18522,31 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, vp = {} }) {
               <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>From {LEAD_SOURCE_LABEL[sel.source] || sel.source}{sel.sourceDetail ? ` · ${sel.sourceDetail}` : ""} · {ago(sel.createdAt)}</div>
             </div>
             {(() => { const dup = dupClient(sel); return dup ? <div style={{ fontSize: 12, fontWeight: 700, color: "#B45309", background: hexA("#F59E0B", 0.12), border: `1px solid ${hexA("#F59E0B", 0.4)}`, borderRadius: 10, padding: "9px 12px" }}>Possible match: existing client <b>{dup.name}</b>. Check before converting.</div> : null; })()}
+            {/* Their message — the reason they reached out — leads the popup, full-strength text. */}
+            {sel.message && (
+              <div style={{ background: hexA(T.primary, 0.05), border: `1px solid ${hexA(T.primary, 0.15)}`, borderLeft: `3px solid ${T.primary}`, borderRadius: 12, padding: "13px 15px" }}>
+                <div style={{ ...lbl, marginBottom: 6 }}>Their message</div>
+                <div style={{ fontSize: 15, fontWeight: 500, color: T.text, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{sel.message}</div>
+              </div>
+            )}
+            {/* Photos / video they attached on the website form */}
+            {Array.isArray(sel.photos) && sel.photos.length > 0 && (
+              <div>
+                <label style={lbl}>Photos & video ({sel.photos.length})</label>
+                <div style={{ display: "grid", gridTemplateColumns: sel.photos.length === 1 ? "1fr" : "1fr 1fr", gap: 8 }}>
+                  {sel.photos.map((u, i) => /\.(mp4|mov|webm|m4v)(\?|$)/i.test(String(u)) ? (
+                    <video key={i} src={u} controls playsInline preload="metadata" style={{ width: "100%", maxHeight: 260, borderRadius: 12, border: `1px solid ${T.border}`, background: "#000", objectFit: "cover" }} />
+                  ) : (
+                    <img key={i} src={u} alt="Lead attachment" loading="lazy" onClick={() => openInAppBrowser(u)} onError={e => { e.target.style.display = "none"; }}
+                      style={{ width: "100%", height: sel.photos.length === 1 ? "auto" : 150, maxHeight: 320, objectFit: "cover", borderRadius: 12, border: `1px solid ${T.border}`, cursor: "pointer", background: T.surfaceAlt }} />
+                  ))}
+                </div>
+              </div>
+            )}
             <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
               {sel.phone && <div style={{ fontSize: 13.5 }}><span style={{ color: T.textMuted }}>Phone: </span><a href={`tel:${sel.phone}`} style={{ color: T.primary, fontWeight: 700, textDecoration: "none" }}>{sel.phone}</a></div>}
               {sel.email && <div style={{ fontSize: 13.5 }}><span style={{ color: T.textMuted }}>Email: </span><a href={`mailto:${sel.email}`} style={{ color: T.primary, fontWeight: 700, textDecoration: "none" }}>{sel.email}</a></div>}
               {sel.service && <div style={{ fontSize: 13.5, color: T.text }}><span style={{ color: T.textMuted }}>Service: </span>{sel.service}</div>}
-              {sel.message && <div style={{ fontSize: 13.5, color: T.text, lineHeight: 1.5, background: T.surfaceAlt, borderRadius: 10, padding: "10px 12px" }}>{sel.message}</div>}
             </div>
             <div>
               <label style={lbl}>Stage</label>
@@ -18551,6 +18572,21 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, vp = {} }) {
             <div><label style={lbl}>Service interest</label><input value={form.service} onChange={e => setForm(f => ({ ...f, service: e.target.value }))} style={field} placeholder="e.g. Pond cleaning" /></div>
             <div><label style={lbl}>Notes</label><textarea rows={3} value={form.message} onChange={e => setForm(f => ({ ...f, message: e.target.value }))} style={{ ...field, resize: "vertical" }} placeholder="What do they need?" /></div>
             <Btn block lg onClick={addManual} style={{ opacity: (form.name || form.phone || form.email) ? 1 : 0.5, pointerEvents: (form.name || form.phone || form.email) ? "auto" : "none" }}>Add lead</Btn>
+          </div>
+        </Modal>
+      )}
+
+      {dupModal && (
+        <Modal title="Already a client?" onClose={() => setDupModal(null)} maxWidth={440}>
+          <div style={{ padding: "4px 18px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ fontSize: 14, color: T.text, lineHeight: 1.55 }}>
+              <b>{dupModal.lead.name || "This lead"}</b> matches your existing client <b>{dupModal.dup.name}</b>
+              {dupModal.dup.phone ? <span style={{ color: T.textMuted }}> · {dupModal.dup.phone}</span> : null}.
+            </div>
+            <div style={{ fontSize: 12.5, color: T.textMuted, lineHeight: 1.5 }}>Link the lead to them (no duplicate account), or create a separate new client anyway.</div>
+            <Btn block onClick={() => { if (onLink) onLink(dupModal.lead, dupModal.dup); setDupModal(null); setSelId(null); }}>Link to {dupModal.dup.name}</Btn>
+            <Btn block variant="outline" onClick={() => { onConvert(dupModal.lead); setDupModal(null); setSelId(null); }}>Create a new client anyway</Btn>
+            <Btn block variant="ghost" onClick={() => setDupModal(null)}>Cancel</Btn>
           </div>
         </Modal>
       )}
@@ -20455,7 +20491,7 @@ function OwnerDigestSettings({ scheduleCfg, setScheduleCfg, email, branding, T }
   );
 }
 
-function CommsScreen({ initialSection, perms = {}, currentUser, schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, reminderLog, setReminderLog, leads, setLeads, onConvertLead, vp = {} }) {
+function CommsScreen({ initialSection, perms = {}, currentUser, schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, reminderLog, setReminderLog, leads, setLeads, onConvertLead, onLinkLead, vp = {} }) {
   const { T } = useApp();
   const isAdmin = !!perms.isAdmin;
   // Only the sections this viewer is allowed to see (owner sees all). The old Messages + Reminders
@@ -20506,7 +20542,7 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
       <div style={{ paddingBottom: 90 }}>
         {section === "messages" && CAN.messages && <div style={{ padding: "0 16px" }}><MessagesScreen clients={clients} currentUser={currentUser} T={T} /></div>}
         {section === "reminders" && CAN.reminders && <div style={{ padding: "0 16px" }}><RemindersScreen schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} /></div>}
-        {section === "inbox" && CAN.inbox && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={onConvertLead} vp={vp} />}
+        {section === "inbox" && CAN.inbox && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={onConvertLead} onLink={onLinkLead} vp={vp} />}
         {section === "settings" && CAN.settings && <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 18 }}><OwnerDigestSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} branding={branding} T={T} /><ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /><CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /></div>}
         {section === "broadcast" && CAN.broadcast && <BroadcastSection clients={clients} invoices={invoices} email={email} branding={branding} T={T} />}
         {section === "log" && CAN.log && soon("Activity log", "A running feed of every reminder, broadcast, and reply that's gone out — with who, when, and the channel — lives here.")}
@@ -27706,17 +27742,29 @@ export default function App({ authEmail = "", onSignOut }) {
       history: form.history || [],
     };
     setClients(cs => [...cs, newClient]);
+    // Saving a lead-conversion: stamp the lead won + linked, so the funnel keeps the record.
+    if (convertLead) {
+      const leadId = convertLead.id;
+      setLeads(ls => (ls || []).map(l => l.id === leadId ? { ...l, status: "won", convertedClientId: newClient.id, updatedAt: new Date().toISOString(), timeline: [...(l.timeline || []), { at: new Date().toISOString(), by: "owner", kind: "converted", text: `Converted to client ${newClient.name || ""}`.trim() }] } : l));
+      setConvertLead(null);
+    }
     setAdding(false);
   };
 
-  // Convert a lead → a real client (the funnel's payoff). Builds a BLANK_CLIENT-shaped form, creates the
-  // client, and stamps the lead won + convertedClientId (the lead is retained for the record).
+  // Convert a lead → a real client (the funnel's payoff). Opens the FULL Add-Client form prefilled
+  // from the lead (name/contact/address/division/referral) so the owner picks services, plan, and
+  // rate exactly like any new client — nothing is created until they save. The lead is stamped
+  // won + convertedClientId in handleSaveNewClient above.
+  const [convertLead, setConvertLead] = useState(null);
   const handleConvertLead = (lead) => {
-    const id = Date.now();
-    const newClient = { ...leadToClientForm(lead), id, status: "Active", balance: "$0.00", equipment: [], history: [] };
-    setClients(cs => [...cs, newClient]);
-    setLeads(ls => (ls || []).map(l => l.id === lead.id ? { ...l, status: "won", convertedClientId: id, updatedAt: new Date().toISOString(), timeline: [...(l.timeline || []), { at: new Date().toISOString(), by: "owner", kind: "converted", text: "Converted to client" }] } : l));
-    return id;
+    setConvertLead(lead);
+    handleNav("clients");
+    setAdding(true); // after handleNav (which resets adding)
+  };
+  // Link a lead to an EXISTING client instead of creating a duplicate — marks it won and points
+  // convertedClientId at the match. The client record itself is untouched.
+  const handleLinkLead = (lead, client) => {
+    setLeads(ls => (ls || []).map(l => l.id === lead.id ? { ...l, status: "won", convertedClientId: client.id, updatedAt: new Date().toISOString(), timeline: [...(l.timeline || []), { at: new Date().toISOString(), by: "owner", kind: "converted", text: `Linked to existing client ${client.name || ""}`.trim() }] } : l));
   };
 
   const handleImportClients = async (imported) => { await snapshotState("Before client import"); setClients(cs => [...cs, ...imported]); };
@@ -28264,18 +28312,18 @@ export default function App({ authEmail = "", onSignOut }) {
   const pageBody = (
     <>
       {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onOpenAlert={handleOpenAlert} onOpenStop={handleOpenStop} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} completedSids={completedSids} budget={budget} vp={vp} />}
-      {page === "clients" && adding && <ClientEditForm client={BLANK_CLIENT} title="Add Client" onSave={handleSaveNewClient} onCancel={() => setAdding(false)} />}
+      {page === "clients" && adding && <ClientEditForm client={convertLead ? leadToClientForm(convertLead) : BLANK_CLIENT} title={convertLead ? "Convert Lead to Client" : "Add Client"} onSave={handleSaveNewClient} onCancel={() => { setAdding(false); setConvertLead(null); }} />}
       {page === "clients" && !adding && (vp.isDesktop ? (
         clientsView === "table" ? (
           /* Desktop Table view: full-width dense, sortable clients table (row → split + detail) */
           <div style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: "22px 24px" }}>
-            <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} view="table" onSetView={setClientsView} selectedId={selectedClient?.id} onSelect={(c) => { handleClientSelect(c); setClientsView("split"); }} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />
+            <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} view="table" onSetView={setClientsView} selectedId={selectedClient?.id} onSelect={(c) => { handleClientSelect(c); setClientsView("split"); }} onAdd={() => { setConvertLead(null); setAdding(true); }} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />
           </div>
         ) : (
         /* Desktop master-detail: client list (left) + selected client's record (right) */
         <div style={{ flex: 1, minWidth: 0, display: "flex", height: "100%", overflow: "hidden" }}>
           <div style={{ width: vp.isTablet ? 320 : 420, boxSizing: "border-box", flexShrink: 0, borderRight: `1px solid ${T.border}`, overflowY: "auto", padding: vp.isTablet ? "18px 14px" : "22px 20px" }}>
-            <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} view="split" onSetView={setClientsView} selectedId={selectedClient?.id} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />
+            <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} view="split" onSetView={setClientsView} selectedId={selectedClient?.id} onSelect={handleClientSelect} onAdd={() => { setConvertLead(null); setAdding(true); }} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />
           </div>
           <div style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: vp.isTablet ? "20px 16px" : "24px 30px" }}>
             {selectedClient
@@ -28292,7 +28340,7 @@ export default function App({ authEmail = "", onSignOut }) {
         )
       ) : (
         <>
-          {!selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
+          {!selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => { setConvertLead(null); setAdding(true); }} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
           {selectedClient && <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>}
         </>
       ))}
@@ -28302,7 +28350,7 @@ export default function App({ authEmail = "", onSignOut }) {
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} isAdmin={perms.isAdmin} />}
       {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
       {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
-      {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : undefined} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} vp={vp} />}
+      {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : undefined} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} onLinkLead={handleLinkLead} vp={vp} />}
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
       {page === "duplicates" && perms.canImport && <DuplicatesScreen clients={clients} invoices={invoices} schedule={schedule} onMerge={handleMergeClients} onGoToClients={() => handleNav("clients")} />}
