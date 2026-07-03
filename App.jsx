@@ -2386,7 +2386,8 @@ const NOTIFY_EVENTS = [
   { key: "payment_received", label: "Payment received",    hint: "An invoice is marked paid" },
   // pushOnly events have no email leg (their emails/texts are managed by their own features) —
   // the settings UI renders only the Push toggle for these.
-  { key: "new_lead",         label: "New website lead",    hint: "A quote request lands in Comms → Leads", pushOnly: true },
+  { key: "new_lead",         label: "New lead",            hint: "A quote request arrives — website form or work email", pushOnly: true },
+  { key: "bill_received",    label: "Bill received",       hint: "A bill or invoice lands in your work email", pushOnly: true },
   { key: "stop_completed",   label: "Stop completed",      hint: "A tech finishes a service stop", pushOnly: true },
   { key: "office_alert",     label: "Tech note for the office", hint: "A tech flags something from the field", pushOnly: true },
   { key: "reports",          label: "Reports & automation summaries", hint: "Digest emails, the money plan, auto-text run summaries", pushOnly: true },
@@ -2401,6 +2402,7 @@ const DEFAULT_NOTIFY = {
     client_message:   { inApp: true, email: false, push: true },
     payment_received: { inApp: true, email: false, push: true },
     new_lead:         { push: true },
+    bill_received:    { push: true },
     stop_completed:   { push: true },
     office_alert:     { push: true },
     reports:          { push: true },
@@ -20803,6 +20805,143 @@ function OwnerDigestSettings({ scheduleCfg, setScheduleCfg, email, branding, T }
   );
 }
 
+// Comms → Email: the owner's WORK inbox (brandon@… forwarded through in.spsway.app). AI
+// triages every email — Lead / Bill / Client / Other — leads flow into Comms → Leads
+// automatically. Owner-only: rows come from the owner-gated api/inbox (sps_inbox has no
+// client-readable policy at all — this is private mail).
+function EmailInboxSection({ leads, setLeads }) {
+  const { T } = useApp();
+  const [rows, setRows] = useState(null);
+  const [err, setErr] = useState("");
+  const [filter, setFilter] = useState("all"); // all | unread | lead | bill | client | other
+  const [openRow, setOpenRow] = useState(null);
+  const load = async () => {
+    setErr("");
+    try {
+      const r = await fetch(`${PROD_URL}/api/inbox?limit=100`, { headers: await authHeaders() });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { setErr(d.error || `Error ${r.status}`); setRows([]); return; }
+      setRows(d.rows || []);
+    } catch (_) { setErr("Couldn't reach the server."); setRows([]); }
+  };
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const KIND = { lead: { label: "Lead", color: "#16a34a" }, bill: { label: "Bill", color: "#b45309" }, client: { label: "Client", color: "#2563eb" }, other: { label: "Other", color: null } };
+  const list = (rows || []).filter(r => filter === "all" ? true : filter === "unread" ? !r.read : r.kind === filter);
+  const unread = (rows || []).filter(r => !r.read).length;
+  const markRead = async (ids) => {
+    setRows(rs => (rs || []).map(r => ids.includes(r.id) ? { ...r, read: true } : r));
+    try { await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "markRead", ids }) }); } catch (_) {}
+  };
+  const addToLeads = async (row) => {
+    const at = row.created_at || new Date().toISOString();
+    const L = (row.ai && row.ai.lead) || {};
+    const lead = {
+      ...BLANK_LEAD,
+      id: `lead_e${row.id}`, srcId: `em_${row.id}`, source: "email", sourceDetail: row.from_email || "",
+      name: L.name || row.from_name || row.from_email || "", phone: L.phone || "", email: L.email || row.from_email || "",
+      service: L.service || "", message: L.message || `${row.subject ? `${row.subject} — ` : ""}${(row.body_text || "").slice(0, 600)}`,
+      mappedDivision: leadDivisionFromService(L.service),
+      status: "new", createdAt: at, updatedAt: at,
+      timeline: [{ at, by: "owner", kind: "captured", text: "Added from work email" }],
+    };
+    setLeads(ls => {
+      const cur = ls || [];
+      if (cur.some(l => l && l.srcId === lead.srcId)) return cur;
+      return [lead, ...cur];
+    });
+    setRows(rs => (rs || []).map(r => r.id === row.id ? { ...r, lead_id: lead.id, kind: "lead" } : r));
+    setOpenRow(o => (o && o.id === row.id ? { ...o, lead_id: lead.id, kind: "lead" } : o));
+    // Persist the reclassification, then ack — but ONLY after the lead is in the SERVER-
+    // CONFIRMED sps_leads (same two-phase as the auto-import; if the save hasn't flushed yet,
+    // the ack simply happens on the next app open — nothing can be lost either way).
+    try { await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "setKind", id: row.id, kind: "lead" }) }); } catch (_) {}
+    try {
+      await new Promise(r2 => setTimeout(r2, 1500)); // give the debounced sps_leads save a beat to flush
+      const { data } = await supabase.from("app_state").select("value").eq("key", "sps_leads").maybeSingle();
+      const v = data && data.value;
+      const arr = typeof v === "string" ? JSON.parse(v) : (Array.isArray(v) ? v : []);
+      if ((Array.isArray(arr) ? arr : []).some(l => l && l.srcId === lead.srcId)) {
+        await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "markImported", id: row.id, leadId: lead.id }) });
+      }
+    } catch (_) { /* auto-import acks it next open */ }
+  };
+  const fmtWhen = (iso) => {
+    try { const d = new Date(iso); return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " · " + d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }); } catch (_) { return ""; }
+  };
+  const chip = (id, label) => (
+    <button key={id} onClick={() => setFilter(id)} style={{ padding: "7px 13px", borderRadius: 100, border: `1.5px solid ${filter === id ? T.primary : T.border}`, background: filter === id ? hexA(T.primary, 0.08) : T.surface, color: filter === id ? T.primary : T.textMuted, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+  );
+  const badge = (kind) => {
+    const k = KIND[kind] || KIND.other;
+    return <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", textTransform: "uppercase", color: k.color || T.textMuted, background: k.color ? hexA(k.color, 0.1) : T.surfaceAlt, padding: "2px 8px", borderRadius: 100, flexShrink: 0 }}>{k.label}</span>;
+  };
+  const setupPending = err && /hasn't been created|sps_inbox/i.test(err);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        {chip("all", "All")}{chip("unread", `Unread${unread ? ` · ${unread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
+        <div style={{ flex: 1 }} />
+        <Btn variant="ghost" sm onClick={load}>Refresh</Btn>
+      </div>
+      {rows === null && <div style={{ textAlign: "center", padding: 40, color: T.textMuted, fontSize: 13 }}>Loading your inbox…</div>}
+      {setupPending && (
+        <div style={{ textAlign: "center", padding: "44px 24px", color: T.textMuted }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginBottom: 6 }}>Almost wired up</div>
+          <div style={{ fontSize: 13, lineHeight: 1.6, maxWidth: 400, margin: "0 auto" }}>The inbox table isn't created yet — finish the one-time setup (SQL + Gmail forwarding) and your work email starts flowing in here, AI-sorted into Leads, Bills, and the rest.</div>
+        </div>
+      )}
+      {err && !setupPending && <div style={{ fontSize: 13, color: T.warning, textAlign: "center", padding: 20 }}>{err}</div>}
+      {rows !== null && !err && list.length === 0 && (
+        <div style={{ textAlign: "center", padding: "44px 24px", color: T.textMuted }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginBottom: 6 }}>No email here yet</div>
+          <div style={{ fontSize: 13, lineHeight: 1.55, maxWidth: 380, margin: "0 auto" }}>Mail forwarded from your work address lands here — AI tags each one as a Lead, Bill, or client message, and leads drop straight into Comms → Leads.</div>
+        </div>
+      )}
+      {list.map(r => (
+        <div key={r.id} onClick={() => { setOpenRow(r); if (!r.read) markRead([r.id]); }}
+          style={{ border: `1px solid ${T.border}`, borderRadius: 14, background: T.surface, padding: "12px 14px", cursor: "pointer", opacity: r.read ? 0.82 : 1 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {!r.read && <span style={{ width: 8, height: 8, borderRadius: "50%", background: T.primary, flexShrink: 0 }} />}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 13.5, fontWeight: r.read ? 600 : 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.from_name || r.from_email}</span>
+                {badge(r.kind)}
+                {r.lead_id && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#16a34a" }}>→ in Leads</span>}
+              </div>
+              <div style={{ fontSize: 12.5, color: T.text, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontWeight: r.read ? 400 : 700 }}>{r.subject || "(no subject)"}</div>
+              <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{(r.ai && r.ai.summary) || (r.body_text || "").slice(0, 120)}</div>
+            </div>
+            <div style={{ fontSize: 11.5, color: T.textMuted, flexShrink: 0 }}>{fmtWhen(r.created_at)}</div>
+          </div>
+        </div>
+      ))}
+      {openRow && (
+        <Modal title={openRow.subject || "(no subject)"} onClose={() => setOpenRow(null)} maxWidth={560}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 13.5, fontWeight: 800, color: T.text }}>{openRow.from_name || openRow.from_email}</span>
+              <span style={{ fontSize: 12, color: T.textMuted }}>{openRow.from_email}</span>
+              {badge(openRow.kind)}
+              <span style={{ fontSize: 11.5, color: T.textMuted, marginLeft: "auto" }}>{fmtWhen(openRow.created_at)}</span>
+            </div>
+            {openRow.ai && openRow.ai.summary && (
+              <div style={{ fontSize: 12.5, color: T.textMuted, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 12px" }}>✨ {openRow.ai.summary}</div>
+            )}
+            <div style={{ fontSize: 13.5, color: T.text, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: "45vh", overflowY: "auto", border: `1px solid ${T.border}`, borderRadius: 12, padding: "12px 14px", background: T.surface }}>
+              {openRow.body_text || "(no text content)"}
+            </div>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              {!openRow.lead_id && <Btn variant="primary" sm onClick={() => addToLeads(openRow)}>➕ Add to Leads</Btn>}
+              {openRow.lead_id && <span style={{ fontSize: 12.5, fontWeight: 700, color: "#16a34a", alignSelf: "center" }}>✓ In your Leads funnel</span>}
+              <Btn href={`mailto:${openRow.from_email}?subject=${encodeURIComponent(`Re: ${openRow.subject || ""}`)}`} variant="outline" sm>Reply by email</Btn>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 // Comms → Log: the full outbound history — every text and email the app, the automations,
 // the report crons, and the lead webhook have sent, WITH its origin (who/what triggered it)
 // and real recipient. Reads sps_comms_log (authenticated RLS read already in place). Rows
@@ -20910,10 +21049,12 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
     broadcast: isAdmin || !!perms.commsBroadcast,
     settings:  isAdmin || !!perms.commsSettings || !!perms.editNotifications, // editNotifications keeps its old access (identity + Test Mode + alerts moved here)
     log:       isAdmin || !!perms.commsLog,
+    email:     isAdmin, // the owner's private work inbox — owner only, no per-staff grant
   };
   const SECTIONS = [
     { id: "messages", label: "Messages", icon: "message" },
     { id: "inbox", label: "Leads", icon: "funnel" },
+    { id: "email", label: "Email", icon: "mail" },
     { id: "reminders", label: "Reminders", icon: "calendar" },
     { id: "broadcast", label: "Broadcast", icon: "mail" },
     { id: "settings", label: "Settings", icon: "sliders" },
@@ -20964,6 +21105,7 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
           {(perms.isAdmin || perms.commsSettings) && <CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />}
         </div>}
         {section === "broadcast" && CAN.broadcast && <BroadcastSection clients={clients} invoices={invoices} email={email} branding={branding} T={T} />}
+        {section === "email" && CAN.email && <div style={{ padding: "0 16px" }}><EmailInboxSection leads={leads} setLeads={setLeads} /></div>}
         {section === "log" && CAN.log && <div style={{ padding: "0 16px" }}><LogsScreen clients={clients} showOwnerRows={!!perms.isAdmin} /></div>}
       </div>
     </div>
@@ -27987,6 +28129,61 @@ export default function App({ authEmail = "", onSignOut }) {
           await fetch(`${PROD_URL}/api/leads-sync`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ imported: ackIds }) }).catch(() => {});
         }
       } catch (_) { /* best-effort — leads stay safe in the website table until imported */ }
+    })();
+  }, [hydrated, currentUser, dbOk]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Work-email leads — the same loss-proof two-phase as the website bridge above: AI-triaged
+  // "lead" emails (sps_inbox, via the owner-only api/inbox) merge into sps_leads deduped by
+  // srcId, and are acked (markImported) ONLY once present in the SERVER-CONFIRMED sps_leads.
+  const _emailLeadSyncRef = useRef(false);
+  useEffect(() => {
+    if (!hydrated || !dbOk || _emailLeadSyncRef.current) return;
+    if (!currentUser || currentUser.role !== "owner") return;
+    _emailLeadSyncRef.current = true;
+    (async () => {
+      try {
+        const r = await fetch(`${PROD_URL}/api/inbox?kind=lead&unimported=1&limit=50`, { headers: await authHeaders() });
+        if (!r.ok) return; // ships dark until the inbox table/webhook exist — silent
+        const d = await r.json().catch(() => ({}));
+        const rows = Array.isArray(d.rows) ? d.rows : [];
+        if (!rows.length) return;
+        const have = new Set((leads || []).map(l => l && l.srcId).filter(Boolean));
+        const fresh = rows.filter(row => row && row.id && !have.has(`em_${row.id}`));
+        if (fresh.length) {
+          const mapped = fresh.map(row => {
+            const at = row.created_at || new Date().toISOString();
+            const L = (row.ai && row.ai.lead) || {};
+            return {
+              ...BLANK_LEAD,
+              id: `lead_e${row.id}`, srcId: `em_${row.id}`, source: "email", sourceDetail: row.from_email || "",
+              name: L.name || row.from_name || row.from_email || "", phone: L.phone || "", email: L.email || row.from_email || "",
+              service: L.service || "", message: L.message || `${row.subject ? `${row.subject} — ` : ""}${(row.body_text || "").slice(0, 600)}`,
+              mappedDivision: leadDivisionFromService(L.service),
+              status: "new", createdAt: at, updatedAt: at,
+              timeline: [{ at, by: "system", kind: "captured", text: `Work email${row.ai && row.ai.summary ? ` — ${row.ai.summary}` : ""}` }],
+            };
+          }).reverse();
+          setLeads(ls => {
+            const cur = ls || [];
+            const haveNow = new Set(cur.map(l => l && l.srcId).filter(Boolean));
+            const add = mapped.filter(m => !haveNow.has(m.srcId));
+            return add.length ? [...add, ...cur] : cur;
+          });
+        }
+        let confirmed = null;
+        try {
+          const { data } = await supabase.from("app_state").select("value").eq("key", "sps_leads").maybeSingle();
+          const v = data && data.value;
+          const arr = typeof v === "string" ? JSON.parse(v) : (Array.isArray(v) ? v : []);
+          confirmed = new Set((Array.isArray(arr) ? arr : []).map(l => l && l.srcId).filter(Boolean));
+        } catch (_) { confirmed = null; }
+        if (confirmed) {
+          for (const row of rows) {
+            if (!confirmed.has(`em_${row.id}`)) continue;
+            await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "markImported", id: row.id, leadId: `lead_e${row.id}` }) }).catch(() => {});
+          }
+        }
+      } catch (_) { /* best-effort — emails stay in sps_inbox until imported */ }
     })();
   }, [hydrated, currentUser, dbOk]); // eslint-disable-line react-hooks/exhaustive-deps
 

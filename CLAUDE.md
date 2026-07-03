@@ -32,6 +32,7 @@ Serverless functions under `api/` read these. None are committed; missing ones m
 - `ANTHROPIC_API_KEY` — **the ONLY thing needed to turn on the AI features.** Powers the AI helpers in `api/_ai.js` → `api/ai-summarize.js` (client visit recap) and `api/ai-water-diagnosis.js` (water-test analysis + treatment/upsell suggestions), surfaced on the stop-completion screen's "✨ AI assist". Until it's set, the AI buttons show a clean "AI isn't connected yet — add your key" message and nothing else breaks. Get it at console.anthropic.com. Optional `ANTHROPIC_MODEL` overrides the default `claude-sonnet-4-6`.
 - `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_PRIVATE_KEY` — **native push notifications (Build 27+).** From an APNs Auth Key (.p8) created at developer.apple.com → Certificates, Identifiers & Profiles → Keys (enable "Apple Push Notifications service"): `APNS_KEY_ID` = the key's 10-char id, `APNS_TEAM_ID` = `JASPHFVN38`, `APNS_PRIVATE_KEY` = the .p8 file contents (PEM — newlines preserved or `\n`-escaped both work). Optional: `APNS_BUNDLE_ID` (defaults to `com.stonepropertysolutions.app`) and `APNS_HOST` (defaults to production `https://api.push.apple.com`; set `https://api.sandbox.push.apple.com` ONLY while testing an Xcode debug build — debug builds mint sandbox tokens and each host rejects the other's with BadDeviceToken). Ships dark until set: `api/_push.js` no-ops, endpoints report `configured:{apns:false}`, nothing breaks. Requires the `sps_push_tokens` table (SQL below). Safety: Test Mode restricts ALL pushes to owner-role devices; owner pushes honor the per-event Push toggles in Comms → Settings.
 - `MSG_WEBHOOK_SECRET` — Bearer secret for `api/message-intake.js` (the sps_messages INSERT webhook that turns chat messages into pushes: client → owner "New message", staff → client "New message / New invoice / Service report"). Falls back to `LEAD_WEBHOOK_SECRET` so one secret can serve both intakes. Wire-up SQL below.
+- `INBOUND_WEBHOOK_SECRET` — the work-email funnel (`api/inbound-email.js`). The owner's Gmail (brandon@stonepropertysolutions.com, Google Workspace — its MX is NEVER touched) auto-forwards to `<anything>@in.spsway.app`; Resend Inbound (GA, all plans; MX on the subdomain from the Resend dashboard → Domains) receives it and fires `email.received` at `https://spsway.app/api/inbound-email?key=<this secret>`. The webhook payload is metadata-only — the endpoint fetches the full body via `GET api.resend.com/emails/receiving/{id}` with `RESEND_API_KEY`, has Claude triage it (lead|bill|client|other; existing-client match by from_email wins over AI; AI down → "other"), stores to `sps_inbox` (SQL below), pushes the owner (new_lead / bill_received toggles), and the APP imports AI-leads into sps_leads two-phase (server never writes sps_leads — single-writer rule). Owner reads mail ONLY via `api/inbox.js` (requireOwner; sps_inbox has NO client-readable policy — private mail). Resend retains mail ~30 days; sps_inbox is the system of record.
 
 Optional: `SUPABASE_URL`, `RESEND_FROM`, `PUBLIC_APP_URL`, `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `ANTHROPIC_MODEL`.
 
@@ -130,6 +131,28 @@ CREATE INDEX IF NOT EXISTS sps_push_tokens_role_idx ON public.sps_push_tokens(ro
 CREATE INDEX IF NOT EXISTS sps_push_tokens_user_idx ON public.sps_push_tokens(role, user_key);
 ALTER TABLE public.sps_push_tokens ENABLE ROW LEVEL SECURITY;
 -- No policies: service-role only, same posture as qb_tokens/plaid_tokens.
+
+-- Work-email inbox (Comms → Email) — one row per received email, upserted by api/inbound-email.js
+-- with the SERVICE_ROLE key (?on_conflict=id = the Resend email id, so webhook retries collapse).
+-- NO RLS POLICIES AT ALL — this is the OWNER'S PRIVATE MAIL; the app reads it exclusively through
+-- the owner-gated api/inbox.js (requireOwner), never the shared supabase client.
+CREATE TABLE IF NOT EXISTS public.sps_inbox (
+  id          text PRIMARY KEY,           -- Resend received-email id
+  from_name   text NOT NULL DEFAULT '',
+  from_email  text NOT NULL DEFAULT '',
+  subject     text NOT NULL DEFAULT '',
+  body_text   text NOT NULL DEFAULT '',   -- plain text (or stripped HTML), capped at 20k
+  message_id  text NOT NULL DEFAULT '',   -- RFC Message-ID for threading in-app replies (In-Reply-To)
+  kind        text NOT NULL DEFAULT 'other',  -- lead | bill | client | other (AI triage; owner can reclassify)
+  ai          jsonb,                      -- {kind, confidence, summary, lead:{...}, bill:{...}} or {clientId,...}
+  lead_id     text NOT NULL DEFAULT '',   -- stamped when the app confirms the lead in sps_leads (two-phase ack)
+  read        boolean DEFAULT false,
+  replied     boolean DEFAULT false,      -- an in-app reply went out (api/inbox action:"reply")
+  created_at  timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS sps_inbox_kind_idx ON public.sps_inbox(kind, lead_id);
+ALTER TABLE public.sps_inbox ENABLE ROW LEVEL SECURITY;
+-- No policies on purpose: service-role only.
 
 -- Live staff location while clocked in (one row per staff member, upserted).
 CREATE TABLE IF NOT EXISTS public.staff_locations (
