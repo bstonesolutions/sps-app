@@ -75,7 +75,9 @@ export default async function handler(req, res) {
   // Same "from" resolution as the app's texts (api/send-sms): the configured Sending Identity
   // texting number first, then the server default — so this alert comes from the same line.
   const toNum = toE164(toPhone), fromNum = toE164(email.textingNumber) || toE164(QUO_FROM);
-  if (QUO_KEY && fromNum && toNum && toNum !== fromNum) {
+  if (!toNum) out.sms = { ok: false, skipped: "no owner cell set — add yours in Comms → Settings" };
+  else if (toNum === fromNum) out.sms = { ok: false, skipped: "owner cell matches the business line" };
+  else if (QUO_KEY && fromNum) {
     try {
       const r = await fetch("https://api.quo.com/v1/messages", {
         method: "POST", headers: { Authorization: QUO_KEY, "Content-Type": "application/json" },
@@ -86,12 +88,30 @@ export default async function handler(req, res) {
   }
   if (RESEND_KEY && /.+@.+\..+/.test(toEmail)) {
     const esc = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    // Photos/videos the lead attached (public bucket URLs) — images render inline; videos link out.
+    const media = (Array.isArray(rec.photos) ? rec.photos : []).filter((u) => typeof u === "string" && /^https:\/\//i.test(u)).slice(0, 6);
+    const isVideo = (u) => /\.(mp4|mov|webm|m4v)(\?|$)/i.test(u);
+    const mediaHtml = media.length ? `
+      <div style="margin-top:14px;">
+        ${media.filter((u) => !isVideo(u)).map((u) => `<img src="${esc(u)}" width="100%" style="display:block;max-width:494px;border-radius:12px;border:1px solid #e8e5e0;margin:0 0 10px;" alt="Lead photo" />`).join("")}
+        ${media.filter(isVideo).map((u) => `<a href="${esc(u)}" style="display:block;font-size:13px;font-weight:700;color:#B81D24;margin:0 0 8px;">▶ View attached video</a>`).join("")}
+      </div>` : "";
+    // One-tap replies + the app button (deep-links straight to Comms → Leads).
+    const quick = [
+      phone ? `<a href="tel:${esc(phone)}" style="color:#B81D24;font-weight:700;text-decoration:none;">📞 Call</a>` : "",
+      phone ? `<a href="sms:${esc(phone)}" style="color:#B81D24;font-weight:700;text-decoration:none;">💬 Text</a>` : "",
+      emailAddr ? `<a href="mailto:${esc(emailAddr)}" style="color:#B81D24;font-weight:700;text-decoration:none;">✉️ Reply</a>` : "",
+    ].filter(Boolean).join(" &nbsp;·&nbsp; ");
     const html = `<div style="max-width:520px;margin:0 auto;padding:24px;font-family:-apple-system,Segoe UI,Roboto,sans-serif;">
       <div style="font-size:17px;font-weight:800;color:#26211C;margin-bottom:12px;">🔔 New website lead</div>
       <div style="background:#faf9f7;border:1px solid #e8e5e0;border-radius:14px;padding:18px;font-size:14px;line-height:1.7;color:#26211C;">
-        <b>${esc(name)}</b>${service ? `<br/>Service: ${esc(service)}` : ""}${phone ? `<br/>Phone: ${esc(phone)}` : ""}${emailAddr ? `<br/>Email: ${esc(emailAddr)}` : ""}${msg ? `<br/><br/>“${esc(msg)}”` : ""}
+        <b style="font-size:16px;">${esc(name)}</b>${service ? `<br/>Service: <b>${esc(service)}</b>` : ""}${phone ? `<br/>Phone: ${esc(phone)}` : ""}${emailAddr ? `<br/>Email: ${esc(emailAddr)}` : ""}
+        ${msg ? `<div style="margin-top:12px;padding:12px 14px;background:#fff;border-left:3px solid #B81D24;border-radius:8px;font-size:15px;">“${esc(msg)}”</div>` : ""}
+        ${mediaHtml}
+        ${quick ? `<div style="margin-top:14px;font-size:14px;">${quick}</div>` : ""}
       </div>
-      <div style="font-size:12px;color:#8a857e;margin-top:12px;">It's waiting in SPS → Comms → Leads — reply fast, win the job.</div>
+      <a href="https://spsway.app/?open=leads" style="display:block;background:#B81D24;color:#ffffff;text-align:center;font-weight:800;font-size:15px;padding:15px 20px;border-radius:12px;text-decoration:none;margin-top:16px;">Open in SPS → Leads</a>
+      <div style="font-size:12px;color:#8a857e;margin-top:12px;text-align:center;">Reply fast, win the job.</div>
     </div>`;
     try {
       const r = await fetch("https://api.resend.com/emails", {

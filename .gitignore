@@ -18,3 +18,5 @@ ios/App/App/public/
 
 # local tooling
 .claude/
+.vercel
+.env*

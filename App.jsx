@@ -12164,12 +12164,12 @@ function AIAssist({ kind = "reminder", channel = "text", context = {}, value = "
   );
 }
 
-function EmailSettings({ email, setEmail, branding, setBranding }) {
+// ── Sending identity — THE one place (Comms → Settings) for what your messages send FROM. ──
+// Email sender (Resend-verified) + the Quo texting number. Moved out of Customize → Messages &
+// Templates per the owner: every number/email setting lives in Comms → Settings, nowhere else.
+function SendingIdentitySettings({ email, setEmail }) {
   const { T } = useApp();
   const set = (k, v) => setEmail(e => ({ ...e, [k]: v }));
-  const setB = (k, v) => setBranding(b => ({ ...b, [k]: v }));
-
-  // Sending-identity live status: the verified Resend domain + the Quo account's numbers.
   const [identity, setIdentity] = useState({ verifiedDomain: "", numbers: [], smsFrom: "", resendOk: false, quoOk: false, loaded: false });
   useEffect(() => {
     let alive = true;
@@ -12185,7 +12185,84 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
   const emailDomain = (email.fromAddress || "").split("@").pop().toLowerCase();
   const emailVerified = !!identity.verifiedDomain && emailDomain === identity.verifiedDomain;
   const numNorm = normNum(email.textingNumber);
-  const numOnAccount = identity.numbers.length ? identity.numbers.some(n => n.number === numNorm) : null; // null = can't verify
+  const numOnAccount = identity.numbers.length ? identity.numbers.some(n => n.number === numNorm) : null;
+  const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 };
+  const field = { width: "100%", padding: "10px 13px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const hint = { fontSize: 11, color: T.textMuted, marginTop: 6 };
+  return (
+    <>
+      <Card>
+        <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>Sending status</div>
+          {[
+            { label: "Email (Resend)", ok: identity.resendOk, hint: identity.resendOk ? "Connected" : "Not configured — set RESEND_API_KEY in Vercel" },
+            { label: "Texting (Quo)", ok: identity.quoOk, hint: identity.quoOk ? (identity.smsFrom || "Connected") : "Not configured — set QUO_API_KEY + number in Vercel" },
+          ].map((row) => {
+            const col = !identity.loaded ? T.textMuted : row.ok ? "#16a34a" : "#d97706";
+            return (
+              <div key={row.label} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: col, flexShrink: 0 }} />
+                <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{row.label}</span>
+                <span style={{ fontSize: 12, color: T.textMuted }}>— {!identity.loaded ? "checking…" : row.hint}</span>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+      <Card>
+        <CardHeader title="Email Sender" />
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
+          <div><label style={labelStyle}>From Name</label><input type="text" style={field} value={email.fromName} onChange={e => set("fromName", e.target.value)} /></div>
+          <div>
+            <label style={labelStyle}>From Address</label>
+            <input type="email" style={field} value={email.fromAddress} onChange={e => set("fromAddress", e.target.value)} placeholder="service@yourcompany.com" />
+            <div style={{ fontSize: 12, fontWeight: 700, marginTop: 6, color: !identity.loaded ? T.textMuted : emailVerified ? "#16a34a" : "#d97706" }}>
+              {!identity.loaded ? "Checking sending domain…"
+                : emailVerified ? "✓ Verified — emails send from this address"
+                : `${emailDomain || "This domain"} isn't verified${identity.verifiedDomain ? ` (verified: ${identity.verifiedDomain})` : ""}. Emails will send from the default address until it is.`}
+            </div>
+            <div style={hint}>The address clients reply to and that emails send from. To use your own domain, verify it in Resend first.</div>
+          </div>
+        </div>
+      </Card>
+      <Card>
+        <CardHeader title="Texting Number" />
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: -2 }}>The business line your texts go out from — On My Way, arrival, invoice, lead alerts, and money-plan texts. Must be a number on your Quo account.</div>
+          {identity.numbers.length > 0 ? (
+            <div>
+              <label style={labelStyle}>Send Texts From</label>
+              <select style={field} value={numNorm && identity.numbers.some(n => n.number === numNorm) ? numNorm : ""} onChange={e => set("textingNumber", e.target.value)}>
+                <option value="">{identity.smsFrom ? `Default (${identity.smsFrom})` : "Server default"}</option>
+                {identity.numbers.map(n => <option key={n.number} value={n.number}>{n.number}{n.label ? ` — ${n.label}` : ""}</option>)}
+              </select>
+              <div style={hint}>Pick the line your texts go out from, or leave on Default to use the server's number.</div>
+            </div>
+          ) : (
+            <div>
+              <label style={labelStyle}>Texting Number</label>
+              <input type="tel" inputMode="tel" style={field} value={email.textingNumber || ""} onChange={e => set("textingNumber", e.target.value)} placeholder={identity.smsFrom || "+1 610 555 1234"} />
+              <div style={hint}>{!identity.loaded ? "Checking…" : identity.smsFrom ? `Leave blank to use the server default (${identity.smsFrom}).` : "Texting isn't configured on the server yet."}</div>
+            </div>
+          )}
+          {email.textingNumber ? (
+            <div style={{ fontSize: 12, fontWeight: 700, color: numOnAccount === false ? "#d97706" : (numOnAccount ? "#16a34a" : T.textMuted) }}>
+              {numOnAccount === false ? "Not found on your Quo account — texts from it may be rejected."
+                : numOnAccount ? "✓ On your Quo account"
+                : (numNorm ? `Will send from ${numNorm}` : "")}
+            </div>
+          ) : null}
+        </div>
+      </Card>
+    </>
+  );
+}
+
+function EmailSettings({ email, setEmail, branding, setBranding }) {
+  const { T } = useApp();
+  const set = (k, v) => setEmail(e => ({ ...e, [k]: v }));
+  const setB = (k, v) => setBranding(b => ({ ...b, [k]: v }));
+
   // Fill any template with clearly-fake sample data for live previews.
   const sampleFill = (tpl) => String(tpl || "")
     .replace(/\{first\}/g, "Robert")
@@ -12219,24 +12296,10 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
 
   return (
     <>
-      {/* Quo + Resend connection status — confirm both are synced before relying on sends */}
+      {/* Sending identity (from name/address + texting number) now lives in ONE place: Comms → Settings. */}
       <Card style={{ marginBottom: 14 }}>
-        <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
-          <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>Sending status</div>
-          {[
-            { label: "Email (Resend)", ok: identity.resendOk, hint: identity.resendOk ? "Connected" : "Not configured — set RESEND_API_KEY in Vercel" },
-            { label: "Texting (Quo)", ok: identity.quoOk, hint: identity.quoOk ? (identity.smsFrom || "Connected") : "Not configured — set QUO_API_KEY + number in Vercel" },
-          ].map((row) => {
-            const col = !identity.loaded ? T.textMuted : row.ok ? "#16a34a" : "#d97706";
-            return (
-              <div key={row.label} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                <span style={{ width: 8, height: 8, borderRadius: "50%", background: col, flexShrink: 0 }} />
-                <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{row.label}</span>
-                <span style={{ fontSize: 12, color: T.textMuted }}>— {!identity.loaded ? "checking…" : row.hint}</span>
-              </div>
-            );
-          })}
-          <div style={{ fontSize: 11, color: T.textMuted }}>The templates below send through these. Fix a connection in Customize → Sync.</div>
+        <div style={{ padding: 16, fontSize: 12.5, color: T.textMuted, lineHeight: 1.55 }}>
+          <b style={{ color: T.text }}>Sending identity moved.</b> The from-name, from-address, and texting number now live in <b style={{ color: T.text }}>Comms → Settings</b> — the one place for every number and email.
         </div>
       </Card>
 
@@ -12248,55 +12311,6 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
           <div><label style={labelStyle}>Contact Email</label><input type="email" style={field} value={branding.companyEmail || ""} onChange={e => setB("companyEmail", e.target.value)} placeholder="hello@yourcompany.com" /></div>
           <div><label style={labelStyle}>Website</label><input type="url" style={field} value={branding.companyWebsite || ""} onChange={e => setB("companyWebsite", e.target.value)} placeholder="yourcompany.com" /></div>
           <div><label style={labelStyle}>Business Address</label><input type="text" style={field} value={branding.companyAddress || ""} onChange={e => setB("companyAddress", e.target.value)} placeholder="123 Main St, Honey Brook, PA 19344" /></div>
-        </div>
-      </Card>
-
-      {/* Email sender */}
-      <Card style={{ marginBottom: 14 }}>
-        <CardHeader title="Email Sender" />
-        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
-          <div><label style={labelStyle}>From Name</label><input type="text" style={field} value={email.fromName} onChange={e => set("fromName", e.target.value)} /></div>
-          <div>
-            <label style={labelStyle}>From Address</label>
-            <input type="email" style={field} value={email.fromAddress} onChange={e => set("fromAddress", e.target.value)} placeholder="service@yourcompany.com" />
-            <div style={{ fontSize: 12, fontWeight: 700, marginTop: 6, color: !identity.loaded ? T.textMuted : emailVerified ? "#16a34a" : "#d97706" }}>
-              {!identity.loaded ? "Checking sending domain…"
-                : emailVerified ? "✓ Verified — emails send from this address"
-                : `${emailDomain || "This domain"} isn't verified${identity.verifiedDomain ? ` (verified: ${identity.verifiedDomain})` : ""}. Emails will send from the default address until it is.`}
-            </div>
-            <div style={hint}>The address clients reply to and that emails send from. To use your own domain, verify it in Resend first.</div>
-          </div>
-        </div>
-      </Card>
-
-      {/* Texting number (Quo) — the business line texts send from */}
-      <Card style={{ marginBottom: 14 }}>
-        <CardHeader title="Texting Number" />
-        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
-          <div style={{ fontSize: 12, color: T.textMuted, marginTop: -2 }}>The business line your texts go out from — On My Way, arrival, and invoice texts. Must be a number on your Quo account.</div>
-          {identity.numbers.length > 0 ? (
-            <div>
-              <label style={labelStyle}>Send Texts From</label>
-              <select style={field} value={numNorm && identity.numbers.some(n => n.number === numNorm) ? numNorm : ""} onChange={e => set("textingNumber", e.target.value)}>
-                <option value="">{identity.smsFrom ? `Default (${identity.smsFrom})` : "Server default"}</option>
-                {identity.numbers.map(n => <option key={n.number} value={n.number}>{n.number}{n.label ? ` — ${n.label}` : ""}</option>)}
-              </select>
-              <div style={hint}>Pick the line your texts go out from, or leave on Default to use the server's number.</div>
-            </div>
-          ) : (
-            <div>
-              <label style={labelStyle}>Texting Number</label>
-              <input type="tel" inputMode="tel" style={field} value={email.textingNumber || ""} onChange={e => set("textingNumber", e.target.value)} placeholder={identity.smsFrom || "+1 610 555 1234"} />
-              <div style={hint}>{!identity.loaded ? "Checking…" : identity.smsFrom ? `Leave blank to use the server default (${identity.smsFrom}).` : "Texting isn't configured on the server yet."}</div>
-            </div>
-          )}
-          {email.textingNumber ? (
-            <div style={{ fontSize: 12, fontWeight: 700, color: numOnAccount === false ? "#d97706" : (numOnAccount ? "#16a34a" : T.textMuted) }}>
-              {numOnAccount === false ? "Not found on your Quo account — texts from it may be rejected."
-                : numOnAccount ? "✓ On your Quo account"
-                : (numNorm ? `Will send from ${numNorm}` : "")}
-            </div>
-          ) : null}
         </div>
       </Card>
 
@@ -18157,13 +18171,13 @@ function NotificationSettings({ email, setEmail, branding }) {
         Client events always appear in your in-app Alerts. Use the toggles below to also get an email, and set where those emails go.
       </div>
       <div>
-        <label style={lbl}>Owner email — where alert emails are sent</label>
+        <label style={lbl}>Your email — alerts, lead notifications & report fallback</label>
         <input type="email" inputMode="email" value={base.ownerEmail || ""} placeholder={companyEmail || "you@yourcompany.com"}
           onChange={e => setField("ownerEmail", e.target.value)} style={field} />
         {!base.ownerEmail && companyEmail && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>Defaults to your company email ({companyEmail}) until you set one here.</div>}
       </div>
       <div>
-        <label style={lbl}>Owner phone — for text alerts</label>
+        <label style={lbl}>Your cell — lead alerts, money-plan texts & owner alerts</label>
         <input type="tel" inputMode="tel" value={base.ownerPhone || ""} placeholder="(555) 555-5555"
           onChange={e => setField("ownerPhone", e.target.value)} style={field} />
       </div>
@@ -18711,16 +18725,19 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
               {(perms.editSettings || perms.canInvoice || perms.isAdmin) && <InviteEmailSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} />}
             </Collapsible>
           )}
-          {/* Communications hub: owner alerts + appointment/seasonal reminders + automated client messages.
-              The reminders/automation config here is the SAME as the Comms tab's Settings section, so it's
-              gated by the same commsSettings flag (owner always; staff opt-in) — otherwise a staffer denied
-              Comms→Settings could still reach the identical config here. Owner alerts stay on editNotifications. */}
-          {(perms.isAdmin || perms.commsSettings || perms.editNotifications) && (
-            <Collapsible title="Communications & Automations" subtitle="Owner alerts, appointment + seasonal reminders, and the automated messages your clients get.">
-              {perms.editNotifications && <><SaveBar ctl={emailCtl} T={T} /><NotificationSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} /></>}
-              {(perms.isAdmin || perms.commsSettings) && <ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />}
-              {(perms.isAdmin || perms.commsSettings) && <CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />}
-            </Collapsible>
+          {/* All comms config (sending identity, Test Mode, owner contacts, alerts, reminders,
+              automations) lives in ONE place now: Comms → Settings. This is just the signpost —
+              shown only to people whose permissions can actually reach that section. */}
+          {(perms.isAdmin || perms.commsSettings || perms.editNotifications) && canSeeComms(perms) && (
+            <Card style={{ marginBottom: 14 }}>
+              <div style={{ padding: 16, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", rowGap: 10 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>Communications & Automations</div>
+                  <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 2, lineHeight: 1.5 }}>Everything moved to one place — sending identity, Test Mode, your contacts, alerts, reminders, and automations all live in Comms → Settings.</div>
+                </div>
+                <Btn sm onClick={() => onNav("comms")}>Open Comms →</Btn>
+              </div>
+            </Card>
           )}
           {perms.editCosts && (
             <div ref={initialSection === "budgetCosts" ? sectionRef : undefined}>
@@ -20433,7 +20450,7 @@ function OwnerDigestSettings({ scheduleCfg, setScheduleCfg, email, branding, T }
   const [testMsg, setTestMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const [testPeriod, setTestPeriod] = useState(od.monthlyOn && !od.dailyOn && !od.weeklyOn ? "monthly" : od.weeklyOn && !od.dailyOn ? "weekly" : "daily");
-  const recipient = (od.to || email?.ownerEmail || branding?.companyEmail || "").trim();
+  const recipient = (od.to || (email?.notify?.ownerEmail) || email?.ownerEmail || branding?.companyEmail || "").trim();
 
   // Open the chosen report as a printable page (browser Print dialog → Save as PDF). Fetches the
   // authed HTML, then writes it into a new window (a plain new-tab GET can't carry the auth token).
@@ -20531,7 +20548,7 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
     inbox:     isAdmin || !!perms.commsInbox,
     reminders: isAdmin || !!perms.commsReminders,
     broadcast: isAdmin || !!perms.commsBroadcast,
-    settings:  isAdmin || !!perms.commsSettings,
+    settings:  isAdmin || !!perms.commsSettings || !!perms.editNotifications, // editNotifications keeps its old access (identity + Test Mode + alerts moved here)
     log:       isAdmin || !!perms.commsLog,
   };
   const SECTIONS = [
@@ -20573,7 +20590,18 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
         {section === "messages" && CAN.messages && <div style={{ padding: "0 16px" }}><MessagesScreen clients={clients} currentUser={currentUser} T={T} /></div>}
         {section === "reminders" && CAN.reminders && <div style={{ padding: "0 16px" }}><RemindersScreen schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} /></div>}
         {section === "inbox" && CAN.inbox && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={onConvertLead} onLink={onLinkLead} openLeadId={openLeadId} onLeadOpened={onLeadOpened} vp={vp} />}
-        {section === "settings" && CAN.settings && <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 18 }}><OwnerDigestSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} branding={branding} T={T} /><ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /><CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /></div>}
+        {section === "settings" && CAN.settings && <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 18 }}>
+          {/* THE control room — every number + email the app sends from / alerts you at lives here.
+              Gates preserve the pre-consolidation surfaces: identity + Test Mode + alerts stay on
+              editNotifications; digest/reminders/automations stay on commsSettings; owner sees all. */}
+          {(perms.isAdmin || perms.editNotifications) && <SendingIdentitySettings email={email} setEmail={setEmail} />}
+          {(perms.isAdmin || perms.editNotifications) && (
+            <Card><CardHeader title="Test Mode, Your Contacts & Alerts" /><NotificationSettings email={email} setEmail={setEmail} branding={branding} /></Card>
+          )}
+          {(perms.isAdmin || perms.commsSettings) && <OwnerDigestSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} branding={branding} T={T} />}
+          {(perms.isAdmin || perms.commsSettings) && <ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />}
+          {(perms.isAdmin || perms.commsSettings) && <CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />}
+        </div>}
         {section === "broadcast" && CAN.broadcast && <BroadcastSection clients={clients} invoices={invoices} email={email} branding={branding} T={T} />}
         {section === "log" && CAN.log && soon("Activity log", "A running feed of every reminder, broadcast, and reply that's gone out — with who, when, and the channel — lives here.")}
       </div>
@@ -23256,20 +23284,7 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
                           ))}
                           <Btn sm variant="outline" onClick={sendNudgeTest} disabled={nudgeBusy} style={{ marginLeft: "auto" }}>{nudgeBusy ? "Sending…" : "Send me one now"}</Btn>
                         </div>
-                        {((nudgeCfg.channel || "email") === "sms" || nudgeCfg.channel === "both") && (
-                          <div>
-                            <div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginBottom: 4 }}>Text it to <span style={{ fontWeight: 400 }}>(optional override)</span></div>
-                            <input type="tel" inputMode="tel" value={nudgeCfg.toPhone || ""} onChange={e => setNudge({ toPhone: e.target.value })} placeholder="uses your Owner Alerts number"
-                              style={{ width: "100%", maxWidth: 240, padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13.5, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
-                          </div>
-                        )}
-                        {((nudgeCfg.channel || "email") === "email" || nudgeCfg.channel === "both") && (
-                          <div>
-                            <div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginBottom: 4 }}>Email it to <span style={{ fontWeight: 400 }}>(optional override)</span></div>
-                            <input type="email" inputMode="email" autoCapitalize="none" value={nudgeCfg.toEmail || ""} onChange={e => setNudge({ toEmail: e.target.value })} placeholder="uses your reports email"
-                              style={{ width: "100%", maxWidth: 280, padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13.5, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
-                          </div>
-                        )}
+                        <div style={{ fontSize: 11, color: T.textMuted }}>Texts go to your cell and emails to your address from <b style={{ color: T.text }}>Comms → Settings</b> — set them once there.</div>
                         {nudgeMsg && <div style={{ fontSize: 12, color: nudgeMsg.ok ? green : red, fontWeight: 600 }}>{nudgeMsg.text}</div>}
                         <div style={{ fontSize: 11, color: T.textMuted }}>Sends to the same places as your reports and owner-alert texts — no extra setup. Includes taxes ({moBank ? "from real profit" : "planned"}), payroll, debt minimums, and goal plans. Payroll comes from Customize → Budget & Costs → Payroll.</div>
                       </div>
@@ -27484,6 +27499,26 @@ export default function App({ authEmail = "", onSignOut }) {
       } catch (_) { /* best-effort — Budget → Bank still loads on demand */ }
     })();
   }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Email deep links: https://spsway.app/?open=leads jumps straight to that page after sign-in
+  // (the "Open in SPS" buttons in owner emails). Allowlisted pages only; param stripped after use
+  // so a refresh doesn't re-navigate.
+  const _openParamRef = useRef(false);
+  useEffect(() => {
+    if (!hydrated || !currentUser || _openParamRef.current) return;
+    _openParamRef.current = true;
+    try {
+      const q = new URLSearchParams(window.location.search);
+      const open = q.get("open");
+      const ALLOW = ["leads", "comms", "budget", "invoices", "schedule", "clients", "reports"];
+      if (open && ALLOW.includes(open)) {
+        handleNav(open);
+        q.delete("open");
+        const rest = q.toString();
+        window.history.replaceState({}, "", window.location.pathname + (rest ? `?${rest}` : ""));
+      }
+    } catch (_) {}
+  }, [hydrated, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Website leads auto-import — once per open, owner only. Pulls new quote-form submissions
   // from the marketing site's Supabase `leads` table (api/leads-sync) into the in-app funnel
