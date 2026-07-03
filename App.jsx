@@ -18678,6 +18678,8 @@ function Icon({ name, size = 22, filled = false }) {
     clients:  <><circle cx="12" cy="8" r="3.4" /><path d="M5.5 20c0-3.6 3-6 6.5-6s6.5 2.4 6.5 6" /></>,
     calendar: <><rect x="4" y="5" width="16" height="16" rx="2.5" /><path d="M4 9.5h16M9 3v4M15 3v4" /></>,
     sliders:  <><path d="M5 8h9M19 8h0M5 16h0M10 16h9" /><circle cx="16.5" cy="8" r="2.2" /><circle cx="7.5" cy="16" r="2.2" /></>,
+    inbox:    <><path d="M22 12h-6l-2 3h-4l-2-3H2" /><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" /></>,
+    funnel:   <path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z" />,
     // Actions
     edit:     <><path d="M11 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6" /><path d="M17.5 2.5a2.12 2.12 0 0 1 3 3L12 14l-4 1 1-4Z" /></>,
     trash:    <><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" /><path d="M10 11v6M14 11v6" /></>,
@@ -19947,12 +19949,12 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
     log:       isAdmin || !!perms.commsLog,
   };
   const SECTIONS = [
-    { id: "messages", label: "Messages" },
-    { id: "inbox", label: "Inbox" },
-    { id: "reminders", label: "Reminders" },
-    { id: "broadcast", label: "Broadcast" },
-    { id: "settings", label: "Settings" },
-    { id: "log", label: "Log" },
+    { id: "messages", label: "Messages", icon: "message" },
+    { id: "inbox", label: "Leads", icon: "funnel" },
+    { id: "reminders", label: "Reminders", icon: "calendar" },
+    { id: "broadcast", label: "Broadcast", icon: "mail" },
+    { id: "settings", label: "Settings", icon: "sliders" },
+    { id: "log", label: "Log", icon: "history" },
   ].filter(s => CAN[s.id]);
   const firstId = SECTIONS[0] ? SECTIONS[0].id : "messages";
   const secKey = SECTIONS.map(s => s.id).join(",");
@@ -19976,7 +19978,7 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
         {!single && (
           <div style={{ display: "flex", gap: 7, overflowX: "auto", paddingBottom: 12, WebkitOverflowScrolling: "touch" }}>
             {SECTIONS.map(s => (
-              <button key={s.id} onClick={() => setSection(s.id)} style={{ flexShrink: 0, padding: "8px 16px", borderRadius: 100, border: "none", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: section === s.id ? T.primary : T.surfaceAlt, color: section === s.id ? "#fff" : T.textMuted }}>{s.label}</button>
+              <button key={s.id} onClick={() => setSection(s.id)} style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 6, padding: "8px 15px", borderRadius: 100, border: "none", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: section === s.id ? T.primary : T.surfaceAlt, color: section === s.id ? "#fff" : T.textMuted }}><Icon name={s.icon} size={15} />{s.label}</button>
             ))}
           </div>
         )}
@@ -22167,7 +22169,6 @@ function BudgetScreen({ budget, setBudget, clients, costs, invoices, onNav, T, v
 const ALL_NAV = [
   { id: "dashboard",  label: "Home",      icon: "home" },
   { id: "clients",    label: "Clients",   icon: "clients" },
-  { id: "leads",      label: "Leads",     icon: "funnel",    ownerOnly: true },
   { id: "schedule",   label: "Schedule",  icon: "calendar" },
   // Messages folded into Comms. Comms visibility is per-section (see isTabVisible → canSeeComms):
   // the owner sees every section; staff see only the sections granted in the staff editor.
@@ -22186,7 +22187,7 @@ const DEFAULT_DOCK = ["dashboard", "clients", "schedule", "invoices"];
 // staff member who had Messages in their bottom bar keeps a one-tap path (now into Comms), de-duped.
 const dockAlias = (arr) => {
   const out = [];
-  (arr || DEFAULT_DOCK).forEach(id => { const m = (id === "messages" || id === "reminders") ? "comms" : id; if (!out.includes(m)) out.push(m); });
+  (arr || DEFAULT_DOCK).forEach(id => { const m = (id === "messages" || id === "reminders" || id === "leads") ? "comms" : id; if (!out.includes(m)) out.push(m); });
   return out;
 };
 
@@ -22266,7 +22267,7 @@ function DockEditor({ navDock, setNavDock, perms, T }) {
   );
 }
 
-function NavSheet({ page, perms, navUnread, reminderDue, navDock, setNavDock, onNav, onSignOut, currentUser, T, onClose }) {
+function NavSheet({ page, perms, navUnread, reminderDue, leadDue = 0, navDock, setNavDock, onNav, onSignOut, currentUser, T, onClose }) {
   const items = ALL_NAV.filter(n => isTabVisible(n, perms));
   const [editDock, setEditDock] = useState(false);
   const { handleProps, sheetStyle } = useSheetSwipe(onClose);
@@ -22284,7 +22285,7 @@ function NavSheet({ page, perms, navUnread, reminderDue, navDock, setNavDock, on
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
           {items.map(n => {
             const active = page === n.id;
-            const badge = n.id === "comms" ? ((perms.isAdmin || perms.commsMessages ? navUnread : 0) + (perms.isAdmin || perms.commsReminders ? reminderDue : 0)) : 0;
+            const badge = n.id === "comms" ? ((perms.isAdmin || perms.commsMessages ? navUnread : 0) + (perms.isAdmin || perms.commsReminders ? reminderDue : 0) + (perms.isAdmin || perms.commsInbox ? leadDue : 0)) : 0;
             return (
               <button key={n.id} onClick={() => { onNav(n.id); onClose(); }}
                 style={{ display: "flex", alignItems: "center", gap: 11, padding: "15px 14px", border: `1.5px solid ${active ? T.primary : T.border}`, borderRadius: 14, background: active ? hexA(T.primary, 0.08) : T.surface, color: active ? T.primary : T.text, cursor: "pointer", fontFamily: "inherit", textAlign: "left", position: "relative" }}>
@@ -25043,7 +25044,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
 // Desktop (>=1024px) left sidebar — replaces the mobile floating menu button.
 // Same destinations as the mobile nav sheet, shown vertically with the SPS logo on
 // top, active item in crimson, and sync/account/sign-out pinned at the bottom.
-function DesktopSidebar({ page, perms, navUnread, reminderDue, onNav, onSignOut, currentUser, branding, syncState, onSync, T, vp = {} }) {
+function DesktopSidebar({ page, perms, navUnread, reminderDue, leadDue = 0, onNav, onSignOut, currentUser, branding, syncState, onSync, T, vp = {} }) {
   const items = ALL_NAV.filter(n => isTabVisible(n, perms));
   return (
     <aside style={{ width: vp?.isTablet ? 208 : 244, flexShrink: 0, height: "100%", background: T.surface, borderRight: `1px solid ${T.border}`, display: "flex", flexDirection: "column" }}>
@@ -25063,7 +25064,7 @@ function DesktopSidebar({ page, perms, navUnread, reminderDue, onNav, onSignOut,
       <nav style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 3 }}>
         {items.map(n => {
           const active = page === n.id;
-          const badge = n.id === "comms" ? ((perms.isAdmin || perms.commsMessages ? navUnread : 0) + (perms.isAdmin || perms.commsReminders ? reminderDue : 0)) : 0;
+          const badge = n.id === "comms" ? ((perms.isAdmin || perms.commsMessages ? navUnread : 0) + (perms.isAdmin || perms.commsReminders ? reminderDue : 0) + (perms.isAdmin || perms.commsInbox ? leadDue : 0)) : 0;
           return (
             <button key={n.id} onClick={() => onNav(n.id)}
               style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 13px", border: "none", borderRadius: 11, background: active ? T.primary : "transparent", color: active ? "#fff" : T.text, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%", fontWeight: active ? 700 : 600, fontSize: 14, letterSpacing: "-0.01em" }}>
@@ -25676,6 +25677,8 @@ export default function App({ authEmail = "", onSignOut }) {
     try { return buildReminderQueue(schedule, clients, scheduleCfg, reminderLog, new Date()).due.length; }
     catch { return 0; }
   }, [schedule, clients, scheduleCfg, reminderLog]);
+  // Count of new (unhandled) leads, for the Comms nav badge — so leads stay visible now they live in the hub
+  const leadNewCount = useMemo(() => (leads || []).filter(l => l && l.status === "new").length, [leads]);
 
   // Customizable dock — which pages appear in the bottom bar (max 5)
   const [navDock, setNavDock, lndock] = useStoredState("sps_nav_dock", DEFAULT_DOCK);
@@ -25804,7 +25807,7 @@ export default function App({ authEmail = "", onSignOut }) {
   // aliases that render inside Comms, so they resolve against the Comms entry.
   useEffect(() => {
     if (!perms.tabAccess) return;
-    const effId = (page === "messages" || page === "reminders") ? "comms" : page;
+    const effId = (page === "messages" || page === "reminders" || page === "leads") ? "comms" : page;
     const navEntry = ALL_NAV.find(n => n.id === effId);
     const hidden = navEntry ? !isTabVisible(navEntry, perms) : (perms.tabAccess[effId] === "hidden");
     if (hidden) {
@@ -26786,8 +26789,7 @@ export default function App({ authEmail = "", onSignOut }) {
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetScreen budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} />}
       {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
       {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
-      {page === "leads" && perms.isAdmin && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={handleConvertLead} vp={vp} />}
-      {(page === "comms" || page === "reminders" || page === "messages") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : undefined} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} vp={vp} />}
+      {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : undefined} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} vp={vp} />}
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
       {page === "duplicates" && perms.canImport && <DuplicatesScreen clients={clients} invoices={invoices} schedule={schedule} onMerge={handleMergeClients} onGoToClients={() => handleNav("clients")} />}
@@ -26804,7 +26806,7 @@ export default function App({ authEmail = "", onSignOut }) {
       <AppCtx.Provider value={{ T, branding, perms, email, tiers: serviceTiers || DEFAULT_TIERS }}>
         <div style={{ fontFamily: fontStack, background: T.bg, position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden", display: "flex", flexDirection: "row", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ["--ring"]: hexA(T.primary, 0.22), ["--ringBorder"]: T.primary }}>
           {shellCss}
-          <DesktopSidebar page={page} perms={perms} navUnread={navUnread} reminderDue={reminderDueCount} onNav={handleTabNav} onSignOut={handleSignOut} currentUser={currentUser} branding={branding} syncState={syncState} onSync={manualSync} T={T} vp={vp} />
+          <DesktopSidebar page={page} perms={perms} navUnread={navUnread} reminderDue={reminderDueCount} leadDue={leadNewCount} onNav={handleTabNav} onSignOut={handleSignOut} currentUser={currentUser} branding={branding} syncState={syncState} onSync={manualSync} T={T} vp={vp} />
           <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
             <div style={{ height: 2, flexShrink: 0, zIndex: 99, background: syncState === "syncing" ? T.primary : syncState === "saved" ? "#16a34a" : "transparent", transition: "background 0.3s", animation: syncState === "syncing" ? "syncPulse 0.8s ease-in-out" : "none" }} />
             {dbError && (
@@ -26935,7 +26937,7 @@ export default function App({ authEmail = "", onSignOut }) {
             return n ? { id: n.id, label: n.label, icon: n.icon, onClick: () => handleTabNav(n.id) } : null;
           }).filter(Boolean);
           const dockedSet = new Set(docked);
-          const commsBadge = (perms.isAdmin || perms.commsMessages ? navUnread : 0) + (perms.isAdmin || perms.commsReminders ? reminderDueCount : 0);
+          const commsBadge = (perms.isAdmin || perms.commsMessages ? navUnread : 0) + (perms.isAdmin || perms.commsReminders ? reminderDueCount : 0) + (perms.isAdmin || perms.commsInbox ? leadNewCount : 0);
           const menuBadge = dockedSet.has("comms") ? 0 : commsBadge;
           const tabs = [
             ...primary.map(t => ({ ...t, active: page === t.id, badge: t.id === "comms" ? commsBadge : 0 })),
@@ -26965,7 +26967,7 @@ export default function App({ authEmail = "", onSignOut }) {
             page={page}
             perms={perms}
             navUnread={navUnread}
-            reminderDue={reminderDueCount}
+            reminderDue={reminderDueCount} leadDue={leadNewCount}
             navDock={navDock}
             setNavDock={setNavDock}
             onNav={handleTabNav}
