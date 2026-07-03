@@ -176,6 +176,88 @@ function bankMonthSummary(budget, when = new Date()) {
   return { inflow: r2(inflow), outflow: r2(outflow), income, expense, savings: Math.max(0, r2(savings)), debt: Math.max(0, r2(debt)), profit, net: r2(inflow - outflow), count };
 }
 
+// ── Payroll + upcoming-payments planning (client twins of api/transfer-nudge.js) ──────────────────
+// Payroll runs detected in the bank feed (Gusto & co.): median amount + cadence of the latest runs.
+const PAYROLL_NAME_RE = /gusto|payroll|adp\b|paychex|paycor|onpay|heartland payroll|intuit.*payroll|quickbooks payroll/i;
+function bankDetectPayroll(budget) {
+  const txns = (_bankCache.data && _bankCache.data.transactions) || [];
+  // Processors debit 2-3 times per run (wages/taxes/fees) — group by DATE first so a run's amount
+  // is the day's total and cadence is measured between distinct paydays. Twin: api/transfer-nudge.js.
+  const hits = txns.filter(t => t.amount < 0 && (PAYROLL_NAME_RE.test(t.name || "") || PAYROLL_NAME_RE.test(t.category || "")) && bankEffKind(budget, t) !== "ignore");
+  const byDate = {};
+  hits.forEach(t => { byDate[t.date] = (byDate[t.date] || 0) + Math.abs(t.amount); });
+  const runDates = Object.keys(byDate).sort((a, b) => b.localeCompare(a)).slice(0, 6);
+  if (runDates.length < 2) return null;
+  const amts = runDates.map(d => byDate[d]).sort((a, b) => a - b);
+  const gaps = [];
+  for (let i = 0; i < runDates.length - 1; i++) gaps.push(Math.round((Date.parse(runDates[i]) - Date.parse(runDates[i + 1])) / 86400000));
+  gaps.sort((a, b) => a - b);
+  return { amount: amts[Math.floor(amts.length / 2)], everyDays: gaps[Math.floor(gaps.length / 2)] || 14, lastDate: runDates[0], runs: runDates.length };
+}
+// Paydays remaining this month + the next few, from the payroll config in sps_costs
+// ({ freq, anchor: a recent payday "YYYY-MM-DD", amount: all-in cost per run }) — the bank-detected
+// cadence/amount fill any gap. Dates handled as UTC civil days so timezones can't shift a payday.
+function payrollMonthPlan(pcfg, detected, when = new Date()) {
+  const num = (v) => parseFloat(v) || 0;
+  const freq = (pcfg && pcfg.freq) || "";
+  if (!freq) return { remaining: 0, runsLeft: 0, amount: 0, next: null, dates: [] }; // payroll Off → out of the plan (twin: server)
+  const amount = num(pcfg && pcfg.amount) || (detected ? detected.amount : 0);
+  if (!amount) return { remaining: 0, runsLeft: 0, amount: 0, next: null, dates: [] };
+  const stepDays = freq === "weekly" ? 7 : freq === "biweekly" ? 14 : 0;
+  const todayUTC = Date.UTC(when.getFullYear(), when.getMonth(), when.getDate());
+  const monthEndUTC = Date.UTC(when.getFullYear(), when.getMonth() + 1, 0);
+  const anchor = pcfg && /^\d{4}-\d{2}-\d{2}$/.test(pcfg.anchor || "") ? pcfg.anchor : (detected ? detected.lastDate : "");
+  const dates = [];
+  if ((freq === "weekly" || freq === "biweekly") && anchor) {
+    const step = stepDays * 86400000;
+    let t = Date.parse(anchor + "T00:00:00Z");
+    while (t - step > todayUTC) t -= step; // future-dated anchor → snap back onto the grid
+    while (t <= todayUTC) t += step;
+    for (; dates.length < 4; t += step) dates.push(t);
+  } else if (freq === "monthly" && anchor) {
+    const ad = +anchor.slice(8, 10);
+    for (let k = 0; dates.length < 2 && k < 3; k++) {
+      const last = new Date(Date.UTC(when.getFullYear(), when.getMonth() + 1 + k, 0)).getUTCDate();
+      const t = Date.UTC(when.getFullYear(), when.getMonth() + k, Math.min(ad, last));
+      if (t > todayUTC) dates.push(t);
+    }
+  } else if (detected && detected.everyDays > 0 && detected.lastDate) {
+    let t = Date.parse(detected.lastDate + "T00:00:00Z") + detected.everyDays * 86400000;
+    while (t <= todayUTC) t += detected.everyDays * 86400000;
+    for (; dates.length < 4; t += detected.everyDays * 86400000) dates.push(t);
+  }
+  const runsLeft = dates.filter(t => t <= monthEndUTC).length;
+  const fmt = (t) => { const d = new Date(t); return `${d.getUTCMonth() + 1}/${d.getUTCDate()}`; };
+  return { remaining: runsLeft * amount, runsLeft, amount, next: dates.length ? fmt(dates[0]) : null, dates: dates.map(t => ({ utc: t, label: fmt(t) })) };
+}
+// Monthly-ish recurring bills from the bank feed: same merchant, ~30-day gap, similar amounts.
+// Best with a couple of months loaded; degrades to nothing on thin data. Payroll excluded (own line).
+function bankRecurringBills(budget) {
+  const txns = (_bankCache.data && _bankCache.data.transactions) || [];
+  const by = {};
+  txns.forEach(t => {
+    if (t.amount >= 0) return;
+    const k = bankNormName(t.name); if (!k) return;
+    const kind = bankEffKind(budget, t);
+    if (kind === "ignore" || kind === "savings" || kind === "debt") return;
+    (by[k] = by[k] || []).push(t);
+  });
+  const bills = [];
+  Object.values(by).forEach(list => {
+    if (list.length < 2) return;
+    list.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    if (PAYROLL_NAME_RE.test(list[0].name || "")) return;
+    const gap = Math.round((Date.parse(list[0].date) - Date.parse(list[1].date)) / 86400000);
+    if (gap < 25 || gap > 35) return;
+    const a0 = Math.abs(list[0].amount), a1 = Math.abs(list[1].amount);
+    if (Math.abs(a0 - a1) > Math.max(a0, a1) * 0.3) return;
+    const nextUTC = Date.parse(list[0].date + "T00:00:00Z") + gap * 86400000;
+    const d = new Date(nextUTC);
+    bills.push({ name: list[0].name, amount: (a0 + a1) / 2, next: `${d.getUTCMonth() + 1}/${d.getUTCDate()}`, nextUTC });
+  });
+  return bills.sort((a, b) => a.nextUTC - b.nextUTC).slice(0, 5);
+}
+
 // Open a URL INSIDE the app on native (Capacitor in-app browser — no logout, with
 // a Done button to return cleanly), or a normal new tab on the web PWA. Used for
 // the QuickBooks payment link so paying clients stay in-app. Dynamic imports keep
@@ -13067,9 +13149,12 @@ function BudgetManager({ budget, setBudget, clients, costs, invoices, embedded =
 // ─────────────────────────────────────────────
 // COST SETTINGS (admin cost assumptions)
 // ─────────────────────────────────────────────
-function CostSettings({ costs, setCosts, clients, onNav }) {
+function CostSettings({ costs, setCosts, clients, onNav, budget }) {
   const { T } = useApp();
   const n = (v) => parseFloat(v) || 0;
+  const payroll = (costs && costs.payroll) || {};
+  const setPayroll = (patch) => setCosts(c => ({ ...c, payroll: { ...((c && c.payroll) || {}), ...patch } }));
+  const payrollDetected = bankDetectPayroll(budget || {});
   // Metric tile — same visual as the Budget page's Overview tiles, so this section
   // reads as the "settings side" of that page.
   const tile = (label, value, sub) => (
@@ -13132,6 +13217,43 @@ function CostSettings({ costs, setCosts, clients, onNav }) {
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Bank Sync" />
         <BankConnect />
+      </Card>
+
+      {/* Payroll planning — feeds the Budget's "Spoken for" card + the money-plan nudge. Gusto still
+          RUNS payroll; this only tells the plan when the cash leaves and how much to keep liquid. */}
+      <Card style={{ marginBottom: 14 }}>
+        <CardHeader title="Payroll" />
+        <div style={{ padding: 18 }}>
+          <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 12, lineHeight: 1.5 }}>How often payroll runs and what a run costs all-in — so the Budget can warn you before the cash leaves. {payrollDetected ? <b style={{ color: T.text }}>Detected from your bank: ~${Math.round(payrollDetected.amount).toLocaleString()} about every {payrollDetected.everyDays} days.</b> : "Connect your bank and it can detect this automatically."}</div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+            {[["", "Off"], ["weekly", "Weekly"], ["biweekly", "Every 2 weeks"], ["monthly", "Monthly"]].map(([v, label]) => (
+              <button key={v || "off"} onClick={() => setPayroll({ freq: v })}
+                style={{ padding: "8px 14px", borderRadius: 100, border: "none", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: (payroll.freq || "") === v ? T.primary : T.surfaceAlt, color: (payroll.freq || "") === v ? "#fff" : T.textMuted }}>{label}</button>
+            ))}
+          </div>
+          {payroll.freq ? (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 }}>
+              <div>
+                <div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginBottom: 4 }}>Last payday</div>
+                <input type="date" value={payroll.anchor || ""} max={new Date().toISOString().slice(0, 10)} onChange={e => setPayroll({ anchor: e.target.value })}
+                  style={{ width: "100%", padding: "9px 11px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
+                {!payroll.anchor && !payrollDetected && <div style={{ fontSize: 10.5, color: T.warning, fontWeight: 700, marginTop: 4 }}>Set your last payday — until then payroll is left out of the plan.</div>}
+              </div>
+              <div>
+                <div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginBottom: 4 }}>Cost per run (all-in)</div>
+                <div style={{ position: "relative" }}>
+                  <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>$</span>
+                  <input type="text" inputMode="decimal" value={payroll.amount || ""} onChange={e => setPayroll({ amount: e.target.value.replace(/[^\d.]/g, "") })}
+                    placeholder={payrollDetected ? String(Math.round(payrollDetected.amount)) : "0"}
+                    style={{ width: "100%", padding: "9px 10px 9px 22px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
+                </div>
+                <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 4 }}>Blank = use the bank-detected amount.</div>
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: 11.5, color: T.textMuted }}>Off — payroll is left out of the money plan{payrollDetected ? " (even though runs were detected in your bank)" : ""}.</div>
+          )}
+        </div>
       </Card>
 
       <Card style={{ marginBottom: 14 }}>
@@ -18517,7 +18639,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
           {perms.editCosts && (
             <Collapsible title="Budget & Costs" subtitle="Bank sync, labor rate, overhead, and taxes — the live inputs behind your Budget tab.">
               <SaveBar ctl={costCtl} T={T} />
-              <CostSettings costs={costCtl.draft} setCosts={costCtl.update} clients={clients} onNav={onNav} />
+              <CostSettings costs={costCtl.draft} setCosts={costCtl.update} clients={clients} onNav={onNav} budget={budget} />
             </Collapsible>
           )}
         </div>
@@ -22570,7 +22692,7 @@ function BudgetScreen({ budget, setBudget, clients, costs, invoices, onNav, T, v
 }
 
 // ── Full finance hub: Overview · Budget (categories, budget-vs-actual) · Debt (payoff) · Savings ──
-function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp = {} }) {
+function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp = {}, scheduleCfg, setScheduleCfg, isAdmin = false }) {
   const money = (n) => `$${Math.round(parseFloat(n) || 0).toLocaleString()}`;
   const num = (v) => parseFloat(v) || 0;
   const [section, setSection] = useState("overview");
@@ -22766,6 +22888,20 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
   // Debt tools: per-debt payoff calculator + the AI payoff strategy
   const [calcFor, setCalcFor] = useState(null); // debt id with the calculator open
   const [calcPay, setCalcPay] = useState("");
+  // Money-plan nudge (the app computes the transfer; the OWNER moves the money in their bank)
+  const [nudgeBusy, setNudgeBusy] = useState(false);
+  const [nudgeMsg, setNudgeMsg] = useState(null); // { ok, text }
+  const nudgeCfg = (scheduleCfg && scheduleCfg.transferNudge) || {};
+  const setNudge = (patch) => setScheduleCfg && setScheduleCfg(c => ({ ...c, transferNudge: { ...((c && c.transferNudge) || {}), ...patch } }));
+  const sendNudgeTest = async () => {
+    setNudgeBusy(true); setNudgeMsg(null);
+    try {
+      const r = await fetch(`${PROD_URL}/api/transfer-nudge?test=1`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: "{}" });
+      const d = await r.json().catch(() => ({}));
+      setNudgeMsg(r.ok && d.ok ? { ok: true, text: "Sent — check your messages." } : { ok: false, text: (d.sms && d.sms.error) || (d.email && d.email.error) || d.error || "Couldn't send." });
+    } catch (_) { setNudgeMsg({ ok: false, text: "Couldn't reach the server." }); }
+    setNudgeBusy(false);
+  };
   const [aiBusy, setAiBusy] = useState(false);
   const [aiAdvice, setAiAdvice] = useState("");
   const [aiErr, setAiErr] = useState("");
@@ -22938,6 +23074,109 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
             {metric("Total debt", money(debtTotal), debtTotal > 0 ? red : T.text, `${money(debtMonthly)}/mo`)}
             {metric("Net position", money(netPosition), netPosition >= 0 ? green : red, "cash − debt")}
           </div>
+
+          {(() => {
+            // ── Spoken for this month ── the money that's already claimed: taxes to set aside (from
+            // real profit when the bank speaks), payroll runs still to hit, debt minimums not yet
+            // paid (marks-aware), and planned goal contributions. What's left is what's truly free.
+            const pcfg = (costs && costs.payroll) || {};
+            const detected = bankDetectPayroll(budget);
+            const pp = pcfg.freq ? payrollMonthPlan(pcfg, detected, now) : { remaining: 0, runsLeft: 0, amount: 0, next: null, dates: [] };
+            const taxMo = taxCfg.enabled ? estimateTaxes(Math.max(0, incomeActual - expenseActual) * 12, costs).total / 12 : 0;
+            const debtLeft = debts.reduce((s, d) => {
+              if (num(d.balance) <= 0) return s;
+              const due = num(d.minPayment) || num(d.monthlyPayment);
+              return due ? s + Math.max(0, due - debtPaidMo(d.id)) : s;
+            }, 0);
+            // Goal plans net out what's already been marked to each goal this month (same as debts).
+            const goalPaidMo = (gid) => Math.max(0, Object.values(txMarks).filter(m => m && m.kind === "savings" && m.goalId === gid && String(m.date || "").startsWith(ymPrefix)).reduce((s, m) => s + (-(m.amount) || 0), 0));
+            const goalsMo = goals.reduce((s, g) => { const plan = num(g.monthly); return plan ? s + Math.max(0, plan - goalPaidMo(g.id)) : s; }, 0);
+            const total = taxMo + pp.remaining + debtLeft + goalsMo;
+            const bills = bankRecurringBills(budget);
+            const upcoming = [
+              ...pp.dates.slice(0, 2).map(d0 => ({ label: "Payroll", sub: detected && !num(pcfg.amount) ? "detected from bank" : "from your payroll settings", amount: pp.amount, when: d0.label, utc: d0.utc })),
+              ...debts.filter(d => num(d.balance) > 0 && (num(d.minPayment) || num(d.monthlyPayment)) > 0 && Math.max(0, (num(d.minPayment) || num(d.monthlyPayment)) - debtPaidMo(d.id)) > 0)
+                .map(d => ({ label: `${d.name || "Debt"} minimum`, sub: "by month end", amount: Math.max(0, (num(d.minPayment) || num(d.monthlyPayment)) - debtPaidMo(d.id)), when: "", utc: Infinity })),
+              ...bills.map(b => ({ label: b.name, sub: "recurring bill", amount: b.amount, when: `≈ ${b.next}`, utc: b.nextUTC })),
+            ].sort((a, b) => a.utc - b.utc).slice(0, 7);
+            return (
+              <>
+                {total > 0 && (
+                  <div style={card}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+                      <div style={lbl}>Spoken for this month</div>
+                      <div style={{ fontSize: 20, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>{money(total)}</div>
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {taxMo > 0 && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}><span style={{ color: T.text }}>Taxes set-aside <span style={{ color: T.textMuted, fontSize: 11 }}>({moBank ? "from real profit" : "estimated"})</span></span><b style={{ color: T.text }}>{money(taxMo)}</b></div>}
+                      {pp.remaining > 0 && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}><span style={{ color: T.text }}>Payroll <span style={{ color: T.textMuted, fontSize: 11 }}>({pp.runsLeft} run{pp.runsLeft === 1 ? "" : "s"} left{pp.next ? ` · next ${pp.next}` : ""})</span></span><b style={{ color: T.text }}>{money(pp.remaining)}</b></div>}
+                      {debtLeft > 0 && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}><span style={{ color: T.text }}>Debt minimums left</span><b style={{ color: T.text }}>{money(debtLeft)}</b></div>}
+                      {goalsMo > 0 && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}><span style={{ color: T.text }}>Savings goals plan</span><b style={{ color: T.text }}>{money(goalsMo)}</b></div>}
+                    </div>
+                    {moBank && (
+                      <div style={{ display: "flex", justifyContent: "space-between", borderTop: `1px solid ${T.border}`, marginTop: 11, paddingTop: 10, fontSize: 13 }}>
+                        <span style={{ fontWeight: 700, color: T.text }}>Free after commitments</span>
+                        <b style={{ color: netCashFlow - total >= 0 ? green : red }}>{money(netCashFlow - total)}</b>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {upcoming.length > 0 && (
+                  <div style={card}>
+                    <div style={{ ...lbl, marginBottom: 12 }}>Upcoming payments</div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+                      {upcoming.map((u, i) => (
+                        <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{u.label}</div>
+                            <div style={{ fontSize: 11, color: T.textMuted }}>{u.when ? `${u.when} · ` : ""}{u.sub}</div>
+                          </div>
+                          <b style={{ fontSize: 13.5, color: T.text, flexShrink: 0 }}>{money(u.amount)}</b>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {isAdmin && setScheduleCfg && (
+                  <div style={card}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", rowGap: 8 }}>
+                      <div>
+                        <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text }}>Money-plan nudge</div>
+                        <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2 }}>Texts/emails you the exact transfer to make — you move the money in your bank.</div>
+                      </div>
+                      <Toggle on={!!nudgeCfg.on} onChange={v => setNudge({ on: v })} />
+                    </div>
+                    {nudgeCfg.on && (
+                      <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                          {[["weekly", "Weekly"], ["monthly", "Monthly"]].map(([v, label]) => (
+                            <button key={v} onClick={() => setNudge({ freq: v })} style={{ padding: "7px 13px", borderRadius: 100, border: "none", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: (nudgeCfg.freq || "weekly") === v ? T.primary : T.surfaceAlt, color: (nudgeCfg.freq || "weekly") === v ? "#fff" : T.textMuted }}>{label}</button>
+                          ))}
+                          {(nudgeCfg.freq || "weekly") === "weekly" ? (
+                            ["S", "M", "T", "W", "T", "F", "S"].map((d0, i) => (
+                              <button key={i} onClick={() => setNudge({ weekday: i })} style={{ width: 30, height: 30, borderRadius: "50%", border: "none", fontSize: 11.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: (nudgeCfg.weekday != null ? nudgeCfg.weekday : 5) === i ? T.primary : T.surfaceAlt, color: (nudgeCfg.weekday != null ? nudgeCfg.weekday : 5) === i ? "#fff" : T.textMuted }}>{d0}</button>
+                            ))
+                          ) : (
+                            <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: T.textMuted }}>on day
+                              <input type="text" inputMode="numeric" value={nudgeCfg.monthDay || 1} onChange={e => setNudge({ monthDay: Math.min(28, Math.max(1, parseInt(e.target.value.replace(/\D/g, ""), 10) || 1)) })} style={{ width: 46, padding: "7px 8px", border: `1px solid ${T.border}`, borderRadius: 9, fontSize: 13, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center" }} />
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                          {[["sms", "Text"], ["email", "Email"], ["both", "Both"]].map(([v, label]) => (
+                            <button key={v} onClick={() => setNudge({ channel: v })} style={{ padding: "7px 13px", borderRadius: 100, border: "none", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: (nudgeCfg.channel || "email") === v ? T.primary : T.surfaceAlt, color: (nudgeCfg.channel || "email") === v ? "#fff" : T.textMuted }}>{label}</button>
+                          ))}
+                          <Btn sm variant="outline" onClick={sendNudgeTest} disabled={nudgeBusy} style={{ marginLeft: "auto" }}>{nudgeBusy ? "Sending…" : "Send me one now"}</Btn>
+                        </div>
+                        {nudgeMsg && <div style={{ fontSize: 12, color: nudgeMsg.ok ? green : red, fontWeight: 600 }}>{nudgeMsg.text}</div>}
+                        <div style={{ fontSize: 11, color: T.textMuted }}>Includes taxes ({moBank ? "from real profit" : "planned"}), payroll, debt minimums, and goal plans. Payroll comes from Customize → Budget & Costs → Payroll.</div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            );
+          })()}
           {goals.length > 0 && (
             <div style={card}>
               <div style={{ ...lbl, marginBottom: 12 }}>Savings goals</div>
@@ -23272,6 +23511,7 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
                   <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                     <div style={{ flex: 1 }}><div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginBottom: 3 }}>Saved{goalAuto(g.id) > 0 ? " (starting amount)" : ""}</div>{dollar(<input type="text" inputMode="decimal" value={g.saved} onChange={e => editGoal(g.id, "saved", e.target.value)} placeholder="0" style={{ ...amtInput, width: "100%" }} />)}{goalAuto(g.id) > 0 && <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 3 }}>+ {money(goalAuto(g.id))} marked from your bank</div>}</div>
                     <div style={{ flex: 1 }}><div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginBottom: 3 }}>Target</div>{dollar(<input type="text" inputMode="decimal" value={g.target} onChange={e => editGoal(g.id, "target", e.target.value)} placeholder="0" style={{ ...amtInput, width: "100%" }} />)}</div>
+                    <div style={{ flex: 1 }}><div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginBottom: 3, whiteSpace: "nowrap" }}>Plan /mo</div>{dollar(<input type="text" inputMode="decimal" value={g.monthly || ""} onChange={e => editGoal(g.id, "monthly", e.target.value)} placeholder="0" style={{ ...amtInput, width: "100%" }} />)}</div>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.textMuted, marginTop: 6 }}><span>{Math.round(pct)}% funded{goalAuto(g.id) > 0 ? ` · ${money(goalAuto(g.id))} from bank` : ""}</span><span>{money(Math.max(0, t - s))} to go</span></div>
                   <div style={{ height: 7, borderRadius: 100, background: T.surfaceAlt, overflow: "hidden", marginTop: 5 }}><div style={{ width: `${pct}%`, height: "100%", borderRadius: 100, background: green }} /></div>
@@ -27934,7 +28174,7 @@ export default function App({ authEmail = "", onSignOut }) {
       {page === "schedule" && <SectionErrorBoundary key={"schedule-" + schedNonce}><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <SectionErrorBoundary key="inventory"><InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} /></SectionErrorBoundary>}
       {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} budget={budget} />}
-      {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} />}
+      {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} isAdmin={perms.isAdmin} />}
       {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
       {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
       {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : undefined} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} vp={vp} />}
