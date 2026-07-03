@@ -69,7 +69,7 @@ function toE164(s) {
 async function sendQuo(to, message) {
   const toNum = toE164(to), fromNum = toE164(QUO_FROM);
   if (!QUO_KEY || !fromNum) return { ok: false, error: "texting not configured (QUO_API_KEY / QUO_PHONE_NUMBER)" };
-  if (!toNum) return { ok: false, error: "no owner phone — set one on the nudge or your team profile" };
+  if (!toNum) return { ok: false, error: "no number found — set your Owner Alerts phone (Customize → Communications) or type one on the nudge card" };
   if (toNum === fromNum) return { ok: false, error: "owner phone matches the business texting number — set your personal number" };
   try {
     const r = await fetch("https://api.quo.com/v1/messages", {
@@ -278,15 +278,20 @@ export default async function handler(req, res) {
   }
   if (!SERVICE_KEY) return res.status(501).json({ error: "Server missing SUPABASE_SERVICE_ROLE_KEY" });
 
-  const [cfgAll, branding, email, team] = await Promise.all([
-    sbGet("sps_schedule_cfg", {}), sbGet("sps_branding", {}), sbGet("sps_email", {}), sbGet("sps_team", []),
+  const [cfgAll, branding, email] = await Promise.all([
+    sbGet("sps_schedule_cfg", {}), sbGet("sps_branding", {}), sbGet("sps_email", {}),
   ]);
   const cfg = cfgAll.transferNudge || {};
-  const ownerMember = (team || []).find((m) => m && m.role === "owner") || {};
-  // No company-phone fallback: the business line can be public (or the Quo number itself) and this
-  // message is the owner's private financials. sendQuo says exactly what to set if it's missing.
-  const toPhone = cfg.toPhone || ownerMember.phone || "";
-  const toEmail = cfg.toEmail || email.ownerEmail || branding.companyEmail || "";
+  // Wired to the SAME sending settings the working sends already use — zero extra setup:
+  //   texts  → the Owner-Alerts contact (email.notify.ownerPhone — where visit/alert texts to the
+  //            owner go), then the Test-Mode redirect phone.
+  //   emails → the report recipient (ownerDigest.to — where the daily/weekly reports go), then the
+  //            Owner-Alerts email → owner email → company email.
+  // The card's inputs are optional OVERRIDES only. Still NO company-phone fallback for texts: the
+  // business line can be public (or the Quo number itself) and this is the owner's private money.
+  const notify = email.notify || {}, tmode = email.testMode || {};
+  const toPhone = cfg.toPhone || notify.ownerPhone || tmode.phone || "";
+  const toEmail = cfg.toEmail || (cfgAll.ownerDigest && cfgAll.ownerDigest.to) || notify.ownerEmail || email.ownerEmail || branding.companyEmail || "";
 
   const test = q.test === "1", preview = q.preview === "1";
   if (test || preview) {

@@ -18546,11 +18546,19 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, vp = {} }) {
   );
 }
 
-function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEmail, costs, setCosts, budget, setBudget, clients, setClients, invoices, scheduleCfg, setScheduleCfg, team, setTeam, invoicing, setInvoicing, currentUserId, onResetData, serviceTiers, setServiceTiers, onSyncData, onNav, initialTab, navDock, setNavDock, vp = {} }) {
+function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEmail, costs, setCosts, budget, setBudget, clients, setClients, invoices, scheduleCfg, setScheduleCfg, team, setTeam, invoicing, setInvoicing, currentUserId, onResetData, serviceTiers, setServiceTiers, onSyncData, onNav, initialTab, initialSection, navDock, setNavDock, vp = {} }) {
   const { T, perms } = useApp();
   const fileRef = useRef();
   const [tab, setTab] = useState(initialTab || "branding");
   useEffect(() => { if (initialTab) setTab(initialTab); }, [initialTab]); // deep-link from elsewhere (e.g. the header Test pill)
+  // Section deep-link (e.g. Budget → Cost Settings → the Budget & Costs collapsible): the target
+  // section mounts OPEN (via key remount + defaultOpen) and scrolls into view once rendered.
+  const sectionRef = useRef(null);
+  useEffect(() => {
+    if (!initialSection || !sectionRef.current) return;
+    const t = setTimeout(() => { try { sectionRef.current.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (_) {} }, 180);
+    return () => clearTimeout(t);
+  }, [initialSection, tab]);
   // Debounced auto-save controllers — one per Customize settings slice.
   const brandCtl = useSectionAutosave(branding, setBranding);
   const emailCtl = useSectionAutosave(email, setEmail);
@@ -18637,10 +18645,12 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             </Collapsible>
           )}
           {perms.editCosts && (
-            <Collapsible title="Budget & Costs" subtitle="Bank sync, labor rate, overhead, and taxes — the live inputs behind your Budget tab.">
-              <SaveBar ctl={costCtl} T={T} />
-              <CostSettings costs={costCtl.draft} setCosts={costCtl.update} clients={clients} onNav={onNav} budget={budget} />
-            </Collapsible>
+            <div ref={initialSection === "budgetCosts" ? sectionRef : undefined}>
+              <Collapsible key={initialSection === "budgetCosts" ? "bc-open" : "bc"} defaultOpen={initialSection === "budgetCosts"} title="Budget & Costs" subtitle="Bank sync, labor rate, overhead, and taxes — the live inputs behind your Budget tab.">
+                <SaveBar ctl={costCtl} T={T} />
+                <CostSettings costs={costCtl.draft} setCosts={costCtl.update} clients={clients} onNav={onNav} budget={budget} />
+              </Collapsible>
+            </div>
           )}
         </div>
       )}
@@ -23024,7 +23034,7 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
     <div style={{ maxWidth: vp.isPhone ? "100%" : 820, margin: "0 auto", width: "100%" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", rowGap: 10, marginBottom: 14 }}>
         <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Budget</h2>
-        <Btn sm variant="outline" onClick={() => onNav("settings")} style={{ display: "flex", alignItems: "center", gap: 5 }}><Icon name="sliders" size={13} /> Cost Settings</Btn>
+        <Btn sm variant="outline" onClick={() => onNav("settings", { settingsTab: "business", settingsSection: "budgetCosts" })} style={{ display: "flex", alignItems: "center", gap: 5 }}><Icon name="sliders" size={13} /> Cost Settings</Btn>
       </div>
       <div style={{ display: "flex", gap: 7, overflowX: "auto", paddingBottom: 12, WebkitOverflowScrolling: "touch" }}>
         {SECTIONS.map(([id, label]) => (
@@ -23168,8 +23178,22 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
                           ))}
                           <Btn sm variant="outline" onClick={sendNudgeTest} disabled={nudgeBusy} style={{ marginLeft: "auto" }}>{nudgeBusy ? "Sending…" : "Send me one now"}</Btn>
                         </div>
+                        {((nudgeCfg.channel || "email") === "sms" || nudgeCfg.channel === "both") && (
+                          <div>
+                            <div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginBottom: 4 }}>Text it to <span style={{ fontWeight: 400 }}>(optional override)</span></div>
+                            <input type="tel" inputMode="tel" value={nudgeCfg.toPhone || ""} onChange={e => setNudge({ toPhone: e.target.value })} placeholder="uses your Owner Alerts number"
+                              style={{ width: "100%", maxWidth: 240, padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13.5, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
+                          </div>
+                        )}
+                        {((nudgeCfg.channel || "email") === "email" || nudgeCfg.channel === "both") && (
+                          <div>
+                            <div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginBottom: 4 }}>Email it to <span style={{ fontWeight: 400 }}>(optional override)</span></div>
+                            <input type="email" inputMode="email" autoCapitalize="none" value={nudgeCfg.toEmail || ""} onChange={e => setNudge({ toEmail: e.target.value })} placeholder="uses your reports email"
+                              style={{ width: "100%", maxWidth: 280, padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13.5, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
+                          </div>
+                        )}
                         {nudgeMsg && <div style={{ fontSize: 12, color: nudgeMsg.ok ? green : red, fontWeight: 600 }}>{nudgeMsg.text}</div>}
-                        <div style={{ fontSize: 11, color: T.textMuted }}>Includes taxes ({moBank ? "from real profit" : "planned"}), payroll, debt minimums, and goal plans. Payroll comes from Customize → Budget & Costs → Payroll.</div>
+                        <div style={{ fontSize: 11, color: T.textMuted }}>Sends to the same places as your reports and owner-alert texts — no extra setup. Includes taxes ({moBank ? "from real profit" : "planned"}), payroll, debt minimums, and goal plans. Payroll comes from Customize → Budget & Costs → Payroll.</div>
                       </div>
                     )}
                   </div>
@@ -26564,6 +26588,7 @@ export default function App({ authEmail = "", onSignOut }) {
   }, [clients, page]);
   const [invoiceFilter, setInvoiceFilter] = useState("All"); // deep-link from dashboard tiles
   const [settingsTab, setSettingsTab] = useState(null); // deep-link into a Customize sub-tab (e.g. the Test pill → Business)
+  const [settingsSection, setSettingsSection] = useState(null); // deep-link further: open + scroll to a specific section (e.g. Budget → Cost Settings → "budgetCosts")
   const [schedNonce, setSchedNonce] = useState(0); // bump to force-remount Schedule (re-tap reset)
   const [schedule, setSchedule, ls] = useStoredState("sps_schedule", DEFAULT_SCHEDULE);
   const [catalog, setCatalog, lcat] = useStoredState("sps_catalog", DEFAULT_CATALOG);
@@ -27543,6 +27568,7 @@ export default function App({ authEmail = "", onSignOut }) {
     setAdding(false);
     setInvoiceFilter(opts.invoiceFilter || "All");
     setSettingsTab(opts.settingsTab || null);
+    setSettingsSection(opts.settingsSection || null);
     window.scrollTo({ top: 0, behavior: "instant" });
   };
 
@@ -28031,9 +28057,18 @@ export default function App({ authEmail = "", onSignOut }) {
   // until app_state is locked to staff-only.
   const sData = portalData && portalData.client ? portalData : null;
   const portalClient = sData ? sData.client : clientUser;
-  // Client session still loading its scoped slice with no local fallback yet — show a spinner.
+  // Session resolving (signed-in email → staff or client slice) with no local fallback yet.
+  // Branded splash — same look as the !hydrated fallback above, so the whole boot reads as ONE
+  // continuous branded screen (this used to be a bare grey "Loading…" page).
   if (!currentUser && emailKey && portalData === undefined && !clientUser) {
-    return <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: fontStack, background: T.bg, color: T.textMuted, fontSize: 14 }}>Loading…</div>;
+    const brandColor  = (branding.accentColor && branding.accentColor.trim()) ? branding.accentColor : T.primary;
+    const splashColor = (branding.splashBgColor && branding.splashBgColor.trim()) ? branding.splashBgColor : brandColor;
+    return (
+      <div style={{ position: "fixed", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16, background: splashColor, zIndex: 9998, fontFamily: fontStack }}>
+        <div style={{ width: 22, height: 22, border: "2.5px solid rgba(255,255,255,0.3)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.9s linear infinite" }} />
+        <div style={{ color: "rgba(255,255,255,0.85)", fontSize: 13.5, fontWeight: 700, letterSpacing: "0.02em" }}>Signing you in…</div>
+      </div>
+    );
   }
   if (!currentUser && portalClient) {
     // Theme/branding from the (possibly server-provided) branding, so the portal looks right even
@@ -28181,7 +28216,7 @@ export default function App({ authEmail = "", onSignOut }) {
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
       {page === "duplicates" && perms.canImport && <DuplicatesScreen clients={clients} invoices={invoices} schedule={schedule} onMerge={handleMergeClients} onGoToClients={() => handleNav("clients")} />}
-      {page === "settings" && <AppSettings onNav={handleNav} initialTab={settingsTab} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeamSafe} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} navDock={navDock} setNavDock={setNavDock} vp={vp} />}
+      {page === "settings" && <AppSettings onNav={handleNav} initialTab={settingsTab} initialSection={settingsSection} branding={branding} setBranding={setBranding} catalog={catalog} setCatalog={setCatalog} email={email} setEmail={setEmail} costs={costs} setCosts={setCosts} budget={budget} setBudget={setBudget} clients={clients} setClients={setClients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} team={team} setTeam={setTeamSafe} invoicing={invoicing} setInvoicing={setInvoicing} currentUserId={currentUser.id} onResetData={handleResetData} serviceTiers={serviceTiers} setServiceTiers={setServiceTiers} onSyncData={handleQBSync} navDock={navDock} setNavDock={setNavDock} vp={vp} />}
     </>
   );
 
