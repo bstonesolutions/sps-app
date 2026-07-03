@@ -4247,7 +4247,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
   return (
     <div style={{ width: "100%" }}>
     <div style={{ maxWidth: 1040, margin: "0 auto", width: "100%", boxSizing: "border-box" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", rowGap: 10, marginBottom: 14 }}>
         <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Clients</h2>
         {selectMode ? (
           <button onClick={exitSelect} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Done</button>
@@ -4405,7 +4405,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
           return (
             <div key={c.id}
               onClick={() => selectMode ? toggle(c.id) : onSelect(c)}
-              style={{ background: isActive ? hexA(T.primary, 0.05) : T.surface, border: `1px solid ${(isSel || isActive) ? T.primary : T.border}`, borderRadius: 16, padding: "15px 16px", cursor: "pointer", display: "flex", gap: 14, alignItems: "flex-start", transition: "box-shadow 0.15s, border-color 0.15s", boxShadow: isActive ? `0 2px 10px ${hexA(T.primary, 0.12)}` : "0 1px 4px rgba(0,0,0,0.04)" }}
+              style={{ background: isActive ? hexA(T.primary, 0.05) : T.surface, border: `1px solid ${(isSel || isActive) ? T.primary : T.border}`, borderRadius: 16, padding: "14px 15px", cursor: "pointer", display: "flex", gap: 11, alignItems: "flex-start", transition: "box-shadow 0.15s, border-color 0.15s", boxShadow: isActive ? `0 2px 10px ${hexA(T.primary, 0.12)}` : "0 1px 4px rgba(0,0,0,0.04)" }}
               onMouseEnter={e => e.currentTarget.style.boxShadow = "0 4px 16px rgba(0,0,0,0.09)"}
               onMouseLeave={e => e.currentTarget.style.boxShadow = "0 1px 4px rgba(0,0,0,0.04)"}
             >
@@ -4413,8 +4413,8 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
               {/* Division color bar instead of emoji */}
               <div style={{ width: 4, alignSelf: "stretch", borderRadius: 4, background: pm.bg, flexShrink: 0, minHeight: 44 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 700, fontSize: 15, letterSpacing: "-0.01em", display: "flex", alignItems: "center", gap: 7, color: c.status === "Inactive" ? T.textMuted : T.text }}>
-                  {c.name}
+                <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+                  <span style={{ fontWeight: 700, fontSize: 15, letterSpacing: "-0.01em", color: c.status === "Inactive" ? T.textMuted : T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{c.name}</span>
                   {c.status === "Inactive" && <span style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 6, padding: "1px 6px", flexShrink: 0 }}>Inactive</span>}
                 </div>
                 <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.address || "No address"}</div>
@@ -26820,7 +26820,7 @@ export default function App({ authEmail = "", onSignOut }) {
         ) : (
         /* Desktop master-detail: client list (left) + selected client's record (right) */
         <div style={{ flex: 1, minWidth: 0, display: "flex", height: "100%", overflow: "hidden" }}>
-          <div style={{ width: vp.isTablet ? 280 : 404, boxSizing: "border-box", flexShrink: 0, borderRight: `1px solid ${T.border}`, overflowY: "auto", padding: vp.isTablet ? "18px 14px" : "22px 20px" }}>
+          <div style={{ width: vp.isTablet ? 320 : 420, boxSizing: "border-box", flexShrink: 0, borderRight: `1px solid ${T.border}`, overflowY: "auto", padding: vp.isTablet ? "18px 14px" : "22px 20px" }}>
             <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} view="split" onSetView={setClientsView} selectedId={selectedClient?.id} onSelect={handleClientSelect} onAdd={() => setAdding(true)} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />
           </div>
           <div style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: vp.isTablet ? "20px 16px" : "24px 30px" }}>
