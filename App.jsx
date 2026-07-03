@@ -2381,6 +2381,41 @@ function monthActuals(clients, when = new Date(), invoices = []) {
   return { revenue, cost, profit: revenue - cost, jobs };
 }
 
+// Sum this month's completed-job cost breakdowns into category buckets — the auto-filled "actuals" for
+// the budget. Keys line up with the expense-line `src` values (labor / gas / cogs / equipment / etc.).
+function monthCostActuals(clients, when = new Date()) {
+  const m = when.getMonth(), y = when.getFullYear();
+  const n = (v) => parseFloat(v) || 0;
+  const a = { labor: 0, gas: 0, cogs: 0, equipment: 0, insurance: 0, overhead: 0 };
+  (clients || []).forEach(c => (c.history || []).forEach(h => {
+    const b = h && h.breakdown; if (!b) return;
+    const [mm, , yy] = (h.date || "").split("/").map(Number);
+    if (mm - 1 !== m || yy !== y) return;
+    a.labor += n(b.labor); a.gas += n(b.gas);
+    a.cogs += n(b.treatment) + n(b.parts) + n(b.product);
+    a.equipment += n(b.equipment); a.insurance += n(b.insurance); a.overhead += n(b.overhead);
+  }));
+  return a;
+}
+
+// Debt payoff math: months to clear a balance at a monthly payment + APR, plus total interest. Returns
+// { months, totalInterest, neverPaysOff? } — neverPaysOff when the payment can't cover the interest.
+function debtPayoff(balance, apr, payment) {
+  const B = parseFloat(balance) || 0, P = parseFloat(payment) || 0, r = (parseFloat(apr) || 0) / 1200;
+  if (B <= 0) return { months: 0, totalInterest: 0, paid: true };
+  if (P <= 0) return null;
+  if (r === 0) { const months = Math.ceil(B / P); return { months, totalInterest: 0 }; }
+  if (P <= B * r) return { months: Infinity, totalInterest: Infinity, neverPaysOff: true };
+  const months = Math.ceil(-Math.log(1 - (B * r) / P) / Math.log(1 + r));
+  return { months, totalInterest: Math.max(0, P * months - B) };
+}
+// Add N months to today → a "Mon YYYY" label.
+function monthsOutLabel(months) {
+  if (!isFinite(months)) return "—";
+  const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + months);
+  return d.toLocaleDateString("en-US", { month: "short", year: "numeric" });
+}
+
 // derive outstanding balances + equipment flags into alert items
 function deriveAlerts(clients, invoices, catalog) {
   const alerts = [];
@@ -2712,18 +2747,29 @@ const DEFAULT_HOME = { items: [
 ] };
 
 // Admin budget: expected monthly money in/out (customizable lines)
+// The budget store. `src` on a line ties it to REAL data so its "actual" auto-fills:
+//   income  src "revenue"                                        → paid-invoice revenue this month
+//   expense src "labor"|"gas"|"cogs"|"equipment"|"insurance"|"overhead" → summed from completed-job breakdowns
+// Lines with no src are budget-only (owner types the actual, or it stays a target). Legacy budgets used
+// `label`; the UI reads `category || label`, and debts/cash/goals default empty, so no migration is needed.
 const DEFAULT_BUDGET = {
   income: [
-    { id: "i1", label: "Service Revenue (target)", amount: "12000" },
+    { id: "i1", category: "Service revenue", amount: "12000", src: "revenue" },
+    { id: "i2", category: "Other income", amount: "0" },
   ],
   expenses: [
-    { id: "e1", label: "Payroll", amount: "4500" },
-    { id: "e2", label: "Insurance", amount: "400" },
-    { id: "e3", label: "Vehicle & Gas", amount: "900" },
-    { id: "e4", label: "Equipment", amount: "1200" },
-    { id: "e5", label: "Software & Subscriptions", amount: "300" },
-    { id: "e6", label: "Other Overhead", amount: "800" },
+    { id: "e1", category: "Payroll & labor", amount: "4500", src: "labor" },
+    { id: "e2", category: "Supplies & COGS", amount: "1500", src: "cogs" },
+    { id: "e3", category: "Vehicle & gas", amount: "900", src: "gas" },
+    { id: "e4", category: "Equipment", amount: "1200", src: "equipment" },
+    { id: "e5", category: "Insurance", amount: "400", src: "insurance" },
+    { id: "e6", category: "Software & subscriptions", amount: "300" },
+    { id: "e7", category: "Marketing", amount: "300" },
+    { id: "e8", category: "Other overhead", amount: "800", src: "overhead" },
   ],
+  debts: [],   // { id, name, type, balance, apr, monthlyPayment, originalAmount }
+  cash: "",    // cash on hand (owner-entered)
+  goals: [],   // { id, name, target, saved }  savings goals
 };
 
 // ─────────────────────────────────────────────
@@ -22225,6 +22271,215 @@ function BudgetScreen({ budget, setBudget, clients, costs, invoices, onNav, T, v
   );
 }
 
+// ── Full finance hub: Overview · Budget (categories, budget-vs-actual) · Debt (payoff) · Savings ──
+function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp = {} }) {
+  const money = (n) => `$${Math.round(parseFloat(n) || 0).toLocaleString()}`;
+  const num = (v) => parseFloat(v) || 0;
+  const [section, setSection] = useState("overview");
+  const now = new Date();
+
+  const actuals = monthActuals(clients, now, invoices || []);
+  const costA = monthCostActuals(clients, now);
+  const fixedFromCosts = costs ? monthlyFixedCosts(costs) : 0;
+  const income = budget.income || [], expenses = budget.expenses || [], debts = budget.debts || [], goals = budget.goals || [];
+  const catName = (r) => r.category || r.label || "";
+  const catActual = (r) => { if (!r.src) return null; if (r.src === "revenue") return actuals.revenue; return costA[r.src] != null ? costA[r.src] : null; };
+
+  const incomeBudget = income.reduce((s, r) => s + num(r.amount), 0);
+  const expenseBudget = expenses.reduce((s, r) => s + num(r.amount), 0) + fixedFromCosts;
+  const incomeActual = actuals.revenue;
+  const expenseActual = actuals.cost + fixedFromCosts;
+  const debtMonthly = debts.reduce((s, d) => s + num(d.monthlyPayment), 0);
+  const debtTotal = debts.reduce((s, d) => s + num(d.balance), 0);
+  const cash = num(budget.cash);
+  const netCashFlow = incomeActual - expenseActual - debtMonthly;
+  const netPosition = cash - debtTotal;
+  const taxCfg = { ...DEFAULT_COSTS.tax, ...((costs && costs.tax) || {}) };
+  const tx = estimateTaxes((incomeActual - expenseActual) * 12, costs);
+  const moTakeHome = taxCfg.enabled ? tx.takeHome / 12 : (incomeActual - expenseActual);
+
+  const editRow = (kind, id, field, value) => setBudget(b => ({ ...b, [kind]: (b[kind] || []).map(r => r.id === id ? { ...r, [field]: field === "amount" ? value.replace(/[^\d.]/g, "") : value } : r) }));
+  const addRow = (kind) => setBudget(b => ({ ...b, [kind]: [...(b[kind] || []), { id: `${kind[0]}${Date.now()}`, category: "", amount: "" }] }));
+  const removeRow = (kind, id) => setBudget(b => ({ ...b, [kind]: (b[kind] || []).filter(r => r.id !== id) }));
+  const setCash = (v) => setBudget(b => ({ ...b, cash: v.replace(/[^\d.]/g, "") }));
+  const addDebt = () => setBudget(b => ({ ...b, debts: [...(b.debts || []), { id: `d${Date.now()}`, name: "", balance: "", apr: "", monthlyPayment: "", originalAmount: "" }] }));
+  const editDebt = (id, field, value) => setBudget(b => ({ ...b, debts: (b.debts || []).map(d => d.id === id ? { ...d, [field]: field === "name" ? value : value.replace(/[^\d.]/g, "") } : d) }));
+  const removeDebt = (id) => setBudget(b => ({ ...b, debts: (b.debts || []).filter(d => d.id !== id) }));
+  const addGoal = () => setBudget(b => ({ ...b, goals: [...(b.goals || []), { id: `g${Date.now()}`, name: "", target: "", saved: "" }] }));
+  const editGoal = (id, field, value) => setBudget(b => ({ ...b, goals: (b.goals || []).map(g => g.id === id ? { ...g, [field]: field === "name" ? value : value.replace(/[^\d.]/g, "") } : g) }));
+  const removeGoal = (id) => setBudget(b => ({ ...b, goals: (b.goals || []).filter(g => g.id !== id) }));
+
+  const green = "#16a34a", red = "#E5484D";
+  const card = { background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: 16, marginBottom: 14 };
+  const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted };
+  const nameInput = { flex: 1, minWidth: 0, padding: "9px 11px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const amtInput = { width: 92, padding: "9px 8px 9px 18px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" };
+  const dollar = (child) => <div style={{ position: "relative", flexShrink: 0 }}><span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>{child}</div>;
+  const metric = (label, value, color, sub) => (
+    <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: "13px 14px" }}>
+      <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: T.textMuted }}>{label}</div>
+      <div style={{ fontSize: 21, fontWeight: 800, color: color || T.text, letterSpacing: "-0.02em", marginTop: 3, whiteSpace: "nowrap" }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+  const bar = (actual, target, color) => { const pct = target > 0 ? Math.min(140, (actual / target) * 100) : 0; return (
+    <div style={{ height: 6, borderRadius: 100, background: T.surfaceAlt, overflow: "hidden", marginTop: 6 }}><div style={{ width: `${Math.min(100, pct)}%`, height: "100%", borderRadius: 100, background: pct > 100 ? red : color, transition: "width 0.3s" }} /></div>
+  ); };
+
+  const catRows = (kind, actualColor) => (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {(budget[kind] || []).map(r => {
+        const act = catActual(r), tgt = num(r.amount);
+        return (
+          <div key={r.id}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input type="text" value={catName(r)} onChange={e => editRow(kind, r.id, "category", e.target.value)} placeholder="Category…" style={nameInput} />
+              {dollar(<input type="text" inputMode="decimal" value={r.amount} onChange={e => editRow(kind, r.id, "amount", e.target.value)} placeholder="0" style={amtInput} />)}
+              <button onClick={() => removeRow(kind, r.id)} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", fontSize: 17, lineHeight: 1, flexShrink: 0 }}>×</button>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.textMuted, marginTop: 5 }}>
+              <span>{act != null ? <>Actual <b style={{ color: actualColor }}>{money(act)}</b> of {money(tgt)}</> : <span style={{ opacity: 0.7 }}>Budgeted {money(tgt)}</span>}</span>
+              {act != null && tgt > 0 && <span style={{ color: (kind === "expenses" ? act > tgt : act < tgt) ? red : green, fontWeight: 700 }}>{kind === "expenses" ? (act > tgt ? "over" : "under") : (act >= tgt ? "on track" : "below")} · {money(Math.abs(tgt - act))}</span>}
+            </div>
+            {act != null && bar(act, tgt, actualColor)}
+          </div>
+        );
+      })}
+      {kind === "expenses" && fixedFromCosts > 0 && (
+        <div style={{ display: "flex", justifyContent: "space-between", background: T.surfaceAlt, borderRadius: 10, padding: "9px 12px", fontSize: 12.5 }}>
+          <span style={{ color: T.text }}>Fixed overhead <span style={{ color: T.textMuted, fontSize: 11 }}>(from Cost Settings)</span></span>
+          <span style={{ fontWeight: 800, color: T.text }}>{money(fixedFromCosts)}</span>
+        </div>
+      )}
+      <Btn sm variant="ghost" onClick={() => addRow(kind)} style={{ alignSelf: "flex-start" }}>+ Add category</Btn>
+    </div>
+  );
+
+  const SECTIONS = [["overview", "Overview"], ["budget", "Budget"], ["debt", "Debt"], ["savings", "Savings"]];
+
+  return (
+    <div style={{ maxWidth: vp.isPhone ? "100%" : 820, margin: "0 auto", width: "100%" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", rowGap: 10, marginBottom: 14 }}>
+        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Budget</h2>
+        <Btn sm variant="outline" onClick={() => onNav("settings")} style={{ display: "flex", alignItems: "center", gap: 5 }}><Icon name="sliders" size={13} /> Cost Settings</Btn>
+      </div>
+      <div style={{ display: "flex", gap: 7, overflowX: "auto", paddingBottom: 12, WebkitOverflowScrolling: "touch" }}>
+        {SECTIONS.map(([id, label]) => (
+          <button key={id} onClick={() => setSection(id)} style={{ flexShrink: 0, padding: "8px 16px", borderRadius: 100, border: "none", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: section === id ? T.primary : T.surfaceAlt, color: section === id ? "#fff" : T.textMuted }}>{label}</button>
+        ))}
+      </div>
+
+      {section === "overview" && (
+        <>
+          <div style={{ background: `linear-gradient(150deg, ${T.primary} 0%, ${mix(T.primary, "#000", 0.32)} 100%)`, borderRadius: 20, padding: 20, color: "#fff", marginBottom: 14, boxShadow: `0 10px 36px ${hexA(T.primary, 0.3)}` }}>
+            <div style={{ ...lbl, color: "rgba(255,255,255,0.75)", marginBottom: 10 }}>Net cash flow · this month</div>
+            <div style={{ fontSize: 34, fontWeight: 800, letterSpacing: "-0.03em", lineHeight: 1 }}>{money(netCashFlow)}</div>
+            <div style={{ display: "flex", gap: 18, marginTop: 14, flexWrap: "wrap", fontSize: 12.5 }}>
+              <span>In <b>{money(incomeActual)}</b></span><span style={{ opacity: 0.6 }}>−</span>
+              <span>Out <b>{money(expenseActual)}</b></span><span style={{ opacity: 0.6 }}>−</span>
+              <span>Debt <b>{money(debtMonthly)}</b></span>
+            </div>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: vp.isPhone ? "1fr 1fr" : "repeat(3, 1fr)", gap: 10, marginBottom: 14 }}>
+            {metric("Income", money(incomeActual), T.text, `of ${money(incomeBudget)} target`)}
+            {metric("Expenses", money(expenseActual), T.text, `of ${money(expenseBudget)} budget`)}
+            {metric("Take-home", money(Math.max(0, moTakeHome)), green, "est. after taxes")}
+            {metric("Cash on hand", money(cash), T.text, "you entered")}
+            {metric("Total debt", money(debtTotal), debtTotal > 0 ? red : T.text, `${money(debtMonthly)}/mo`)}
+            {metric("Net position", money(netPosition), netPosition >= 0 ? green : red, "cash − debt")}
+          </div>
+          {goals.length > 0 && (
+            <div style={card}>
+              <div style={{ ...lbl, marginBottom: 12 }}>Savings goals</div>
+              {goals.map(g => { const t = num(g.target), s = num(g.saved), pct = t > 0 ? Math.min(100, (s / t) * 100) : 0; return (
+                <div key={g.id} style={{ marginBottom: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}><span style={{ fontWeight: 700, color: T.text }}>{g.name || "Goal"}</span><span style={{ color: T.textMuted }}>{money(s)} / {money(t)}</span></div>
+                  <div style={{ height: 7, borderRadius: 100, background: T.surfaceAlt, overflow: "hidden", marginTop: 6 }}><div style={{ width: `${pct}%`, height: "100%", borderRadius: 100, background: green }} /></div>
+                </div>
+              ); })}
+            </div>
+          )}
+        </>
+      )}
+
+      {section === "budget" && (
+        <>
+          <div style={card}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}><span style={{ fontSize: 15, fontWeight: 800, color: T.text }}>Income</span><span style={{ fontSize: 13, fontWeight: 800, color: green }}>{money(incomeActual)} <span style={{ color: T.textMuted, fontWeight: 600 }}>of {money(incomeBudget)}</span></span></div>
+            {catRows("income", green)}
+          </div>
+          <div style={card}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}><span style={{ fontSize: 15, fontWeight: 800, color: T.text }}>Expenses</span><span style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{money(expenseActual)} <span style={{ color: T.textMuted, fontWeight: 600 }}>of {money(expenseBudget)}</span></span></div>
+            {catRows("expenses", T.primary)}
+          </div>
+          <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5, padding: "0 4px" }}>Actuals auto-fill from real data: income from paid invoices, and job costs (labor, supplies, gas, equipment) from completed stops. Categories without a live source show your budgeted amount.</div>
+        </>
+      )}
+
+      {section === "debt" && (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: vp.isPhone ? "1fr 1fr" : "repeat(3, 1fr)", gap: 10, marginBottom: 14 }}>
+            {metric("Total debt", money(debtTotal), debtTotal > 0 ? red : green, `${debts.length} account${debts.length === 1 ? "" : "s"}`)}
+            {metric("Monthly payments", money(debtMonthly), T.text, "total debt service")}
+            {metric("Debt-free by", debts.length ? monthsOutLabel(Math.max(0, ...debts.map(d => { const p = debtPayoff(d.balance, d.apr, d.monthlyPayment); return p && isFinite(p.months) ? p.months : 0; }))) : "—", T.text, "at current payments")}
+          </div>
+          {debts.map(d => { const p = debtPayoff(d.balance, d.apr, d.monthlyPayment); const orig = num(d.originalAmount), paidPct = orig > 0 ? Math.min(100, ((orig - num(d.balance)) / orig) * 100) : 0; return (
+            <div key={d.id} style={card}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                <input type="text" value={d.name} onChange={e => editDebt(d.id, "name", e.target.value)} placeholder="e.g. Truck loan, Card…" style={{ ...nameInput, fontWeight: 700 }} />
+                <button onClick={() => removeDebt(d.id)} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", fontSize: 17, flexShrink: 0 }}>×</button>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                {[["balance", "Balance"], ["apr", "APR %"], ["monthlyPayment", "Payment/mo"]].map(([f, ph]) => (
+                  <div key={f}><div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginBottom: 3 }}>{ph}</div>{dollar(<input type="text" inputMode="decimal" value={d[f]} onChange={e => editDebt(d.id, f, e.target.value)} placeholder="0" style={{ ...amtInput, width: "100%", paddingLeft: f === "apr" ? 8 : 18 }} />)}</div>
+                ))}
+              </div>
+              <div style={{ marginTop: 8, fontSize: 12, color: T.textMuted, display: "flex", flexWrap: "wrap", gap: 12 }}>
+                {p == null ? <span>Enter a monthly payment to see payoff.</span>
+                  : p.neverPaysOff ? <span style={{ color: red, fontWeight: 700 }}>Payment doesn't cover interest — balance won't drop.</span>
+                  : p.paid ? <span style={{ color: green, fontWeight: 700 }}>Paid off 🎉</span>
+                  : <><span>Paid off in <b style={{ color: T.text }}>{p.months} mo</b> ({monthsOutLabel(p.months)})</span><span>Interest <b style={{ color: T.text }}>{money(p.totalInterest)}</b></span></>}
+              </div>
+              {orig > 0 && <div style={{ height: 6, borderRadius: 100, background: T.surfaceAlt, overflow: "hidden", marginTop: 8 }}><div style={{ width: `${paidPct}%`, height: "100%", borderRadius: 100, background: green }} /></div>}
+            </div>
+          ); })}
+          <Btn sm variant="ghost" onClick={addDebt} style={{ alignSelf: "flex-start" }}>+ Add a debt</Btn>
+        </>
+      )}
+
+      {section === "savings" && (
+        <>
+          <div style={card}>
+            <div style={{ ...lbl, marginBottom: 8 }}>Cash on hand</div>
+            {dollar(<input type="text" inputMode="decimal" value={budget.cash || ""} onChange={e => setCash(e.target.value)} placeholder="0" style={{ ...amtInput, width: 160, fontSize: 18, padding: "12px 10px 12px 22px", textAlign: "left" }} />)}
+            <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 8 }}>Your current cash/bank balance. Used for the Net position on the Overview.</div>
+          </div>
+          <div style={card}>
+            <div style={{ ...lbl, marginBottom: 12 }}>Savings goals</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              {goals.map(g => { const t = num(g.target), s = num(g.saved), pct = t > 0 ? Math.min(100, (s / t) * 100) : 0; return (
+                <div key={g.id}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <input type="text" value={g.name} onChange={e => editGoal(g.id, "name", e.target.value)} placeholder="e.g. New truck fund" style={{ ...nameInput, fontWeight: 700 }} />
+                    <button onClick={() => removeGoal(g.id)} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", fontSize: 17, flexShrink: 0 }}>×</button>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                    <div style={{ flex: 1 }}><div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginBottom: 3 }}>Saved</div>{dollar(<input type="text" inputMode="decimal" value={g.saved} onChange={e => editGoal(g.id, "saved", e.target.value)} placeholder="0" style={{ ...amtInput, width: "100%" }} />)}</div>
+                    <div style={{ flex: 1 }}><div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginBottom: 3 }}>Target</div>{dollar(<input type="text" inputMode="decimal" value={g.target} onChange={e => editGoal(g.id, "target", e.target.value)} placeholder="0" style={{ ...amtInput, width: "100%" }} />)}</div>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.textMuted, marginTop: 6 }}><span>{Math.round(pct)}% funded</span><span>{money(Math.max(0, t - s))} to go</span></div>
+                  <div style={{ height: 7, borderRadius: 100, background: T.surfaceAlt, overflow: "hidden", marginTop: 5 }}><div style={{ width: `${pct}%`, height: "100%", borderRadius: 100, background: green }} /></div>
+                </div>
+              ); })}
+              <Btn sm variant="ghost" onClick={addGoal} style={{ alignSelf: "flex-start" }}>+ Add a goal</Btn>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 const ALL_NAV = [
   { id: "dashboard",  label: "Home",      icon: "home" },
   { id: "clients",    label: "Clients",   icon: "clients" },
@@ -26845,7 +27100,7 @@ export default function App({ authEmail = "", onSignOut }) {
       {page === "schedule" && <SectionErrorBoundary key={"schedule-" + schedNonce}><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <SectionErrorBoundary key="inventory"><InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} /></SectionErrorBoundary>}
       {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} />}
-      {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetScreen budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} />}
+      {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} />}
       {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
       {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
       {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : undefined} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} vp={vp} />}
