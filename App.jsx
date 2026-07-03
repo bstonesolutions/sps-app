@@ -18431,13 +18431,18 @@ function SyncStatus({ T, branding, team, currentUserId, email = {} }) {
 
 // ── Leads (intake funnel) — the owner's pipeline of prospects → one-tap convert to client. ──
 // Owner-only (the nav entry is ownerOnly). Reads/writes the sps_leads app_state collection.
-function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, vp = {} }) {
+function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, onLeadOpened, vp = {} }) {
   const { T } = useApp();
   const [filter, setFilter] = useState("active"); // active | all | <stage>
   const [selId, setSelId] = useState(null);
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState({ ...BLANK_LEAD });
   const [dupModal, setDupModal] = useState(null); // { lead, dup } — convert hit an existing client
+  const [lightbox, setLightbox] = useState(null);  // full-screen photo URL (in-app, no browser hop)
+  // Deep-link: reopen a specific lead (e.g. returning from a cancelled convert).
+  useEffect(() => {
+    if (openLeadId) { setSelId(openLeadId); if (onLeadOpened) onLeadOpened(); }
+  }, [openLeadId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const norm = (s) => String(s || "").replace(/[^\d]/g, "").slice(-10);
   const lcs = (s) => String(s || "").trim().toLowerCase();
@@ -18497,29 +18502,42 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, vp = {} }) {
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "0 16px" }}>
         {shown.length === 0 && <div style={{ textAlign: "center", color: T.textMuted, fontSize: 13.5, padding: "40px 16px", lineHeight: 1.5 }}>No leads here yet. Website leads will appear automatically once the funnel's connected — or add one manually.</div>}
-        {shown.map(l => (
-          <div key={l.id} onClick={() => setSelId(l.id)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "13px 15px", cursor: "pointer", display: "flex", alignItems: "center", gap: 12, boxShadow: "0 2px 10px rgba(0,0,0,0.04)" }}>
+        {shown.map(l => {
+          const initials = (l.name || "?").trim().split(/\s+/).map(w => w[0]).slice(0, 2).join("").toUpperCase() || "?";
+          const isNew = l.status === "new";
+          const nPhotos = Array.isArray(l.photos) ? l.photos.length : 0;
+          const firstImg = nPhotos ? l.photos.find(u => !/\.(mp4|mov|webm|m4v)(\?|$)/i.test(String(u))) : null;
+          const meta = [l.service, ago(l.createdAt), nPhotos ? `📷 ${nPhotos}` : ""].filter(Boolean).join(" · ");
+          return (
+          <div key={l.id} onClick={() => setSelId(l.id)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderLeft: `3px solid ${STATUS_COLOR[l.status] || T.border}`, borderRadius: 16, padding: "13px 15px", cursor: "pointer", display: "flex", alignItems: "flex-start", gap: 12, boxShadow: "0 2px 10px rgba(0,0,0,0.04)" }}>
+            <div style={{ width: 40, height: 40, borderRadius: "50%", flexShrink: 0, background: isNew ? T.primary : hexA(T.primary, 0.12), color: isNew ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 13.5 }}>{initials}</div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <div style={{ fontSize: 15.5, fontWeight: 800, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.name || l.phone || l.email || "New lead"}</div>
+                <div style={{ fontSize: 15, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.name || l.phone || l.email || "New lead"}</div>
                 <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", textTransform: "uppercase", color: T.textMuted, background: T.surfaceAlt, padding: "2px 7px", borderRadius: 100, flexShrink: 0 }}>{LEAD_SOURCE_LABEL[l.source] || l.source}</span>
+                <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: 10, fontWeight: 800, color: STATUS_COLOR[l.status] || T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{LEAD_STAGES.find(s => s.id === l.status)?.label || l.status}</span>
               </div>
-              <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{[l.service, l.message].filter(Boolean).join(" — ") || "No details"}</div>
+              {l.message
+                ? <div style={{ fontSize: 13, color: T.text, marginTop: 4, lineHeight: 1.45, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{l.message}</div>
+                : <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 4, fontStyle: "italic" }}>No message left</div>}
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{meta}</div>
             </div>
-            <div style={{ textAlign: "right", flexShrink: 0 }}>
-              <span style={{ fontSize: 10.5, fontWeight: 800, color: STATUS_COLOR[l.status] || T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em" }}>{LEAD_STAGES.find(s => s.id === l.status)?.label || l.status}</span>
-              <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 2 }}>{ago(l.createdAt)}</div>
-            </div>
+            {firstImg && <img src={firstImg} alt="" loading="lazy" onError={e => { e.target.style.display = "none"; }} style={{ width: 52, height: 52, borderRadius: 12, objectFit: "cover", border: `1px solid ${T.border}`, flexShrink: 0, background: T.surfaceAlt }} />}
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {sel && (
         <Modal title="Lead" onClose={() => setSelId(null)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <div>
-              <div style={{ fontSize: 19, fontWeight: 800, color: T.text }}>{sel.name || "New lead"}</div>
-              <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>From {LEAD_SOURCE_LABEL[sel.source] || sel.source}{sel.sourceDetail ? ` · ${sel.sourceDetail}` : ""} · {ago(sel.createdAt)}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ width: 48, height: 48, borderRadius: "50%", flexShrink: 0, background: sel.status === "new" ? T.primary : hexA(T.primary, 0.12), color: sel.status === "new" ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 16 }}>{((sel.name || "?").trim().split(/\s+/).map(w => w[0]).slice(0, 2).join("") || "?").toUpperCase()}</div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 19, fontWeight: 800, color: T.text, letterSpacing: "-0.01em" }}>{sel.name || "New lead"}</div>
+                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{LEAD_SOURCE_LABEL[sel.source] || sel.source}{sel.sourceDetail ? ` · ${sel.sourceDetail}` : ""} · {ago(sel.createdAt)}</div>
+              </div>
+              <span style={{ flexShrink: 0, fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", color: STATUS_COLOR[sel.status] || T.textMuted, background: hexA(STATUS_COLOR[sel.status] || T.textMuted, 0.12), padding: "5px 11px", borderRadius: 100 }}>{LEAD_STAGES.find(s => s.id === sel.status)?.label || sel.status}</span>
             </div>
             {(() => { const dup = dupClient(sel); return dup ? <div style={{ fontSize: 12, fontWeight: 700, color: "#B45309", background: hexA("#F59E0B", 0.12), border: `1px solid ${hexA("#F59E0B", 0.4)}`, borderRadius: 10, padding: "9px 12px" }}>Possible match: existing client <b>{dup.name}</b>. Check before converting.</div> : null; })()}
             {/* Their message — the reason they reached out — leads the popup, full-strength text. */}
@@ -18537,17 +18555,19 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, vp = {} }) {
                   {sel.photos.map((u, i) => /\.(mp4|mov|webm|m4v)(\?|$)/i.test(String(u)) ? (
                     <video key={i} src={u} controls playsInline preload="metadata" style={{ width: "100%", maxHeight: 260, borderRadius: 12, border: `1px solid ${T.border}`, background: "#000", objectFit: "cover" }} />
                   ) : (
-                    <img key={i} src={u} alt="Lead attachment" loading="lazy" onClick={() => openInAppBrowser(u)} onError={e => { e.target.style.display = "none"; }}
+                    <img key={i} src={u} alt="Lead attachment" loading="lazy" onClick={() => setLightbox(u)} onError={e => { e.target.style.display = "none"; }}
                       style={{ width: "100%", height: sel.photos.length === 1 ? "auto" : 150, maxHeight: 320, objectFit: "cover", borderRadius: 12, border: `1px solid ${T.border}`, cursor: "pointer", background: T.surfaceAlt }} />
                   ))}
                 </div>
               </div>
             )}
-            <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-              {sel.phone && <div style={{ fontSize: 13.5 }}><span style={{ color: T.textMuted }}>Phone: </span><a href={`tel:${sel.phone}`} style={{ color: T.primary, fontWeight: 700, textDecoration: "none" }}>{sel.phone}</a></div>}
-              {sel.email && <div style={{ fontSize: 13.5 }}><span style={{ color: T.textMuted }}>Email: </span><a href={`mailto:${sel.email}`} style={{ color: T.primary, fontWeight: 700, textDecoration: "none" }}>{sel.email}</a></div>}
-              {sel.service && <div style={{ fontSize: 13.5, color: T.text }}><span style={{ color: T.textMuted }}>Service: </span>{sel.service}</div>}
-            </div>
+            {(sel.phone || sel.email || sel.service) && (
+              <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, overflow: "hidden" }}>
+                {sel.service && <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "11px 14px", borderBottom: (sel.phone || sel.email) ? `1px solid ${T.border}` : "none" }}><span style={{ fontSize: 12.5, color: T.textMuted, fontWeight: 700 }}>Service</span><span style={{ fontSize: 13.5, color: T.text, fontWeight: 700, textAlign: "right" }}>{sel.service}</span></div>}
+                {sel.phone && <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "11px 14px", borderBottom: sel.email ? `1px solid ${T.border}` : "none" }}><span style={{ fontSize: 12.5, color: T.textMuted, fontWeight: 700 }}>Phone</span><span style={{ display: "flex", gap: 8, alignItems: "center", minWidth: 0 }}><span style={{ fontSize: 13.5, color: T.text, fontWeight: 700 }}>{sel.phone}</span><a href={`tel:${sel.phone}`} style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "5px 12px", textDecoration: "none" }}>Call</a><a href={`sms:${sel.phone}`} style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "5px 12px", textDecoration: "none" }}>Text</a></span></div>}
+                {sel.email && <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "11px 14px" }}><span style={{ fontSize: 12.5, color: T.textMuted, fontWeight: 700 }}>Email</span><span style={{ display: "flex", gap: 8, alignItems: "center", minWidth: 0 }}><span style={{ fontSize: 13, color: T.text, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sel.email}</span><a href={`mailto:${sel.email}`} style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "5px 12px", textDecoration: "none" }}>Email</a></span></div>}
+              </div>
+            )}
             <div>
               <label style={lbl}>Stage</label>
               <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
@@ -18589,6 +18609,16 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, vp = {} }) {
             <Btn block variant="ghost" onClick={() => setDupModal(null)}>Cancel</Btn>
           </div>
         </Modal>
+      )}
+
+      {/* In-app photo lightbox — full-screen overlay, tap anywhere (or ✕) to close. No browser hop. */}
+      {lightbox && createPortal(
+        <div onClick={() => setLightbox(null)} style={{ position: "fixed", inset: 0, zIndex: 10050, background: "rgba(0,0,0,0.9)", display: "flex", alignItems: "center", justifyContent: "center", padding: 18 }}>
+          <img src={lightbox} alt="" style={{ maxWidth: "100%", maxHeight: "94%", borderRadius: 12, objectFit: "contain" }} />
+          <button onClick={() => setLightbox(null)} aria-label="Close"
+            style={{ position: "absolute", top: "max(16px, env(safe-area-inset-top))", right: 16, width: 40, height: 40, borderRadius: "50%", border: "none", background: "rgba(255,255,255,0.16)", color: "#fff", fontSize: 18, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>✕</button>
+        </div>,
+        document.body
       )}
     </div>
   );
@@ -20491,7 +20521,7 @@ function OwnerDigestSettings({ scheduleCfg, setScheduleCfg, email, branding, T }
   );
 }
 
-function CommsScreen({ initialSection, perms = {}, currentUser, schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, reminderLog, setReminderLog, leads, setLeads, onConvertLead, onLinkLead, vp = {} }) {
+function CommsScreen({ initialSection, perms = {}, currentUser, schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, reminderLog, setReminderLog, leads, setLeads, onConvertLead, onLinkLead, openLeadId, onLeadOpened, vp = {} }) {
   const { T } = useApp();
   const isAdmin = !!perms.isAdmin;
   // Only the sections this viewer is allowed to see (owner sees all). The old Messages + Reminders
@@ -20542,7 +20572,7 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
       <div style={{ paddingBottom: 90 }}>
         {section === "messages" && CAN.messages && <div style={{ padding: "0 16px" }}><MessagesScreen clients={clients} currentUser={currentUser} T={T} /></div>}
         {section === "reminders" && CAN.reminders && <div style={{ padding: "0 16px" }}><RemindersScreen schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} /></div>}
-        {section === "inbox" && CAN.inbox && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={onConvertLead} onLink={onLinkLead} vp={vp} />}
+        {section === "inbox" && CAN.inbox && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={onConvertLead} onLink={onLinkLead} openLeadId={openLeadId} onLeadOpened={onLeadOpened} vp={vp} />}
         {section === "settings" && CAN.settings && <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 18 }}><OwnerDigestSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} branding={branding} T={T} /><ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /><CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /></div>}
         {section === "broadcast" && CAN.broadcast && <BroadcastSection clients={clients} invoices={invoices} email={email} branding={branding} T={T} />}
         {section === "log" && CAN.log && soon("Activity log", "A running feed of every reminder, broadcast, and reply that's gone out — with who, when, and the channel — lives here.")}
@@ -27754,12 +27784,19 @@ export default function App({ authEmail = "", onSignOut }) {
   // Convert a lead → a real client (the funnel's payoff). Opens the FULL Add-Client form prefilled
   // from the lead (name/contact/address/division/referral) so the owner picks services, plan, and
   // rate exactly like any new client — nothing is created until they save. The lead is stamped
-  // won + convertedClientId in handleSaveNewClient above.
+  // won + convertedClientId in handleSaveNewClient above. Cancelling returns to the LEAD you came
+  // from (openLeadId → LeadsScreen reopens it), not a dead-end in the client hub.
   const [convertLead, setConvertLead] = useState(null);
+  const [openLeadId, setOpenLeadId] = useState(null); // deep-link: Comms → Leads opens this lead's popup
   const handleConvertLead = (lead) => {
     setConvertLead(lead);
     handleNav("clients");
     setAdding(true); // after handleNav (which resets adding)
+  };
+  const handleCancelConvert = () => {
+    const lead = convertLead;
+    setAdding(false); setConvertLead(null);
+    if (lead) { setOpenLeadId(lead.id); handleNav("leads"); }
   };
   // Link a lead to an EXISTING client instead of creating a duplicate — marks it won and points
   // convertedClientId at the match. The client record itself is untouched.
@@ -28312,7 +28349,7 @@ export default function App({ authEmail = "", onSignOut }) {
   const pageBody = (
     <>
       {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onOpenAlert={handleOpenAlert} onOpenStop={handleOpenStop} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} completedSids={completedSids} budget={budget} vp={vp} />}
-      {page === "clients" && adding && <ClientEditForm client={convertLead ? leadToClientForm(convertLead) : BLANK_CLIENT} title={convertLead ? "Convert Lead to Client" : "Add Client"} onSave={handleSaveNewClient} onCancel={() => { setAdding(false); setConvertLead(null); }} />}
+      {page === "clients" && adding && <ClientEditForm client={convertLead ? leadToClientForm(convertLead) : BLANK_CLIENT} title={convertLead ? "Convert Lead to Client" : "Add Client"} onSave={handleSaveNewClient} onCancel={handleCancelConvert} />}
       {page === "clients" && !adding && (vp.isDesktop ? (
         clientsView === "table" ? (
           /* Desktop Table view: full-width dense, sortable clients table (row → split + detail) */
@@ -28350,7 +28387,7 @@ export default function App({ authEmail = "", onSignOut }) {
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} isAdmin={perms.isAdmin} />}
       {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
       {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
-      {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : undefined} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} onLinkLead={handleLinkLead} vp={vp} />}
+      {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : undefined} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} onLinkLead={handleLinkLead} openLeadId={openLeadId} onLeadOpened={() => setOpenLeadId(null)} vp={vp} />}
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
       {page === "duplicates" && perms.canImport && <DuplicatesScreen clients={clients} invoices={invoices} schedule={schedule} onMerge={handleMergeClients} onGoToClients={() => handleNav("clients")} />}
