@@ -40,17 +40,32 @@ export default async function handler(req, res) {
   if (c.amount) ctxLines.push(`Amount due: ${c.amount}`);
   if (c.invoiceNumber) ctxLines.push(`Invoice #: ${c.invoiceNumber}`);
 
+  // Owner's free-text direction ("make it shorter", "fall pond cleaning promo, upbeat"), and whether
+  // to also produce a subject line (email only).
+  const instruction = String(b.instruction || "").trim().slice(0, 400);
+  const wantSubject = !!b.wantSubject && channel === "email";
+
   const system = [
     `You write ${channel === "email" ? "a short email" : "a single SMS text"} for a pond / pool / seasonal property-service business — ${intent}.`,
     `Voice: warm, plain-English, like a friendly local pro. ${channel === "text" ? "Keep it to 1-2 short sentences, well under 320 characters." : "Keep it to 2-4 short sentences."} No markdown, no emoji spam, no salesy hype.`,
-    `IMPORTANT: keep any {curly placeholders} EXACTLY as written (e.g. {first}, {company}, {date}, {amount}, {number}, {link}) — the app fills them per recipient. Never invent numbers, dates, or a payment link. Do not add a subject line. Output ONLY the message text, nothing else.`,
-    b.draft ? `Improve the owner's draft below — keep its intent + any placeholders, make it warmer and cleaner.` : `Write it fresh from the context.`,
-  ].join(" ");
-  const content = `${ctxLines.join("\n")}\n\n${b.draft ? `Draft to improve:\n${String(b.draft).slice(0, 800)}` : "Write the message."}`;
+    `IMPORTANT: keep any {curly placeholders} EXACTLY as written (e.g. {first}, {company}, {date}, {amount}, {number}, {link}) — the app fills them per recipient. Never invent numbers, dates, or a payment link.`,
+    instruction ? `Follow the owner's specific direction closely: "${instruction}".` : "",
+    wantSubject
+      ? `Output EXACTLY this shape: first line "Subject: <a short, specific subject line under 60 characters>", then a blank line, then the email body. Nothing before or after.`
+      : `Do not add a subject line. Output ONLY the message text, nothing else.`,
+    b.draft
+      ? `Improve the owner's draft below — keep its intent and any placeholders${instruction ? ", and apply the direction above" : ", make it warmer and cleaner"}.`
+      : `Write it fresh from the context${instruction ? " and the direction above" : ""}.`,
+  ].filter(Boolean).join(" ");
+  const content = `${ctxLines.join("\n")}${instruction ? `\nDirection: ${instruction}` : ""}\n\n${b.draft ? `Draft to improve:\n${String(b.draft).slice(0, 800)}` : "Write the message."}`;
 
   try {
-    const message = await callClaude({ system, content, maxTokens: 300, temperature: 0.6 });
-    return res.status(200).json({ ok: true, message });
+    const raw = String(await callClaude({ system, content, maxTokens: wantSubject ? 400 : 300, temperature: 0.6 }) || "");
+    if (wantSubject) {
+      const m = /^\s*subject:\s*(.+?)(?:\r?\n){1,2}([\s\S]*)$/i.exec(raw);
+      if (m) return res.status(200).json({ ok: true, subject: m[1].trim(), message: m[2].trim() });
+    }
+    return res.status(200).json({ ok: true, message: raw.replace(/^\s*subject:.*?(?:\r?\n){1,2}/i, "").trim() });
   } catch (e) {
     return res.status(e.missingEnv ? 501 : 502).json({ error: e.message || "AI request failed", missingEnv: !!e.missingEnv });
   }

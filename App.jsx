@@ -11845,6 +11845,53 @@ function InviteEmailSettings({ email, setEmail, branding }) {
   );
 }
 
+// Reusable "✨ AI" helper for any message / template field. A small button opens a compact panel where
+// you type a DIRECTION ("shorter", "fall pond cleaning promo, upbeat") + quick chips, then Write/Improve.
+// It fills the field via api/ai-message (keeps {placeholders} intact); for email it can also produce a
+// subject line (wantSubject + onSubject). Drop it under any textarea: <AIAssist value={x} onChange={setX} />.
+function AIAssist({ kind = "reminder", channel = "text", context = {}, value = "", onChange, wantSubject = false, onSubject }) {
+  const { T } = useApp();
+  const [open, setOpen] = useState(false);
+  const [instruction, setInstruction] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const has = !!String(value || "").trim();
+
+  const run = async (extra) => {
+    const instr = [instruction.trim(), extra].filter(Boolean).join(". ");
+    setBusy(true); setErr("");
+    try {
+      const r = await fetch(`${PROD_URL}/api/ai-message`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ kind, channel, draft: value, instruction: instr, wantSubject, context }) });
+      const d = await r.json().catch(() => ({}));
+      if (d && d.message) { onChange && onChange(d.message); if (wantSubject && d.subject && onSubject) onSubject(d.subject); setOpen(false); setInstruction(""); }
+      else setErr(d && d.missingEnv ? "AI isn't connected — add your ANTHROPIC_API_KEY in Vercel." : "Couldn't reach the AI.");
+    } catch (_) { setErr("Couldn't reach the AI."); }
+    setBusy(false);
+  };
+
+  const CHIPS = has ? ["Shorter", "Warmer", "More professional", "Fix grammar"] : ["Friendly", "Upbeat + short", "Professional"];
+  const chipStyle = { padding: "5px 11px", borderRadius: 100, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 12, fontWeight: 600, cursor: busy ? "default" : "pointer", fontFamily: "inherit" };
+  return (
+    <div style={{ marginTop: 6 }}>
+      <button type="button" onClick={() => setOpen(o => !o)} style={{ background: "none", border: "none", color: T.primary, fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", padding: 0 }}>✨ {has ? "Improve with AI" : "Write with AI"}</button>
+      {open && (
+        <div style={{ marginTop: 8, padding: 12, border: `1px solid ${T.border}`, borderRadius: 12, background: T.surfaceAlt, display: "flex", flexDirection: "column", gap: 9 }}>
+          <input type="text" value={instruction} onChange={e => setInstruction(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); run(); } }}
+            placeholder="Tell the AI what you want — e.g. fall pond cleaning, friendly, short"
+            style={{ width: "100%", padding: "10px 12px", border: `1.5px solid ${T.border}`, borderRadius: 10, fontSize: 13.5, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{CHIPS.map(t => <button key={t} type="button" disabled={busy} onClick={() => run(t)} style={chipStyle}>{t}</button>)}</div>
+          {err && <div style={{ fontSize: 12, fontWeight: 700, color: T.accent }}>{err}</div>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <Btn sm disabled={busy} onClick={() => run()}>{busy ? "Writing…" : (has ? "Improve" : "Write it")}</Btn>
+            <Btn sm variant="ghost" disabled={busy} onClick={() => { setOpen(false); setInstruction(""); setErr(""); }}>Cancel</Btn>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function EmailSettings({ email, setEmail, branding, setBranding }) {
   const { T } = useApp();
   const set = (k, v) => setEmail(e => ({ ...e, [k]: v }));
@@ -11990,7 +12037,7 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
             <input type="text" style={field} value={email.subject} onChange={e => set("subject", e.target.value)} />
             <div style={hint}>Use {"{date}"} to insert the service date.</div>
           </div>
-          <div><label style={labelStyle}>Intro Line</label><textarea style={{ ...field, resize: "vertical" }} rows={2} value={email.intro} onChange={e => set("intro", e.target.value)} /></div>
+          <div><label style={labelStyle}>Intro Line</label><textarea style={{ ...field, resize: "vertical" }} rows={2} value={email.intro} onChange={e => set("intro", e.target.value)} /><AIAssist kind="broadcast" channel="email" context={{ company: branding?.companyName || "" }} value={email.intro || ""} onChange={v => set("intro", v)} /></div>
           <div><label style={labelStyle}>Sign-off Line</label><textarea style={{ ...field, resize: "vertical" }} rows={2} value={email.signoff} onChange={e => set("signoff", e.target.value)} /></div>
           <div><label style={labelStyle}>Footer <span style={{ textTransform: "none", color: T.textMuted, fontWeight: 400 }}>(small print)</span></label><input style={field} value={email.footer || ""} onChange={e => set("footer", e.target.value)} placeholder="Stone Property Solutions · Licensed & insured" /></div>
           <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 4 }}>
@@ -12045,7 +12092,7 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
               </>
             )}
           </div>
-          <div><label style={labelStyle}>Reminder Text</label><textarea style={{ ...field, resize: "vertical" }} rows={2} value={email.smsReminder || ""} onChange={e => set("smsReminder", e.target.value)} /></div>
+          <div><label style={labelStyle}>Reminder Text</label><textarea style={{ ...field, resize: "vertical" }} rows={2} value={email.smsReminder || ""} onChange={e => set("smsReminder", e.target.value)} /><AIAssist kind="reminder" channel="text" context={{ company: branding?.companyName || "" }} value={email.smsReminder || ""} onChange={v => set("smsReminder", v)} /></div>
           <div>
             <label style={labelStyle}>Text Preview</label>
             <div style={{ background: hexA(T.primary, 0.1), borderRadius: 14, padding: "12px 14px", fontSize: 13, color: T.text, lineHeight: 1.5, borderTopLeftRadius: 4 }}>{smsPreview || "Your On My Way text will appear here."}</div>
@@ -12112,11 +12159,13 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
           <div>
             <label style={labelStyle}>Invoice Email Intro</label>
             <textarea style={{ ...field, resize: "vertical" }} rows={2} value={email.invoiceEmailIntro || ""} onChange={e => set("invoiceEmailIntro", e.target.value)} placeholder={DEFAULT_EMAIL.invoiceEmailIntro} />
+            <AIAssist kind="payment" channel="email" context={{ company: branding?.companyName || "" }} value={email.invoiceEmailIntro || ""} onChange={v => set("invoiceEmailIntro", v)} />
             <div style={previewBox}>{sampleFill(email.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro)}</div>
           </div>
           <div>
             <label style={labelStyle}>Upgrade Confirmation Text</label>
             <textarea style={{ ...field, resize: "vertical" }} rows={2} value={email.upgradeConfirm || ""} onChange={e => set("upgradeConfirm", e.target.value)} placeholder={DEFAULT_EMAIL.upgradeConfirm} />
+            <AIAssist kind="broadcast" channel="email" context={{ company: branding?.companyName || "" }} value={email.upgradeConfirm || ""} onChange={v => set("upgradeConfirm", v)} />
             <div style={hint}>Texted to the client when you finish a plan upgrade. Tags: {"{first}"} {"{company}"} {"{plan}"}.</div>
             <div style={previewBox}>{sampleFill(email.upgradeConfirm || DEFAULT_EMAIL.upgradeConfirm)}</div>
           </div>
@@ -12131,6 +12180,7 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
           <div>
             <label style={labelStyle}>"On My Way" Text</label>
             <textarea style={{ ...field, resize: "vertical" }} rows={3} value={email.smsOnMyWay || ""} onChange={e => set("smsOnMyWay", e.target.value)} />
+            <AIAssist kind="reminder" channel="text" context={{ company: branding?.companyName || "" }} value={email.smsOnMyWay || ""} onChange={v => set("smsOnMyWay", v)} />
             {smsPreview ? (
               <div style={{ marginTop: 8, background: T.surfaceAlt, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.text, lineHeight: 1.5, borderTopLeftRadius: 4 }}>{smsPreview}</div>
             ) : null}
@@ -12138,11 +12188,13 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
           <div>
             <label style={labelStyle}>"I'm Here" (Arrived) Text</label>
             <textarea style={{ ...field, resize: "vertical" }} rows={3} value={email.smsArrived || ""} onChange={e => set("smsArrived", e.target.value)} placeholder={DEFAULT_EMAIL.smsArrived} />
+            <AIAssist kind="reminder" channel="text" context={{ company: branding?.companyName || "" }} value={email.smsArrived || ""} onChange={v => set("smsArrived", v)} />
             <div style={hint}>Sent in-app and by text when you tap "I'm Here" on a stop (which also starts the job clock). Extra tag: {"{service}"} = the service type.</div>
           </div>
           <div>
             <label style={labelStyle}>"Service Complete" Text</label>
             <textarea style={{ ...field, resize: "vertical" }} rows={3} value={email.smsReport || ""} onChange={e => set("smsReport", e.target.value)} placeholder={DEFAULT_EMAIL.smsReport} />
+            <AIAssist kind="reminder" channel="text" context={{ company: branding?.companyName || "" }} value={email.smsReport || ""} onChange={v => set("smsReport", v)} />
             <div style={hint}>Sent when you tap "Text Report" after finishing a visit. Tags: {"{first}"}, {"{service}"}, {"{company}"}.</div>
             <div style={previewBox}>{sampleFill(email.smsReport || DEFAULT_EMAIL.smsReport)}</div>
           </div>
@@ -19758,18 +19810,6 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
   const fill = (c) => fillOne(msg, c);
   const ready = isEmail ? (!!msg.trim() && !!subject.trim()) : !!msg.trim();
 
-  const aiDraft = async () => {
-    setAiBusy(true); setErr("");
-    try {
-      const r = await fetch(`${PROD_URL}/api/ai-message`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ kind: "broadcast", draft: msg, channel, context: { company: branding?.companyName || "" } }) });
-      const d = await r.json().catch(() => ({}));
-      if (d && d.message) setMsg(d.message);
-      else setErr(d && d.missingEnv ? "AI isn't connected yet — add your ANTHROPIC_API_KEY in Vercel." : "Couldn't reach the AI.");
-    } catch (_) { setErr("Couldn't reach the AI."); }
-    setAiBusy(false);
-  };
-
   const sendEmailTo = async (c) => {
     try {
       const r = await fetch(`${PROD_URL}/api/send-notification`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
@@ -19822,12 +19862,10 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
         </div>
       )}
       <div>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }}>
-          <label style={{ ...lbl, marginBottom: 0 }}>{isEmail ? "Body" : "Message"}</label>
-          <button onClick={aiDraft} disabled={aiBusy} style={{ background: "none", border: "none", color: T.primary, fontSize: 12.5, fontWeight: 800, cursor: aiBusy ? "default" : "pointer", fontFamily: "inherit" }}>{aiBusy ? "Drafting…" : "✨ Draft with AI"}</button>
-        </div>
+        <label style={lbl}>{isEmail ? "Body" : "Message"}</label>
         <textarea rows={isEmail ? 6 : 4} value={msg} onChange={e => setMsg(e.target.value)} placeholder="Hi {first}, ..." style={{ ...field, resize: "vertical", lineHeight: 1.5 }} />
         <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>{"{first}"} and {"{company}"} fill in per client{isEmail ? " · sent from your branded template" : ` · ${msg.length} chars${msg.length > 160 ? " (multi-part)" : ""}`}</div>
+        <AIAssist kind="broadcast" channel={channel} context={{ company: branding?.companyName || "" }} value={msg} onChange={setMsg} wantSubject={isEmail} onSubject={setSubject} />
       </div>
       {testMode && <div style={{ fontSize: 12, fontWeight: 700, color: "#B45309", background: hexA("#F59E0B", 0.12), border: `1px solid ${hexA("#F59E0B", 0.4)}`, borderRadius: 10, padding: "9px 12px" }}>Test Mode is ON — sends route to you, not the clients.</div>}
       {err && <div style={{ fontSize: 12.5, fontWeight: 700, color: T.accent }}>{err}</div>}
