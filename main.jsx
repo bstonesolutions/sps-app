@@ -78,9 +78,14 @@ async function handleAuthDeepLink(rawUrl) {
 // it up after the app mounts, and broadcast an event for a warm app. Auth links
 // (spsway://login#tokens) are handled by handleAuthDeepLink above and skipped here.
 function handleAppDeepLink(rawUrl) {
-  if (!rawUrl || rawUrl.indexOf("spsway://") !== 0) return;
+  if (!rawUrl) return;
   let host = "";
-  try { host = (new URL(rawUrl).host || "").toLowerCase(); } catch (_) { return; }
+  if (rawUrl.indexOf("spsway://") === 0) {
+    try { host = (new URL(rawUrl).host || "").toLowerCase(); } catch (_) { return; }
+  } else if (/^https:\/\/spsway\.app(\/|\?|$)/i.test(rawUrl)) {
+    // Universal link (the ?open= buttons in owner emails) — translate to the same target.
+    try { host = (new URL(rawUrl).searchParams.get("open") || "").toLowerCase(); } catch (_) { return; }
+  } else return;
   if (!host || host === "login") return; // login = auth deep link, not a navigation target
   try { localStorage.setItem("sps_deeplink", host); } catch (_) {}
   try { window.dispatchEvent(new CustomEvent("sps-deeplink", { detail: host })); } catch (_) {}

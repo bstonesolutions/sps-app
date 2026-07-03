@@ -34,7 +34,7 @@ Sub-captions (optional, smaller line under each headline) live in §2–3 of `SU
 
 ## How to capture (tomorrow)
 
-- **Simulator (cleanest):** Xcode → run on **iPhone 16 Pro Max** (6.9", 1320 × 2868) → `⌘S`
+- **Simulator (cleanest):** Xcode → run on **iPhone 17 Pro Max** (6.9", 1320 × 2868) → `⌘S`
   saves each screen at the exact required size.
 - **Real device:** screenshot on the phone, AirDrop to the Mac (works if it's a Pro Max-class
   screen; otherwise simulator is safer for exact pixel dimensions).

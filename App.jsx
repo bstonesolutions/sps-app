@@ -3649,7 +3649,7 @@ function ClockInOut({ me, T }) {
 
     setSubmitting(true);
     try {
-      const r = await fetch("/api/gusto-timesheet", {
+      const r = await fetch(`${PROD_URL}/api/gusto-timesheet`, { // absolute: relative /api breaks on native (capacitor://localhost)
         method: "POST",
         headers: await authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
@@ -14841,10 +14841,13 @@ function BankConnect() {
           <button onClick={() => { setSt(null); bankCheckStatus().then(setSt); }} style={{ background: "none", border: `1px solid ${T.border}`, borderRadius: 9, padding: "7px 12px", fontSize: 12, fontWeight: 700, color: T.text, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Try again</button>
         </div>
       ) : !st.connected ? (
+        <>
         <button onClick={handleConnect} disabled={busy}
           style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, background: T.primary, color: "#fff", border: "none", borderRadius: 14, padding: "14px 20px", fontWeight: 800, fontSize: 15, cursor: busy ? "default" : "pointer", fontFamily: "inherit", opacity: busy ? 0.7 : 1, boxShadow: `0 4px 16px ${hexA(T.primary, 0.3)}` }}>
           <Icon name="dollar" size={18} /> {busy ? "Opening…" : "Connect Bank"}
         </button>
+        {!!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) && <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5, marginTop: 10 }}>Tip: some banks connect more smoothly from a browser — sign in at <b>spsway.app</b> and connect there once; the app shares the same connection automatically.</div>}
+        </>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, background: hexA("#16a34a", 0.08), border: `1px solid ${hexA("#16a34a", 0.2)}`, borderRadius: 12, padding: "10px 14px" }}>
@@ -20449,6 +20452,7 @@ function OwnerDigestSettings({ scheduleCfg, setScheduleCfg, email, branding, T }
   const setOD = (patch) => setScheduleCfg(c => ({ ...c, ownerDigest: { ...((c && c.ownerDigest) || {}), ...patch } }));
   const [testMsg, setTestMsg] = useState("");
   const [busy, setBusy] = useState(false);
+  const [reportHtml, setReportHtml] = useState(null); // native in-app report viewer (WKWebView can't window.open/print)
   const [testPeriod, setTestPeriod] = useState(od.monthlyOn && !od.dailyOn && !od.weeklyOn ? "monthly" : od.weeklyOn && !od.dailyOn ? "weekly" : "daily");
   const recipient = (od.to || (email?.notify?.ownerEmail) || email?.ownerEmail || branding?.companyEmail || "").trim();
 
@@ -20460,6 +20464,10 @@ function OwnerDigestSettings({ scheduleCfg, setScheduleCfg, email, branding, T }
       const r = await fetch(`${PROD_URL}/api/owner-digest?html=1&period=${testPeriod}`, { headers: await authHeaders() });
       if (!r.ok) { setTestMsg(r.status === 403 ? "Owner only — set a company/owner email first." : "Couldn't open the report."); setBusy(false); return; }
       const htmlText = await r.text();
+      // Native WKWebView: window.open("")/window.print are dead — show the report in-app instead
+      // (the in-app viewer's share/print comes from the OS long-press; web keeps the print window).
+      const isNative = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+      if (isNative) { setReportHtml(htmlText); setBusy(false); return; }
       const w = window.open("", "_blank");
       if (w) { w.document.open(); w.document.write(htmlText); w.document.close(); }
       else setTestMsg("Allow pop-ups to open the printable report.");
@@ -20534,6 +20542,13 @@ function OwnerDigestSettings({ scheduleCfg, setScheduleCfg, email, branding, T }
         {testMsg && <div style={{ fontSize: 12.5, fontWeight: 700, color: testMsg.startsWith("Sent") ? "#16a34a" : T.accent }}>{testMsg}</div>}
       </div>
       <div style={{ fontSize: 11, color: T.textMuted, lineHeight: 1.5, borderTop: `1px solid ${T.border}`, paddingTop: 10 }}>Automatic sending needs <b>CRON_SECRET</b> set in Vercel. "Send me one now" works without it, so you can preview the email anytime.</div>
+      {reportHtml && (
+        <Modal title="Report" onClose={() => setReportHtml(null)} maxWidth={720}>
+          <div style={{ padding: "0 6px 10px" }}>
+            <iframe title="Owner report" srcDoc={reportHtml} style={{ width: "100%", height: "70vh", border: `1px solid ${T.border}`, borderRadius: 12, background: "#fff" }} />
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -23333,6 +23348,7 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
               <div style={{ marginTop: 18 }}><Btn onClick={connectBank} disabled={bankBusy}>{bankBusy ? "Opening…" : "Connect bank"}</Btn></div>
               {bankMsg && <div style={{ fontSize: 12.5, color: red, marginTop: 12 }}>{bankMsg}</div>}
               <div style={{ fontSize: 11, color: T.textMuted, marginTop: 16, display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}><Icon name="lock" size={11} /> Bank-grade encryption · read-only access</div>
+              {!!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) && <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5, marginTop: 10 }}>Tip: some banks connect more smoothly from a browser — sign in at <b>spsway.app</b> and connect there once; the app shares the same connection automatically.</div>}
             </div>
           ) : (
             <>
@@ -27503,16 +27519,20 @@ export default function App({ authEmail = "", onSignOut }) {
   // ── Email deep links: https://spsway.app/?open=leads jumps straight to that page after sign-in
   // (the "Open in SPS" buttons in owner emails). Allowlisted pages only; param stripped after use
   // so a refresh doesn't re-navigate.
+  // ONE map for every deep-link surface — this web ?open= effect AND the native spsway:// /
+  // universal-link consumer further down — so the two can never drift. Email targets
+  // alerts/profit land on the dashboard (their cards live there).
+  const DEEPLINK_MAP = { alerts: "dashboard", profit: "dashboard", schedule: "schedule", invoices: "invoices", invoice: "invoices", leads: "leads", comms: "comms", budget: "budget", clients: "clients", reports: "reports" };
   const _openParamRef = useRef(false);
   useEffect(() => {
     if (!hydrated || !currentUser || _openParamRef.current) return;
     _openParamRef.current = true;
     try {
       const q = new URLSearchParams(window.location.search);
-      const open = q.get("open");
-      const ALLOW = ["leads", "comms", "budget", "invoices", "schedule", "clients", "reports"];
-      if (open && ALLOW.includes(open)) {
-        handleNav(open);
+      const open = String(q.get("open") || "").toLowerCase();
+      const target = DEEPLINK_MAP[open];
+      if (target) {
+        handleNav(target);
         q.delete("open");
         const rest = q.toString();
         window.history.replaceState({}, "", window.location.pathname + (rest ? `?${rest}` : ""));
@@ -27782,13 +27802,12 @@ export default function App({ authEmail = "", onSignOut }) {
   // cold start (target stashed in localStorage by main.jsx before React mounted).
   useEffect(() => {
     if (!hydrated) return;
-    const map = { alerts: "dashboard", schedule: "schedule", invoices: "invoices", invoice: "invoices", profit: "dashboard", leads: "leads", comms: "comms", budget: "budget" };
     const go = (section) => {
       const sec = String(section || "").toLowerCase();
       try { localStorage.removeItem("sps_deeplink"); } catch (_) {}
       // A signed-in client sees the portal, not the staff pages — route within the portal instead.
       if (clientUser && !currentUser) { setPortalDeepLink(sec); return; }
-      const target = map[sec.split("/")[0]];
+      const target = DEEPLINK_MAP[sec.split("/")[0]];
       if (target) handleNav(target);
     };
     try { const pending = localStorage.getItem("sps_deeplink"); if (pending) go(pending); } catch (_) {}

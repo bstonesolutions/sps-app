@@ -10,8 +10,9 @@ export default defineConfig({
       writeBundle() {
         const files = ["icon.svg","icon-180.png","icon-180-dark.png","icon-192.png","icon-512.png","favicon.png","manifest.webmanifest"];
         files.forEach(f => { if (existsSync(f)) copyFileSync(f, "dist/" + f); });
-        // Apple App Site Association — enables iOS password autofill (webcredentials)
-        // for the native app. Must be served at /.well-known/apple-app-site-association.
+        // Apple App Site Association — enables iOS password autofill (webcredentials) AND
+        // universal links (applinks: the ?open= email buttons open the native app).
+        // Must be served at /.well-known/apple-app-site-association.
         if (existsSync(".well-known/apple-app-site-association")) {
           mkdirSync("dist/.well-known", { recursive: true });
           copyFileSync(".well-known/apple-app-site-association", "dist/.well-known/apple-app-site-association");

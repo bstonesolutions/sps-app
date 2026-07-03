@@ -1,4 +1,15 @@
 {
+  "applinks": {
+    "apps": [],
+    "details": [
+      {
+        "appIDs": ["JASPHFVN38.com.stonepropertysolutions.app"],
+        "components": [
+          { "/": "/", "?": { "open": "?*" }, "comment": "Only ?open= deep links (owner email buttons) open the app — tracking links, magic links, and pay pages stay in the browser." }
+        ]
+      }
+    ]
+  },
   "webcredentials": {
     "apps": ["JASPHFVN38.com.stonepropertysolutions.app"]
   }
