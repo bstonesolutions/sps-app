@@ -1388,6 +1388,12 @@ const DEFAULT_SCHEDULE_CFG = {
   winBackAfterDays: 60,          // "lapsed" = no completed visit in this many days
   autoCooldownHours: 20,         // guardrail: never send a client the same auto-type twice within this window
   schedulerOn: false,            // MASTER switch — the cron sends NOTHING unless this is true
+  // ── Owner digest (emails YOU, not clients — independent of the client-comms master switch/Test Mode) ──
+  // The api/owner-digest cron sends a Daily and/or Weekly recap: invoices still owed, what got done
+  // yesterday (stops + notes + payments), and today's agenda. hour is the send time in Eastern (0-23);
+  // weekday is the weekly send day (0=Sun…1=Mon). `to` overrides the recipient (defaults to your owner
+  // /company email). Needs CRON_SECRET set in Vercel for the scheduled send; the "Send me one now" button works regardless.
+  ownerDigest: { dailyOn: false, weeklyOn: false, monthlyOn: false, hour: 7, weekday: 1, monthDay: 1, to: "" },
 };
 
 // Roles & access — admin configures exactly what employees can see, change, and do
@@ -19851,6 +19857,82 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
   );
 }
 
+// Owner digest — a Daily / Weekly recap emailed to YOU (not clients): invoices still owed, what got
+// done yesterday, and today's agenda. Independent of the client-comms master switch + Test Mode; it
+// only ever emails the owner. The scheduled send needs CRON_SECRET in Vercel; "Send me one now" works now.
+function OwnerDigestSettings({ scheduleCfg, setScheduleCfg, email, branding, T }) {
+  const od = (scheduleCfg && scheduleCfg.ownerDigest) || {};
+  const setOD = (patch) => setScheduleCfg(c => ({ ...c, ownerDigest: { ...((c && c.ownerDigest) || {}), ...patch } }));
+  const [testMsg, setTestMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const recipient = (od.to || email?.ownerEmail || branding?.companyEmail || "").trim();
+
+  const sendTest = async () => {
+    setBusy(true); setTestMsg("");
+    try {
+      const r = await fetch(`${PROD_URL}/api/owner-digest?test=1`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }) });
+      const d = await r.json().catch(() => ({}));
+      if (d && d.sent) setTestMsg(`Sent to ${d.to}. Check your inbox.`);
+      else setTestMsg(d && (d.skipped || d.error) ? `Couldn't send: ${d.skipped || d.error}` : "Couldn't send the test.");
+    } catch (_) { setTestMsg("Couldn't reach the server."); }
+    setBusy(false);
+  };
+
+  const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const chip = (on, label, onClick) => <button key={label} type="button" onClick={onClick} style={{ padding: "7px 13px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.1) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>;
+  const row = (title, hint, on, set) => (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "4px 0" }}>
+      <div><div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{title}</div><div style={{ fontSize: 12, color: T.textMuted }}>{hint}</div></div>
+      <Toggle on={!!on} onChange={set} />
+    </div>
+  );
+  const HOURS = [6, 7, 8, 9];
+  const DAYS = [["Mon", 1], ["Tue", 2], ["Wed", 3], ["Thu", 4], ["Fri", 5], ["Sat", 6], ["Sun", 0]];
+
+  return (
+    <div style={{ border: `1px solid ${T.border}`, borderRadius: 16, background: T.surface, padding: 16, display: "flex", flexDirection: "column", gap: 14 }}>
+      <div>
+        <div style={{ fontSize: 16, fontWeight: 800, color: T.text }}>Your reports</div>
+        <div style={{ fontSize: 12.5, color: T.textMuted, lineHeight: 1.5, marginTop: 3 }}>Business reports emailed only to you — financial snapshot, a running month/year tally, money owed + aging, what got done, payments, and the agenda. Turn on any mix of daily, weekly, and monthly.</div>
+      </div>
+      {row("Daily report", "Yesterday's activity + today's agenda", od.dailyOn, v => setOD({ dailyOn: v }))}
+      {row("Weekly report", "The last 7 days", od.weeklyOn, v => setOD({ weeklyOn: v }))}
+      {row("Monthly report", "The full previous month + year-to-date", od.monthlyOn, v => setOD({ monthlyOn: v }))}
+      {(od.dailyOn || od.weeklyOn || od.monthlyOn) && (
+        <div>
+          <label style={lbl}>Send time (Eastern)</label>
+          <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>{HOURS.map(h => chip((Number.isInteger(od.hour) ? od.hour : 7) === h, `${h} AM`, () => setOD({ hour: h })))}</div>
+        </div>
+      )}
+      {od.weeklyOn && (
+        <div>
+          <label style={lbl}>Weekly report day</label>
+          <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>{DAYS.map(([l, n]) => chip((Number.isInteger(od.weekday) ? od.weekday : 1) === n, l, () => setOD({ weekday: n })))}</div>
+        </div>
+      )}
+      {od.monthlyOn && (
+        <div>
+          <label style={lbl}>Monthly report on the</label>
+          <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>{[["1st", 1], ["15th", 15]].map(([l, n]) => chip((Number.isInteger(od.monthDay) ? od.monthDay : 1) === n, l, () => setOD({ monthDay: n })))}</div>
+          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>Recaps the previous full month.</div>
+        </div>
+      )}
+      <div>
+        <label style={lbl}>Send to</label>
+        <input type="email" value={od.to || ""} onChange={e => setOD({ to: e.target.value.trim() })} placeholder={recipient || "your email address"} style={field} inputMode="email" autoCapitalize="none" />
+        {!od.to && recipient && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>Defaults to {recipient}</div>}
+        {!recipient && <div style={{ fontSize: 11, color: T.accent, marginTop: 5 }}>Add an email here (or a company email in settings) so the digest has somewhere to go.</div>}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <Btn variant="ghost" disabled={busy || !recipient} onClick={sendTest}>{busy ? "Sending…" : "Send me one now"}</Btn>
+        {testMsg && <div style={{ fontSize: 12.5, fontWeight: 700, color: testMsg.startsWith("Sent") ? "#16a34a" : T.accent }}>{testMsg}</div>}
+      </div>
+      <div style={{ fontSize: 11, color: T.textMuted, lineHeight: 1.5, borderTop: `1px solid ${T.border}`, paddingTop: 10 }}>Automatic sending needs <b>CRON_SECRET</b> set in Vercel. "Send me one now" works without it, so you can preview the email anytime.</div>
+    </div>
+  );
+}
+
 function CommsScreen({ initialSection, perms = {}, currentUser, schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, reminderLog, setReminderLog, leads, setLeads, onConvertLead, vp = {} }) {
   const { T } = useApp();
   const isAdmin = !!perms.isAdmin;
@@ -19903,7 +19985,7 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
         {section === "messages" && CAN.messages && <div style={{ padding: "0 16px" }}><MessagesScreen clients={clients} currentUser={currentUser} T={T} /></div>}
         {section === "reminders" && CAN.reminders && <div style={{ padding: "0 16px" }}><RemindersScreen schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} /></div>}
         {section === "inbox" && CAN.inbox && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={onConvertLead} vp={vp} />}
-        {section === "settings" && CAN.settings && <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 18 }}><ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /><CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /></div>}
+        {section === "settings" && CAN.settings && <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 18 }}><OwnerDigestSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} branding={branding} T={T} /><ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /><CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /></div>}
         {section === "broadcast" && CAN.broadcast && <BroadcastSection clients={clients} invoices={invoices} email={email} branding={branding} T={T} />}
         {section === "log" && CAN.log && soon("Activity log", "A running feed of every reminder, broadcast, and reply that's gone out — with who, when, and the channel — lives here.")}
       </div>
