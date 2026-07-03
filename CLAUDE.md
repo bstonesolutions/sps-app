@@ -101,6 +101,8 @@ CREATE TABLE IF NOT EXISTS public.sps_comms_log (
   channel     text NOT NULL DEFAULT 'sms',
   body        text NOT NULL DEFAULT '',
   ok          boolean DEFAULT true,
+  origin      text NOT NULL DEFAULT '',  -- WHO/WHAT triggered the send (Comms → Log). Existing installs: ALTER TABLE ... ADD COLUMN IF NOT EXISTS (run 2026-07-03)
+  recipient   text NOT NULL DEFAULT '',  -- where it went; owner-directed rows store "you" (NEVER the owner's personal phone/email — table is broadly readable until the RLS lockdown)
   created_at  timestamptz DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS sps_comms_log_client_idx ON public.sps_comms_log(client_id, created_at DESC);

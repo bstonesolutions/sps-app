@@ -55,13 +55,19 @@ async function sbSet(key, obj) {
     body: JSON.stringify([{ key, value: JSON.stringify(obj) }]),
   });
 }
-async function logComm(clientId, type, body, ok) {
+async function logComm(clientId, type, body, ok, origin = "", recipient = "") {
   if (clientId == null) return;
+  const base = { client_id: String(clientId), type, channel: "sms", body: String(body || "").slice(0, 800), ok: !!ok };
   try {
-    await fetch(`${SUPABASE_URL}/rest/v1/sps_comms_log`, {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/sps_comms_log`, {
       method: "POST", headers: sbHeaders(),
-      body: JSON.stringify({ client_id: String(clientId), type, channel: "sms", body: String(body || "").slice(0, 800), ok: !!ok }),
+      body: JSON.stringify({ ...base, origin: String(origin).slice(0, 140), recipient: String(recipient).slice(0, 140) }),
     });
+    // Legacy-shape fallback ONLY for the missing-column case (fresh installs that haven't run
+    // the ALTER TABLE) — never on transient errors, which would silently strip the origin.
+    if (r.status === 400 && /column/i.test(await r.text().catch(() => ""))) {
+      await fetch(`${SUPABASE_URL}/rest/v1/sps_comms_log`, { method: "POST", headers: sbHeaders(), body: JSON.stringify(base) });
+    }
   } catch { /* best-effort */ }
 }
 
@@ -291,7 +297,11 @@ export default async function handler(req, res) {
       if (m.dedup.ledger === "rem") remNext[m.dedup.key] = { sentAt: stamp, method: "auto" };
       else if (m.dedup.key) { if (m.dedup.bump) autoNext[m.dedup.key] = { count: (m.dedup.bump.count || 0) + 1, lastSentAt: stamp }; else autoNext[m.dedup.key] = m.dedup.set || { sentAt: stamp }; }
       autoNext[`cool_${m.type}_${m.clientId}`] = stamp;
-      await logComm(m.clientId, m.type, m.message, true);
+      // Honest accounting: a HELD send never happened — say so, and never stamp the real
+      // client number as a delivered-to recipient.
+      await logComm(m.clientId, m.type, m.message, true,
+        held ? `automation: ${m.type} (held by Test Mode)` : `automation: ${m.type}${testMode.on ? " · TEST redirect → you" : ""}`,
+        held ? "" : dest);
     }
   }
   if (sent > 0 || errors.length) { await sbSet("sps_reminders", remNext); await sbSet("sps_auto_log", autoNext); }

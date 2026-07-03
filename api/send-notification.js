@@ -18,7 +18,7 @@ function setCors(res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
-function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = "", actionUrl = "", actionLabel = "", footerHtml = "" }) {
+function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = "", actionUrl = "", actionLabel = "", footerHtml = "", logoSrc = "" }) {
   const accent = /^#?[0-9a-fA-F]{3,8}$/.test(branding.accent || "") ? branding.accent : "#B81D24";
   const company = escapeHtml(branding.companyName || "Stone Property Solutions");
   // Monogram (company initial) in the header — matches the app's logo mark for consistent branding.
@@ -35,9 +35,13 @@ function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = ""
       <td style="padding:6px 0;font-size:13px;color:#6b7280;white-space:nowrap;vertical-align:top">${escapeHtml(k)}</td>
       <td style="padding:6px 0 6px 14px;font-size:13px;color:#111827;font-weight:700;vertical-align:top">${escapeHtml(v)}</td>
     </tr>`).join("");
+  // Real company logo when the caller provides one (cid: or https:); monogram tile is the fallback.
+  const logoTile = logoSrc
+    ? `<img src="${escapeHtml(logoSrc)}" alt="${company}" width="40" height="40" style="width:40px;height:40px;border-radius:11px;background:#fff;object-fit:contain;display:block;flex-shrink:0" />`
+    : `<div style="width:40px;height:40px;border-radius:11px;background:#fff;text-align:center;line-height:40px;flex-shrink:0;font-size:21px;font-weight:800;color:${accent}">${initial}</div>`;
   return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:8px;color:#111827">
     <div style="background:${accent};border-radius:14px 14px 0 0;padding:18px 20px;color:#fff;display:flex;align-items:center;gap:12px">
-      <div style="width:40px;height:40px;border-radius:11px;background:#fff;text-align:center;line-height:40px;flex-shrink:0;font-size:21px;font-weight:800;color:${accent}">${initial}</div>
+      ${logoTile}
       <div>
         <div style="font-size:17px;font-weight:800">${company}</div>
         ${contactBits ? `<div style="font-size:11px;opacity:0.85;margin-top:2px">${contactBits}</div>` : ""}
@@ -125,10 +129,21 @@ export default async function handler(req, res) {
       if (uEmail) listUnsub = `<mailto:${uEmail}?subject=Unsubscribe>`;
     }
 
-    const html = buildHtml({ branding, heading: heading || subject, message, rows, photosHtml, actionUrl, actionLabel, footerHtml });
+    // Real company logo in the header when one is set — same CID mechanism as the photos above
+    // and the invoice/digest emails. Monogram tile stays as the fallback.
+    let logoSrc = "";
+    const li = (branding.logoType === "image" && branding.logoImage) || "";
+    const lm = /^data:(image\/[a-zA-Z+]+);base64,(.+)$/.exec(li || "");
+    if (lm) {
+      const ext = (lm[1].split("/")[1] || "png").replace("jpeg", "jpg");
+      attachments.push({ filename: `logo.${ext}`, content: lm[2], content_type: lm[1], content_id: "splogo@sps" });
+      logoSrc = "cid:splogo@sps";
+    } else if (/^https?:\/\//.test(li)) logoSrc = li;
+
+    const html = buildHtml({ branding, heading: heading || subject, message, rows, photosHtml, actionUrl, actionLabel, footerHtml, logoSrc });
     const textLines = [heading || subject, "", message || ""];
     (rows || []).filter(Boolean).forEach(([k, v]) => textLines.push(`${k}: ${v}`));
-    if (attachments.length) textLines.push("", `(${attachments.length} photo${attachments.length > 1 ? "s" : ""} attached)`);
+    if (photoBlocks.length) textLines.push("", `(${photoBlocks.length} photo${photoBlocks.length > 1 ? "s" : ""} attached)`);
     if (unsub && (unsub.email || unsub.address)) textLines.push("", `To stop these updates, reply to this email${unsub.email ? ` or contact ${unsub.email}` : ""}.`);
     const text = textLines.join("\n");
 

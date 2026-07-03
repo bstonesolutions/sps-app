@@ -342,6 +342,10 @@ function setSenderIdentity(v) { SENDER_IDENTITY = { ...SENDER_IDENTITY, ...(v ||
 // App effect (with owner/company fallbacks resolved). mode: "redirect" | "hold".
 let TEST_MODE = { on: false, mode: "redirect", email: "", phone: "" };
 function setTestMode(v) { TEST_MODE = { ...TEST_MODE, ...(v || {}) }; }
+// Who's driving this device — mirrored by an App effect (like TEST_MODE) so module-level
+// send helpers can stamp a human origin ("Brandon — app") onto the comms log.
+let ACTOR = "";
+function setActor(v) { ACTOR = String(v || ""); }
 // Test Mode must ALSO hold staff→client in-app/portal messages, not just email + SMS — a portal
 // notification (new-invoice card, arrival notice, service report) reaches the REAL client, which
 // is exactly what Test Mode exists to prevent pre-launch. Returns a clean "held" result (no error)
@@ -391,8 +395,16 @@ async function sendSms(to, message, meta) {
   // Test/launch safety: hold or redirect to the owner so real clients get nothing.
   let dest = to, body = message;
   if (TEST_MODE.on) {
-    if (TEST_MODE.mode === "hold") return { ok: true, held: true };
-    if (!TEST_MODE.phone) return { ok: false, error: "Test mode is on, but no owner phone is set to redirect texts to." };
+    if (TEST_MODE.mode === "hold") {
+      // Held texts still hit the Log (honest accounting, matching email broadcasts) — with no
+      // recipient, since nothing was delivered anywhere.
+      if (meta && meta.clientId != null) logComm({ clientId: meta.clientId, type: meta.type, channel: "sms", body: message, ok: true, origin: `${(meta && meta.origin) || (ACTOR ? `${ACTOR} — app` : "app")} (held by Test Mode)`, recipient: "" });
+      return { ok: true, held: true };
+    }
+    if (!TEST_MODE.phone) {
+      if (meta && meta.clientId != null) logComm({ clientId: meta.clientId, type: meta.type, channel: "sms", body: message, ok: false, origin: `${(meta && meta.origin) || (ACTOR ? `${ACTOR} — app` : "app")} (Test Mode misconfigured — no redirect phone)`, recipient: "" });
+      return { ok: false, error: "Test mode is on, but no owner phone is set to redirect texts to." };
+    }
     dest = TEST_MODE.phone;
     body = `[TEST → ${to}] ${message}`;
   }
@@ -408,7 +420,14 @@ async function sendSms(to, message, meta) {
   } catch (e) { result = { ok: false, error: e.message || "network error" }; }
   // Record the send to the owner-side comms log (best-effort, never blocks the send). Optional
   // meta = { clientId, type } from the caller; when absent (e.g. a one-off manual text) nothing logs.
-  if (meta && meta.clientId != null) logComm({ clientId: meta.clientId, type: meta.type, channel: "sms", body: message, ok: result.ok });
+  if (meta && meta.clientId != null) {
+    const redirected = TEST_MODE.on && TEST_MODE.mode !== "hold";
+    logComm({
+      clientId: meta.clientId, type: meta.type, channel: "sms", body: message, ok: result.ok,
+      origin: `${(meta && meta.origin) || (ACTOR ? `${ACTOR} — app` : "app")}${redirected ? " · TEST redirect → you" : ""}`,
+      recipient: dest,
+    });
+  }
   return result;
 }
 
@@ -416,12 +435,16 @@ async function sendSms(to, message, meta) {
 // kept OUT of the client conversation (sps_messages) so the chat stays clean — recorded to its own
 // append-only sps_comms_log table and surfaced as a collapsed "Sent texts" strip in the client's
 // chat. Best-effort: never throws, never blocks a send; a no-op until the one-time table is created.
-async function logComm({ clientId, type, channel = "sms", body = "", ok = true }) {
-  if (clientId == null || clientId === "") return;
+async function logComm({ clientId, type, channel = "sms", body = "", ok = true, origin = "", recipient = "" }) {
+  // origin/recipient (Build 27+, Comms → Log): WHO/WHAT triggered the send and where it went.
+  // Entries without a client (owner reports, lead alerts) log with client_id "" + an origin.
+  if ((clientId == null || clientId === "") && !origin) return;
+  const base = { client_id: clientId == null ? "" : String(clientId), type: type || "Text", channel, body: String(body || "").slice(0, 800), ok: !!ok };
   try {
-    await supabase.from("sps_comms_log").insert({
-      client_id: String(clientId), type: type || "Text", channel, body: String(body || "").slice(0, 800), ok: !!ok,
-    });
+    const { error } = await supabase.from("sps_comms_log").insert({ ...base, origin: String(origin || "").slice(0, 140), recipient: String(recipient || "").slice(0, 140) });
+    // Until the one-time ALTER TABLE adds origin/recipient, fall back to the legacy shape so
+    // logging never silently stops.
+    if (error && /origin|recipient|column|schema/i.test(String(error.message || ""))) await supabase.from("sps_comms_log").insert(base);
   } catch (_) { /* table not created yet, or offline — logging is best-effort */ }
 }
 
@@ -13739,7 +13762,7 @@ function AdvancedPermsEditor({ member, onChange }) {
             {row("commsMessages",  "Messages",            "Two-way texting with clients")}
             {row("commsInbox",     "Leads inbox",         "New leads coming in from the funnel")}
             {row("commsReminders", "Reminders",           "Upcoming-service + overdue-payment nudges")}
-            {row("commsBroadcast", "Broadcast",           "Mass-text a whole segment of clients")}
+            {row("commsBroadcast", "Broadcast",           "Mass text or email a whole segment of clients")}
             {row("commsSettings",  "Automation settings", "Message templates + auto-send config")}
             {row("commsLog",       "Activity log",        "The running feed of everything sent")}
           </>)}
@@ -14142,6 +14165,7 @@ function InvoiceSendStep({ invoice, client, onClose }) {
           }),
         });
         const d = await r.json().catch(() => ({}));
+        logComm({ clientId: client.id, type: "Invoice", channel: "email", body: `Invoice ${invoice.number || ""} emailed`, ok: r.ok, origin: ACTOR ? `${ACTOR} — invoice send` : "invoice send", recipient: clientEmail });
         if (!r.ok) fails.push(`Email: ${d.error || "failed"}`);
       } catch (_) { fails.push("Email: couldn't reach server"); }
     }
@@ -15786,6 +15810,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
         }),
       });
       const d = await r.json().catch(() => ({}));
+      logComm({ clientId: client?.id, type: "Invoice", channel: "email", body: `Invoice ${invoice.number || ""} emailed`, ok: r.ok, origin: ACTOR ? `${ACTOR} — invoice send` : "invoice send", recipient: clientEmail });
       if (!r.ok) throw new Error(d.error || "Email send failed");
 
       // 2) In-app notification in the client's portal (drives the Messages badge on login)
@@ -16609,7 +16634,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
       const cEmail = (c.email || "").trim();
       if (doSms && phone && commPref(c, "text")) { try { const r = await sendSms(phone, fill(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv), { clientId: c.id, type: "Invoice" }); if (!r.ok) fails++; } catch (_) { fails++; } }
       if (doChat && c.id && commPref(c, "app")) { try { await postToPortalSafe({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) + invCardMarker(inv, "$" + ((invoiceTotals(inv).total) || 0).toFixed(2), branding.companyName) }); } catch (_) { fails++; } }
-      if (doEmail && cEmail && commPref(c, "email")) { try { const tt = invoiceTotals(inv); await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ ...senderEmailFields(), emailSubject: fill(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, c, inv), emailIntro: fill(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, c, inv), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); } catch (_) { fails++; } }
+      if (doEmail && cEmail && commPref(c, "email")) { try { const tt = invoiceTotals(inv); const rE = await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ ...senderEmailFields(), emailSubject: fill(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, c, inv), emailIntro: fill(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, c, inv), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); logComm({ clientId: c.id, type: "Invoice", channel: "email", body: `Invoice ${inv.number || ""} emailed (batch)`, ok: rE.ok, origin: ACTOR ? `${ACTOR} — batch invoice` : "batch invoice", recipient: cEmail }); if (!rE.ok) fails++; } catch (_) { fails++; } }
     }
     setMsgBusy(false);
     if (fails > 0) { setMsgErr(`${fails} message(s) couldn't be sent. The invoices were still created.`); return; }
@@ -20576,24 +20601,39 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
           branding: { companyName: branding?.companyName || "", companyEmail: branding?.companyEmail || "", companyPhone: branding?.companyPhone || "", companyAddress: branding?.companyAddress || "", accent: T.primary },
           unsubscribe: { email: branding?.companyEmail || "", address: branding?.companyAddress || "" },
         }) });
-      return { ok: r.ok };
-    } catch (_) { return { ok: false }; }
+      // Honest accounting: a Test-Mode HOLD comes back 200 {held:true} — that's not a send.
+      const d = await r.json().catch(() => ({}));
+      const held = !!d.held;
+      logComm({
+        clientId: c.id, type: "Broadcast", channel: "email", body: `${fillOne(subject, c)} — ${fill(c)}`, ok: r.ok,
+        origin: `${ACTOR ? `${ACTOR} — ` : ""}email broadcast${held ? " (held by Test Mode)" : TEST_MODE.on ? " · TEST redirect → you" : ""}`,
+        recipient: c.email,
+      });
+      return { ok: r.ok, held };
+    } catch (_) {
+      // Network failure still hits the Log — otherwise the Failed filter under-reports emails.
+      logComm({ clientId: c.id, type: "Broadcast", channel: "email", body: fillOne(subject, c), ok: false, origin: `${ACTOR ? `${ACTOR} — ` : ""}email broadcast`, recipient: c.email });
+      return { ok: false };
+    }
   };
 
   const send = async (limit) => {
     const list = limit ? recipients.slice(0, limit) : recipients;
     if (!list.length || !ready) return;
     setSending(true); setConfirmAll(false); setErr(""); setResult(""); setProgress({ done: 0, total: list.length, failed: 0 });
-    let done = 0, failed = 0;
+    let done = 0, failed = 0, held = 0;
     for (const c of list) {
-      const r = isEmail ? await sendEmailTo(c) : await sendSms((c.phone || "").replace(/\D/g, ""), fill(c), { clientId: c.id, type: "Broadcast" });
+      const r = isEmail ? await sendEmailTo(c) : await sendSms((c.phone || "").replace(/\D/g, ""), fill(c), { clientId: c.id, type: "Broadcast", origin: `${ACTOR ? `${ACTOR} — ` : ""}text broadcast` });
       if (!r.ok) failed++;
+      else if (r.held) held++;
       done++;
       setProgress({ done, total: list.length, failed });
-      await new Promise(res => setTimeout(res, isEmail ? 320 : 220)); // throttle so a big blast never trips carrier / Quo / Resend rate limits
+      await new Promise(res => setTimeout(res, isEmail ? 600 : 220)); // throttle: Resend caps emails at ~2/s; Quo tolerates faster
     }
     setSending(false);
-    setResult(`Sent to ${done - failed} of ${list.length}${failed ? ` · ${failed} couldn't send` : ""}.${testMode ? " (Test Mode — routed to you.)" : ""}`);
+    setResult(held === list.length && held > 0
+      ? `Held by Test Mode — nothing was sent (${held} would have gone out). Flip Test Mode off in Comms → Settings to go live.`
+      : `Sent to ${done - failed - held} of ${list.length}${failed ? ` · ${failed} couldn't send` : ""}${held ? ` · ${held} held by Test Mode` : ""}.${testMode ? " (Test Mode — routed to you.)" : ""}`);
   };
 
   const chip = (on, label, onClick) => <button key={label} onClick={onClick} style={{ padding: "8px 15px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.1) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>;
@@ -20763,6 +20803,101 @@ function OwnerDigestSettings({ scheduleCfg, setScheduleCfg, email, branding, T }
   );
 }
 
+// Comms → Log: the full outbound history — every text and email the app, the automations,
+// the report crons, and the lead webhook have sent, WITH its origin (who/what triggered it)
+// and real recipient. Reads sps_comms_log (authenticated RLS read already in place). Rows
+// older than the origin/recipient columns show "—" for origin; everything new is stamped.
+function LogsScreen({ clients, showOwnerRows = false }) {
+  const { T } = useApp();
+  const [rows, setRows] = useState(null);
+  const [filter, setFilter] = useState("all"); // all | sms | email | failed
+  const [q, setQ] = useState("");
+  const [openId, setOpenId] = useState(null);
+  const load = async () => {
+    try {
+      const { data } = await supabase.from("sps_comms_log").select("*").order("created_at", { ascending: false }).limit(250);
+      setRows(data || []);
+    } catch (_) { setRows([]); }
+  };
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const nameOf = (cid) => {
+    if (cid == null || cid === "") return "";
+    const c = (clients || []).find(x => String(x.id) === String(cid));
+    return c ? c.name : `Client ${cid}`;
+  };
+  const list = (rows || []).filter(r => {
+    // Owner-directed rows (reports, money plan, lead alerts, owner alerts) are the owner's
+    // business — staff with only the Log permission see client comms, not those.
+    if (!showOwnerRows && (r.client_id == null || r.client_id === "")) return false;
+    if (filter === "sms" && r.channel !== "sms") return false;
+    if (filter === "email" && r.channel !== "email") return false;
+    if (filter === "failed" && r.ok !== false) return false;
+    if (q) {
+      const hay = `${nameOf(r.client_id)} ${r.recipient || ""} ${r.origin || ""} ${r.type || ""} ${r.body || ""}`.toLowerCase();
+      if (!hay.includes(q.toLowerCase())) return false;
+    }
+    return true;
+  });
+  const fmtWhen = (iso) => {
+    try {
+      const d = new Date(iso);
+      return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " · " + d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+    } catch (_) { return ""; }
+  };
+  const chip = (id, label) => (
+    <button key={id} onClick={() => setFilter(id)} style={{ padding: "7px 13px", borderRadius: 100, border: `1.5px solid ${filter === id ? T.primary : T.border}`, background: filter === id ? hexA(T.primary, 0.08) : T.surface, color: filter === id ? T.primary : T.textMuted, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+  );
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        {chip("all", "All")}{chip("sms", "Texts")}{chip("email", "Emails")}{chip("failed", "Failed")}
+        <div style={{ flex: 1 }} />
+        <Btn variant="ghost" sm onClick={load}>Refresh</Btn>
+      </div>
+      <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search by client, recipient, origin, or content…"
+        style={{ width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
+      {rows === null && <div style={{ textAlign: "center", padding: 40, color: T.textMuted, fontSize: 13 }}>Loading the log…</div>}
+      {rows !== null && list.length === 0 && (
+        <div style={{ textAlign: "center", padding: "48px 24px", color: T.textMuted }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginBottom: 6 }}>Nothing here yet</div>
+          <div style={{ fontSize: 13, lineHeight: 1.55, maxWidth: 380, margin: "0 auto" }}>Every text and email the app sends — manual, automated, reports, lead alerts — will appear here with who or what triggered it.</div>
+        </div>
+      )}
+      {list.map(r => {
+        const who = nameOf(r.client_id) || r.recipient || "—";
+        const open = openId === r.id;
+        return (
+          <div key={r.id} onClick={() => setOpenId(open ? null : r.id)} style={{ border: `1px solid ${T.border}`, borderRadius: 14, background: T.surface, padding: "12px 14px", cursor: "pointer" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ width: 32, height: 32, borderRadius: 9, background: hexA(r.ok === false ? "#dc2626" : T.primary, 0.1), color: r.ok === false ? "#dc2626" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                <Icon name={r.channel === "email" ? "mail" : "message"} size={15} />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {r.type || "Text"} → {who}
+                  {r.ok === false && <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 800, color: "#dc2626", background: hexA("#dc2626", 0.1), padding: "2px 7px", borderRadius: 100 }}>FAILED</span>}
+                </div>
+                <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {r.origin || "—"}{r.recipient && nameOf(r.client_id) ? ` · to ${r.recipient}` : ""}
+                </div>
+              </div>
+              <div style={{ fontSize: 11.5, color: T.textMuted, flexShrink: 0 }}>{fmtWhen(r.created_at)}</div>
+            </div>
+            {open && (
+              <div style={{ marginTop: 10, padding: "10px 12px", background: T.surfaceAlt, borderRadius: 10, fontSize: 13, color: T.text, lineHeight: 1.55, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{r.body || "(no content recorded)"}</div>
+            )}
+          </div>
+        );
+      })}
+      {rows !== null && rows.length > 0 && (
+        <div style={{ fontSize: 11.5, color: T.textMuted, textAlign: "center", padding: "4px 0 12px" }}>
+          Showing the last {rows.length} sends. Entries from before today may not carry an origin — everything from now on does.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CommsScreen({ initialSection, perms = {}, currentUser, schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, reminderLog, setReminderLog, leads, setLeads, onConvertLead, onLinkLead, openLeadId, onLeadOpened, vp = {} }) {
   const { T } = useApp();
   const isAdmin = !!perms.isAdmin;
@@ -20829,7 +20964,7 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
           {(perms.isAdmin || perms.commsSettings) && <CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />}
         </div>}
         {section === "broadcast" && CAN.broadcast && <BroadcastSection clients={clients} invoices={invoices} email={email} branding={branding} T={T} />}
-        {section === "log" && CAN.log && soon("Activity log", "A running feed of every reminder, broadcast, and reply that's gone out — with who, when, and the channel — lives here.")}
+        {section === "log" && CAN.log && <div style={{ padding: "0 16px" }}><LogsScreen clients={clients} showOwnerRows={!!perms.isAdmin} /></div>}
       </div>
     </div>
   );
@@ -26927,6 +27062,8 @@ export default function App({ authEmail = "", onSignOut }) {
     const redirEmail = tm.email || (email.notify && email.notify.ownerEmail) || (authEmail || "").trim() || branding.companyEmail || "";
     const redirPhone = tm.phone || (email.notify && email.notify.ownerPhone) || branding.companyPhone || "";
     setTestMode({ on: !!tm.on, mode: tm.mode || "redirect", email: redirEmail, phone: redirPhone });
+    // Keep the ACTOR mirror current too — comms-log entries carry who sent from this device.
+    setActor((currentUser && (currentUser.name || currentUser.email)) || (clientUser && clientUser.name) || "");
   }, [email.testMode, email.notify, branding.companyEmail, branding.companyPhone, authEmail]);
   const [costs, setCosts, lco] = useStoredState("sps_costs", DEFAULT_COSTS);
   const [home, setHome, lh] = useStoredState("sps_home", DEFAULT_HOME);
@@ -28271,7 +28408,10 @@ export default function App({ authEmail = "", onSignOut }) {
           headers: h,
           body: JSON.stringify({ ...senderEmailFields(), to, subject, heading, message, rows, branding, actionUrl, actionLabel }),
         })
-          .then(r => { if (!r.ok) r.json().catch(() => ({})).then(d => console.warn("Owner email failed:", d?.error || r.status)); })
+          .then(r => {
+            logComm({ clientId: "", type: "Owner alert", channel: "email", body: subject || heading || eventKey, ok: r.ok, origin: `owner alert: ${eventKey}`, recipient: "you" });
+            if (!r.ok) r.json().catch(() => ({})).then(d => console.warn("Owner email failed:", d?.error || r.status));
+          })
           .catch(err => console.warn("Owner email error:", err?.message || err))
       );
     } catch (e) { console.warn("notifyOwnerEmail error:", e?.message || e); }

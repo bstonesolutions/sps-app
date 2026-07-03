@@ -124,6 +124,19 @@ export default async function handler(req, res) {
       out.email = { ok: r.ok };
     } catch { out.email = { ok: false }; }
   }
+  // Comms → Log entries for the alert sends. SECURITY: the log table is readable by any
+  // authenticated session until the RLS lockdown — record the lead's NAME only (no phone/
+  // email/message) and "you" instead of the owner's personal contact.
+  const logIt = (channel, ok) =>
+    fetch(`${SUPABASE_URL}/rest/v1/sps_comms_log`, {
+      method: "POST", headers: sbHeaders(),
+      body: JSON.stringify({ client_id: "", type: "Lead alert", channel, body: `New lead: ${name}${service ? ` — ${service}` : ""} (details in Comms → Leads)`, ok: !!ok, origin: "new-lead alert (website webhook)", recipient: "you" }),
+    }).catch(() => {});
+  try {
+    if (out.sms) await logIt("sms", out.sms.ok);
+    if (out.email) await logIt("email", out.email.ok);
+  } catch { /* best-effort */ }
+
   // Native push to the owner's devices — best-effort mirror of the text/email above.
   out.push = await pushOwner("new_lead", `New lead: ${name}`,
     `${bits ? `${bits}. ` : ""}${msg ? `“${msg}”` : "Waiting in Comms → Leads."}`, "leads", { email });

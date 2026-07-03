@@ -67,6 +67,22 @@ function toE164(s) {
   if (d.length === 11 && d.startsWith("1")) return "+" + d;
   return d ? "+" + d : "";
 }
+// Comms → Log entries for whatever channels actually attempted. SECURITY: sps_comms_log is
+// readable by any authenticated session (staff + portal clients) until the RLS lockdown, so
+// the log row carries a NEUTRAL body — never the plan itself (tax/payroll/debt amounts) —
+// and "you" instead of the owner's personal phone/email.
+async function logNudge(out, origin) {
+  const put = (channel, ok) =>
+    fetch(`${SUPABASE_URL}/rest/v1/sps_comms_log`, {
+      method: "POST", headers: sbHeaders(),
+      body: JSON.stringify({ client_id: "", type: "Money plan", channel, body: "Money plan sent — open Budget for the numbers.", ok: !!ok, origin, recipient: "you" }),
+    }).catch(() => {});
+  try {
+    if (out.sms) await put("sms", out.sms.ok);
+    if (out.email) await put("email", out.email.ok);
+  } catch { /* best-effort */ }
+}
+
 async function sendQuo(to, message, fromOverride) {
   // Same "from" resolution as the app's texts (api/send-sms): the configured Sending Identity
   // texting number when set, else the server default.
@@ -307,6 +323,7 @@ export default async function handler(req, res) {
     if (channel === "sms" || channel === "both") out.sms = await sendQuo(toPhone, message, email.textingNumber);
     if (channel === "email" || channel === "both") out.email = await sendEmail(toEmail, `${branding.companyName || "SPS"} — money plan`, message, branding);
     const sent = Object.values(out).some((r) => r && r.ok);
+    await logNudge(out, "money plan (test button)");
     // Push mirror — added AFTER the sent calculation so it never influences it.
     out.push = await pushOwner("reports", `${branding.companyName || "SPS"} money plan`, message, "budget", { email, collapseId: "nudge-test" });
     return res.status(sent ? 200 : 400).json({ ok: sent, test: true, ...out });
@@ -337,6 +354,7 @@ export default async function handler(req, res) {
   if (channel === "email" || channel === "both") out.email = await sendEmail(toEmail, `${branding.companyName || "SPS"} — money plan`, message, branding);
   const sent = Object.values(out).some((r) => r && r.ok);
   if (sent) await sbSet("sps_nudge_log", { ...ledger, sent: et.mdy });
+  await logNudge(out, "money plan (auto)");
   // Push mirror — after the sent/ledger decision so a push-only success can't stamp the ledger
   // and suppress the real SMS/email retry next hour. collapseId dedupes hourly retries.
   out.push = await pushOwner("reports", `${branding.companyName || "SPS"} money plan`, message, "budget", { email, collapseId: `nudge-${et.mdy}` });

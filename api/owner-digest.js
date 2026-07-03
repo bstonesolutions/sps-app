@@ -21,6 +21,7 @@
 import { verifyUser } from "./_auth.js";
 import { resolveFrom } from "./_sender.js";
 import { pushOwner } from "./_push.js";
+import { fetchBankTxns, bankMonthRollup } from "./_bank.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
 const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -198,6 +199,8 @@ export function buildDigest(state, { period }) {
 
   return {
     period: P, periodLabel, kind, pill, collectedLabel, doneTitle, winStartMDY, winEndMDY, yest,
+    bank: P === "monthly" ? (state.bankPrev || null) : (state.bankMTD || null),
+    bankLabel: P === "monthly" ? "last month" : "this month so far",
     outstanding, outstandingTotal, overdue, overdueTotal, aging,
     done, revenueDone, profitDone, jobs, avgTicket, marginPct, techRows,
     payments, paymentsTotal, tally, agenda,
@@ -240,6 +243,16 @@ export function renderEmail(dg, branding) {
     <div style="padding:14px 6px"><table style="width:100%;border-collapse:collapse;table-layout:fixed"><tr>
       ${mCell("Collected", money0(dg.tally.collected), g)}${mCell("Billed", money0(dg.tally.rev), ink)}${mCell("Profit", money0(dg.tally.prof), dg.tally.prof >= 0 ? g : accent)}${mCell("Jobs", String(dg.tally.jobs), ink)}
     </tr></table></div></div>`;
+
+  // #67 — the bank card: the same live numbers as the Budget hub (marks-aware). Only renders
+  // when a bank is actually connected.
+  const bankCard = dg.bank ? `<div style="border:1px solid ${line};border-radius:14px;margin-top:14px;overflow:hidden">
+    <div style="background:#f8f9fb;padding:11px 16px;border-bottom:1px solid ${line};display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:13px;font-weight:800;color:${ink}">From your bank</span><span style="font-size:12px;font-weight:700;color:${grayT}">${esc(dg.bankLabel)}</span></div>
+    <div style="padding:14px 6px"><table style="width:100%;border-collapse:collapse;table-layout:fixed"><tr>
+      ${mCell("Money in", money0(dg.bank.income), g)}${mCell("Money out", money0(dg.bank.expense), ink)}${mCell("Bank profit", money0(dg.bank.profit), dg.bank.profit >= 0 ? g : accent)}${mCell("Saved / debt", `${money0(dg.bank.savings)}/${money0(dg.bank.debt)}`, ink)}
+    </tr></table>
+    <div style="font-size:11px;color:${faint};margin:6px 10px 2px;text-align:center">${dg.bank.count} transaction${dg.bank.count === 1 ? "" : "s"}, categorized your way — live from your connected bank, matching the Budget hub.</div></div></div>` : "";
 
   const agingCells = [["Current", dg.aging.current, ink], ["1–30", dg.aging.d30, ink], ["31–60", dg.aging.d60, "#b45309"], ["61–90", dg.aging.d90, accent], ["90+", dg.aging.d90p, accent]];
   const agingCard = dg.outstandingTotal > 0 ? card("Receivables aging", `<table style="width:100%;border-collapse:collapse;table-layout:fixed"><tr>${agingCells.map(([l]) => `<td style="text-align:center;font-size:10.5px;font-weight:700;text-transform:uppercase;color:${faint};padding-bottom:4px">${l}</td>`).join("")}</tr><tr>${agingCells.map(([, v, c]) => `<td style="text-align:center;font-size:14px;font-weight:800;color:${v > 0 ? c : faint}">${v > 0 ? money0(v) : "—"}</td>`).join("")}</tr></table>`) : "";
@@ -285,7 +298,7 @@ export function renderEmail(dg, branding) {
     <div style="padding:8px 16px 20px">
       <div style="font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:${faint};margin:12px 4px 2px">Financial snapshot</div>
       ${snapshot}
-      ${tallyCard}${agingCard}${techCard}${owedCard}${doneCard}${payCard}${agendaCard}
+      ${tallyCard}${bankCard}${agingCard}${techCard}${owedCard}${doneCard}${payCard}${agendaCard}
       ${contact ? `<div style="text-align:center;font-size:11px;color:${faint};margin-top:18px;line-height:1.6">${company}<br>${contact}</div>` : ""}
     </div>
   </div></div>`;
@@ -295,7 +308,9 @@ export function renderText(dg) {
   const L = [`${dg.kind.toUpperCase()} REPORT · ${dg.periodLabel}`, ""];
   L.push(`Collected: ${money(dg.paymentsTotal)} · Outstanding: ${money(dg.outstandingTotal)} (${money(dg.overdueTotal)} overdue)`);
   L.push(`Work done: ${money(dg.revenueDone)} (${dg.jobs} stops) · Est. profit: ${money(dg.profitDone)} (${dg.marginPct}%)`);
-  L.push(`${dg.tally.label}: collected ${money(dg.tally.collected)} · billed ${money(dg.tally.rev)} · profit ${money(dg.tally.prof)} · ${dg.tally.jobs} jobs`, "");
+  L.push(`${dg.tally.label}: collected ${money(dg.tally.collected)} · billed ${money(dg.tally.rev)} · profit ${money(dg.tally.prof)} · ${dg.tally.jobs} jobs`);
+  if (dg.bank) L.push(`Bank (${dg.bankLabel}): in ${money(dg.bank.income)} · out ${money(dg.bank.expense)} · profit ${money(dg.bank.profit)} · saved ${money(dg.bank.savings)} · debt paid ${money(dg.bank.debt)}`);
+  L.push("");
   L.push("INVOICES STILL OWED"); dg.outstanding.slice(0, 25).forEach((o) => L.push(`  - ${o.client} #${o.number} ${money(o.amount)}${o.overdue ? " OVERDUE" : ""}${o.due ? ` (due ${o.due})` : ""}`));
   L.push("", `${dg.doneTitle.toUpperCase()} (${dg.jobs} stops, ${money(dg.revenueDone)})`);
   dg.done.slice(0, 40).forEach((d) => L.push(`  - ${d.client} · ${d.type}${d.revenue > 0 ? ` ${money(d.revenue)}` : ""}${d.notes ? ` — ${d.notes}` : ""}`));
@@ -314,7 +329,7 @@ function resolveLogo(branding) {
   return { logoSrc: DEFAULT_LOGO, attachments: [] };
 }
 
-async function sendDigest({ period, state, cfg, email, branding }) {
+async function sendDigest({ period, state, cfg, email, branding, via = "auto" }) {
   const to = String((cfg.ownerDigest && cfg.ownerDigest.to) || email.ownerEmail || branding.companyEmail || "").trim();
   if (!to || !/.+@.+\..+/.test(to)) return { sent: false, skipped: "no recipient email (set an Owner Digest recipient, or a company email)" };
   if (!RESEND_KEY) return { sent: false, skipped: "RESEND_API_KEY not set" };
@@ -331,6 +346,14 @@ async function sendDigest({ period, state, cfg, email, branding }) {
   } catch (e) { return { sent: false, error: `network: ${(e && ((e.cause && e.cause.code) || e.message)) || "fetch failed"}` }; }
   const d = await r.json().catch(() => ({}));
   if (!r.ok) return { sent: false, error: d?.message || `Resend ${r.status}` };
+  // Comms → Log entry so the owner can see where every email they receive came from.
+  // "you" instead of the raw address — the table is broadly readable until the RLS lockdown.
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/sps_comms_log`, {
+      method: "POST", headers: sbHeaders(),
+      body: JSON.stringify({ client_id: "", type: "Report", channel: "email", body: subject, ok: true, origin: `${period} report (${via})`, recipient: "you" }),
+    });
+  } catch { /* best-effort */ }
   return { sent: true, to, id: d.id || null, period };
 }
 
@@ -344,11 +367,29 @@ export default async function handler(req, res) {
   const html = q.html === "1"; // rendered HTML for in-app preview / print-to-PDF
   const period = ["daily", "weekly", "monthly"].includes(q.period) ? q.period : "daily";
 
-  const [cfg, email, clients, schedule, invoices, branding, team] = await Promise.all([
+  const [cfg, email, clients, schedule, invoices, branding, team, budget] = await Promise.all([
     sbGet("sps_schedule_cfg", {}), sbGet("sps_email", {}), sbGet("sps_clients", []),
     sbGet("sps_schedule", []), sbGet("sps_invoices", []), sbGet("sps_branding", {}), sbGet("sps_team", []),
+    sbGet("sps_budget", {}),
   ]);
   const state = { clients, schedule, invoices, branding };
+
+  // Bank truth (#67) — the SAME numbers the Budget hub shows: daily/weekly reports carry
+  // month-to-date, the monthly report carries the month it covers. LAZY on purpose: only
+  // fetched after the caller has proven owner/cron authority AND a report is actually about
+  // to render or send — the hourly cron (and anonymous pokes) must not hit Plaid for nothing.
+  // Absent bank (no Plaid, not connected, unreachable) → the card simply isn't rendered.
+  let _bankLoaded = false;
+  const loadBank = async () => {
+    if (_bankLoaded) return;
+    _bankLoaded = true;
+    const bankTxns = await fetchBankTxns();
+    if (!bankTxns) return;
+    const etB = etNow();
+    const [by, bm] = String(etB.ym).split("-").map(Number);
+    state.bankMTD = bankMonthRollup(bankTxns, budget, etB.ym);
+    state.bankPrev = bankMonthRollup(bankTxns, budget, bm === 1 ? `${by - 1}-12` : `${by}-${String(bm - 1).padStart(2, "0")}`);
+  };
   const od = cfg.ownerDigest || {};
 
   // test + dryRun expose / trigger the owner's financials → OWNER ONLY (verify by email, independent
@@ -365,8 +406,9 @@ export default async function handler(req, res) {
     if (!cronOk) return res.status(401).json({ error: "unauthorized", hint: "real runs require CRON_SECRET; use ?test=1 (signed in as owner) to send yourself one now" });
   }
 
-  if (dryRun) return res.status(200).json({ ok: true, dryRun: true, daily: buildDigest(state, { period: "daily" }), weekly: buildDigest(state, { period: "weekly" }), monthly: buildDigest(state, { period: "monthly" }) });
+  if (dryRun) { await loadBank(); return res.status(200).json({ ok: true, dryRun: true, daily: buildDigest(state, { period: "daily" }), weekly: buildDigest(state, { period: "weekly" }), monthly: buildDigest(state, { period: "monthly" }) }); }
   if (html) {
+    await loadBank();
     // Browser-viewable version for preview + print-to-PDF. Use the logo as a data/http URL (cid is
     // email-only). Wrapped in a minimal page with a print button that auto-opens the print dialog.
     const logoSrc = (typeof branding.logoImage === "string" && (branding.logoImage.startsWith("data:") || /^https?:\/\//.test(branding.logoImage))) ? branding.logoImage : DEFAULT_LOGO;
@@ -374,7 +416,7 @@ export default async function handler(req, res) {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.status(200).send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(branding.companyName || "SPS")} report</title><style>@media print{.noprint{display:none}}</style></head><body style="margin:0;background:#f4f5f7">${body}<div class="noprint" style="text-align:center;padding:14px"><button onclick="window.print()" style="background:${/^#?[0-9a-fA-F]{3,8}$/.test(branding.accent||"")?branding.accent:"#B81D24"};color:#fff;border:none;border-radius:10px;padding:11px 22px;font-size:15px;font-weight:800;cursor:pointer;font-family:-apple-system,sans-serif">Print / Save as PDF</button></div></body></html>`);
   }
-  if (test) { const out = await sendDigest({ period, state, cfg, email, branding }); return res.status(out.sent ? 200 : 400).json({ ok: out.sent, test: true, ...out }); }
+  if (test) { await loadBank(); const out = await sendDigest({ period, state, cfg, email, branding, via: "test button" }); return res.status(out.sent ? 200 : 400).json({ ok: out.sent, test: true, ...out }); }
 
   // ── real cron run ──
   if (!od.dailyOn && !od.weeklyOn && !od.monthlyOn) return res.status(200).json({ ok: true, note: "Owner report is off." });
@@ -387,12 +429,16 @@ export default async function handler(req, res) {
   const ledger = await sbGet("sps_digest_log", {});
   const results = {};
   let changed = false;
-  if (od.dailyOn && ledger.dailySent !== et.mdy) { results.daily = await sendDigest({ period: "daily", state, cfg, email, branding }); if (results.daily.sent) { ledger.dailySent = et.mdy; changed = true; } }
   const weeklyDay = Number.isInteger(od.weekday) ? od.weekday : 1;
-  if (od.weeklyOn && et.weekday === weeklyDay && ledger.weeklySent !== et.mdy) { results.weekly = await sendDigest({ period: "weekly", state, cfg, email, branding }); if (results.weekly.sent) { ledger.weeklySent = et.mdy; changed = true; } }
   const monthDay = Number.isInteger(od.monthDay) ? od.monthDay : 1;
   const lastDom = new Date(Date.UTC(+et.ym.slice(0, 4), +et.ym.slice(5, 7), 0)).getUTCDate(); // clamp so 29/30/31 still fires in short months
-  if (od.monthlyOn && et.day === Math.min(monthDay, lastDom) && ledger.monthlySent !== et.ym) { results.monthly = await sendDigest({ period: "monthly", state, cfg, email, branding }); if (results.monthly.sent) { ledger.monthlySent = et.ym; changed = true; } }
+  const dueDaily = od.dailyOn && ledger.dailySent !== et.mdy;
+  const dueWeekly = od.weeklyOn && et.weekday === weeklyDay && ledger.weeklySent !== et.mdy;
+  const dueMonthly = od.monthlyOn && et.day === Math.min(monthDay, lastDom) && ledger.monthlySent !== et.ym;
+  if (dueDaily || dueWeekly || dueMonthly) await loadBank(); // one Plaid read, only when something sends
+  if (dueDaily) { results.daily = await sendDigest({ period: "daily", state, cfg, email, branding }); if (results.daily.sent) { ledger.dailySent = et.mdy; changed = true; } }
+  if (dueWeekly) { results.weekly = await sendDigest({ period: "weekly", state, cfg, email, branding }); if (results.weekly.sent) { ledger.weeklySent = et.mdy; changed = true; } }
+  if (dueMonthly) { results.monthly = await sendDigest({ period: "monthly", state, cfg, email, branding }); if (results.monthly.sent) { ledger.monthlySent = et.ym; changed = true; } }
   if (changed) await sbSet("sps_digest_log", ledger);
 
   // Push mirror of whatever emailed — best-effort, and deliberately NOT part of the ledger
