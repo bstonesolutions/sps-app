@@ -30,6 +30,8 @@ Serverless functions under `api/` read these. None are committed; missing ones m
 - `CRON_SECRET` — **required to ACTIVATE automated sending.** The `api/cron-automations` scheduler (Vercel cron, hourly per `vercel.json`) only performs REAL sends when the request carries `Authorization: Bearer <CRON_SECRET>` — which Vercel attaches automatically once this env var is set. Without it, the cron 401s on real runs (so nothing sends) while the app's **dry-run preview** (`?dryRun=1`) still works. Set any long random string. The whole engine is *also* gated by the in-app master switch (`sps_schedule_cfg.schedulerOn`) + Test Mode, so setting this alone does not send anything until the owner turns it on.
 - `PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_ENV` — Plaid bank sync (real transactions in Budget → Bank + the Customize "Bank Sync" card). `PLAID_ENV` = `sandbox` (test banks, instant) or `production` (real banks, needs Plaid production approval); the secret is PER-ENVIRONMENT — swap it when flipping envs. Ships dark until set. Requires the `plaid_tokens` table (SQL below). Data endpoints are owner-only.
 - `ANTHROPIC_API_KEY` — **the ONLY thing needed to turn on the AI features.** Powers the AI helpers in `api/_ai.js` → `api/ai-summarize.js` (client visit recap) and `api/ai-water-diagnosis.js` (water-test analysis + treatment/upsell suggestions), surfaced on the stop-completion screen's "✨ AI assist". Until it's set, the AI buttons show a clean "AI isn't connected yet — add your key" message and nothing else breaks. Get it at console.anthropic.com. Optional `ANTHROPIC_MODEL` overrides the default `claude-sonnet-4-6`.
+- `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_PRIVATE_KEY` — **native push notifications (Build 27+).** From an APNs Auth Key (.p8) created at developer.apple.com → Certificates, Identifiers & Profiles → Keys (enable "Apple Push Notifications service"): `APNS_KEY_ID` = the key's 10-char id, `APNS_TEAM_ID` = `JASPHFVN38`, `APNS_PRIVATE_KEY` = the .p8 file contents (PEM — newlines preserved or `\n`-escaped both work). Optional: `APNS_BUNDLE_ID` (defaults to `com.stonepropertysolutions.app`) and `APNS_HOST` (defaults to production `https://api.push.apple.com`; set `https://api.sandbox.push.apple.com` ONLY while testing an Xcode debug build — debug builds mint sandbox tokens and each host rejects the other's with BadDeviceToken). Ships dark until set: `api/_push.js` no-ops, endpoints report `configured:{apns:false}`, nothing breaks. Requires the `sps_push_tokens` table (SQL below). Safety: Test Mode restricts ALL pushes to owner-role devices; owner pushes honor the per-event Push toggles in Comms → Settings.
+- `MSG_WEBHOOK_SECRET` — Bearer secret for `api/message-intake.js` (the sps_messages INSERT webhook that turns chat messages into pushes: client → owner "New message", staff → client "New message / New invoice / Service report"). Falls back to `LEAD_WEBHOOK_SECRET` so one secret can serve both intakes. Wire-up SQL below.
 
 Optional: `SUPABASE_URL`, `RESEND_FROM`, `PUBLIC_APP_URL`, `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `ANTHROPIC_MODEL`.
 
@@ -106,6 +108,27 @@ ALTER TABLE public.sps_comms_log ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "comms_log read"   ON public.sps_comms_log FOR SELECT TO authenticated USING (true);
 CREATE POLICY "comms_log insert" ON public.sps_comms_log FOR INSERT TO authenticated WITH CHECK (true);
 
+-- Native push device tokens (Build 27) — one row per DEVICE, upserted by api/push/register.js
+-- with the SERVICE_ROLE key (?on_conflict=token, so `token` MUST be the primary key — same trap
+-- as qb_tokens/plaid_tokens above; without this table, "Enable on this device" errors with a
+-- "create the sps_push_tokens table" hint). role/user_key are derived SERVER-side from the
+-- caller's VERIFIED auth email (never from body claims): sps_team member → owner|staff (+ member
+-- id), else owner-email chain → owner, else sps_clients match → client (+ client id). Dead tokens
+-- (APNs 410 Unregistered / BadDeviceToken) are pruned automatically on send by api/_push.js.
+CREATE TABLE IF NOT EXISTS public.sps_push_tokens (
+  token       text PRIMARY KEY,
+  user_email  text NOT NULL DEFAULT '',
+  user_key    text NOT NULL DEFAULT '',
+  role        text NOT NULL DEFAULT 'staff',
+  platform    text NOT NULL DEFAULT 'ios',
+  enabled     boolean DEFAULT true,
+  updated_at  timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS sps_push_tokens_role_idx ON public.sps_push_tokens(role);
+CREATE INDEX IF NOT EXISTS sps_push_tokens_user_idx ON public.sps_push_tokens(role, user_key);
+ALTER TABLE public.sps_push_tokens ENABLE ROW LEVEL SECURITY;
+-- No policies: service-role only, same posture as qb_tokens/plaid_tokens.
+
 -- Live staff location while clocked in (one row per staff member, upserted).
 CREATE TABLE IF NOT EXISTS public.staff_locations (
   staff_id   text PRIMARY KEY,
@@ -137,6 +160,30 @@ CREATE POLICY "anon read tracking tokens"
 CREATE POLICY "anon read active staff locations"
   ON public.staff_locations FOR SELECT TO anon USING (is_active = true);
 ```
+
+## Message-push webhook (run once in the APP's Supabase project — Build 27)
+
+Chat messages never pass through `api/` (both sides insert into `sps_messages` directly), so
+pushes for them ride a Database Webhook. One-time setup, same recipe as the website's lead
+webhook: **Database → Webhooks → Enable webhooks** first (creates the `supabase_functions`
+schema — skipping this gives `3F000 schema supabase_functions does not exist`), then run
+(replace `<SECRET>` with the `MSG_WEBHOOK_SECRET` value set in Vercel):
+
+```sql
+create trigger sps_messages_push_webhook
+  after insert on public.sps_messages
+  for each row
+  execute function supabase_functions.http_request(
+    'https://spsway.app/api/message-intake',
+    'POST',
+    '{"Content-Type":"application/json","Authorization":"Bearer <SECRET>"}',
+    '{}',
+    '5000'
+  );
+```
+
+Until this trigger exists, everything else works — message pushes are simply absent. The
+endpoint always answers 200 once authorized (Supabase retries non-2xx → would double-push).
 
 ## Supabase Realtime (run once in the SQL editor)
 

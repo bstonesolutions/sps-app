@@ -6,6 +6,7 @@
 // once app_state is locked and the device's local copy is empty, would wipe the table). This +
 // api/portal-data are what let app_state be locked to staff-only. See SECURITY-RLS-PLAN.md.
 import { verifyUser } from "./_auth.js";
+import { pushOwner } from "./_push.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
@@ -91,7 +92,15 @@ export default async function handler(req, res) {
       const alerts = (await readKey("sps_officeAlerts")) || [];
       // Force the verified client identity so a client can't forge an alert as another client.
       const alert = { id: Date.now(), resolved: false, ...a, clientId: client.id, clientName: client.name };
-      return res.status((await writeKey("sps_officeAlerts", [alert, ...alerts])) ? 200 : 502).json({ ok: true });
+      const saved = await writeKey("sps_officeAlerts", [alert, ...alerts]);
+      if (saved) {
+        // Owner push — best-effort; the alert itself is already saved. Keyed by the alert type
+        // so it follows the matching per-event toggle in Comms → Settings.
+        const key = a.type === "request" ? "service_request" : a.type === "feedback" ? "low_rating" : a.type === "upgrade_request" ? "upgrade_request" : "office_alert";
+        const title = String(a.title || `${client.name || "A client"} needs attention`).slice(0, 110);
+        await pushOwner(key, title, String(a.body || a.message || "New request from the client portal").slice(0, 200), "alerts");
+      }
+      return res.status(saved ? 200 : 502).json({ ok: true });
     }
 
     return res.status(400).json({ error: "Unknown action." });

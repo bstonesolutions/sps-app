@@ -18,6 +18,7 @@
 // Ledger in sps_nudge_log (separate key so the cron never rewrites the app-edited cfg).
 
 import { getItem, plaidCall, requireOwner } from "./plaid/_plaid.js";
+import { pushOwner } from "./_push.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
 const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -306,6 +307,8 @@ export default async function handler(req, res) {
     if (channel === "sms" || channel === "both") out.sms = await sendQuo(toPhone, message, email.textingNumber);
     if (channel === "email" || channel === "both") out.email = await sendEmail(toEmail, `${branding.companyName || "SPS"} — money plan`, message, branding);
     const sent = Object.values(out).some((r) => r && r.ok);
+    // Push mirror — added AFTER the sent calculation so it never influences it.
+    out.push = await pushOwner("reports", `${branding.companyName || "SPS"} money plan`, message, "budget", { email, collapseId: "nudge-test" });
     return res.status(sent ? 200 : 400).json({ ok: sent, test: true, ...out });
   }
 
@@ -334,5 +337,8 @@ export default async function handler(req, res) {
   if (channel === "email" || channel === "both") out.email = await sendEmail(toEmail, `${branding.companyName || "SPS"} — money plan`, message, branding);
   const sent = Object.values(out).some((r) => r && r.ok);
   if (sent) await sbSet("sps_nudge_log", { ...ledger, sent: et.mdy });
+  // Push mirror — after the sent/ledger decision so a push-only success can't stamp the ledger
+  // and suppress the real SMS/email retry next hour. collapseId dedupes hourly retries.
+  out.push = await pushOwner("reports", `${branding.companyName || "SPS"} money plan`, message, "budget", { email, collapseId: `nudge-${et.mdy}` });
   return res.status(200).json({ ok: sent, ...out });
 }

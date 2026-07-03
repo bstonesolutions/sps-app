@@ -425,6 +425,112 @@ async function logComm({ clientId, type, channel = "sms", body = "", ok = true }
   } catch (_) { /* table not created yet, or offline — logging is best-effort */ }
 }
 
+// Fire an event push to the right audience (owner / a client / a staff member) through
+// api/send-push — the SERVER resolves recipients from registered device tokens and enforces
+// Test Mode + the per-event Push toggles in Comms → Settings; the caller only names an event.
+// Best-effort like logComm: never throws, never blocks the flow that triggered it, and a
+// clean no-op until APNs is configured (Build 27). Works from web AND native — a stop
+// completed on a tech's iPhone pushes the owner's phone, wherever the tap happened.
+function sendPushEvent(event, fields) {
+  (async () => {
+    try {
+      await fetch(`${PROD_URL}/api/send-push`, {
+        method: "POST",
+        headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ event, ...(fields || {}) }),
+      });
+    } catch (_) { /* best-effort */ }
+  })();
+}
+
+// ── Build 27: native push registration (@capacitor/push-notifications) ──────────────────────
+// Web builds and web runtime no-op cleanly (guarded dynamic import, same pattern as main.jsx's
+// @capacitor/app). The token lands in sps_push_tokens via api/push/register, bound server-side
+// to the VERIFIED signed-in account. A tapped notification routes through the SAME deep-link
+// sink as spsway:// links (localStorage sps_deeplink + the sps-deeplink event), so cold-start
+// and warm-app routing come for free.
+let _pushToken = "";
+let _pushListenersOn = false;
+async function pushPlugin() {
+  try {
+    const { Capacitor } = await import("@capacitor/core");
+    if (!Capacitor.isNativePlatform()) return null;
+    const mod = await import("@capacitor/push-notifications").catch(() => null);
+    return (mod && mod.PushNotifications) || null;
+  } catch (_) { return null; }
+}
+async function wirePushListeners(P) {
+  if (_pushListenersOn) return;
+  _pushListenersOn = true;
+  P.addListener("registration", async (t) => {
+    _pushToken = (t && t.value) || "";
+    if (!_pushToken) return;
+    try {
+      await fetch(`${PROD_URL}/api/push/register`, {
+        method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ token: _pushToken }),
+      });
+    } catch (_) { /* re-registered on next app open */ }
+  });
+  P.addListener("registrationError", () => { /* surfaced as a status line in the settings card */ });
+  P.addListener("pushNotificationActionPerformed", (a) => {
+    const link = a && a.notification && a.notification.data && a.notification.data.link;
+    if (!link) return;
+    try { localStorage.setItem("sps_deeplink", String(link)); } catch (_) {}
+    try { window.dispatchEvent(new CustomEvent("sps-deeplink", { detail: String(link) })); } catch (_) {}
+  });
+}
+async function pushPermissionState() {
+  const P = await pushPlugin();
+  if (!P) return "unsupported";
+  try { return (await P.checkPermissions()).receive || "prompt"; } catch (_) { return "unsupported"; }
+}
+// Prompts if needed (iOS system dialog), registers with APNs, and the registration listener
+// binds the token to this account. Called by the primer, the settings card, and — silently,
+// when permission is already granted — on every app open (tokens rotate).
+async function enableDevicePush() {
+  const P = await pushPlugin();
+  if (!P) return { ok: false, error: "Notifications are delivered through the iOS app." };
+  try { localStorage.removeItem("sps_push_disabled"); } catch (_) {}
+  await wirePushListeners(P);
+  let perm = await P.checkPermissions().catch(() => ({ receive: "prompt" }));
+  if (perm.receive !== "granted") perm = await P.requestPermissions().catch(() => ({ receive: "denied" }));
+  if (perm.receive !== "granted") return { ok: false, denied: true, error: "Notifications are turned off for SPS Way in iOS Settings." };
+  try { await P.register(); } catch (e) { return { ok: false, error: (e && e.message) || "Couldn't register with Apple." }; }
+  return { ok: true };
+}
+// Sign-out unbind: remove this device's row server-side WITHOUT the opt-out flag or APNs
+// unregister — a different account signing in should re-register cleanly. Fire-and-forget.
+function unbindDevicePushToken() {
+  if (!_pushToken) return; // not registered this session — next sign-in rebinds the row anyway
+  (async () => {
+    try {
+      await fetch(`${PROD_URL}/api/push/register`, {
+        method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ token: _pushToken, remove: true }),
+      });
+    } catch (_) {}
+  })();
+}
+
+async function disableDevicePush() {
+  const P = await pushPlugin();
+  if (!P) return { ok: false };
+  // Remember the explicit opt-out — iOS permission stays "granted" after unregister(), so
+  // without this flag the silent re-register on next app open would resurrect pushes.
+  try { localStorage.setItem("sps_push_disabled", "1"); } catch (_) {}
+  try { await P.unregister(); } catch (_) {}
+  if (_pushToken) {
+    try {
+      await fetch(`${PROD_URL}/api/push/register`, {
+        method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ token: _pushToken, remove: true }),
+      });
+    } catch (_) {}
+  }
+  return { ok: true };
+}
+
 // Open a URL in the device's DEFAULT/EXTERNAL browser (not the in-app browser) —
 // intentionally the opposite of openInAppBrowser. Used for Google reviews, where
 // the client's signed-in browser session makes leaving a review frictionless. On
@@ -2255,16 +2361,26 @@ const NOTIFY_EVENTS = [
   { key: "low_rating",       label: "Low visit rating",    hint: "A client rates a visit 3 stars or lower" },
   { key: "client_message",   label: "New client message",  hint: "A client sends a message from the portal" },
   { key: "payment_received", label: "Payment received",    hint: "An invoice is marked paid" },
+  // pushOnly events have no email leg (their emails/texts are managed by their own features) —
+  // the settings UI renders only the Push toggle for these.
+  { key: "new_lead",         label: "New website lead",    hint: "A quote request lands in Comms → Leads", pushOnly: true },
+  { key: "stop_completed",   label: "Stop completed",      hint: "A tech finishes a service stop", pushOnly: true },
+  { key: "office_alert",     label: "Tech note for the office", hint: "A tech flags something from the field", pushOnly: true },
+  { key: "reports",          label: "Reports & automation summaries", hint: "Digest emails, the money plan, auto-text run summaries", pushOnly: true },
 ];
 const DEFAULT_NOTIFY = {
   ownerEmail: "",   // empty → falls back to the configured company email at send time
   ownerPhone: "",
   events: {
-    upgrade_request:  { inApp: true, email: true },
-    service_request:  { inApp: true, email: true },
-    low_rating:       { inApp: true, email: true },
-    client_message:   { inApp: true, email: false },
-    payment_received: { inApp: true, email: false },
+    upgrade_request:  { inApp: true, email: true,  push: true },
+    service_request:  { inApp: true, email: true,  push: true },
+    low_rating:       { inApp: true, email: true,  push: true },
+    client_message:   { inApp: true, email: false, push: true },
+    payment_received: { inApp: true, email: false, push: true },
+    new_lead:         { push: true },
+    stop_completed:   { push: true },
+    office_alert:     { push: true },
+    reports:          { push: true },
   },
 };
 
@@ -10112,8 +10228,29 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
     }));
   };
 
+  // Build 27 — tell a tech a stop landed on their schedule (push to their registered devices).
+  // Skips self-assignment and Unassigned; Test Mode holds these server-side. Best-effort.
+  const notifyAssigned = (techId, count, when) => {
+    const idStr = String(techId || "");
+    if (!idStr || idStr === "__un" || idStr === String(me?.id || "")) return;
+    sendPushEvent("stop_assigned", {
+      staffId: idStr,
+      body: count > 1 ? `${count} stops were assigned to you` : `A stop was assigned to you${when ? ` — ${when}` : ""}`,
+      collapseId: `assign-${idStr}`,
+    });
+  };
+
   // Edit a stop's details in place (time, type, duration, tech, date)
   const updateStop = (origDate, sid, changes) => {
+    // Assignment push: only when the stop EXISTS and the tech actually changed (a missing
+    // stop means setSchedule below bails too — no phantom notifications).
+    if (changes && changes.assigneeId != null) {
+      const prevDay = (schedule || []).find(d => (d.stops || []).some(s => s.sid === sid));
+      const prevStop = prevDay && prevDay.stops.find(s => s.sid === sid);
+      if (prevStop && String(changes.assigneeId) !== String(prevStop.assigneeId || "")) {
+        notifyAssigned(changes.assigneeId, 1, `${changes.date || prevDay.date || ""} ${changes.time || prevStop.time || ""}`.trim());
+      }
+    }
     setSchedule(prev => {
       let copy = prev.map(d => ({ ...d, stops: [...d.stops] }));
       // Find the stop by its sid across ALL days — never rely on origDate matching, which can go stale
@@ -10227,6 +10364,10 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   };
 
   const addStops = (date, newStops) => {
+    // Assignment pushes for brand-new stops — one per tech, counted.
+    const perTech = {};
+    (newStops || []).forEach(s => { if (s.assigneeId) perTech[String(s.assigneeId)] = (perTech[String(s.assigneeId)] || 0) + 1; });
+    Object.entries(perTech).forEach(([techId, count]) => notifyAssigned(techId, count, date));
     setSchedule(prev => {
       const copy = prev.map(d => ({ ...d, stops: [...d.stops] }));
       const existing = copy.find(d => d.date === date);
@@ -10252,6 +10393,10 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   };
   // Bulk-reassign every selected stop to one tech (or Unassigned) at once.
   const reassignSelectedTo = (techId) => {
+    // Count only stops that actually CHANGE hands — re-assigning a tech's own stops to them
+    // must not notify.
+    const changed = (schedule || []).flatMap(d => d.stops || []).filter(s => selected[s.sid] && String(s.assigneeId || "") !== String(techId)).length;
+    if (changed > 0) notifyAssigned(techId, changed, "");
     setSchedule(prev => prev.map(d => ({ ...d, stops: d.stops.map(s => selected[s.sid] ? { ...s, assigneeId: techId } : s) })));
     setReassignOpen(false);
     exitSelect();
@@ -18108,6 +18253,61 @@ function BackupRestore() {
 // Owner Alerts — choose which client events notify the owner and through which
 // channels, plus the destination email/phone. Reads/writes email.notify so it
 // persists with the rest of the messaging settings (via the same autosave draft).
+// Build 27 — Comms → Settings card: device-level enable/disable for native push, plus the
+// server key status. WHICH events push is chosen in "Notify me when…" (NotificationSettings).
+function PushSettingsCard() {
+  const { T } = useApp();
+  const [ps, setPs] = useState({ perm: "checking", apns: null, busy: false, msg: "" });
+  const refresh = async () => {
+    const perm = await pushPermissionState();
+    let apns = null;
+    try {
+      const r = await fetch(`${PROD_URL}/api/push/register`);
+      const d = await r.json().catch(() => ({}));
+      apns = !!(d.configured && d.configured.apns);
+    } catch (_) {}
+    setPs(s => ({ ...s, perm, apns }));
+  };
+  useEffect(() => { refresh(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const enable = async () => {
+    setPs(s => ({ ...s, busy: true, msg: "" }));
+    const r = await enableDevicePush();
+    setPs(s => ({ ...s, busy: false, msg: r.ok ? "This device is registered — you're set." : (r.error || "Couldn't enable notifications.") }));
+    refresh();
+  };
+  const disable = async () => {
+    setPs(s => ({ ...s, busy: true, msg: "" }));
+    await disableDevicePush();
+    setPs(s => ({ ...s, busy: false, msg: "Push is off for this device." }));
+  };
+  const native = ps.perm !== "unsupported" && ps.perm !== "checking";
+  return (
+    <div style={{ border: `1px solid ${T.border}`, borderRadius: 16, background: T.surface, padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+      <div>
+        <div style={{ fontSize: 16, fontWeight: 800, color: T.text }}>Push Notifications</div>
+        <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 3, lineHeight: 1.5 }}>
+          Lock-screen alerts on your iPhone — new leads, payments, completed stops, messages, reports. Choose which events under “Notify me when…” below.
+        </div>
+      </div>
+      {ps.apns === false && (
+        <div style={{ fontSize: 12.5, color: T.textMuted, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 12px" }}>
+          The server key isn't set yet — add the APNS_* keys in Vercel to turn sending on. Devices can still register in the meantime.
+        </div>
+      )}
+      {!native ? (
+        <div style={{ fontSize: 13, color: T.textMuted }}>You're on the web — notifications are delivered through the iOS app. Open SPS Way on your iPhone and enable them there.</div>
+      ) : (
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <Btn variant="primary" sm onClick={ps.busy ? undefined : enable}>{ps.perm === "granted" ? "Re-register this device" : "Enable on this device"}</Btn>
+          <Btn variant="ghost" sm onClick={ps.busy ? undefined : disable}>Turn off</Btn>
+          {ps.perm === "denied" && <span style={{ fontSize: 12, color: T.warning }}>Blocked in iOS Settings → Notifications → SPS Way.</span>}
+        </div>
+      )}
+      {ps.msg && <div style={{ fontSize: 12.5, color: T.textMuted }}>{ps.msg}</div>}
+    </div>
+  );
+}
+
 function NotificationSettings({ email, setEmail, branding }) {
   const { T } = useApp();
   const base = { ...DEFAULT_NOTIFY, ...(email.notify || {}) };
@@ -18193,13 +18393,21 @@ function NotificationSettings({ email, setEmail, branding }) {
               <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{ev.label}</div>
               <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2, marginBottom: 12 }}>{ev.hint}</div>
               <div style={{ display: "flex", gap: 22, flexWrap: "wrap" }}>
+                {!ev.pushOnly && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                    <Toggle on={cfg.inApp !== false} onChange={v => setEvent(ev.key, "inApp", v)} />
+                    <span style={{ fontSize: 13, fontWeight: 600, color: T.text }}>In-app</span>
+                  </div>
+                )}
+                {!ev.pushOnly && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                    <Toggle on={!!cfg.email} onChange={v => setEvent(ev.key, "email", v)} />
+                    <span style={{ fontSize: 13, fontWeight: 600, color: T.text }}>Email</span>
+                  </div>
+                )}
                 <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-                  <Toggle on={cfg.inApp !== false} onChange={v => setEvent(ev.key, "inApp", v)} />
-                  <span style={{ fontSize: 13, fontWeight: 600, color: T.text }}>In-app</span>
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-                  <Toggle on={!!cfg.email} onChange={v => setEvent(ev.key, "email", v)} />
-                  <span style={{ fontSize: 13, fontWeight: 600, color: T.text }}>Email</span>
+                  <Toggle on={cfg.push !== false} onChange={v => setEvent(ev.key, "push", v)} />
+                  <span style={{ fontSize: 13, fontWeight: 600, color: T.text }}>Push</span>
                 </div>
               </div>
             </div>
@@ -19420,7 +19628,7 @@ function MessagesScreen({ clients, currentUser, T }) {
       const map = {};
       data.forEach(m => {
         const cid = String(m.client_id);
-        if (!map[cid]) map[cid] = { lastMsg: String(m.body || "").replace(/\[\[inv(?:card)?:[^\]]+\]\]/g, "").trim() || "Invoice", lastAt: m.created_at, unread: 0 };
+        if (!map[cid]) map[cid] = { lastMsg: String(m.body || "").replace(/\[\[inv(?:card)?:[^\]]+\]\]|\[\[svccard:[^\]]+\]\]|\[\[echo\]\]/g, "").trim() || "Invoice", lastAt: m.created_at, unread: 0 };
         if (m.sender === "client" && !m.read_at) map[cid].unread++;
       });
       setThreadMap(map);
@@ -19562,7 +19770,9 @@ function svcCardMarker(serviceType, dateStr, company) {
 //   [[inv:<id>]]                                   → legacy: the trailing "here" becomes a link
 // Either way the marker is stripped from the visible text; onOpenInvoice makes it tappable.
 function renderChatBody(body, onOpenInvoice, T, onOpenService) {
-  const raw = String(body || "");
+  // [[echo]] marks a message that mirrors an office alert (service/upgrade request) so the
+  // push webhook doesn't double-notify the owner — invisible in the rendered chat.
+  const raw = String(body || "").replace(/\[\[echo\]\]/g, "").trim();
   const t = T || { primary: "#B81D24", text: "#111827", textMuted: "#6b7280", border: "#e5e7eb", surface: "#ffffff" };
   const cm = raw.match(/\[\[invcard:([^\]]+)\]\]/);
   if (cm) {
@@ -20610,6 +20820,7 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
               Gates preserve the pre-consolidation surfaces: identity + Test Mode + alerts stay on
               editNotifications; digest/reminders/automations stay on commsSettings; owner sees all. */}
           {(perms.isAdmin || perms.editNotifications) && <SendingIdentitySettings email={email} setEmail={setEmail} />}
+          {(perms.isAdmin || perms.editNotifications) && <PushSettingsCard />}
           {(perms.isAdmin || perms.editNotifications) && (
             <Card><CardHeader title="Test Mode, Your Contacts & Alerts" /><NotificationSettings email={email} setEmail={setEmail} branding={branding} /></Card>
           )}
@@ -26352,6 +26563,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
     if (!deepLink) return;
     const t = String(deepLink).toLowerCase();
     if (t === "invoices" || t.indexOf("invoice") === 0) setPage("cp_invoices");
+    else if (t === "messages" || t === "comms") setPage("cp_messages"); // push taps on new-message notifications
     else if (t === "track" || t === "home") setPage("cp_home"); // live tracking lives on Home
     if (onDeepLinkHandled) onDeepLinkHandled();
   }, [deepLink]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -27328,7 +27540,10 @@ export default function App({ authEmail = "", onSignOut }) {
     return () => clearInterval(interval);
   }, []);
 
-  const handleSignOut = () => { setPage("dashboard"); setSelectedClient(null); setAdding(false); if (onSignOut) onSignOut(); };
+  // Sign-out unbinds this device's push token server-side FIRST (while the auth token is
+  // still valid) so a handed-off phone doesn't keep receiving the previous account's pushes.
+  // No opt-out flag — the next sign-in re-registers cleanly. Best-effort, never blocks.
+  const handleSignOut = () => { unbindDevicePushToken(); setPage("dashboard"); setSelectedClient(null); setAdding(false); if (onSignOut) onSignOut(); };
   // first real sign-in (no emails assigned yet) claims the owner account automatically
   useEffect(() => {
     // Don't touch the team while the initial read failed — `team` is the seeded DEFAULT_TEAM right
@@ -27523,6 +27738,46 @@ export default function App({ authEmail = "", onSignOut }) {
   // universal-link consumer further down — so the two can never drift. Email targets
   // alerts/profit land on the dashboard (their cards live there).
   const DEEPLINK_MAP = { alerts: "dashboard", profit: "dashboard", schedule: "schedule", invoices: "invoices", invoice: "invoices", leads: "leads", comms: "comms", budget: "budget", clients: "clients", reports: "reports" };
+
+  // ── Build 27: native push — silent re-register on open once permission is granted (APNs
+  // tokens rotate; the signed-in account can change). Never prompts from here — the primer
+  // below and the Comms → Settings card own the permission ask.
+  useEffect(() => {
+    if (!hydrated || (!currentUser && !clientUser)) return;
+    // Respect an explicit "Turn off" — checked HERE (not inside enableDevicePush, which clears
+    // the flag on purpose for EXPLICIT re-enables from the primer / settings card).
+    try { if (localStorage.getItem("sps_push_disabled")) return; } catch (_) {}
+    (async () => {
+      try { if ((await pushPermissionState()) === "granted") await enableDevicePush(); } catch (_) {}
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, (currentUser && currentUser.email) || (clientUser && clientUser.email) || ""]);
+
+  // Friendly primer before the iOS permission prompt (native only). "Turn on" is permanent;
+  // "Not now" snoozes 14 days — for plain techs and portal clients the primer is the ONLY
+  // enable surface (the Comms settings card is permission-gated), so it must come back.
+  const [pushPrimer, setPushPrimer] = useState(false);
+  useEffect(() => {
+    if (!hydrated || (!currentUser && !clientUser)) return;
+    let seen = false;
+    try {
+      if (localStorage.getItem("sps_push_disabled")) seen = true; // explicit opt-out — never re-ask
+      const v = localStorage.getItem("sps_push_primer");
+      if (v === "done" || v === "1") seen = true;
+      else if (Number(v) > 0 && Date.now() - Number(v) < 14 * 24 * 3600 * 1000) seen = true;
+    } catch (_) {}
+    if (seen) return;
+    (async () => {
+      try { if ((await pushPermissionState()) === "prompt") setPushPrimer(true); } catch (_) {}
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, !!currentUser, !!clientUser]);
+  const dismissPushPrimer = (enable) => {
+    try { localStorage.setItem("sps_push_primer", enable ? "done" : String(Date.now())); } catch (_) {}
+    setPushPrimer(false);
+    if (enable) enableDevicePush();
+  };
+
   const _openParamRef = useRef(false);
   useEffect(() => {
     if (!hydrated || !currentUser || _openParamRef.current) return;
@@ -27733,6 +27988,9 @@ export default function App({ authEmail = "", onSignOut }) {
 
     // Build 15, Item 6 — surface a payment-received banner to the owner (in-app, while open).
     if (_newlyPaid && perms && perms.isAdmin) setPayBanner({ ..._newlyPaid, id: Date.now() });
+    // Build 27 — the out-of-app leg: push the owner's devices. Every device that syncs QB can
+    // detect the same payment, so the collapseId folds repeats into one notification.
+    if (_newlyPaid) sendPushEvent("invoice_paid", { body: `${_newlyPaid.clientName} — ${_newlyPaid.amount}${_newlyPaid.number ? ` (invoice ${_newlyPaid.number})` : ""}`, collapseId: `paid-${_newlyPaid.invoiceId}` });
     // Log match stats
     const matched = newInvoices.filter(iv => iv.clientId).length;
     console.log(`QB Sync: ${newInvoices.length} invoices, ${matched} matched to clients`);
@@ -27976,7 +28234,14 @@ export default function App({ authEmail = "", onSignOut }) {
     setCompletedSids({});
   };
 
-  const handleOfficeAlert = (a) => setOfficeAlerts(list => [{ id: Date.now(), resolved: false, ...a }, ...list]);
+  const handleOfficeAlert = (a) => {
+    setOfficeAlerts(list => [{ id: Date.now(), resolved: false, ...a }, ...list]);
+    // Owner push, keyed by the alert type so it follows the matching Comms → Settings toggle.
+    // (Portal clients in server mode go through api/portal-action, which pushes there instead —
+    // this handler and that endpoint are disjoint producers, so nothing double-fires.)
+    const key = a && a.type === "request" ? "service_request" : a && a.type === "feedback" ? "low_rating" : a && a.type === "upgrade_request" ? "upgrade_request" : "office_alert";
+    sendPushEvent(key, { title: (a && a.title) || "", body: String((a && (a.body || a.message)) || "").slice(0, 200) });
+  };
   const handleResolveAlert = (id) => setOfficeAlerts(list => list.filter(a => a.id !== id));
   // Server-mediated client write (Step 2): once app_state is locked to staff-only, client actions
   // must NOT write whole arrays from the device — route them through api/portal-action, which
@@ -28035,7 +28300,7 @@ export default function App({ authEmail = "", onSignOut }) {
       actionUrl: "spsway://alerts",
       actionLabel: "Open in the SPS app",
     });
-    postClientMessage(req.clientId, "client", req.clientName, `I'd like to request ${req.type || "service"}${req.dates ? ` (${req.dates})` : ""}.${req.notes ? ` ${req.notes}` : ""}`);
+    postClientMessage(req.clientId, "client", req.clientName, `I'd like to request ${req.type || "service"}${req.dates ? ` (${req.dates})` : ""}.${req.notes ? ` ${req.notes}` : ""} [[echo]]`);
   };
 
   // Store a client's service rating on their most recent visit, and route low
@@ -28126,7 +28391,7 @@ export default function App({ authEmail = "", onSignOut }) {
       actionUrl: "spsway://alerts",
       actionLabel: "Open in the SPS app",
     });
-    postClientMessage(req.clientId, "client", req.clientName, `I'd like to upgrade to ${req.requestedPlan}${req.currentPlan ? ` (from ${req.currentPlan})` : ""}.${req.message ? ` ${req.message}` : ""}`);
+    postClientMessage(req.clientId, "client", req.clientName, `I'd like to upgrade to ${req.requestedPlan}${req.currentPlan ? ` (from ${req.currentPlan})` : ""}.${req.message ? ` ${req.message}` : ""} [[echo]]`);
   };
 
   const handleSaveInvoice = (inv) => {
@@ -28154,6 +28419,9 @@ export default function App({ authEmail = "", onSignOut }) {
       });
       // Client-facing receipt in their chat thread (like the invoice-sent message).
       postClientMessage(inv.clientId, "staff", branding.companyName || "", `Payment received for invoice ${inv.number || ""} — ${amount}. Thank you!`);
+      // Owner phones too — skipped when the OWNER marked it paid themselves (no
+      // self-notifications; staff-recorded and QB-detected payments still push).
+      if (!(perms && perms.isAdmin)) sendPushEvent("invoice_paid", { body: `${cl?.name || "A client"} — ${amount}${inv.number ? ` (invoice ${inv.number})` : ""}`, collapseId: `paid-${inv.id}` });
     }
   };
   const handleDeleteInvoice = (id) => {
@@ -28181,6 +28449,12 @@ export default function App({ authEmail = "", onSignOut }) {
 
   // mark a stop complete: prepend the visit to the client's history (with photos)
   const handleCompleteStop = (clientId, entry, sid) => {
+    // Owner push (skipped when the OWNER completed it — no self-notifications). The client's
+    // own "visit report" push rides the portal-message webhook, not this.
+    if (!(perms && perms.isAdmin)) {
+      const _cl = (clients || []).find(c => String(c.id) === String(clientId));
+      sendPushEvent("stop_completed", { body: `${_cl?.name || "A client"} — visit completed`, collapseId: `stop-${sid || clientId}` });
+    }
     setClients(cs => cs.map(c => {
       if (c.id !== clientId) return c;
       const history = [entry, ...(c.history || [])];
@@ -28299,6 +28573,24 @@ export default function App({ authEmail = "", onSignOut }) {
     const pT = pBranding.themeKey === "custom" ? buildCustomTheme(pBranding.custom, pMode) : (pThemeDef ? (pThemeDef[pMode] || pThemeDef.light) : THEMES.sps.light);
     const pFont = FONTS[pBranding.appFont || "rounded"]?.stack || DEFAULT_FONT_STACK;
     return (
+      <>
+      {/* Build 27 — the push primer must ALSO reach portal clients (this early return exits
+          before the staff layout that renders the staff primer). Self-contained overlay in
+          the portal's own theme — the shared Modal depends on the staff theme context. */}
+      {pushPrimer && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 10000, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div style={{ background: pT.surface, borderRadius: 18, padding: 20, maxWidth: 420, width: "100%", fontFamily: pFont, display: "flex", flexDirection: "column", gap: 14, boxShadow: "0 18px 50px rgba(0,0,0,0.35)" }}>
+            <div style={{ fontSize: 17, fontWeight: 800, color: pT.text }}>Turn on notifications?</div>
+            <div style={{ fontSize: 14, color: pT.textMuted, lineHeight: 1.55 }}>
+              Get a ping when {pBranding.companyName || "your service team"} sends you a message, an invoice, or a visit report.
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={() => dismissPushPrimer(false)} style={{ flex: 1, padding: "12px 14px", borderRadius: 12, border: `1.5px solid ${pT.border}`, background: pT.surface, color: pT.text, fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Not now</button>
+              <button onClick={() => dismissPushPrimer(true)} style={{ flex: 1, padding: "12px 14px", borderRadius: 12, border: "none", background: pT.primary, color: "#ffffff", fontWeight: 800, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Turn on</button>
+            </div>
+          </div>
+        </div>
+      )}
       <SPSClientPortal
         client={portalClient}
         estimates={sData ? sData.estimates : estimatesRaw}
@@ -28331,6 +28623,7 @@ export default function App({ authEmail = "", onSignOut }) {
           else setClients(cs => (cs || []).map(c => String(c.id) === String(portalClient.id) ? { ...c, notifyPrefs } : c));
         }}
       />
+      </>
     );
   }
 
@@ -28529,6 +28822,19 @@ export default function App({ authEmail = "", onSignOut }) {
         `}</style>
 
         <PaymentBanner banner={payBanner} T={T} onOpen={() => { setPayBanner(null); handleNav("invoices", { invoiceFilter: "Paid" }); }} onClose={() => setPayBanner(null)} />
+        {pushPrimer && (
+          <Modal title="Turn on notifications?" onClose={() => dismissPushPrimer(false)} maxWidth={430}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <div style={{ fontSize: 14, color: T.text, lineHeight: 1.55 }}>
+                Get a ping the moment it matters — new leads, payments, completed stops, and messages, right on your lock screen. You can fine-tune which events notify you anytime in Comms → Settings.
+              </div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <Btn variant="ghost" block onClick={() => dismissPushPrimer(false)}>Not now</Btn>
+                <Btn variant="primary" block onClick={() => dismissPushPrimer(true)}>Turn on</Btn>
+              </div>
+            </div>
+          </Modal>
+        )}
 
         {/* Header — a non-scrolling flex child, frozen at the top */}
         <header style={{ background: hexA(T.surface, 0.9), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, position: "relative", zIndex: 100, flexShrink: 0, borderBottom: `1px solid ${T.border}` }}>

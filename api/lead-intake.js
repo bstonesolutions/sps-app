@@ -13,6 +13,8 @@
 // Env: LEAD_WEBHOOK_SECRET (required to accept posts), QUO_API_KEY + QUO_PHONE_NUMBER (text),
 // RESEND_API_KEY (email), SUPABASE_SERVICE_ROLE_KEY (reads the sending settings).
 
+import { pushOwner } from "./_push.js";
+
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
 const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const RESEND_KEY   = process.env.RESEND_API_KEY;
@@ -122,6 +124,10 @@ export default async function handler(req, res) {
       out.email = { ok: r.ok };
     } catch { out.email = { ok: false }; }
   }
+  // Native push to the owner's devices — best-effort mirror of the text/email above.
+  out.push = await pushOwner("new_lead", `New lead: ${name}`,
+    `${bits ? `${bits}. ` : ""}${msg ? `“${msg}”` : "Waiting in Comms → Leads."}`, "leads", { email });
+
   // Always 200 once authorized — Supabase retries non-2xx, and a notify hiccup must not re-fire
   // (the lead itself is safe in the website table; the app imports it on next open regardless).
   return res.status(200).json({ ok: true, ...out });

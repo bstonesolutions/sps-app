@@ -20,6 +20,7 @@
 
 import { verifyUser } from "./_auth.js";
 import { resolveFrom } from "./_sender.js";
+import { pushOwner } from "./_push.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
 const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -393,6 +394,16 @@ export default async function handler(req, res) {
   const lastDom = new Date(Date.UTC(+et.ym.slice(0, 4), +et.ym.slice(5, 7), 0)).getUTCDate(); // clamp so 29/30/31 still fires in short months
   if (od.monthlyOn && et.day === Math.min(monthDay, lastDom) && ledger.monthlySent !== et.ym) { results.monthly = await sendDigest({ period: "monthly", state, cfg, email, branding }); if (results.monthly.sent) { ledger.monthlySent = et.ym; changed = true; } }
   if (changed) await sbSet("sps_digest_log", ledger);
+
+  // Push mirror of whatever emailed — best-effort, and deliberately NOT part of the ledger
+  // decision above (a push-only success must never suppress the email retry).
+  for (const period of ["daily", "weekly", "monthly"]) {
+    if (results[period] && results[period].sent) {
+      results[period].push = await pushOwner("reports", `Your ${period} report is out`,
+        "The business digest just landed in your inbox — tap for the live numbers.", "reports",
+        { email, collapseId: `digest-${period}` });
+    }
+  }
 
   return res.status(200).json({ ok: true, ran: new Date().toISOString(), et, results });
 }

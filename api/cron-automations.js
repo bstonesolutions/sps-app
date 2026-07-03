@@ -19,6 +19,7 @@
 // Env (Vercel): SUPABASE_SERVICE_ROLE_KEY, QUO_API_KEY, QUO_PHONE_NUMBER, CRON_SECRET. Optional SUPABASE_URL.
 
 import { requireUser } from "./_auth.js";
+import { pushOwner } from "./_push.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
 const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -294,6 +295,14 @@ export default async function handler(req, res) {
     }
   }
   if (sent > 0 || errors.length) { await sbSet("sps_reminders", remNext); await sbSet("sps_auto_log", autoNext); }
+
+  // ONE summary push per run (a full run can send up to RATE_CAP texts — never push per text).
+  // Skipped when Test Mode holds everything, since nothing actually went out.
+  if (sent > 0 && !(testMode.on && testMode.mode === "hold")) {
+    await pushOwner("reports", "Auto-texts sent",
+      `${sent} automated ${sent === 1 ? "text" : "texts"} just went out${errors.length ? ` · ${errors.length} failed` : ""}. Details in Comms.`,
+      "comms", { email, collapseId: "auto-texts" });
+  }
 
   return res.status(200).json({
     ok: true, ran: new Date(now).toISOString(), master: true,
