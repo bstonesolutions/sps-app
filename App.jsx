@@ -1299,6 +1299,9 @@ const haversineMiles = (a, b) => {
   const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(h));
 };
+// Geofence radius for auto-arrival: ~64m. A hair above 60m to stay forgiving of geocode jitter;
+// firing a touch early just texts the client "arrived" ~15s out, and the Undo affordance covers it.
+const GEOFENCE_MI = 0.04;
 
 // ── Google Maps (live tracking, ETA, route optimization) ──
 // Requires VITE_GOOGLE_MAPS_API_KEY (set in Vercel). Enabled APIs needed:
@@ -3642,6 +3645,8 @@ function useStaffLocationTracking(opts) {
   // (mounted once) always reads current values without re-subscribing.
   const optsRef = useRef(opts || {});
   optsRef.current = opts || {};
+  const firedRef = useRef({});   // geofence: auto-arrival fires at most once per stop sid
+  const coordRef = useRef({});   // geofence: resolved {lat,lng} per stop sid (from the geocode cache)
   useEffect(() => {
     if (typeof window === "undefined") return;
     let watchId = null;
@@ -3675,6 +3680,29 @@ function useStaffLocationTracking(opts) {
           ).then(() => {}, () => {});
           if (authUid) writeLoc(authUid);
           else supabase.auth.getUser().then(({ data }) => { authUid = (data && data.user && data.user.id) || null; writeLoc(authUid); }, () => writeLoc(null));
+          // Geofence auto-arrival — fire once when the tech comes within GEOFENCE_MI of a not-yet-
+          // arrived stop. Coordinates resolve async into coordRef (NEVER awaited inside this GPS
+          // callback), so a geocode/network failure can never disrupt the location broadcast.
+          const go = optsRef.current || {};
+          const gStops = Array.isArray(go.stops) ? go.stops : [];
+          if (typeof go.onGeofenceArrive === "function" && gStops.length) {
+            const here = { lat: latitude, lng: longitude };
+            let cache = null;
+            gStops.forEach((s) => {
+              if (!s || !s.sid || firedRef.current[s.sid]) return;
+              if (typeof go.isArrived === "function" && go.isArrived(s.sid)) return;
+              const address = s.address || "";
+              if (!address) return;
+              const ckey = s.sid + "::" + geoKey(address);   // address in the key → an address edit forces a fresh geocode (never a stale coord)
+              const known = coordRef.current[ckey];
+              if (known) {
+                if (haversineMiles(here, known) <= GEOFENCE_MI) { firedRef.current[s.sid] = true; try { go.onGeofenceArrive(s.sid); } catch (_) {} }
+              } else {
+                if (!cache) cache = loadGeoCache();
+                geocodeAddress(address, cache).then((coord) => { if (coord) { coordRef.current[ckey] = coord; try { saveGeoCache(cache); } catch (_) {} } }, () => {});
+              }
+            });
+          }
         },
         () => { /* denied / unavailable — clock-in still works, just no broadcast */ },
         { enableHighAccuracy: true, maximumAge: 30000, timeout: 27000 }
@@ -3721,10 +3749,15 @@ function useStaffLocationTracking(opts) {
     };
 
     sync();
+    // Undo of an auto-arrival re-arms the geofence for that stop (firedRef is private to this hook,
+    // so App signals it via this event — same idiom as sps-shift-changed above).
+    const onGeoUndo = (e) => { const sid = e && e.detail; if (sid) { try { delete firedRef.current[sid]; } catch (_) {} } };
     window.addEventListener("sps-shift-changed", sync);
+    window.addEventListener("sps-geofence-undo", onGeoUndo);
     const iv = setInterval(sync, 20000); // safety re-sync (covers cross-tab changes)
     return () => {
       window.removeEventListener("sps-shift-changed", sync);
+      window.removeEventListener("sps-geofence-undo", onGeoUndo);
       clearInterval(iv);
       // Flip the live-location row inactive on unmount/sign-out so a stale row can't keep showing
       // "active" (or get hijacked by the next signer) after this user leaves.
@@ -9128,7 +9161,7 @@ function RouteRing({ done, total, size = 58, label = "stops" }) {
   );
 }
 
-function HeadHereModal({ stop, client, email, defaultMapApp = "", onClose, onSent }) {
+function HeadHereModal({ stop, client, email, defaultMapApp = "", defaultEtaBuffer = 5, onClose, onSent }) {
   const { T, branding } = useApp();
   const [pref, setPref] = useState(() => { if (defaultMapApp) return defaultMapApp; try { return localStorage.getItem("sps_map_app") || null; } catch { return null; } });
   const [expanded, setExpanded] = useState(false);
@@ -9140,6 +9173,9 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", onClose, onSen
   // Editable ETA (buffer) + message — the tech bumps the arrival estimate and can tweak the text
   // before sending. {eta} is the number (template adds "minutes"); {arrival} is the clock time.
   const [etaMin, setEtaMin] = useState(15);
+  const etaTouchedRef = useRef(false);        // tech adjusted the ETA — auto-compute must not stomp it
+  const [calc, setCalc] = useState(false);    // computing drive time from the tech's GPS
+  const [driveMin, setDriveMin] = useState(null); // computed one-way drive minutes (caption only)
   const buildMsg = (eta) => {
     const tpl = (email && email.smsOnMyWay) || DEFAULT_EMAIL.smsOnMyWay;
     // Per-stop live-tracking link (browser link; opens the app once universal links are set up).
@@ -9157,6 +9193,31 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", onClose, onSen
   const [draft, setDraft] = useState(() => buildMsg(15));
   const [edited, setEdited] = useState(false);
   useEffect(() => { if (!edited) setDraft(buildMsg(etaMin)); }, [etaMin]);
+  // Auto-ETA: seed the estimate with the real drive time from the tech's live GPS to the stop,
+  // then ADD the tech's buffer on top (they may stop for gas/parts). Falls back to the 15-min
+  // default when there's no Maps key, no GPS, or Directions fails — identical to prior behavior.
+  useEffect(() => {
+    let alive = true;
+    if (!hasGoogleMaps() || typeof navigator === "undefined" || !navigator.geolocation || !addr) return;
+    setCalc(true);
+    (async () => {
+      try {
+        const maps = await loadGoogleMaps();
+        const pos = await new Promise((res, rej) => navigator.geolocation.getCurrentPosition(res, rej, { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }));
+        const svc = new maps.DirectionsService();
+        const result = await svc.route({ origin: { lat: pos.coords.latitude, lng: pos.coords.longitude }, destination: addr, travelMode: maps.TravelMode.DRIVING });
+        const leg = result && result.routes && result.routes[0] && result.routes[0].legs && result.routes[0].legs[0];
+        const secs = leg && leg.duration && leg.duration.value;
+        if (alive && secs != null) {
+          const cm = Math.max(5, Math.round(secs / 60));
+          setDriveMin(cm);
+          if (!etaTouchedRef.current) setEtaMin(cm + Math.max(0, Number(defaultEtaBuffer) || 0));
+        }
+      } catch (_) { /* leave etaMin at the default */ }
+      finally { if (alive) setCalc(false); }
+    })();
+    return () => { alive = false; };
+  }, []);
   const [omw, setOmw] = useState({ busy: false, msg: null });
   // Send via the business Quo line ONLY — never open the device Messages app.
   const sendOmwText = async () => {
@@ -9183,16 +9244,16 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", onClose, onSen
           {phone ? <>
             {/* ETA / buffer — bump the arrival estimate; the text below follows along until you edit it. */}
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-              <button onClick={() => setEtaMin(e => Math.max(5, e - 5))} style={{ width: 40, height: 40, borderRadius: 12, border: `1.5px solid ${T.border}`, background: T.surface, fontSize: 22, fontWeight: 300, color: T.text, cursor: "pointer", flexShrink: 0 }}>−</button>
+              <button onClick={() => { etaTouchedRef.current = true; setEtaMin(e => Math.max(5, e - 5)); }} style={{ width: 40, height: 40, borderRadius: 12, border: `1.5px solid ${T.border}`, background: T.surface, fontSize: 22, fontWeight: 300, color: T.text, cursor: "pointer", flexShrink: 0 }}>−</button>
               <div style={{ flex: 1, textAlign: "center" }}>
                 <div style={{ fontSize: 22, fontWeight: 800, color: T.text, lineHeight: 1 }}>{etaMin}<span style={{ fontSize: 13, fontWeight: 600, color: T.textMuted }}> min</span></div>
-                <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 3 }}>Arriving around {arrivalStr}</div>
+                <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 3 }}>{calc ? "Calculating drive time…" : `Arriving around ${arrivalStr}${driveMin != null ? ` · ~${driveMin} min drive` : ""}`}</div>
               </div>
-              <button onClick={() => setEtaMin(e => e + 5)} style={{ width: 40, height: 40, borderRadius: 12, border: `1.5px solid ${T.border}`, background: T.surface, fontSize: 22, fontWeight: 300, color: T.text, cursor: "pointer", flexShrink: 0 }}>+</button>
+              <button onClick={() => { etaTouchedRef.current = true; setEtaMin(e => e + 5); }} style={{ width: 40, height: 40, borderRadius: 12, border: `1.5px solid ${T.border}`, background: T.surface, fontSize: 22, fontWeight: 300, color: T.text, cursor: "pointer", flexShrink: 0 }}>+</button>
             </div>
             <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
               {[10, 15, 20, 30, 45, 60].map(m => (
-                <button key={m} onClick={() => setEtaMin(m)} style={{ flex: 1, padding: "6px 2px", borderRadius: 9, border: `1.5px solid ${etaMin === m ? T.primary : T.border}`, background: etaMin === m ? hexA(T.primary, 0.1) : T.surface, color: etaMin === m ? T.primary : T.textMuted, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>{m}</button>
+                <button key={m} onClick={() => { etaTouchedRef.current = true; setEtaMin(m); }} style={{ flex: 1, padding: "6px 2px", borderRadius: 9, border: `1.5px solid ${etaMin === m ? T.primary : T.border}`, background: etaMin === m ? hexA(T.primary, 0.1) : T.surface, color: etaMin === m ? T.primary : T.textMuted, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>{m}</button>
               ))}
             </div>
             <textarea value={draft} onChange={e => { setDraft(e.target.value); setEdited(true); }} rows={4}
@@ -10766,6 +10827,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   // Tech's preferred maps app (saved per-tech in Customize → Team; falls back to the device's
   // last choice). Empty => the default web directions, so behavior is unchanged when unset.
   const preferredMapApp = (me && me.mapApp) || (() => { try { return localStorage.getItem("sps_map_app") || ""; } catch { return ""; } })();
+  const preferredEtaBuffer = (me && me.etaBuffer != null && me.etaBuffer !== "") ? Number(me.etaBuffer) : 5;
   const goDirections = (addr) => buildMapUrl(addr || "", preferredMapApp);
   const catChip = (s) => { const c = clients.find(x => String(x.id) === String(s.clientId ?? s.id)); return (c && c.division) || s.type; };
 
@@ -11340,7 +11402,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
       {arrivedModal && (
         <ArrivedModal stop={arrivedModal.stop} client={arrivedModal.client} email={email} onClose={() => setArrivedModal(null)} onArrived={() => { onArrived && onArrived(arrivedModal.key); }} />
       )}
-      {headHereModal && <HeadHereModal stop={headHereModal.stop} client={headHereModal.client} email={email} defaultMapApp={preferredMapApp} onClose={() => setHeadHereModal(null)} onSent={() => handleOmwSent(headHereModal.stop.sid)} />}
+      {headHereModal && <HeadHereModal stop={headHereModal.stop} client={headHereModal.client} email={email} defaultMapApp={preferredMapApp} defaultEtaBuffer={preferredEtaBuffer} onClose={() => setHeadHereModal(null)} onSent={() => handleOmwSent(headHereModal.stop.sid)} />}
       {stopChange && (
         <StopChangeModal
           stop={stopChange.stop}
@@ -14149,6 +14211,24 @@ function TeamManager({ team, setTeam, currentUserId, email, branding, catalog })
                 })}
               </div>
               <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>When set, tapping "Head here" opens directions straight in this app — no prompt each time.</div>
+            </div>
+
+            {/* Default arrival buffer — auto-added on top of the computed drive time when the tech taps
+                "Head here", so their on-my-way ETA already includes the padding they like to keep. */}
+            <div>
+              <label style={labelStyle}>Default Arrival Buffer <span style={{ textTransform: "none", fontWeight: 400 }}>(added to the live drive-time estimate)</span></label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {[0, 5, 10, 15].map(b => {
+                  const on = Number(modal.data.etaBuffer ?? 5) === b;
+                  return (
+                    <button key={b} type="button" onClick={() => setD({ etaBuffer: b })}
+                      style={{ padding: "9px 14px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.1) : T.surface, color: on ? T.primary : T.text, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+                      +{b} min
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>Auto-added on top of the live drive-time estimate; the tech can still adjust before sending.</div>
             </div>
 
             {/* Default stock location — the tech's own truck/shed. When set, completing a stop pre-picks
@@ -27768,9 +27848,62 @@ export default function App({ authEmail = "", onSignOut }) {
     const day = (schedule || []).find(d => d.date === key);
     return day ? (day.stops || []).filter(s => String(s.assigneeId) === String(currentUser.id)) : [];
   }, [schedule, currentUser && currentUser.id]);
+  // ── Geofence auto-arrival (Batch B) ──────────────────────────────────────────
+  // When the tech's broadcast GPS enters the geofence of a stop, fire the SAME arrival the "I'm
+  // Here" button does — stamp arrival, flip the public track record to "arrived", and send the
+  // on-site text (through the existing Test-Mode/pilot-gated sendSms) — with a one-shot guard in
+  // the location hook and a 60-second Undo here.
+  const [autoArrivedToast, setAutoArrivedToast] = useState(null); // { sid, name } | null
+  const geoUndoTimer = useRef(null);
+  const geoTrackWrite = (stop, status) => {
+    if (!stop || !stop.trackToken) return;
+    try {
+      store.set("sps_track_" + stop.trackToken, JSON.stringify({
+        sid: stop.sid, assigneeId: stop.assigneeId || "",
+        client: (stop.client || "").split(" ")[0] || "there",
+        address: stop.address || "", status: status || "scheduled", at: new Date().toISOString(),
+      }));
+    } catch (_) {}
+  };
+  const onGeofenceArrive = (sid) => {
+    if (!sid || arrivals[sid]) return;                        // already arrived (manual or prior auto)
+    const day = (schedule || []).find(d => (d.stops || []).some(s => s.sid === sid));
+    const stop = day && (day.stops || []).find(s => s.sid === sid);
+    if (!stop) return;
+    setArrivals(a => ({ ...a, [sid]: a[sid] || new Date().toISOString() })); // stamp arrival (first-wins)
+    geoTrackWrite(stop, "arrived");                           // flip the public live-track page to "arrived"
+    const client = (clients || []).find(c => String(c.id) === String(stop.clientId ?? stop.id));
+    if (client) {
+      const firstName = (client.name || "").split(" ")[0] || "there";
+      const tpl = (email && email.smsArrived) || DEFAULT_EMAIL.smsArrived;
+      let msg = tpl.replace(/\{first\}/g, firstName)
+        .replace(/\{sender\}/g, (email && email.senderName) || (email && email.fromName) || branding.companyName)
+        .replace(/\{company\}/g, branding.companyName)
+        .replace(/\{service\}/g, stop.type || "service");
+      const trackUrl = stop.trackToken ? stopTrackLink(stop.trackToken) : ((email && email.trackLink) || "");
+      const linkLine = ((email && email.liveTrackingEnabled !== false) && trackUrl) ? `See the live update here: ${trackUrl}` : "";
+      if (/\{track\}/.test(tpl)) msg = msg.replace(/\{track\}/g, linkLine);
+      else if (linkLine) msg += `\n\n${linkLine}`;
+      if (client.id != null && commPref(client, "app")) postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: msg }).then(() => {}, () => {});
+      const phone = (client.phone || "").replace(/\D/g, "");
+      if (phone && commPref(client, "text")) sendSms(client.phone, msg, { clientId: client.id, type: "On site", origin: `visit:${sid} · arrived (auto)` }).then(() => {}, () => {});
+    }
+    setAutoArrivedToast({ sid, name: (client && client.name) || (stop.client || "the stop") });
+    if (geoUndoTimer.current) clearTimeout(geoUndoTimer.current);
+    geoUndoTimer.current = setTimeout(() => setAutoArrivedToast(null), 60000);
+  };
+  const onUndoArrive = (sid) => {
+    setArrivals(a => { const n = { ...a }; delete n[sid]; return n; });
+    const day = (schedule || []).find(d => (d.stops || []).some(s => s.sid === sid));
+    const stop = day && (day.stops || []).find(s => s.sid === sid);
+    if (stop) geoTrackWrite(stop, "enroute");
+    try { window.dispatchEvent(new CustomEvent("sps-geofence-undo", { detail: sid })); } catch (_) {} // re-arm the geofence for this stop
+    if (geoUndoTimer.current) { clearTimeout(geoUndoTimer.current); geoUndoTimer.current = null; }
+    setAutoArrivedToast(null);
+  };
   // Broadcast staff location while clocked in OR during the tech's scheduled route
   // window today (auto-share — no clock-in needed once location's been allowed once).
-  useStaffLocationTracking({ staffId: currentUser ? currentUser.id : null, meKey: currentUser ? (currentUser.email || "").trim().toLowerCase() : "", stops: myTodayStops });
+  useStaffLocationTracking({ staffId: currentUser ? currentUser.id : null, meKey: currentUser ? (currentUser.email || "").trim().toLowerCase() : "", stops: myTodayStops, onGeofenceArrive, isArrived: (sid) => !!arrivals[sid] });
 
   // Resolve the brand logo to a base64 the native widget can render: a data: URL passes through; a
   // bundled path (e.g. /icon-192.png) is fetched + encoded. Skipped if it's too large to keep the
@@ -29682,6 +29815,17 @@ export default function App({ authEmail = "", onSignOut }) {
           onClose={() => setPreviewClient(null)}
         />
       )}
+
+      {/* Geofence auto-arrival — transient Undo banner (Batch B). Portaled above the nav. */}
+      {autoArrivedToast && createPortal(
+        <div style={{ position: "fixed", bottom: "calc(86px + env(safe-area-inset-bottom))", left: 0, right: 0, zIndex: 260, display: "flex", justifyContent: "center", padding: "0 16px", pointerEvents: "none" }}>
+          <div style={{ pointerEvents: "auto", display: "flex", alignItems: "center", gap: 10, background: T.text, color: T.surface, borderRadius: 14, padding: "11px 12px 11px 14px", boxShadow: "0 8px 30px rgba(0,0,0,0.28)", maxWidth: 460, width: "100%", boxSizing: "border-box" }}>
+            <span style={{ fontSize: 17, flexShrink: 0 }}>📍</span>
+            <div style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, lineHeight: 1.35 }}>Auto-arrived at {autoArrivedToast.name}</div>
+            <button onClick={() => onUndoArrive(autoArrivedToast.sid)} style={{ flexShrink: 0, background: hexA(T.surface, 0.16), color: T.surface, border: `1px solid ${hexA(T.surface, 0.3)}`, borderRadius: 9, padding: "7px 13px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}>Not here — undo</button>
+            <button onClick={() => setAutoArrivedToast(null)} aria-label="Dismiss" style={{ flexShrink: 0, background: "none", border: "none", color: hexA(T.surface, 0.7), fontSize: 18, cursor: "pointer", fontFamily: "inherit", lineHeight: 1, padding: 2 }}>×</button>
+          </div>
+        </div>, document.body)}
     </AppCtx.Provider>
   );
 }
