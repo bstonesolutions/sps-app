@@ -12706,6 +12706,33 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
 // ─────────────────────────────────────────────
 // CATALOG MANAGER (stop types, services w/ products+tests, products, tests)
 // ─────────────────────────────────────────────
+// Division picker for catalog items — "All" (every division) + Pond/Pool/Seasonal. Segmented
+// control matching the pricing-model toggle. Value stored on the item as .division.
+function DivisionPicker({ value, onChange, label = "Division" }) {
+  const { T } = useApp();
+  const opts = ["All", ...DIVISIONS];
+  const cur = value || "All";
+  return (
+    <div>
+      <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 }}>{label} <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(where this shows in the catalog)</span></label>
+      <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 11, padding: 3, gap: 3 }}>
+        {opts.map(o => (
+          <button key={o} type="button" onClick={() => onChange(o)}
+            style={{ flex: 1, padding: "9px 6px", border: "none", borderRadius: 9, fontSize: 12.5, fontWeight: 700, cursor: "pointer", background: cur === o ? T.surface : "transparent", color: cur === o ? T.primary : T.textMuted, fontFamily: "inherit", boxShadow: cur === o ? "0 1px 4px rgba(0,0,0,0.1)" : "none" }}>{o}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Small division tag shown on catalog rows (hidden for "All"/untagged).
+const DIVISION_COLOR = { Pond: "#0E9488", Pool: "#2563eb", Seasonal: "#b45309" };
+function DivBadge({ division }) {
+  if (!division || division === "All") return null;
+  const c = DIVISION_COLOR[division] || "#6b7280";
+  return <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", textTransform: "uppercase", color: c, background: hexA(c, 0.12), padding: "2px 7px", borderRadius: 100, flexShrink: 0 }}>{division}</span>;
+}
+
 // Searchable + category-collapsible chip picker — the same organized pattern as the live
 // stop-completion popup, so the Edit Service editor doesn't dump a flat wall of chips.
 // items: [{ id, name, category? }] · selectedIds: array · onToggle(id) · accent: on-state color.
@@ -12763,6 +12790,10 @@ function CatalogManager({ catalog, setCatalog }) {
   const [svcModal, setSvcModal] = useState(null);   // service editor
   const [prodModal, setProdModal] = useState(null); // product editor
   const [txModal, setTxModal] = useState(null);     // treatment editor
+  const [catDiv, setCatDiv] = useState("All");       // catalog division filter (All shows everything)
+  // An item belongs to the active division when it's tagged that division, or untagged/"All"
+  // (universal). Water tests + stop types are cross-division and always shown.
+  const inDiv = (it) => catDiv === "All" || !it.division || it.division === "All" || it.division === catDiv;
   const [chipModal, setChipModal] = useState(null); // { kind:"stopTypes"|"tests", mode, value, original }
 
   const tests = catalog.tests || [];
@@ -12798,7 +12829,7 @@ function CatalogManager({ catalog, setCatalog }) {
   };
 
   // ---- products: add / edit / delete ----
-  const openAddProd = () => setProdModal({ mode: "add", data: { id: `p${Date.now()}`, name: "", price: "", cost: "", sku: "", vendor: "", purchaseDate: "" } });
+  const openAddProd = () => setProdModal({ mode: "add", data: { id: `p${Date.now()}`, name: "", price: "", cost: "", sku: "", vendor: "", purchaseDate: "", division: catDiv } });
   const openEditProd = (p) => setProdModal({ mode: "edit", data: { ...p } });
   const saveProd = () => {
     const d = prodModal.data; if (!d.name.trim()) return;
@@ -12811,7 +12842,7 @@ function CatalogManager({ catalog, setCatalog }) {
   const deleteProd = () => { setCatalog(c => ({ ...c, products: (c.products || []).filter(p => p.id !== prodModal.data.id) })); setProdModal(null); };
 
   // ---- treatments: add / edit / delete + inventory ----
-  const openAddTx = () => setTxModal({ mode: "add", data: { id: `t${Date.now()}`, name: "", costPerOz: "", inventoryOz: "0" }, addOz: "" });
+  const openAddTx = () => setTxModal({ mode: "add", data: { id: `t${Date.now()}`, name: "", costPerOz: "", inventoryOz: "0", division: catDiv }, addOz: "" });
   const openEditTx = (t) => setTxModal({ mode: "edit", data: { ...t, inventoryOz: t.inventoryOz ?? "0" }, addOz: "" });
   const saveTx = () => {
     const d = txModal.data; if (!d.name.trim()) return;
@@ -12826,7 +12857,7 @@ function CatalogManager({ catalog, setCatalog }) {
   const addInvAmount = () => setTxModal(m => ({ ...m, data: { ...m.data, inventoryOz: String(Math.max(0, num(m.data.inventoryOz) + num(m.addOz))) }, addOz: "" }));
 
   // ---- services: add / edit / delete ----
-  const openAddSvc = () => setSvcModal({ mode: "add", data: { id: `s${Date.now()}`, name: "", price: "", price_type: "flat", target_hourly_rate: "", products: [], treatments: [], tests: [] } });
+  const openAddSvc = () => setSvcModal({ mode: "add", data: { id: `s${Date.now()}`, name: "", price: "", price_type: "flat", target_hourly_rate: "", products: [], treatments: [], tests: [], division: catDiv } });
   const openEditSvc = (s) => setSvcModal({ mode: "edit", data: { ...s, products: s.products || [], tests: s.tests || [] } });
   const saveSvc = () => {
     const d = svcModal.data;
@@ -12868,6 +12899,16 @@ function CatalogManager({ catalog, setCatalog }) {
 
   return (
     <>
+      {/* Division filter — organize services / products / treatments by the line of business.
+          Water tests & stop types are cross-division and always shown. */}
+      <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 12, padding: 3, gap: 3, marginBottom: 14, position: "sticky", top: 0, zIndex: 2 }}>
+        {["All", ...DIVISIONS].map(d => (
+          <button key={d} type="button" onClick={() => setCatDiv(d)}
+            style={{ flex: 1, padding: "10px 6px", border: "none", borderRadius: 9, fontSize: 13, fontWeight: 800, cursor: "pointer", background: catDiv === d ? T.surface : "transparent", color: catDiv === d ? T.primary : T.textMuted, fontFamily: "inherit", boxShadow: catDiv === d ? "0 1px 5px rgba(0,0,0,0.12)" : "none" }}>{d}</button>
+        ))}
+      </div>
+      {catDiv !== "All" && <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 12, marginTop: -4, lineHeight: 1.5 }}>Showing {catDiv} items plus anything marked “All”. Tag items with a division inside each editor.</div>}
+
       {/* Stop Types */}
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Stop Types" action={<Btn sm onClick={() => openAddChip("stopTypes")}>+ Add</Btn>} />
@@ -12882,13 +12923,13 @@ function CatalogManager({ catalog, setCatalog }) {
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Services" action={<Btn sm onClick={openAddSvc}>+ Add</Btn>} />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 8 }}>
-          {services.length === 0 && <div style={{ fontSize: 13, color: T.textMuted }}>No services yet. Tap "+ Add" to create one.</div>}
-          {services.map(s => (
+          {services.filter(inDiv).length === 0 && <div style={{ fontSize: 13, color: T.textMuted }}>{services.length === 0 ? 'No services yet. Tap "+ Add" to create one.' : `No ${catDiv} services yet.`}</div>}
+          {services.filter(inDiv).map(s => (
             <div key={s.id} onClick={() => openEditSvc(s)}
               style={{ padding: "12px 14px", background: T.surfaceAlt, borderRadius: 12, cursor: "pointer" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: (s.products?.length || s.tests?.length) ? 8 : 0 }}>
-                <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{s.name}</span>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}><span style={{ fontSize: 14, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</span><DivBadge division={s.division} /></span>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
                   {s.price && <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>${s.price}</span>}
                   <Icon name="edit" size={14} />
                 </div>
@@ -12906,11 +12947,11 @@ function CatalogManager({ catalog, setCatalog }) {
         <CardHeader title="Products Purchased" action={<Btn sm onClick={openAddProd}>+ Add</Btn>} />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 4 }}>Items clients buy from you — billed to them at the sale price. Not the treatments/parts used during a stop.</div>
-          {products.length === 0 && <div style={{ fontSize: 13, color: T.textMuted }}>No products yet. Tap "+ Add" to create one.</div>}
-          {products.map(p => (
+          {products.filter(inDiv).length === 0 && <div style={{ fontSize: 13, color: T.textMuted }}>{products.length === 0 ? 'No products yet. Tap "+ Add" to create one.' : `No ${catDiv} products yet.`}</div>}
+          {products.filter(inDiv).map(p => (
             <div key={p.id} onClick={() => openEditProd(p)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", background: T.surfaceAlt, borderRadius: 12, cursor: "pointer" }}>
-              <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{p.name}</span>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}><span style={{ fontSize: 14, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span><DivBadge division={p.division} /></span>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
                 {p.price && <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>${p.price}{p.cost ? <span style={{ fontWeight: 400, color: T.textMuted }}> · ${p.cost} cost</span> : null}</span>}
                 <Icon name="edit" size={14} />
               </div>
@@ -12925,15 +12966,15 @@ function CatalogManager({ catalog, setCatalog }) {
         <div style={{ padding: 18 }}>
           <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 12 }}>Define treatments and your cost per unit here. Manage stock levels and locations in the Inventory tab.</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {treatments.length === 0 && <div style={{ fontSize: 13, color: T.textMuted }}>No treatments yet. Tap "+ Add" to create one.</div>}
-            {treatments.map(t => {
+            {treatments.filter(inDiv).length === 0 && <div style={{ fontSize: 13, color: T.textMuted }}>{treatments.length === 0 ? 'No treatments yet. Tap "+ Add" to create one.' : `No ${catDiv} treatments yet.`}</div>}
+            {treatments.filter(inDiv).map(t => {
               const inv = invTotal(t);
               const unit = t.unit || "oz";
               const low = inv <= 32;
               return (
                 <div key={t.id} onClick={() => openEditTx(t)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", background: T.surfaceAlt, borderRadius: 12, cursor: "pointer" }}>
                   <div>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{t.name}</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: T.text, display: "flex", alignItems: "center", gap: 8 }}>{t.name}<DivBadge division={t.division} /></div>
                     <div style={{ fontSize: 11, color: low ? T.warning : T.textMuted, fontWeight: low ? 700 : 400 }}>{inv} {unit} on hand{low ? " · low" : ""}</div>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -12983,6 +13024,7 @@ function CatalogManager({ catalog, setCatalog }) {
                 autoFocus
               />
             </div>
+            <DivisionPicker value={prodModal.data.division} onChange={v => setProdModal(m => ({ ...m, data: { ...m.data, division: v } }))} />
             <div style={{ display: "flex", gap: 12 }}>
               <div style={{ flex: 1 }}><label style={labelStyle}>Sale Price <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(billed to client)</span></label>
                 <div style={{ position: "relative" }}>
@@ -13032,6 +13074,7 @@ function CatalogManager({ catalog, setCatalog }) {
                 autoFocus
               />
             </div>
+            <DivisionPicker value={txModal.data.division} onChange={v => setTxModal(m => ({ ...m, data: { ...m.data, division: v } }))} />
             <div>
               <label style={labelStyle}>Brand <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
               <AutocompleteInput
@@ -13096,6 +13139,8 @@ function CatalogManager({ catalog, setCatalog }) {
                 autoFocus
               />
             </div>
+
+            <DivisionPicker value={svcModal.data.division} onChange={v => setSvc("division", v)} />
 
             {/* Feature 3A — pricing model: flat price vs hourly rate, + per-service target $/hr */}
             {(() => {
@@ -19018,7 +19063,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
       {activeTab === "services" && (
         <div key="services-tab">
           {perms.editCatalog && (
-            <Collapsible title="Service Catalog" subtitle="Stop types, services, products, treatments, and water tests.">
+            <Collapsible title="Service Catalog" subtitle="Services, products, treatments, stop types & water tests — filter by division (Pond / Pool / Seasonal).">
               <CatalogManager catalog={catalog} setCatalog={setCatalog} />
             </Collapsible>
           )}
@@ -19041,23 +19086,15 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
               <InvoiceSettings invoicing={invCtl.draft} setInvoicing={invCtl.update} branding={brandCtl.draft} setBranding={brandCtl.update} onSyncData={onSyncData} vp={vp} />
             </Collapsible>
           )}
-          {/* Merged: client message/email templates + sending identity + staff invite/login emails */}
-          {(perms.editNotifications || perms.editSettings || perms.canInvoice || perms.isAdmin) && (
-            <Collapsible title="Messages & Templates" subtitle="Client texts + email templates, your sending identity, and the staff invite + login emails.">
-              <SaveBar ctl={emailCtl} T={T} />
-              {perms.editNotifications && <EmailSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} setBranding={brandCtl.update} />}
-              {(perms.editSettings || perms.canInvoice || perms.isAdmin) && <InviteEmailSettings email={emailCtl.draft} setEmail={emailCtl.update} branding={brandCtl.draft} />}
-            </Collapsible>
-          )}
-          {/* All comms config (sending identity, Test Mode, owner contacts, alerts, reminders,
-              automations) lives in ONE place now: Comms → Settings. This is just the signpost —
-              shown only to people whose permissions can actually reach that section. */}
+          {/* Client texts/email templates, sending identity, Test Mode, alerts, reminders,
+              automations, AND the staff invite/login emails ALL live in Comms → Settings now —
+              one place for everything the app sends. This is just the signpost. */}
           {(perms.isAdmin || perms.commsSettings || perms.editNotifications) && canSeeComms(perms) && (
             <Card style={{ marginBottom: 14 }}>
               <div style={{ padding: 16, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", rowGap: 10 }}>
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>Communications & Automations</div>
-                  <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 2, lineHeight: 1.5 }}>Everything moved to one place — sending identity, Test Mode, your contacts, alerts, reminders, and automations all live in Comms → Settings.</div>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>Communications, Templates & Automations</div>
+                  <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 2, lineHeight: 1.5 }}>Message & email templates, sending identity, Test Mode, your contacts, alerts, reminders, and automations all live in Comms → Settings.</div>
                 </div>
                 <Btn sm onClick={() => onNav("comms")}>Open Comms →</Btn>
               </div>
@@ -20946,6 +20983,26 @@ function EmailInboxSection({ leads, setLeads }) {
   const [openRow, setOpenRow] = useState(null);
   const [copied, setCopied] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importState, setImportState] = useState({ running: false, done: 0, total: 0, imported: 0, msg: "" });
+  const runImport = async (sinceDays) => {
+    setImportOpen(false);
+    setImportState({ running: true, done: 0, total: 0, imported: 0, msg: "Connecting to Gmail…" });
+    let offset = 0, imported = 0, guard = 0;
+    try {
+      while (guard++ < 200) {
+        const r = await fetch(`${PROD_URL}/api/gmail-backfill`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ sinceDays, offset }) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { setImportState({ running: false, done: 0, total: 0, imported, msg: d.error || `Import failed (${r.status}).` }); return; }
+        imported += d.imported || 0;
+        offset = d.nextOffset || (offset + 12);
+        setImportState({ running: true, done: Math.min(offset, d.total || offset), total: d.total || 0, imported, msg: `Imported ${imported}… (${Math.min(offset, d.total || offset)} of ${d.total || "?"})` });
+        if (d.done) break;
+      }
+      setImportState({ running: false, done: 0, total: 0, imported, msg: `Done — ${imported} email${imported === 1 ? "" : "s"} imported and sorted.` });
+      load();
+    } catch (_) { setImportState({ running: false, done: 0, total: 0, imported, msg: "Couldn't reach the server." }); }
+  };
   const [replying, setReplying] = useState(false);
   const [replyText, setReplyText] = useState("");
   const [replyBusy, setReplyBusy] = useState(false);
@@ -21029,8 +21086,21 @@ function EmailInboxSection({ leads, setLeads }) {
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         {chip("all", "All")}{chip("unread", `Unread${unread ? ` · ${unread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
         <div style={{ flex: 1 }} />
+        <Btn variant="ghost" sm onClick={importState.running ? undefined : () => setImportOpen(o => !o)}>{importState.running ? "Importing…" : "Import Gmail"}</Btn>
         <Btn variant="ghost" sm onClick={refreshing ? undefined : load}>{refreshing ? "Refreshing…" : "Refresh"}</Btn>
       </div>
+      {importOpen && !importState.running && (
+        <div style={{ border: `1px solid ${T.border}`, borderRadius: 12, background: T.surface, padding: "12px 14px", display: "flex", flexDirection: "column", gap: 9 }}>
+          <div style={{ fontSize: 13, color: T.text, fontWeight: 700 }}>Pull your existing Gmail into the inbox</div>
+          <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5 }}>Imports past mail from your work address, AI-sorted like new email. Marked read so it won't flood your unread count. Needs a Gmail app password set up (I'll walk you through it).</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {[["30 days", 30], ["90 days", 90], ["1 year", 365], ["Everything", 3650]].map(([lbl, d]) => (
+              <Btn key={d} variant="outline" sm onClick={() => runImport(d)}>{lbl}</Btn>
+            ))}
+          </div>
+        </div>
+      )}
+      {importState.msg && <div style={{ fontSize: 12.5, fontWeight: 700, color: importState.running ? T.textMuted : (importState.msg.startsWith("Done") ? "#16a34a" : T.warning), padding: "2px 2px" }}>{importState.msg}</div>}
       {rows === null && <div style={{ textAlign: "center", padding: 40, color: T.textMuted, fontSize: 13 }}>Loading your inbox…</div>}
       {setupPending && (
         <div style={{ textAlign: "center", padding: "44px 24px", color: T.textMuted }}>
@@ -21244,7 +21314,7 @@ function LogsScreen({ clients, showOwnerRows = false }) {
   );
 }
 
-function CommsScreen({ initialSection, perms = {}, currentUser, schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, reminderLog, setReminderLog, leads, setLeads, onConvertLead, onLinkLead, openLeadId, onLeadOpened, vp = {} }) {
+function CommsScreen({ initialSection, perms = {}, currentUser, schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, setBranding, reminderLog, setReminderLog, leads, setLeads, onConvertLead, onLinkLead, openLeadId, onLeadOpened, vp = {} }) {
   const { T } = useApp();
   const isAdmin = !!perms.isAdmin;
   // Only the sections this viewer is allowed to see (owner sees all). The old Messages + Reminders
@@ -21310,6 +21380,10 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
           {(perms.isAdmin || perms.commsSettings) && <OwnerDigestSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} branding={branding} T={T} />}
           {(perms.isAdmin || perms.commsSettings) && <ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />}
           {(perms.isAdmin || perms.commsSettings) && <CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />}
+          {/* Message + email templates now live HERE (moved out of Customize so all comms editing
+              is in one place). EmailSettings = client texts/emails; InviteEmailSettings = staff invite + login emails. */}
+          {(perms.isAdmin || perms.editNotifications) && <Card><CardHeader title="Message & Email Templates" /><EmailSettings email={email} setEmail={setEmail} branding={branding} setBranding={setBranding} /></Card>}
+          {(perms.isAdmin || perms.editSettings || perms.canInvoice) && <Card><CardHeader title="Staff Invite & Login Emails" /><InviteEmailSettings email={email} setEmail={setEmail} branding={branding} /></Card>}
         </div>}
         {section === "broadcast" && CAN.broadcast && <BroadcastSection clients={clients} invoices={invoices} email={email} branding={branding} T={T} />}
         {section === "email" && CAN.email && <div style={{ padding: "0 16px" }}><EmailInboxSection leads={leads} setLeads={setLeads} /></div>}
@@ -29281,7 +29355,7 @@ export default function App({ authEmail = "", onSignOut }) {
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} isAdmin={perms.isAdmin} />}
       {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
       {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
-      {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : undefined} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} onLinkLead={handleLinkLead} openLeadId={openLeadId} onLeadOpened={() => setOpenLeadId(null)} vp={vp} />}
+      {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : undefined} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} setBranding={setBranding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} onLinkLead={handleLinkLead} openLeadId={openLeadId} onLeadOpened={() => setOpenLeadId(null)} vp={vp} />}
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
       {page === "duplicates" && perms.canImport && <DuplicatesScreen clients={clients} invoices={invoices} schedule={schedule} onMerge={handleMergeClients} onGoToClients={() => handleNav("clients")} />}
