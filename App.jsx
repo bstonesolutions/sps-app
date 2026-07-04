@@ -340,8 +340,12 @@ function setSenderIdentity(v) { SENDER_IDENTITY = { ...SENDER_IDENTITY, ...(v ||
 // Test/launch safety. While ON, every client-facing email + text is HELD or REDIRECTED
 // to the owner so nothing reaches real clients until you flip it live. Kept current by an
 // App effect (with owner/company fallbacks resolved). mode: "redirect" | "hold".
-let TEST_MODE = { on: false, mode: "redirect", email: "", phone: "" };
+let TEST_MODE = { on: false, mode: "redirect", email: "", phone: "", liveClientIds: [] };
 function setTestMode(v) { TEST_MODE = { ...TEST_MODE, ...(v || {}) }; }
+// Pilot launch: while Test Mode is ON globally, clients on the live list get REAL comms
+// (texts, emails, portal posts, pushes) — everyone else stays held/redirected. IDs stored as
+// STRINGS (client ids are Date.now() numbers at creation; String() both sides, always).
+const clientIsLive = (cid) => cid != null && cid !== "" && (TEST_MODE.liveClientIds || []).includes(String(cid));
 // Who's driving this device — mirrored by an App effect (like TEST_MODE) so module-level
 // send helpers can stamp a human origin ("Brandon — app") onto the comms log.
 let ACTOR = "";
@@ -352,7 +356,7 @@ function setActor(v) { ACTOR = String(v || ""); }
 // so callers treat it as a no-op success, never a failure. Use ONLY for staff-originated posts;
 // a client's own inbound actions (sender:"client") should still record.
 function postToPortalSafe(row) {
-  if (TEST_MODE.on) return Promise.resolve({ data: null, error: null, held: true });
+  if (TEST_MODE.on && !clientIsLive(row && row.client_id)) return Promise.resolve({ data: null, error: null, held: true });
   return supabase.from("sps_messages").insert(row);
 }
 
@@ -360,23 +364,26 @@ function postToPortalSafe(row) {
 // text — with the SAME message, so an app-only client and a text-only client each get it (and
 // "all" gets both). Honors commPref + Test Mode (sendSms redirects to the owner in test; portal
 // posts are held). Returns { app, text } with each channel's result (null = channel skipped).
-async function notifyClientChannels(client, message, companyName) {
+async function notifyClientChannels(client, message, companyName, meta) {
   const out = { app: null, text: null };
   if (client && client.id != null && commPref(client, "app")) {
     try { await postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: companyName || "", body: message }); out.app = { ok: true }; }
     catch (_) { out.app = { ok: false }; }
   }
   const phone = (client && client.phone) || "";
-  if (phone && commPref(client, "text")) out.text = await sendSms(phone, message, { clientId: client && client.id, type: "Notice" });
+  if (phone && commPref(client, "text")) out.text = await sendSms(phone, message, { clientId: client && client.id, type: (meta && meta.type) || "Notice", origin: meta && meta.origin });
   return out;
 }
 
 // Spread into a Resend email body; the server only honors the from-fields on the verified
 // domain. When test mode is on it also carries the redirect instruction the server enforces.
-const senderEmailFields = () => ({
+// Pass the destination CLIENT's id for client-facing emails — a pilot-live client's emails
+// omit the testMode instruction entirely, so they send for real. Owner-facing emails (alerts,
+// digests, test sends) call this with NO argument and keep full Test Mode behavior.
+const senderEmailFields = (liveForClientId) => ({
   fromName: SENDER_IDENTITY.fromName || "",
   fromAddress: SENDER_IDENTITY.fromAddress || "",
-  ...(TEST_MODE.on ? { testMode: { on: true, mode: TEST_MODE.mode, to: TEST_MODE.email || "" } } : {}),
+  ...(TEST_MODE.on && !clientIsLive(liveForClientId) ? { testMode: { on: true, mode: TEST_MODE.mode, to: TEST_MODE.email || "" } } : {}),
 });
 
 // Home-screen widget sync status, surfaced in the Sync/Status tab. The owner widget
@@ -392,17 +399,18 @@ async function resyncWidgets() { return _widgetPush ? _widgetPush() : setWidgetS
 // Send a text via the business Quo number (server-side, from the company line).
 // Absolute PROD_URL so it works on the native app too. Returns { ok, error, missingEnv }.
 async function sendSms(to, message, meta) {
-  // Test/launch safety: hold or redirect to the owner so real clients get nothing.
+  // Test/launch safety: hold or redirect to the owner so real clients get nothing —
+  // EXCEPT pilot-live clients, who get the real text while everyone else stays protected.
   let dest = to, body = message;
-  if (TEST_MODE.on) {
+  if (TEST_MODE.on && !clientIsLive(meta && meta.clientId)) {
     if (TEST_MODE.mode === "hold") {
       // Held texts still hit the Log (honest accounting, matching email broadcasts) — with no
       // recipient, since nothing was delivered anywhere.
-      if (meta && meta.clientId != null) logComm({ clientId: meta.clientId, type: meta.type, channel: "sms", body: message, ok: true, origin: `${(meta && meta.origin) || (ACTOR ? `${ACTOR} — app` : "app")} (held by Test Mode)`, recipient: "" });
+      if (meta && meta.clientId != null) logComm({ clientId: meta.clientId, type: meta.type, channel: "sms", body: message, ok: true, origin: `${(meta && meta.origin) || (ACTOR ? `${ACTOR} — app` : "app")} · held by Test Mode`, recipient: "" });
       return { ok: true, held: true };
     }
     if (!TEST_MODE.phone) {
-      if (meta && meta.clientId != null) logComm({ clientId: meta.clientId, type: meta.type, channel: "sms", body: message, ok: false, origin: `${(meta && meta.origin) || (ACTOR ? `${ACTOR} — app` : "app")} (Test Mode misconfigured — no redirect phone)`, recipient: "" });
+      if (meta && meta.clientId != null) logComm({ clientId: meta.clientId, type: meta.type, channel: "sms", body: message, ok: false, origin: `${(meta && meta.origin) || (ACTOR ? `${ACTOR} — app` : "app")} · Test Mode misconfigured (no redirect phone)`, recipient: "" });
       return { ok: false, error: "Test mode is on, but no owner phone is set to redirect texts to." };
     }
     dest = TEST_MODE.phone;
@@ -421,10 +429,11 @@ async function sendSms(to, message, meta) {
   // Record the send to the owner-side comms log (best-effort, never blocks the send). Optional
   // meta = { clientId, type } from the caller; when absent (e.g. a one-off manual text) nothing logs.
   if (meta && meta.clientId != null) {
-    const redirected = TEST_MODE.on && TEST_MODE.mode !== "hold";
+    const live = clientIsLive(meta.clientId);
+    const redirected = TEST_MODE.on && !live && TEST_MODE.mode !== "hold";
     logComm({
       clientId: meta.clientId, type: meta.type, channel: "sms", body: message, ok: result.ok,
-      origin: `${(meta && meta.origin) || (ACTOR ? `${ACTOR} — app` : "app")}${redirected ? " · TEST redirect → you" : ""}`,
+      origin: `${(meta && meta.origin) || (ACTOR ? `${ACTOR} — app` : "app")}${redirected ? " · TEST redirect → you" : ""}${TEST_MODE.on && live ? " · pilot (live)" : ""}`,
       recipient: dest,
     });
   }
@@ -2456,7 +2465,7 @@ const DEFAULT_EMAIL = {
   notify: DEFAULT_NOTIFY,
   // Test/launch safety — while ON, nothing reaches real clients. "redirect" sends every
   // client email/text to you instead (tagged [TEST]); "hold" sends nothing. Off = live.
-  testMode: { on: false, mode: "redirect", email: "", phone: "" },
+  testMode: { on: false, mode: "redirect", email: "", phone: "", liveClientIds: [] }, // liveClientIds = pilot clients who get REAL comms while Test Mode protects everyone else
 };
 
 // Build the report text from the template + a completed-visit record.
@@ -7148,7 +7157,7 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
     // Mirror the same message into the in-app portal for app-preference clients.
     if (canApp) postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: message }).then(() => {}, () => {});
     if (phone) {
-      const r = await sendSms(client.phone, message, { clientId: client.id, type: "On my way" }); // business Quo line ONLY — never the device Messages app
+      const r = await sendSms(client.phone, message, { clientId: client.id, type: "On my way", origin: `visit:${stop?.sid || ""} · on my way` }); // business Quo line ONLY — never the device Messages app
       setSending(false);
       if (!r.ok) { setSendErr(r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send the text — try again.")); return; }
     } else setSending(false);
@@ -7293,7 +7302,7 @@ function ArrivedModal({ stop, client, email, onClose, onArrived }) {
     }
     if (phone && commPref(client, "text")) {  // text the client from the business Quo line ONLY — never the device
       setSending(true); setSendErr("");
-      const r = await sendSms(client.phone, message, { clientId: client.id, type: "On site" });
+      const r = await sendSms(client.phone, message, { clientId: client.id, type: "On site", origin: `visit:${stop?.sid || ""} · arrived` });
       setSending(false);
       if (!r.ok) { setSendErr(r.error || (r.missingEnv ? "Texting isn't set up yet — arrival was still recorded." : "Text didn't send — arrival was still recorded.")); return; }
     }
@@ -7689,12 +7698,24 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     // master switch + the post-visit toggle, the client's text channel, and their per-type opt-out;
     // sendText() itself honors Test Mode (so a [TEST] run reaches the owner, not the client).
     const acfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
-    if (acfg.schedulerOn && acfg.postVisitOn && phone && commPref(client, "text") && !(client && client.notifyPrefs && client.notifyPrefs.reportSummary === false)) {
+    const reportOptOut = client && client.notifyPrefs && client.notifyPrefs.reportSummary === false;
+    if (acfg.schedulerOn && acfg.postVisitOn && phone && commPref(client, "text") && !reportOptOut) {
       sendText();
+    }
+    // The report EMAIL leg — this never existed before (email was manual-only), which is why
+    // "I don't receive email reports" in Test Mode: there was nothing to redirect. Same gates
+    // as the text, on the client's email channel.
+    if (acfg.schedulerOn && acfg.postVisitOn && (client?.email || "").trim() && commPref(client, "email") && !reportOptOut) {
+      sendEmail();
     }
   };
 
-  const [reportSend, setReportSend] = useState({ busy: "", msg: null });
+  // Per-CHANNEL send state — the auto post-visit flow fires text + email CONCURRENTLY, so a
+  // shared {busy,msg} would re-enable buttons mid-flight and let one result silently overwrite
+  // the other. busy/msgs are keyed by "email" | "text".
+  const [reportSend, setReportSend] = useState({ busy: {}, msgs: {} });
+  const rsStart = (ch) => setReportSend(s => ({ busy: { ...s.busy, [ch]: true }, msgs: { ...s.msgs, [ch]: null } }));
+  const rsDone = (ch, msg) => setReportSend(s => ({ busy: { ...s.busy, [ch]: false }, msgs: { ...s.msgs, [ch]: msg } }));
   // Drop the same report into the client's in-app portal thread so they always have it
   // in the app too — not just email/text. Posted once per completed report (deduped),
   // best-effort: a failure never blocks the send.
@@ -7709,8 +7730,8 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
   // phone's Mail or Messages app, so they always send as the company (not the tech).
   const sendEmail = async () => {
     const to = (client?.email || "").trim();
-    if (!to) { setReportSend({ busy: "", msg: { ok: false, text: "No email on file for this client." } }); return; }
-    setReportSend({ busy: "email", msg: null });
+    if (!to) { rsDone("email", { ok: false, text: "No email on file for this client." }); return; }
+    rsStart("email");
     const subject = (email.subject || DEFAULT_EMAIL.subject).replace("{date}", todayStr);
     // Shrink + size-cap the stop photos so they ride along in the email under the request limit.
     let photoPayload = [];
@@ -7735,19 +7756,22 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     try {
       const r = await fetch(`${PROD_URL}/api/send-notification`, {
         method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ ...senderEmailFields(), to, subject, heading: subject, message: renderReport(email, ctx, { includeUsage: false }), rows: reportRows, photos: photoPayload, branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary } }),
+        body: JSON.stringify({ ...senderEmailFields(client?.id), to, subject, heading: subject, message: renderReport(email, ctx, { includeUsage: false }), rows: reportRows, photos: photoPayload, branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary } }),
       });
       const d = await r.json().catch(() => ({}));
       if (r.ok) postReportToPortal();   // mirror the report into the in-app portal thread (always posts)
-      const okMsg = d.held ? "Test Mode (hold) — report NOT sent to the client."
-        : TEST_MODE.on ? "Test Mode — report sent to you, tagged [TEST]."
+      const live = clientIsLive(client?.id);
+      // The report email now hits the Log too (it never did — a held/failed email was invisible).
+      logComm({ clientId: client?.id, type: "Service report", channel: "email", body: subject, ok: r.ok && (d.sent || d.held), origin: `visit:${stop?.sid || ""} · report email${d.held ? " · held by Test Mode" : TEST_MODE.on && !live ? " · TEST redirect → you" : TEST_MODE.on && live ? " · pilot (live)" : ""}`, recipient: d.held ? "" : to });
+      const okMsg = d.held ? `Test Mode — report NOT sent.${d.reason ? ` (${d.reason})` : ""}`
+        : TEST_MODE.on && !live ? "Test Mode — report sent to you, tagged [TEST]."
         : `Report emailed to ${to}${photoPayload.length ? ` with ${photoPayload.length} photo${photoPayload.length > 1 ? "s" : ""}` : ""}.`;
-      setReportSend({ busy: "", msg: (r.ok && (d.sent || d.held)) ? { ok: true, text: okMsg } : { ok: false, text: d.error || "Email failed to send." } });
-    } catch (_) { setReportSend({ busy: "", msg: { ok: false, text: "Couldn't reach the server." } }); }
+      rsDone("email", (r.ok && (d.sent || d.held)) ? { ok: true, text: okMsg } : { ok: false, text: d.error || "Email failed to send." });
+    } catch (_) { rsDone("email", { ok: false, text: "Couldn't reach the server." }); }
   };
   const sendText = async () => {
-    if (!phone) { setReportSend({ busy: "", msg: { ok: false, text: "No phone number on file for this client." } }); return; }
-    setReportSend({ busy: "text", msg: null });
+    if (!phone) { rsDone("text", { ok: false, text: "No phone number on file for this client." }); return; }
+    rsStart("text");
     const tpl = (email && email.smsReport) || DEFAULT_EMAIL.smsReport;
     let short = tpl
       .replace(/\{first\}/g, firstName)
@@ -7759,12 +7783,13 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     const portalUrl = PROD_URL;
     if (/\{link\}/.test(tpl)) short = short.replace(/\{link\}/g, portalUrl);
     else short += `\n\nView your full report and photos here: ${portalUrl}`;
-    const r = await sendSms(phone, short, { clientId: stop?.clientId, type: "Service report" }); // business Quo line ONLY
+    const r = await sendSms(phone, short, { clientId: client?.id ?? stop?.clientId, type: "Service report", origin: `visit:${stop?.sid || ""} · report text` }); // business Quo line ONLY
     if (r.ok) postReportToPortal();   // mirror the full report into the in-app portal thread
+    const liveTx = clientIsLive(client?.id ?? stop?.clientId);
     const txtMsg = r.held ? "Test Mode (hold) — text NOT sent."
-      : TEST_MODE.on ? "Test Mode — text sent to you, tagged [TEST]."
-      : `Report texted to ${client?.name || "the client"}.`;
-    setReportSend({ busy: "", msg: r.ok ? { ok: true, text: txtMsg } : { ok: false, text: r.error || (r.missingEnv ? "Texting isn't set up yet." : "Text failed to send.") } });
+      : TEST_MODE.on && !liveTx ? "Test Mode — text sent to you, tagged [TEST]."
+      : `Report texted to ${client?.name || "the client"}${TEST_MODE.on && liveTx ? " (pilot — live)" : ""}.`;
+    rsDone("text", r.ok ? { ok: true, text: txtMsg } : { ok: false, text: r.error || (r.missingEnv ? "Texting isn't set up yet." : "Text failed to send.") });
   };
 
   // ── AI assist — optional; degrades to a clear "add your key" message until ANTHROPIC_API_KEY is set ──
@@ -7801,11 +7826,12 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     setAiBusy(b => ({ ...b, diag: false }));
   };
   const textAiRecap = async () => {
-    if (!phone) { setReportSend({ busy: "", msg: { ok: false, text: "No phone number on file for this client." } }); return; }
-    setReportSend({ busy: "text", msg: null });
-    const r = await sendSms(phone, `${aiRecap}\n\nView your full report and photos here: ${PROD_URL}`, { clientId: stop?.clientId, type: "Service report" });
+    if (!phone) { rsDone("text", { ok: false, text: "No phone number on file for this client." }); return; }
+    rsStart("text");
+    const r = await sendSms(phone, `${aiRecap}\n\nView your full report and photos here: ${PROD_URL}`, { clientId: client?.id ?? stop?.clientId, type: "Service report", origin: `visit:${stop?.sid || ""} · report text` });
     if (r.ok) { try { postReportToPortal(); } catch (_) {} }
-    setReportSend({ busy: "", msg: r.ok ? { ok: true, text: r.held ? "Test Mode (hold) — not sent." : TEST_MODE.on ? "Test Mode — recap sent to you, tagged [TEST]." : `Recap texted to ${client?.name || "the client"}.` } : { ok: false, text: r.error || "Text failed to send." } });
+    const liveAi = clientIsLive(client?.id ?? stop?.clientId);
+    rsDone("text", r.ok ? { ok: true, text: r.held ? "Test Mode (hold) — not sent." : TEST_MODE.on && !liveAi ? "Test Mode — recap sent to you, tagged [TEST]." : `Recap texted to ${client?.name || "the client"}${TEST_MODE.on && liveAi ? " (pilot — live)" : ""}.` } : { ok: false, text: r.error || "Text failed to send." });
   };
 
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
@@ -7873,11 +7899,13 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
           <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 10, lineHeight: 1.5 }}>Send the client their report:</div>
           <div style={{ marginBottom: 12 }}><CommPrefBadges client={client} compact /></div>
           <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
-            <Btn onClick={sendEmail} disabled={!!reportSend.busy} style={{ flex: 1, padding: "13px", borderRadius: 12, display:"flex", alignItems:"center", justifyContent:"center", gap:6, opacity: commPref(client, "email") ? 1 : 0.5 }}><Icon name="mail" size={14} /> {reportSend.busy === "email" ? "Sending…" : "Email Report"}</Btn>
-            <Btn onClick={sendText} variant="ghost" disabled={!!reportSend.busy} style={{ flex: 1, padding: "13px", borderRadius: 12, display:"flex", alignItems:"center", justifyContent:"center", gap:6, opacity: commPref(client, "text") ? 1 : 0.5 }}><Icon name="message" size={14} /> {reportSend.busy === "text" ? "Sending…" : "Text Report"}</Btn>
+            <Btn onClick={sendEmail} disabled={!!reportSend.busy.email} style={{ flex: 1, padding: "13px", borderRadius: 12, display:"flex", alignItems:"center", justifyContent:"center", gap:6, opacity: commPref(client, "email") ? 1 : 0.5 }}><Icon name="mail" size={14} /> {reportSend.busy.email ? "Sending…" : "Email Report"}</Btn>
+            <Btn onClick={sendText} variant="ghost" disabled={!!reportSend.busy.text} style={{ flex: 1, padding: "13px", borderRadius: 12, display:"flex", alignItems:"center", justifyContent:"center", gap:6, opacity: commPref(client, "text") ? 1 : 0.5 }}><Icon name="message" size={14} /> {reportSend.busy.text ? "Sending…" : "Text Report"}</Btn>
           </div>
           {(!commPref(client, "email") || !commPref(client, "text")) && <div style={{ fontSize: 11.5, color: T.textMuted, marginBottom: 8, lineHeight: 1.4 }}>Dimmed = the client opted out of that channel. Sending still works if you need to reach them.</div>}
-          {reportSend.msg && <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 10, color: reportSend.msg.ok ? "#16a34a" : T.accent }}>{reportSend.msg.text}</div>}
+          {["email", "text"].map(ch => reportSend.msgs[ch] && (
+            <div key={ch} style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 6, color: reportSend.msgs[ch].ok ? "#16a34a" : T.accent }}>{reportSend.msgs[ch].text}</div>
+          ))}
           {/* ✨ AI assist — a personalized recap + a water check, generated from this visit's data */}
           <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 4, paddingTop: 12, marginBottom: 12 }}>
             <div style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>✨ AI assist</div>
@@ -7890,7 +7918,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
               <div style={{ marginTop: 10 }}>
                 <label style={labelStyle}>Client recap — edit if you like</label>
                 <textarea rows={3} value={aiRecap} onChange={e => setAiRecap(e.target.value)} style={{ width: "100%", padding: "10px 12px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 13.5, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical", lineHeight: 1.5 }} />
-                <Btn onClick={textAiRecap} disabled={!!reportSend.busy} style={{ marginTop: 8, padding: "10px 14px", borderRadius: 12, display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="message" size={13} /> Text this recap</Btn>
+                <Btn onClick={textAiRecap} disabled={!!reportSend.busy.text} style={{ marginTop: 8, padding: "10px 14px", borderRadius: 12, display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="message" size={13} /> Text this recap</Btn>
               </div>
             )}
             {aiDiag && (() => {
@@ -9072,7 +9100,7 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", onClose, onSen
     // Mirror the same On-My-Way message into the in-app portal for app-preference clients.
     if (canApp) postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: outgoing }).then(() => {}, () => {});
     if (!phone) { setOmw({ busy: false, msg: { ok: true, text: "Client notified in the app." } }); onSent && onSent(); return; }
-    const r = await sendSms(phone, outgoing, { clientId: client.id, type: "On my way" });
+    const r = await sendSms(phone, outgoing, { clientId: client.id, type: "On my way", origin: `visit:${stop?.sid || ""} · on my way` });
     setOmw({ busy: false, msg: r.ok ? { ok: true, text: canApp ? "On My Way sent (text + app)." : "On My Way text sent." } : { ok: false, text: r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send — your Quo texting may not be A2P-approved yet.") } });
     if (r.ok) onSent && onSent();
   };
@@ -10142,7 +10170,7 @@ function StopChangeModal({ stop, client, dayDate, email, onReschedule, onCancelS
     setBusy(true); setResult(null);
     const recReason = (isOther ? customReason.trim() : reason) || "";
     const willNotify = notifyClient || action === "late"; // "late" IS the notice — it always notifies
-    if (willNotify) await notifyClientChannels(client, message, company); // toggled off → reschedule/cancel quietly, no client notice
+    if (willNotify) await notifyClientChannels(client, message, company, { type: "Notice", origin: `visit:${stop?.sid || ""} · ${action || "notice"}` }); // toggled off → reschedule/cancel quietly, no client notice
     if (action === "reschedule") onReschedule(newDateMDY, recReason, message);
     else if (action === "cancel") onCancelStop(recReason, message);
     // "late" makes no schedule change — it's only a heads-up notice.
@@ -14156,7 +14184,7 @@ function InvoiceSendStep({ invoice, client, onClose }) {
         const r = await fetch(`${PROD_URL}/api/send-invoice`, {
           method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({
-            ...senderEmailFields(),
+            ...senderEmailFields(client?.id),
             emailSubject: fill(e.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject),
             emailIntro: fill(e.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro),
             to: clientEmail,
@@ -15787,7 +15815,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
         method: "POST",
         headers: await authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
-          ...senderEmailFields(),
+          ...senderEmailFields(client?.id),
           emailSubject: fillInv(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject),
           emailIntro: fillInv(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro),
           to: clientEmail,
@@ -15825,7 +15853,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
       }
 
       setSendState("sent");
-      setSendMsg(d.held ? "Test Mode (hold) — invoice NOT emailed to the client." : TEST_MODE.on ? "Test Mode — invoice sent to you, tagged [TEST]." : `Invoice sent to ${clientEmail}.`);
+      setSendMsg(d.held ? "Test Mode (hold) — invoice NOT emailed to the client." : TEST_MODE.on && !clientIsLive(client?.id) ? "Test Mode — invoice sent to you, tagged [TEST]." : `Invoice sent to ${clientEmail}${TEST_MODE.on && clientIsLive(client?.id) ? " (pilot — live)" : ""}.`);
       setTimeout(() => { setSendState("idle"); setSendMsg(""); }, 6000);
     } catch (e) {
       setSendState("error"); setSendMsg("Couldn't send: " + (e.message || "unknown error"));
@@ -16167,7 +16195,7 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
     try {
       const r = await fetch(`${PROD_URL}/api/send-notification`, {
         method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ ...senderEmailFields(), to: em, subject: `Estimate from ${branding.companyName || "Stone Property Solutions"}`, heading: "Your Estimate", message: buildSmsText(), branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary } }),
+        body: JSON.stringify({ ...senderEmailFields(client?.id), to: em, subject: `Estimate from ${branding.companyName || "Stone Property Solutions"}`, heading: "Your Estimate", message: buildSmsText(), branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary } }),
       });
       const d = await r.json().catch(() => ({}));
       if (r.ok && d.sent) { set("status", "sent"); setSentMsg("Estimate emailed to the client."); }
@@ -16636,7 +16664,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
       const cEmail = (c.email || "").trim();
       if (doSms && phone && commPref(c, "text")) { try { const r = await sendSms(phone, fill(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv), { clientId: c.id, type: "Invoice" }); if (!r.ok) fails++; } catch (_) { fails++; } }
       if (doChat && c.id && commPref(c, "app")) { try { await postToPortalSafe({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) + invCardMarker(inv, "$" + ((invoiceTotals(inv).total) || 0).toFixed(2), branding.companyName) }); } catch (_) { fails++; } }
-      if (doEmail && cEmail && commPref(c, "email")) { try { const tt = invoiceTotals(inv); const rE = await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ ...senderEmailFields(), emailSubject: fill(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, c, inv), emailIntro: fill(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, c, inv), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); logComm({ clientId: c.id, type: "Invoice", channel: "email", body: `Invoice ${inv.number || ""} emailed (batch)`, ok: rE.ok, origin: ACTOR ? `${ACTOR} — batch invoice` : "batch invoice", recipient: cEmail }); if (!rE.ok) fails++; } catch (_) { fails++; } }
+      if (doEmail && cEmail && commPref(c, "email")) { try { const tt = invoiceTotals(inv); const rE = await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ ...senderEmailFields(c.id), emailSubject: fill(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, c, inv), emailIntro: fill(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, c, inv), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); logComm({ clientId: c.id, type: "Invoice", channel: "email", body: `Invoice ${inv.number || ""} emailed (batch)`, ok: rE.ok, origin: ACTOR ? `${ACTOR} — batch invoice` : "batch invoice", recipient: cEmail }); if (!rE.ok) fails++; } catch (_) { fails++; } }
     }
     setMsgBusy(false);
     if (fails > 0) { setMsgErr(`${fails} message(s) couldn't be sent. The invoices were still created.`); return; }
@@ -18335,13 +18363,14 @@ function PushSettingsCard() {
   );
 }
 
-function NotificationSettings({ email, setEmail, branding }) {
+function NotificationSettings({ email, setEmail, branding, clients }) {
   const { T } = useApp();
   const base = { ...DEFAULT_NOTIFY, ...(email.notify || {}) };
   const events = { ...DEFAULT_NOTIFY.events, ...(base.events || {}) };
   const companyEmail = (branding && branding.companyEmail) || email.fromAddress || "";
-  const tm = { on: false, mode: "redirect", email: "", phone: "", ...(email.testMode || {}) };
-  const setTM = (k, v) => setEmail(prev => ({ ...prev, testMode: { on: false, mode: "redirect", email: "", phone: "", ...(prev.testMode || {}), [k]: v } }));
+  const tm = { on: false, mode: "redirect", email: "", phone: "", liveClientIds: [], ...(email.testMode || {}) };
+  const [pilotQ, setPilotQ] = useState("");
+  const setTM = (k, v) => setEmail(prev => ({ ...prev, testMode: { on: false, mode: "redirect", email: "", phone: "", liveClientIds: [], ...(prev.testMode || {}), [k]: v } }));
   const setField = (k, v) => setEmail(prev => {
     const pn = { ...DEFAULT_NOTIFY, ...(prev.notify || {}) };
     return { ...prev, notify: { ...pn, events: { ...DEFAULT_NOTIFY.events, ...(pn.events || {}) }, [k]: v } };
@@ -18393,6 +18422,39 @@ function NotificationSettings({ email, setEmail, branding }) {
             ) : (
               <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5 }}>No client emails or texts are sent at all. In-app portal messages still post (only a logged-in client sees those). Turn Test Mode off to go live.</div>
             )}
+            {/* Pilot launch: hand-picked clients go LIVE (real texts/emails/portal posts/pushes)
+                while Test Mode keeps protecting everyone else — soft-launch a few at a time. */}
+            <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 12, display: "flex", flexDirection: "column", gap: 9 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 800, color: T.text }}>Pilot clients <span style={{ fontSize: 11, fontWeight: 700, color: "#16a34a", background: hexA("#16a34a", 0.1), padding: "2px 8px", borderRadius: 100, marginLeft: 4 }}>LIVE</span></div>
+              <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5 }}>These clients receive <b>real</b> comms — texts, emails, in-app messages, pushes — while everyone else stays in Test Mode. Launch to a few at a time.</div>
+              {(tm.liveClientIds || []).length > 0 && (
+                <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+                  {(tm.liveClientIds || []).map(id => {
+                    const c = (clients || []).find(x => String(x.id) === String(id));
+                    return (
+                      <button key={id} onClick={() => setTM("liveClientIds", (tm.liveClientIds || []).filter(x => String(x) !== String(id)))}
+                        style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 100, border: `1.5px solid ${hexA("#16a34a", 0.5)}`, background: hexA("#16a34a", 0.08), color: "#15803d", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                        {c ? c.name : `Client ${id}`} <span style={{ fontWeight: 800 }}>×</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              <input value={pilotQ} onChange={e => setPilotQ(e.target.value)} placeholder="Search clients to add…" style={field} />
+              {pilotQ.trim() && (
+                <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+                  {(clients || [])
+                    .filter(c => c.status !== "Inactive" && (c.name || "").toLowerCase().includes(pilotQ.trim().toLowerCase()) && !(tm.liveClientIds || []).some(x => String(x) === String(c.id)))
+                    .slice(0, 6)
+                    .map(c => (
+                      <button key={c.id} onClick={() => { setTM("liveClientIds", [...(tm.liveClientIds || []), String(c.id)]); setPilotQ(""); }}
+                        style={{ padding: "7px 12px", borderRadius: 100, border: `1.5px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                        + {c.name}
+                      </button>
+                    ))}
+                </div>
+              )}
+            </div>
           </>
         )}
       </div>
@@ -19876,25 +19938,68 @@ function ClientCommsLog({ clientId, T }) {
   if (!rows || rows.length === 0) return null;
 
   const fmt = (ts) => { try { return new Date(ts).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); } catch (_) { return ""; } };
+  const fmtDay = (ts) => { try { return new Date(ts).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" }); } catch (_) { return ""; } };
+
+  // Group visit-tagged rows (origin "visit:<sid> · <step>") into ONE entry per stop that expands
+  // into its messages (on-my-way, arrived, report text/email, reschedule notices) — every comm
+  // is on record without spamming the strip. Untagged rows (older history, reminders, invoices,
+  // broadcasts) list individually as before.
+  const visitOf = (r) => { const m = /^visit:(\S+)/.exec(r.origin || ""); return m ? m[1] : null; };
+  const stepOf = (r) => {
+    const m = /^visit:\S+\s*·\s*([^·]+)/.exec(r.origin || "");
+    // Belt + suspenders: strip any legacy space-appended Test-Mode parenthetical from the label.
+    return (m ? m[1] : (r.type || "message")).replace(/\s*\((held by|Test Mode)[^)]*\)\s*$/i, "").trim();
+  };
+  const entries = [];
+  const groups = {};
+  rows.forEach(r => {
+    const sid = visitOf(r);
+    if (!sid) { entries.push({ kind: "single", key: `s${r.id}`, at: r.created_at, row: r }); return; }
+    if (!groups[sid]) { groups[sid] = { kind: "visit", key: `v${sid}`, at: r.created_at, rows: [] }; entries.push(groups[sid]); }
+    groups[sid].rows.push(r);
+    if (r.created_at > groups[sid].at) groups[sid].at = r.created_at;
+  });
+  entries.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+
+  const line = (r, label) => (
+    <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 12px", borderTop: `1px solid ${hexA(T.border, 0.55)}` }}>
+      <span style={{ fontSize: 12, fontWeight: 700, color: T.text, flexShrink: 0, maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label || r.type || "Text"}</span>
+      <span style={{ fontSize: 11.5, color: T.textMuted, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.body}</span>
+      <span style={{ fontSize: 10.5, fontWeight: 600, color: r.ok === false ? "#E5484D" : T.textMuted, flexShrink: 0 }}>{r.ok === false ? "failed" : fmt(r.created_at)}</span>
+    </div>
+  );
 
   return (
     <div style={{ border: `1px solid ${T.border}`, borderRadius: 12, overflow: "hidden", marginBottom: 10, background: T.surfaceAlt, flexShrink: 0 }}>
       <button onClick={() => setOpen(o => !o)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 7, padding: "10px 12px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-        <span style={{ fontSize: 12.5, fontWeight: 700, color: T.text }}>Sent texts</span>
+        <span style={{ fontSize: 12.5, fontWeight: 700, color: T.text }}>Sent comms</span>
         <span style={{ fontSize: 12, fontWeight: 700, color: T.textMuted }}>· {rows.length}</span>
         <span style={{ marginLeft: "auto", fontSize: 15, color: T.textMuted, transform: open ? "rotate(90deg)" : "none", transition: "transform 0.15s", display: "inline-block" }}>›</span>
       </button>
       {open && (
-        <div style={{ maxHeight: 240, overflowY: "auto", borderTop: `1px solid ${T.border}` }}>
-          {rows.map(r => (
-            <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 12px", borderTop: `1px solid ${hexA(T.border, 0.55)}` }}>
-              <span style={{ fontSize: 12, fontWeight: 700, color: T.text, flexShrink: 0 }}>{r.type || "Text"}</span>
-              <span style={{ fontSize: 11.5, color: T.textMuted, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.body}</span>
-              <span style={{ fontSize: 10.5, fontWeight: 600, color: r.ok === false ? "#E5484D" : T.textMuted, flexShrink: 0 }}>{r.ok === false ? "failed" : fmt(r.created_at)}</span>
-            </div>
-          ))}
+        <div style={{ maxHeight: 280, overflowY: "auto", borderTop: `1px solid ${T.border}` }}>
+          {entries.map(e => e.kind === "single" ? line(e.row) : <VisitCommsGroup key={e.key} group={e} T={T} fmt={fmt} fmtDay={fmtDay} stepOf={stepOf} line={line} />)}
         </div>
       )}
+    </div>
+  );
+}
+
+// One service visit's comms, collapsed to a single row: "Service visit — Thu Jul 3 · 3 messages".
+function VisitCommsGroup({ group, T, fmt, fmtDay, stepOf, line }) {
+  const [open, setOpen] = useState(false);
+  const ordered = [...group.rows].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+  const anyFailed = ordered.some(r => r.ok === false);
+  return (
+    <div>
+      <button onClick={() => setOpen(o => !o)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 9, padding: "9px 12px", background: hexA(T.primary, 0.04), border: "none", borderTop: `1px solid ${hexA(T.border, 0.55)}`, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+        <span style={{ fontSize: 12, fontWeight: 800, color: T.primary, flexShrink: 0 }}>Service visit</span>
+        <span style={{ fontSize: 11.5, color: T.textMuted, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {fmtDay(group.at)} · {ordered.length} message{ordered.length === 1 ? "" : "s"}{anyFailed ? " · 1+ failed" : ""}
+        </span>
+        <span style={{ fontSize: 13, color: T.textMuted, transform: open ? "rotate(90deg)" : "none", transition: "transform 0.15s", display: "inline-block", flexShrink: 0 }}>›</span>
+      </button>
+      {open && <div style={{ paddingLeft: 8, background: hexA(T.primary, 0.02) }}>{ordered.map(r => line(r, stepOf(r)))}</div>}
     </div>
   );
 }
@@ -20598,7 +20703,7 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
     try {
       const r = await fetch(`${PROD_URL}/api/send-notification`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
-          ...senderEmailFields(),
+          ...senderEmailFields(c.id),
           to: c.email, subject: fillOne(subject, c), heading: fillOne(subject, c), message: fill(c),
           branding: { companyName: branding?.companyName || "", companyEmail: branding?.companyEmail || "", companyPhone: branding?.companyPhone || "", companyAddress: branding?.companyAddress || "", accent: T.primary },
           unsubscribe: { email: branding?.companyEmail || "", address: branding?.companyAddress || "" },
@@ -20608,7 +20713,7 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
       const held = !!d.held;
       logComm({
         clientId: c.id, type: "Broadcast", channel: "email", body: `${fillOne(subject, c)} — ${fill(c)}`, ok: r.ok,
-        origin: `${ACTOR ? `${ACTOR} — ` : ""}email broadcast${held ? " (held by Test Mode)" : TEST_MODE.on ? " · TEST redirect → you" : ""}`,
+        origin: `${ACTOR ? `${ACTOR} — ` : ""}email broadcast${held ? " · held by Test Mode" : TEST_MODE.on && !clientIsLive(c.id) ? " · TEST redirect → you" : TEST_MODE.on && clientIsLive(c.id) ? " · pilot (live)" : ""}`,
         recipient: c.email,
       });
       return { ok: r.ok, held };
@@ -20635,7 +20740,7 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
     setSending(false);
     setResult(held === list.length && held > 0
       ? `Held by Test Mode — nothing was sent (${held} would have gone out). Flip Test Mode off in Comms → Settings to go live.`
-      : `Sent to ${done - failed - held} of ${list.length}${failed ? ` · ${failed} couldn't send` : ""}${held ? ` · ${held} held by Test Mode` : ""}.${testMode ? " (Test Mode — routed to you.)" : ""}`);
+      : `Sent to ${done - failed - held} of ${list.length}${failed ? ` · ${failed} couldn't send` : ""}${held ? ` · ${held} held by Test Mode` : ""}.${testMode ? (() => { const lv = list.filter(c => clientIsLive(c.id)).length; return lv ? ` (Test Mode — ${lv} pilot client${lv === 1 ? "" : "s"} got it for real; the rest routed to you.)` : " (Test Mode — routed to you.)"; })() : ""}`);
   };
 
   const chip = (on, label, onClick) => <button key={label} onClick={onClick} style={{ padding: "8px 15px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.1) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>;
@@ -20666,7 +20771,7 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
         <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>{"{first}"} and {"{company}"} fill in per client{isEmail ? " · sent from your branded template" : ` · ${msg.length} chars${msg.length > 160 ? " (multi-part)" : ""}`}</div>
         <AIAssist kind="broadcast" channel={channel} context={{ company: branding?.companyName || "" }} value={msg} onChange={setMsg} wantSubject={isEmail} onSubject={setSubject} />
       </div>
-      {testMode && <div style={{ fontSize: 12, fontWeight: 700, color: "#B45309", background: hexA("#F59E0B", 0.12), border: `1px solid ${hexA("#F59E0B", 0.4)}`, borderRadius: 10, padding: "9px 12px" }}>Test Mode is ON — sends route to you, not the clients.</div>}
+      {testMode && <div style={{ fontSize: 12, fontWeight: 700, color: "#B45309", background: hexA("#F59E0B", 0.12), border: `1px solid ${hexA("#F59E0B", 0.4)}`, borderRadius: 10, padding: "9px 12px" }}>Test Mode is ON — sends route to you, not the clients.{(() => { const lv = recipients.filter(c => clientIsLive(c.id)).length; return lv ? ` Exception: ${lv} pilot client${lv === 1 ? "" : "s"} in this segment will receive it FOR REAL.` : ""; })()}</div>}
       {err && <div style={{ fontSize: 12.5, fontWeight: 700, color: T.accent }}>{err}</div>}
       {progress ? (
         <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text }}>Sending… {progress.done}/{progress.total}{progress.failed ? ` · ${progress.failed} failed` : ""}</div>
@@ -20830,6 +20935,9 @@ function EmailInboxSection({ leads, setLeads }) {
   };
   useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const KIND = { lead: { label: "Lead", color: "#16a34a" }, bill: { label: "Bill", color: "#b45309" }, client: { label: "Client", color: "#2563eb" }, other: { label: "Other", color: null } };
+  // Membership is checked against the ACTUAL leads list, not the imported stamp — if a lead
+  // ever vanishes (multi-device array overwrite), "Add to Leads" reappears for a one-tap re-add.
+  const inLeads = (emailId) => (leads || []).some(l => l && l.srcId === `em_${emailId}`);
   const list = (rows || []).filter(r => filter === "all" ? true : filter === "unread" ? !r.read : r.kind === filter);
   const unread = (rows || []).filter(r => !r.read).length;
   const markRead = async (ids, read = true) => {
@@ -20918,7 +21026,7 @@ function EmailInboxSection({ leads, setLeads }) {
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ fontSize: 13.5, fontWeight: r.read ? 600 : 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.from_name || r.from_email}</span>
                 {badge(r.kind)}
-                {r.lead_id && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#16a34a" }}>→ in Leads</span>}
+                {inLeads(r.id) && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#16a34a" }}>→ in Leads</span>}
               </div>
               <div style={{ fontSize: 12.5, color: T.text, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontWeight: r.read ? 400 : 700 }}>{r.subject || "(no subject)"}</div>
               <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{(r.ai && r.ai.summary) || (r.body_text || "").slice(0, 120)}</div>
@@ -20928,31 +21036,39 @@ function EmailInboxSection({ leads, setLeads }) {
         </div>
       ))}
       {openRow && (
-        <Modal title={openRow.subject || "(no subject)"} onClose={() => setOpenRow(null)} maxWidth={560}>
+        <Modal title={openRow.subject || "(no subject)"} onClose={() => setOpenRow(null)} maxWidth={640}>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <span style={{ fontSize: 13.5, fontWeight: 800, color: T.text }}>{openRow.from_name || openRow.from_email}</span>
-              <span style={{ fontSize: 12, color: T.textMuted }}>{openRow.from_email}</span>
-              {badge(openRow.kind)}
-              <span style={{ fontSize: 11.5, color: T.textMuted, marginLeft: "auto" }}>{fmtWhen(openRow.created_at)}</span>
+            {/* Sender header — avatar + identity, Gmail-grade */}
+            <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
+              <div style={{ width: 40, height: 40, borderRadius: "50%", background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 17, fontWeight: 800, flexShrink: 0 }}>
+                {((openRow.from_name || openRow.from_email || "?").trim()[0] || "?").toUpperCase()}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 14.5, fontWeight: 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{openRow.from_name || openRow.from_email}</span>
+                  {badge(openRow.kind)}
+                </div>
+                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{openRow.from_email} · {fmtWhen(openRow.created_at)}</div>
+              </div>
             </div>
             {openRow.ai && openRow.ai.summary && (
-              <div style={{ fontSize: 12.5, color: T.textMuted, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 12px" }}>✨ {openRow.ai.summary}</div>
+              <div style={{ fontSize: 12.5, color: T.text, background: hexA(T.primary, 0.05), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 10, padding: "9px 12px", lineHeight: 1.5 }}>✨ {openRow.ai.summary}</div>
             )}
-            <div style={{ fontSize: 13.5, color: T.text, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: "45vh", overflowY: "auto", border: `1px solid ${T.border}`, borderRadius: 12, padding: "12px 14px", background: T.surface, userSelect: "text", WebkitUserSelect: "text" }}>
-              {/* URLs render as real tappable links (system browser); everything else selectable text */}
-              {String(openRow.body_text || "(no text content)").split(/(https?:\/\/[^\s)]+)/g).map((part, i) =>
-                /^https?:\/\//.test(part)
-                  ? <a key={i} href={part} onClick={(e) => { e.preventDefault(); openExternalBrowser(part); }} style={{ color: T.primary, fontWeight: 700, wordBreak: "break-all", textDecoration: "underline", cursor: "pointer" }}>{part}</a>
-                  : part
-              )}
-            </div>
-            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-              <Btn variant="ghost" sm onClick={async () => {
-                try { await navigator.clipboard.writeText(openRow.body_text || ""); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch (_) {}
-              }}>{copied ? "Copied ✓" : "Copy text"}</Btn>
-            </div>
-            {/* Manage: reclassify (the owner's override on the AI's call) + read state */}
+            {/* The email itself — real HTML in a sandboxed frame (looks like Gmail), text fallback */}
+            {openRow.body_html ? (
+              <iframe title="Email content" sandbox="allow-popups allow-popups-to-escape-sandbox"
+                srcDoc={`<html><head><base target="_blank"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;padding:14px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;color:#111827;word-break:break-word;background:#ffffff}img{max-width:100%;height:auto}table{max-width:100%}</style></head><body>${openRow.body_html}</body></html>`}
+                style={{ width: "100%", height: "48vh", border: `1px solid ${T.border}`, borderRadius: 12, background: "#ffffff" }} />
+            ) : (
+              <div style={{ fontSize: 13.5, color: T.text, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: "48vh", overflowY: "auto", border: `1px solid ${T.border}`, borderRadius: 12, padding: "12px 14px", background: T.surface, userSelect: "text", WebkitUserSelect: "text" }}>
+                {String(openRow.body_text || "(no text content)").split(/(https?:\/\/[^\s)]+)/g).map((part, i) =>
+                  /^https?:\/\//.test(part)
+                    ? <a key={i} href={part} onClick={(e) => { e.preventDefault(); openExternalBrowser(part); }} style={{ color: T.primary, fontWeight: 700, wordBreak: "break-all", textDecoration: "underline", cursor: "pointer" }}>{part}</a>
+                    : part
+                )}
+              </div>
+            )}
+            {/* Manage: reclassify (the owner's override on the AI's call) + read state + copy */}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
               <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted }}>Sort as</span>
               {["lead", "bill", "client", "other"].map(k => {
@@ -20965,10 +21081,13 @@ function EmailInboxSection({ leads, setLeads }) {
               <div style={{ flex: 1 }} />
               <Btn variant="ghost" sm onClick={() => markRead([openRow.id], !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>
             </div>
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-              {!openRow.lead_id && <Btn variant="primary" sm onClick={() => addToLeads(openRow)}>➕ Add to Leads</Btn>}
-              {openRow.lead_id && <span style={{ fontSize: 12.5, fontWeight: 700, color: "#16a34a", alignSelf: "center" }}>✓ In your Leads funnel</span>}
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              {!inLeads(openRow.id) && <Btn variant="primary" sm onClick={() => addToLeads(openRow)}>➕ Add to Leads</Btn>}
+              {inLeads(openRow.id) && <span style={{ fontSize: 12.5, fontWeight: 700, color: "#16a34a", alignSelf: "center" }}>✓ In your Leads funnel</span>}
               <Btn href={`mailto:${openRow.from_email}?subject=${encodeURIComponent(`Re: ${openRow.subject || ""}`)}`} variant="outline" sm>Reply by email</Btn>
+              <Btn variant="ghost" sm onClick={async () => {
+                try { await navigator.clipboard.writeText(openRow.body_text || ""); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch (_) {}
+              }}>{copied ? "Copied ✓" : "Copy text"}</Btn>
             </div>
           </div>
         </Modal>
@@ -21133,7 +21252,7 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
           {(perms.isAdmin || perms.editNotifications) && <SendingIdentitySettings email={email} setEmail={setEmail} />}
           {(perms.isAdmin || perms.editNotifications) && <PushSettingsCard />}
           {(perms.isAdmin || perms.editNotifications) && (
-            <Card><CardHeader title="Test Mode, Your Contacts & Alerts" /><NotificationSettings email={email} setEmail={setEmail} branding={branding} /></Card>
+            <Card><CardHeader title="Test Mode, Your Contacts & Alerts" /><NotificationSettings email={email} setEmail={setEmail} branding={branding} clients={clients} /></Card>
           )}
           {(perms.isAdmin || perms.commsSettings) && <OwnerDigestSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} branding={branding} T={T} />}
           {(perms.isAdmin || perms.commsSettings) && <ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />}
@@ -27236,9 +27355,12 @@ export default function App({ authEmail = "", onSignOut }) {
     // Default the redirect targets to the SIGNED-IN owner so "test stuff sends to me" works
     // even before an explicit redirect email/phone is set: explicit → Owner-Alert contact →
     // signed-in account → company contact.
-    const redirEmail = tm.email || (email.notify && email.notify.ownerEmail) || (authEmail || "").trim() || branding.companyEmail || "";
+    // A typo'd explicit email must NOT short-circuit the fallbacks — the server silently HOLDS
+    // redirect emails whose target fails its address check, which looks like "emails never arrive".
+    const validEmail = (e) => /.+@.+\..+/.test(String(e || "").trim());
+    const redirEmail = String([tm.email, email.notify && email.notify.ownerEmail, (authEmail || "").trim(), branding.companyEmail].find(validEmail) || "").trim();
     const redirPhone = tm.phone || (email.notify && email.notify.ownerPhone) || branding.companyPhone || "";
-    setTestMode({ on: !!tm.on, mode: tm.mode || "redirect", email: redirEmail, phone: redirPhone });
+    setTestMode({ on: !!tm.on, mode: tm.mode || "redirect", email: redirEmail, phone: redirPhone, liveClientIds: (tm.liveClientIds || []).map(String) });
     // Keep the ACTOR mirror current too — comms-log entries carry who sent from this device.
     setActor((currentUser && (currentUser.name || currentUser.email)) || (clientUser && clientUser.name) || "");
   }, [email.testMode, email.notify, branding.companyEmail, branding.companyPhone, authEmail]);
@@ -28654,7 +28776,7 @@ export default function App({ authEmail = "", onSignOut }) {
   // can reply to. Best-effort: a failure is logged, never blocks the action.
   const postClientMessage = (clientId, sender, senderName, body) => {
     if (!clientId || !body) return;
-    if (sender === "staff" && TEST_MODE.on) return; // Test Mode holds staff→client posts (client's own actions still record)
+    if (sender === "staff" && TEST_MODE.on && !clientIsLive(clientId)) return; // Test Mode holds staff→client posts (pilot-live clients excepted)
     supabase.from("sps_messages")
       .insert({ client_id: String(clientId), sender, sender_name: senderName || "", body })
       .then(({ error }) => { if (error) console.warn("Chat message insert failed:", error.message); }, () => {});

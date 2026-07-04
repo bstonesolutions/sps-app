@@ -75,6 +75,9 @@ const htmlToText = (h) => String(h || "")
   .replace(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (m, href, inner) => {
     const t = inner.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
     if (!/^https?:/i.test(href)) return t;                 // mailto/tel/anchors → keep text only
+    // Only inline SHORT urls (verification links etc.) — marketing emails carry giant encoded
+    // tracking links that turn the text body into garbage soup. Long links live in body_html.
+    if (href.length > 90) return t;
     return !t || t === href ? ` ${href} ` : `${t} ( ${href} )`;
   })
   .replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|tr|li|h[1-6])>/gi, "\n")
@@ -130,6 +133,9 @@ export default async function handler(req, res) {
     const { name: fromName, email: fromEmail } = parseAddr(em.from);
     const subject = String(em.subject || "").slice(0, 300);
     const text = (String(em.text || "").trim() || htmlToText(em.html)).slice(0, 20000);
+    // The real HTML rides along (scripts stripped; the app renders it in a sandboxed frame) so
+    // emails look like they do in Gmail — text stays the AI/preview/search form.
+    const html = String(em.html || "").replace(/<script[\s\S]*?<\/script>/gi, "").slice(0, 300000);
     const messageId = String(em.message_id || (body.data && body.data.message_id) || "").slice(0, 300);
 
     const [clients, emailCfg] = await Promise.all([sbGet("sps_clients", []), sbGet("sps_email", {})]);
@@ -174,7 +180,7 @@ export default async function handler(req, res) {
     const row = {
       id: String(emailId),
       from_name: fromName.slice(0, 120), from_email: fromEmail.slice(0, 200),
-      subject, body_text: text, message_id: messageId,
+      subject, body_text: text, body_html: html, message_id: messageId,
       kind, ai: ai || (client ? { summary: `From client ${client.name}`, clientId: String(client.id) } : null),
       lead_id: "", read: false,
     };

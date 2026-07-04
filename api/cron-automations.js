@@ -242,6 +242,10 @@ export default async function handler(req, res) {
   cfg._company = (branding && branding.companyName) || "Stone Property Solutions";
   const clientsById = {}; (clients || []).forEach(c => { if (c && c.id != null) clientsById[String(c.id)] = c; });
   const testMode = (email && email.testMode) || { on: false };
+  // Pilot launch: clients on the live list get REAL automated texts while Test Mode
+  // holds/redirects everyone else. Stored as strings; compared as strings, always.
+  const liveSet = new Set(((testMode.liveClientIds || [])).map(String));
+  const isLive = (cid) => cid != null && liveSet.has(String(cid));
   const cooldownMs = (Number(cfg.autoCooldownHours) || 20) * 3600000;
 
   // 1) build the full due list
@@ -271,7 +275,7 @@ export default async function handler(req, res) {
       ok: true, dryRun: true, ran: new Date(now).toISOString(), master: true,
       testMode: { on: !!testMode.on, mode: testMode.mode || "redirect" },
       counts: { due: due.length, wouldSend: toSend.length, cooledDown: cooled.length, capped: capped.length },
-      wouldSend: toSend.map(m => ({ type: m.type, to: testMode.on && testMode.mode === "redirect" ? `${testMode.phone} (TEST)` : m.to, client: m.who, message: m.message })),
+      wouldSend: toSend.map(m => ({ type: m.type, to: testMode.on && isLive(m.clientId) ? `${m.to} (LIVE — pilot)` : testMode.on && testMode.mode === "redirect" ? `${testMode.phone} (TEST)` : m.to, client: m.who, message: m.message })),
       cooledDown: cooled, capped: capped.map(m => ({ type: m.type, client: m.who })),
     });
   }
@@ -279,9 +283,11 @@ export default async function handler(req, res) {
   // 5) REAL RUN — send, then record dedup + cooldown + log
   let sent = 0; const errors = [];
   const remNext = { ...reminderLog }, autoNext = { ...autoLog };
+  let sentReal = 0; // sends that actually reached a real client number (live pilots, or Test Mode off)
   for (const m of toSend) {
     let dest = m.to, body = m.message, held = false;
-    if (testMode.on) {
+    const live = isLive(m.clientId);
+    if (testMode.on && !live) {
       if (testMode.mode === "hold") { held = true; }
       else if (!testMode.phone) { errors.push({ who: m.who, error: "test mode on, no owner phone" }); continue; }
       else { dest = testMode.phone; body = `[TEST → ${m.to}] ${m.message}`; }
@@ -293,24 +299,26 @@ export default async function handler(req, res) {
     }
     if (ok) {
       sent++;
+      if (!held && (!testMode.on || live)) sentReal++;
       const stamp = new Date(now).toISOString();
       if (m.dedup.ledger === "rem") remNext[m.dedup.key] = { sentAt: stamp, method: "auto" };
       else if (m.dedup.key) { if (m.dedup.bump) autoNext[m.dedup.key] = { count: (m.dedup.bump.count || 0) + 1, lastSentAt: stamp }; else autoNext[m.dedup.key] = m.dedup.set || { sentAt: stamp }; }
       autoNext[`cool_${m.type}_${m.clientId}`] = stamp;
       // Honest accounting: a HELD send never happened — say so, and never stamp the real
-      // client number as a delivered-to recipient.
+      // client number as a delivered-to recipient. Pilot-live sends are labeled as such.
       await logComm(m.clientId, m.type, m.message, true,
-        held ? `automation: ${m.type} (held by Test Mode)` : `automation: ${m.type}${testMode.on ? " · TEST redirect → you" : ""}`,
+        held ? `automation: ${m.type} (held by Test Mode)` : `automation: ${m.type}${testMode.on ? (live ? " · pilot (live)" : " · TEST redirect → you") : ""}`,
         held ? "" : dest);
     }
   }
   if (sent > 0 || errors.length) { await sbSet("sps_reminders", remNext); await sbSet("sps_auto_log", autoNext); }
 
   // ONE summary push per run (a full run can send up to RATE_CAP texts — never push per text).
-  // Skipped when Test Mode holds everything, since nothing actually went out.
-  if (sent > 0 && !(testMode.on && testMode.mode === "hold")) {
+  // Fires when anything ACTUALLY went out (real client sends — incl. pilot-live in a hold-mode
+  // run — or redirected-to-owner sends); a fully-held run stays silent.
+  if (sentReal > 0 || (sent > 0 && !(testMode.on && testMode.mode === "hold"))) {
     await pushOwner("reports", "Auto-texts sent",
-      `${sent} automated ${sent === 1 ? "text" : "texts"} just went out${errors.length ? ` · ${errors.length} failed` : ""}. Details in Comms.`,
+      `${sent} automated ${sent === 1 ? "text" : "texts"} processed${sentReal ? ` · ${sentReal} to real clients` : ""}${errors.length ? ` · ${errors.length} failed` : ""}. Details in Comms.`,
       "comms", { email, collapseId: "auto-texts" });
   }
 

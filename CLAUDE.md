@@ -141,7 +141,8 @@ CREATE TABLE IF NOT EXISTS public.sps_inbox (
   from_name   text NOT NULL DEFAULT '',
   from_email  text NOT NULL DEFAULT '',
   subject     text NOT NULL DEFAULT '',
-  body_text   text NOT NULL DEFAULT '',   -- plain text (or stripped HTML), capped at 20k
+  body_text   text NOT NULL DEFAULT '',   -- plain text (or stripped HTML), capped at 20k — the AI/preview/search form
+  body_html   text NOT NULL DEFAULT '',   -- real HTML (scripts stripped, 300k cap) — rendered in a sandboxed iframe so emails look like Gmail. Existing installs: ALTER TABLE ... ADD COLUMN IF NOT EXISTS
   message_id  text NOT NULL DEFAULT '',   -- RFC Message-ID for threading in-app replies (In-Reply-To)
   kind        text NOT NULL DEFAULT 'other',  -- lead | bill | client | other (AI triage; owner can reclassify)
   ai          jsonb,                      -- {kind, confidence, summary, lead:{...}, bill:{...}} or {clientId,...}

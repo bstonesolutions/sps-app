@@ -204,14 +204,16 @@ export async function pushOwner(eventKey, title, body, link, opts = {}) {
   } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
 }
 
-// One client's devices. Test Mode on → skipped (clients are never pushed under test rules).
+// One client's devices. Test Mode on → skipped (clients are never pushed under test rules) —
+// EXCEPT pilot-live clients (testMode.liveClientIds), who get real pushes with everything else.
 export async function pushClient(clientId, title, body, link, opts = {}) {
   try {
     if (!pushConfigured()) return { ok: false, skipped: "apns not configured" };
     if (clientId == null || clientId === "") return { ok: false, skipped: "no client id" };
     const email = await getEmailCfg(opts);
     if (email == null) return { ok: true, held: true, skipped: "settings unreadable — held (fail closed)" };
-    if (email.testMode && email.testMode.on) return { ok: true, held: true, skipped: "test mode — client pushes held" };
+    const live = !!(email.testMode && (email.testMode.liveClientIds || []).map(String).includes(String(clientId)));
+    if (email.testMode && email.testMode.on && !live) return { ok: true, held: true, skipped: "test mode — client pushes held" };
     const rows = await getTokens(`role=eq.client&user_key=eq.${encodeURIComponent(String(clientId))}`);
     return await sendToTokens(rows, { title, body, link, collapseId: opts.collapseId });
   } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
