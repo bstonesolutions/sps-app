@@ -58,9 +58,10 @@ export default async function handler(req, res) {
       return r.ok;
     };
     if (b.action === "markRead") {
+      // b.read: true (default) or false — same action handles "mark unread".
       const ids = (Array.isArray(b.ids) ? b.ids : []).map(String).filter(Boolean).slice(0, 200);
       if (!ids.length) return res.status(400).json({ error: "No ids." });
-      const ok = await patch(`id=in.(${ids.map(encodeURIComponent).join(",")})`, { read: true });
+      const ok = await patch(`id=in.(${ids.map(encodeURIComponent).join(",")})`, { read: b.read !== false });
       return res.status(ok ? 200 : 502).json({ ok });
     }
     if (b.action === "markImported") {

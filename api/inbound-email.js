@@ -67,9 +67,16 @@ function parseAddr(s) {
   if (m) return { name: m[1].trim(), email: m[2].trim().toLowerCase() };
   return { name: "", email: str.trim().toLowerCase() };
 }
-// Crude but safe HTML → text for triage/preview when no text part exists.
+// Crude but safe HTML → text for triage/preview when no text part exists. Anchor hrefs are
+// PRESERVED — "Confirm here" becomes "Confirm here ( https://… )" — so verification links and
+// pay links survive into the reader instead of being silently stripped.
 const htmlToText = (h) => String(h || "")
   .replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<script[\s\S]*?<\/script>/gi, " ")
+  .replace(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (m, href, inner) => {
+    const t = inner.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    if (!/^https?:/i.test(href)) return t;                 // mailto/tel/anchors → keep text only
+    return !t || t === href ? ` ${href} ` : `${t} ( ${href} )`;
+  })
   .replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|tr|li|h[1-6])>/gi, "\n")
   .replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
   .replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();

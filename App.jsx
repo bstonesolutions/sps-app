@@ -20815,22 +20815,34 @@ function EmailInboxSection({ leads, setLeads }) {
   const [err, setErr] = useState("");
   const [filter, setFilter] = useState("all"); // all | unread | lead | bill | client | other
   const [openRow, setOpenRow] = useState(null);
+  const [copied, setCopied] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const load = async () => {
     setErr("");
+    setRefreshing(true);
     try {
       const r = await fetch(`${PROD_URL}/api/inbox?limit=100`, { headers: await authHeaders() });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) { setErr(d.error || `Error ${r.status}`); setRows([]); return; }
-      setRows(d.rows || []);
+      if (!r.ok) { setErr(d.error || `Error ${r.status}`); setRows([]); }
+      else setRows(d.rows || []);
     } catch (_) { setErr("Couldn't reach the server."); setRows([]); }
+    setRefreshing(false);
   };
   useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const KIND = { lead: { label: "Lead", color: "#16a34a" }, bill: { label: "Bill", color: "#b45309" }, client: { label: "Client", color: "#2563eb" }, other: { label: "Other", color: null } };
   const list = (rows || []).filter(r => filter === "all" ? true : filter === "unread" ? !r.read : r.kind === filter);
   const unread = (rows || []).filter(r => !r.read).length;
-  const markRead = async (ids) => {
-    setRows(rs => (rs || []).map(r => ids.includes(r.id) ? { ...r, read: true } : r));
-    try { await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "markRead", ids }) }); } catch (_) {}
+  const markRead = async (ids, read = true) => {
+    setRows(rs => (rs || []).map(r => ids.includes(r.id) ? { ...r, read } : r));
+    setOpenRow(o => (o && ids.includes(o.id) ? { ...o, read } : o));
+    try { await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "markRead", ids, read }) }); } catch (_) {}
+  };
+  // Reclassify an email — the owner's override on the AI's call. "lead" goes through
+  // addToLeads instead (label + funnel + ack in one tap).
+  const setKindOf = async (row, kind) => {
+    setRows(rs => (rs || []).map(r => r.id === row.id ? { ...r, kind } : r));
+    setOpenRow(o => (o && o.id === row.id ? { ...o, kind } : o));
+    try { await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "setKind", id: row.id, kind }) }); } catch (_) {}
   };
   const addToLeads = async (row) => {
     const at = row.created_at || new Date().toISOString();
@@ -20881,7 +20893,7 @@ function EmailInboxSection({ leads, setLeads }) {
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         {chip("all", "All")}{chip("unread", `Unread${unread ? ` · ${unread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
         <div style={{ flex: 1 }} />
-        <Btn variant="ghost" sm onClick={load}>Refresh</Btn>
+        <Btn variant="ghost" sm onClick={refreshing ? undefined : load}>{refreshing ? "Refreshing…" : "Refresh"}</Btn>
       </div>
       {rows === null && <div style={{ textAlign: "center", padding: 40, color: T.textMuted, fontSize: 13 }}>Loading your inbox…</div>}
       {setupPending && (
@@ -20927,8 +20939,31 @@ function EmailInboxSection({ leads, setLeads }) {
             {openRow.ai && openRow.ai.summary && (
               <div style={{ fontSize: 12.5, color: T.textMuted, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 12px" }}>✨ {openRow.ai.summary}</div>
             )}
-            <div style={{ fontSize: 13.5, color: T.text, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: "45vh", overflowY: "auto", border: `1px solid ${T.border}`, borderRadius: 12, padding: "12px 14px", background: T.surface }}>
-              {openRow.body_text || "(no text content)"}
+            <div style={{ fontSize: 13.5, color: T.text, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: "45vh", overflowY: "auto", border: `1px solid ${T.border}`, borderRadius: 12, padding: "12px 14px", background: T.surface, userSelect: "text", WebkitUserSelect: "text" }}>
+              {/* URLs render as real tappable links (system browser); everything else selectable text */}
+              {String(openRow.body_text || "(no text content)").split(/(https?:\/\/[^\s)]+)/g).map((part, i) =>
+                /^https?:\/\//.test(part)
+                  ? <a key={i} href={part} onClick={(e) => { e.preventDefault(); openExternalBrowser(part); }} style={{ color: T.primary, fontWeight: 700, wordBreak: "break-all", textDecoration: "underline", cursor: "pointer" }}>{part}</a>
+                  : part
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <Btn variant="ghost" sm onClick={async () => {
+                try { await navigator.clipboard.writeText(openRow.body_text || ""); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch (_) {}
+              }}>{copied ? "Copied ✓" : "Copy text"}</Btn>
+            </div>
+            {/* Manage: reclassify (the owner's override on the AI's call) + read state */}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted }}>Sort as</span>
+              {["lead", "bill", "client", "other"].map(k => {
+                const kk = KIND[k]; const on = openRow.kind === k;
+                return (
+                  <button key={k} onClick={() => { if (on) return; if (k === "lead") { addToLeads(openRow); } else setKindOf(openRow, k); }}
+                    style={{ padding: "6px 12px", borderRadius: 100, border: `1.5px solid ${on ? (kk.color || T.text) : T.border}`, background: on ? hexA(kk.color || T.text, 0.1) : T.surface, color: on ? (kk.color || T.text) : T.textMuted, fontSize: 12, fontWeight: 700, cursor: on ? "default" : "pointer", fontFamily: "inherit" }}>{kk.label}</button>
+                );
+              })}
+              <div style={{ flex: 1 }} />
+              <Btn variant="ghost" sm onClick={() => markRead([openRow.id], !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>
             </div>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
               {!openRow.lead_id && <Btn variant="primary" sm onClick={() => addToLeads(openRow)}>➕ Add to Leads</Btn>}
