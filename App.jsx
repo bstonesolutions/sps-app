@@ -18948,7 +18948,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               <div style={{ width: 48, height: 48, borderRadius: "50%", flexShrink: 0, background: sel.status === "new" ? T.primary : hexA(T.primary, 0.12), color: sel.status === "new" ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 16 }}>{((sel.name || "?").trim().split(/\s+/).map(w => w[0]).slice(0, 2).join("") || "?").toUpperCase()}</div>
               <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ fontSize: 19, fontWeight: 800, color: T.text, letterSpacing: "-0.01em" }}>{sel.name || "New lead"}</div>
+                <div style={{ fontSize: 19, fontWeight: 800, color: T.text, letterSpacing: "-0.01em" }}>{sel.name || sel.phone || "New lead"}</div>
                 <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{LEAD_SOURCE_LABEL[sel.source] || sel.source}{sel.sourceDetail ? ` · ${sel.sourceDetail}` : ""} · {ago(sel.createdAt)}</div>
               </div>
               <span style={{ flexShrink: 0, fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", color: STATUS_COLOR[sel.status] || T.textMuted, background: hexA(STATUS_COLOR[sel.status] || T.textMuted, 0.12), padding: "5px 11px", borderRadius: 100 }}>{LEAD_STAGES.find(s => s.id === sel.status)?.label || sel.status}</span>
@@ -21073,14 +21073,17 @@ function EmailInboxSection({ leads, setLeads }) {
   const addToLeads = async (row) => {
     const at = row.created_at || new Date().toISOString();
     const L = (row.ai && row.ai.lead) || {};
+    const isSms = row.channel === "sms";
     const lead = {
       ...BLANK_LEAD,
-      id: `lead_e${row.id}`, srcId: `em_${row.id}`, source: "email", sourceDetail: row.from_email || "",
-      name: L.name || row.from_name || row.from_email || "", phone: L.phone || "", email: L.email || row.from_email || "",
-      service: L.service || "", message: L.message || `${row.subject ? `${row.subject} — ` : ""}${(row.body_text || "").slice(0, 600)}`,
+      id: `lead_e${row.id}`, srcId: `em_${row.id}`, source: isSms ? "sms" : "email", sourceDetail: (isSms ? row.from_phone : row.from_email) || "",
+      name: L.name || (isSms ? "" : row.from_name) || (isSms ? "" : row.from_email) || "",
+      phone: L.phone || (isSms ? (row.from_phone || "") : ""),
+      email: L.email || (isSms ? "" : (row.from_email || "")),
+      service: L.service || "", message: L.message || `${row.subject && !isSms ? `${row.subject} — ` : ""}${(row.body_text || "").slice(0, 600)}`,
       mappedDivision: leadDivisionFromService(L.service),
       status: "new", createdAt: at, updatedAt: at,
-      timeline: [{ at, by: "owner", kind: "captured", text: "Added from work email" }],
+      timeline: [{ at, by: "owner", kind: "captured", text: isSms ? "Added from a text message" : "Added from work email" }],
     };
     setLeads(ls => {
       const cur = ls || [];
@@ -21168,6 +21171,7 @@ function EmailInboxSection({ leads, setLeads }) {
                 <span style={{ fontSize: 11.5, color: r.read ? T.textMuted : T.primary, fontWeight: r.read ? 500 : 700, flexShrink: 0 }}>{fmtWhen(r.created_at)}</span>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 2 }}>
+                {r.channel === "sms" && <span title="Text message" style={{ fontSize: 12, flexShrink: 0 }}>💬</span>}
                 <span style={{ fontSize: 13, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontWeight: r.read ? 500 : 800, flex: 1, minWidth: 0 }}>{r.subject || "(no subject)"}</span>
                 {badge(r.kind)}
               </div>
@@ -21228,7 +21232,9 @@ function EmailInboxSection({ leads, setLeads }) {
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
               {!inLeads(openRow.id) && <Btn variant="primary" sm onClick={() => addToLeads(openRow)}>➕ Add to Leads</Btn>}
               {inLeads(openRow.id) && <span style={{ fontSize: 12.5, fontWeight: 700, color: "#16a34a", alignSelf: "center" }}>✓ In your Leads funnel</span>}
-              <Btn variant="outline" sm onClick={() => { setReplying(v => !v); setReplyMsg(""); }}>{replying ? "Hide reply" : "↩ Reply"}</Btn>
+              {openRow.channel === "sms"
+                ? <Btn href={`sms:${(openRow.from_phone || "").replace(/[^\d+]/g, "")}`} variant="outline" sm>💬 Text back</Btn>
+                : <Btn variant="outline" sm onClick={() => { setReplying(v => !v); setReplyMsg(""); }}>{replying ? "Hide reply" : "↩ Reply"}</Btn>}
               <Btn variant="ghost" sm onClick={async () => {
                 try { await navigator.clipboard.writeText(openRow.body_text || ""); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch (_) {}
               }}>{copied ? "Copied ✓" : "Copy text"}</Btn>
@@ -28486,11 +28492,14 @@ export default function App({ authEmail = "", onSignOut }) {
           const mapped = fresh.map(row => {
             const at = row.created_at || new Date().toISOString();
             const L = (row.ai && row.ai.lead) || {};
+            const isSms = row.channel === "sms";
             return {
               ...BLANK_LEAD,
-              id: `lead_e${row.id}`, srcId: `em_${row.id}`, source: "email", sourceDetail: row.from_email || "",
-              name: L.name || row.from_name || row.from_email || "", phone: L.phone || "", email: L.email || row.from_email || "",
-              service: L.service || "", message: L.message || `${row.subject ? `${row.subject} — ` : ""}${(row.body_text || "").slice(0, 600)}`,
+              id: `lead_e${row.id}`, srcId: `em_${row.id}`, source: isSms ? "sms" : "email", sourceDetail: (isSms ? row.from_phone : row.from_email) || "",
+              name: L.name || (isSms ? "" : row.from_name) || (isSms ? "" : row.from_email) || "",
+              phone: L.phone || (isSms ? (row.from_phone || "") : ""),
+              email: L.email || (isSms ? "" : (row.from_email || "")),
+              service: L.service || "", message: L.message || `${row.subject && !isSms ? `${row.subject} — ` : ""}${(row.body_text || "").slice(0, 600)}`,
               mappedDivision: leadDivisionFromService(L.service),
               status: "new", createdAt: at, updatedAt: at,
               timeline: [{ at, by: "system", kind: "captured", text: `Work email${row.ai && row.ai.summary ? ` — ${row.ai.summary}` : ""}` }],

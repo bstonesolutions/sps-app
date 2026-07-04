@@ -98,6 +98,11 @@ export default async function handler(req, res) {
       const rr = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?id=eq.${encodeURIComponent(String(b.id))}&select=from_email,from_name,subject,message_id`, { headers: sbHeaders() });
       const orig = ((await rr.json().catch(() => [])) || [])[0];
       if (!orig || !orig.from_email) return res.status(404).json({ error: "That email isn't in the inbox anymore." });
+      // Defense in depth: SMS rows store a formatted phone in from_email — never try to email
+      // that. The UI hides email-reply for texts (shows "Text back"), but guard the API too.
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(orig.from_email).trim())) {
+        return res.status(400).json({ error: "This is a text message — reply with “Text back,” not email." });
+      }
       // FROM = the configured Sending Identity (Comms → Settings) on the verified domain —
       // same canon as every other send. BCC the owner so Gmail keeps the record (the inbound
       // loop guard skips that copy when Gmail forwards it back).
