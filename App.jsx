@@ -12706,6 +12706,58 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
 // ─────────────────────────────────────────────
 // CATALOG MANAGER (stop types, services w/ products+tests, products, tests)
 // ─────────────────────────────────────────────
+// Searchable + category-collapsible chip picker — the same organized pattern as the live
+// stop-completion popup, so the Edit Service editor doesn't dump a flat wall of chips.
+// items: [{ id, name, category? }] · selectedIds: array · onToggle(id) · accent: on-state color.
+function CatChipPicker({ items, selectedIds, onToggle, accent, emptyHint, searchPlaceholder }) {
+  const { T } = useApp();
+  const [q, setQ] = useState("");
+  const [collapsed, setCollapsed] = useState({});
+  const sel = new Set((selectedIds || []).map(String));
+  const filtered = (items || []).filter(it => { const s = q.trim().toLowerCase(); return !s || (it.name || "").toLowerCase().includes(s); });
+  const chip = (it) => {
+    const on = sel.has(String(it.id));
+    return (
+      <button key={it.id} type="button" onClick={() => onToggle(it.id)}
+        style={{ padding: "7px 13px", borderRadius: 20, border: `1.5px solid ${on ? accent : T.border}`, background: on ? hexA(accent, 0.1) : T.surface, color: on ? accent : T.text, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+        {it.name}
+      </button>
+    );
+  };
+  if (!items || items.length === 0) return <div style={{ fontSize: 12, color: T.textMuted }}>{emptyHint}</div>;
+  // Group by category (Uncategorized last). Flat when searching or when there's ≤1 real category.
+  const map = {};
+  filtered.forEach(it => { const k = (it.category || "").trim() || "Uncategorized"; (map[k] = map[k] || []).push(it); });
+  const cats = Object.keys(map).sort((a, b) => a === "Uncategorized" ? 1 : b === "Uncategorized" ? -1 : a.localeCompare(b));
+  const flat = q.trim() || cats.length <= 1;
+  const searchStyle = { width: "100%", padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", marginBottom: 9 };
+  const headStyle = { display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: T.surfaceAlt, border: "none", borderRadius: 8, padding: "7px 12px", cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em" };
+  return (
+    <div>
+      {items.length > 6 && <input value={q} onChange={e => setQ(e.target.value)} placeholder={searchPlaceholder || "Search…"} style={searchStyle} />}
+      {flat ? (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>{filtered.length ? filtered.map(chip) : <div style={{ fontSize: 12, color: T.textMuted }}>No matches.</div>}</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {cats.map(cat => {
+            const isCol = !!collapsed[cat];
+            const selN = map[cat].filter(it => sel.has(String(it.id))).length;
+            return (
+              <div key={cat} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <button type="button" onClick={() => setCollapsed(s => ({ ...s, [cat]: !s[cat] }))} style={headStyle}>
+                  <span>{cat} · {map[cat].length}{selN ? ` · ${selN} on` : ""}</span>
+                  <span style={{ fontSize: 14, transform: isCol ? "none" : "rotate(90deg)", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
+                </button>
+                {!isCol && <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>{map[cat].map(chip)}</div>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CatalogManager({ catalog, setCatalog }) {
   const { T } = useApp();
   const [svcModal, setSvcModal] = useState(null);   // service editor
@@ -13110,40 +13162,12 @@ function CatalogManager({ catalog, setCatalog }) {
 
             <div>
               <label style={labelStyle}>Water Treatments Needed <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(chemicals, dosed by oz)</span></label>
-              {treatments.length === 0 ? (
-                <div style={{ fontSize: 12, color: T.textMuted }}>Add treatments (above), then attach them here.</div>
-              ) : (
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-                  {treatments.map(t => {
-                    const on = (svcModal.data.treatments || []).includes(t.id);
-                    return (
-                      <button key={t.id} onClick={() => toggleSvcTreatment(t.id)}
-                        style={{ padding: "7px 13px", borderRadius: 20, border: `1.5px solid ${on ? "#0E9488" : T.border}`, background: on ? hexA("#0E9488", 0.1) : T.surface, color: on ? "#0E9488" : T.text, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-                        {t.name}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
+              <CatChipPicker items={treatments} selectedIds={svcModal.data.treatments || []} onToggle={toggleSvcTreatment} accent="#0E9488" emptyHint="Add treatments (above), then attach them here." searchPlaceholder="Search treatments…" />
             </div>
 
             <div>
               <label style={labelStyle}>Products / Add-ons <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(sold to the client)</span></label>
-              {products.length === 0 ? (
-                <div style={{ fontSize: 12, color: T.textMuted }}>Add products first, then attach them here.</div>
-              ) : (
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-                  {products.map(p => {
-                    const on = svcModal.data.products.includes(p.id);
-                    return (
-                      <button key={p.id} onClick={() => toggleSvcProduct(p.id)}
-                        style={{ padding: "7px 13px", borderRadius: 20, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? T.navActiveBg : T.surface, color: on ? T.primary : T.text, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-                        {p.name}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
+              <CatChipPicker items={products} selectedIds={svcModal.data.products || []} onToggle={toggleSvcProduct} accent={T.primary} emptyHint="Add products first, then attach them here." searchPlaceholder="Search products…" />
             </div>
 
             <div>
@@ -20922,6 +20946,10 @@ function EmailInboxSection({ leads, setLeads }) {
   const [openRow, setOpenRow] = useState(null);
   const [copied, setCopied] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [replying, setReplying] = useState(false);
+  const [replyText, setReplyText] = useState("");
+  const [replyBusy, setReplyBusy] = useState(false);
+  const [replyMsg, setReplyMsg] = useState("");
   const load = async () => {
     setErr("");
     setRefreshing(true);
@@ -21018,7 +21046,7 @@ function EmailInboxSection({ leads, setLeads }) {
         </div>
       )}
       {list.map(r => (
-        <div key={r.id} onClick={() => { setOpenRow(r); if (!r.read) markRead([r.id]); }}
+        <div key={r.id} onClick={() => { setOpenRow(r); setReplying(false); setReplyText(""); setReplyMsg(""); if (!r.read) markRead([r.id]); }}
           style={{ border: `1px solid ${T.border}`, borderRadius: 14, background: T.surface, padding: "12px 14px", cursor: "pointer", opacity: r.read ? 0.82 : 1 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             {!r.read && <span style={{ width: 8, height: 8, borderRadius: "50%", background: T.primary, flexShrink: 0 }} />}
@@ -21027,6 +21055,7 @@ function EmailInboxSection({ leads, setLeads }) {
                 <span style={{ fontSize: 13.5, fontWeight: r.read ? 600 : 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.from_name || r.from_email}</span>
                 {badge(r.kind)}
                 {inLeads(r.id) && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#16a34a" }}>→ in Leads</span>}
+                {r.replied && <span style={{ fontSize: 9.5, fontWeight: 800, color: T.textMuted }}>↩ replied</span>}
               </div>
               <div style={{ fontSize: 12.5, color: T.text, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontWeight: r.read ? 400 : 700 }}>{r.subject || "(no subject)"}</div>
               <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{(r.ai && r.ai.summary) || (r.body_text || "").slice(0, 120)}</div>
@@ -21084,11 +21113,35 @@ function EmailInboxSection({ leads, setLeads }) {
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
               {!inLeads(openRow.id) && <Btn variant="primary" sm onClick={() => addToLeads(openRow)}>➕ Add to Leads</Btn>}
               {inLeads(openRow.id) && <span style={{ fontSize: 12.5, fontWeight: 700, color: "#16a34a", alignSelf: "center" }}>✓ In your Leads funnel</span>}
-              <Btn href={`mailto:${openRow.from_email}?subject=${encodeURIComponent(`Re: ${openRow.subject || ""}`)}`} variant="outline" sm>Reply by email</Btn>
+              <Btn variant="outline" sm onClick={() => { setReplying(v => !v); setReplyMsg(""); }}>{replying ? "Hide reply" : "↩ Reply"}</Btn>
               <Btn variant="ghost" sm onClick={async () => {
                 try { await navigator.clipboard.writeText(openRow.body_text || ""); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch (_) {}
               }}>{copied ? "Copied ✓" : "Copy text"}</Btn>
             </div>
+            {replying && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <textarea value={replyText} onChange={e => setReplyText(e.target.value)} rows={5} placeholder={`Reply to ${openRow.from_name || openRow.from_email}…`}
+                  style={{ width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical" }} />
+                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                  <Btn variant="primary" sm onClick={replyBusy || !replyText.trim() ? undefined : async () => {
+                    setReplyBusy(true); setReplyMsg("");
+                    try {
+                      const r = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "reply", id: openRow.id, body: replyText.trim() }) });
+                      const d = await r.json().catch(() => ({}));
+                      if (!r.ok) setReplyMsg(d.error || `Couldn't send (${r.status}).`);
+                      else {
+                        setReplyMsg("Sent ✓"); setReplyText(""); setReplying(false);
+                        setRows(rs => (rs || []).map(x => x.id === openRow.id ? { ...x, replied: true } : x));
+                        setOpenRow(o => o ? { ...o, replied: true } : o);
+                      }
+                    } catch (_) { setReplyMsg("Couldn't reach the server."); }
+                    setReplyBusy(false);
+                  }}>{replyBusy ? "Sending…" : "Send reply"}</Btn>
+                  {replyMsg && <span style={{ fontSize: 12.5, fontWeight: 700, color: replyMsg.startsWith("Sent") ? "#16a34a" : T.warning }}>{replyMsg}</span>}
+                </div>
+                <div style={{ fontSize: 11.5, color: T.textMuted }}>Sends from your Sending Identity (Comms → Settings) and quietly copies your Gmail for the record.</div>
+              </div>
+            )}
           </div>
         </Modal>
       )}
