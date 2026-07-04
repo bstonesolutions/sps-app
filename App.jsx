@@ -7458,6 +7458,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
   const [productBill, setProductBill] = useState({}); // productId -> bill client at sale price (default true)
   const [notesClient, setNotesClient] = useState("");
   const [notesOffice, setNotesOffice] = useState("");
+  const [lastOpen, setLastOpen] = useState(false);   // "Last visit" context card (collapsed by default)
   const [officeFlag, setOfficeFlag] = useState(false);
   const [officeFlagMsg, setOfficeFlagMsg] = useState("");
   // Unified photos: each entry is { src, label } — label is editable per photo
@@ -8047,6 +8048,42 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
         </div>
       )}
 
+      {/* Last visit — prior-visit context so the tech arrives knowing what to check */}
+      {(() => {
+        const lv = Array.isArray(client?.history) ? client.history[0] : null;
+        if (!lv) return null;
+        const lvReadings = lv.readings && typeof lv.readings === "object" ? Object.entries(lv.readings).filter(([, v]) => v !== "" && v != null && v !== "—") : [];
+        const lvTx = Array.isArray(lv.treatmentsUsed) ? lv.treatmentsUsed : [];
+        const lvParts = Array.isArray(lv.partsUsed) ? lv.partsUsed : [];
+        return (
+          <div style={sectionGap}>
+            <button type="button" onClick={() => setLastOpen(o => !o)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 13px", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>📋 Last visit · {lv.date || "—"}</div>
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{[lv.tech, lv.type].filter(Boolean).join(" · ") || "Prior service"}</div>
+              </div>
+              <span style={{ color: T.textMuted, fontSize: 16, transform: lastOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", lineHeight: 1, flexShrink: 0 }}>›</span>
+            </button>
+            {lastOpen && (
+              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 9 }}>
+                {lvReadings.length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {lvReadings.map(([k, v]) => {
+                      const fc = READING_FLAG_COLOR[readingFlag(v, WATER_RANGES[k])] || null;
+                      return <span key={k} style={{ fontSize: 11.5, fontWeight: 700, color: fc || T.text, background: fc ? hexA(fc, 0.1) : T.surface, border: `1px solid ${fc ? hexA(fc, 0.35) : T.border}`, borderRadius: 8, padding: "3px 8px" }}>{k} {v}</span>;
+                    })}
+                  </div>
+                )}
+                {lvTx.length > 0 && <div style={{ fontSize: 12, color: T.text }}><span style={{ color: T.textMuted, fontWeight: 700 }}>Treatments: </span>{lvTx.map(x => `${x.name}${x.oz ? ` ${x.oz} ${x.unit || "oz"}` : ""}`).join(", ")}</div>}
+                {lvParts.length > 0 && <div style={{ fontSize: 12, color: T.text }}><span style={{ color: T.textMuted, fontWeight: 700 }}>Parts: </span>{lvParts.map(x => `${x.name}${x.qty ? ` ×${x.qty}` : ""}`).join(", ")}</div>}
+                {lv.officeNotes && <div style={{ fontSize: 12, color: T.text }}><span style={{ color: T.textMuted, fontWeight: 700 }}>Office notes: </span>{lv.officeNotes}</div>}
+                {lv.notes && lv.notes !== "Service completed." && <div style={{ fontSize: 12, color: T.text }}><span style={{ color: T.textMuted, fontWeight: 700 }}>Client notes: </span>{lv.notes}</div>}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {/* Assigned to */}
       {(team || []).length > 0 && (
         <div style={sectionGap}>
@@ -8231,19 +8268,18 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {tests.map(t => {
               const range = WATER_RANGES[t];
-              const val = parseFloat(readings[t]);
-              const hasVal = readings[t] !== "" && readings[t] != null && !isNaN(val);
-              const outOfRange = !!(range && hasVal && (val < range.min || val > range.max));
+              const flag = readingFlag(readings[t], range);   // null | "good" | "warn" | "bad"
+              const fc = flag ? READING_FLAG_COLOR[flag] : null;
               const st = readingStatus[t] || "";
               return (
                 <div key={t} style={{ background: T.surfaceAlt, borderRadius: 12, padding: "9px 11px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 12.5, fontWeight: 700, color: T.text }}>{t}</div>
-                      {range && <div style={{ fontSize: 10, color: outOfRange ? "#dc2626" : T.textMuted }}>ideal {range.ideal}{range.unit ? ` ${range.unit}` : ""}{outOfRange ? " · out of range" : ""}</div>}
+                      {range && <div style={{ fontSize: 10, color: fc || T.textMuted }}>ideal {range.ideal}{range.unit ? ` ${range.unit}` : ""}{flag === "bad" ? " · out of range" : flag === "warn" ? " · near limit" : ""}</div>}
                     </div>
                     <input type="text" inputMode="decimal" value={readings[t] || ""} onChange={e => setReadings(r => ({ ...r, [t]: e.target.value }))} placeholder="—"
-                      style={{ width: 80, padding: "8px", border: `1.5px solid ${outOfRange ? "#dc2626" : T.border}`, borderRadius: 8, fontSize: 15, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
+                      style={{ width: 80, padding: "8px", border: `1.5px solid ${fc || T.border}`, borderRadius: 8, fontSize: 15, fontWeight: 700, fontFamily: "inherit", color: fc || T.text, background: fc ? hexA(fc, 0.1) : T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
                   </div>
                   <div style={{ display: "flex", gap: 5, marginTop: 7 }}>
                     {["good", "attention", "treated"].map(s => {
@@ -22392,6 +22428,22 @@ const READING_STATUS = {
   attention: { label: "Attention", color: "#dc2626" },
   treated:   { label: "Treated",   color: "#2563eb" },
 };
+
+// Live green/amber/red flag for a reading vs its healthy range, as the tech types.
+// "warn" = in range but within 15% of a boundary that matters — the upper limit always, and the
+// lower limit only when min > 0 (a 0-floor reading like ammonia is IDEAL at 0, not "near limit").
+function readingFlag(raw, range) {
+  if (!range) return null;
+  const v = parseFloat(raw);
+  if (raw === "" || raw == null || isNaN(v)) return null;
+  if (v < range.min || v > range.max) return "bad";
+  const span = (range.max - range.min) || 1;
+  const margin = span * 0.15;
+  if (v > range.max - margin) return "warn";
+  if (range.min > 0 && v < range.min + margin) return "warn";
+  return "good";
+}
+const READING_FLAG_COLOR = { good: "#16a34a", warn: "#D97706", bad: "#dc2626" };
 
 function WaterQualityTrends({ clients, T, clientId }) {
   // clientId locks the view to one client (embedded in the Client Hub) — hides the picker/header
