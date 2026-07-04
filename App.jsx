@@ -963,6 +963,37 @@ function useStoredState(key, initial) {
 // last change — so the existing storage mechanism saves once, not per keystroke.
 // Keeps a per-section "undo" baseline (the state before the current edit burst)
 // and a brief "saved" flag. Does not touch useStoredState / the storage layer.
+// Debounced field editor for a useStoredState object — immediate LOCAL echo (so controlled
+// inputs stay snappy) but coalesced network writes on a trailing debounce, committed via a
+// FUNCTIONAL merge of only the changed keys so it can never clobber a sibling card editing a
+// different key of the same object (fixes the template-editor per-keystroke thrash in Comms).
+function useDebouncedFields(value, setValue, delay = 450) {
+  const [over, setOver] = useState({});
+  const overRef = useRef({});
+  const timer = useRef(null);
+  const set = (updater) => {
+    setOver(o => {
+      const nextFull = typeof updater === "function" ? updater({ ...value, ...o }) : (updater || {});
+      const no = {};
+      Object.keys(nextFull).forEach(k => { if (nextFull[k] !== value[k]) no[k] = nextFull[k]; });
+      overRef.current = no;
+      return no;
+    });
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => {
+      const o = overRef.current;
+      if (Object.keys(o).length) setValue(prev => ({ ...prev, ...o }));
+      overRef.current = {}; setOver({});
+    }, delay);
+  };
+  useEffect(() => () => { // flush any pending edits on unmount (leaving the tab)
+    clearTimeout(timer.current);
+    const o = overRef.current;
+    if (Object.keys(o).length) setValue(prev => ({ ...prev, ...o }));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  return [{ ...value, ...over }, set];
+}
+
 function useSectionAutosave(value, setValue, delay = 500) {
   const [draft, setDraft] = useState(value);
   const [dirty, setDirty] = useState(false);
@@ -19022,7 +19053,6 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
   }, [initialSection, tab]);
   // Debounced auto-save controllers — one per Customize settings slice.
   const brandCtl = useSectionAutosave(branding, setBranding);
-  const emailCtl = useSectionAutosave(email, setEmail);
   const invCtl   = useSectionAutosave(invoicing, setInvoicing);
   const costCtl  = useSectionAutosave(costs, setCosts);
   const schedCtl = useSectionAutosave(scheduleCfg, setScheduleCfg);
@@ -20988,13 +21018,16 @@ function EmailInboxSection({ leads, setLeads }) {
   const runImport = async (sinceDays) => {
     setImportOpen(false);
     setImportState({ running: true, done: 0, total: 0, imported: 0, msg: "Connecting to Gmail…" });
-    let offset = 0, imported = 0, guard = 0;
+    let offset = 0, imported = 0, guard = 0, aiUsed = 0;
+    const AI_BUDGET = 60; // hard ceiling on Claude triage calls across the WHOLE run (cost guard —
+                          // beyond this, mail still imports via client-match/"other", just no AI)
     try {
       while (guard++ < 200) {
-        const r = await fetch(`${PROD_URL}/api/gmail-backfill`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ sinceDays, offset }) });
+        const r = await fetch(`${PROD_URL}/api/gmail-backfill`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ sinceDays, offset, aiCap: Math.max(0, AI_BUDGET - aiUsed) }) });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) { setImportState({ running: false, done: 0, total: 0, imported, msg: d.error || `Import failed (${r.status}).` }); return; }
         imported += d.imported || 0;
+        aiUsed += d.aiUsed || 0;
         offset = d.nextOffset || (offset + 12);
         setImportState({ running: true, done: Math.min(offset, d.total || offset), total: d.total || 0, imported, msg: `Imported ${imported}… (${Math.min(offset, d.total || offset)} of ${d.total || "?"})` });
         if (d.done) break;
@@ -21080,6 +21113,14 @@ function EmailInboxSection({ leads, setLeads }) {
     const k = KIND[kind] || KIND.other;
     return <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", textTransform: "uppercase", color: k.color || T.textMuted, background: k.color ? hexA(k.color, 0.1) : T.surfaceAlt, padding: "2px 8px", borderRadius: 100, flexShrink: 0 }}>{k.label}</span>;
   };
+  // Gmail-style colored sender avatar — deterministic hue from the address so the same sender
+  // always gets the same color.
+  const AV = ["#B81D24", "#0E9488", "#2563eb", "#b45309", "#7c3aed", "#c2410c", "#0891b2", "#be185d"];
+  const avatarColor = (seed) => { let h = 0; const s = String(seed || "?"); for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return AV[h % AV.length]; };
+  const Avatar = ({ name, email, size = 40 }) => {
+    const c = avatarColor(email || name);
+    return <div style={{ width: size, height: size, borderRadius: "50%", background: hexA(c, 0.15), color: c, display: "flex", alignItems: "center", justifyContent: "center", fontSize: size * 0.42, fontWeight: 800, flexShrink: 0 }}>{((name || email || "?").trim()[0] || "?").toUpperCase()}</div>;
+  };
   const setupPending = err && /hasn't been created|sps_inbox/i.test(err);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -21115,33 +21156,36 @@ function EmailInboxSection({ leads, setLeads }) {
           <div style={{ fontSize: 13, lineHeight: 1.55, maxWidth: 380, margin: "0 auto" }}>Mail forwarded from your work address lands here — AI tags each one as a Lead, Bill, or client message, and leads drop straight into Comms → Leads.</div>
         </div>
       )}
-      {list.map(r => (
-        <div key={r.id} onClick={() => { setOpenRow(r); setReplying(false); setReplyText(""); setReplyMsg(""); if (!r.read) markRead([r.id]); }}
-          style={{ border: `1px solid ${T.border}`, borderRadius: 14, background: T.surface, padding: "12px 14px", cursor: "pointer", opacity: r.read ? 0.82 : 1 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            {!r.read && <span style={{ width: 8, height: 8, borderRadius: "50%", background: T.primary, flexShrink: 0 }} />}
+      <div style={{ border: `1px solid ${T.border}`, borderRadius: 16, overflow: "hidden", background: T.surface }}>
+        {list.map((r, i) => (
+          <div key={r.id} onClick={() => { setOpenRow(r); setReplying(false); setReplyText(""); setReplyMsg(""); if (!r.read) markRead([r.id]); }}
+            style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "12px 14px", cursor: "pointer", borderTop: i === 0 ? "none" : `1px solid ${hexA(T.border, 0.6)}`, background: r.read ? T.surface : hexA(T.primary, 0.035), position: "relative" }}>
+            {!r.read && <span style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: T.primary }} />}
+            <Avatar name={r.from_name} email={r.from_email} />
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ fontSize: 13.5, fontWeight: r.read ? 600 : 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.from_name || r.from_email}</span>
-                {badge(r.kind)}
-                {inLeads(r.id) && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#16a34a" }}>→ in Leads</span>}
-                {r.replied && <span style={{ fontSize: 9.5, fontWeight: 800, color: T.textMuted }}>↩ replied</span>}
+                <span style={{ fontSize: 14, fontWeight: r.read ? 600 : 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{r.from_name || r.from_email}</span>
+                <span style={{ fontSize: 11.5, color: r.read ? T.textMuted : T.primary, fontWeight: r.read ? 500 : 700, flexShrink: 0 }}>{fmtWhen(r.created_at)}</span>
               </div>
-              <div style={{ fontSize: 12.5, color: T.text, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontWeight: r.read ? 400 : 700 }}>{r.subject || "(no subject)"}</div>
-              <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{(r.ai && r.ai.summary) || (r.body_text || "").slice(0, 120)}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 2 }}>
+                <span style={{ fontSize: 13, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontWeight: r.read ? 500 : 800, flex: 1, minWidth: 0 }}>{r.subject || "(no subject)"}</span>
+                {badge(r.kind)}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 3 }}>
+                <span style={{ fontSize: 12, color: T.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{(r.ai && r.ai.summary) || (r.body_text || "").slice(0, 120)}</span>
+                {inLeads(r.id) && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#16a34a", flexShrink: 0 }}>→ Leads</span>}
+                {r.replied && <span style={{ fontSize: 11, color: T.textMuted, flexShrink: 0 }}>↩</span>}
+              </div>
             </div>
-            <div style={{ fontSize: 11.5, color: T.textMuted, flexShrink: 0 }}>{fmtWhen(r.created_at)}</div>
           </div>
-        </div>
-      ))}
+        ))}
+      </div>
       {openRow && (
         <Modal title={openRow.subject || "(no subject)"} onClose={() => setOpenRow(null)} maxWidth={640}>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {/* Sender header — avatar + identity, Gmail-grade */}
             <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
-              <div style={{ width: 40, height: 40, borderRadius: "50%", background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 17, fontWeight: 800, flexShrink: 0 }}>
-                {((openRow.from_name || openRow.from_email || "?").trim()[0] || "?").toUpperCase()}
-              </div>
+              <Avatar name={openRow.from_name} email={openRow.from_email} size={44} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ fontSize: 14.5, fontWeight: 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{openRow.from_name || openRow.from_email}</span>
@@ -21159,12 +21203,13 @@ function EmailInboxSection({ leads, setLeads }) {
                 srcDoc={`<html><head><base target="_blank"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;padding:14px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;color:#111827;word-break:break-word;background:#ffffff}img{max-width:100%;height:auto}table{max-width:100%}</style></head><body>${openRow.body_html}</body></html>`}
                 style={{ width: "100%", height: "48vh", border: `1px solid ${T.border}`, borderRadius: 12, background: "#ffffff" }} />
             ) : (
-              <div style={{ fontSize: 13.5, color: T.text, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: "48vh", overflowY: "auto", border: `1px solid ${T.border}`, borderRadius: 12, padding: "12px 14px", background: T.surface, userSelect: "text", WebkitUserSelect: "text" }}>
-                {String(openRow.body_text || "(no text content)").split(/(https?:\/\/[^\s)]+)/g).map((part, i) =>
-                  /^https?:\/\//.test(part)
-                    ? <a key={i} href={part} onClick={(e) => { e.preventDefault(); openExternalBrowser(part); }} style={{ color: T.primary, fontWeight: 700, wordBreak: "break-all", textDecoration: "underline", cursor: "pointer" }}>{part}</a>
-                    : part
-                )}
+              <div style={{ fontSize: 14, color: T.text, lineHeight: 1.65, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: "48vh", overflowY: "auto", border: `1px solid ${T.border}`, borderRadius: 12, padding: "16px 18px", background: T.surface, userSelect: "text", WebkitUserSelect: "text" }}>
+                {String(openRow.body_text || "(no text content)").split(/(https?:\/\/[^\s)]+)/g).map((part, i) => {
+                  if (!/^https?:\/\//.test(part)) return part;
+                  let host = part; try { host = new URL(part).hostname.replace(/^www\./, ""); } catch (_) {}
+                  // Clean link chip (🔗 domain) instead of dumping a giant raw URL into the prose.
+                  return <a key={i} href={part} onClick={(e) => { e.preventDefault(); openExternalBrowser(part); }} style={{ display: "inline-flex", alignItems: "center", gap: 3, color: T.primary, fontWeight: 700, textDecoration: "none", background: hexA(T.primary, 0.08), padding: "1px 8px", borderRadius: 100, fontSize: 13, cursor: "pointer", verticalAlign: "baseline" }}>🔗 {host}</a>;
+                })}
               </div>
             )}
             {/* Manage: reclassify (the owner's override on the AI's call) + read state + copy */}
@@ -21317,6 +21362,10 @@ function LogsScreen({ clients, showOwnerRows = false }) {
 function CommsScreen({ initialSection, perms = {}, currentUser, schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, setBranding, reminderLog, setReminderLog, leads, setLeads, onConvertLead, onLinkLead, openLeadId, onLeadOpened, vp = {} }) {
   const { T } = useApp();
   const isAdmin = !!perms.isAdmin;
+  // Debounced editors for the template cards (heavy textareas) — snappy local echo, one write
+  // per burst instead of per keystroke, functional-merge commit (no clobber of other cards).
+  const [emailTpl, setEmailTpl] = useDebouncedFields(email, setEmail);
+  const [brandTpl, setBrandTpl] = useDebouncedFields(branding, setBranding);
   // Only the sections this viewer is allowed to see (owner sees all). The old Messages + Reminders
   // tabs are folded in here, each behind its own per-staff permission flag.
   const CAN = {
@@ -21382,8 +21431,8 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
           {(perms.isAdmin || perms.commsSettings) && <CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />}
           {/* Message + email templates now live HERE (moved out of Customize so all comms editing
               is in one place). EmailSettings = client texts/emails; InviteEmailSettings = staff invite + login emails. */}
-          {(perms.isAdmin || perms.editNotifications) && <Card><CardHeader title="Message & Email Templates" /><EmailSettings email={email} setEmail={setEmail} branding={branding} setBranding={setBranding} /></Card>}
-          {(perms.isAdmin || perms.editSettings || perms.canInvoice) && <Card><CardHeader title="Staff Invite & Login Emails" /><InviteEmailSettings email={email} setEmail={setEmail} branding={branding} /></Card>}
+          {(perms.isAdmin || perms.editNotifications) && <Card><CardHeader title="Message & Email Templates" /><EmailSettings email={emailTpl} setEmail={setEmailTpl} branding={brandTpl} setBranding={setBrandTpl} /></Card>}
+          {(perms.isAdmin || perms.editSettings || perms.canInvoice) && <Card><CardHeader title="Staff Invite & Login Emails" /><InviteEmailSettings email={emailTpl} setEmail={setEmailTpl} branding={brandTpl} /></Card>}
         </div>}
         {section === "broadcast" && CAN.broadcast && <BroadcastSection clients={clients} invoices={invoices} email={email} branding={branding} T={T} />}
         {section === "email" && CAN.email && <div style={{ padding: "0 16px" }}><EmailInboxSection leads={leads} setLeads={setLeads} /></div>}

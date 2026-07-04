@@ -142,7 +142,11 @@ export default async function handler(req, res) {
 
     // LOOP GUARD: replies the app itself sends are BCC'd back to the owner for record-keeping,
     // and Gmail's forward rule dutifully bounces that copy here. Never re-ingest our own sends.
-    const selfAddrs = [emailCfg.fromAddress, emailCfg.ownerEmail, emailCfg.notify && emailCfg.notify.ownerEmail]
+    // Include the RESEND_FROM default address too — when the owner clears the Sending Identity,
+    // a reply goes out FROM that default, and without this the app would re-ingest + re-triage
+    // its own reply (review finding).
+    const resendFromAddr = ((process.env.RESEND_FROM || "noreply@stonepropertysolutions.com").match(/[^<\s]+@[^>\s]+/) || [])[0];
+    const selfAddrs = [emailCfg.fromAddress, emailCfg.ownerEmail, emailCfg.notify && emailCfg.notify.ownerEmail, resendFromAddr, "noreply@stonepropertysolutions.com"]
       .filter(Boolean).map(e => String(e).trim().toLowerCase());
     if (fromEmail && selfAddrs.includes(fromEmail)) return res.status(200).json({ ok: true, skipped: "own send — loop guard" });
 

@@ -118,12 +118,17 @@ export default async function handler(req, res) {
       const sd = await sr.json().catch(() => ({}));
       if (!sr.ok) return res.status(502).json({ error: sd?.message || `Resend ${sr.status}` });
       await patch(`id=eq.${encodeURIComponent(String(b.id))}`, { replied: true }).catch(() => {});
-      // Comms → Log entry (outbound record, like any other send).
+      // Comms → Log entry (outbound record, like any other send). Legacy-shape fallback for
+      // installs that haven't added the origin/recipient columns yet.
       try {
-        await fetch(`${SUPABASE_URL}/rest/v1/sps_comms_log`, {
+        const base = { client_id: "", type: "Email reply", channel: "email", body: `${subject} — ${replyBody.slice(0, 600)}`, ok: true };
+        const lr = await fetch(`${SUPABASE_URL}/rest/v1/sps_comms_log`, {
           method: "POST", headers: sbHeaders(),
-          body: JSON.stringify({ client_id: "", type: "Email reply", channel: "email", body: `${subject} — ${replyBody.slice(0, 600)}`, ok: true, origin: "work-email reply (Comms → Email)", recipient: orig.from_email }),
+          body: JSON.stringify({ ...base, origin: "work-email reply (Comms → Email)", recipient: orig.from_email }),
         });
+        if (lr.status === 400 && /column/i.test(await lr.text().catch(() => ""))) {
+          await fetch(`${SUPABASE_URL}/rest/v1/sps_comms_log`, { method: "POST", headers: sbHeaders(), body: JSON.stringify(base) });
+        }
       } catch { /* best-effort */ }
       return res.status(200).json({ ok: true, id: sd.id || null });
     }

@@ -14,6 +14,7 @@
 // big inbox can't run up a bill in one call. Dedupe is by a deterministic id from the RFC
 // Message-ID, and the upsert is ignore-duplicates, so re-running is safe and cheap.
 
+import crypto from "node:crypto";
 import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
 import { callClaude, extractJson, aiConfigured } from "./_ai.js";
@@ -59,8 +60,10 @@ const TRIAGE_SYSTEM = `You triage the work-email inbox for a pond/pool service b
  "bill":{"vendor":"","amount":"","dueDate":""}}
 Rules: "lead" = a person asking about getting service, a quote, an estimate, availability. "bill" = money the business owes (invoices TO the business, statements, utilities, suppliers, subscriptions). "client" = an existing customer writing about their own service (the caller tells you if the sender matched the client list). Marketing blasts, newsletters, receipts for tiny purchases, spam, notifications = "other". Never invent contact details.`;
 
+// Deterministic id from the FULL Message-ID (sha1 → no prefix-collision risk that a 48-char
+// base64url slice would have for Message-IDs sharing a long prefix). No Message-ID → uid+date.
 const idFor = (messageId, uid, dateIso) =>
-  "im_" + Buffer.from(String(messageId || `${uid}|${dateIso}`)).toString("base64url").slice(0, 48);
+  "im_" + crypto.createHash("sha1").update(String(messageId || `${uid}|${dateIso}`)).digest("hex").slice(0, 32);
 
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
