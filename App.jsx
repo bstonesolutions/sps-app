@@ -21170,7 +21170,11 @@ function RichEditor({ onChange, placeholder = "Write your message…", minHeight
 // client-readable policy at all — this is private mail).
 function EmailInboxSection({ leads, setLeads }) {
   const { T } = useApp();
-  const vp = useViewport();                    // isDesktop (>=700) → two-pane; phone → single column + modal reader
+  const vp = useViewport();
+  // Two-pane (list + reading pane) ONLY when there's genuinely room — this section sits inside the
+  // global sidebar AND the Comms sidebar, so isDesktop (>=700, incl. portrait iPad) is too narrow and
+  // would crush the reader. Below this, use the clean single-column list + full-screen modal reader.
+  const wide = vp.width >= 1080;
   const [rows, setRows] = useState(null);
   const [err, setErr] = useState("");
   const [q, setQ] = useState("");              // inbox search
@@ -21237,13 +21241,18 @@ function EmailInboxSection({ leads, setLeads }) {
     .filter(r => filter === "all" ? true : filter === "unread" ? !r.read : r.kind === filter)
     .filter(r => !qq || [r.from_name, r.from_email, r.subject, r.body_text, r.ai && r.ai.summary].some(v => String(v || "").toLowerCase().includes(qq)));
   const unread = (rows || []).filter(r => !r.read).length;
-  const markRead = async (ids, read = true) => {
+  const markRead = (ids, read = true) => {
+    // Instant optimistic flip; both server writes (app copy + Gmail mirror) fire in the background,
+    // in parallel, and are never awaited — the UI never waits on the network or IMAP.
     setRows(rs => (rs || []).map(r => ids.includes(r.id) ? { ...r, read } : r));
     setOpenRow(o => (o && ids.includes(o.id) ? { ...o, read } : o));
-    try { await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "markRead", ids, read }) }); } catch (_) {}
-    // Mirror the read-state into the real Gmail mailbox (and thus Apple Mail). Best-effort +
-    // fire-and-forget so the UI never waits on IMAP; unmatched rows stay local-only.
-    try { const h = await authHeaders({ "Content-Type": "application/json" }); fetch(`${PROD_URL}/api/gmail-action`, { method: "POST", headers: h, body: JSON.stringify({ action: read ? "markRead" : "markUnread", ids }) }).catch(() => {}); } catch (_) {}
+    (async () => {
+      try {
+        const h = await authHeaders({ "Content-Type": "application/json" });
+        fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: h, body: JSON.stringify({ action: "markRead", ids, read }) }).catch(() => {});
+        fetch(`${PROD_URL}/api/gmail-action`, { method: "POST", headers: h, body: JSON.stringify({ action: read ? "markRead" : "markUnread", ids }) }).catch(() => {});
+      } catch (_) {}
+    })();
   };
   // Reclassify an email — the owner's override on the AI's call. "lead" goes through
   // addToLeads instead (label + funnel + ack in one tap).
@@ -21306,27 +21315,29 @@ function EmailInboxSection({ leads, setLeads }) {
     try { await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "setKind", ids, kind }) }); } catch (_) {}
     setBusyBulk(false); exitSelect();
   };
-  const deleteEmails = async (rawIds, { ask = true } = {}) => {
-    const ids = (rawIds || []).filter(Boolean); if (!ids.length || busyBulk) return;
+  const deleteEmails = (rawIds, { ask = true } = {}) => {
+    const ids = (rawIds || []).filter(Boolean); if (!ids.length) return;
     if (ask && !confirm(`Delete ${ids.length} email${ids.length === 1 ? "" : "s"}? Matched messages move to your Gmail Trash (recoverable there for ~30 days).`)) return;
-    setRows(rs => (rs || []).filter(r => !ids.includes(r.id)));   // optimistic
+    // INSTANT: remove from the UI and unblock right now. All server work (Gmail Trash + delete the
+    // app copy) runs in the background so the user NEVER waits on the multi-second IMAP round-trip.
+    setRows(rs => (rs || []).filter(r => !ids.includes(r.id)));
     setOpenRow(o => (o && ids.includes(o.id) ? null : o));
-    setBusyBulk(true); setGmailNote("");
-    try {
-      const h = await authHeaders({ "Content-Type": "application/json" });
-      // Move the real Gmail message to Trash FIRST (needs the sps_inbox rows to resolve the match),
-      // then remove the app's copy. Read the result so we can be honest about what reached Gmail.
-      let trashRes = null;
-      try { const tr = await fetch(`${PROD_URL}/api/gmail-action`, { method: "POST", headers: h, body: JSON.stringify({ action: "trash", ids }) }); trashRes = await tr.json().catch(() => null); } catch (_) {}
-      await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: h, body: JSON.stringify({ action: "delete", ids }) });
-      const movedN = (trashRes && Array.isArray(trashRes.updated)) ? trashRes.updated.length : 0;
-      const missN = ids.length - movedN;
-      if (missN > 0) {
-        setGmailNote(`${movedN ? `${movedN} moved to Gmail Trash · ` : ""}${missN} removed from the app only — ${missN === 1 ? "it wasn't" : "they weren't"} matched in Gmail (can happen with forwarded mail).`);
-        setTimeout(() => setGmailNote(""), 9000);
-      }
-    } catch (_) {}
-    setBusyBulk(false); exitSelect();
+    exitSelect(); setGmailNote("");
+    (async () => {
+      try {
+        const h = await authHeaders({ "Content-Type": "application/json" });
+        // Trash in Gmail FIRST (needs the sps_inbox rows to resolve the match), then delete the copy.
+        let trashRes = null;
+        try { const tr = await fetch(`${PROD_URL}/api/gmail-action`, { method: "POST", headers: h, body: JSON.stringify({ action: "trash", ids }) }); trashRes = await tr.json().catch(() => null); } catch (_) {}
+        await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: h, body: JSON.stringify({ action: "delete", ids }) });
+        const movedN = (trashRes && Array.isArray(trashRes.updated)) ? trashRes.updated.length : 0;
+        const missN = ids.length - movedN;
+        if (missN > 0) {
+          setGmailNote(`${movedN ? `${movedN} moved to Gmail Trash · ` : ""}${missN} removed from the app only — ${missN === 1 ? "it wasn't" : "they weren't"} matched in Gmail (can happen with forwarded mail).`);
+          setTimeout(() => setGmailNote(""), 9000);
+        }
+      } catch (_) {}
+    })();
   };
   const bulkDelete = () => deleteEmails(selIds);
   const sendCompose = async () => {
@@ -21367,6 +21378,111 @@ function EmailInboxSection({ leads, setLeads }) {
     return <div style={{ width: size, height: size, borderRadius: "50%", background: hexA(c, 0.15), color: c, display: "flex", alignItems: "center", justifyContent: "center", fontSize: size * 0.42, fontWeight: 800, flexShrink: 0 }}>{((name || email || "?").trim()[0] || "?").toUpperCase()}</div>;
   };
   const setupPending = err && /hasn't been created|sps_inbox/i.test(err);
+  // Airier list rows — reused by the desktop list column and the mobile list.
+  const listRows = list.map((r, i) => {
+    const active = openRow && openRow.id === r.id && wide;
+    return (
+      <div key={r.id} onClick={() => { if (selMode) { toggleSel(r.id); return; } setOpenRow(r); setReplying(false); setReplyText(""); setReplyHtml(""); setReplyMsg(""); if (!r.read) markRead([r.id]); }}
+        style={{ display: "flex", alignItems: "flex-start", gap: 13, padding: "15px 16px", cursor: "pointer", borderTop: i === 0 ? "none" : `1px solid ${hexA(T.border, 0.5)}`, background: (sel[r.id] || active) ? hexA(T.primary, 0.08) : (r.read ? "transparent" : hexA(T.primary, 0.03)), position: "relative" }}>
+        {!r.read && <span style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: T.primary }} />}
+        {selMode && <div style={{ alignSelf: "center", flexShrink: 0 }}><Checkbox checked={!!sel[r.id]} onChange={() => toggleSel(r.id)} /></div>}
+        <Avatar name={r.from_name} email={r.from_email} size={42} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 14.5, fontWeight: r.read ? 600 : 820, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{r.from_name || r.from_email}</span>
+            <span style={{ fontSize: 11.5, color: r.read ? T.textMuted : T.primary, fontWeight: r.read ? 500 : 700, flexShrink: 0 }}>{fmtWhen(r.created_at)}</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 4 }}>
+            {r.channel === "sms" && <span title="Text message" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="message" size={13} /></span>}
+            <span style={{ fontSize: 13.5, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontWeight: r.read ? 550 : 750, flex: 1, minWidth: 0 }}>{r.subject || "(no subject)"}</span>
+            {badge(r.kind)}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 5 }}>
+            <span style={{ fontSize: 12.5, color: T.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{(r.ai && r.ai.summary) || (r.body_text || "").slice(0, 120)}</span>
+            {inLeads(r.id) && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#16a34a", flexShrink: 0 }}>→ Leads</span>}
+            {r.replied && <span title="Replied" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="reply" size={12} /></span>}
+          </div>
+        </div>
+      </div>
+    );
+  });
+  // The open-email body — rendered in a desktop reading pane OR a mobile modal.
+  const readerInner = !openRow ? null : (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
+        <Avatar name={openRow.from_name} email={openRow.from_email} size={44} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 14.5, fontWeight: 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{openRow.from_name || openRow.from_email}</span>
+            {badge(openRow.kind)}
+          </div>
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{openRow.from_email} · {fmtWhen(openRow.created_at)}</div>
+        </div>
+      </div>
+      {openRow.ai && openRow.ai.summary && (
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12.5, color: T.text, background: hexA(T.primary, 0.05), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 10, padding: "9px 12px", lineHeight: 1.5 }}><span style={{ color: T.primary, flexShrink: 0, display: "inline-flex", marginTop: 1 }}><Icon name="sparkle" size={14} /></span><span>{openRow.ai.summary}</span></div>
+      )}
+      {openRow.body_html ? (
+        <iframe title="Email content" sandbox="allow-popups allow-popups-to-escape-sandbox"
+          srcDoc={`<html><head><base target="_blank"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;padding:14px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;color:#111827;word-break:break-word;background:#ffffff}img{max-width:100%;height:auto}table{max-width:100%}</style></head><body>${openRow.body_html}</body></html>`}
+          style={{ width: "100%", height: "46vh", border: `1px solid ${T.border}`, borderRadius: 12, background: "#ffffff" }} />
+      ) : (
+        <div style={{ fontSize: 14, color: T.text, lineHeight: 1.65, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: "46vh", overflowY: "auto", border: `1px solid ${T.border}`, borderRadius: 12, padding: "16px 18px", background: T.surface, userSelect: "text", WebkitUserSelect: "text" }}>
+          {String(openRow.body_text || "(no text content)").split(/(https?:\/\/[^\s)]+)/g).map((part, i) => {
+            if (!/^https?:\/\//.test(part)) return part;
+            let host = part; try { host = new URL(part).hostname.replace(/^www\./, ""); } catch (_) {}
+            return <a key={i} href={part} onClick={(e) => { e.preventDefault(); openExternalBrowser(part); }} style={{ display: "inline-flex", alignItems: "center", gap: 4, color: T.primary, fontWeight: 700, textDecoration: "none", background: hexA(T.primary, 0.08), padding: "2px 9px", borderRadius: 100, fontSize: 13, cursor: "pointer", verticalAlign: "baseline" }}><Icon name="link" size={11} />{host}</a>;
+          })}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted }}>Sort as</span>
+        {["lead", "bill", "client", "other"].map(k => {
+          const kk = KIND[k]; const on = openRow.kind === k;
+          return (
+            <button key={k} onClick={() => { if (on) return; if (k === "lead") { addToLeads(openRow); } else setKindOf(openRow, k); }}
+              style={{ padding: "6px 12px", borderRadius: 100, border: `1.5px solid ${on ? (kk.color || T.text) : T.border}`, background: on ? hexA(kk.color || T.text, 0.1) : T.surface, color: on ? (kk.color || T.text) : T.textMuted, fontSize: 12, fontWeight: 700, cursor: on ? "default" : "pointer", fontFamily: "inherit" }}>{kk.label}</button>
+          );
+        })}
+        <div style={{ flex: 1 }} />
+        <Btn variant="ghost" sm onClick={() => markRead([openRow.id], !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>
+        <Btn variant="danger" sm onClick={() => deleteEmails([openRow.id])}>Delete</Btn>
+      </div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+        {!inLeads(openRow.id) && <Btn variant="primary" sm onClick={() => addToLeads(openRow)} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={14} />Add to Leads</Btn>}
+        {inLeads(openRow.id) && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 700, color: "#16a34a", alignSelf: "center" }}><Icon name="check" size={14} />In your Leads funnel</span>}
+        {openRow.channel === "sms"
+          ? <Btn href={`sms:${(openRow.from_phone || "").replace(/[^\d+]/g, "")}`} variant="outline" sm style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="message" size={14} />Text back</Btn>
+          : <Btn variant="outline" sm onClick={() => { setReplying(v => !v); setReplyMsg(""); }} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="reply" size={14} />{replying ? "Hide reply" : "Reply"}</Btn>}
+        <Btn variant="ghost" sm onClick={async () => {
+          try { await navigator.clipboard.writeText(openRow.body_text || ""); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch (_) {}
+        }}>{copied ? <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><Icon name="check" size={13} />Copied</span> : "Copy text"}</Btn>
+      </div>
+      {replying && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <RichEditor onChange={(html, text) => { setReplyHtml(html); setReplyText(text); }} placeholder={`Reply to ${openRow.from_name || openRow.from_email}…`} minHeight={130} />
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <Btn variant="primary" sm onClick={replyBusy || !replyText.trim() ? undefined : async () => {
+              setReplyBusy(true); setReplyMsg("");
+              try {
+                const r = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "reply", id: openRow.id, body: replyText.trim(), html: replyHtml }) });
+                const d = await r.json().catch(() => ({}));
+                if (!r.ok) setReplyMsg(d.error || `Couldn't send (${r.status}).`);
+                else {
+                  setReplyMsg("Sent"); setReplyText(""); setReplyHtml(""); setReplying(false);
+                  setRows(rs => (rs || []).map(x => x.id === openRow.id ? { ...x, replied: true } : x));
+                  setOpenRow(o => o ? { ...o, replied: true } : o);
+                }
+              } catch (_) { setReplyMsg("Couldn't reach the server."); }
+              setReplyBusy(false);
+            }}>{replyBusy ? "Sending…" : "Send reply"}</Btn>
+            {replyMsg && <span style={{ fontSize: 12.5, fontWeight: 700, color: replyMsg.startsWith("Sent") ? "#16a34a" : T.warning }}>{replyMsg}</span>}
+          </div>
+          <div style={{ fontSize: 11.5, color: T.textMuted }}>Sends from your Sending Identity (Comms → Settings) and quietly copies your Gmail for the record.</div>
+        </div>
+      )}
+    </div>
+  );
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       {/* Search + Compose — the premium client header */}
@@ -21446,33 +21562,29 @@ function EmailInboxSection({ leads, setLeads }) {
           <div style={{ fontSize: 13, lineHeight: 1.55, maxWidth: 380, margin: "0 auto" }}>Mail forwarded from your work address lands here — AI tags each one as a Lead, Bill, or client message, and leads drop straight into Comms → Leads.</div>
         </div>
       )}
-      <div style={{ border: `1px solid ${T.border}`, borderRadius: 16, overflow: "hidden", background: T.surface }}>
-        {list.map((r, i) => (
-          <div key={r.id} onClick={() => { if (selMode) { toggleSel(r.id); return; } setOpenRow(r); setReplying(false); setReplyText(""); setReplyMsg(""); if (!r.read) markRead([r.id]); }}
-            style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "12px 14px", cursor: "pointer", borderTop: i === 0 ? "none" : `1px solid ${hexA(T.border, 0.6)}`, background: sel[r.id] ? hexA(T.primary, 0.1) : (r.read ? T.surface : hexA(T.primary, 0.035)), position: "relative" }}>
-            {!r.read && <span style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: T.primary }} />}
-            {selMode && <div style={{ alignSelf: "center", flexShrink: 0 }}><Checkbox checked={!!sel[r.id]} onChange={() => toggleSel(r.id)} /></div>}
-            <Avatar name={r.from_name} email={r.from_email} />
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ fontSize: 14, fontWeight: r.read ? 600 : 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{r.from_name || r.from_email}</span>
-                <span style={{ fontSize: 11.5, color: r.read ? T.textMuted : T.primary, fontWeight: r.read ? 500 : 700, flexShrink: 0 }}>{fmtWhen(r.created_at)}</span>
+      {wide ? (
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(320px, 380px) 1fr", gap: 16, alignItems: "start" }}>
+          <div style={{ border: `1px solid ${T.border}`, borderRadius: 16, overflow: "hidden", background: T.surface, maxHeight: "calc(100dvh - 250px)", overflowY: "auto" }}>{listRows}</div>
+          <div style={{ border: `1px solid ${T.border}`, borderRadius: 16, background: T.surface, minHeight: "calc(100dvh - 250px)", maxHeight: "calc(100dvh - 250px)", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+            {openRow ? (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "13px 18px", borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
+                  <span style={{ fontSize: 15, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{openRow.subject || "(no subject)"}</span>
+                  <button onClick={() => setOpenRow(null)} title="Close" style={{ width: 32, height: 32, borderRadius: 9, border: "none", background: "none", color: T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}><Icon name="close" size={16} /></button>
+                </div>
+                <div style={{ padding: "20px 22px", overflowY: "auto", flex: 1 }}>{readerInner}</div>
+              </>
+            ) : (
+              <div style={{ flex: 1, display: "grid", placeItems: "center", padding: 40, textAlign: "center", color: T.textMuted }}>
+                <div><span style={{ display: "inline-flex", color: T.border }}><Icon name="mail" size={40} /></span><div style={{ fontSize: 14.5, fontWeight: 750, marginTop: 12, color: T.text }}>Select an email to read</div><div style={{ fontSize: 12.5, marginTop: 4 }}>Choose a message from the list.</div></div>
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 2 }}>
-                {r.channel === "sms" && <span title="Text message" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="message" size={13} /></span>}
-                <span style={{ fontSize: 13, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontWeight: r.read ? 500 : 800, flex: 1, minWidth: 0 }}>{r.subject || "(no subject)"}</span>
-                {badge(r.kind)}
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 3 }}>
-                <span style={{ fontSize: 12, color: T.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{(r.ai && r.ai.summary) || (r.body_text || "").slice(0, 120)}</span>
-                {inLeads(r.id) && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#16a34a", flexShrink: 0 }}>→ Leads</span>}
-                {r.replied && <span title="Replied" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="reply" size={12} /></span>}
-              </div>
-            </div>
+            )}
           </div>
-        ))}
-      </div>
-      {openRow && (
+        </div>
+      ) : (
+        <div style={{ border: `1px solid ${T.border}`, borderRadius: 16, overflow: "hidden", background: T.surface }}>{listRows}</div>
+      )}
+      {openRow && !wide && (
         <Modal title={openRow.subject || "(no subject)"} onClose={() => setOpenRow(null)} maxWidth={640}>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {/* Sender header — avatar + identity, Gmail-grade */}
@@ -21716,6 +21828,7 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
   useEffect(() => { if (SECTIONS.some(s => s.id === initialSection)) setSection(initialSection); }, [initialSection]); // eslint-disable-line react-hooks/exhaustive-deps
   // If the permitted set changes and the current section is no longer allowed, snap to the first.
   useEffect(() => { if (!SECTIONS.some(s => s.id === section)) setSection(firstId); }, [secKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const vpx = useViewport();   // desktop → left sidebar shell; phone → sleek top section nav
 
   const soon = (label, note) => (
     <div style={{ textAlign: "center", padding: "56px 24px", color: T.textMuted }}>
@@ -21724,43 +21837,82 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
     </div>
   );
 
-  return (
-    <div style={{ maxWidth: 780, margin: "0 auto" }}>
-      <div style={{ padding: "16px 16px 0" }}>
-        <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", marginBottom: single ? 6 : 12 }}>{single && SECTIONS[0] ? SECTIONS[0].label : "Comms"}</div>
-        {!single && (
-          <div style={{ display: "flex", gap: 7, overflowX: "auto", paddingBottom: 12, WebkitOverflowScrolling: "touch" }}>
-            {SECTIONS.map(s => (
-              <button key={s.id} onClick={() => setSection(s.id)} style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 6, padding: "8px 15px", borderRadius: 100, border: "none", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: section === s.id ? T.primary : T.surfaceAlt, color: section === s.id ? "#fff" : T.textMuted }}><Icon name={s.icon} size={15} />{s.label}</button>
-            ))}
-          </div>
+  const content = (
+    <>
+      {section === "messages" && CAN.messages && <div style={{ padding: "0 16px" }}><MessagesScreen clients={clients} currentUser={currentUser} T={T} /></div>}
+      {section === "reminders" && CAN.reminders && <div style={{ padding: "0 16px" }}><RemindersScreen schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} /></div>}
+      {section === "inbox" && CAN.inbox && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={onConvertLead} onLink={onLinkLead} openLeadId={openLeadId} onLeadOpened={onLeadOpened} vp={vp} />}
+      {section === "settings" && CAN.settings && <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 18 }}>
+        {/* THE control room — every number + email the app sends from / alerts you at lives here.
+            Gates preserve the pre-consolidation surfaces: identity + Test Mode + alerts stay on
+            editNotifications; digest/reminders/automations stay on commsSettings; owner sees all. */}
+        {(perms.isAdmin || perms.editNotifications) && <SendingIdentitySettings email={email} setEmail={setEmail} />}
+        {(perms.isAdmin || perms.editNotifications) && <PushSettingsCard />}
+        {(perms.isAdmin || perms.editNotifications) && (
+          <Card><CardHeader title="Test Mode, Your Contacts & Alerts" /><NotificationSettings email={email} setEmail={setEmail} branding={branding} clients={clients} /></Card>
         )}
-      </div>
-      <div style={{ paddingBottom: 90 }}>
-        {section === "messages" && CAN.messages && <div style={{ padding: "0 16px" }}><MessagesScreen clients={clients} currentUser={currentUser} T={T} /></div>}
-        {section === "reminders" && CAN.reminders && <div style={{ padding: "0 16px" }}><RemindersScreen schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} /></div>}
-        {section === "inbox" && CAN.inbox && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={onConvertLead} onLink={onLinkLead} openLeadId={openLeadId} onLeadOpened={onLeadOpened} vp={vp} />}
-        {section === "settings" && CAN.settings && <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 18 }}>
-          {/* THE control room — every number + email the app sends from / alerts you at lives here.
-              Gates preserve the pre-consolidation surfaces: identity + Test Mode + alerts stay on
-              editNotifications; digest/reminders/automations stay on commsSettings; owner sees all. */}
-          {(perms.isAdmin || perms.editNotifications) && <SendingIdentitySettings email={email} setEmail={setEmail} />}
-          {(perms.isAdmin || perms.editNotifications) && <PushSettingsCard />}
-          {(perms.isAdmin || perms.editNotifications) && (
-            <Card><CardHeader title="Test Mode, Your Contacts & Alerts" /><NotificationSettings email={email} setEmail={setEmail} branding={branding} clients={clients} /></Card>
+        {(perms.isAdmin || perms.commsSettings) && <OwnerDigestSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} branding={branding} T={T} />}
+        {(perms.isAdmin || perms.commsSettings) && <ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />}
+        {(perms.isAdmin || perms.commsSettings) && <CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />}
+        {/* Message + email templates now live HERE (moved out of Customize so all comms editing
+            is in one place). EmailSettings = client texts/emails; InviteEmailSettings = staff invite + login emails. */}
+        {(perms.isAdmin || perms.editNotifications) && <Card><CardHeader title="Message & Email Templates" /><EmailSettings email={emailTpl} setEmail={setEmailTpl} branding={brandTpl} setBranding={setBrandTpl} /></Card>}
+        {(perms.isAdmin || perms.editSettings || perms.canInvoice) && <Card><CardHeader title="Staff Invite & Login Emails" /><InviteEmailSettings email={emailTpl} setEmail={setEmailTpl} branding={brandTpl} /></Card>}
+      </div>}
+      {section === "broadcast" && CAN.broadcast && <BroadcastSection clients={clients} invoices={invoices} email={email} branding={branding} T={T} />}
+      {section === "email" && CAN.email && <div style={{ padding: "0 16px" }}><EmailInboxSection leads={leads} setLeads={setLeads} /></div>}
+      {section === "log" && CAN.log && <div style={{ padding: "0 16px" }}><LogsScreen clients={clients} showOwnerRows={!!perms.isAdmin} /></div>}
+    </>
+  );
+
+  // Phone + tablet (incl. portrait iPad) / single-section: big title + sleek underline top-nav, then
+  // content. The left-sidebar shell only kicks in on a genuinely wide desktop so it never stacks with
+  // the app's global sidebar and crushes the content column.
+  if (vpx.width < 1080 || single) {
+    return (
+      <div style={{ maxWidth: 780, margin: "0 auto" }}>
+        <div style={{ padding: "14px 16px 0" }}>
+          <div style={{ fontSize: 26, fontWeight: 840, color: T.text, letterSpacing: "-0.035em", marginBottom: single ? 8 : 10 }}>{single && SECTIONS[0] ? SECTIONS[0].label : "Comms"}</div>
+          {!single && (
+            <div style={{ display: "flex", gap: 20, overflowX: "auto", WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", borderBottom: `1px solid ${T.border}` }}>
+              {SECTIONS.map(s => {
+                const on = section === s.id;
+                return (
+                  <button key={s.id} onClick={() => setSection(s.id)} style={{ flexShrink: 0, position: "relative", display: "flex", alignItems: "center", gap: 7, padding: "10px 2px 12px", background: "none", border: "none", fontSize: 14.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", color: on ? T.text : T.textMuted }}>
+                    <Icon name={s.icon} size={15} />{s.label}
+                    {on && <span style={{ position: "absolute", left: 0, right: 0, bottom: -1, height: 2.5, borderRadius: 3, background: T.primary }} />}
+                  </button>
+                );
+              })}
+            </div>
           )}
-          {(perms.isAdmin || perms.commsSettings) && <OwnerDigestSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} branding={branding} T={T} />}
-          {(perms.isAdmin || perms.commsSettings) && <ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />}
-          {(perms.isAdmin || perms.commsSettings) && <CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />}
-          {/* Message + email templates now live HERE (moved out of Customize so all comms editing
-              is in one place). EmailSettings = client texts/emails; InviteEmailSettings = staff invite + login emails. */}
-          {(perms.isAdmin || perms.editNotifications) && <Card><CardHeader title="Message & Email Templates" /><EmailSettings email={emailTpl} setEmail={setEmailTpl} branding={brandTpl} setBranding={setBrandTpl} /></Card>}
-          {(perms.isAdmin || perms.editSettings || perms.canInvoice) && <Card><CardHeader title="Staff Invite & Login Emails" /><InviteEmailSettings email={emailTpl} setEmail={setEmailTpl} branding={brandTpl} /></Card>}
-        </div>}
-        {section === "broadcast" && CAN.broadcast && <BroadcastSection clients={clients} invoices={invoices} email={email} branding={branding} T={T} />}
-        {section === "email" && CAN.email && <div style={{ padding: "0 16px" }}><EmailInboxSection leads={leads} setLeads={setLeads} /></div>}
-        {section === "log" && CAN.log && <div style={{ padding: "0 16px" }}><LogsScreen clients={clients} showOwnerRows={!!perms.isAdmin} /></div>}
+        </div>
+        <div style={{ paddingBottom: 90, paddingTop: 16 }}>{content}</div>
       </div>
+    );
+  }
+
+  // Desktop: a clean left section-nav (sidebar) + a wide content area — the unified Comms shell.
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "236px 1fr", maxWidth: 1240, margin: "0 auto", minHeight: "calc(100dvh - 130px)" }}>
+      <aside style={{ borderRight: `1px solid ${T.border}`, padding: "18px 14px", display: "flex", flexDirection: "column", gap: 2 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "4px 8px 16px" }}>
+          <div style={{ width: 34, height: 34, borderRadius: 10, background: T.primary, color: "#fff", display: "grid", placeItems: "center", fontWeight: 800, fontSize: 15, flexShrink: 0 }}>{((branding.companyName || "S").trim()[0] || "S").toUpperCase()}</div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 16, fontWeight: 820, color: T.text, letterSpacing: "-0.02em" }}>Comms</div>
+            <div style={{ fontSize: 11, color: T.textMuted, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{branding.companyName || ""}</div>
+          </div>
+        </div>
+        {SECTIONS.map(s => {
+          const on = section === s.id;
+          return (
+            <button key={s.id} onClick={() => setSection(s.id)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 12px", borderRadius: 12, border: "none", background: on ? hexA(T.primary, 0.09) : "transparent", color: on ? T.primary : T.textMuted, fontSize: 14, fontWeight: on ? 750 : 650, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+              <Icon name={s.icon} size={18} />{s.label}
+            </button>
+          );
+        })}
+      </aside>
+      <div style={{ minWidth: 0, padding: "20px 4px 60px" }}>{content}</div>
     </div>
   );
 }
