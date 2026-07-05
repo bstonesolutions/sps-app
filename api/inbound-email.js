@@ -186,7 +186,7 @@ export default async function handler(req, res) {
       from_name: fromName.slice(0, 120), from_email: fromEmail.slice(0, 200),
       subject, body_text: text, body_html: html, message_id: messageId,
       kind, ai: ai || (client ? { summary: `From client ${client.name}`, clientId: String(client.id) } : null),
-      lead_id: "", read: false,
+      lead_id: "", read: false, source_type: "email_forwarded",
     };
     // ignore-duplicates (ON CONFLICT DO NOTHING): a concurrent retry can never reset the
     // owner's read/lead_id flags back to fresh — first write wins, forever.

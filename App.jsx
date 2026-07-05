@@ -21181,6 +21181,9 @@ function EmailInboxSection({ leads, setLeads }) {
     setRows(rs => (rs || []).map(r => ids.includes(r.id) ? { ...r, read } : r));
     setOpenRow(o => (o && ids.includes(o.id) ? { ...o, read } : o));
     try { await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "markRead", ids, read }) }); } catch (_) {}
+    // Mirror the read-state into the real Gmail mailbox (and thus Apple Mail). Best-effort +
+    // fire-and-forget so the UI never waits on IMAP; unmatched rows stay local-only.
+    try { const h = await authHeaders({ "Content-Type": "application/json" }); fetch(`${PROD_URL}/api/gmail-action`, { method: "POST", headers: h, body: JSON.stringify({ action: read ? "markRead" : "markUnread", ids }) }).catch(() => {}); } catch (_) {}
   };
   // Reclassify an email — the owner's override on the AI's call. "lead" goes through
   // addToLeads instead (label + funnel + ack in one tap).

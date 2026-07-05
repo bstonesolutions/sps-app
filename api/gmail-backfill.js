@@ -141,7 +141,7 @@ export default async function handler(req, res) {
           } catch (_) { /* leave as "other" */ }
         }
 
-        const row = { id, from_name: fromName.slice(0, 120), from_email: fromEmail.slice(0, 200), subject, body_text: text, body_html: html, message_id: messageId, kind, ai, lead_id: "", read: true, replied: false, created_at: dateIso };
+        const row = { id, from_name: fromName.slice(0, 120), from_email: fromEmail.slice(0, 200), subject, body_text: text, body_html: html, message_id: messageId, kind, ai, lead_id: "", read: true, replied: false, created_at: dateIso, source_type: "email_imported", gmail_uid: Number(uid) || 0 };
         try {
           const ir = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?on_conflict=id`, {
             method: "POST", headers: { ...sbHeaders(), Prefer: "resolution=ignore-duplicates" },

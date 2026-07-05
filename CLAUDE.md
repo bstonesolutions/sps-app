@@ -153,8 +153,16 @@ CREATE TABLE IF NOT EXISTS public.sps_inbox (
   replied     boolean DEFAULT false,      -- an in-app reply went out (api/inbox action:"reply")
   channel     text NOT NULL DEFAULT 'email', -- 'email' | 'sms' (inbound SMS funnel). Existing installs: ALTER TABLE ... ADD COLUMN IF NOT EXISTS
   from_phone  text NOT NULL DEFAULT '',   -- E.164 sender for channel='sms' rows
+  source_type text NOT NULL DEFAULT 'email',    -- how the row was created: 'email_imported' (Gmail IMAP backfill, carries the ORIGINAL Message-ID), 'email_forwarded' (Resend inbound), 'email' (legacy/unknown), 'sms'. Drives two-way Gmail sync matchability. Existing installs: ALTER TABLE ... ADD COLUMN IF NOT EXISTS
+  gmail_uid   bigint NOT NULL DEFAULT 0,     -- Gmail IMAP UID at import time (hint only — UIDs drift; api/gmail-action re-verifies by Message-ID). Existing installs: ALTER TABLE ... ADD COLUMN IF NOT EXISTS
+  original_message_id text NOT NULL DEFAULT '', -- reserved: the ORIGINAL Message-ID for forwarded rows if the copy's differs (two-way sync fallback). Existing installs: ALTER TABLE ... ADD COLUMN IF NOT EXISTS
   created_at  timestamptz DEFAULT now()
 );
+-- Two-way Gmail sync (api/gmail-action.js): the owner's inbox actions (mark read/unread, delete→Trash)
+-- are mirrored into the REAL Gmail mailbox over IMAP (reusing GMAIL_IMAP_USER/PASSWORD). Each row is
+-- matched to the real message by its unique RFC Message-ID (Gmail rfc822msgid: search) and acted on
+-- ONLY when exactly one message matches — otherwise it stays app-local (never touches the wrong mail).
+-- Delete is a MOVE TO TRASH, never a permanent expunge. Owner-only (requireOwner).
 CREATE INDEX IF NOT EXISTS sps_inbox_kind_idx ON public.sps_inbox(kind, lead_id);
 ALTER TABLE public.sps_inbox ENABLE ROW LEVEL SECURITY;
 -- No policies on purpose: service-role only.
