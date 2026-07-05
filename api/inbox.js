@@ -13,11 +13,15 @@
 
 //   POST { action: "reply", id, body }            ← send a real reply via Resend, FROM the
 //        configured Sending Identity (Comms → Settings), threaded (In-Reply-To) onto the
-//        original, BCC'd to the owner so Gmail keeps a record (inbound-email.js loop-guards
-//        that copy so it never re-ingests).
+//        original, with a copy dropped into the owner's real Gmail "Sent" over IMAP
+//        (api/_gmail.js appendToGmailSent — best-effort; replaces the old inbox BCC).
 
 import { requireOwner } from "./plaid/_plaid.js";
 import { resolveFrom } from "./_sender.js";
+import { appendToGmailSent } from "./_gmail.js";
+
+// Sending also drops a copy into Gmail "Sent" over IMAP — give the function room for that round-trip.
+export const config = { maxDuration: 30 };
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
 const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -137,30 +141,32 @@ export default async function handler(req, res) {
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(orig.from_email).trim())) {
         return res.status(400).json({ error: "This is a text message — reply with “Text back,” not email." });
       }
-      // FROM = the configured Sending Identity (Comms → Settings) on the verified domain —
-      // same canon as every other send. BCC the owner so Gmail keeps the record (the inbound
-      // loop guard skips that copy when Gmail forwards it back).
+      // FROM = the configured Sending Identity (Comms → Settings) on the verified domain — same canon
+      // as every other send. The sent copy lands in the owner's real Gmail "Sent" over IMAP below
+      // (no BCC — that used to drop a copy into the Inbox instead, which just cluttered it).
       const email = await sbGet("sps_email", {});
       const from = resolveFrom({ fromName: email.fromName, fromAddress: email.fromAddress }, process.env.RESEND_FROM || "Stone Property Solutions <noreply@stonepropertysolutions.com>");
-      const bcc = [email.notify && email.notify.ownerEmail, email.ownerEmail].map(e => String(e || "").trim()).find(e => /.+@.+\..+/.test(e));
       const sig = String(email.signature || "").trim();
       const bodyOut = replyBody + (sig ? `\n\n${sig}` : "");
       const htmlIn = b.html ? stripHtml(b.html) : "";
       const subject = /^re:/i.test(orig.subject || "") ? orig.subject : `Re: ${orig.subject || ""}`.trim();
       const atts = cleanAttachments(b.attachments);
+      const replyHtmlOut = emailHtml(htmlIn, bodyOut, sig);
       const sr = await fetch("https://api.resend.com/emails", {
         method: "POST", headers: { Authorization: `Bearer ${RESEND_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           from, to: [orig.from_email], subject,
           text: bodyOut,
-          html: emailHtml(htmlIn, bodyOut, sig),
-          ...(bcc ? { bcc: [bcc] } : {}),
+          html: replyHtmlOut,
           ...(atts.length ? { attachments: atts } : {}),
           ...(orig.message_id ? { headers: { "In-Reply-To": orig.message_id, References: orig.message_id } } : {}),
         }),
       });
       const sd = await sr.json().catch(() => ({}));
       if (!sr.ok) return res.status(502).json({ error: sd?.message || `Resend ${sr.status}` });
+      // Drop the sent copy into the owner's real Gmail "Sent" (and Apple Mail), threaded to the
+      // original. Best-effort — the reply already went out; never fail the request on this.
+      try { await appendToGmailSent({ from, to: orig.from_email, subject, html: replyHtmlOut, text: bodyOut, inReplyTo: orig.message_id || undefined, references: orig.message_id || undefined }); } catch (_) {}
       await patch(`id=eq.${encodeURIComponent(String(b.id))}`, { replied: true }).catch(() => {});
       // Comms → Log entry (outbound record, like any other send). Legacy-shape fallback for
       // installs that haven't added the origin/recipient columns yet.
@@ -177,8 +183,8 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, id: sd.id || null });
     }
     if (b.action === "send") {
-      // Compose a brand-new email from the app (Comms → Email → Compose). Same send canon as
-      // reply: FROM the Sending Identity, signature appended, BCC the owner for the record.
+      // Compose a brand-new email from the app (Comms → Email → Compose). Same send canon as reply:
+      // FROM the Sending Identity, signature appended, and the sent copy dropped into Gmail "Sent".
       if (!RESEND_KEY) return res.status(501).json({ error: "Email sending isn't configured (RESEND_API_KEY).", missingEnv: true });
       const to = String(b.to || "").trim();
       const subject = String(b.subject || "").trim().slice(0, 300);
@@ -187,23 +193,24 @@ export default async function handler(req, res) {
       if (!bodyIn) return res.status(400).json({ error: "Write a message first." });
       const email = await sbGet("sps_email", {});
       const from = resolveFrom({ fromName: email.fromName, fromAddress: email.fromAddress }, process.env.RESEND_FROM || "Stone Property Solutions <noreply@stonepropertysolutions.com>");
-      const bcc = [email.notify && email.notify.ownerEmail, email.ownerEmail].map(e => String(e || "").trim()).find(e => /.+@.+\..+/.test(e));
       const sig = String(email.signature || "").trim();
       const bodyOut = bodyIn + (sig ? `\n\n${sig}` : "");
       const htmlIn = b.html ? stripHtml(b.html) : "";
       const atts = cleanAttachments(b.attachments);
+      const sendHtmlOut = emailHtml(htmlIn, bodyOut, sig);
       const sr = await fetch("https://api.resend.com/emails", {
         method: "POST", headers: { Authorization: `Bearer ${RESEND_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           from, to: [to], subject: subject || "(no subject)",
           text: bodyOut,
-          html: emailHtml(htmlIn, bodyOut, sig),
-          ...(bcc ? { bcc: [bcc] } : {}),
+          html: sendHtmlOut,
           ...(atts.length ? { attachments: atts } : {}),
         }),
       });
       const sd = await sr.json().catch(() => ({}));
       if (!sr.ok) return res.status(502).json({ error: sd?.message || `Resend ${sr.status}` });
+      // Land the sent copy in the owner's real Gmail "Sent" (and Apple Mail). Best-effort.
+      try { await appendToGmailSent({ from, to, subject: subject || "(no subject)", html: sendHtmlOut, text: bodyOut }); } catch (_) {}
       try {
         const base = { client_id: "", type: "Email sent", channel: "email", body: `${subject || "(no subject)"} — ${bodyIn.slice(0, 600)}`, ok: true };
         const lr = await fetch(`${SUPABASE_URL}/rest/v1/sps_comms_log`, { method: "POST", headers: sbHeaders(), body: JSON.stringify({ ...base, origin: "work-email compose (Comms → Email)", recipient: to }) });
