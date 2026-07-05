@@ -22017,7 +22017,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
 function LogsScreen({ clients, showOwnerRows = false }) {
   const { T } = useApp();
   const [rows, setRows] = useState(null);
-  const [filter, setFilter] = useState("all"); // all | sms | email | failed
+  const [filter, setFilter] = useState("all"); // all | sms | email | auto | alerts | failed
   const [q, setQ] = useState("");
   const [openId, setOpenId] = useState(null);
   const load = async () => {
@@ -22032,12 +22032,19 @@ function LogsScreen({ clients, showOwnerRows = false }) {
     const c = (clients || []).find(x => String(x.id) === String(cid));
     return c ? c.name : `Client ${cid}`;
   };
+  // Bucket a row: owner-directed (alerts/reports/digests) · automated (reminders, on-my-way…) · manual.
+  const category = (r) => {
+    const o = String(r.origin || "").toLowerCase();
+    if (r.client_id == null || r.client_id === "") return "alerts";
+    if (/remind|on-my-way|on my way|geofence|arriv|nudge|payment|win-?back|seasonal|post-visit|recap|summary|automation|cron|scheduled/.test(o)) return "auto";
+    return "manual";
+  };
   const list = (rows || []).filter(r => {
-    // Owner-directed rows (reports, money plan, lead alerts, owner alerts) are the owner's
-    // business — staff with only the Log permission see client comms, not those.
     if (!showOwnerRows && (r.client_id == null || r.client_id === "")) return false;
     if (filter === "sms" && r.channel !== "sms") return false;
     if (filter === "email" && r.channel !== "email") return false;
+    if (filter === "auto" && category(r) !== "auto") return false;
+    if (filter === "alerts" && category(r) !== "alerts") return false;
     if (filter === "failed" && r.ok !== false) return false;
     if (q) {
       const hay = `${nameOf(r.client_id)} ${r.recipient || ""} ${r.origin || ""} ${r.type || ""} ${r.body || ""}`.toLowerCase();
@@ -22045,61 +22052,104 @@ function LogsScreen({ clients, showOwnerRows = false }) {
     }
     return true;
   });
-  const fmtWhen = (iso) => {
+  // Plain-English "what is this row + why did it go out" (from the technical type/origin).
+  const whoOf = (r) => nameOf(r.client_id) || r.recipient || "—";
+  const titleOf = (r) => /reply/i.test(r.type || "") ? `Reply to ${whoOf(r)}` : `${r.channel === "email" ? "Email" : "Text"} to ${whoOf(r)}`;
+  const subOf = (r) => {
+    const o = String(r.origin || "").toLowerCase();
+    if (/work-email compose/.test(o)) return "You wrote this in Email";
+    if (/work-email reply/.test(o)) return "You replied in Email";
+    if (/on-my-way|on my way/.test(o)) return "Auto-sent when the tech headed out";
+    if (/geofence|arriv/.test(o)) return "Auto-sent on arrival";
+    if (/remind/.test(o)) return "Automatic appointment reminder";
+    if (/nudge|payment/.test(o)) return "Payment reminder";
+    if (/win-?back/.test(o)) return "Win-back check-in";
+    if (/seasonal/.test(o)) return "Seasonal outreach";
+    if (/post-visit|recap|summary/.test(o)) return "Post-visit recap";
+    if (/invoice/.test(o)) return "Invoice sent";
+    if (/broadcast/.test(o)) return "Broadcast to clients";
+    if (/lead/.test(o)) return "New-lead alert";
+    if (/digest|report/.test(o)) return "Your report";
+    if (/alert/.test(o)) return "Alert to you";
+    if (/test mode/.test(o)) return "Held by Test Mode (not actually sent)";
+    return (r.origin && r.origin !== "—") ? r.origin : "Sent from the app";
+  };
+  const timeOnly = (iso) => { try { return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }); } catch (_) { return ""; } };
+  const dayKey = (iso) => { try { const d = new Date(iso); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; } catch (_) { return "?"; } };
+  const dayLabel = (iso) => {
     try {
-      const d = new Date(iso);
-      return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " · " + d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+      const d = new Date(iso), now = new Date();
+      const s = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+      const diff = Math.round((s(now) - s(d)) / 86400000);
+      if (diff <= 0) return "Today";
+      if (diff === 1) return "Yesterday";
+      if (diff < 7) return d.toLocaleDateString("en-US", { weekday: "long" });
+      return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
     } catch (_) { return ""; }
   };
+  // Group the (newest-first) list into day buckets, order preserved.
+  const groups = [];
+  let ck = null;
+  list.forEach(r => { const k = dayKey(r.created_at); if (k !== ck) { groups.push({ key: k, label: dayLabel(r.created_at), rows: [] }); ck = k; } groups[groups.length - 1].rows.push(r); });
+  const chColor = (r) => r.ok === false ? "#dc2626" : (r.channel === "email" ? T.primary : "#16a34a");
   const chip = (id, label) => (
-    <button key={id} onClick={() => setFilter(id)} style={{ padding: "7px 13px", borderRadius: 100, border: `1.5px solid ${filter === id ? T.primary : T.border}`, background: filter === id ? hexA(T.primary, 0.08) : T.surface, color: filter === id ? T.primary : T.textMuted, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+    <button key={id} onClick={() => setFilter(id)} style={{ padding: "7px 13px", borderRadius: 100, border: `1.5px solid ${filter === id ? T.primary : T.border}`, background: filter === id ? hexA(T.primary, 0.08) : T.surface, color: filter === id ? T.primary : T.textMuted, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, whiteSpace: "nowrap" }}>{label}</button>
   );
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        {chip("all", "All")}{chip("sms", "Texts")}{chip("email", "Emails")}{chip("failed", "Failed")}
-        <div style={{ flex: 1 }} />
+      {/* Prominent search — find a past send by person or content */}
+      <div style={{ display: "flex", alignItems: "center", gap: 9, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: "12px 14px", boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 6px 18px rgba(0,0,0,0.05)", minWidth: 0 }}>
+        <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={T.textMuted} strokeWidth={2} style={{ flexShrink: 0 }}><circle cx="11" cy="11" r="7" /><path d="m21 21-4-4" /></svg>
+        <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search sent messages by person or content" style={{ flex: 1, border: "none", background: "none", outline: "none", fontFamily: "inherit", fontSize: 14, color: T.text, minWidth: 0 }} />
+        {q && <button onClick={() => setQ("")} title="Clear" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", display: "inline-flex", padding: 0, flexShrink: 0 }}><Icon name="close" size={16} /></button>}
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none" }}>
+        {chip("all", "All")}{chip("sms", "Texts")}{chip("email", "Emails")}{chip("auto", "Automated")}{showOwnerRows && chip("alerts", "Alerts to you")}{chip("failed", "Failed")}
+        <div style={{ flex: 1, minWidth: 8 }} />
         <Btn variant="ghost" sm onClick={load}>Refresh</Btn>
       </div>
-      <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search by client, recipient, origin, or content…"
-        style={{ width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" }} />
-      {rows === null && <div style={{ textAlign: "center", padding: 40, color: T.textMuted, fontSize: 13 }}>Loading the log…</div>}
+      {rows === null && <div style={{ textAlign: "center", padding: 40, color: T.textMuted, fontSize: 13 }}>Loading your activity…</div>}
       {rows !== null && list.length === 0 && (
         <div style={{ textAlign: "center", padding: "48px 24px", color: T.textMuted }}>
-          <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginBottom: 6 }}>Nothing here yet</div>
-          <div style={{ fontSize: 13, lineHeight: 1.55, maxWidth: 380, margin: "0 auto" }}>Every text and email the app sends — manual, automated, reports, lead alerts — will appear here with who or what triggered it.</div>
+          <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginBottom: 6 }}>{(q || filter !== "all") ? "Nothing matches" : "Nothing here yet"}</div>
+          <div style={{ fontSize: 13, lineHeight: 1.55, maxWidth: 380, margin: "0 auto" }}>{(q || filter !== "all") ? "Try a different search or filter." : "Every text and email the app sends — yours and the automatic ones — shows up here as a daily timeline."}</div>
         </div>
       )}
-      {list.map(r => {
-        const who = nameOf(r.client_id) || r.recipient || "—";
-        const open = openId === r.id;
-        return (
-          <div key={r.id} onClick={() => setOpenId(open ? null : r.id)} style={{ border: `1px solid ${T.border}`, borderRadius: 14, background: T.surface, padding: "12px 14px", cursor: "pointer" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{ width: 32, height: 32, borderRadius: 9, background: hexA(r.ok === false ? "#dc2626" : T.primary, 0.1), color: r.ok === false ? "#dc2626" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                <Icon name={r.channel === "email" ? "mail" : "message"} size={15} />
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {r.type || "Text"} → {who}
-                  {r.ok === false && <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 800, color: "#dc2626", background: hexA("#dc2626", 0.1), padding: "2px 7px", borderRadius: 100 }}>FAILED</span>}
-                </div>
-                <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {r.origin || "—"}{r.recipient && nameOf(r.client_id) ? ` · to ${r.recipient}` : ""}
-                </div>
-              </div>
-              <div style={{ fontSize: 11.5, color: T.textMuted, flexShrink: 0 }}>{fmtWhen(r.created_at)}</div>
-            </div>
-            {open && (
-              <div style={{ marginTop: 10, padding: "10px 12px", background: T.surfaceAlt, borderRadius: 10, fontSize: 13, color: T.text, lineHeight: 1.55, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{r.body || "(no content recorded)"}</div>
-            )}
+      {groups.map(g => (
+        <div key={g.key} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 2px 0" }}>
+            <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: "0.02em", color: T.text }}>{g.label}</span>
+            <span style={{ fontSize: 11, fontWeight: 700, color: T.textMuted }}>{g.rows.length}</span>
+            <div style={{ flex: 1, height: 1, background: hexA(T.border, 0.7) }} />
           </div>
-        );
-      })}
-      {rows !== null && rows.length > 0 && (
-        <div style={{ fontSize: 11.5, color: T.textMuted, textAlign: "center", padding: "4px 0 12px" }}>
-          Showing the last {rows.length} sends. Entries from before today may not carry an origin — everything from now on does.
+          {g.rows.map(r => {
+            const open = openId === r.id;
+            return (
+              <div key={r.id} onClick={() => setOpenId(open ? null : r.id)} style={{ display: "flex", gap: 12, padding: "12px 14px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.04)", cursor: "pointer" }}>
+                <div style={{ width: 38, height: 38, borderRadius: 11, background: hexA(chColor(r), 0.12), color: chColor(r), display: "grid", placeItems: "center", flexShrink: 0 }}>
+                  <Icon name={r.channel === "email" ? "mail" : "message"} size={16} />
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 14, fontWeight: 750, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{titleOf(r)}</span>
+                    {r.ok === false && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#dc2626", background: hexA("#dc2626", 0.1), padding: "2px 7px", borderRadius: 100, flexShrink: 0 }}>FAILED</span>}
+                    <span style={{ fontSize: 11, color: T.textMuted, fontWeight: 600, flexShrink: 0 }}>{timeOnly(r.created_at)}</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{subOf(r)}</div>
+                  {open && (
+                    <div style={{ marginTop: 10, padding: "10px 12px", background: T.surfaceAlt, borderRadius: 10, fontSize: 13, color: T.text, lineHeight: 1.55, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                      {r.body || "(no content recorded)"}
+                      {(r.recipient || r.origin) && <div style={{ marginTop: 8, fontSize: 11, color: T.textMuted }}>{[r.recipient && `To ${r.recipient}`, r.origin && `via ${r.origin}`].filter(Boolean).join(" · ")}</div>}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
+      ))}
+      {rows !== null && rows.length > 0 && (
+        <div style={{ fontSize: 11.5, color: T.textMuted, textAlign: "center", padding: "4px 0 12px" }}>Showing the last {rows.length} sends.</div>
       )}
     </div>
   );
