@@ -21395,10 +21395,10 @@ function EmailInboxSection({ leads, setLeads }) {
           <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 4 }}>
             {r.channel === "sms" && <span title="Text message" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="message" size={13} /></span>}
             <span style={{ fontSize: 13.5, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontWeight: r.read ? 550 : 750, flex: 1, minWidth: 0 }}>{r.subject || "(no subject)"}</span>
-            {badge(r.kind)}
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 5 }}>
-            <span style={{ fontSize: 12.5, color: T.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{(r.ai && r.ai.summary) || (r.body_text || "").slice(0, 120)}</span>
+          <div style={{ fontSize: 12.5, color: T.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginTop: 4 }}>{(r.ai && r.ai.summary) || (r.body_text || "").slice(0, 120)}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 9 }}>
+            {badge(r.kind)}
             {inLeads(r.id) && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#16a34a", flexShrink: 0 }}>→ Leads</span>}
             {r.replied && <span title="Replied" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="reply" size={12} /></span>}
           </div>
@@ -21485,37 +21485,53 @@ function EmailInboxSection({ leads, setLeads }) {
   );
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      {/* Search + Compose — the premium client header */}
-      <div style={{ display: "flex", gap: 9, alignItems: "center" }}>
-        <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "11px 13px", minWidth: 0 }}>
-          <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke={T.textMuted} strokeWidth={2} style={{ flexShrink: 0 }}><circle cx="11" cy="11" r="7" /><path d="m21 21-4-4" /></svg>
-          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search mail, people, tags"
-            style={{ flex: 1, border: "none", background: "none", outline: "none", fontFamily: "inherit", fontSize: 13.5, color: T.text, minWidth: 0 }} />
-          {q && <button onClick={() => setQ("")} title="Clear" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", display: "inline-flex", padding: 0, flexShrink: 0 }}><Icon name="close" size={15} /></button>}
-        </div>
-        <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }} style={{ display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0 }}><Icon name="edit" size={14} />Compose</Btn>
-      </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <span style={{ fontSize: 18, fontWeight: 820, letterSpacing: "-0.02em", color: T.text }}>Inbox</span>
-        {unread > 0 && <span style={{ fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "3px 10px" }}>{unread} unread</span>}
-        <div style={{ flex: 1 }} />
-        {vp.isDesktop ? (
-          <>
+      {wide ? (
+        <>
+          {/* Desktop: search + compose, title + text actions, pill filters */}
+          <div style={{ display: "flex", gap: 9, alignItems: "center" }}>
+            <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "11px 13px", minWidth: 0 }}>
+              <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke={T.textMuted} strokeWidth={2} style={{ flexShrink: 0 }}><circle cx="11" cy="11" r="7" /><path d="m21 21-4-4" /></svg>
+              <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search mail, people, tags" style={{ flex: 1, border: "none", background: "none", outline: "none", fontFamily: "inherit", fontSize: 13.5, color: T.text, minWidth: 0 }} />
+              {q && <button onClick={() => setQ("")} title="Clear" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", display: "inline-flex", padding: 0, flexShrink: 0 }}><Icon name="close" size={15} /></button>}
+            </div>
+            <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }} style={{ display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0 }}><Icon name="edit" size={14} />Compose</Btn>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 18, fontWeight: 820, letterSpacing: "-0.02em", color: T.text }}>Inbox</span>
+            {unread > 0 && <span style={{ fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "3px 10px" }}>{unread} unread</span>}
+            <div style={{ flex: 1 }} />
             <Btn variant="ghost" sm onClick={importState.running ? undefined : () => setImportOpen(o => !o)}>{importState.running ? "Importing…" : "Import"}</Btn>
             <Btn variant="ghost" sm onClick={refreshing ? undefined : load}>{refreshing ? "Refreshing…" : "Refresh"}</Btn>
             {list.length > 0 && <Btn variant={selMode ? "primary" : "ghost"} sm onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }}>{selMode ? "Done" : "Select"}</Btn>}
-          </>
-        ) : (
-          <div style={{ display: "flex", gap: 7 }}>
-            {iconBtn("download", importState.running ? "Importing…" : "Import Gmail", importState.running ? undefined : () => setImportOpen(o => !o), importOpen)}
-            {iconBtn("refresh", refreshing ? "Refreshing…" : "Refresh", refreshing ? undefined : load, false)}
-            {list.length > 0 && iconBtn("check", selMode ? "Done" : "Select", () => { if (selMode) exitSelect(); else setSelMode(true); }, selMode)}
           </div>
-        )}
-      </div>
-      <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none" }}>
-        {chip("all", "All")}{chip("unread", `Unread${unread ? ` · ${unread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
-      </div>
+          <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none" }}>
+            {chip("all", "All")}{chip("unread", `Unread${unread ? ` · ${unread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
+          </div>
+        </>
+      ) : (
+        <>
+          {/* Mobile — stripped & airy (matches the mockup): big title + compose icon, one search, underline filters */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
+            <span style={{ fontSize: 27, fontWeight: 840, letterSpacing: "-0.035em", color: T.text }}>Inbox</span>
+            {unread > 0 && <span style={{ fontSize: 12, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "3px 10px" }}>{unread}</span>}
+            <div style={{ flex: 1 }} />
+            <button type="button" onClick={refreshing ? undefined : load} title="Refresh" style={{ width: 40, height: 40, borderRadius: 12, border: "none", background: "none", color: T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}><Icon name="refresh" size={18} /></button>
+            {list.length > 0 && <button type="button" onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }} title={selMode ? "Done" : "Select"} style={{ width: 40, height: 40, borderRadius: 12, border: "none", background: selMode ? hexA(T.primary, 0.1) : "none", color: selMode ? T.primary : T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}><Icon name="check" size={18} /></button>}
+            <button type="button" onClick={() => { setComposeMsg(""); setComposeOpen(true); }} title="Compose" style={{ width: 44, height: 44, borderRadius: 14, border: "none", background: T.primary, color: "#fff", display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0, boxShadow: `0 6px 16px ${hexA(T.primary, 0.32)}` }}><Icon name="edit" size={19} /></button>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 9, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: "13px 15px", boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 6px 18px rgba(0,0,0,0.05)", minWidth: 0 }}>
+            <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={T.textMuted} strokeWidth={2} style={{ flexShrink: 0 }}><circle cx="11" cy="11" r="7" /><path d="m21 21-4-4" /></svg>
+            <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search mail, people, tags" style={{ flex: 1, border: "none", background: "none", outline: "none", fontFamily: "inherit", fontSize: 14, color: T.text, minWidth: 0 }} />
+            {q && <button onClick={() => setQ("")} title="Clear" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", display: "inline-flex", padding: 0, flexShrink: 0 }}><Icon name="close" size={16} /></button>}
+          </div>
+          <div style={{ display: "flex", gap: 22, overflowX: "auto", WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", borderBottom: `1px solid ${T.border}` }}>
+            {[["all", "All"], ["unread", `Unread${unread ? ` · ${unread}` : ""}`], ["lead", "Leads"], ["bill", "Bills"], ["client", "Clients"], ["other", "Other"]].map(([id, label]) => {
+              const on = filter === id;
+              return <button key={id} type="button" onClick={() => setFilter(id)} style={{ flexShrink: 0, position: "relative", background: "none", border: "none", padding: "8px 1px 11px", fontSize: 14.5, fontWeight: 700, color: on ? T.text : T.textMuted, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>{label}{on && <span style={{ position: "absolute", left: 1, right: 1, bottom: -1, height: 2.5, borderRadius: 3, background: T.primary }} />}</button>;
+            })}
+          </div>
+        </>
+      )}
       {selMode && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "8px 12px" }}>
           <button type="button" onClick={toggleSelectAll} style={{ background: "none", border: "none", color: T.primary, fontWeight: 800, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit", padding: 0 }}>{allVisibleSelected ? "Clear" : "Select all"}</button>
@@ -21872,7 +21888,7 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
     return (
       <div style={{ maxWidth: 780, margin: "0 auto" }}>
         <div style={{ padding: "14px 16px 0" }}>
-          <div style={{ fontSize: 26, fontWeight: 840, color: T.text, letterSpacing: "-0.035em", marginBottom: single ? 8 : 10 }}>{single && SECTIONS[0] ? SECTIONS[0].label : "Comms"}</div>
+          {single && SECTIONS[0] && <div style={{ fontSize: 26, fontWeight: 840, color: T.text, letterSpacing: "-0.035em", marginBottom: 8 }}>{SECTIONS[0].label}</div>}
           {!single && (
             <div style={{ display: "flex", gap: 20, overflowX: "auto", WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", borderBottom: `1px solid ${T.border}` }}>
               {SECTIONS.map(s => {
