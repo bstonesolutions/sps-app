@@ -19799,6 +19799,8 @@ function Icon({ name, size = 22, filled = false }) {
     close:    <path d="M18 6 6 18M6 6l12 12" />,
     back:     <path d="M19 12H5M12 19l-7-7 7-7" />,
     forward:  <path d="M5 12h14M12 5l7 7-7 7" />,
+    reply:    <><path d="M9 14 4 9l5-5" /><path d="M4 9h11a5 5 0 0 1 5 5v3" /></>,
+    sparkle:  <path d="M12 2l2.1 5.6a2 2 0 0 0 1.3 1.3L21 11l-5.6 2.1a2 2 0 0 0-1.3 1.3L12 20l-2.1-5.6a2 2 0 0 0-1.3-1.3L3 11l5.6-2.1a2 2 0 0 0 1.3-1.3L12 2z" />,
     // Content
     download: <><path d="M12 4v11M8 11l4 4 4-4" /><path d="M5 20h14" /></>,
     invoice:  <><rect x="5" y="3" width="14" height="18" rx="2" /><path d="M9 8h6M9 12h6M9 16h3.5" /></>,
@@ -21207,6 +21209,7 @@ function EmailInboxSection({ leads, setLeads }) {
   const [selMode, setSelMode] = useState(false);   // bulk-select mode in the inbox list
   const [sel, setSel] = useState({});              // { [emailId]: true }
   const [busyBulk, setBusyBulk] = useState(false); // a bulk action is in flight
+  const [gmailNote, setGmailNote] = useState("");  // honest note when a delete couldn't reach Gmail
   const [composeOpen, setComposeOpen] = useState(false);
   const [compose, setCompose] = useState({ to: "", subject: "" });
   const [composeHtml, setComposeHtml] = useState("");   // rich body (HTML) from the editor
@@ -21308,13 +21311,20 @@ function EmailInboxSection({ leads, setLeads }) {
     if (ask && !confirm(`Delete ${ids.length} email${ids.length === 1 ? "" : "s"}? Matched messages move to your Gmail Trash (recoverable there for ~30 days).`)) return;
     setRows(rs => (rs || []).filter(r => !ids.includes(r.id)));   // optimistic
     setOpenRow(o => (o && ids.includes(o.id) ? null : o));
-    setBusyBulk(true);
+    setBusyBulk(true); setGmailNote("");
     try {
       const h = await authHeaders({ "Content-Type": "application/json" });
-      // Move the real Gmail message to Trash FIRST (needs the sps_inbox rows to resolve Message-IDs),
-      // then remove the app's copy. Trashing is best-effort — unmatched mail just leaves the app.
-      await fetch(`${PROD_URL}/api/gmail-action`, { method: "POST", headers: h, body: JSON.stringify({ action: "trash", ids }) }).catch(() => {});
+      // Move the real Gmail message to Trash FIRST (needs the sps_inbox rows to resolve the match),
+      // then remove the app's copy. Read the result so we can be honest about what reached Gmail.
+      let trashRes = null;
+      try { const tr = await fetch(`${PROD_URL}/api/gmail-action`, { method: "POST", headers: h, body: JSON.stringify({ action: "trash", ids }) }); trashRes = await tr.json().catch(() => null); } catch (_) {}
       await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: h, body: JSON.stringify({ action: "delete", ids }) });
+      const movedN = (trashRes && Array.isArray(trashRes.updated)) ? trashRes.updated.length : 0;
+      const missN = ids.length - movedN;
+      if (missN > 0) {
+        setGmailNote(`${movedN ? `${movedN} moved to Gmail Trash · ` : ""}${missN} removed from the app only — ${missN === 1 ? "it wasn't" : "they weren't"} matched in Gmail (can happen with forwarded mail).`);
+        setTimeout(() => setGmailNote(""), 9000);
+      }
     } catch (_) {}
     setBusyBulk(false); exitSelect();
   };
@@ -21326,7 +21336,7 @@ function EmailInboxSection({ leads, setLeads }) {
       const r = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "send", to: compose.to.trim(), subject: compose.subject.trim(), body: composeText.trim(), html: composeHtml }) });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) setComposeMsg(d.error || `Couldn't send (${r.status}).`);
-      else { setComposeMsg("Sent ✓"); setTimeout(() => { setComposeOpen(false); setCompose({ to: "", subject: "" }); setComposeHtml(""); setComposeText(""); setComposeMsg(""); }, 1000); }
+      else { setComposeMsg("Sent"); setTimeout(() => { setComposeOpen(false); setCompose({ to: "", subject: "" }); setComposeHtml(""); setComposeText(""); setComposeMsg(""); }, 1000); }
     } catch (_) { setComposeMsg("Couldn't reach the server."); }
     setComposeBusy(false);
   };
@@ -21334,7 +21344,15 @@ function EmailInboxSection({ leads, setLeads }) {
     try { const d = new Date(iso); return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " · " + d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }); } catch (_) { return ""; }
   };
   const chip = (id, label) => (
-    <button key={id} onClick={() => setFilter(id)} style={{ padding: "7px 13px", borderRadius: 100, border: `1.5px solid ${filter === id ? T.primary : T.border}`, background: filter === id ? hexA(T.primary, 0.08) : T.surface, color: filter === id ? T.primary : T.textMuted, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+    <button key={id} onClick={() => setFilter(id)} style={{ padding: "7px 14px", borderRadius: 100, border: `1.5px solid ${filter === id ? T.primary : T.border}`, background: filter === id ? hexA(T.primary, 0.08) : T.surface, color: filter === id ? T.primary : T.textMuted, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, whiteSpace: "nowrap" }}>{label}</button>
+  );
+  // Compact icon button for secondary actions (Import / Refresh / Select) — used on phones so the
+  // header doesn't stack three text buttons and wrap. Matches the app's Icon style.
+  const iconBtn = (icon, label, onClick, active) => (
+    <button type="button" title={label} onClick={onClick}
+      style={{ width: 38, height: 38, borderRadius: 11, border: `1px solid ${active ? T.primary : T.border}`, background: active ? hexA(T.primary, 0.1) : T.surface, color: active ? T.primary : T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0, fontFamily: "inherit" }}>
+      <Icon name={icon} size={16} />
+    </button>
   );
   const badge = (kind) => {
     const k = KIND[kind] || KIND.other;
@@ -21353,23 +21371,33 @@ function EmailInboxSection({ leads, setLeads }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       {/* Search + Compose — the premium client header */}
       <div style={{ display: "flex", gap: 9, alignItems: "center" }}>
-        <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "9px 12px", minWidth: 0 }}>
+        <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "11px 13px", minWidth: 0 }}>
           <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke={T.textMuted} strokeWidth={2} style={{ flexShrink: 0 }}><circle cx="11" cy="11" r="7" /><path d="m21 21-4-4" /></svg>
           <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search mail, people, tags"
             style={{ flex: 1, border: "none", background: "none", outline: "none", fontFamily: "inherit", fontSize: 13.5, color: T.text, minWidth: 0 }} />
-          {q && <button onClick={() => setQ("")} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", fontSize: 15, lineHeight: 1, padding: 0 }}>✕</button>}
+          {q && <button onClick={() => setQ("")} title="Clear" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", display: "inline-flex", padding: 0, flexShrink: 0 }}><Icon name="close" size={15} /></button>}
         </div>
-        <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }}>✏️ Compose</Btn>
+        <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }} style={{ display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0 }}><Icon name="edit" size={14} />Compose</Btn>
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 17, fontWeight: 820, letterSpacing: "-0.02em", color: T.text }}>Inbox</span>
-        {unread > 0 && <span style={{ fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "2px 9px" }}>{unread} unread</span>}
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ fontSize: 18, fontWeight: 820, letterSpacing: "-0.02em", color: T.text }}>Inbox</span>
+        {unread > 0 && <span style={{ fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "3px 10px" }}>{unread} unread</span>}
         <div style={{ flex: 1 }} />
-        <Btn variant="ghost" sm onClick={importState.running ? undefined : () => setImportOpen(o => !o)}>{importState.running ? "Importing…" : "Import"}</Btn>
-        <Btn variant="ghost" sm onClick={refreshing ? undefined : load}>{refreshing ? "Refreshing…" : "Refresh"}</Btn>
-        {list.length > 0 && <Btn variant={selMode ? "primary" : "ghost"} sm onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }}>{selMode ? "Done" : "Select"}</Btn>}
+        {vp.isDesktop ? (
+          <>
+            <Btn variant="ghost" sm onClick={importState.running ? undefined : () => setImportOpen(o => !o)}>{importState.running ? "Importing…" : "Import"}</Btn>
+            <Btn variant="ghost" sm onClick={refreshing ? undefined : load}>{refreshing ? "Refreshing…" : "Refresh"}</Btn>
+            {list.length > 0 && <Btn variant={selMode ? "primary" : "ghost"} sm onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }}>{selMode ? "Done" : "Select"}</Btn>}
+          </>
+        ) : (
+          <div style={{ display: "flex", gap: 7 }}>
+            {iconBtn("download", importState.running ? "Importing…" : "Import Gmail", importState.running ? undefined : () => setImportOpen(o => !o), importOpen)}
+            {iconBtn("refresh", refreshing ? "Refreshing…" : "Refresh", refreshing ? undefined : load, false)}
+            {list.length > 0 && iconBtn("check", selMode ? "Done" : "Select", () => { if (selMode) exitSelect(); else setSelMode(true); }, selMode)}
+          </div>
+        )}
       </div>
-      <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none" }}>
         {chip("all", "All")}{chip("unread", `Unread${unread ? ` · ${unread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
       </div>
       {selMode && (
@@ -21403,6 +21431,7 @@ function EmailInboxSection({ leads, setLeads }) {
         </div>
       )}
       {importState.msg && <div style={{ fontSize: 12.5, fontWeight: 700, color: importState.running ? T.textMuted : (importState.msg.startsWith("Done") ? "#16a34a" : T.warning), padding: "2px 2px" }}>{importState.msg}</div>}
+      {gmailNote && <div style={{ fontSize: 12.5, fontWeight: 600, color: T.textMuted, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 12px", lineHeight: 1.45 }}>{gmailNote}</div>}
       {rows === null && <div style={{ textAlign: "center", padding: 40, color: T.textMuted, fontSize: 13 }}>Loading your inbox…</div>}
       {setupPending && (
         <div style={{ textAlign: "center", padding: "44px 24px", color: T.textMuted }}>
@@ -21430,14 +21459,14 @@ function EmailInboxSection({ leads, setLeads }) {
                 <span style={{ fontSize: 11.5, color: r.read ? T.textMuted : T.primary, fontWeight: r.read ? 500 : 700, flexShrink: 0 }}>{fmtWhen(r.created_at)}</span>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 2 }}>
-                {r.channel === "sms" && <span title="Text message" style={{ fontSize: 12, flexShrink: 0 }}>💬</span>}
+                {r.channel === "sms" && <span title="Text message" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="message" size={13} /></span>}
                 <span style={{ fontSize: 13, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontWeight: r.read ? 500 : 800, flex: 1, minWidth: 0 }}>{r.subject || "(no subject)"}</span>
                 {badge(r.kind)}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 3 }}>
                 <span style={{ fontSize: 12, color: T.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{(r.ai && r.ai.summary) || (r.body_text || "").slice(0, 120)}</span>
                 {inLeads(r.id) && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#16a34a", flexShrink: 0 }}>→ Leads</span>}
-                {r.replied && <span style={{ fontSize: 11, color: T.textMuted, flexShrink: 0 }}>↩</span>}
+                {r.replied && <span title="Replied" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="reply" size={12} /></span>}
               </div>
             </div>
           </div>
@@ -21458,7 +21487,7 @@ function EmailInboxSection({ leads, setLeads }) {
               </div>
             </div>
             {openRow.ai && openRow.ai.summary && (
-              <div style={{ fontSize: 12.5, color: T.text, background: hexA(T.primary, 0.05), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 10, padding: "9px 12px", lineHeight: 1.5 }}>✨ {openRow.ai.summary}</div>
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12.5, color: T.text, background: hexA(T.primary, 0.05), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 10, padding: "9px 12px", lineHeight: 1.5 }}><span style={{ color: T.primary, flexShrink: 0, display: "inline-flex", marginTop: 1 }}><Icon name="sparkle" size={14} /></span><span>{openRow.ai.summary}</span></div>
             )}
             {/* The email itself — real HTML in a sandboxed frame (looks like Gmail), text fallback */}
             {openRow.body_html ? (
@@ -21471,7 +21500,7 @@ function EmailInboxSection({ leads, setLeads }) {
                   if (!/^https?:\/\//.test(part)) return part;
                   let host = part; try { host = new URL(part).hostname.replace(/^www\./, ""); } catch (_) {}
                   // Clean link chip (🔗 domain) instead of dumping a giant raw URL into the prose.
-                  return <a key={i} href={part} onClick={(e) => { e.preventDefault(); openExternalBrowser(part); }} style={{ display: "inline-flex", alignItems: "center", gap: 3, color: T.primary, fontWeight: 700, textDecoration: "none", background: hexA(T.primary, 0.08), padding: "1px 8px", borderRadius: 100, fontSize: 13, cursor: "pointer", verticalAlign: "baseline" }}>🔗 {host}</a>;
+                  return <a key={i} href={part} onClick={(e) => { e.preventDefault(); openExternalBrowser(part); }} style={{ display: "inline-flex", alignItems: "center", gap: 4, color: T.primary, fontWeight: 700, textDecoration: "none", background: hexA(T.primary, 0.08), padding: "2px 9px", borderRadius: 100, fontSize: 13, cursor: "pointer", verticalAlign: "baseline" }}><Icon name="link" size={11} />{host}</a>;
                 })}
               </div>
             )}
@@ -21490,14 +21519,14 @@ function EmailInboxSection({ leads, setLeads }) {
               <Btn variant="danger" sm onClick={() => deleteEmails([openRow.id])}>Delete</Btn>
             </div>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-              {!inLeads(openRow.id) && <Btn variant="primary" sm onClick={() => addToLeads(openRow)}>➕ Add to Leads</Btn>}
-              {inLeads(openRow.id) && <span style={{ fontSize: 12.5, fontWeight: 700, color: "#16a34a", alignSelf: "center" }}>✓ In your Leads funnel</span>}
+              {!inLeads(openRow.id) && <Btn variant="primary" sm onClick={() => addToLeads(openRow)} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={14} />Add to Leads</Btn>}
+              {inLeads(openRow.id) && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 700, color: "#16a34a", alignSelf: "center" }}><Icon name="check" size={14} />In your Leads funnel</span>}
               {openRow.channel === "sms"
-                ? <Btn href={`sms:${(openRow.from_phone || "").replace(/[^\d+]/g, "")}`} variant="outline" sm>💬 Text back</Btn>
-                : <Btn variant="outline" sm onClick={() => { setReplying(v => !v); setReplyMsg(""); }}>{replying ? "Hide reply" : "↩ Reply"}</Btn>}
+                ? <Btn href={`sms:${(openRow.from_phone || "").replace(/[^\d+]/g, "")}`} variant="outline" sm style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="message" size={14} />Text back</Btn>
+                : <Btn variant="outline" sm onClick={() => { setReplying(v => !v); setReplyMsg(""); }} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="reply" size={14} />{replying ? "Hide reply" : "Reply"}</Btn>}
               <Btn variant="ghost" sm onClick={async () => {
                 try { await navigator.clipboard.writeText(openRow.body_text || ""); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch (_) {}
-              }}>{copied ? "Copied ✓" : "Copy text"}</Btn>
+              }}>{copied ? <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><Icon name="check" size={13} />Copied</span> : "Copy text"}</Btn>
             </div>
             {replying && (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -21510,7 +21539,7 @@ function EmailInboxSection({ leads, setLeads }) {
                       const d = await r.json().catch(() => ({}));
                       if (!r.ok) setReplyMsg(d.error || `Couldn't send (${r.status}).`);
                       else {
-                        setReplyMsg("Sent ✓"); setReplyText(""); setReplyHtml(""); setReplying(false);
+                        setReplyMsg("Sent"); setReplyText(""); setReplyHtml(""); setReplying(false);
                         setRows(rs => (rs || []).map(x => x.id === openRow.id ? { ...x, replied: true } : x));
                         setOpenRow(o => o ? { ...o, replied: true } : o);
                       }

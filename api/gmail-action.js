@@ -65,7 +65,7 @@ export default async function handler(req, res) {
   // Load the match keys for these rows (Message-ID; forwarded rows may carry an original_message_id).
   let rows = [];
   try {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?id=in.(${ids.map(encodeURIComponent).join(",")})&select=id,message_id,original_message_id,channel`, { headers: sbHeaders() });
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?id=in.(${ids.map(encodeURIComponent).join(",")})&select=id,message_id,original_message_id,channel,from_email,subject`, { headers: sbHeaders() });
     if (r.ok) rows = (await r.json().catch(() => [])) || [];
   } catch (_) { /* fall through — everything becomes "skipped" */ }
   const byId = new Map(rows.map(r => [String(r.id), r]));
@@ -81,20 +81,41 @@ export default async function handler(req, res) {
     try {
       for (const id of ids) {
         const row = byId.get(String(id));
-        if (!row || row.channel === "sms") { skipped.push(id); continue; }
+        if (!row) { skipped.push({ id, reason: "no-row" }); continue; }
+        if (row.channel === "sms") { skipped.push({ id, reason: "sms" }); continue; }
+        let uid = null, reason = "";
+        // 1) Exact match by unique Message-ID (imported mail, and forwarded mail where Gmail kept it).
         const key = norm(row.original_message_id || row.message_id);
-        if (!key) { skipped.push(id); continue; }
-        // Positively match the real message by its unique Message-ID (Gmail search operator).
-        let uids = [];
-        try { uids = await client.search({ gmailRaw: `rfc822msgid:${key}` }, { uid: true }); } catch (_) { uids = []; }
-        if (!uids || uids.length !== 1) { skipped.push(id); continue; } // 0 or ambiguous → never touch Gmail
-        const uid = uids[0];
+        if (key) {
+          try {
+            const u = await client.search({ gmailRaw: `rfc822msgid:${key}` }, { uid: true });
+            if (u && u.length === 1) uid = u[0];
+            else if (u && u.length > 1) reason = "ambiguous-id";
+          } catch (_) { reason = "search-error"; }
+        }
+        // 2) Fallback ONLY for TRASH (the user-confirmed, recoverable action) on FORWARDED mail whose
+        //    forwarded copy carries a different Message-ID: locate by sender + exact subject in a recent
+        //    window, requiring BOTH constraints and acting on a SINGLE hit only. Both are sanitized so a
+        //    quote/space can't inject Gmail search operators. Read-state sync stays exact-Message-ID only,
+        //    so a fuzzy match can never silently flag the wrong message.
+        if (uid == null && action === "trash") {
+          const clean = (s) => String(s || "").replace(/["\\\r\n]+/g, " ").trim();
+          const from = clean(row.from_email), subj = clean(row.subject);
+          if (from && subj) {
+            try {
+              const u = await client.search({ gmailRaw: `from:${from} subject:"${subj}" newer_than:2y` }, { uid: true });
+              if (u && u.length === 1) uid = u[0];
+              else reason = (u && u.length > 1) ? "ambiguous-match" : (reason || "not-found");
+            } catch (_) { reason = reason || "search-error"; }
+          } else if (!reason) reason = "not-found";
+        }
+        if (uid == null) { skipped.push({ id, reason: reason || "not-found" }); continue; }
         try {
           if (action === "markRead")        await client.messageFlagsAdd(uid, ["\\Seen"], { uid: true });
           else if (action === "markUnread") await client.messageFlagsRemove(uid, ["\\Seen"], { uid: true });
           else if (action === "trash")      await client.messageMove(uid, trash, { uid: true });
           updated.push(id);
-        } catch (_) { skipped.push(id); }
+        } catch (_) { skipped.push({ id, reason: "op-error" }); }
       }
     } finally { try { lock.release(); } catch (_) {} }
     try { await client.logout(); } catch (_) {}
