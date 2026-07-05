@@ -50,6 +50,21 @@ function setCors(res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
+// Composer attachments → Resend format ([{ filename, content(base64) }]). Hard-capped: Vercel's
+// request body is ~4.5MB, so we bound total base64 well under that and keep headroom for the message.
+const cleanAttachments = (arr) => {
+  const out = [];
+  let total = 0;
+  for (const a of (Array.isArray(arr) ? arr : []).slice(0, 5)) {
+    const content = String((a && a.content) || "");
+    if (!content) continue;
+    total += content.length;
+    if (total > 4_000_000) break; // ~3MB of raw bytes across all files — a backstop below Vercel's ~4.5MB body limit
+    out.push({ filename: String((a && a.filename) || "attachment").replace(/[\r\n"\\]+/g, " ").slice(0, 200), content });
+  }
+  return out;
+};
+
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
@@ -132,6 +147,7 @@ export default async function handler(req, res) {
       const bodyOut = replyBody + (sig ? `\n\n${sig}` : "");
       const htmlIn = b.html ? stripHtml(b.html) : "";
       const subject = /^re:/i.test(orig.subject || "") ? orig.subject : `Re: ${orig.subject || ""}`.trim();
+      const atts = cleanAttachments(b.attachments);
       const sr = await fetch("https://api.resend.com/emails", {
         method: "POST", headers: { Authorization: `Bearer ${RESEND_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -139,6 +155,7 @@ export default async function handler(req, res) {
           text: bodyOut,
           html: emailHtml(htmlIn, bodyOut, sig),
           ...(bcc ? { bcc: [bcc] } : {}),
+          ...(atts.length ? { attachments: atts } : {}),
           ...(orig.message_id ? { headers: { "In-Reply-To": orig.message_id, References: orig.message_id } } : {}),
         }),
       });
@@ -174,6 +191,7 @@ export default async function handler(req, res) {
       const sig = String(email.signature || "").trim();
       const bodyOut = bodyIn + (sig ? `\n\n${sig}` : "");
       const htmlIn = b.html ? stripHtml(b.html) : "";
+      const atts = cleanAttachments(b.attachments);
       const sr = await fetch("https://api.resend.com/emails", {
         method: "POST", headers: { Authorization: `Bearer ${RESEND_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -181,6 +199,7 @@ export default async function handler(req, res) {
           text: bodyOut,
           html: emailHtml(htmlIn, bodyOut, sig),
           ...(bcc ? { bcc: [bcc] } : {}),
+          ...(atts.length ? { attachments: atts } : {}),
         }),
       });
       const sd = await sr.json().catch(() => ({}));

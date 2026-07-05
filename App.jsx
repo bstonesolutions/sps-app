@@ -19801,6 +19801,7 @@ function Icon({ name, size = 22, filled = false }) {
     forward:  <path d="M5 12h14M12 5l7 7-7 7" />,
     reply:    <><path d="M9 14 4 9l5-5" /><path d="M4 9h11a5 5 0 0 1 5 5v3" /></>,
     sparkle:  <path d="M12 2l2.1 5.6a2 2 0 0 0 1.3 1.3L21 11l-5.6 2.1a2 2 0 0 0-1.3 1.3L12 20l-2.1-5.6a2 2 0 0 0-1.3-1.3L3 11l5.6-2.1a2 2 0 0 0 1.3-1.3L12 2z" />,
+    paperclip: <path d="M21 11.5 12.5 20a5 5 0 0 1-7-7L14 4.5a3.3 3.3 0 0 1 4.7 4.7L10.2 18a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8" />,
     // Content
     download: <><path d="M12 4v11M8 11l4 4 4-4" /><path d="M5 20h14" /></>,
     invoice:  <><rect x="5" y="3" width="14" height="18" rx="2" /><path d="M9 8h6M9 12h6M9 16h3.5" /></>,
@@ -21131,13 +21132,23 @@ function OwnerDigestSettings({ scheduleCfg, setScheduleCfg, email, branding, T }
 // small formatting toolbar (bold / italic / underline, bullet + numbered lists, links). Uncontrolled
 // (owns its DOM); emits (html, plainText) on every change so the caller can send both parts. Remounts
 // fresh whenever its host modal opens, so there's no stale content to clear.
-function RichEditor({ onChange, placeholder = "Write your message…", minHeight = 190 }) {
+function RichEditor({ onChange, placeholder = "Write your message…", minHeight = 190, apiRef }) {
   const { T } = useApp();
   const ref = useRef(null);
   const [empty, setEmpty] = useState(true);
   const emit = () => { const el = ref.current; if (!el) return; setEmpty(!el.textContent.trim()); onChange && onChange(el.innerHTML, el.innerText); };
   const cmd = (c, val) => { const el = ref.current; if (el) el.focus(); try { document.execCommand(c, false, val); } catch (_) {} emit(); };
   const addLink = () => { const url = window.prompt("Link URL"); if (!url) return; cmd("createLink", /^https?:\/\//i.test(url) ? url : `https://${url}`); };
+  // Optional imperative handle so a host (e.g. Compose) can drop reference snippets into the body.
+  useEffect(() => {
+    if (!apiRef) return undefined;
+    apiRef.current = {
+      insert: (html) => { const el = ref.current; if (!el) return; el.focus(); try { document.execCommand("insertHTML", false, html); } catch (_) { el.innerHTML += html; } emit(); },
+      clear: () => { const el = ref.current; if (el) { el.innerHTML = ""; emit(); } },
+      focus: () => { if (ref.current) ref.current.focus(); },
+    };
+    return () => { if (apiRef) apiRef.current = null; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const ic = (path) => <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={2}>{path}</svg>;
   const tb = (node, onClick, extra) => (
     <button type="button" onMouseDown={e => e.preventDefault()} onClick={onClick}
@@ -21168,7 +21179,7 @@ function RichEditor({ onChange, placeholder = "Write your message…", minHeight
 // triages every email — Lead / Bill / Client / Other — leads flow into Comms → Leads
 // automatically. Owner-only: rows come from the owner-gated api/inbox (sps_inbox has no
 // client-readable policy at all — this is private mail).
-function EmailInboxSection({ leads, setLeads }) {
+function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const { T } = useApp();
   const vp = useViewport();
   // Two-pane (list + reading pane) ONLY when there's genuinely room — this section sits inside the
@@ -21220,6 +21231,11 @@ function EmailInboxSection({ leads, setLeads }) {
   const [composeText, setComposeText] = useState("");   // plain-text mirror (validation + text part)
   const [composeBusy, setComposeBusy] = useState(false);
   const [composeMsg, setComposeMsg] = useState("");
+  const [composeClient, setComposeClient] = useState(null); // client picked as recipient (enables reference starters)
+  const [toFocus, setToFocus] = useState(false);            // show the client picker dropdown under To
+  const [attachments, setAttachments] = useState([]);       // [{ name, type, size, content(base64) }]
+  const [attachErr, setAttachErr] = useState("");
+  const composeEditorRef = useRef(null);                    // RichEditor insert API for reference snippets
   const load = async () => {
     setErr("");
     setRefreshing(true);
@@ -21376,14 +21392,75 @@ function EmailInboxSection({ leads, setLeads }) {
     })();
   };
   const bulkDelete = () => deleteEmails(selIds);
+  // ── Compose: recipient picker + client "reference" starters + attachments ──
+  const compEsc = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const clientMatches = (() => {
+    const q = String(compose.to || "").trim().toLowerCase();
+    const src = (Array.isArray(clients) ? clients : []).filter(c => c && (c.email || c.name));
+    const list = !q ? src : src.filter(c => `${c.name || ""} ${c.email || ""}`.toLowerCase().includes(q));
+    return list.slice(0, 6);
+  })();
+  const clientBalanceStr = (c) => {
+    const owed = (invoices || []).filter(iv => String(iv.clientId) === String(c.id) && !/paid/i.test(iv.status || "")).reduce((s, iv) => s + (invoiceTotals(iv).balance || 0), 0);
+    if (owed > 0) return `$${owed.toFixed(2)}`;
+    return (c.balance && !/^\$?0(\.00)?$/.test(String(c.balance).trim())) ? String(c.balance) : "";
+  };
+  const openInvoiceFor = (c) => (invoices || [])
+    .filter(iv => String(iv.clientId) === String(c.id) && !/paid/i.test(iv.status || "") && (invoiceTotals(iv).balance || 0) > 0)
+    .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")))[0] || null;
+  const REF = {
+    service: (c) => {
+      const h = (c.history || [])[0];
+      if (!h) return `<p>Following up on your pond service.</p><p><br></p>`;
+      const reads = [h.ph && `pH ${h.ph}`, h.temp && `temp ${h.temp}`, (h.ammonia != null && h.ammonia !== "") && `ammonia ${h.ammonia}`, (h.nitrite != null && h.nitrite !== "") && `nitrite ${h.nitrite}`].filter(Boolean).join(", ");
+      return `<p>Following up on your last service — <b>${compEsc(h.type || "visit")}</b> on <b>${compEsc(h.date || "")}</b>${h.tech ? ` (${compEsc(h.tech)})` : ""}.${h.notes ? ` ${compEsc(h.notes)}` : ""}${reads ? `<br><span style="color:#6b7280">Readings: ${compEsc(reads)}</span>` : ""}</p><p><br></p>`;
+    },
+    account: (c) => {
+      const bal = clientBalanceStr(c);
+      const bits = [
+        c.plan && `${compEsc(c.plan)}${c.planFreq ? ` (${compEsc(c.planFreq)})` : ""} plan`,
+        c.division && compEsc(c.division),
+        (c.pondType || c.pondSize) && compEsc(`${c.pondType || ""} ${c.pondSize || ""}`.trim()),
+        c.nextService && `next visit ${compEsc(c.nextService)}`,
+        bal && `balance ${compEsc(bal)}`,
+      ].filter(Boolean);
+      return `<p>Regarding your account — ${bits.join(" · ") || "your service with us"}.</p><p><br></p>`;
+    },
+    invoice: (c) => {
+      const inv = openInvoiceFor(c);
+      if (!inv) { const bal = clientBalanceStr(c); return `<p>Regarding your account${bal ? ` balance of <b>${compEsc(bal)}</b>` : ""}.</p><p><br></p>`; }
+      const t = invoiceTotals(inv);
+      return `<p>Regarding invoice <b>${compEsc(inv.number || "")}</b> — <b>$${(t.total || 0).toFixed(2)}</b>, ${compEsc(inv.status || "")}${inv.dueDate ? `, due ${compEsc(inv.dueDate)}` : ""}.</p><p><br></p>`;
+    },
+  };
+  const insertRef = (kind) => { if (composeClient && composeEditorRef.current) composeEditorRef.current.insert(REF[kind](composeClient)); };
+  const pickClient = (c) => { setComposeClient(c); setCompose(x => ({ ...x, to: c.email || x.to })); setToFocus(false); };
+  const fmtSize = (b) => b < 1024 ? `${b} B` : b < 1048576 ? `${Math.round(b / 1024)} KB` : `${(b / 1048576).toFixed(1)} MB`;
+  const ATTACH_MAX = Math.floor(2.5 * 1024 * 1024); // ~2.5MB of files → base64 (~+33%) + the message body stays under Vercel's ~4.5MB request-body limit
+  const addFiles = async (fileList) => {
+    setAttachErr("");
+    const files = Array.from(fileList || []);
+    let cur = attachments.reduce((s, a) => s + a.size, 0);
+    const next = attachments.slice();
+    for (const f of files) {
+      if (next.length >= 5) { setAttachErr("Up to 5 files per email."); break; }
+      if (cur + f.size > ATTACH_MAX) { setAttachErr("Attachments are capped at ~2.5 MB total for now — larger files can't be emailed yet."); continue; }
+      try {
+        const content = await new Promise((res, rej) => { const rd = new FileReader(); rd.onload = () => res(String(rd.result).split(",")[1] || ""); rd.onerror = rej; rd.readAsDataURL(f); });
+        if (content) { next.push({ name: f.name, type: f.type, size: f.size, content }); cur += f.size; }
+      } catch (_) {}
+    }
+    setAttachments(next);
+  };
+  const resetCompose = () => { setComposeOpen(false); setCompose({ to: "", subject: "" }); setComposeHtml(""); setComposeText(""); setComposeMsg(""); setComposeClient(null); setToFocus(false); setAttachments([]); setAttachErr(""); };
   const sendCompose = async () => {
     if (composeBusy || !compose.to.trim() || !composeText.trim()) return;
     setComposeBusy(true); setComposeMsg("");
     try {
-      const r = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "send", to: compose.to.trim(), subject: compose.subject.trim(), body: composeText.trim(), html: composeHtml }) });
+      const r = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "send", to: compose.to.trim(), subject: compose.subject.trim(), body: composeText.trim(), html: composeHtml, attachments: attachments.map(a => ({ filename: a.name, content: a.content })) }) });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) setComposeMsg(d.error || `Couldn't send (${r.status}).`);
-      else { setComposeMsg("Sent"); setTimeout(() => { setComposeOpen(false); setCompose({ to: "", subject: "" }); setComposeHtml(""); setComposeText(""); setComposeMsg(""); }, 1000); }
+      else { setComposeMsg("Sent"); setTimeout(() => { resetCompose(); }, 1000); }
     } catch (_) { setComposeMsg("Couldn't reach the server."); }
     setComposeBusy(false);
   };
@@ -21756,22 +21833,75 @@ function EmailInboxSection({ leads, setLeads }) {
       )}
 
       {composeOpen && (
-        <Modal title="New email" onClose={() => { setComposeOpen(false); setCompose({ to: "", subject: "" }); setComposeHtml(""); setComposeText(""); setComposeMsg(""); }} maxWidth={620}>
+        <Modal title="New email" onClose={resetCompose} maxWidth={620}>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {(() => {
               const cLabel = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 };
               const cInp = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
               return (
                 <>
-                  <div>
+                  {/* To — searchable client picker (or type any address) */}
+                  <div style={{ position: "relative" }}>
                     <label style={cLabel}>To</label>
-                    <input type="email" inputMode="email" value={compose.to} onChange={e => setCompose(c => ({ ...c, to: e.target.value }))} placeholder="name@example.com" style={cInp} />
+                    <input type="text" inputMode="email" value={compose.to}
+                      onChange={e => { setCompose(c => ({ ...c, to: e.target.value })); setComposeClient(null); setToFocus(true); }}
+                      onFocus={() => setToFocus(true)} onBlur={() => setTimeout(() => setToFocus(false), 150)}
+                      placeholder="Search clients or type an email" style={cInp} />
+                    {toFocus && clientMatches.length > 0 && (
+                      <div style={{ position: "absolute", left: 0, right: 0, top: "100%", marginTop: 4, zIndex: 50, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, boxShadow: "0 8px 24px rgba(0,0,0,0.14)", overflow: "hidden", maxHeight: 244, overflowY: "auto" }}>
+                        {clientMatches.map((c, i) => (
+                          <button key={c.id ?? i} type="button" onMouseDown={e => e.preventDefault()} onClick={() => pickClient(c)}
+                            style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "10px 12px", background: "none", border: "none", borderTop: i === 0 ? "none" : `1px solid ${hexA(T.border, 0.5)}`, cursor: "pointer", fontFamily: "inherit" }}>
+                            <Avatar name={c.name} email={c.email} size={30} />
+                            <div style={{ minWidth: 0, flex: 1 }}>
+                              <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.name || c.email}</div>
+                              <div style={{ fontSize: 11.5, color: T.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.email || "no email on file"}</div>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
+                  {/* Picked a client → one-tap reference starters that drop into the body */}
+                  {composeClient && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", background: hexA(T.primary, 0.05), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 12, padding: "9px 11px" }}>
+                      <span style={{ fontSize: 12, fontWeight: 800, color: T.text }}>{composeClient.name || composeClient.email}</span>
+                      <span style={{ fontSize: 11, color: T.textMuted }}>Insert:</span>
+                      {[["service", "Last service"], ["account", "Account"], ["invoice", "Open invoice"]].map(([k, lbl]) => (
+                        <button key={k} type="button" onMouseDown={e => e.preventDefault()} onClick={() => insertRef(k)}
+                          style={{ fontSize: 11.5, fontWeight: 700, color: T.primary, background: T.surface, border: `1.5px solid ${hexA(T.primary, 0.35)}`, borderRadius: 100, padding: "5px 11px", cursor: "pointer", fontFamily: "inherit" }}>{lbl}</button>
+                      ))}
+                      {!composeClient.email && <span style={{ fontSize: 11, fontWeight: 600, color: T.warning }}>· no email on file — add a recipient above to send</span>}
+                    </div>
+                  )}
                   <div>
                     <label style={cLabel}>Subject</label>
                     <input type="text" value={compose.subject} onChange={e => setCompose(c => ({ ...c, subject: e.target.value }))} placeholder="Subject" style={cInp} />
                   </div>
-                  <RichEditor onChange={(html, text) => { setComposeHtml(html); setComposeText(text); }} placeholder="Write your message…" />
+                  <RichEditor apiRef={composeEditorRef} onChange={(html, text) => { setComposeHtml(html); setComposeText(text); }} placeholder="Write your message…" />
+                  {/* Attachments */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                      <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 700, color: T.text, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 10, padding: "8px 12px", cursor: "pointer", fontFamily: "inherit" }}>
+                        <Icon name="paperclip" size={14} />Attach files
+                        <input type="file" multiple onChange={e => { addFiles(e.target.files); e.target.value = ""; }} style={{ display: "none" }} />
+                      </label>
+                      {attachments.length > 0 && <span style={{ fontSize: 11.5, color: T.textMuted }}>{attachments.length} file{attachments.length === 1 ? "" : "s"} · {fmtSize(attachments.reduce((s, a) => s + a.size, 0))}</span>}
+                    </div>
+                    {attachments.length > 0 && (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                        {attachments.map((a, i) => (
+                          <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 7, fontSize: 12, color: T.text, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 10, padding: "6px 10px" }}>
+                            <Icon name="paperclip" size={12} />
+                            <span style={{ maxWidth: 150, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{a.name}</span>
+                            <span style={{ color: T.textMuted, fontSize: 11 }}>{fmtSize(a.size)}</span>
+                            <button type="button" onClick={() => setAttachments(list => list.filter((_, j) => j !== i))} title="Remove" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", display: "inline-flex", padding: 0 }}><Icon name="close" size={13} /></button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {attachErr && <span style={{ fontSize: 11.5, fontWeight: 600, color: T.warning }}>{attachErr}</span>}
+                  </div>
                 </>
               );
             })()}
@@ -21951,7 +22081,7 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
         {(perms.isAdmin || perms.editSettings || perms.canInvoice) && <Card><CardHeader title="Staff Invite & Login Emails" /><InviteEmailSettings email={emailTpl} setEmail={setEmailTpl} branding={brandTpl} /></Card>}
       </div>}
       {section === "broadcast" && CAN.broadcast && <BroadcastSection clients={clients} invoices={invoices} email={email} branding={branding} T={T} />}
-      {section === "email" && CAN.email && <div style={{ padding: "0 16px" }}><EmailInboxSection leads={leads} setLeads={setLeads} /></div>}
+      {section === "email" && CAN.email && <div style={{ padding: "0 16px" }}><EmailInboxSection leads={leads} setLeads={setLeads} clients={clients} invoices={invoices} /></div>}
       {section === "log" && CAN.log && <div style={{ padding: "0 16px" }}><LogsScreen clients={clients} showOwnerRows={!!perms.isAdmin} /></div>}
     </>
   );
