@@ -86,9 +86,19 @@ export default async function handler(req, res) {
       return res.status(ok ? 200 : 502).json({ ok });
     }
     if (b.action === "setKind") {
-      if (!b.id || !["lead", "bill", "client", "other"].includes(b.kind)) return res.status(400).json({ error: "Need id + a valid kind." });
-      const ok = await patch(`id=eq.${encodeURIComponent(String(b.id))}`, { kind: b.kind });
+      // Accepts a single id or a batch of ids (bulk reclassify from the inbox select mode).
+      const ids = (Array.isArray(b.ids) ? b.ids : (b.id ? [b.id] : [])).map(String).filter(Boolean).slice(0, 200);
+      if (!ids.length || !["lead", "bill", "client", "other"].includes(b.kind)) return res.status(400).json({ error: "Need id(s) + a valid kind." });
+      const ok = await patch(`id=in.(${ids.map(encodeURIComponent).join(",")})`, { kind: b.kind });
       return res.status(ok ? 200 : 502).json({ ok });
+    }
+    if (b.action === "delete") {
+      // Owner deletes mail from their own inbox (single or bulk). Hard delete — sps_inbox is the
+      // system of record, so there's no soft-delete; the UI confirms before calling this.
+      const ids = (Array.isArray(b.ids) ? b.ids : (b.id ? [b.id] : [])).map(String).filter(Boolean).slice(0, 200);
+      if (!ids.length) return res.status(400).json({ error: "No ids." });
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?id=in.(${ids.map(encodeURIComponent).join(",")})`, { method: "DELETE", headers: sbHeaders() });
+      return res.status(r.ok ? 200 : 502).json({ ok: r.ok, deleted: r.ok ? ids.length : 0 });
     }
     if (b.action === "reply") {
       if (!RESEND_KEY) return res.status(501).json({ error: "Email sending isn't configured (RESEND_API_KEY).", missingEnv: true });

@@ -21156,6 +21156,9 @@ function EmailInboxSection({ leads, setLeads }) {
   const [replyText, setReplyText] = useState("");
   const [replyBusy, setReplyBusy] = useState(false);
   const [replyMsg, setReplyMsg] = useState("");
+  const [selMode, setSelMode] = useState(false);   // bulk-select mode in the inbox list
+  const [sel, setSel] = useState({});              // { [emailId]: true }
+  const [busyBulk, setBusyBulk] = useState(false); // a bulk action is in flight
   const load = async () => {
     setErr("");
     setRefreshing(true);
@@ -21222,6 +21225,33 @@ function EmailInboxSection({ leads, setLeads }) {
       }
     } catch (_) { /* auto-import acks it next open */ }
   };
+  // ── Bulk select: mark read/unread, reclassify, or delete several emails at once ──
+  const selIds = selMode ? list.filter(r => sel[r.id]).map(r => r.id) : [];
+  const allVisibleSelected = list.length > 0 && list.every(r => sel[r.id]);
+  const toggleSel = (id) => setSel(s => ({ ...s, [id]: !s[id] }));
+  const toggleSelectAll = () => { if (allVisibleSelected) setSel({}); else setSel(Object.fromEntries(list.map(r => [r.id, true]))); };
+  const exitSelect = () => { setSelMode(false); setSel({}); };
+  const bulkSetKind = async (kind) => {
+    const ids = selIds; if (!ids.length || busyBulk) return;
+    if (kind === "lead") {                       // route each through addToLeads so it also enters the funnel + acks
+      setBusyBulk(true);
+      for (const id of ids) { const row = (rows || []).find(r => r.id === id); if (row && !inLeads(id)) await addToLeads(row); }
+      setBusyBulk(false); exitSelect(); return;
+    }
+    setRows(rs => (rs || []).map(r => ids.includes(r.id) ? { ...r, kind } : r));
+    setBusyBulk(true);
+    try { await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "setKind", ids, kind }) }); } catch (_) {}
+    setBusyBulk(false); exitSelect();
+  };
+  const bulkDelete = async () => {
+    const ids = selIds; if (!ids.length || busyBulk) return;
+    if (!confirm(`Delete ${ids.length} email${ids.length === 1 ? "" : "s"}? This can't be undone.`)) return;
+    setRows(rs => (rs || []).filter(r => !ids.includes(r.id)));
+    setOpenRow(o => (o && ids.includes(o.id) ? null : o));
+    setBusyBulk(true);
+    try { await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "delete", ids }) }); } catch (_) {}
+    setBusyBulk(false); exitSelect();
+  };
   const fmtWhen = (iso) => {
     try { const d = new Date(iso); return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " · " + d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }); } catch (_) { return ""; }
   };
@@ -21248,7 +21278,27 @@ function EmailInboxSection({ leads, setLeads }) {
         <div style={{ flex: 1 }} />
         <Btn variant="ghost" sm onClick={importState.running ? undefined : () => setImportOpen(o => !o)}>{importState.running ? "Importing…" : "Import Gmail"}</Btn>
         <Btn variant="ghost" sm onClick={refreshing ? undefined : load}>{refreshing ? "Refreshing…" : "Refresh"}</Btn>
+        {list.length > 0 && <Btn variant={selMode ? "primary" : "ghost"} sm onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }}>{selMode ? "Done" : "Select"}</Btn>}
       </div>
+      {selMode && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "8px 12px" }}>
+          <button type="button" onClick={toggleSelectAll} style={{ background: "none", border: "none", color: T.primary, fontWeight: 800, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit", padding: 0 }}>{allVisibleSelected ? "Clear" : "Select all"}</button>
+          <span style={{ fontSize: 12.5, fontWeight: 700, color: T.textMuted }}>{selIds.length} selected</span>
+          {selIds.length > 0 && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginLeft: "auto" }}>
+              <Btn variant="ghost" sm onClick={busyBulk ? undefined : () => markRead(selIds, true)}>Mark read</Btn>
+              <Btn variant="ghost" sm onClick={busyBulk ? undefined : () => markRead(selIds, false)}>Unread</Btn>
+              <span style={{ width: 1, height: 20, background: T.border, alignSelf: "center" }} />
+              {["lead", "bill", "client", "other"].map(k => (
+                <button key={k} type="button" onClick={busyBulk ? undefined : () => bulkSetKind(k)}
+                  style={{ padding: "6px 11px", borderRadius: 100, border: `1.5px solid ${T.border}`, background: T.surface, color: KIND[k].color || T.textMuted, fontSize: 11.5, fontWeight: 700, cursor: busyBulk ? "default" : "pointer", fontFamily: "inherit", opacity: busyBulk ? 0.6 : 1 }}>{KIND[k].label}</button>
+              ))}
+              <span style={{ width: 1, height: 20, background: T.border, alignSelf: "center" }} />
+              <Btn variant="danger" sm onClick={busyBulk ? undefined : bulkDelete}>Delete</Btn>
+            </div>
+          )}
+        </div>
+      )}
       {importOpen && !importState.running && (
         <div style={{ border: `1px solid ${T.border}`, borderRadius: 12, background: T.surface, padding: "12px 14px", display: "flex", flexDirection: "column", gap: 9 }}>
           <div style={{ fontSize: 13, color: T.text, fontWeight: 700 }}>Pull your existing Gmail into the inbox</div>
@@ -21277,9 +21327,10 @@ function EmailInboxSection({ leads, setLeads }) {
       )}
       <div style={{ border: `1px solid ${T.border}`, borderRadius: 16, overflow: "hidden", background: T.surface }}>
         {list.map((r, i) => (
-          <div key={r.id} onClick={() => { setOpenRow(r); setReplying(false); setReplyText(""); setReplyMsg(""); if (!r.read) markRead([r.id]); }}
-            style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "12px 14px", cursor: "pointer", borderTop: i === 0 ? "none" : `1px solid ${hexA(T.border, 0.6)}`, background: r.read ? T.surface : hexA(T.primary, 0.035), position: "relative" }}>
+          <div key={r.id} onClick={() => { if (selMode) { toggleSel(r.id); return; } setOpenRow(r); setReplying(false); setReplyText(""); setReplyMsg(""); if (!r.read) markRead([r.id]); }}
+            style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "12px 14px", cursor: "pointer", borderTop: i === 0 ? "none" : `1px solid ${hexA(T.border, 0.6)}`, background: sel[r.id] ? hexA(T.primary, 0.1) : (r.read ? T.surface : hexA(T.primary, 0.035)), position: "relative" }}>
             {!r.read && <span style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: T.primary }} />}
+            {selMode && <div style={{ alignSelf: "center", flexShrink: 0 }}><Checkbox checked={!!sel[r.id]} onChange={() => toggleSel(r.id)} /></div>}
             <Avatar name={r.from_name} email={r.from_email} />
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
