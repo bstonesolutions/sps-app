@@ -2459,6 +2459,7 @@ const DEFAULT_EMAIL = {
   intro: "Thanks for trusting us with your property. Here's a summary of today's visit.",
   signoff: "Questions? Just reply to this email or give us a call.",
   footer: "",                 // small print under every email (address, license #, etc.)
+  signature: "",              // appended to emails you WRITE / reply to from Comms → Email (plain text)
   showReadings: true,
   showPhotosNote: true,
   // text-message templates ({first}, {sender}, {company}, {eta}, {arrival}, {track})
@@ -12553,6 +12554,13 @@ function SendingIdentitySettings({ email, setEmail }) {
         </div>
       </Card>
       <Card>
+        <CardHeader title="Email Signature" />
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 10 }}>
+          <textarea style={{ ...field, minHeight: 96, resize: "vertical", lineHeight: 1.5 }} value={email.signature || ""} onChange={e => set("signature", e.target.value)} placeholder={"Brandon Stone\nStone Property Solutions\n(555) 123-4567"} />
+          <div style={hint}>Added to the bottom of every email you write or reply to from Comms → Email. Plain text — line breaks are kept.</div>
+        </div>
+      </Card>
+      <Card>
         <CardHeader title="Texting Number" />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
           <div style={{ fontSize: 12, color: T.textMuted, marginTop: -2 }}>The business line your texts go out from — On My Way, arrival, invoice, lead alerts, and money-plan texts. Must be a number on your Quo account.</div>
@@ -21117,14 +21125,53 @@ function OwnerDigestSettings({ scheduleCfg, setScheduleCfg, email, branding, T }
   );
 }
 
+// Lightweight rich-text editor for composing / replying to email — a contentEditable body with a
+// small formatting toolbar (bold / italic / underline, bullet + numbered lists, links). Uncontrolled
+// (owns its DOM); emits (html, plainText) on every change so the caller can send both parts. Remounts
+// fresh whenever its host modal opens, so there's no stale content to clear.
+function RichEditor({ onChange, placeholder = "Write your message…", minHeight = 190 }) {
+  const { T } = useApp();
+  const ref = useRef(null);
+  const [empty, setEmpty] = useState(true);
+  const emit = () => { const el = ref.current; if (!el) return; setEmpty(!el.textContent.trim()); onChange && onChange(el.innerHTML, el.innerText); };
+  const cmd = (c, val) => { const el = ref.current; if (el) el.focus(); try { document.execCommand(c, false, val); } catch (_) {} emit(); };
+  const addLink = () => { const url = window.prompt("Link URL"); if (!url) return; cmd("createLink", /^https?:\/\//i.test(url) ? url : `https://${url}`); };
+  const ic = (path) => <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={2}>{path}</svg>;
+  const tb = (node, onClick, extra) => (
+    <button type="button" onMouseDown={e => e.preventDefault()} onClick={onClick}
+      style={{ width: 32, height: 32, borderRadius: 8, border: "none", background: "none", color: "#54545c", cursor: "pointer", fontFamily: "inherit", fontSize: 14, display: "grid", placeItems: "center", ...extra }}>{node}</button>
+  );
+  const sep = <span style={{ width: 1, height: 20, background: T.border, margin: "0 5px" }} />;
+  return (
+    <div style={{ border: `1.5px solid ${T.border}`, borderRadius: 12, overflow: "hidden", background: T.surface }}>
+      <div style={{ position: "relative" }}>
+        {empty && <div style={{ position: "absolute", top: 12, left: 14, color: T.textMuted, fontSize: 14.5, pointerEvents: "none" }}>{placeholder}</div>}
+        <div ref={ref} contentEditable suppressContentEditableWarning onInput={emit} onBlur={emit}
+          style={{ minHeight, maxHeight: "42vh", overflowY: "auto", padding: "12px 14px", fontSize: 14.5, lineHeight: 1.6, color: T.text, outline: "none", WebkitUserSelect: "text", wordBreak: "break-word" }} />
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 2, padding: "6px 8px", borderTop: `1px solid ${T.border}`, background: T.surfaceAlt, flexWrap: "wrap" }}>
+        {tb("B", () => cmd("bold"), { fontWeight: 900, fontSize: 15 })}
+        {tb("I", () => cmd("italic"), { fontStyle: "italic", fontFamily: "Georgia, serif", fontSize: 15 })}
+        {tb("U", () => cmd("underline"), { textDecoration: "underline", fontSize: 15 })}
+        {sep}
+        {tb(ic(<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" />), () => cmd("insertUnorderedList"))}
+        {tb(ic(<path d="M10 6h11M10 12h11M10 18h11M4 6h1v4M4 10H6M4 15h1.5a1 1 0 1 1 0 2H4v-2z" />), () => cmd("insertOrderedList"))}
+        {tb(ic(<><path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1" /><path d="M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1" /></>), addLink)}
+      </div>
+    </div>
+  );
+}
+
 // Comms → Email: the owner's WORK inbox (brandon@… forwarded through in.spsway.app). AI
 // triages every email — Lead / Bill / Client / Other — leads flow into Comms → Leads
 // automatically. Owner-only: rows come from the owner-gated api/inbox (sps_inbox has no
 // client-readable policy at all — this is private mail).
 function EmailInboxSection({ leads, setLeads }) {
   const { T } = useApp();
+  const vp = useViewport();                    // isDesktop (>=700) → two-pane; phone → single column + modal reader
   const [rows, setRows] = useState(null);
   const [err, setErr] = useState("");
+  const [q, setQ] = useState("");              // inbox search
   const [filter, setFilter] = useState("all"); // all | unread | lead | bill | client | other
   const [openRow, setOpenRow] = useState(null);
   const [copied, setCopied] = useState(false);
@@ -21154,11 +21201,18 @@ function EmailInboxSection({ leads, setLeads }) {
   };
   const [replying, setReplying] = useState(false);
   const [replyText, setReplyText] = useState("");
+  const [replyHtml, setReplyHtml] = useState("");
   const [replyBusy, setReplyBusy] = useState(false);
   const [replyMsg, setReplyMsg] = useState("");
   const [selMode, setSelMode] = useState(false);   // bulk-select mode in the inbox list
   const [sel, setSel] = useState({});              // { [emailId]: true }
   const [busyBulk, setBusyBulk] = useState(false); // a bulk action is in flight
+  const [composeOpen, setComposeOpen] = useState(false);
+  const [compose, setCompose] = useState({ to: "", subject: "" });
+  const [composeHtml, setComposeHtml] = useState("");   // rich body (HTML) from the editor
+  const [composeText, setComposeText] = useState("");   // plain-text mirror (validation + text part)
+  const [composeBusy, setComposeBusy] = useState(false);
+  const [composeMsg, setComposeMsg] = useState("");
   const load = async () => {
     setErr("");
     setRefreshing(true);
@@ -21175,7 +21229,10 @@ function EmailInboxSection({ leads, setLeads }) {
   // Membership is checked against the ACTUAL leads list, not the imported stamp — if a lead
   // ever vanishes (multi-device array overwrite), "Add to Leads" reappears for a one-tap re-add.
   const inLeads = (emailId) => (leads || []).some(l => l && l.srcId === `em_${emailId}`);
-  const list = (rows || []).filter(r => filter === "all" ? true : filter === "unread" ? !r.read : r.kind === filter);
+  const qq = q.trim().toLowerCase();
+  const list = (rows || [])
+    .filter(r => filter === "all" ? true : filter === "unread" ? !r.read : r.kind === filter)
+    .filter(r => !qq || [r.from_name, r.from_email, r.subject, r.body_text, r.ai && r.ai.summary].some(v => String(v || "").toLowerCase().includes(qq)));
   const unread = (rows || []).filter(r => !r.read).length;
   const markRead = async (ids, read = true) => {
     setRows(rs => (rs || []).map(r => ids.includes(r.id) ? { ...r, read } : r));
@@ -21262,6 +21319,17 @@ function EmailInboxSection({ leads, setLeads }) {
     setBusyBulk(false); exitSelect();
   };
   const bulkDelete = () => deleteEmails(selIds);
+  const sendCompose = async () => {
+    if (composeBusy || !compose.to.trim() || !composeText.trim()) return;
+    setComposeBusy(true); setComposeMsg("");
+    try {
+      const r = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "send", to: compose.to.trim(), subject: compose.subject.trim(), body: composeText.trim(), html: composeHtml }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) setComposeMsg(d.error || `Couldn't send (${r.status}).`);
+      else { setComposeMsg("Sent ✓"); setTimeout(() => { setComposeOpen(false); setCompose({ to: "", subject: "" }); setComposeHtml(""); setComposeText(""); setComposeMsg(""); }, 1000); }
+    } catch (_) { setComposeMsg("Couldn't reach the server."); }
+    setComposeBusy(false);
+  };
   const fmtWhen = (iso) => {
     try { const d = new Date(iso); return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " · " + d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }); } catch (_) { return ""; }
   };
@@ -21283,12 +21351,26 @@ function EmailInboxSection({ leads, setLeads }) {
   const setupPending = err && /hasn't been created|sps_inbox/i.test(err);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        {chip("all", "All")}{chip("unread", `Unread${unread ? ` · ${unread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
+      {/* Search + Compose — the premium client header */}
+      <div style={{ display: "flex", gap: 9, alignItems: "center" }}>
+        <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "9px 12px", minWidth: 0 }}>
+          <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke={T.textMuted} strokeWidth={2} style={{ flexShrink: 0 }}><circle cx="11" cy="11" r="7" /><path d="m21 21-4-4" /></svg>
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search mail, people, tags"
+            style={{ flex: 1, border: "none", background: "none", outline: "none", fontFamily: "inherit", fontSize: 13.5, color: T.text, minWidth: 0 }} />
+          {q && <button onClick={() => setQ("")} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", fontSize: 15, lineHeight: 1, padding: 0 }}>✕</button>}
+        </div>
+        <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }}>✏️ Compose</Btn>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 17, fontWeight: 820, letterSpacing: "-0.02em", color: T.text }}>Inbox</span>
+        {unread > 0 && <span style={{ fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "2px 9px" }}>{unread} unread</span>}
         <div style={{ flex: 1 }} />
-        <Btn variant="ghost" sm onClick={importState.running ? undefined : () => setImportOpen(o => !o)}>{importState.running ? "Importing…" : "Import Gmail"}</Btn>
+        <Btn variant="ghost" sm onClick={importState.running ? undefined : () => setImportOpen(o => !o)}>{importState.running ? "Importing…" : "Import"}</Btn>
         <Btn variant="ghost" sm onClick={refreshing ? undefined : load}>{refreshing ? "Refreshing…" : "Refresh"}</Btn>
         {list.length > 0 && <Btn variant={selMode ? "primary" : "ghost"} sm onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }}>{selMode ? "Done" : "Select"}</Btn>}
+      </div>
+      <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+        {chip("all", "All")}{chip("unread", `Unread${unread ? ` · ${unread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
       </div>
       {selMode && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "8px 12px" }}>
@@ -21419,17 +21501,16 @@ function EmailInboxSection({ leads, setLeads }) {
             </div>
             {replying && (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                <textarea value={replyText} onChange={e => setReplyText(e.target.value)} rows={5} placeholder={`Reply to ${openRow.from_name || openRow.from_email}…`}
-                  style={{ width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical" }} />
+                <RichEditor onChange={(html, text) => { setReplyHtml(html); setReplyText(text); }} placeholder={`Reply to ${openRow.from_name || openRow.from_email}…`} minHeight={130} />
                 <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                   <Btn variant="primary" sm onClick={replyBusy || !replyText.trim() ? undefined : async () => {
                     setReplyBusy(true); setReplyMsg("");
                     try {
-                      const r = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "reply", id: openRow.id, body: replyText.trim() }) });
+                      const r = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "reply", id: openRow.id, body: replyText.trim(), html: replyHtml }) });
                       const d = await r.json().catch(() => ({}));
                       if (!r.ok) setReplyMsg(d.error || `Couldn't send (${r.status}).`);
                       else {
-                        setReplyMsg("Sent ✓"); setReplyText(""); setReplying(false);
+                        setReplyMsg("Sent ✓"); setReplyText(""); setReplyHtml(""); setReplying(false);
                         setRows(rs => (rs || []).map(x => x.id === openRow.id ? { ...x, replied: true } : x));
                         setOpenRow(o => o ? { ...o, replied: true } : o);
                       }
@@ -21441,6 +21522,35 @@ function EmailInboxSection({ leads, setLeads }) {
                 <div style={{ fontSize: 11.5, color: T.textMuted }}>Sends from your Sending Identity (Comms → Settings) and quietly copies your Gmail for the record.</div>
               </div>
             )}
+          </div>
+        </Modal>
+      )}
+
+      {composeOpen && (
+        <Modal title="New email" onClose={() => { setComposeOpen(false); setCompose({ to: "", subject: "" }); setComposeHtml(""); setComposeText(""); setComposeMsg(""); }} maxWidth={620}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {(() => {
+              const cLabel = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 };
+              const cInp = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+              return (
+                <>
+                  <div>
+                    <label style={cLabel}>To</label>
+                    <input type="email" inputMode="email" value={compose.to} onChange={e => setCompose(c => ({ ...c, to: e.target.value }))} placeholder="name@example.com" style={cInp} />
+                  </div>
+                  <div>
+                    <label style={cLabel}>Subject</label>
+                    <input type="text" value={compose.subject} onChange={e => setCompose(c => ({ ...c, subject: e.target.value }))} placeholder="Subject" style={cInp} />
+                  </div>
+                  <RichEditor onChange={(html, text) => { setComposeHtml(html); setComposeText(text); }} placeholder="Write your message…" />
+                </>
+              );
+            })()}
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <Btn variant="primary" sm onClick={sendCompose} disabled={composeBusy || !compose.to.trim() || !composeText.trim()}>{composeBusy ? "Sending…" : "Send"}</Btn>
+              {composeMsg && <span style={{ fontSize: 12.5, fontWeight: 700, color: composeMsg.startsWith("Sent") ? "#16a34a" : T.warning }}>{composeMsg}</span>}
+            </div>
+            <div style={{ fontSize: 11.5, color: T.textMuted }}>Sends from your Sending Identity with your signature (Comms → Settings). A copy is kept for your records.</div>
           </div>
         </Modal>
       )}

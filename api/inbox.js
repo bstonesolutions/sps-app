@@ -34,6 +34,15 @@ async function sbGet(key, fallback) {
   } catch { return fallback; }
 }
 const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+// Shared email look + helpers for send/reply. The rich composer sends real HTML (bold/italic/
+// lists/links); strip only scripts/styles (the owner authors it, so this is a light guard).
+const EMAIL_FONT = "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;color:#111827;line-height:1.6";
+const stripHtml = (h) => String(h || "").replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "").slice(0, 300000);
+const sigHtml = (sig) => sig ? `<br><br>${escapeHtml(sig).replace(/\n/g, "<br>")}` : "";
+// Build the html part: use the composer's HTML when present, else pre-wrap the plain text.
+const emailHtml = (htmlIn, textOut, sig) => htmlIn
+  ? `<div style="${EMAIL_FONT}">${htmlIn}${sigHtml(sig)}</div>`
+  : `<div style="${EMAIL_FONT};white-space:pre-wrap">${escapeHtml(textOut)}</div>`;
 
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -119,13 +128,16 @@ export default async function handler(req, res) {
       const email = await sbGet("sps_email", {});
       const from = resolveFrom({ fromName: email.fromName, fromAddress: email.fromAddress }, process.env.RESEND_FROM || "Stone Property Solutions <noreply@stonepropertysolutions.com>");
       const bcc = [email.notify && email.notify.ownerEmail, email.ownerEmail].map(e => String(e || "").trim()).find(e => /.+@.+\..+/.test(e));
+      const sig = String(email.signature || "").trim();
+      const bodyOut = replyBody + (sig ? `\n\n${sig}` : "");
+      const htmlIn = b.html ? stripHtml(b.html) : "";
       const subject = /^re:/i.test(orig.subject || "") ? orig.subject : `Re: ${orig.subject || ""}`.trim();
       const sr = await fetch("https://api.resend.com/emails", {
         method: "POST", headers: { Authorization: `Bearer ${RESEND_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           from, to: [orig.from_email], subject,
-          text: replyBody,
-          html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;color:#111827;line-height:1.6;white-space:pre-wrap">${escapeHtml(replyBody)}</div>`,
+          text: bodyOut,
+          html: emailHtml(htmlIn, bodyOut, sig),
           ...(bcc ? { bcc: [bcc] } : {}),
           ...(orig.message_id ? { headers: { "In-Reply-To": orig.message_id, References: orig.message_id } } : {}),
         }),
@@ -141,6 +153,41 @@ export default async function handler(req, res) {
           method: "POST", headers: sbHeaders(),
           body: JSON.stringify({ ...base, origin: "work-email reply (Comms → Email)", recipient: orig.from_email }),
         });
+        if (lr.status === 400 && /column/i.test(await lr.text().catch(() => ""))) {
+          await fetch(`${SUPABASE_URL}/rest/v1/sps_comms_log`, { method: "POST", headers: sbHeaders(), body: JSON.stringify(base) });
+        }
+      } catch { /* best-effort */ }
+      return res.status(200).json({ ok: true, id: sd.id || null });
+    }
+    if (b.action === "send") {
+      // Compose a brand-new email from the app (Comms → Email → Compose). Same send canon as
+      // reply: FROM the Sending Identity, signature appended, BCC the owner for the record.
+      if (!RESEND_KEY) return res.status(501).json({ error: "Email sending isn't configured (RESEND_API_KEY).", missingEnv: true });
+      const to = String(b.to || "").trim();
+      const subject = String(b.subject || "").trim().slice(0, 300);
+      const bodyIn = String(b.body || "").trim().slice(0, 10000);
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return res.status(400).json({ error: "Enter a valid recipient email address." });
+      if (!bodyIn) return res.status(400).json({ error: "Write a message first." });
+      const email = await sbGet("sps_email", {});
+      const from = resolveFrom({ fromName: email.fromName, fromAddress: email.fromAddress }, process.env.RESEND_FROM || "Stone Property Solutions <noreply@stonepropertysolutions.com>");
+      const bcc = [email.notify && email.notify.ownerEmail, email.ownerEmail].map(e => String(e || "").trim()).find(e => /.+@.+\..+/.test(e));
+      const sig = String(email.signature || "").trim();
+      const bodyOut = bodyIn + (sig ? `\n\n${sig}` : "");
+      const htmlIn = b.html ? stripHtml(b.html) : "";
+      const sr = await fetch("https://api.resend.com/emails", {
+        method: "POST", headers: { Authorization: `Bearer ${RESEND_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from, to: [to], subject: subject || "(no subject)",
+          text: bodyOut,
+          html: emailHtml(htmlIn, bodyOut, sig),
+          ...(bcc ? { bcc: [bcc] } : {}),
+        }),
+      });
+      const sd = await sr.json().catch(() => ({}));
+      if (!sr.ok) return res.status(502).json({ error: sd?.message || `Resend ${sr.status}` });
+      try {
+        const base = { client_id: "", type: "Email sent", channel: "email", body: `${subject || "(no subject)"} — ${bodyIn.slice(0, 600)}`, ok: true };
+        const lr = await fetch(`${SUPABASE_URL}/rest/v1/sps_comms_log`, { method: "POST", headers: sbHeaders(), body: JSON.stringify({ ...base, origin: "work-email compose (Comms → Email)", recipient: to }) });
         if (lr.status === 400 && /column/i.test(await lr.text().catch(() => ""))) {
           await fetch(`${SUPABASE_URL}/rest/v1/sps_comms_log`, { method: "POST", headers: sbHeaders(), body: JSON.stringify(base) });
         }
