@@ -21246,15 +21246,22 @@ function EmailInboxSection({ leads, setLeads }) {
     try { await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "setKind", ids, kind }) }); } catch (_) {}
     setBusyBulk(false); exitSelect();
   };
-  const bulkDelete = async () => {
-    const ids = selIds; if (!ids.length || busyBulk) return;
-    if (!confirm(`Delete ${ids.length} email${ids.length === 1 ? "" : "s"}? This can't be undone.`)) return;
-    setRows(rs => (rs || []).filter(r => !ids.includes(r.id)));
+  const deleteEmails = async (rawIds, { ask = true } = {}) => {
+    const ids = (rawIds || []).filter(Boolean); if (!ids.length || busyBulk) return;
+    if (ask && !confirm(`Delete ${ids.length} email${ids.length === 1 ? "" : "s"}? Matched messages move to your Gmail Trash (recoverable there for ~30 days).`)) return;
+    setRows(rs => (rs || []).filter(r => !ids.includes(r.id)));   // optimistic
     setOpenRow(o => (o && ids.includes(o.id) ? null : o));
     setBusyBulk(true);
-    try { await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "delete", ids }) }); } catch (_) {}
+    try {
+      const h = await authHeaders({ "Content-Type": "application/json" });
+      // Move the real Gmail message to Trash FIRST (needs the sps_inbox rows to resolve Message-IDs),
+      // then remove the app's copy. Trashing is best-effort — unmatched mail just leaves the app.
+      await fetch(`${PROD_URL}/api/gmail-action`, { method: "POST", headers: h, body: JSON.stringify({ action: "trash", ids }) }).catch(() => {});
+      await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: h, body: JSON.stringify({ action: "delete", ids }) });
+    } catch (_) {}
     setBusyBulk(false); exitSelect();
   };
+  const bulkDelete = () => deleteEmails(selIds);
   const fmtWhen = (iso) => {
     try { const d = new Date(iso); return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " · " + d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }); } catch (_) { return ""; }
   };
@@ -21398,6 +21405,7 @@ function EmailInboxSection({ leads, setLeads }) {
               })}
               <div style={{ flex: 1 }} />
               <Btn variant="ghost" sm onClick={() => markRead([openRow.id], !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>
+              <Btn variant="danger" sm onClick={() => deleteEmails([openRow.id])}>Delete</Btn>
             </div>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
               {!inLeads(openRow.id) && <Btn variant="primary" sm onClick={() => addToLeads(openRow)}>➕ Add to Leads</Btn>}
