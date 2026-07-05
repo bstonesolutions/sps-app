@@ -21579,7 +21579,7 @@ function EmailInboxSection({ leads, setLeads }) {
         </div>
       )}
       {wide ? (
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(320px, 380px) 1fr", gap: 16, alignItems: "start" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(300px, 360px) 1fr", gap: 12, alignItems: "start" }}>
           <div style={{ border: `1px solid ${T.border}`, borderRadius: 16, overflow: "hidden", background: T.surface, maxHeight: "calc(100dvh - 250px)", overflowY: "auto" }}>{listRows}</div>
           <div style={{ border: `1px solid ${T.border}`, borderRadius: 16, background: T.surface, minHeight: "calc(100dvh - 250px)", maxHeight: "calc(100dvh - 250px)", overflow: "hidden", display: "flex", flexDirection: "column" }}>
             {openRow ? (
@@ -21845,6 +21845,9 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
   // If the permitted set changes and the current section is no longer allowed, snap to the first.
   useEffect(() => { if (!SECTIONS.some(s => s.id === section)) setSection(firstId); }, [secKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const vpx = useViewport();   // desktop → left sidebar shell; phone → sleek top section nav
+  // Collapsible Comms sidebar — reclaim horizontal space on desktop (icon-only rail). Persisted.
+  const [navCollapsed, setNavCollapsed] = useState(() => { try { return localStorage.getItem("sps_comms_nav_collapsed") === "1"; } catch { return false; } });
+  const toggleNav = () => setNavCollapsed(c => { const n = !c; try { localStorage.setItem("sps_comms_nav_collapsed", n ? "1" : "0"); } catch (_) {} return n; });
 
   const soon = (label, note) => (
     <div style={{ textAlign: "center", padding: "56px 24px", color: T.textMuted }}>
@@ -21908,27 +21911,33 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
     );
   }
 
-  // Desktop: a clean left section-nav (sidebar) + a wide content area — the unified Comms shell.
+  // Desktop: a clean left section-nav (sidebar, collapsible) + a wide content area.
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "236px 1fr", maxWidth: 1240, margin: "0 auto", minHeight: "calc(100dvh - 130px)" }}>
-      <aside style={{ borderRight: `1px solid ${T.border}`, padding: "18px 14px", display: "flex", flexDirection: "column", gap: 2 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "4px 8px 16px" }}>
-          <div style={{ width: 34, height: 34, borderRadius: 10, background: T.primary, color: "#fff", display: "grid", placeItems: "center", fontWeight: 800, fontSize: 15, flexShrink: 0 }}>{((branding.companyName || "S").trim()[0] || "S").toUpperCase()}</div>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 16, fontWeight: 820, color: T.text, letterSpacing: "-0.02em" }}>Comms</div>
-            <div style={{ fontSize: 11, color: T.textMuted, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{branding.companyName || ""}</div>
-          </div>
+    <div style={{ display: "grid", gridTemplateColumns: navCollapsed ? "58px 1fr" : "224px 1fr", maxWidth: 1360, margin: "0 auto", minHeight: "calc(100dvh - 130px)" }}>
+      <aside style={{ borderRight: `1px solid ${T.border}`, padding: navCollapsed ? "16px 8px" : "16px 12px", display: "flex", flexDirection: "column", gap: 2 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: navCollapsed ? "2px 0 14px" : "2px 6px 14px", justifyContent: navCollapsed ? "center" : "flex-start" }}>
+          {!navCollapsed && <div style={{ width: 32, height: 32, borderRadius: 9, background: T.primary, color: "#fff", display: "grid", placeItems: "center", fontWeight: 800, fontSize: 14, flexShrink: 0 }}>{((branding.companyName || "S").trim()[0] || "S").toUpperCase()}</div>}
+          {!navCollapsed && (
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 15.5, fontWeight: 820, color: T.text, letterSpacing: "-0.02em" }}>Comms</div>
+              <div style={{ fontSize: 11, color: T.textMuted, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{branding.companyName || ""}</div>
+            </div>
+          )}
+          <button onClick={toggleNav} title={navCollapsed ? "Expand sidebar" : "Collapse sidebar"} style={{ width: 30, height: 30, borderRadius: 8, border: "none", background: "none", color: T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}>
+            <span style={{ display: "inline-flex", transform: navCollapsed ? "none" : "rotate(180deg)" }}><Icon name="chevronR" size={17} /></span>
+          </button>
         </div>
         {SECTIONS.map(s => {
           const on = section === s.id;
           return (
-            <button key={s.id} onClick={() => setSection(s.id)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 12px", borderRadius: 12, border: "none", background: on ? hexA(T.primary, 0.09) : "transparent", color: on ? T.primary : T.textMuted, fontSize: 14, fontWeight: on ? 750 : 650, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-              <Icon name={s.icon} size={18} />{s.label}
+            <button key={s.id} onClick={() => setSection(s.id)} title={navCollapsed ? s.label : undefined}
+              style={{ display: "flex", alignItems: "center", gap: 12, justifyContent: navCollapsed ? "center" : "flex-start", padding: navCollapsed ? "11px 0" : "11px 12px", borderRadius: 11, border: "none", background: on ? hexA(T.primary, 0.09) : "transparent", color: on ? T.primary : T.textMuted, fontSize: 14, fontWeight: on ? 750 : 650, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+              <Icon name={s.icon} size={18} />{!navCollapsed && s.label}
             </button>
           );
         })}
       </aside>
-      <div style={{ minWidth: 0, padding: "20px 4px 60px" }}>{content}</div>
+      <div style={{ minWidth: 0, padding: "16px 2px 50px" }}>{content}</div>
     </div>
   );
 }
