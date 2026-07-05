@@ -19802,6 +19802,7 @@ function Icon({ name, size = 22, filled = false }) {
     reply:    <><path d="M9 14 4 9l5-5" /><path d="M4 9h11a5 5 0 0 1 5 5v3" /></>,
     sparkle:  <path d="M12 2l2.1 5.6a2 2 0 0 0 1.3 1.3L21 11l-5.6 2.1a2 2 0 0 0-1.3 1.3L12 20l-2.1-5.6a2 2 0 0 0-1.3-1.3L3 11l5.6-2.1a2 2 0 0 0 1.3-1.3L12 2z" />,
     paperclip: <path d="M21 11.5 12.5 20a5 5 0 0 1-7-7L14 4.5a3.3 3.3 0 0 1 4.7 4.7L10.2 18a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8" />,
+    send:     <><path d="M22 2 11 13" /><path d="M22 2l-7 20-4-9-9-4 20-7z" /></>,
     // Content
     download: <><path d="M12 4v11M8 11l4 4 4-4" /><path d="M5 20h14" /></>,
     invoice:  <><rect x="5" y="3" width="14" height="18" rx="2" /><path d="M9 8h6M9 12h6M9 16h3.5" /></>,
@@ -21236,6 +21237,11 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const [attachments, setAttachments] = useState([]);       // [{ name, type, size, content(base64) }]
   const [attachErr, setAttachErr] = useState("");
   const composeEditorRef = useRef(null);                    // RichEditor insert API for reference snippets
+  const [folder, setFolder] = useState("inbox");            // "inbox" | "sent"
+  const [sentRows, setSentRows] = useState(null);           // outbound emails (from sps_comms_log)
+  const [sentErr, setSentErr] = useState("");
+  const [sentQ, setSentQ] = useState("");
+  const [openSent, setOpenSent] = useState(null);           // expanded sent row id
   const load = async () => {
     setErr("");
     setRefreshing(true);
@@ -21623,26 +21629,118 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       )}
     </div>
   );
+  // ── Sent folder — the emails you composed/replied from here. Read from sps_comms_log (already
+  // owner-readable); no schema change. Only the two work-email origins, not every system email. ──
+  const loadSent = async () => {
+    setSentErr("");
+    try {
+      const { data, error } = await supabase.from("sps_comms_log").select("*").eq("channel", "email").order("created_at", { ascending: false }).limit(120);
+      if (error) { setSentErr("Couldn't load your sent mail."); setSentRows([]); return; }
+      const rows = (data || []).filter(r => /work-email (compose|reply)/i.test(r.origin || "") || /^Email (sent|reply)$/i.test(r.type || ""));
+      setSentRows(rows);
+    } catch (_) { setSentErr("Couldn't load your sent mail."); setSentRows([]); }
+  };
+  useEffect(() => { if (folder === "sent" && sentRows === null) loadSent(); }, [folder]); // eslint-disable-line react-hooks/exhaustive-deps
+  const nameForSent = (r) => { if (r.client_id) { const c = (clients || []).find(x => String(x.id) === String(r.client_id)); if (c) return c.name; } return ""; };
+  const sentList = (sentRows || []).filter(r => {
+    const qq = sentQ.trim().toLowerCase(); if (!qq) return true;
+    return `${r.recipient || ""} ${nameForSent(r)} ${r.body || ""} ${r.origin || ""}`.toLowerCase().includes(qq);
+  });
+  const folderBar = (
+    <div style={{ display: "flex", gap: 4, background: T.surfaceAlt, borderRadius: 12, padding: 4, alignSelf: "flex-start" }}>
+      {[["inbox", "Inbox", unread], ["sent", "Sent", 0]].map(([id, lbl, badge]) => {
+        const on = folder === id;
+        return (
+          <button key={id} type="button" onClick={() => setFolder(id)}
+            style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "8px 16px", borderRadius: 9, border: "none", background: on ? T.surface : "transparent", color: on ? T.text : T.textMuted, fontSize: 13.5, fontWeight: on ? 800 : 650, cursor: "pointer", fontFamily: "inherit", boxShadow: on ? "0 1px 2px rgba(0,0,0,0.08)" : "none" }}>
+            <Icon name={id === "inbox" ? "mail" : "send"} size={15} />{lbl}
+            {badge > 0 && <span style={{ fontSize: 10.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.12), borderRadius: 100, padding: "1px 7px" }}>{badge}</span>}
+          </button>
+        );
+      })}
+    </div>
+  );
+  const sentView = (
+    <>
+      <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+        <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: wide ? T.surfaceAlt : T.surface, border: `1px solid ${T.border}`, borderRadius: wide ? 12 : 14, padding: wide ? "11px 13px" : "13px 15px", boxShadow: wide ? "none" : "0 1px 2px rgba(0,0,0,0.04), 0 6px 18px rgba(0,0,0,0.05)", minWidth: 0 }}>
+          <svg viewBox="0 0 24 24" width={wide ? 15 : 16} height={wide ? 15 : 16} fill="none" stroke={T.textMuted} strokeWidth={2} style={{ flexShrink: 0 }}><circle cx="11" cy="11" r="7" /><path d="m21 21-4-4" /></svg>
+          <input value={sentQ} onChange={e => setSentQ(e.target.value)} placeholder="Search sent mail" style={{ flex: 1, border: "none", background: "none", outline: "none", fontFamily: "inherit", fontSize: wide ? 13.5 : 14, color: T.text, minWidth: 0 }} />
+          {sentQ && <button onClick={() => setSentQ("")} title="Clear" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", display: "inline-flex", padding: 0, flexShrink: 0 }}><Icon name="close" size={15} /></button>}
+        </div>
+        <Btn variant="ghost" sm onClick={loadSent}>Refresh</Btn>
+      </div>
+      {sentRows === null && <div style={{ textAlign: "center", padding: 40, color: T.textMuted, fontSize: 13 }}>Loading your sent mail…</div>}
+      {sentErr && <div style={{ fontSize: 13, color: T.warning, textAlign: "center", padding: 20 }}>{sentErr}</div>}
+      {sentRows !== null && !sentErr && sentList.length === 0 && (
+        <div style={{ textAlign: "center", padding: "44px 24px", color: T.textMuted }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginBottom: 6 }}>No sent email yet</div>
+          <div style={{ fontSize: 13, lineHeight: 1.55, maxWidth: 380, margin: "0 auto" }}>Emails you compose or reply to from here show up in Sent, newest first.</div>
+        </div>
+      )}
+      {sentList.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: wide ? 8 : 72 }}>
+          {sentList.map(r => {
+            const to = r.recipient || nameForSent(r) || "—";
+            const parts = String(r.body || "").split(" — ");
+            const subj = (parts[0] || "").trim() || "(no subject)";
+            const prev = parts.slice(1).join(" — ").trim();
+            const open = openSent === r.id;
+            const isReply = /reply/i.test(r.type || "");
+            return (
+              <div key={r.id} onClick={() => setOpenSent(open ? null : r.id)}
+                style={{ display: "flex", gap: 12, padding: "13px 14px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 6px 16px rgba(0,0,0,0.05)", cursor: "pointer" }}>
+                <Avatar name={nameForSent(r) || to} email={r.recipient} size={40} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 14, fontWeight: 750, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>To {to}</span>
+                    <span style={{ fontSize: 11, color: T.textMuted, fontWeight: 600, flexShrink: 0 }}>{fmtWhen(r.created_at)}</span>
+                  </div>
+                  <div style={{ fontSize: 13.5, fontWeight: 750, color: T.text, marginTop: 3, whiteSpace: open ? "normal" : "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{subj}</div>
+                  {prev && <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3, lineHeight: 1.45, ...(open ? {} : { display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }) }}>{prev}</div>}
+                  <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 8 }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", textTransform: "uppercase", color: T.primary, background: hexA(T.primary, 0.1), padding: "2px 8px", borderRadius: 100 }}><Icon name={isReply ? "reply" : "send"} size={11} />{isReply ? "Reply" : "Sent"}</span>
+                    {r.ok === false && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#dc2626", background: hexA("#dc2626", 0.1), padding: "2px 8px", borderRadius: 100 }}>FAILED</span>}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {/* Folder switch (Inbox / Sent) + context actions — one clean toolbar row */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        {folderBar}
+        <div style={{ flex: 1 }} />
+        {folder === "inbox" && (wide ? (
+          <>
+            <Btn variant="ghost" sm onClick={importState.running ? undefined : () => setImportOpen(o => !o)}>{importState.running ? "Importing…" : "Import"}</Btn>
+            <Btn variant="ghost" sm onClick={refreshing ? undefined : load}>{refreshing ? "Refreshing…" : "Refresh"}</Btn>
+            {list.length > 0 && <Btn variant={selMode ? "primary" : "ghost"} sm onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }}>{selMode ? "Done" : "Select"}</Btn>}
+          </>
+        ) : (
+          <>
+            <button type="button" onClick={refreshing ? undefined : load} title="Refresh" style={{ width: 38, height: 38, borderRadius: 12, border: "none", background: "none", color: T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}><Icon name="refresh" size={18} /></button>
+            {list.length > 0 && <button type="button" onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }} title={selMode ? "Done" : "Select"} style={{ width: 38, height: 38, borderRadius: 12, border: "none", background: selMode ? hexA(T.primary, 0.1) : "none", color: selMode ? T.primary : T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}><Icon name="check" size={18} /></button>}
+          </>
+        ))}
+        {wide && <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }} style={{ display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0 }}><Icon name="edit" size={14} />Compose</Btn>}
+      </div>
+      {folder === "inbox" ? (
+        <>
       {wide ? (
         <>
-          {/* Desktop: search + compose, title + text actions, pill filters */}
+          {/* Desktop: search + pill filters */}
           <div style={{ display: "flex", gap: 9, alignItems: "center" }}>
             <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "11px 13px", minWidth: 0 }}>
               <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke={T.textMuted} strokeWidth={2} style={{ flexShrink: 0 }}><circle cx="11" cy="11" r="7" /><path d="m21 21-4-4" /></svg>
               <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search mail, people, tags" style={{ flex: 1, border: "none", background: "none", outline: "none", fontFamily: "inherit", fontSize: 13.5, color: T.text, minWidth: 0 }} />
               {q && <button onClick={() => setQ("")} title="Clear" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", display: "inline-flex", padding: 0, flexShrink: 0 }}><Icon name="close" size={15} /></button>}
             </div>
-            <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }} style={{ display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0 }}><Icon name="edit" size={14} />Compose</Btn>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <span style={{ fontSize: 18, fontWeight: 820, letterSpacing: "-0.02em", color: T.text }}>Inbox</span>
-            {unread > 0 && <span style={{ fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "3px 10px" }}>{unread} unread</span>}
-            <div style={{ flex: 1 }} />
-            <Btn variant="ghost" sm onClick={importState.running ? undefined : () => setImportOpen(o => !o)}>{importState.running ? "Importing…" : "Import"}</Btn>
-            <Btn variant="ghost" sm onClick={refreshing ? undefined : load}>{refreshing ? "Refreshing…" : "Refresh"}</Btn>
-            {list.length > 0 && <Btn variant={selMode ? "primary" : "ghost"} sm onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }}>{selMode ? "Done" : "Select"}</Btn>}
           </div>
           <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none" }}>
             {chip("all", "All")}{chip("unread", `Unread${unread ? ` · ${unread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
@@ -21650,14 +21748,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
         </>
       ) : (
         <>
-          {/* Mobile — the approved mockup: airy title, one search, pill filters; card list + floating Compose FAB below */}
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 2 }}>
-            <span style={{ fontSize: 26, fontWeight: 850, letterSpacing: "-0.035em", color: T.text }}>Inbox</span>
-            {unread > 0 && <span style={{ fontSize: 12, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "3px 10px" }}>{unread}</span>}
-            <div style={{ flex: 1 }} />
-            <button type="button" onClick={refreshing ? undefined : load} title="Refresh" style={{ width: 38, height: 38, borderRadius: 12, border: "none", background: "none", color: T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}><Icon name="refresh" size={18} /></button>
-            {list.length > 0 && <button type="button" onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }} title={selMode ? "Done" : "Select"} style={{ width: 38, height: 38, borderRadius: 12, border: "none", background: selMode ? hexA(T.primary, 0.1) : "none", color: selMode ? T.primary : T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}><Icon name="check" size={18} /></button>}
-          </div>
+          {/* Mobile — airy: one search, pill filters; card list + floating Compose FAB below */}
           <div style={{ display: "flex", alignItems: "center", gap: 9, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: "13px 15px", boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 6px 18px rgba(0,0,0,0.05)", minWidth: 0 }}>
             <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={T.textMuted} strokeWidth={2} style={{ flexShrink: 0 }}><circle cx="11" cy="11" r="7" /><path d="m21 21-4-4" /></svg>
             <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search mail, people, tags" style={{ flex: 1, border: "none", background: "none", outline: "none", fontFamily: "inherit", fontSize: 14, color: T.text, minWidth: 0 }} />
@@ -21742,6 +21833,8 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       ) : (
         list.length > 0 && <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: 72 }}>{cardRows}</div>
       )}
+        </>
+      ) : sentView}
       {/* Floating Compose FAB (mobile) — sits above the bottom nav, matching the mockup. */}
       {!wide && !setupPending && rows !== null && (
         <button type="button" onClick={() => { setComposeMsg(""); setComposeOpen(true); }}
