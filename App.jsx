@@ -21960,13 +21960,17 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
   // content. The left-sidebar shell only kicks in on a genuinely wide desktop so it never stacks with
   // the app's global sidebar and crushes the content column.
   if (vpx.width < 1080 || single) {
+    // <main> has a top padding (22px phone / 28px tablet). Cancel it here so the sticky section nav
+    // pins FLUSH under the app header — otherwise that padding band lets the search bar peek through
+    // above the tabs as a white sliver. The nav restores the spacing via its own paddingTop.
+    const padTop = vpx.isPhone ? 22 : 28;
     return (
-      <div style={{ maxWidth: 780, margin: "0 auto" }}>
+      <div style={{ maxWidth: 780, margin: single ? "0 auto" : `-${padTop}px auto 0` }}>
         {single && SECTIONS[0] && <div style={{ padding: "14px 16px 0", fontSize: 26, fontWeight: 840, color: T.text, letterSpacing: "-0.035em" }}>{SECTIONS[0].label}</div>}
         {!single && (
           // Pinned section switcher — sticks flush under the app header instead of scrolling away and
           // resting half-hidden (which read as janky). The opaque background hides content passing under it.
-          <div style={{ position: "sticky", top: 0, zIndex: 30, background: T.bg, padding: "12px 16px 0" }}>
+          <div style={{ position: "sticky", top: 0, zIndex: 30, background: T.bg, padding: `${padTop + 12}px 16px 0` }}>
             <div style={{ display: "flex", gap: 20, overflowX: "auto", WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", borderBottom: `1px solid ${T.border}` }}>
               {SECTIONS.map(s => {
                 const on = section === s.id;
