@@ -65,7 +65,7 @@ export default async function handler(req, res) {
   // Load the match keys for these rows (Message-ID; forwarded rows may carry an original_message_id).
   let rows = [];
   try {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?id=in.(${ids.map(encodeURIComponent).join(",")})&select=id,message_id,original_message_id,channel,from_email,subject`, { headers: sbHeaders() });
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?id=in.(${ids.map(encodeURIComponent).join(",")})&select=id,message_id,original_message_id,channel,from_email,subject,created_at`, { headers: sbHeaders() });
     if (r.ok) rows = (await r.json().catch(() => [])) || [];
   } catch (_) { /* fall through — everything becomes "skipped" */ }
   const byId = new Map(rows.map(r => [String(r.id), r]));
@@ -94,18 +94,43 @@ export default async function handler(req, res) {
           } catch (_) { reason = "search-error"; }
         }
         // 2) Fallback ONLY for TRASH (the user-confirmed, recoverable action) on FORWARDED mail whose
-        //    forwarded copy carries a different Message-ID: locate by sender + exact subject in a recent
-        //    window, requiring BOTH constraints and acting on a SINGLE hit only. Both are sanitized so a
-        //    quote/space can't inject Gmail search operators. Read-state sync stays exact-Message-ID only,
-        //    so a fuzzy match can never silently flag the wrong message.
+        //    forwarded copy carries a different Message-ID than the original sitting in Gmail. Locate by
+        //    sender + subject; then VERIFY each candidate's EXACT subject + sender (Gmail's subject: is
+        //    word-based, not literal) and, when a threaded/bulk sender yields several identical ones,
+        //    pick the message whose INTERNALDATE is nearest the row's arrival (created_at) — requiring a
+        //    tight ±2h window so a wrong pick can't happen. Move-to-Trash is recoverable regardless.
+        //    Read-state sync stays exact-Message-ID only, so a fuzzy match can never flag a wrong message.
         if (uid == null && action === "trash") {
           const clean = (s) => String(s || "").replace(/["\\\r\n]+/g, " ").trim();
           const from = clean(row.from_email), subj = clean(row.subject);
+          const wantSubj = String(row.subject || "").trim();
+          const wantFrom = String(row.from_email || "").trim().toLowerCase();
+          const createdMs = row.created_at ? Date.parse(row.created_at) : NaN;
           if (from && subj) {
             try {
-              const u = await client.search({ gmailRaw: `from:${from} subject:"${subj}" newer_than:2y` }, { uid: true });
-              if (u && u.length === 1) uid = u[0];
-              else reason = (u && u.length > 1) ? "ambiguous-match" : (reason || "not-found");
+              const hits = await client.search({ gmailRaw: `from:${from} subject:"${subj}"` }, { uid: true });
+              const cand = (hits || []).slice(0, 60);
+              if (cand.length === 1) uid = cand[0];
+              else if (cand.length > 1) {
+                let best = null, bestDelta = Infinity, exact = 0;
+                for await (const msg of client.fetch(cand, { uid: true, internalDate: true, envelope: true }, { uid: true })) {
+                  const env = msg.envelope || {};
+                  if (String(env.subject || "").trim() !== wantSubj) continue;
+                  const ef = ((env.from && env.from[0] && env.from[0].address) || "").trim().toLowerCase();
+                  if (wantFrom && ef && ef !== wantFrom) continue;
+                  exact++;
+                  const d = msg.internalDate ? new Date(msg.internalDate).getTime() : NaN;
+                  if (!Number.isNaN(createdMs) && !Number.isNaN(d)) {
+                    const delta = Math.abs(d - createdMs);
+                    if (delta < bestDelta) { bestDelta = delta; best = msg.uid; }
+                  } else if (best == null) best = msg.uid;
+                }
+                if (exact === 1) uid = best;
+                else if (exact > 1) {
+                  if (best != null && !Number.isNaN(createdMs) && bestDelta <= 2 * 3600 * 1000) uid = best;
+                  else reason = "ambiguous-match";
+                } else reason = reason || "not-found";
+              } else reason = reason || "not-found";
             } catch (_) { reason = reason || "search-error"; }
           } else if (!reason) reason = "not-found";
         }

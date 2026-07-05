@@ -21318,25 +21318,61 @@ function EmailInboxSection({ leads, setLeads }) {
   const deleteEmails = (rawIds, { ask = true } = {}) => {
     const ids = (rawIds || []).filter(Boolean); if (!ids.length) return;
     if (ask && !confirm(`Delete ${ids.length} email${ids.length === 1 ? "" : "s"}? Matched messages move to your Gmail Trash (recoverable there for ~30 days).`)) return;
-    // INSTANT: remove from the UI and unblock right now. All server work (Gmail Trash + delete the
-    // app copy) runs in the background so the user NEVER waits on the multi-second IMAP round-trip.
+    // Capture the rows so we can put back any the server could NOT actually remove from Gmail —
+    // deleting the app copy while the message lingers in Gmail is the exact bug we're fixing.
+    const removed = (rows || []).filter(r => ids.includes(r.id));
+    const smsIds = new Set(removed.filter(r => r.channel === "sms").map(r => r.id)); // no Gmail copy → app-only delete
+    // INSTANT: pull them from the list now (optimistic). We reconcile against the REAL Gmail result
+    // below and restore anything that couldn't be trashed, so nothing is silently stranded.
     setRows(rs => (rs || []).filter(r => !ids.includes(r.id)));
     setOpenRow(o => (o && ids.includes(o.id) ? null : o));
     exitSelect(); setGmailNote("");
     (async () => {
+      const restore = (keepIds) => {
+        const back = removed.filter(r => keepIds.includes(r.id));
+        if (!back.length) return;
+        setRows(rs => {
+          const cur = rs || [];
+          const merged = [...cur, ...back.filter(b => !cur.some(c => c.id === b.id))];
+          return merged.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+        });
+      };
       try {
         const h = await authHeaders({ "Content-Type": "application/json" });
-        // Trash in Gmail FIRST (needs the sps_inbox rows to resolve the match), then delete the copy.
-        let trashRes = null;
-        try { const tr = await fetch(`${PROD_URL}/api/gmail-action`, { method: "POST", headers: h, body: JSON.stringify({ action: "trash", ids }) }); trashRes = await tr.json().catch(() => null); } catch (_) {}
-        await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: h, body: JSON.stringify({ action: "delete", ids }) });
-        const movedN = (trashRes && Array.isArray(trashRes.updated)) ? trashRes.updated.length : 0;
-        const missN = ids.length - movedN;
-        if (missN > 0) {
-          setGmailNote(`${movedN ? `${movedN} moved to Gmail Trash · ` : ""}${missN} removed from the app only — ${missN === 1 ? "it wasn't" : "they weren't"} matched in Gmail (can happen with forwarded mail).`);
-          setTimeout(() => setGmailNote(""), 9000);
+        // Trash the real Gmail messages FIRST (needs the sps_inbox rows to resolve the match). SMS
+        // rows have no Gmail counterpart, so they're never sent to IMAP.
+        const gmailIds = ids.filter(id => !smsIds.has(id));
+        let trashRes = null, callFailed = false;
+        if (gmailIds.length) {
+          try {
+            const tr = await fetch(`${PROD_URL}/api/gmail-action`, { method: "POST", headers: h, body: JSON.stringify({ action: "trash", ids: gmailIds }) });
+            trashRes = await tr.json().catch(() => null);
+            if (!tr.ok) callFailed = true;
+          } catch (_) { callFailed = true; }
         }
-      } catch (_) {}
+        const updated = (trashRes && Array.isArray(trashRes.updated)) ? trashRes.updated.map(String) : [];
+        const skipped = (trashRes && Array.isArray(trashRes.skipped)) ? trashRes.skipped : [];
+        // Safe to hard-delete the app copy: SMS rows, rows Gmail moved to Trash, and rows the server
+        // says have no Gmail copy at all (sms/no-row). Everything else STAYS so it can be retried.
+        const benign = skipped.filter(s => s && (s.reason === "sms" || s.reason === "no-row")).map(s => String(s.id));
+        const okIds = [...new Set([...smsIds, ...updated, ...benign])].filter(id => ids.includes(id));
+        const failIds = ids.filter(id => !okIds.includes(id));
+        if (okIds.length) {
+          try { await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: h, body: JSON.stringify({ action: "delete", ids: okIds }) }); } catch (_) {}
+        }
+        if (failIds.length) {
+          restore(failIds);
+          const movedGmail = updated.length;
+          const hardErr = callFailed || failIds.some(id => { const s = skipped.find(x => String(x.id) === String(id)); return s && ["search-error", "op-error"].includes(s.reason); });
+          setGmailNote(hardErr
+            ? `Couldn't reach Gmail to delete ${failIds.length === 1 ? "that email" : `${failIds.length} emails`} — ${failIds.length === 1 ? "it's" : "they're"} still here, so nothing was lost. Try again in a moment.`
+            : `${failIds.length === 1 ? "That email is" : `${failIds.length} emails are`} still here — couldn't find ${failIds.length === 1 ? "it" : "them"} in your Gmail to delete.${movedGmail ? ` (${movedGmail} other${movedGmail === 1 ? "" : "s"} moved to Gmail Trash.)` : ""}`);
+        }
+      } catch (_) {
+        // Total failure (e.g. couldn't get an auth token) — restore everything, delete nothing.
+        restore(ids);
+        setGmailNote("Couldn't delete right now — nothing was removed. Try again.");
+      }
     })();
   };
   const bulkDelete = () => deleteEmails(selIds);
@@ -21406,6 +21442,33 @@ function EmailInboxSection({ leads, setLeads }) {
       </div>
     );
   });
+  // Mobile: each email as its own rounded, shadowed card (the approved mockup look) — airy and
+  // tappable, unread gets a red rail + a tinted border. Separate from listRows so the desktop
+  // two-pane keeps its flat divided list.
+  const cardRows = list.map((r) => (
+    <div key={r.id} onClick={() => { if (selMode) { toggleSel(r.id); return; } setOpenRow(r); setReplying(false); setReplyText(""); setReplyHtml(""); setReplyMsg(""); if (!r.read) markRead([r.id]); }}
+      style={{ position: "relative", display: "flex", gap: 12, padding: "13px 14px", background: sel[r.id] ? hexA(T.primary, 0.06) : T.surface, border: `1px solid ${sel[r.id] ? T.primary : (r.read ? T.border : hexA(T.primary, 0.28))}`, borderRadius: 16, boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 6px 16px rgba(0,0,0,0.05)", cursor: "pointer" }}>
+      {!r.read && <span style={{ position: "absolute", left: -1, top: 14, bottom: 14, width: 3, borderRadius: 3, background: T.primary }} />}
+      {selMode && <div style={{ alignSelf: "center", flexShrink: 0 }}><Checkbox checked={!!sel[r.id]} onChange={() => toggleSel(r.id)} /></div>}
+      <Avatar name={r.from_name} email={r.from_email} size={40} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 14, fontWeight: r.read ? 700 : 820, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{r.from_name || r.from_email}</span>
+          <span style={{ fontSize: 11, color: r.read ? T.textMuted : T.primary, fontWeight: r.read ? 600 : 800, flexShrink: 0 }}>{fmtWhen(r.created_at)}</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
+          {r.channel === "sms" && <span title="Text message" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="message" size={12} /></span>}
+          <span style={{ fontSize: 13.5, fontWeight: r.read ? 600 : 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{r.subject || "(no subject)"}</span>
+        </div>
+        <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3, lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{(r.ai && r.ai.summary) || (r.body_text || "").slice(0, 160)}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 8 }}>
+          {badge(r.kind)}
+          {inLeads(r.id) && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#16a34a", flexShrink: 0 }}>→ Leads</span>}
+          {r.replied && <span title="Replied" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="reply" size={12} /></span>}
+        </div>
+      </div>
+    </div>
+  ));
   // The open-email body — rendered in a desktop reading pane OR a mobile modal.
   const readerInner = !openRow ? null : (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -21510,25 +21573,21 @@ function EmailInboxSection({ leads, setLeads }) {
         </>
       ) : (
         <>
-          {/* Mobile — stripped & airy (matches the mockup): big title + compose icon, one search, underline filters */}
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
-            <span style={{ fontSize: 27, fontWeight: 840, letterSpacing: "-0.035em", color: T.text }}>Inbox</span>
+          {/* Mobile — the approved mockup: airy title, one search, pill filters; card list + floating Compose FAB below */}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 2 }}>
+            <span style={{ fontSize: 26, fontWeight: 850, letterSpacing: "-0.035em", color: T.text }}>Inbox</span>
             {unread > 0 && <span style={{ fontSize: 12, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "3px 10px" }}>{unread}</span>}
             <div style={{ flex: 1 }} />
-            <button type="button" onClick={refreshing ? undefined : load} title="Refresh" style={{ width: 40, height: 40, borderRadius: 12, border: "none", background: "none", color: T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}><Icon name="refresh" size={18} /></button>
-            {list.length > 0 && <button type="button" onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }} title={selMode ? "Done" : "Select"} style={{ width: 40, height: 40, borderRadius: 12, border: "none", background: selMode ? hexA(T.primary, 0.1) : "none", color: selMode ? T.primary : T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}><Icon name="check" size={18} /></button>}
-            <button type="button" onClick={() => { setComposeMsg(""); setComposeOpen(true); }} title="Compose" style={{ width: 44, height: 44, borderRadius: 14, border: "none", background: T.primary, color: "#fff", display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0, boxShadow: `0 6px 16px ${hexA(T.primary, 0.32)}` }}><Icon name="edit" size={19} /></button>
+            <button type="button" onClick={refreshing ? undefined : load} title="Refresh" style={{ width: 38, height: 38, borderRadius: 12, border: "none", background: "none", color: T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}><Icon name="refresh" size={18} /></button>
+            {list.length > 0 && <button type="button" onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }} title={selMode ? "Done" : "Select"} style={{ width: 38, height: 38, borderRadius: 12, border: "none", background: selMode ? hexA(T.primary, 0.1) : "none", color: selMode ? T.primary : T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}><Icon name="check" size={18} /></button>}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 9, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: "13px 15px", boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 6px 18px rgba(0,0,0,0.05)", minWidth: 0 }}>
             <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={T.textMuted} strokeWidth={2} style={{ flexShrink: 0 }}><circle cx="11" cy="11" r="7" /><path d="m21 21-4-4" /></svg>
             <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search mail, people, tags" style={{ flex: 1, border: "none", background: "none", outline: "none", fontFamily: "inherit", fontSize: 14, color: T.text, minWidth: 0 }} />
             {q && <button onClick={() => setQ("")} title="Clear" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", display: "inline-flex", padding: 0, flexShrink: 0 }}><Icon name="close" size={16} /></button>}
           </div>
-          <div style={{ display: "flex", gap: 22, overflowX: "auto", WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", borderBottom: `1px solid ${T.border}` }}>
-            {[["all", "All"], ["unread", `Unread${unread ? ` · ${unread}` : ""}`], ["lead", "Leads"], ["bill", "Bills"], ["client", "Clients"], ["other", "Other"]].map(([id, label]) => {
-              const on = filter === id;
-              return <button key={id} type="button" onClick={() => setFilter(id)} style={{ flexShrink: 0, position: "relative", background: "none", border: "none", padding: "8px 1px 11px", fontSize: 14.5, fontWeight: 700, color: on ? T.text : T.textMuted, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>{label}{on && <span style={{ position: "absolute", left: 1, right: 1, bottom: -1, height: 2.5, borderRadius: 3, background: T.primary }} />}</button>;
-            })}
+          <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none" }}>
+            {chip("all", "All")}{chip("unread", `Unread${unread ? ` · ${unread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
           </div>
         </>
       )}
@@ -21563,7 +21622,13 @@ function EmailInboxSection({ leads, setLeads }) {
         </div>
       )}
       {importState.msg && <div style={{ fontSize: 12.5, fontWeight: 700, color: importState.running ? T.textMuted : (importState.msg.startsWith("Done") ? "#16a34a" : T.warning), padding: "2px 2px" }}>{importState.msg}</div>}
-      {gmailNote && <div style={{ fontSize: 12.5, fontWeight: 600, color: T.textMuted, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 12px", lineHeight: 1.45 }}>{gmailNote}</div>}
+      {gmailNote && (
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 10, fontSize: 12.5, fontWeight: 600, color: T.text, background: hexA(T.warning, 0.1), border: `1px solid ${hexA(T.warning, 0.35)}`, borderRadius: 10, padding: "10px 12px", lineHeight: 1.45 }}>
+          <span style={{ color: T.warning, flexShrink: 0, display: "inline-flex", marginTop: 1 }}><Icon name="warning" size={15} /></span>
+          <span style={{ flex: 1, minWidth: 0 }}>{gmailNote}</span>
+          <button onClick={() => setGmailNote("")} title="Dismiss" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", display: "inline-flex", padding: 0, flexShrink: 0 }}><Icon name="close" size={15} /></button>
+        </div>
+      )}
       {rows === null && <div style={{ textAlign: "center", padding: 40, color: T.textMuted, fontSize: 13 }}>Loading your inbox…</div>}
       {setupPending && (
         <div style={{ textAlign: "center", padding: "44px 24px", color: T.textMuted }}>
@@ -21598,7 +21663,14 @@ function EmailInboxSection({ leads, setLeads }) {
           </div>
         </div>
       ) : (
-        <div style={{ border: `1px solid ${T.border}`, borderRadius: 16, overflow: "hidden", background: T.surface }}>{listRows}</div>
+        list.length > 0 && <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: 72 }}>{cardRows}</div>
+      )}
+      {/* Floating Compose FAB (mobile) — sits above the bottom nav, matching the mockup. */}
+      {!wide && !setupPending && rows !== null && (
+        <button type="button" onClick={() => { setComposeMsg(""); setComposeOpen(true); }}
+          style={{ position: "fixed", right: "max(18px, env(safe-area-inset-right))", bottom: vp.isDesktop ? "calc(env(safe-area-inset-bottom) + 24px)" : "calc(env(safe-area-inset-bottom) + 82px)", zIndex: 90, display: "inline-flex", alignItems: "center", gap: 8, background: T.primary, color: "#fff", border: "none", borderRadius: 100, padding: "14px 20px", fontFamily: "inherit", fontSize: 14, fontWeight: 780, cursor: "pointer", boxShadow: `0 8px 24px ${hexA(T.primary, 0.4)}` }}>
+          <Icon name="edit" size={17} />Compose
+        </button>
       )}
       {openRow && !wide && (
         <Modal title={openRow.subject || "(no subject)"} onClose={() => setOpenRow(null)} maxWidth={640}>
@@ -21890,9 +21962,11 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
   if (vpx.width < 1080 || single) {
     return (
       <div style={{ maxWidth: 780, margin: "0 auto" }}>
-        <div style={{ padding: "14px 16px 0" }}>
-          {single && SECTIONS[0] && <div style={{ fontSize: 26, fontWeight: 840, color: T.text, letterSpacing: "-0.035em", marginBottom: 8 }}>{SECTIONS[0].label}</div>}
-          {!single && (
+        {single && SECTIONS[0] && <div style={{ padding: "14px 16px 0", fontSize: 26, fontWeight: 840, color: T.text, letterSpacing: "-0.035em" }}>{SECTIONS[0].label}</div>}
+        {!single && (
+          // Pinned section switcher — sticks flush under the app header instead of scrolling away and
+          // resting half-hidden (which read as janky). The opaque background hides content passing under it.
+          <div style={{ position: "sticky", top: 0, zIndex: 30, background: T.bg, padding: "12px 16px 0" }}>
             <div style={{ display: "flex", gap: 20, overflowX: "auto", WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", borderBottom: `1px solid ${T.border}` }}>
               {SECTIONS.map(s => {
                 const on = section === s.id;
@@ -21904,8 +21978,8 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
                 );
               })}
             </div>
-          )}
-        </div>
+          </div>
+        )}
         <div style={{ paddingBottom: 90, paddingTop: 16 }}>{content}</div>
       </div>
     );
