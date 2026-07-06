@@ -27112,7 +27112,14 @@ function CPService({ client, branding, onNav, onUpgradeRequest, T, division }) {
   // per-service rate; otherwise the client's primary tier. Empty means NO tier (never default one).
   const clientDiv = division || client.division || "Pond";
   const plan = (division ? ((client.plans && client.plans[division]) || "") : effectiveTier(client)) || null;
-  const svcRate = (division ? ((client.planRates && client.planRates[division]) || "") : (client.monthlyRate || ""));
+  // The client's ACTUAL price for this plan: their per-division rate, else their flat monthlyRate when
+  // this is effectively their only plan. Custom prices set in the bulk editor (and the flat-rate field)
+  // land on monthlyRate, NOT planRates — without this fallback the portal wrongly showed the GENERIC
+  // tier price instead of what the client actually pays.
+  const _planList = clientPlanList(client);
+  const _planEntry = _planList.find(p => p.div === clientDiv);
+  const svcRate = (_planEntry && _planEntry.rate) ? String(_planEntry.rate)
+    : (_planList.length <= 1 ? String(client.monthlyRate || "").replace(/[^\d.]/g, "") : "");
   const allTiers = tiers || CP_TIERS;
   const divTierSet = (allTiers[clientDiv] || allTiers["Pond"] || DEFAULT_TIERS["Pond"]);
   const tier = plan ? (divTierSet[plan] || null) : null;   // null when untiered — no fallback tier
