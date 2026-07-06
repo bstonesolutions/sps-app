@@ -19946,114 +19946,161 @@ function MessagesScreen({ clients, currentUser, T }) {
     return () => clearInterval(interval);
   }, []);
 
-  if (selectedClient) {
-    return <StaffChat client={selectedClient} currentUser={currentUser} T={T} onBack={() => setSelectedClientId(null)} />;
-  }
+  // Two-pane (conversation list + open chat side-by-side) once the container is wide enough — adapts
+  // to the window AND to collapsing the sidebars. Below that, the single-column list that opens the
+  // chat full-screen (the phone/tablet behavior).
+  const wrapRef = useRef(null);
+  const [cw, setCw] = useState(0);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return undefined;
+    const ro = new ResizeObserver(es => { for (const e of es) setCw(e.contentRect.width); });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const twoPane = cw >= 820;
 
   // Conversations sorted by most recent
   const threads = Object.entries(threadMap)
     .map(([cid, meta]) => ({ client: (clients || []).find(c => String(c.id) === cid), ...meta }))
     .filter(t => t.client)
     .sort((a, b) => new Date(b.lastAt) - new Date(a.lastAt));
-
   const totalUnread = threads.reduce((s, t) => s + (t.unread || 0), 0);
 
-  // New message picker
   const activeClients = selectableClients(clients);
   const filteredNew = activeClients.filter(c =>
     (c.name || "").toLowerCase().includes(newSearch.toLowerCase()) ||
     (c.address || "").toLowerCase().includes(newSearch.toLowerCase())
   );
 
-  if (showNewMsg) {
-    return (
-      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <button onClick={() => { setShowNewMsg(false); setNewSearch(""); }}
-            style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4, padding: 0 }}>
-            <Icon name="back" size={16} /> Messages
-          </button>
-          <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>New Message</div>
-        </div>
+  // ── New Message picker (fills the left pane in two-pane, or the whole screen when narrow) ──
+  const newMsgPane = (
+    <div style={{ display: "flex", flexDirection: "column", height: twoPane ? "100%" : "auto", minHeight: 0, gap: twoPane ? 0 : 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: twoPane ? "14px 16px" : 0, borderBottom: twoPane ? `1px solid ${T.border}` : "none", flexShrink: 0 }}>
+        <button onClick={() => { setShowNewMsg(false); setNewSearch(""); }}
+          title="Back" style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4, padding: 0 }}>
+          <Icon name="back" size={16} />{twoPane ? "" : " Messages"}
+        </button>
+        <div style={{ fontSize: twoPane ? 16 : 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>New Message</div>
+      </div>
+      <div style={{ padding: twoPane ? "10px 12px 0" : 0 }}>
         <input type="search" placeholder="Search clients..." value={newSearch} onChange={e => setNewSearch(e.target.value)}
           style={{ width: "100%", padding: "11px 14px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", background: T.surface, color: T.text, outline: "none", boxSizing: "border-box" }} />
-        <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+      </div>
+      <div style={{ flex: twoPane ? 1 : "none", minHeight: 0, overflowY: "auto", padding: twoPane ? "10px 12px 12px" : 0 }}>
+        <div style={{ background: T.surface, borderRadius: twoPane ? 12 : 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
           {filteredNew.length === 0 && <div style={{ padding: "32px 20px", textAlign: "center", color: T.textMuted, fontSize: 14 }}>No clients found</div>}
           {filteredNew.map((c, i) => (
             <button key={c.id} onClick={() => { setSelectedClientId(c.id); setShowNewMsg(false); setNewSearch(""); }}
-              style={{ width: "100%", padding: "14px 18px", background: "none", border: "none", borderBottom: i < filteredNew.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-              <div style={{ width: 42, height: 42, borderRadius: 13, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 800, flexShrink: 0 }}>
+              style={{ width: "100%", padding: "12px 14px", background: "none", border: "none", borderBottom: i < filteredNew.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 12, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+              <div style={{ width: 40, height: 40, borderRadius: 13, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, flexShrink: 0 }}>
                 {(c.name || "?")[0].toUpperCase()}
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{c.name}</div>
-                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>{c.division || "Pond"} · {c.address || ""}</div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.name}</div>
+                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.division || "Pond"} · {c.address || ""}</div>
               </div>
-              <Icon name="chevronR" size={16} />
             </button>
           ))}
         </div>
       </div>
-    );
-  }
+    </div>
+  );
 
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <div>
-          <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", display: "flex", alignItems: "center", gap: 10 }}>
-            Messages
-            {totalUnread > 0 && <span style={{ background: T.primary, color: "#fff", borderRadius: 100, fontSize: 11, fontWeight: 800, padding: "2px 8px" }}>{totalUnread}</span>}
-          </div>
-          <div style={{ fontSize: 13, color: T.textMuted, marginTop: 2 }}>{threads.length} conversation{threads.length !== 1 ? "s" : ""}</div>
-        </div>
-        <button onClick={() => setShowNewMsg(true)}
-          style={{ display: "flex", alignItems: "center", gap: 6, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "10px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
-          <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"><path d="M12 5v14M5 12h14"/></svg>
-          New Message
-        </button>
-      </div>
-
-      {threads.length === 0 ? (
-        <div style={{ background: T.surface, borderRadius: 18, border: `1px dashed ${T.border}`, padding: "48px 20px", textAlign: "center" }}>
-          <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 12px" }}>
-            <Icon name="message" size={24} />
-          </div>
-          <div style={{ fontSize: 15, fontWeight: 700, color: T.text, marginBottom: 6 }}>No conversations yet</div>
-          <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5, marginBottom: 18 }}>Start a message with any client, or wait for one to reach out through their portal.</div>
-          <button onClick={() => setShowNewMsg(true)}
-            style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "11px 22px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>
-            Start a Conversation
-          </button>
+  // ── Conversation list header + body ──
+  const listHeader = (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: twoPane ? "14px 16px" : 0, borderBottom: twoPane ? `1px solid ${T.border}` : "none", flexShrink: 0, marginTop: twoPane ? 0 : 2, minHeight: twoPane ? 0 : 44 }}>
+      {twoPane ? (
+        <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", display: "flex", alignItems: "center", gap: 8 }}>
+          Messages
+          {totalUnread > 0 && <span style={{ background: T.primary, color: "#fff", borderRadius: 100, fontSize: 11, fontWeight: 800, padding: "2px 8px" }}>{totalUnread}</span>}
         </div>
       ) : (
-        <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
-          {threads.map((t, i) => {
-            const c = t.client;
-            const hasUnread = t.unread > 0;
-            return (
-              <button key={c.id} onClick={() => setSelectedClientId(c.id)}
-                style={{ width: "100%", padding: "14px 18px", background: hasUnread ? hexA(T.primary, 0.04) : "none", border: "none", borderBottom: i < threads.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-                <div style={{ position: "relative", flexShrink: 0 }}>
-                  <div style={{ width: 44, height: 44, borderRadius: 14, background: hasUnread ? T.primary : hexA(T.primary, 0.1), color: hasUnread ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 800 }}>
-                    {(c.name || "?")[0].toUpperCase()}
-                  </div>
-                  {hasUnread && <div style={{ position: "absolute", top: -3, right: -3, width: 18, height: 18, borderRadius: "50%", background: "#E5484D", border: `2px solid ${T.bg}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 800, color: "#fff" }}>{t.unread}</div>}
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 3 }}>
-                    <div style={{ fontSize: 14, fontWeight: hasUnread ? 800 : 600, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{c.name}</div>
-                    <div style={{ fontSize: 11, color: T.textMuted, flexShrink: 0, marginLeft: 8 }}>{fmtMsgTime(t.lastAt)}</div>
-                  </div>
-                  <div style={{ fontSize: 13, color: hasUnread ? T.text : T.textMuted, fontWeight: hasUnread ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {t.lastMsg || "No messages yet"}
-                  </div>
-                </div>
-              </button>
-            );
-          })}
-        </div>
+        <div>{totalUnread > 0 && <span style={{ fontSize: 12, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "4px 11px" }}>{totalUnread} unread</span>}</div>
       )}
+      <button onClick={() => setShowNewMsg(true)}
+        style={{ display: "flex", alignItems: "center", gap: 6, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: twoPane ? "8px 12px" : "10px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, boxShadow: twoPane ? "none" : `0 6px 16px ${hexA(T.primary, 0.3)}` }}>
+        <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        {twoPane ? "New" : "New Message"}
+      </button>
+    </div>
+  );
+  // Circular, deterministic-hue avatar (matches the Email inbox look) instead of the old red squares.
+  const MSG_AV = ["#B81D24", "#0E9488", "#2563eb", "#b45309", "#7c3aed", "#c2410c", "#0891b2", "#be185d"];
+  const msgAvColor = (seed) => { let h = 0; const s = String(seed || "?"); for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return MSG_AV[h % MSG_AV.length]; };
+  const convBtn = (t, card) => {
+    const c = t.client, hasUnread = t.unread > 0, col = msgAvColor(c.name || c.id);
+    const active = twoPane && String(selectedClientId) === String(c.id);
+    return (
+      <button key={c.id} onClick={() => setSelectedClientId(c.id)}
+        style={card
+          ? { position: "relative", display: "flex", alignItems: "center", gap: 12, padding: "13px 14px", width: "100%", background: hasUnread ? hexA(T.primary, 0.03) : T.surface, border: `1px solid ${hasUnread ? hexA(T.primary, 0.28) : T.border}`, borderRadius: 16, boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 6px 16px rgba(0,0,0,0.05)", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }
+          : { position: "relative", display: "flex", alignItems: "center", gap: 12, padding: "13px 16px", width: "100%", background: active ? hexA(T.primary, 0.08) : (hasUnread ? hexA(T.primary, 0.04) : "none"), border: "none", borderBottom: `1px solid ${T.border}`, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+        {card && hasUnread && <span style={{ position: "absolute", left: -1, top: 14, bottom: 14, width: 3, borderRadius: 3, background: T.primary }} />}
+        <div style={{ width: 44, height: 44, borderRadius: "50%", flexShrink: 0, display: "grid", placeItems: "center", background: hexA(col, 0.15), color: col, fontSize: 17, fontWeight: 800 }}>{(c.name || "?")[0].toUpperCase()}</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+            <span style={{ flex: 1, minWidth: 0, fontSize: 14.5, fontWeight: hasUnread ? 820 : 650, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.name}</span>
+            <span style={{ fontSize: 11, color: hasUnread ? T.primary : T.textMuted, fontWeight: hasUnread ? 700 : 500, flexShrink: 0 }}>{fmtMsgTime(t.lastAt)}</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 3 }}>
+            <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: hasUnread ? T.text : T.textMuted, fontWeight: hasUnread ? 650 : 400, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.lastMsg || "No messages yet"}</span>
+            {hasUnread && <span style={{ minWidth: 18, height: 18, borderRadius: 9, background: T.primary, color: "#fff", fontSize: 10.5, fontWeight: 800, display: "grid", placeItems: "center", padding: "0 5px", flexShrink: 0 }}>{t.unread}</span>}
+          </div>
+        </div>
+      </button>
+    );
+  };
+  const listBody = threads.length === 0 ? (
+    <div style={{ background: T.surface, borderRadius: 18, border: `1px dashed ${T.border}`, padding: "48px 20px", textAlign: "center", margin: twoPane ? 12 : 0 }}>
+      <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 12px" }}>
+        <Icon name="message" size={24} />
+      </div>
+      <div style={{ fontSize: 15, fontWeight: 700, color: T.text, marginBottom: 6 }}>No conversations yet</div>
+      <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5, marginBottom: 18 }}>Start a message with any client, or wait for one to reach out through their portal.</div>
+      <button onClick={() => setShowNewMsg(true)}
+        style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "11px 22px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>
+        Start a Conversation
+      </button>
+    </div>
+  ) : twoPane ? (
+    <div>{threads.map(t => convBtn(t, false))}</div>
+  ) : (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: 20 }}>{threads.map(t => convBtn(t, true))}</div>
+  );
+  const listPane = twoPane ? (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+      {listHeader}
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>{listBody}</div>
+    </div>
+  ) : (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>{listHeader}{listBody}</div>
+  );
+
+  const chatPane = selectedClient
+    ? <StaffChat client={selectedClient} currentUser={currentUser} T={T} embedded onBack={() => setSelectedClientId(null)} />
+    : (
+      <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: T.textMuted, gap: 10, padding: 40, textAlign: "center" }}>
+        <div style={{ width: 60, height: 60, borderRadius: 18, background: hexA(T.primary, 0.06), color: T.primary, display: "grid", placeItems: "center" }}><Icon name="message" size={28} /></div>
+        <div style={{ fontSize: 15, fontWeight: 750, color: T.text }}>Select a conversation</div>
+        <div style={{ fontSize: 13, maxWidth: 280, lineHeight: 1.5 }}>Choose a client on the left to see the thread — or start a new message.</div>
+      </div>
+    );
+
+  if (twoPane) {
+    return (
+      <div ref={wrapRef} style={{ display: "grid", gridTemplateColumns: "340px 1fr", gap: 16, height: "calc(100dvh - 210px)", minHeight: 460 }}>
+        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, overflow: "hidden" }}>{showNewMsg ? newMsgPane : listPane}</div>
+        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, overflow: "hidden", padding: "16px 18px" }}>{chatPane}</div>
+      </div>
+    );
+  }
+  // Narrow: single column — the list, or a full-screen chat / new-message view.
+  return (
+    <div ref={wrapRef}>
+      {selectedClient
+        ? <StaffChat client={selectedClient} currentUser={currentUser} T={T} onBack={() => setSelectedClientId(null)} />
+        : showNewMsg ? newMsgPane : listPane}
     </div>
   );
 }
@@ -20331,13 +20378,15 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
 }
 
 // ── Staff chat view (single client thread) ──
-function StaffChat({ client, currentUser, T, onBack }) {
+function StaffChat({ client, currentUser, T, onBack, embedded = false }) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 180px)" }}>
+    <div style={{ display: "flex", flexDirection: "column", height: embedded ? "100%" : "calc(100vh - 180px)", minHeight: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, paddingBottom: 16, borderBottom: `1px solid ${T.border}` }}>
-        <button onClick={onBack} style={{ background: "none", border: "none", color: T.primary, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4, fontWeight: 700, fontSize: 13, fontFamily: "inherit" }}>
-          <Icon name="back" size={16} /> Back
-        </button>
+        {!embedded && (
+          <button onClick={onBack} style={{ background: "none", border: "none", color: T.primary, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4, fontWeight: 700, fontSize: 13, fontFamily: "inherit" }}>
+            <Icon name="back" size={16} /> Back
+          </button>
+        )}
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 15, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{client.name}</div>
           <div style={{ fontSize: 12, color: T.textMuted }}>{client.division || "Pond"} client</div>
@@ -22264,7 +22313,7 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
 
   // Desktop: a clean left section-nav (sidebar, collapsible) + a wide content area.
   return (
-    <div style={{ display: "grid", gridTemplateColumns: navCollapsed ? "58px 1fr" : "224px 1fr", maxWidth: 1360, margin: "0 auto", minHeight: "calc(100dvh - 130px)" }}>
+    <div style={{ display: "grid", gridTemplateColumns: navCollapsed ? "58px 1fr" : "224px 1fr", maxWidth: 1720, margin: "0 auto", minHeight: "calc(100dvh - 130px)" }}>
       <aside style={{ borderRight: `1px solid ${T.border}`, padding: navCollapsed ? "16px 8px" : "16px 12px", display: "flex", flexDirection: "column", gap: 2 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: navCollapsed ? "2px 0 14px" : "2px 2px 14px", justifyContent: navCollapsed ? "center" : "space-between" }}>
           {!navCollapsed && <div style={{ fontSize: 15.5, fontWeight: 820, color: T.text, letterSpacing: "-0.02em" }}>Comms</div>}
