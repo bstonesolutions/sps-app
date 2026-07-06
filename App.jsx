@@ -18981,6 +18981,18 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
   useEffect(() => {
     if (openLeadId) { setSelId(openLeadId); if (onLeadOpened) onLeadOpened(); }
   }, [openLeadId]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Two-pane (lead list + inline detail) once the container is wide enough — adapts to the window
+  // and to collapsing the sidebars. Below that, the single-column list + a full-screen detail modal.
+  const wrapRef = useRef(null);
+  const [cw, setCw] = useState(0);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return undefined;
+    const ro = new ResizeObserver(es => { for (const e of es) setCw(e.contentRect.width); });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const twoPane = cw >= 820;
 
   const norm = (s) => String(s || "").replace(/[^\d]/g, "").slice(-10);
   const lcs = (s) => String(s || "").trim().toLowerCase();
@@ -19022,52 +19034,54 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
     <button type="button" onClick={onClick} style={{ padding: "7px 13px", borderRadius: 100, border: `1.5px solid ${on ? (color || T.primary) : T.border}`, background: on ? hexA(color || T.primary, 0.1) : T.surface, color: on ? (color || T.primary) : T.textMuted, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
   );
 
-  return (
-    <div style={{ maxWidth: 760, margin: "0 auto", padding: "0 0 90px" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 16px 10px" }}>
-        <div>
-          <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Leads</div>
-          <div style={{ fontSize: 12.5, color: T.textMuted }}>{activeCount} active · {sorted.length} total</div>
-        </div>
-        <Btn sm onClick={() => { setForm({ ...BLANK_LEAD }); setAdding(true); }}>+ Add lead</Btn>
+  const headerBar = (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 16px 10px" }}>
+      <div>
+        <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Leads</div>
+        <div style={{ fontSize: 12.5, color: T.textMuted }}>{activeCount} active · {sorted.length} total</div>
       </div>
-
-      <div style={{ display: "flex", gap: 7, flexWrap: "wrap", padding: "0 16px 12px" }}>
-        {chip(filter === "active", "Active", () => setFilter("active"))}
-        {LEAD_STAGES.map(st => chip(filter === st.id, `${st.label}${counts[st.id] ? ` ${counts[st.id]}` : ""}`, () => setFilter(st.id), STATUS_COLOR[st.id]))}
-        {chip(filter === "all", "All", () => setFilter("all"))}
-      </div>
-
-      <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "0 16px" }}>
-        {shown.length === 0 && <div style={{ textAlign: "center", color: T.textMuted, fontSize: 13.5, padding: "40px 16px", lineHeight: 1.5 }}>No leads here yet. Website leads will appear automatically once the funnel's connected — or add one manually.</div>}
-        {shown.map(l => {
-          const initials = (l.name || "?").trim().split(/\s+/).map(w => w[0]).slice(0, 2).join("").toUpperCase() || "?";
-          const isNew = l.status === "new";
-          const nPhotos = Array.isArray(l.photos) ? l.photos.length : 0;
-          const firstImg = nPhotos ? l.photos.find(u => !/\.(mp4|mov|webm|m4v)(\?|$)/i.test(String(u))) : null;
-          const meta = [l.service, ago(l.createdAt), nPhotos ? `📷 ${nPhotos}` : ""].filter(Boolean).join(" · ");
-          return (
-          <div key={l.id} onClick={() => setSelId(l.id)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderLeft: `3px solid ${STATUS_COLOR[l.status] || T.border}`, borderRadius: 16, padding: "13px 15px", cursor: "pointer", display: "flex", alignItems: "flex-start", gap: 12, boxShadow: "0 2px 10px rgba(0,0,0,0.04)" }}>
-            <div style={{ width: 40, height: 40, borderRadius: "50%", flexShrink: 0, background: isNew ? T.primary : hexA(T.primary, 0.12), color: isNew ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 13.5 }}>{initials}</div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <div style={{ fontSize: 15, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.name || l.phone || l.email || "New lead"}</div>
-                <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", textTransform: "uppercase", color: T.textMuted, background: T.surfaceAlt, padding: "2px 7px", borderRadius: 100, flexShrink: 0 }}>{LEAD_SOURCE_LABEL[l.source] || l.source}</span>
-                <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: 10, fontWeight: 800, color: STATUS_COLOR[l.status] || T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{LEAD_STAGES.find(s => s.id === l.status)?.label || l.status}</span>
-              </div>
-              {l.message
-                ? <div style={{ fontSize: 13, color: T.text, marginTop: 4, lineHeight: 1.45, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{l.message}</div>
-                : <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 4, fontStyle: "italic" }}>No message left</div>}
-              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{meta}</div>
+      <Btn sm onClick={() => { setForm({ ...BLANK_LEAD }); setAdding(true); }}>+ Add lead</Btn>
+    </div>
+  );
+  const filterBar = (
+    <div style={{ display: "flex", gap: 7, flexWrap: "wrap", padding: "0 16px 12px" }}>
+      {chip(filter === "active", "Active", () => setFilter("active"))}
+      {LEAD_STAGES.map(st => chip(filter === st.id, `${st.label}${counts[st.id] ? ` ${counts[st.id]}` : ""}`, () => setFilter(st.id), STATUS_COLOR[st.id]))}
+      {chip(filter === "all", "All", () => setFilter("all"))}
+    </div>
+  );
+  const listCards = (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "0 16px 16px" }}>
+      {shown.length === 0 && <div style={{ textAlign: "center", color: T.textMuted, fontSize: 13.5, padding: "40px 16px", lineHeight: 1.5 }}>No leads here yet. Website leads will appear automatically once the funnel's connected — or add one manually.</div>}
+      {shown.map(l => {
+        const initials = (l.name || "?").trim().split(/\s+/).map(w => w[0]).slice(0, 2).join("").toUpperCase() || "?";
+        const isNew = l.status === "new";
+        const nPhotos = Array.isArray(l.photos) ? l.photos.length : 0;
+        const firstImg = nPhotos ? l.photos.find(u => !/\.(mp4|mov|webm|m4v)(\?|$)/i.test(String(u))) : null;
+        const meta = [l.service, ago(l.createdAt), nPhotos ? `📷 ${nPhotos}` : ""].filter(Boolean).join(" · ");
+        const active = twoPane && sel && sel.id === l.id;
+        return (
+        <div key={l.id} onClick={() => setSelId(l.id)} style={{ background: active ? hexA(T.primary, 0.06) : T.surface, border: `1px solid ${active ? hexA(T.primary, 0.4) : T.border}`, borderLeft: `3px solid ${STATUS_COLOR[l.status] || T.border}`, borderRadius: 16, padding: "13px 15px", cursor: "pointer", display: "flex", alignItems: "flex-start", gap: 12, boxShadow: "0 2px 10px rgba(0,0,0,0.04)" }}>
+          <div style={{ width: 40, height: 40, borderRadius: "50%", flexShrink: 0, background: isNew ? T.primary : hexA(T.primary, 0.12), color: isNew ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 13.5 }}>{initials}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ fontSize: 15, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.name || l.phone || l.email || "New lead"}</div>
+              <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", textTransform: "uppercase", color: T.textMuted, background: T.surfaceAlt, padding: "2px 7px", borderRadius: 100, flexShrink: 0 }}>{LEAD_SOURCE_LABEL[l.source] || l.source}</span>
+              <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: 10, fontWeight: 800, color: STATUS_COLOR[l.status] || T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{LEAD_STAGES.find(s => s.id === l.status)?.label || l.status}</span>
             </div>
-            {firstImg && <img src={firstImg} alt="" loading="lazy" onError={e => { e.target.style.display = "none"; }} style={{ width: 52, height: 52, borderRadius: 12, objectFit: "cover", border: `1px solid ${T.border}`, flexShrink: 0, background: T.surfaceAlt }} />}
+            {l.message
+              ? <div style={{ fontSize: 13, color: T.text, marginTop: 4, lineHeight: 1.45, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{l.message}</div>
+              : <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 4, fontStyle: "italic" }}>No message left</div>}
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{meta}</div>
           </div>
-          );
-        })}
-      </div>
-
-      {sel && (
-        <Modal title="Lead" onClose={() => setSelId(null)}>
+          {firstImg && <img src={firstImg} alt="" loading="lazy" onError={e => { e.target.style.display = "none"; }} style={{ width: 52, height: 52, borderRadius: 12, objectFit: "cover", border: `1px solid ${T.border}`, flexShrink: 0, background: T.surfaceAlt }} />}
+        </div>
+        );
+      })}
+    </div>
+  );
+  // Lead detail — inline in the right pane (two-pane) or in a full-screen modal (narrow).
+  const leadDetailInner = !sel ? null : (
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               <div style={{ width: 48, height: 48, borderRadius: "50%", flexShrink: 0, background: sel.status === "new" ? T.primary : hexA(T.primary, 0.12), color: sel.status === "new" ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 16 }}>{((sel.name || "?").trim().split(/\s+/).map(w => w[0]).slice(0, 2).join("") || "?").toUpperCase()}</div>
@@ -19116,7 +19130,36 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
             {sel.status === "won" && <div style={{ fontSize: 13, fontWeight: 700, color: "#16a34a", textAlign: "center" }}>✓ Converted to a client</div>}
             <button onClick={() => removeLead(sel.id)} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", padding: 6 }}>Delete lead</button>
           </div>
-        </Modal>
+  );
+  return (
+    <div ref={wrapRef} style={twoPane
+      ? { display: "grid", gridTemplateColumns: "minmax(320px, 400px) 1fr", gap: 16, height: "calc(100dvh - 200px)", minHeight: 460, padding: "8px 4px 0" }
+      : { maxWidth: 760, margin: "0 auto", padding: "0 0 90px" }}>
+      {twoPane ? (
+        <>
+          <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+            <div style={{ flexShrink: 0 }}>{headerBar}{filterBar}</div>
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>{listCards}</div>
+          </div>
+          <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, overflow: "hidden" }}>
+            {sel
+              ? <div style={{ height: "100%", overflowY: "auto", padding: "20px 22px" }}>{leadDetailInner}</div>
+              : <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: T.textMuted, gap: 10, padding: 40, textAlign: "center" }}>
+                  <div style={{ width: 60, height: 60, borderRadius: 18, background: hexA(T.primary, 0.06), color: T.primary, display: "grid", placeItems: "center" }}><Icon name="funnel" size={26} /></div>
+                  <div style={{ fontSize: 15, fontWeight: 750, color: T.text }}>Select a lead</div>
+                  <div style={{ fontSize: 13, maxWidth: 280, lineHeight: 1.5 }}>Choose a lead on the left to see the details, their message, and any photos here.</div>
+                </div>}
+          </div>
+        </>
+      ) : (
+        <>
+          {headerBar}
+          {filterBar}
+          {listCards}
+        </>
+      )}
+      {sel && !twoPane && (
+        <Modal title="Lead" onClose={() => setSelId(null)}>{leadDetailInner}</Modal>
       )}
 
       {adding && (
