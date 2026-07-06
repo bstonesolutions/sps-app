@@ -22266,15 +22266,9 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
   return (
     <div style={{ display: "grid", gridTemplateColumns: navCollapsed ? "58px 1fr" : "224px 1fr", maxWidth: 1360, margin: "0 auto", minHeight: "calc(100dvh - 130px)" }}>
       <aside style={{ borderRight: `1px solid ${T.border}`, padding: navCollapsed ? "16px 8px" : "16px 12px", display: "flex", flexDirection: "column", gap: 2 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: navCollapsed ? "2px 0 14px" : "2px 6px 14px", justifyContent: navCollapsed ? "center" : "flex-start" }}>
-          {!navCollapsed && <div style={{ width: 32, height: 32, borderRadius: 9, background: T.primary, color: "#fff", display: "grid", placeItems: "center", fontWeight: 800, fontSize: 14, flexShrink: 0 }}>{((branding.companyName || "S").trim()[0] || "S").toUpperCase()}</div>}
-          {!navCollapsed && (
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontSize: 15.5, fontWeight: 820, color: T.text, letterSpacing: "-0.02em" }}>Comms</div>
-              <div style={{ fontSize: 11, color: T.textMuted, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{branding.companyName || ""}</div>
-            </div>
-          )}
-          <button onClick={toggleNav} title={navCollapsed ? "Expand sidebar" : "Collapse sidebar"} style={{ width: 30, height: 30, borderRadius: 8, border: "none", background: "none", color: T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: navCollapsed ? "2px 0 14px" : "2px 2px 14px", justifyContent: navCollapsed ? "center" : "space-between" }}>
+          {!navCollapsed && <div style={{ fontSize: 15.5, fontWeight: 820, color: T.text, letterSpacing: "-0.02em" }}>Comms</div>}
+          <button onClick={toggleNav} title={navCollapsed ? "Expand" : "Collapse"} style={{ width: 30, height: 30, borderRadius: 8, border: "none", background: "none", color: T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}>
             <span style={{ display: "inline-flex", transform: navCollapsed ? "none" : "rotate(180deg)" }}><Icon name="chevronR" size={17} /></span>
           </button>
         </div>
@@ -28225,49 +28219,80 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
 // top, active item in crimson, and sync/account/sign-out pinned at the bottom.
 function DesktopSidebar({ page, perms, navUnread, reminderDue, leadDue = 0, onNav, onSignOut, currentUser, branding, syncState, onSync, T, vp = {} }) {
   const items = ALL_NAV.filter(n => isTabVisible(n, perms));
+  // Collapsible to an icon rail so the owner can reclaim the ~244px whenever they want. Persisted.
+  const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem("sps_sidebar_collapsed") === "1"; } catch { return false; } });
+  const toggle = () => setCollapsed(c => { const n = !c; try { localStorage.setItem("sps_sidebar_collapsed", n ? "1" : "0"); } catch (_) {} return n; });
+  const W = collapsed ? 66 : (vp?.isTablet ? 208 : 244);
+  const logoBox = (
+    <div style={{ width: 38, height: 38, borderRadius: 11, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+      {branding.logoType === "image" && branding.logoImage
+        ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+        : <span style={{ fontSize: 20, fontWeight: 800, color: T.primary }}>{logoInitial(branding)}</span>}
+    </div>
+  );
+  const toggleBtn = (
+    <button onClick={toggle} title={collapsed ? "Expand sidebar" : "Collapse sidebar"} style={{ width: 28, height: 28, borderRadius: 8, border: "none", background: "none", color: T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}>
+      <span style={{ display: "inline-flex", transform: collapsed ? "none" : "rotate(180deg)" }}><Icon name="chevronR" size={17} /></span>
+    </button>
+  );
   return (
-    <aside style={{ width: vp?.isTablet ? 208 : 244, flexShrink: 0, height: "100%", background: T.surface, borderRight: `1px solid ${T.border}`, display: "flex", flexDirection: "column" }}>
-      {/* Logo + company */}
-      <div style={{ padding: "20px 18px 16px", display: "flex", alignItems: "center", gap: 11, borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
-        <div style={{ width: 38, height: 38, borderRadius: 11, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
-          {branding.logoType === "image" && branding.logoImage
-            ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-            : <span style={{ fontSize: 20, fontWeight: 800, color: T.primary }}>{logoInitial(branding)}</span>}
-        </div>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", lineHeight: 1.18, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{branding.companyName}</div>
-          <div style={{ fontSize: 11, color: T.textMuted, lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.division}</div>
-        </div>
+    <aside style={{ width: W, flexShrink: 0, height: "100%", background: T.surface, borderRight: `1px solid ${T.border}`, display: "flex", flexDirection: "column", transition: "width 0.16s ease" }}>
+      {/* Logo + company (+ collapse toggle) */}
+      <div style={{ padding: collapsed ? "18px 0 14px" : "20px 18px 16px", display: "flex", flexDirection: collapsed ? "column" : "row", alignItems: "center", gap: collapsed ? 10 : 11, borderBottom: `1px solid ${T.border}`, flexShrink: 0, justifyContent: collapsed ? "center" : "flex-start" }}>
+        {logoBox}
+        {!collapsed && (
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", lineHeight: 1.18, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{branding.companyName}</div>
+            <div style={{ fontSize: 11, color: T.textMuted, lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.division}</div>
+          </div>
+        )}
+        {toggleBtn}
       </div>
       {/* Nav items */}
-      <nav style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 3 }}>
+      <nav style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: collapsed ? "10px 8px" : "10px 12px", display: "flex", flexDirection: "column", gap: 3 }}>
         {items.map(n => {
           const active = page === n.id;
           const badge = n.id === "comms" ? ((perms.isAdmin || perms.commsMessages ? navUnread : 0) + (perms.isAdmin || perms.commsReminders ? reminderDue : 0) + (perms.isAdmin || perms.commsInbox ? leadDue : 0)) : 0;
           return (
-            <button key={n.id} onClick={() => onNav(n.id)}
-              style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 13px", border: "none", borderRadius: 11, background: active ? T.primary : "transparent", color: active ? "#fff" : T.text, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%", fontWeight: active ? 700 : 600, fontSize: 14, letterSpacing: "-0.01em" }}>
-              <Icon name={n.icon} size={19} />
-              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n.label}</span>
-              {badge > 0 && <span style={{ minWidth: 18, height: 18, borderRadius: 9, background: active ? "rgba(255,255,255,0.25)" : T.primary, color: "#fff", fontSize: 11, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 5px", flexShrink: 0 }}>{badge}</span>}
+            <button key={n.id} onClick={() => onNav(n.id)} title={collapsed ? n.label : undefined}
+              style={{ display: "flex", alignItems: "center", gap: 12, justifyContent: collapsed ? "center" : "flex-start", padding: collapsed ? "11px 0" : "11px 13px", border: "none", borderRadius: 11, background: active ? T.primary : "transparent", color: active ? "#fff" : T.text, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%", fontWeight: active ? 700 : 600, fontSize: 14, letterSpacing: "-0.01em" }}>
+              <span style={{ position: "relative", display: "inline-flex", flexShrink: 0 }}>
+                <Icon name={n.icon} size={19} />
+                {badge > 0 && collapsed && <span style={{ position: "absolute", top: -6, right: -9, minWidth: 15, height: 15, borderRadius: 8, background: active ? "#fff" : T.primary, color: active ? T.primary : "#fff", fontSize: 9, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px", border: `2px solid ${active ? T.primary : T.surface}` }}>{badge}</span>}
+              </span>
+              {!collapsed && <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n.label}</span>}
+              {badge > 0 && !collapsed && <span style={{ minWidth: 18, height: 18, borderRadius: 9, background: active ? "rgba(255,255,255,0.25)" : T.primary, color: "#fff", fontSize: 11, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 5px", flexShrink: 0 }}>{badge}</span>}
             </button>
           );
         })}
       </nav>
       {/* Footer: sync + account */}
-      <div style={{ padding: 12, borderTop: `1px solid ${T.border}`, display: "flex", flexDirection: "column", gap: 8, flexShrink: 0 }}>
-        <button onClick={onSync} title="Sync"
-          style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 13px", border: "none", borderRadius: 10, background: T.surfaceAlt, color: syncState === "saved" ? "#16a34a" : T.text, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600, width: "100%" }}>
-          <Icon name="refresh" size={15} style={{ animation: syncState === "syncing" ? "spin 0.7s linear infinite" : "none" }} />
-          {syncState === "syncing" ? "Syncing…" : syncState === "saved" ? "Saved" : "Sync"}
-        </button>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "2px 4px" }}>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 12.5, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{(currentUser && currentUser.name) || "Signed in"}</div>
-            {currentUser && currentUser.email && <div style={{ fontSize: 10.5, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{currentUser.email}</div>}
-          </div>
-          <button onClick={onSignOut} style={{ flexShrink: 0, background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button>
-        </div>
+      <div style={{ padding: collapsed ? "10px 8px" : 12, borderTop: `1px solid ${T.border}`, display: "flex", flexDirection: "column", gap: 8, flexShrink: 0, alignItems: collapsed ? "center" : "stretch" }}>
+        {collapsed ? (
+          <>
+            <button onClick={onSync} title="Sync" style={{ width: 40, height: 40, borderRadius: 10, border: "none", background: T.surfaceAlt, color: syncState === "saved" ? "#16a34a" : T.text, cursor: "pointer", display: "grid", placeItems: "center" }}>
+              <Icon name="refresh" size={16} style={{ animation: syncState === "syncing" ? "spin 0.7s linear infinite" : "none" }} />
+            </button>
+            <button onClick={onSignOut} title="Sign out" style={{ width: 40, height: 40, borderRadius: 10, border: "none", background: "none", color: T.textMuted, cursor: "pointer", display: "grid", placeItems: "center" }}>
+              <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="m16 17 5-5-5-5" /><path d="M21 12H9" /></svg>
+            </button>
+          </>
+        ) : (
+          <>
+            <button onClick={onSync} title="Sync"
+              style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 13px", border: "none", borderRadius: 10, background: T.surfaceAlt, color: syncState === "saved" ? "#16a34a" : T.text, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600, width: "100%" }}>
+              <Icon name="refresh" size={15} style={{ animation: syncState === "syncing" ? "spin 0.7s linear infinite" : "none" }} />
+              {syncState === "syncing" ? "Syncing…" : syncState === "saved" ? "Saved" : "Sync"}
+            </button>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "2px 4px" }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{(currentUser && currentUser.name) || "Signed in"}</div>
+                {currentUser && currentUser.email && <div style={{ fontSize: 10.5, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{currentUser.email}</div>}
+              </div>
+              <button onClick={onSignOut} style={{ flexShrink: 0, background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Sign out</button>
+            </div>
+          </>
+        )}
       </div>
     </aside>
   );
