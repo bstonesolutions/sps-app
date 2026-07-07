@@ -3139,11 +3139,12 @@ const DEMO_INVOICES = [
   },
 ];
 
-const HOME_WIDGETS = { stats: "Key Stats", profit: "This Month P&L", todayRoute: "Today's Route", alerts: "Alerts" };
+const HOME_WIDGETS = { stats: "Key Stats", comms: "Comms", todayRoute: "Today's Route", profit: "This Month P&L", alerts: "Alerts" };
 const DEFAULT_HOME = { items: [
   { id: "stats", on: true },
-  { id: "profit", on: true },
+  { id: "comms", on: true },
   { id: "todayRoute", on: true },
+  { id: "profit", on: true },
   { id: "alerts", on: true },
 ] };
 
@@ -3982,7 +3983,73 @@ function ClockInOut({ me, T }) {
   );
 }
 
-function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onOpenAlert, onOpenStop, onNav, catalog, onConfirmUpgrade, userName, me, scheduleCfg, reminderLog, completedSids = {}, budget = {}, vp = {} }) {
+// Home → Comms widget: at-a-glance unread chats / new leads / unread email + the most recent items,
+// each tappable into Comms. Self-contained fetch (messages via supabase, email via owner-gated
+// api/inbox best-effort); leads come from the app's live array.
+function HomeCommsWidget({ leads = [], clients = [], onNav, T }) {
+  const [msgs, setMsgs] = useState(null);
+  const [emails, setEmails] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    (async () => { try { const { data } = await supabase.from("sps_messages").select("client_id, body, sender, created_at, read_at").order("created_at", { ascending: false }).limit(60); if (alive) setMsgs(data || []); } catch (_) { if (alive) setMsgs([]); } })();
+    (async () => { try { const r = await fetch(`${PROD_URL}/api/inbox?limit=25`, { headers: await authHeaders() }); const d = await r.json().catch(() => ({})); if (alive) setEmails(r.ok ? (d.rows || []) : []); } catch (_) { if (alive) setEmails([]); } })();
+    return () => { alive = false; };
+  }, []);
+  const nameOf = (cid) => { const c = (clients || []).find(x => String(x.id) === String(cid)); return c ? c.name : "Client"; };
+  const threadMap = {};
+  (msgs || []).forEach(m => { const cid = String(m.client_id); if (!threadMap[cid]) threadMap[cid] = { cid, lastMsg: String(m.body || "").replace(/\[\[[^\]]+\]\]/g, "").trim() || "Message", at: m.created_at, unread: 0 }; if (m.sender === "client" && !m.read_at) threadMap[cid].unread++; });
+  const threads = Object.values(threadMap).sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  const openLeads = (leads || []).filter(l => l && !["won", "lost"].includes(l.status));
+  const unreadChats = threads.reduce((s, t) => s + (t.unread > 0 ? 1 : 0), 0);
+  const newLeads = openLeads.filter(l => l.status === "new").length;
+  const unreadEmail = (emails || []).filter(e => e && !e.read && e.channel !== "sms").length;
+  const recent = [];
+  threads.filter(t => t.unread > 0).slice(0, 4).forEach(t => recent.push({ kind: "chat", name: nameOf(t.cid), sub: t.lastMsg, at: t.at, seed: nameOf(t.cid), onClick: () => onNav("messages") }));
+  openLeads.slice(0, 4).forEach(l => recent.push({ kind: "lead", name: l.name || l.phone || "New lead", sub: l.message || l.service || "New lead", at: l.createdAt, seed: l.name || l.id, onClick: () => onNav("leads") }));
+  (emails || []).filter(e => e && !e.read).slice(0, 4).forEach(e => recent.push({ kind: e.kind === "bill" ? "bill" : "email", name: e.from_name || e.from_email || "Email", sub: e.subject || "(no subject)", at: e.created_at, seed: e.from_email || e.from_name, onClick: () => onNav("comms") }));
+  recent.sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
+  const top = recent.slice(0, 3);
+  const AV = ["#B81D24", "#0E9488", "#2563eb", "#b45309", "#7c3aed", "#c2410c", "#0891b2", "#be185d"];
+  const col = (s) => { let h = 0; const x = String(s || "?"); for (let i = 0; i < x.length; i++) h = (h * 31 + x.charCodeAt(i)) >>> 0; return AV[h % AV.length]; };
+  const fmtT = (iso) => { try { const d = new Date(iso), n = new Date(); return d.toDateString() === n.toDateString() ? d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : d.toLocaleDateString("en-US", { month: "short", day: "numeric" }); } catch (_) { return ""; } };
+  const kindBadge = { lead: ["LEAD", "#16a34a"], bill: ["BILL", "#b45309"], email: ["EMAIL", "#2563eb"] };
+  const loading = msgs === null;
+  return (
+    <Card key="comms" style={{ marginBottom: 16 }}>
+      <CardHeader title="Comms" action={<Btn variant="text" sm onClick={() => onNav("comms")}>Open →</Btn>} />
+      <div style={{ padding: "10px 16px 16px" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 4 }}>
+          {[["Unread chats", unreadChats, T.primary, () => onNav("messages")], ["New leads", newLeads, "#16a34a", () => onNav("leads")], ["Unread email", unreadEmail, "#2563eb", () => onNav("comms")]].map(([lbl, n, c, go]) => (
+            <button key={lbl} onClick={go} style={{ background: T.surfaceAlt, border: "none", borderRadius: 13, padding: "11px 8px", textAlign: "center", cursor: "pointer", fontFamily: "inherit" }}>
+              <div style={{ fontSize: 20, fontWeight: 840, color: n > 0 ? c : T.textMuted }}>{n}</div>
+              <div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginTop: 1 }}>{lbl}</div>
+            </button>
+          ))}
+        </div>
+        {loading && <div style={{ fontSize: 12.5, color: T.textMuted, textAlign: "center", padding: "16px 0" }}>Loading…</div>}
+        {!loading && top.length === 0 && <div style={{ fontSize: 12.5, color: T.textMuted, textAlign: "center", padding: "16px 0" }}>All caught up — no unread items.</div>}
+        {top.map((r, i) => {
+          const c = col(r.seed); const badge = kindBadge[r.kind];
+          return (
+            <div key={i} onClick={r.onClick} style={{ display: "flex", alignItems: "center", gap: 11, padding: "10px 0", borderTop: `1px solid ${hexA(T.border, 0.6)}`, cursor: "pointer" }}>
+              <div style={{ width: 36, height: 36, borderRadius: "50%", flexShrink: 0, display: "grid", placeItems: "center", background: hexA(c, 0.15), color: c, fontSize: 14, fontWeight: 800 }}>{(r.name || "?").trim()[0].toUpperCase()}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ fontSize: 13.5, fontWeight: 750, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>{r.name}</span>
+                  {badge && <span style={{ fontSize: 9, fontWeight: 800, color: badge[1], background: hexA(badge[1], 0.12), borderRadius: 100, padding: "1px 6px", flexShrink: 0 }}>{badge[0]}</span>}
+                </div>
+                <div style={{ fontSize: 12, color: T.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.sub}</div>
+              </div>
+              <span style={{ fontSize: 11, color: T.textMuted, flexShrink: 0 }}>{fmtT(r.at)}</span>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onOpenAlert, onOpenStop, onNav, catalog, onConfirmUpgrade, userName, me, scheduleCfg, reminderLog, completedSids = {}, budget = {}, leads = [], vp = {} }) {
   const { T, perms, branding } = useApp();
   const [editing, setEditing] = useState(false);
   const [statPicker, setStatPicker] = useState(false);
@@ -4076,7 +4143,8 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
   };
   const available = Object.keys(HOME_WIDGETS).filter(id => !items.some(it => it.id === id));
 
-  const widget = (id) => {
+  const widget = (id, compact) => {
+    if (id === "comms") return <HomeCommsWidget key="comms" leads={leads} clients={clients} onNav={onNav} T={T} />;
     if (id === "stats") {
       return (
         <div key="stats" style={{ marginBottom: 16 }}>
@@ -4085,7 +4153,7 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
               <Icon name="edit" size={12} /> Customize
             </button>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: vp.isDesktop ? "repeat(4, 1fr)" : vp.isTablet ? "repeat(3, 1fr)" : "1fr 1fr", gap: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: compact ? "repeat(2, 1fr)" : (vp.isDesktop ? "repeat(4, 1fr)" : vp.isTablet ? "repeat(3, 1fr)" : "1fr 1fr"), gap: 12 }}>
             {shownTiles.map(mid => { const t = STAT_CATALOG[mid]; return <StatCard key={mid} label={t.label} value={t.value} sub={t.sub} accent={t.accent} icon={t.icon} trend={t.trend} onClick={t.onClick} />; })}
           </div>
         </div>
@@ -4247,8 +4315,52 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
     return null;
   };
 
+  // Hero — the day's headline + profit/revenue, with the logo ghosted in. Extracted so desktop can
+  // pair it beside the Key Stats (top row) while mobile keeps it full-width above the widgets.
+  const heroCard = (
+    <div onClick={() => onNav("schedule")} role="button"
+      style={{ position: "relative", overflow: "hidden", background: "#AE0019", color: "#fff", borderRadius: 20, padding: "18px 20px", marginBottom: 16, cursor: "pointer", boxShadow: "0 10px 30px rgba(0,0,0,0.16), inset 0 1px 0 rgba(255,255,255,0.15)" }}>
+      {branding && branding.logoType === "image" && branding.logoImage && (
+        <img src={branding.logoImage} alt="" aria-hidden="true"
+          style={{ position: "absolute", right: -30, top: "50%", transform: "translateY(-50%)", width: 188, height: 188, objectFit: "contain", opacity: 0.45, pointerEvents: "none" }} />
+      )}
+      <div style={{ position: "relative", zIndex: 1 }}>
+        <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.1em", opacity: 0.82 }}>TODAY</div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginTop: 5 }}>
+          {today.stops.length === 0 ? (
+            <span style={{ fontSize: 28, fontWeight: 800, lineHeight: 1.12, letterSpacing: "-0.02em" }}>No stops today</span>
+          ) : (
+            <>
+              <span style={{ fontSize: 42, fontWeight: 800, lineHeight: 1, letterSpacing: "-0.03em" }}>{doneToday}<span style={{ fontSize: 23, fontWeight: 800, opacity: 0.72 }}> / {today.stops.length}</span></span>
+              <span style={{ fontSize: 14, fontWeight: 700, opacity: 0.92 }}>{doneToday >= today.stops.length ? "all done ✓" : "stops done"}</span>
+            </>
+          )}
+        </div>
+        {today.stops.length > 0 && (
+          <div style={{ height: 5, borderRadius: 100, background: "rgba(255,255,255,0.22)", marginTop: 10, overflow: "hidden" }}>
+            <div style={{ height: "100%", borderRadius: 100, background: "rgba(255,255,255,0.92)", width: `${Math.round((doneToday / today.stops.length) * 100)}%`, transition: "width 0.35s ease" }} />
+          </div>
+        )}
+        {perms.seeProfit && (
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 26, marginTop: 16 }}>
+            <div>
+              <div style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.08em", opacity: 0.82 }}>PROFIT (MO)</div>
+              <div style={{ fontSize: 26, fontWeight: 800, lineHeight: 1.05, letterSpacing: "-0.02em", marginTop: 3 }}>{money(ma.profit)}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.08em", opacity: 0.82 }}>REVENUE (MO)</div>
+              <div style={{ fontSize: 16, fontWeight: 800, opacity: 0.95, marginTop: 4 }}>{money(ma.revenue)}</div>
+            </div>
+          </div>
+        )}
+        <div style={{ marginTop: 16, display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.2)", borderRadius: 100, padding: "8px 15px", fontSize: 12.5, fontWeight: 800 }}>
+          View route <span style={{ fontSize: 15, lineHeight: 1 }}>›</span>
+        </div>
+      </div>
+    </div>
+  );
   return (
-    <div style={{ paddingBottom: 40 }}>
+    <div style={{ paddingBottom: 40, maxWidth: vp.isDesktop ? 1520 : "none", marginLeft: "auto", marginRight: "auto", width: "100%" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22 }}>
         <div>
           <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 4, letterSpacing: "-0.01em" }}>{new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" })}</div>
@@ -4273,53 +4385,6 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
             </div>
           </div>
           <Icon name="chevronD" size={16} style={{ transform: "rotate(-90deg)", color: T.primary, flexShrink: 0 }} />
-        </div>
-      )}
-
-      {/* Hero — the day's headline + profit/revenue, with the company logo ghosted into the
-          background (like the branded link card), and a route shortcut. */}
-      {!editing && (
-        <div onClick={() => onNav("schedule")} role="button"
-          style={{ position: "relative", overflow: "hidden", background: "#AE0019", color: "#fff", borderRadius: 20, padding: "18px 20px", marginBottom: 16, cursor: "pointer", boxShadow: "0 10px 30px rgba(0,0,0,0.16), inset 0 1px 0 rgba(255,255,255,0.15)" }}>
-          {/* Logo watermark — the card uses the logo's exact background red (#AE0019) so the red
-              blends away and only the white hexagon ghosts through. Straight, not rotated. */}
-          {branding && branding.logoType === "image" && branding.logoImage && (
-            <img src={branding.logoImage} alt="" aria-hidden="true"
-              style={{ position: "absolute", right: -30, top: "50%", transform: "translateY(-50%)", width: 188, height: 188, objectFit: "contain", opacity: 0.45, pointerEvents: "none" }} />
-          )}
-          <div style={{ position: "relative", zIndex: 1 }}>
-            <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.1em", opacity: 0.82 }}>TODAY</div>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginTop: 5 }}>
-              {today.stops.length === 0 ? (
-                <span style={{ fontSize: 28, fontWeight: 800, lineHeight: 1.12, letterSpacing: "-0.02em" }}>No stops today</span>
-              ) : (
-                <>
-                  <span style={{ fontSize: 42, fontWeight: 800, lineHeight: 1, letterSpacing: "-0.03em" }}>{doneToday}<span style={{ fontSize: 23, fontWeight: 800, opacity: 0.72 }}> / {today.stops.length}</span></span>
-                  <span style={{ fontSize: 14, fontWeight: 700, opacity: 0.92 }}>{doneToday >= today.stops.length ? "all done ✓" : "stops done"}</span>
-                </>
-              )}
-            </div>
-            {today.stops.length > 0 && (
-              <div style={{ height: 5, borderRadius: 100, background: "rgba(255,255,255,0.22)", marginTop: 10, overflow: "hidden" }}>
-                <div style={{ height: "100%", borderRadius: 100, background: "rgba(255,255,255,0.92)", width: `${Math.round((doneToday / today.stops.length) * 100)}%`, transition: "width 0.35s ease" }} />
-              </div>
-            )}
-            {perms.seeProfit && (
-              <div style={{ display: "flex", alignItems: "flex-end", gap: 26, marginTop: 16 }}>
-                <div>
-                  <div style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.08em", opacity: 0.82 }}>PROFIT (MO)</div>
-                  <div style={{ fontSize: 26, fontWeight: 800, lineHeight: 1.05, letterSpacing: "-0.02em", marginTop: 3 }}>{money(ma.profit)}</div>
-                </div>
-                <div>
-                  <div style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.08em", opacity: 0.82 }}>REVENUE (MO)</div>
-                  <div style={{ fontSize: 16, fontWeight: 800, opacity: 0.95, marginTop: 4 }}>{money(ma.revenue)}</div>
-                </div>
-              </div>
-            )}
-            <div style={{ marginTop: 16, display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.2)", borderRadius: 100, padding: "8px 15px", fontSize: 12.5, fontWeight: 800 }}>
-              View route <span style={{ fontSize: 15, lineHeight: 1 }}>›</span>
-            </div>
-          </div>
         </div>
       )}
 
@@ -4356,11 +4421,15 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
           </div>
         </Card>
       ) : vp.isDesktop ? (
-        /* Phase 4 — desktop admin dashboard: Key Stats span full width, the rest of the
-           widgets flow into a balanced 2-column grid (each deep-links to its screen). */
+        /* Desktop: hero paired with Key Stats up top, then the widgets flow into comfortable-width
+           columns that MULTIPLY to fill the space (2 on a laptop, 3–4 on a wide monitor) — the width
+           is used by more columns, not by stretching any one card. */
         <>
-          {items.some(it => it.id === "stats") && widget("stats")}
-          <div style={{ columnCount: 2, columnGap: 16 }}>
+          <div style={{ display: "grid", gridTemplateColumns: vp.width >= 1080 ? "minmax(360px, 1fr) minmax(0, 1fr)" : "1fr", gap: 16, alignItems: "start" }}>
+            {heroCard}
+            {items.some(it => it.id === "stats") ? widget("stats", true) : <div />}
+          </div>
+          <div style={{ columnWidth: 360, columnGap: 16 }}>
             {items.filter(it => it.id !== "stats").map(it => {
               const w = widget(it.id);
               return w ? <div key={it.id} style={{ breakInside: "avoid" }}>{w}</div> : null;
@@ -4368,7 +4437,10 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
           </div>
         </>
       ) : (
-        items.map(it => widget(it.id))
+        <>
+          {heroCard}
+          {items.map(it => widget(it.id))}
+        </>
       )}
       {/* Upgrade workflow modal */}
       {upgradeModal && (
@@ -30412,7 +30484,7 @@ export default function App({ authEmail = "", onSignOut }) {
   );
   const pageBody = (
     <>
-      {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onOpenAlert={handleOpenAlert} onOpenStop={handleOpenStop} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} completedSids={completedSids} budget={budget} vp={vp} />}
+      {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onOpenAlert={handleOpenAlert} onOpenStop={handleOpenStop} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} completedSids={completedSids} budget={budget} leads={leads} vp={vp} />}
       {page === "clients" && adding && <ClientEditForm client={convertLead ? leadToClientForm(convertLead) : BLANK_CLIENT} title={convertLead ? "Convert Lead to Client" : "Add Client"} onSave={handleSaveNewClient} onCancel={handleCancelConvert} />}
       {page === "clients" && !adding && (vp.isDesktop ? (
         clientsView === "table" ? (
