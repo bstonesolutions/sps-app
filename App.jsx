@@ -9372,6 +9372,11 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", defaultEtaBuff
 // ─────────────────────────────────────────────
 
 const DAYS_OF_WEEK = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+// When a route assignment has no explicit day AND the client has no preferred day, auto-place them on
+// a work-week day. Deterministic by client id so the same client always lands on the same day (a stable
+// spread across Mon–Fri) until an explicit day or preference is set.
+const ROUTE_WORKDAYS = ["Monday","Tuesday","Wednesday","Thursday","Friday"];
+const autoRouteDay = (id) => { let h = 0; const s = String(id || ""); for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return ROUTE_WORKDAYS[h % ROUTE_WORKDAYS.length]; };
 const FREQ_OPTIONS = [
   { id: "weekly",    label: "Weekly",       weeks: 1 },
   { id: "biweekly",  label: "Bi-Weekly",    weeks: 2 },
@@ -9399,7 +9404,9 @@ function computeMissingStops(assignments, schedule, clients, catalog, windowWeek
   const missing = [];
 
   (assignments||[]).forEach(a => {
-    if (!a.clientId || !a.dayOfWeek || !a.frequency || !a.startDate) return;
+    // Day is now OPTIONAL — resolved below (explicit day → client's preferred day → auto-spread), so a
+    // route "just populates for the week" without a day being picked per client.
+    if (!a.clientId || !a.frequency || !a.startDate) return;
     if (a.paused) return;
 
     const client = (clients||[]).find(c => String(c.id) === String(a.clientId));
@@ -9413,8 +9420,10 @@ function computeMissingStops(assignments, schedule, clients, catalog, windowWeek
     let cursor = new Date(sy, sm - 1, sd);
     cursor.setHours(0,0,0,0);
 
-    // Advance cursor to the right day of week
-    const targetDay = DAYS_OF_WEEK.indexOf(a.dayOfWeek);
+    // Advance cursor to the right day of week. Effective day: explicit assignment day wins; else the
+    // client's preferred day; else auto-place on a work-week day (deterministic spread).
+    const effDay = a.dayOfWeek || client.preferredDay || autoRouteDay(a.clientId);
+    const targetDay = DAYS_OF_WEEK.indexOf(effDay);
     if (targetDay === -1) return;
     while (cursor.getDay() !== targetDay) cursor.setDate(cursor.getDate() + 1);
 
@@ -9491,7 +9500,7 @@ function computeMissingStops(assignments, schedule, clients, catalog, windowWeek
 function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, onSaveBulk, onClose }) {
   const blank = {
     id: `ra-${Date.now()}`,
-    clientId: "", techId: "", dayOfWeek: "Monday", frequency: "biweekly",
+    clientId: "", techId: "", dayOfWeek: "", frequency: "biweekly", // "" day = Auto (preferred day → work-week spread)
     startDate: new Date().toISOString().split("T")[0],
     stopAfter: "", skipWeeks: "", time: "08:00",
     stopType: "", serviceIds: [], treatmentIds: [], testIds: [], duration: "60", paused: false,
@@ -9586,7 +9595,7 @@ function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, o
   const toggleTreatment = (id) => { const list = form.treatmentIds || []; set("treatmentIds", list.includes(id) ? list.filter(x => x !== id) : [...list, id]); };
   const toggleTest = (t) => { const list = form.testIds || []; set("testIds", list.includes(t) ? list.filter(x => x !== t) : [...list, t]); };
 
-  const canSave = (isAdd ? selIds.length > 0 : !!form.clientId) && form.dayOfWeek && form.frequency && form.startDate;
+  const canSave = (isAdd ? selIds.length > 0 : !!form.clientId) && form.frequency && form.startDate; // day optional (Auto)
 
   return (
     <Modal title={assignment ? "Edit Assignment" : "Add Assignment"} onClose={onClose}>
@@ -9671,10 +9680,14 @@ function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, o
           </select>
         </div>
 
-        {/* Day of week */}
+        {/* Day of week — Auto (default) uses the client's preferred day, else spreads across the week */}
         <div>
           <label style={lbl}>Day of Week</label>
           <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+            <button onClick={() => set("dayOfWeek", "")}
+              style={{ padding: "8px 12px", borderRadius: 10, border: `1.5px solid ${!form.dayOfWeek ? T.primary : T.border}`, background: !form.dayOfWeek ? hexA(T.primary, 0.1) : T.surface, color: !form.dayOfWeek ? T.primary : T.textMuted, fontWeight: 800, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+              Auto
+            </button>
             {DAYS_OF_WEEK.map(d => (
               <button key={d} onClick={() => set("dayOfWeek", d)}
                 style={{ padding: "8px 10px", borderRadius: 10, border: `1.5px solid ${form.dayOfWeek === d ? T.primary : T.border}`, background: form.dayOfWeek === d ? hexA(T.primary, 0.1) : T.surface, color: form.dayOfWeek === d ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
@@ -9682,6 +9695,11 @@ function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, o
               </button>
             ))}
           </div>
+          {!form.dayOfWeek && (() => {
+            const sc = (clients || []).find(c => String(c.id) === String(form.clientId));
+            const pref = sc && sc.preferredDay;
+            return <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>{isAdd ? "Auto → each client's preferred day, otherwise spread across the work-week." : (pref ? `Auto → ${pref} (this client's preferred day).` : `Auto → spread across the work-week${sc ? ` (would land on ${autoRouteDay(sc.id)})` : ""}.`)}</div>;
+          })()}
         </div>
 
         {/* Frequency */}
@@ -9946,7 +9964,7 @@ function RouteAssignmentsTab({ clients, catalog, team, schedule, setSchedule, as
 
     // Get all unique days used in this frequency group for column sub-label
     const dayLabel = (freq) => {
-      const days = [...new Set((assignments||[]).filter(a=>a.frequency===freq).map(a=>a.dayOfWeek))];
+      const days = [...new Set((assignments||[]).filter(a=>a.frequency===freq).map(a=>a.dayOfWeek || "Auto"))];
       return days.length === 1 ? days[0] : days.length > 1 ? "Multiple days" : "";
     };
 
@@ -9995,10 +10013,13 @@ function RouteAssignmentsTab({ clients, catalog, team, schedule, setSchedule, as
                       <div style={{ padding: "11px 14px", display: "flex", flexDirection: "column", justifyContent: "center" }}>
                         <div style={{ fontSize: 13, fontWeight: 700, color: T.text, lineHeight: 1.3 }}>{c?.name || "?"}</div>
                         {a.techId && <div style={{ fontSize: 10, color: T.textMuted, marginTop: 1 }}>{techName(a.techId)}</div>}
-                        {c?.preferredDayOverride && c?.preferredDay && c.preferredDay !== a.dayOfWeek && (
+                        {!a.dayOfWeek && (
+                          <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, marginTop: 2 }}>Auto · {c?.preferredDay || autoRouteDay(a.clientId)}</div>
+                        )}
+                        {a.dayOfWeek && c?.preferredDayOverride && c?.preferredDay && c.preferredDay !== a.dayOfWeek && (
                           <div style={{ fontSize: 10, color: "#F59E0B", fontWeight: 700, marginTop: 2 }}>★ Prefers {c.preferredDay}</div>
                         )}
-                        {c?.preferredDayOverride && c?.preferredDay && c.preferredDay === a.dayOfWeek && (
+                        {a.dayOfWeek && c?.preferredDayOverride && c?.preferredDay && c.preferredDay === a.dayOfWeek && (
                           <div style={{ fontSize: 10, color: T.accent, fontWeight: 700, marginTop: 2 }}>✓ Day matches</div>
                         )}
                       </div>
@@ -10096,7 +10117,7 @@ function RouteAssignmentsTab({ clients, catalog, team, schedule, setSchedule, as
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 14, fontWeight: 700, color: a.paused ? T.textMuted : T.text, letterSpacing: "-0.01em" }}>{c?.name || "Unknown"}</div>
                       <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>
-                        {freqLabel(a.frequency)} · {a.dayOfWeek}s · {week}
+                        {freqLabel(a.frequency)} · {a.dayOfWeek ? `${a.dayOfWeek}s` : `Auto (${c?.preferredDay || autoRouteDay(a.clientId)})`} · {week}
                         {a.techId ? ` · ${techName(a.techId)}` : ""}
                         {a.paused ? " · PAUSED" : ""}
                       </div>
