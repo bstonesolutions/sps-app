@@ -24884,6 +24884,7 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
   const money = (n) => `$${Math.round(parseFloat(n) || 0).toLocaleString()}`;
   const num = (v) => parseFloat(v) || 0;
   const [section, setSection] = useState("overview");
+  const [openCats, setOpenCats] = useState(() => new Set()); // Budget-tab category rows expanded to show their transactions
   const now = new Date();
 
   const actuals = monthActuals(clients, now, invoices || []);
@@ -24900,6 +24901,16 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
     const k = normName(catName(r)); if (!k) return null;
     const v = kind === "income" ? bankMoInc[k] : bankMoExp[k];
     return v != null ? v : null;
+  };
+  // The bank transactions (this month) that roll up into a budget category row — powers the drill-down.
+  const fmtTxnDate = (d) => { try { const dt = new Date(String(d) + "T00:00:00"); return isNaN(dt.getTime()) ? "" : dt.toLocaleDateString("en-US", { month: "short", day: "numeric" }); } catch { return ""; } };
+  const catTxns = (r, kind) => {
+    if (r.src) return []; // ops-sourced (paid invoices / completed stops) — no bank-transaction breakdown
+    const want = normName(catName(r)); if (!want) return [];
+    const wantKind = kind === "income" ? "income" : "expense";
+    return moTxns
+      .filter(t => effKind(t) === wantKind && normName(effCat(t)) === want)
+      .sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
   };
 
   const incomeBudget = income.reduce((s, r) => s + num(r.amount), 0);
@@ -25178,6 +25189,30 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
               {act != null && tgt > 0 && <span style={{ color: (kind === "expenses" ? act > tgt : act < tgt) ? red : green, fontWeight: 700 }}>{kind === "expenses" ? (act > tgt ? "over" : "under") : (act >= tgt ? "on track" : "below")} · {money(Math.abs(tgt - act))}</span>}
             </div>
             {act != null && bar(act, tgt, actualColor)}
+            {(() => {
+              const txns = catTxns(r, kind);
+              if (!txns.length) return null;
+              const open = openCats.has(r.id);
+              return (
+                <div style={{ marginTop: 8 }}>
+                  <button onClick={() => setOpenCats(s => { const n = new Set(s); n.has(r.id) ? n.delete(r.id) : n.add(r.id); return n; })}
+                    style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5, color: T.primary, fontSize: 11.5, fontWeight: 700 }}>
+                    {open ? "Hide" : "Show"} {txns.length} transaction{txns.length === 1 ? "" : "s"}
+                    <Icon name="chevronD" size={12} style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+                  </button>
+                  {open && (
+                    <div style={{ marginTop: 7, borderLeft: `2px solid ${T.border}`, paddingLeft: 11, display: "flex", flexDirection: "column", gap: 7 }}>
+                      {txns.map((t, i) => (
+                        <div key={t.id || i} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12.5 }}>
+                          <span style={{ color: T.text, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name || "—"}{fmtTxnDate(t.date) ? <span style={{ color: T.textMuted, fontSize: 11 }}> · {fmtTxnDate(t.date)}</span> : null}</span>
+                          <span style={{ color: actualColor, fontWeight: 700, flexShrink: 0 }}>{money(Math.abs(t.amount))}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         );
       })}
