@@ -7,7 +7,7 @@
 // mark migration). Ships dark: fetchBankTxns returns null unless Plaid is configured AND a
 // bank is connected AND reachable — callers just skip their bank section.
 
-import { getItem, plaidCall } from "./plaid/_plaid.js";
+import { getItem, plaidCall, enabledAccountSet, filterByAccounts } from "./plaid/_plaid.js";
 
 const pad2 = (n) => String(n).padStart(2, "0");
 const norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
@@ -28,8 +28,10 @@ export async function fetchBankTxns() {
       if (!batch.length) break;
     }
   } catch { return null; } // bank unreachable → caller skips its bank section
+  // Honor the owner's Bank Sync account picker (business-only, etc.) — same filter the Budget uses.
+  const kept = filterByAccounts(all, await enabledAccountSet());
   // Same sign flip as api/plaid/transactions.js: + = money in.
-  return all.map((t) => ({ id: t.transaction_id || "", pendingId: t.pending_transaction_id || null, date: t.date || "", name: t.merchant_name || t.name || "", amount: -(t.amount || 0) }));
+  return kept.map((t) => ({ id: t.transaction_id || "", pendingId: t.pending_transaction_id || null, date: t.date || "", name: t.merchant_name || t.name || "", amount: -(t.amount || 0) }));
 }
 
 // One calendar month (ym = "2026-07") rolled up with the owner's categorization applied.

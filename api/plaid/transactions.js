@@ -3,7 +3,7 @@
 // ?period=month|lastmonth|ytd. Returns the raw list + income/expense rolled up by Plaid category.
 // Plaid sign convention: amount > 0 = money OUT (expense), < 0 = money IN (income) — we flip it so a
 // positive amount means income, matching the Budget's mental model.
-import { plaidCall, getItem, setCors, requireOwner } from "./_plaid.js";
+import { plaidCall, getItem, setCors, requireOwner, enabledAccountSet, filterByAccounts } from "./_plaid.js";
 
 const pad = (n) => String(n).padStart(2, "0");
 const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -40,10 +40,13 @@ export default async function handler(req, res) {
       offset += batch.length;
       if (!batch.length) break;
     }
+    // Keep only the owner-selected accounts (Bank Sync picker) — one bank login can include business +
+    // personal accounts; "all" when nothing is chosen.
+    const kept = filterByAccounts(all, await enabledAccountSet());
     // `id` = Plaid's stable transaction_id — the app keys the owner's category marks off it.
     // `pendingId` links a POSTED txn back to its pending twin (Plaid re-ids on settle) so the app
     // can migrate any mark the owner made while it was pending.
-    const txns = all.map((t) => ({ id: t.transaction_id || "", pendingId: t.pending_transaction_id || null, date: t.date, name: t.merchant_name || t.name || "", amount: -(t.amount || 0), category: catLabel(t), pending: !!t.pending }));
+    const txns = kept.map((t) => ({ id: t.transaction_id || "", pendingId: t.pending_transaction_id || null, date: t.date, name: t.merchant_name || t.name || "", amount: -(t.amount || 0), category: catLabel(t), pending: !!t.pending }));
     const income = {}, expense = {};
     txns.forEach((t) => { if (t.amount >= 0) income[t.category] = (income[t.category] || 0) + t.amount; else expense[t.category] = (expense[t.category] || 0) + (-t.amount); });
     const toArr = (o) => Object.entries(o).map(([category, amount]) => ({ category, amount: Math.round(amount * 100) / 100 })).sort((a, b) => b.amount - a.amount);

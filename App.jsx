@@ -41,6 +41,32 @@ async function sendBrandedAuthEmail(payload) {
 // ── PDF generation (jsPDF) ──
 // Loaded lazily so it doesn't block initial render
 const loadJsPDF = () => import("jspdf").then(m => m.jsPDF || m.default);
+// Save a built jsPDF doc the native-safe way: on touch devices (iOS/iPadOS WKWebView, Android) open the
+// share sheet (AirPrint / Save to Files) from the doc's blob; on desktop download it. NEVER call
+// doc.save() on native — it navigates the WKWebView away, which reads as "the whole screen closed" (this
+// was the estimate PDF bug: exporting kicked you out of the estimate). Mirrors exportInvoicePdf's tail.
+async function savePdfDoc(doc, filename) {
+  const blob = doc.output("blob");
+  const isTouchDevice = typeof navigator !== "undefined" && (navigator.maxTouchPoints || 0) > 0;
+  if (isTouchDevice) {
+    try {
+      const file = new File([blob], filename, { type: "application/pdf" });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: filename });
+        return "shared";
+      }
+    } catch (e) {
+      if (e && e.name === "AbortError") return "cancelled"; // user dismissed the sheet
+      // any other share error → fall through to download
+    }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; a.rel = "noopener";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  return "downloaded";
+}
 
 // ── Plaid Link (bank connect) ──
 // Load Plaid's official web SDK on demand (only when the owner taps "Connect bank"), so it never
@@ -87,6 +113,13 @@ async function bankFetchTxns(period = "month") {
   if (r.ok && !d.notReady && g === _bankCache.gen) { _bankCache.data = d; _bankCache.period = period; _bankCache.at = Date.now(); bankNotify(); }
   return { r, d };
 }
+// The accounts exposed by the connected item (one bank login can include business + personal accounts).
+// Used by the Bank Sync picker so the owner chooses which feed the Budget. Not cached — called on demand.
+async function bankFetchAccounts() {
+  const r = await fetch(`${PROD_URL}/api/plaid/accounts`, { headers: await authHeaders() });
+  const d = await r.json().catch(() => ({}));
+  return { r, d };
+}
 // Full connect flow: link token → Plaid Link (secure popup; we never see credentials) → exchange.
 // Resolves { connected, institution } on success, { cancelled } if the owner closes the popup,
 // and rejects with a user-friendly Error otherwise. Used by BudgetHub AND the Customize card.
@@ -105,6 +138,7 @@ async function bankLinkFlow() {
           const ed = await ex.json().catch(() => ({}));
           if (!ex.ok) return reject(new Error(ed.error || "Couldn't finish connecting."));
           _bankCache.gen++; _bankCache.data = null; _bankCache.at = 0; // fresh link (maybe a different bank) → old cache is invalid
+          try { await store.remove("sps_plaid_sel"); } catch (_) {} // new bank → clear the old account picker (stale ids would filter to nothing)
           _bankCache.status = { ok: true, connected: true, institution: inst, configured: true };
           bankNotify();
           resolve({ connected: true, institution: inst });
@@ -117,6 +151,7 @@ async function bankLinkFlow() {
 }
 async function bankDisconnect() {
   try { await fetch(`${PROD_URL}/api/plaid/disconnect`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: "{}" }); } catch (_) {}
+  try { await store.remove("sps_plaid_sel"); } catch (_) {} // drop the account picker with the connection
   _bankCache.gen++; // invalidate any in-flight fetch so it can't re-fill the cache we just cleared
   _bankCache.status = { ...(_bankCache.status || {}), connected: false, institution: null };
   _bankCache.data = null; _bankCache.at = 0;
@@ -487,9 +522,15 @@ async function pushPlugin() {
   try {
     const { Capacitor } = await import("@capacitor/core");
     if (!Capacitor.isNativePlatform()) return null;
-    const mod = await import("@capacitor/push-notifications").catch(() => null);
-    return (mod && mod.PushNotifications) || null;
-  } catch (_) { return null; }
+    const mod = await import("@capacitor/push-notifications").catch((e) => { try { console.warn("[push] plugin import failed", e); } catch (_) {} return null; });
+    if (!(mod && mod.PushNotifications)) { try { console.warn("[push] PushNotifications missing from module"); } catch (_) {} return null; }
+    return mod.PushNotifications;
+  } catch (e) { try { console.warn("[push] pushPlugin threw", e); } catch (_) {} return null; }
+}
+// Are we on a native platform at all? Used to tell a NATIVE plugin failure ("error") apart from a
+// genuine web runtime ("unsupported") — see pushPermissionState.
+async function pushIsNative() {
+  try { const { Capacitor } = await import("@capacitor/core"); return !!Capacitor.isNativePlatform(); } catch (_) { return false; }
 }
 async function wirePushListeners(P) {
   if (_pushListenersOn) return;
@@ -512,21 +553,30 @@ async function wirePushListeners(P) {
     try { window.dispatchEvent(new CustomEvent("sps-deeplink", { detail: String(link) })); } catch (_) {}
   });
 }
+// Returns: "granted" | "prompt" | "denied" (real iOS states) · "error" (NATIVE, but the plugin/bridge
+// failed — enable surfaces still offer and it's logged) · "unsupported" (genuine web). The error↔
+// unsupported split is the whole fix: collapsing a native failure into "unsupported" is what silently
+// hid BOTH the permission primer AND the settings Enable button (both treat "unsupported" as "web").
 async function pushPermissionState() {
   const P = await pushPlugin();
-  if (!P) return "unsupported";
-  try { return (await P.checkPermissions()).receive || "prompt"; } catch (_) { return "unsupported"; }
+  if (!P) return (await pushIsNative()) ? "error" : "unsupported";
+  try { return (await P.checkPermissions()).receive || "prompt"; }
+  catch (e) { try { console.warn("[push] checkPermissions threw", e); } catch (_) {} return "error"; }
 }
 // Prompts if needed (iOS system dialog), registers with APNs, and the registration listener
 // binds the token to this account. Called by the primer, the settings card, and — silently,
 // when permission is already granted — on every app open (tokens rotate).
 async function enableDevicePush() {
   const P = await pushPlugin();
-  if (!P) return { ok: false, error: "Notifications are delivered through the iOS app." };
+  if (!P) return { ok: false, error: (await pushIsNative()) ? "Couldn't load the notifications plugin — reopen the app and try again." : "Notifications are delivered through the iOS app." };
   try { localStorage.removeItem("sps_push_disabled"); } catch (_) {}
   await wirePushListeners(P);
   let perm = await P.checkPermissions().catch(() => ({ receive: "prompt" }));
-  if (perm.receive !== "granted") perm = await P.requestPermissions().catch(() => ({ receive: "denied" }));
+  // Don't fabricate a "denied": a THROW here (transient bridge/timing) used to be turned into a fake
+  // hard-denial that skipped register() forever. Surface the real error instead so the iOS prompt
+  // actually gets a chance to show.
+  try { if (perm.receive !== "granted") perm = await P.requestPermissions(); }
+  catch (e) { try { console.warn("[push] requestPermissions threw", e); } catch (_) {} return { ok: false, error: (e && e.message) || "Couldn't ask for notification permission." }; }
   if (perm.receive !== "granted") return { ok: false, denied: true, error: "Notifications are turned off for SPS Way in iOS Settings." };
   try { await P.register(); } catch (e) { return { ok: false, error: (e && e.message) || "Couldn't register with Apple." }; }
   return { ok: true };
@@ -572,7 +622,9 @@ const openExternalBrowser = (url) => {
   window.open(url, "_blank", "noopener,noreferrer");
 };
 
-function generateEstimatePDF(estimate, branding, invoicing) {
+// Build the estimate PDF and return the jsPDF doc (not saved) — so both "Download PDF" and the
+// email path (which grabs its base64 to attach) share one layout.
+function buildEstimatePDFDoc(estimate, branding, invoicing) {
   return loadJsPDF().then(JsPDF => {
     const doc = new JsPDF({ unit: "pt", format: "letter" });
     const primary = branding?.accentColor || "#B81D24";
@@ -658,9 +710,15 @@ function generateEstimatePDF(estimate, branding, invoicing) {
     doc.setTextColor("#9CA3AF");
     doc.text(`${branding?.companyName || "Stone Property Solutions"}  ·  ${branding?.companyAddress || "Honey Brook, PA"}`, 40, y);
 
-    const filename = `estimate-${(estimate.clientName || "client").replace(/\s+/g, "-").toLowerCase()}.pdf`;
-    doc.save(filename);
+    return doc;
   });
+}
+function estimatePdfName(estimate) {
+  return `estimate-${(estimate.clientName || "client").replace(/\s+/g, "-").toLowerCase()}.pdf`;
+}
+// Generate + save/share the estimate PDF (native-safe share sheet / desktop download).
+function generateEstimatePDF(estimate, branding, invoicing) {
+  return buildEstimatePDFDoc(estimate, branding, invoicing).then(doc => savePdfDoc(doc, estimatePdfName(estimate)));
 }
 
 function generateStatementPDF(client, invoices, branding) {
@@ -15302,6 +15360,90 @@ function QBConnect({ onSyncData }) {
 // BANK CONNECT (Plaid) — Customize card, mirrors the QuickBooks card above.
 // Same connection as Budget → Bank (one shared server-side link + module cache).
 // ─────────────────────────────────────────────
+// Lets the owner choose WHICH connected accounts feed the Budget — one bank login (e.g. Truist) can
+// expose business + personal accounts under a single Plaid item. Selection saves to app_state
+// (sps_plaid_sel); the server-side pulls (transactions/digest/nudge) filter to it. Empty = all on.
+function BankAccountPicker() {
+  const { T } = useApp();
+  const [accounts, setAccounts] = useState(null); // null = loading
+  const [enabled, setEnabled] = useState([]);      // [] = every account on (no filter)
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => { let alive = true;
+    (async () => {
+      try { const res = await store.get("sps_plaid_sel"); if (alive && res && res.value) { const v = JSON.parse(res.value); if (v && Array.isArray(v.enabled)) setEnabled(v.enabled.map(String)); } } catch (_) {}
+      try {
+        const { r, d } = await bankFetchAccounts();
+        if (!alive) return;
+        if (r.ok && Array.isArray(d.accounts)) setAccounts(d.accounts);
+        else { setAccounts([]); setErr(d.error || (d.notReady ? "Accounts still syncing — try again shortly." : "")); }
+      } catch (_) { if (alive) { setAccounts([]); setErr("Couldn't reach the server."); } }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  const allIds = (accounts || []).map(a => String(a.id));
+  const isOn = (id) => enabled.length ? enabled.includes(String(id)) : true; // empty = all on
+
+  const persist = async (nextEnabled) => {
+    setBusy(true); setErr("");
+    // Store [] when every account is on (= "all", no filter); else the explicit subset.
+    const norm = (allIds.length && allIds.every(id => nextEnabled.includes(id))) ? [] : nextEnabled;
+    setEnabled(norm);
+    try {
+      await store.set("sps_plaid_sel", JSON.stringify({ enabled: norm }));
+      _bankCache.gen++; _bankCache.data = null; _bankCache.at = 0; // selection changed → old rollup is stale
+      await bankFetchTxns(_bankCache.period || "month").catch(() => {});
+    } catch (_) { setErr("Couldn't save — try again."); }
+    setBusy(false);
+  };
+
+  const toggle = (id) => {
+    if (busy) return;
+    const sid = String(id);
+    const current = enabled.length ? enabled.slice() : allIds.slice(); // effective checked set
+    let next;
+    if (current.includes(sid)) {
+      next = current.filter(x => x !== sid);
+      if (!next.length) { setErr("Keep at least one account."); return; } // never zero
+    } else next = [...current, sid];
+    persist(next);
+  };
+
+  if (accounts === null) return <div style={{ fontSize: 12.5, color: T.textMuted, padding: "2px 0" }}>Loading accounts…</div>;
+  if (!accounts.length) return err ? <div style={{ fontSize: 12.5, color: T.textMuted, padding: "2px 0" }}>{err}</div> : null;
+
+  const money = (n) => (n == null ? "" : `$${Number(n).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`);
+  const titleize = (s) => String(s || "").replace(/\b\w/g, c => c.toUpperCase());
+  const onCount = allIds.filter(isOn).length;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted }}>Accounts feeding the Budget</div>
+        <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted }}>{onCount} of {allIds.length} on</div>
+      </div>
+      {accounts.map(a => {
+        const on = isOn(a.id);
+        return (
+          <button key={a.id} onClick={() => toggle(a.id)} disabled={busy}
+            style={{ display: "flex", alignItems: "center", gap: 11, textAlign: "left", background: on ? hexA(T.primary, 0.06) : T.surfaceAlt, border: `1.5px solid ${on ? hexA(T.primary, 0.4) : T.border}`, borderRadius: 12, padding: "10px 12px", cursor: busy ? "default" : "pointer", fontFamily: "inherit", opacity: busy ? 0.7 : 1 }}>
+            <div style={{ width: 20, height: 20, borderRadius: 6, flexShrink: 0, display: "grid", placeItems: "center", color: "#fff", background: on ? T.primary : "transparent", border: `1.5px solid ${on ? T.primary : T.border}` }}>
+              {on && <Icon name="check" size={13} />}
+            </div>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.name || a.official || "Account"}{a.mask ? ` ··${a.mask}` : ""}</div>
+              <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 1 }}>{[titleize(a.subtype || a.type), a.current != null ? money(a.current) : ""].filter(Boolean).join(" · ")}</div>
+            </div>
+          </button>
+        );
+      })}
+      <div style={{ fontSize: 11, color: T.textMuted, lineHeight: 1.45 }}>Only checked accounts count toward your income, spending, and profit — everywhere in the app.</div>
+    </div>
+  );
+}
+
 function BankConnect() {
   const { T } = useApp();
   const [st, setSt] = useState(_bankCache.status); // null=loading
@@ -15381,6 +15523,9 @@ function BankConnect() {
               style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 12, padding: "12px 14px", fontWeight: 700, fontSize: 13, cursor: busy ? "default" : "pointer", fontFamily: "inherit" }}>
               Disconnect
             </button>
+          </div>
+          <div style={{ borderTop: `1px solid ${T.border}`, margin: "4px 0 0", paddingTop: 12 }}>
+            <BankAccountPicker />
           </div>
         </div>
       )}
@@ -16338,13 +16483,15 @@ function EstimatesScreen({ clients, catalog, branding, email, invoicing, T, esti
   const [view, setView] = useState("list"); // list | new | detail
   const [selected, setSelected] = useState(null);
 
-  const saveEstimate = (est) => {
+  // Persist without leaving the editor — used by "Download PDF" so exporting saves your edits but
+  // doesn't kick you back to the list (that close was the reported bug).
+  const persistEstimate = (est) => {
     setEstimates(prev => {
       const exists = (prev||[]).some(e => e.id === est.id);
       return exists ? prev.map(e => e.id === est.id ? est : e) : [est, ...(prev||[])];
     });
-    setView("list");
   };
+  const saveEstimate = (est) => { persistEstimate(est); setView("list"); };
 
   const deleteEstimate = (id) => {
     setEstimates(prev => (prev||[]).filter(e => e.id !== id));
@@ -16362,6 +16509,7 @@ function EstimatesScreen({ clients, catalog, branding, email, invoicing, T, esti
         invoicing={invoicing}
         T={T}
         onSave={saveEstimate}
+        onPersist={persistEstimate}
         onDelete={deleteEstimate}
         onBack={() => { setView("list"); setSelected(null); }}
       />
@@ -16439,7 +16587,7 @@ function EstimatesScreen({ clients, catalog, branding, email, invoicing, T, esti
   );
 }
 
-function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, T, onSave, onDelete, onBack }) {
+function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, T, onSave, onPersist, onDelete, onBack }) {
   const isNew = !estimate;
   const [form, setForm] = useState(() => estimate || {
     id: Date.now(),
@@ -16455,6 +16603,24 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
   });
   const [sending, setSending] = useState(false);
   const [sentMsg, setSentMsg] = useState("");
+  const [pdfBusy, setPdfBusy] = useState(false);
+  // Warm the jsPDF chunk so the native share sheet opens inside the tap's user-gesture window
+  // (iOS blocks navigator.share if an await stalls the gesture). Same trick the invoice export uses.
+  useEffect(() => { loadJsPDF().catch(() => {}); }, []);
+  // Export a PDF of the CURRENT form. Deliberately does NOT call onSave() — that saves-and-closes the
+  // estimate, which is exactly the "export kicks me out of the estimate" bug. Generates from live form
+  // state, so the PDF reflects unsaved edits; use "Save Estimate" to persist.
+  const downloadPdf = async () => {
+    if (pdfBusy) return;
+    setPdfBusy(true); setSentMsg("");
+    try {
+      if (onPersist) onPersist(form); // save edits, but stay on the estimate (no close)
+      const r = await generateEstimatePDF(form, branding, invoicing);
+      if (r === "downloaded") setSentMsg("Estimate PDF saved to your downloads.");
+    } catch (e) {
+      setSentMsg("Couldn't export the PDF: " + ((e && e.message) || "unknown error"));
+    } finally { setPdfBusy(false); }
+  };
 
   const set = (k, v) => setForm(f => {
     const next = { ...f, [k]: v };
@@ -16509,15 +16675,40 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
     const client = (clients||[]).find(c => String(c.id) === String(form.clientId));
     const em = (client?.email || "").trim();
     if (!em) { setSentMsg("No email on file for this client."); return; }
+    if (sending) return;
+    setSending(true); setSentMsg("");
     try {
-      const r = await fetch(`${PROD_URL}/api/send-notification`, {
+      // Attach the same PDF the "Download PDF" button makes, so the client can save it (best-effort).
+      let pdf = null;
+      try {
+        const doc = await buildEstimatePDFDoc(form, branding, invoicing);
+        const b64 = (doc.output("datauristring").split("base64,")[1] || "");
+        if (b64) pdf = { filename: estimatePdfName(form), content: b64 };
+      } catch (_) { /* PDF optional — still send the branded email */ }
+      const r = await fetch(`${PROD_URL}/api/send-estimate`, {
         method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ ...senderEmailFields(client?.id), to: em, subject: `Estimate from ${branding.companyName || "Stone Property Solutions"}`, heading: "Your Estimate", message: buildSmsText(), branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary } }),
+        body: JSON.stringify({
+          ...senderEmailFields(client?.id),
+          to: em,
+          clientName: form.clientName || client?.name || "",
+          emailSubject: `Estimate from ${branding.companyName || "Stone Property Solutions"}`,
+          estimate: {
+            service: form.title || "",
+            items: (form.items || []).map(it => ({ desc: it.desc, qty: it.qty, price: it.price })),
+            total: form.total,
+            notes: form.notes || "",
+            validDays: form.validDays,
+          },
+          branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary },
+          ...(pdf ? { pdf } : {}),
+        }),
       });
       const d = await r.json().catch(() => ({}));
-      if (r.ok && d.sent) { set("status", "sent"); setSentMsg("Estimate emailed to the client."); }
+      if (r.ok && d.sent) { set("status", "sent"); setSentMsg(pdf ? "Estimate emailed to the client — with a PDF attached." : "Estimate emailed to the client."); }
+      else if (r.ok && d.held) { setSentMsg("Held by Test Mode — not sent to the client."); }
       else { setSentMsg(d.error || "Email failed to send."); }
     } catch (_) { setSentMsg("Couldn't reach the server."); }
+    finally { setSending(false); }
   };
 
   const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", outline: "none", color: T.text, background: T.surface };
@@ -16618,11 +16809,11 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
         <Btn onClick={sendViaSms} variant="outline" block style={{ gap: 7 }}>
           <Icon name="message" size={15} /> Send via Text Message
         </Btn>
-        <Btn onClick={sendViaEmail} variant="ghost" block style={{ gap: 7 }}>
-          <Icon name="mail" size={15} /> Send via Email
+        <Btn onClick={sendViaEmail} disabled={sending} variant="ghost" block style={{ gap: 7 }}>
+          <Icon name="mail" size={15} /> {sending ? "Sending…" : "Send via Email"}
         </Btn>
-        <Btn onClick={() => { onSave(form); generateEstimatePDF(form, branding, invoicing); }} variant="ghost" block style={{ gap: 7 }}>
-          <Icon name="download" size={15} /> Download PDF
+        <Btn onClick={downloadPdf} disabled={pdfBusy} variant="ghost" block style={{ gap: 7 }}>
+          <Icon name="download" size={15} /> {pdfBusy ? "Preparing…" : "Download PDF"}
         </Btn>
         {sentMsg && <div style={{ fontSize: 12, color: T.textMuted, textAlign: "center", lineHeight: 1.5 }}>{sentMsg}</div>}
       </div>
@@ -17240,7 +17431,9 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <h2 style={{ margin: 0, fontSize: 26, fontWeight: 700, color: T.text, letterSpacing: "-0.03em" }}>Invoices</h2>
         <div style={{ display: "flex", gap: 8 }}>
-          {qbConnected && (() => {
+          {/* Always visible so a manual sync is available "either way" — when QB is disconnected the
+              handler shows a "Connect QuickBooks under Customize first" hint (idle button stays neutral). */}
+          {(() => {
             const QB_GREEN = "#2CA01C";
             const active = qbSyncing || qbSynced;
             return (
@@ -25227,6 +25420,8 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
                 <button onClick={disconnectBank} disabled={bankBusy} style={{ background: "none", border: `1px solid ${T.border}`, borderRadius: 10, padding: "7px 12px", fontSize: 12.5, fontWeight: 700, color: T.textMuted, cursor: "pointer", fontFamily: "inherit", opacity: bankBusy ? 0.6 : 1 }}>Disconnect</button>
               </div>
 
+              <div style={{ ...card, marginBottom: 14 }}><BankAccountPicker /></div>
+
               <div style={{ display: "flex", gap: 7, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
                 {PERIODS.map(([id, label]) => (
                   <button key={id} onClick={() => setBankPeriod(id)} style={{ padding: "7px 14px", borderRadius: 100, border: "none", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: bankPeriod === id ? T.primary : T.surfaceAlt, color: bankPeriod === id ? "#fff" : T.textMuted }}>{label}</button>
@@ -29517,7 +29712,7 @@ export default function App({ authEmail = "", onSignOut }) {
     } catch (_) {}
     if (seen) return;
     (async () => {
-      try { if ((await pushPermissionState()) === "prompt") setPushPrimer(true); } catch (_) {}
+      try { const st = await pushPermissionState(); if (st === "prompt" || st === "error") setPushPrimer(true); } catch (_) {}
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated, !!currentUser, !!clientUser]);
@@ -30552,7 +30747,24 @@ export default function App({ authEmail = "", onSignOut }) {
     </>
   );
 
-  // ── Desktop (>=1024px): left sidebar + content. Mobile (below) is unchanged. ──
+  // Native push permission primer — hoisted so BOTH layout branches render it. It used to live only
+  // in the mobile return, so at vp.isDesktop (>=700px: iPad, the Mac app, and iPhone in landscape)
+  // the effect could set pushPrimer=true but nothing showed it → the OS prompt was never reachable.
+  const pushPrimerModal = pushPrimer ? (
+    <Modal title="Turn on notifications?" onClose={() => dismissPushPrimer(false)} maxWidth={430}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ fontSize: 14, color: T.text, lineHeight: 1.55 }}>
+          Get a ping the moment it matters — new leads, payments, completed stops, and messages, right on your lock screen. You can fine-tune which events notify you anytime in Comms → Settings.
+        </div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <Btn variant="ghost" block onClick={() => dismissPushPrimer(false)}>Not now</Btn>
+          <Btn variant="primary" block onClick={() => dismissPushPrimer(true)}>Turn on</Btn>
+        </div>
+      </div>
+    </Modal>
+  ) : null;
+
+  // ── Desktop (>=700px): left sidebar + content. Mobile (below) is unchanged. ──
   if (vp.isDesktop) {
     // Master-detail pages fill the whole content area (each column scrolls on its own);
     // every other page keeps the centered, single-scroll column.
@@ -30580,6 +30792,7 @@ export default function App({ authEmail = "", onSignOut }) {
         {previewClient && (
           <StaffClientPreview client={previewClient} invoices={invoices} invoicing={invoicing} schedule={schedule} branding={branding} onClose={() => setPreviewClient(null)} />
         )}
+        {pushPrimerModal}
       </AppCtx.Provider>
     );
   }
@@ -30632,19 +30845,7 @@ export default function App({ authEmail = "", onSignOut }) {
         `}</style>
 
         <PaymentBanner banner={payBanner} T={T} onOpen={() => { setPayBanner(null); handleNav("invoices", { invoiceFilter: "Paid" }); }} onClose={() => setPayBanner(null)} />
-        {pushPrimer && (
-          <Modal title="Turn on notifications?" onClose={() => dismissPushPrimer(false)} maxWidth={430}>
-            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-              <div style={{ fontSize: 14, color: T.text, lineHeight: 1.55 }}>
-                Get a ping the moment it matters — new leads, payments, completed stops, and messages, right on your lock screen. You can fine-tune which events notify you anytime in Comms → Settings.
-              </div>
-              <div style={{ display: "flex", gap: 10 }}>
-                <Btn variant="ghost" block onClick={() => dismissPushPrimer(false)}>Not now</Btn>
-                <Btn variant="primary" block onClick={() => dismissPushPrimer(true)}>Turn on</Btn>
-              </div>
-            </div>
-          </Modal>
-        )}
+        {pushPrimerModal}
 
         {/* Header — a non-scrolling flex child, frozen at the top */}
         <header style={{ background: hexA(T.surface, 0.9), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, position: "relative", zIndex: 100, flexShrink: 0, borderBottom: `1px solid ${T.border}` }}>

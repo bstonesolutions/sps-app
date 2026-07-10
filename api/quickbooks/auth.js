@@ -27,6 +27,16 @@ function makeState() {
 export default function handler(req, res) {
   const clientId     = process.env.QB_CLIENT_ID;
   const redirectUri  = process.env.QB_REDIRECT_URI;
+
+  // Fail LOUD and clear instead of redirecting to Intuit with client_id=undefined — which renders
+  // their cryptic "Sorry, but undefined didn't connect" page. A missing env var is a server-config
+  // gap, not a user error, so name exactly what's missing.
+  if (!clientId || !redirectUri) {
+    const missing = [!clientId && "QB_CLIENT_ID", !redirectUri && "QB_REDIRECT_URI"].filter(Boolean).join(" and ");
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:480px;margin:14vh auto;padding:0 24px;color:#1d1d1f;text-align:center"><h2 style="font-size:20px;margin:0 0 10px">QuickBooks isn't set up yet</h2><p style="font-size:15px;line-height:1.55;color:#555">The server is missing <b>${missing}</b>. Add ${!redirectUri && !clientId ? "these" : "it"} in Vercel → Settings → Environment Variables, then redeploy and try connecting again.</p><p style="font-size:13px;color:#999;margin-top:22px">You can close this window and return to the app.</p></div>`);
+  }
+
   const scope        = 'com.intuit.quickbooks.accounting';
   const state        = makeState(); // signed CSRF token, echoed back by Intuit + verified in callback
 

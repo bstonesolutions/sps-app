@@ -17,7 +17,7 @@
 // anchor: "YYYY-MM-DD" (a recent payday), amount: "" (typical all-in cost per run; blank → detect) }.
 // Ledger in sps_nudge_log (separate key so the cron never rewrites the app-edited cfg).
 
-import { getItem, plaidCall, requireOwner } from "./plaid/_plaid.js";
+import { getItem, plaidCall, requireOwner, enabledAccountSet, filterByAccounts } from "./plaid/_plaid.js";
 import { pushOwner } from "./_push.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
@@ -141,7 +141,9 @@ async function fetchBank(budget) {
       if (!batch.length) break;
     }
   } catch { return null; } // bank unreachable → caller falls back to planned numbers
-  const txns = all.map((t) => ({ id: t.transaction_id || "", pendingId: t.pending_transaction_id || null, date: t.date || "", name: t.merchant_name || t.name || "", amount: -(t.amount || 0), category: (t.personal_finance_category && t.personal_finance_category.primary) || "" }));
+  // Honor the owner's Bank Sync account picker (business-only, etc.) — same filter the Budget uses.
+  const kept = filterByAccounts(all, await enabledAccountSet());
+  const txns = kept.map((t) => ({ id: t.transaction_id || "", pendingId: t.pending_transaction_id || null, date: t.date || "", name: t.merchant_name || t.name || "", amount: -(t.amount || 0), category: (t.personal_finance_category && t.personal_finance_category.primary) || "" }));
 
   const marks = (budget && budget.txMarks) || {}, rules = (budget && budget.txRules) || {};
   // Same pre-migration posture as the app: a mark keyed on the pending twin still counts.

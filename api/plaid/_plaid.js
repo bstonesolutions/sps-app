@@ -64,6 +64,30 @@ export async function clearItem() {
   await fetch(`${SUPABASE_URL}/rest/v1/plaid_tokens?id=eq.${ROW_ID}`, { method: "DELETE", headers: sbHeaders() });
 }
 
+// The owner's per-account include list, chosen in the app's Bank Sync picker and stored in app_state
+// under key `sps_plaid_sel` = { enabled: [account_id, ...] }. One bank login (e.g. Truist) can expose
+// several accounts (business + personal) under one Plaid item; this lets the owner feed only the ones
+// they want into the Budget/Home/Reports/digest numbers. Empty/unset → include ALL accounts (backward
+// compatible). Returns a Set of account_ids to KEEP, or null for "all". Best-effort: any read hiccup
+// falls back to all so the money tiles never silently blank out. Read-only app_state — no schema touch.
+export async function enabledAccountSet() {
+  if (!SERVICE_KEY) return null;
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/app_state?key=eq.sps_plaid_sel&select=value`, { headers: sbHeaders() });
+    if (!r.ok) return null;
+    const rows = await r.json().catch(() => []);
+    let v = rows && rows[0] ? rows[0].value : null;
+    if (typeof v === "string") { try { v = JSON.parse(v); } catch { v = null; } }
+    const ids = v && Array.isArray(v.enabled) ? v.enabled.map(String).filter(Boolean) : [];
+    return ids.length ? new Set(ids) : null;
+  } catch { return null; }
+}
+
+// Filter a raw Plaid /transactions/get list down to the owner-selected accounts (no-op when "all").
+export function filterByAccounts(rawTxns, keepSet) {
+  return keepSet ? (rawTxns || []).filter((t) => keepSet.has(String(t.account_id))) : (rawTxns || []);
+}
+
 // ── owner-only gate ───────────────────────────────────────────────────────────────────────────────
 // Bank transactions are at least as sensitive as the owner financial digest, so the data endpoints
 // (link/exchange/transactions/disconnect) are OWNER-ONLY — a signed-in staff tech must not be able to
