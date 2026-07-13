@@ -3,6 +3,10 @@ import { createPortal } from "react-dom";
 import { store, supabase } from "./supabaseClient";
 import { PROD_URL } from "./config";
 import { sendWidgetPayload, clearWidgetPayload } from "./widgetBridge";
+import { normalizeCompletionInvoice } from "./stopCompletion";
+import { CLIENT_MEDIA_BUCKET, backupManifestStatus, buildMediaArchive, buildStorageObjectPath, findUniqueStableMatch, makeStorageRef, parseDataUrl, parseStorageLocator, selectLegacyMediaForMigration, validateBackupMediaSize } from "./mediaBackup";
+import { createPortalDataFence, portalVisitMatchesReference, portalVisitReference, rejectPortalPreviewAction, requestPortalAction, retainPortalRatingVisit } from "./portalActionClient";
+import { selectActiveEnRouteStop } from "./geofenceSafety";
 
 // True only on a genuine fresh launch of the app shell (hard close / first open).
 // sessionStorage is wiped when the PWA is killed/swiped away, but survives reloads
@@ -138,7 +142,7 @@ async function bankLinkFlow() {
           const ed = await ex.json().catch(() => ({}));
           if (!ex.ok) return reject(new Error(ed.error || "Couldn't finish connecting."));
           _bankCache.gen++; _bankCache.data = null; _bankCache.at = 0; // fresh link (maybe a different bank) → old cache is invalid
-          try { await store.remove("sps_plaid_sel"); } catch (_) {} // new bank → clear the old account picker (stale ids would filter to nothing)
+          try { await store.remove("sps_plaid_sel", { force: true }); } catch (_) {} // new bank → clear the old account picker (stale ids would filter to nothing)
           _bankCache.status = { ok: true, connected: true, institution: inst, configured: true };
           bankNotify();
           resolve({ connected: true, institution: inst });
@@ -151,7 +155,7 @@ async function bankLinkFlow() {
 }
 async function bankDisconnect() {
   try { await fetch(`${PROD_URL}/api/plaid/disconnect`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: "{}" }); } catch (_) {}
-  try { await store.remove("sps_plaid_sel"); } catch (_) {} // drop the account picker with the connection
+  try { await store.remove("sps_plaid_sel", { force: true }); } catch (_) {} // drop the account picker with the connection
   _bankCache.gen++; // invalidate any in-flight fetch so it can't re-fill the cache we just cleared
   _bankCache.status = { ...(_bankCache.status || {}), connected: false, institution: null };
   _bankCache.data = null; _bankCache.at = 0;
@@ -316,9 +320,9 @@ const openInAppBrowser = async (url) => {
 // PROD_URL so it works on the native app (capacitor://localhost) too.
 const QB_API = `${PROD_URL}/api/quickbooks`;
 // Attach the signed-in user's Supabase token so the privileged api/ endpoints can verify a real
-// caller (gated server-side in api/_auth.js). Owner/tech is always signed in, so a token is
-// present; if not, the call still goes (the server gate is fail-open until API_AUTH_ENFORCED is
-// turned on). Merges into any extra headers. ONLY use for our own api/ endpoints — never external.
+// caller and their server-read team permissions (gated in api/_auth.js). Privileged routes are
+// permanently fail-closed when a valid token is absent. Merges into any extra headers. ONLY use
+// for our own api/ endpoints — never external.
 async function authHeaders(extra = {}) {
   try {
     const { data } = await supabase.auth.getSession();
@@ -339,7 +343,8 @@ let DB_READ_OK = false;
 if (typeof document !== "undefined") {
   document.addEventListener("sps-db-status", (e) => {
     const d = (e && e.detail) || {};
-    if (d.type === "ok") DB_READ_OK = true;
+    if (d.type === "read-ok") DB_READ_OK = true;
+    else if (d.type === "identity") DB_READ_OK = false;
     else if (d.type === "error" && /reach the database/i.test(d.msg || "")) DB_READ_OK = false;
   });
 }
@@ -363,7 +368,6 @@ const qbCheckStatus = async () => {
     return !!d.connected;
   } catch { return qbIsConnected(); }
 };
-
 // "Sending identity" mirror of the saved Email settings, so server calls can carry a
 // custom from-name/address + texting number WITHOUT threading props through every call
 // site. The App component keeps this current via setSenderIdentity() whenever the
@@ -582,17 +586,16 @@ async function enableDevicePush() {
   return { ok: true };
 }
 // Sign-out unbind: remove this device's row server-side WITHOUT the opt-out flag or APNs
-// unregister — a different account signing in should re-register cleanly. Fire-and-forget.
-function unbindDevicePushToken() {
+// unregister — a different account signing in should re-register cleanly. The caller awaits this
+// while the current auth token is still valid, so the cleanup is not raced by supabase.signOut().
+async function unbindDevicePushToken() {
   if (!_pushToken) return; // not registered this session — next sign-in rebinds the row anyway
-  (async () => {
-    try {
-      await fetch(`${PROD_URL}/api/push/register`, {
-        method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ token: _pushToken, remove: true }),
-      });
-    } catch (_) {}
-  })();
+  try {
+    await fetch(`${PROD_URL}/api/push/register`, {
+      method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ token: _pushToken, remove: true }),
+    });
+  } catch (_) {}
 }
 
 async function disableDevicePush() {
@@ -980,12 +983,19 @@ function useStoredState(key, initial) {
     if (typeof window.__onSpsSyncStart === "function") window.__onSpsSyncStart();
     let cancelled = false;
     (async () => {
-      const res = await store.set(key, json);
+      const submittedBase = lastPersisted.current;
+      const res = await store.set(key, json, { baseValue: submittedBase });
       if (cancelled) return;
       if (res && res.ok) {
         // Bug #2 — advance the fence ONLY after a CONFIRMED save. On failure the value is queued for
         // durable retry and lastPersisted stays put, so the next edit (or a reconnect flush) re-sends it.
-        lastPersisted.current = json;
+        const savedJson = typeof res.value === "string" ? res.value : json;
+        lastPersisted.current = savedJson;
+        // A compare-and-swap retry may have safely merged another employee's independent changes.
+        // Adopt that exact confirmed value now, otherwise the next local edit could remove the merge.
+        if (savedJson !== json) {
+          try { setValue(JSON.parse(savedJson)); } catch (_) {}
+        }
         if (typeof window.__onSpsSync === "function") window.__onSpsSync();
       } else if (typeof window.__onSpsSyncFail === "function") {
         window.__onSpsSyncFail();
@@ -999,11 +1009,30 @@ function useStoredState(key, initial) {
   // push that edit through now that the read is confirmed. Mirrors _init's pending-precedence rule.
   useEffect(() => {
     if (!loaded) return;
-    const onReconciled = async () => {
+    const onReconciled = async (event) => {
+      const detail = (event && event.detail) || {};
+      if (detail.key && detail.key !== key) return;
       const localJson = JSON.stringify(value);
+      // A conflict choice or completed background retry is authoritative for this key. At this point
+      // the storage cache contains the exact CAS-confirmed merge, so reflect it in React as well.
+      if (detail.key === key && detail.forceRemote) {
+        const res = await store.get(key);
+        if (res && res.value != null) {
+          try { const parsed = JSON.parse(res.value); lastPersisted.current = res.value; setValue(parsed); } catch (_) {}
+        } else {
+          const initialJson = JSON.stringify(initial);
+          lastPersisted.current = initialJson;
+          setValue(initial);
+        }
+        return;
+      }
       if (localJson !== lastPersisted.current) {
-        const r = await store.set(key, localJson);   // flush the in-flight local edit; keep it on screen
-        if (r && r.ok) lastPersisted.current = localJson;
+        const r = await store.set(key, localJson, { baseValue: lastPersisted.current }); // merge the in-flight local edit
+        if (r && r.ok) {
+          const savedJson = typeof r.value === "string" ? r.value : localJson;
+          lastPersisted.current = savedJson;
+          if (savedJson !== localJson) { try { setValue(JSON.parse(savedJson)); } catch (_) {} }
+        }
         return;
       }
       const res = await store.get(key);               // clean key → take the freshly-read DB value
@@ -1392,17 +1421,17 @@ const loadGoogleMaps = () => {
 // address, and draws a live map + ETA. No login — reads happen via the anon client.
 function genTrackToken() {
   try {
-    const a = new Uint8Array(9);
+    const a = new Uint8Array(24);
     (window.crypto || window.msCrypto).getRandomValues(a);
     return Array.from(a, b => "0123456789abcdefghijklmnopqrstuvwxyz"[b % 36]).join("");
-  } catch { return (Math.random().toString(36) + Math.random().toString(36)).replace(/[^a-z0-9]/g, "").slice(0, 12); }
+  } catch { return ""; } // no cryptographically secure randomness → do not create a bearer link
 }
 const stopTrackLink = (token) => `${PROD_URL}/?track=${token}`;
 
 // Public "your technician is on the way" map. Rendered by main.jsx when the URL has
 // ?track=<token>, BEFORE the auth gate. Polls the tech's live location every 15s.
 export function LiveTrack({ token }) {
-  const [phase, setPhase] = useState("loading"); // loading | notfound | nokey | map
+  const [phase, setPhase] = useState("loading"); // loading | notfound | ended | nokey | map
   const [brand, setBrand] = useState({});
   const [status, setStatus] = useState("scheduled"); // scheduled | enroute | arrived | complete
   const [active, setActive] = useState(false); // a fresh GPS fix is live
@@ -1413,22 +1442,32 @@ export function LiveTrack({ token }) {
 
   useEffect(() => {
     let alive = true, timer = null, retry = null, tries = 0;
-    // Read this link's own tiny record (sps_track_<token>) — never the whole schedule.
-    const readRecord = async () => {
-      const r = await supabase.from("app_state").select("value").eq("key", "sps_track_" + token).maybeSingle();
-      try { return r?.data?.value ? JSON.parse(r.data.value) : null; } catch (_) { return null; }
+    // Resolve the opaque tracking token server-side. The public browser has no direct read access
+    // to app_state or staff_locations; the endpoint returns one safe record and, only while that
+    // record is active and unexpired, the assigned technician's fresh location.
+    const readTracking = async () => {
+      try {
+        const r = await fetch(`${PROD_URL}/api/live-track?token=${encodeURIComponent(token || "")}`, { cache: "no-store" });
+        const d = await r.json().catch(() => ({}));
+        if (r.status === 410 || d.ended) return { ended: true };
+        return r.ok && d && d.record ? d : null;
+      } catch (_) { return null; }
     };
     const poll = async () => {
       if (!alive) return;
-      const c = ctx.current, rec = c.rec || {};
-      const [loc, latest] = await Promise.all([
-        supabase.from("staff_locations").select("*").eq("staff_id", String(rec.assigneeId || "")).maybeSingle(),
-        readRecord(), // re-read so the status (enroute → arrived) keeps up while the page is open
-      ]);
+      const c = ctx.current;
+      const latest = await readTracking(); // status and location advance together on the server
       if (!alive) return;
-      if (latest && latest.status) { c.rec = latest; setStatus(latest.status); }
-      const data = loc.data;
-      const fresh = !!(data && data.is_active && data.lat != null && (Date.now() - new Date(data.updated_at || 0).getTime() < 6 * 60000));
+      if (latest && latest.ended) {
+        setStatus("complete"); setActive(false); setEta(""); setPhase("ended");
+        if (timer) { clearInterval(timer); timer = null; }
+        return;
+      }
+      if (!latest || !latest.record) { setActive(false); setEta(""); return; }
+      c.rec = latest.record;
+      if (latest.record.status) setStatus(latest.record.status);
+      const data = latest.location;
+      const fresh = !!(data && data.is_active && data.lat != null && data.lng != null);
       setActive(fresh);
       if (!fresh) { setEta(""); return; }
       const m = c.maps, pos = { lat: Number(data.lat), lng: Number(data.lng) };
@@ -1467,10 +1506,11 @@ export function LiveTrack({ token }) {
     // The record syncs a beat after the tech taps Head Here, so retry briefly before declaring the
     // link dead — a freshly-shared link shouldn't read "unavailable" purely from propagation lag.
     const boot = async () => {
-      const rec = await readRecord();
+      const first = await readTracking();
       if (!alive) return;
-      if (!rec) { tries++; if (tries < 6) { retry = setTimeout(boot, 3000); return; } setPhase("notfound"); return; }
-      start(rec);
+      if (first && first.ended) { setStatus("complete"); setPhase("ended"); return; }
+      if (!first || !first.record) { tries++; if (tries < 6) { retry = setTimeout(boot, 3000); return; } setPhase("notfound"); return; }
+      start(first.record);
     };
     boot();
     return () => { alive = false; if (timer) clearInterval(timer); if (retry) clearTimeout(retry); };
@@ -1481,6 +1521,7 @@ export function LiveTrack({ token }) {
   const center = { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100dvh", padding: 24, textAlign: "center", fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif", background: "#F5F5F7", color: "#1d1d1f" };
   if (phase === "loading") return <div style={center}><div style={{ fontSize: 14, color: "#6b7280" }}>Loading live map…</div></div>;
   if (phase === "notfound") return <div style={center}><div style={{ fontSize: 17, fontWeight: 800, marginBottom: 6 }}>Tracking isn't live yet</div><div style={{ fontSize: 13.5, color: "#6b7280", maxWidth: 320, lineHeight: 1.5 }}>Your tech hasn't headed toward this stop yet — this page goes live once they're on the way. Check back shortly, or reach out to {company} for an update.</div></div>;
+  if (phase === "ended") return <div style={center}><div style={{ fontSize: 17, fontWeight: 800, marginBottom: 6 }}>This tracking session has ended</div><div style={{ fontSize: 13.5, color: "#6b7280", maxWidth: 320, lineHeight: 1.5 }}>Live location is no longer being shared. Reach out to {company} if you need an update.</div></div>;
   if (phase === "nokey") return <div style={center}><div style={{ fontSize: 17, fontWeight: 800, marginBottom: 6 }}>{company}</div><div style={{ fontSize: 13.5, color: "#6b7280", maxWidth: 320, lineHeight: 1.5 }}>Live map isn't available right now. Your technician is on the way — we'll arrive soon.</div></div>;
   return (
     <div style={{ position: "fixed", inset: 0, display: "flex", flexDirection: "column", fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif", background: "#F5F5F7" }}>
@@ -1933,8 +1974,19 @@ function validateTeamWrite(next, prev) {
 // owner and re-open the promotion path. Returns false to skip writing this key (Build 15, Item 1).
 function restoreTeamGuard(key, valueJson) {
   if (key !== "sps_team") return true;
-  try { const arr = JSON.parse(valueJson); return Array.isArray(arr) && arr.some(m => m && m.role === "owner"); } catch { return false; }
+  try {
+    const arr = JSON.parse(valueJson);
+    return Array.isArray(arr) && arr.some((member) => {
+      if (!member || String(member.role || "").trim().toLowerCase() !== "owner") return false;
+      if (!String(member.email || "").trim()) return false;
+      if (String(member.active ?? "true").toLowerCase() === "false") return false;
+      if (String(member.disabled ?? "false").toLowerCase() === "true") return false;
+      return !["disabled", "inactive", "revoked"].includes(String(member.status || "").trim().toLowerCase());
+    });
+  } catch { return false; }
 }
+
+const preserveDuringBulkRestore = (key) => key === "sps_team" || key === "sps_session" || String(key).startsWith("sps_track_");
 // ─────────────────────────────────────────────
 // PER-TAB STAFF PERMISSIONS
 // Preset roles set a baseline; per-person overrides fine-tune each tab to
@@ -2677,36 +2729,131 @@ function compressImage(file, maxDim = 1600) {
   });
 }
 
-// ── Photo storage ─────────────────────────────────────────────────────────────
-// Photos live in Supabase Storage (bucket `client-media`), not inline in the DB. Inline base64
-// bloated app_state until reads/writes timed out (the 2026-06-24 outage). We store the public URL;
-// <img src> renders it the same. Every helper falls back gracefully so a photo is never lost.
-async function uploadToStorage(dataUrl) {
-  try {
-    if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) return dataUrl; // already a URL / empty
-    const blob = await (await fetch(dataUrl)).blob();
-    const type = blob.type || "image/jpeg";
-    const ext = (type.split("/")[1] || "jpg").replace("jpeg", "jpg").replace(/\+xml$/, "");
-    const path = `media/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
-    const { error } = await supabase.storage.from("client-media").upload(path, blob, { contentType: type, upsert: false });
-    if (error) { console.warn("[storage] upload failed, keeping inline:", error.message); return dataUrl; } // fallback: inline
-    return supabase.storage.from("client-media").getPublicUrl(path).data.publicUrl || dataUrl;
-  } catch (e) { console.warn("[storage] upload error, keeping inline:", e && e.message); return dataUrl; }
+// ── Protected client media storage ───────────────────────────────────────────
+// app_state stores a durable Storage locator, never a public URL or a document/video base64 blob.
+// UI surfaces turn that locator into a short-lived signed URL. Older public/signed Supabase URLs
+// are understood by the same resolver, so existing media remains usable while records migrate.
+const _protectedMediaUrlCache = new Map();
+const PROTECTED_MEDIA_URL_TTL = 60 * 60;
+
+async function uploadBlobToStorage(blob, { kind = "media", clientId = "shared", name = "" } = {}) {
+  if (!(blob instanceof Blob)) throw new Error("No media file was provided");
+  const type = blob.type || "application/octet-stream";
+  const path = buildStorageObjectPath({ kind, clientId, name, mime: type });
+  const { error } = await supabase.storage.from(CLIENT_MEDIA_BUCKET).upload(path, blob, { contentType: type, upsert: false });
+  if (error) throw new Error(error.message || "Storage upload failed");
+  return makeStorageRef(CLIENT_MEDIA_BUCKET, path);
 }
-// Compress a captured file, then move it to Storage. Returns a Storage URL (or an inline data-URL
-// fallback if the upload failed), or "" if the file couldn't be decoded (e.g. HEIC) — caller skips "".
+
+async function uploadToStorage(dataUrl, options = {}) {
+  try {
+    if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) return dataUrl;
+    const blob = await (await fetch(dataUrl)).blob();
+    return await uploadBlobToStorage(blob, options);
+  } catch (e) {
+    // Do not silently put the large base64 payload back into app_state. The caller leaves the
+    // record unchanged and can retry the upload without risking database timeouts.
+    console.warn("[storage] upload failed:", e?.message || e);
+    return "";
+  }
+}
+
+async function resolveProtectedMediaUrl(src) {
+  // Portal payloads already carry a short-lived service-signed URL. Portal users intentionally do
+  // not have bucket-wide SELECT, and portal-data rotates these links before expiry.
+  if (/^https?:\/\//i.test(src || "") && String(src).includes("/object/sign/") && String(src).includes("token=")) return src;
+  const locator = parseStorageLocator(src);
+  if (!locator) return src || "";
+  const cached = _protectedMediaUrlCache.get(locator.ref);
+  if (cached && cached.expiresAt > Date.now() + 5 * 60_000) return cached.url;
+  const { data, error } = await supabase.storage.from(locator.bucket).createSignedUrl(locator.path, PROTECTED_MEDIA_URL_TTL);
+  if (error || !data?.signedUrl) {
+    // Migration-safe fallback for old public URLs only. New durable references never fall back to
+    // an unauthenticated URL; once the bucket is private this branch naturally stops being usable.
+    if (/^https?:\/\//i.test(src) && src.includes("/object/public/")) return src;
+    throw new Error(error?.message || "Media access could not be authorized");
+  }
+  _protectedMediaUrlCache.set(locator.ref, { url: data.signedUrl, expiresAt: Date.now() + PROTECTED_MEDIA_URL_TTL * 1000 });
+  return data.signedUrl;
+}
+
+function useProtectedMediaSrc(src) {
+  const [resolved, setResolved] = useState(() => parseStorageLocator(src) ? "" : (src || ""));
+  useEffect(() => {
+    let live = true;
+    let refreshTimer = null;
+    setResolved(parseStorageLocator(src) ? "" : (src || ""));
+    const refresh = () => resolveProtectedMediaUrl(src).then(url => {
+      if (!live) return;
+      setResolved(url || "");
+      if (String(src || "").startsWith("sps-storage://") || String(src || "").includes("/object/public/")) {
+        refreshTimer = setTimeout(refresh, (PROTECTED_MEDIA_URL_TTL - 5 * 60) * 1000);
+      }
+    }).catch(() => { if (live) setResolved(""); });
+    refresh();
+    return () => { live = false; if (refreshTimer) clearTimeout(refreshTimer); };
+  }, [src]);
+  return resolved;
+}
+
+function ProtectedImage({ src, ...props }) {
+  const resolved = useProtectedMediaSrc(src);
+  return <img {...props} src={resolved || undefined} />;
+}
+
+function ProtectedVideo({ src, ...props }) {
+  const resolved = useProtectedMediaSrc(src);
+  return <video {...props} src={resolved || undefined} />;
+}
+
+async function downloadProtectedMedia(src, filename = "download") {
+  const href = await resolveProtectedMediaUrl(src);
+  if (!href) throw new Error("This file is unavailable");
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = filename;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+async function storageObjectToB64(locator) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const { data, error } = await supabase.storage.from(locator.bucket).download(locator.path);
+    if (!error && data) return { b64: await blobToB64(data), mime: data.type || "application/octet-stream", size: data.size };
+    lastError = error || new Error("Storage returned no file");
+  }
+  throw new Error(lastError?.message || "Media download failed");
+}
+
+async function externalObjectToB64(src) {
+  const response = await fetch(src, { credentials: "omit" });
+  if (!response.ok) throw new Error(`External host returned ${response.status}`);
+  const blob = await response.blob();
+  if (!blob || !blob.size) throw new Error("External host returned an empty file");
+  return { b64: await blobToB64(blob), mime: blob.type || "application/octet-stream", size: blob.size };
+}
+
+// Compress a captured file, then move it to Storage. Returns a durable Storage reference,
+// or "" if decoding/upload failed — callers leave the existing record untouched.
 async function compressAndUpload(file, maxDim = 1280) {
   const dataUrl = await compressImage(file, maxDim);
   if (!dataUrl || !dataUrl.startsWith("data:image")) return "";
-  return uploadToStorage(dataUrl);
+  return uploadToStorage(dataUrl, { kind: "photos", name: file?.name || "photo.jpg" });
 }
-// Resolve any photo src (inline data URL OR Storage URL) to a base64 data URL — for places that must
+// Resolve any photo src (inline data URL OR protected Storage locator/legacy URL) to a base64 data URL — for places that must
 // embed the actual bytes (e.g. email). Returns "" on failure so the caller skips it.
 async function toDataUrl(src) {
   if (!src || typeof src !== "string") return "";
   if (src.startsWith("data:")) return src;
   try {
-    const blob = await (await fetch(src)).blob();
+    const locator = parseStorageLocator(src);
+    const blob = locator
+      ? (await supabase.storage.from(locator.bucket).download(locator.path)).data
+      : await (await fetch(src)).blob();
+    if (!blob) return "";
     return await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.onerror = () => r(""); fr.readAsDataURL(blob); });
   } catch (_) { return ""; }
 }
@@ -2956,25 +3103,39 @@ const fmtMDY = (dt) => `${String(dt.getMonth() + 1).padStart(2, "0")}/${String(d
 const logoInitial = (b) => (((b && b.companyName) || "S").trim().charAt(0) || "S").toUpperCase();
 
 // Responsive viewport hook — the foundation for adapting layout to phone / tablet / desktop.
-// Returns { width, isPhone, isTablet, isDesktop }. Breakpoints: phone <700, tablet (narrow
-// desktop) 700-1023, desktop >=1024. isDesktop is true at >=700 so iPad gets the desktop layout.
+// Returns { width, height, isPhone, isTablet, isDesktop }. Width handles normal portrait layouts;
+// viewport height keeps short landscape phones in the touch-friendly phone shell.
 function useViewport() {
-  const [width, setWidth] = useState(typeof window !== "undefined" ? window.innerWidth : 390);
+  const [size, setSize] = useState(() => ({
+    width: typeof window !== "undefined" ? window.innerWidth : 390,
+    height: typeof window !== "undefined" ? window.innerHeight : 844,
+  }));
   useEffect(() => {
-    const onResize = () => setWidth(window.innerWidth);
+    const onResize = () => setSize({ width: window.innerWidth, height: window.innerHeight });
     window.addEventListener("resize", onResize);
     onResize();
     return () => window.removeEventListener("resize", onResize);
   }, []);
+  const { width, height } = size;
+  // Wide phones in landscape used to cross the 700px width breakpoint and receive the iPad/
+  // desktop sidebar. A short touch viewport is still a phone; iPad portrait/landscape keeps the
+  // richer layout because its short side is comfortably above this threshold.
+  const touchDevice = typeof navigator !== "undefined" && (navigator.maxTouchPoints || 0) > 0;
+  const shortScreen = typeof window !== "undefined" && window.screen
+    ? Math.min(window.screen.width || width, window.screen.height || height)
+    : Math.min(width, height);
+  const landscapePhone = touchDevice && width > height && shortScreen < 600;
+  const isPhone = width < 700 || landscapePhone;
   return {
     width,
-    isPhone: width < 700,
-    isTablet: width >= 700 && width < 1024,
+    height,
+    isPhone,
+    isTablet: !isPhone && width >= 700 && width < 1024,
     // The desktop layout (sidebar nav, master-detail, tables, full-detail views) activates
     // at tablet width and up so iPad — portrait (≥744pt) and landscape — gets the rich
     // layout, never the phone layout. isTablet (700–1023) is the "narrow desktop" range used
     // to shrink column widths so the multi-column panes still fit on a portrait iPad.
-    isDesktop: width >= 700,
+    isDesktop: !isPhone && width >= 700,
   };
 }
 
@@ -3306,8 +3467,9 @@ function Btn({ children, onClick, href, variant = "primary", sm, lg, block, disa
     transition: "opacity 0.15s, transform 0.08s",
     ...style,
   };
-  if (href) return <a href={href} onClick={onClick} style={css}>{children}</a>;
-  return <button onClick={onClick} disabled={disabled} style={css}>{children}</button>;
+  const className = `sps-btn${sm ? " sps-btn-sm" : ""}`;
+  if (href) return <a className={className} href={href} onClick={onClick} style={css}>{children}</a>;
+  return <button className={className} onClick={onClick} disabled={disabled} style={css}>{children}</button>;
 }
 
 function StatCard({ label, value, sub, accent, onClick, icon, trend }) {
@@ -3400,7 +3562,7 @@ function Select({ value, onChange, options }) {
   const { T } = useApp();
   return (
     <select value={value} onChange={onChange}
-      style={{ width: "100%", padding: "11px 14px", border: `1px solid ${T.border}`, borderRadius: 11, fontSize: 15, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", appearance: "none", WebkitAppearance: "none" }}>
+      style={{ width: "100%", padding: "11px 14px", border: `1px solid ${T.border}`, borderRadius: 11, fontSize: 15, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none" }}>
       {options.map(o => <option key={o}>{o}</option>)}
     </select>
   );
@@ -3433,20 +3595,22 @@ function UpgradeWorkflowModal({ alert: a, clients, T, onConfirm, onClose }) {
   const [contractNote, setContractNote] = useState(a.contractNote || "");
   const [uploadedDoc, setUploadedDoc] = useState(a.signedDoc || null);
   const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
   const fileInputRef = useRef(null);
 
   const fmtSize = (bytes) => bytes > 1e6 ? `${(bytes/1e6).toFixed(1)} MB` : `${(bytes/1e3).toFixed(0)} KB`;
 
-  const handleDocUpload = (files) => {
+  const handleDocUpload = async (files) => {
     const file = files[0];
     if (!file) return;
     setUploading(true);
-    const reader = new FileReader();
-    reader.onload = e => {
-      setUploadedDoc({ src: e.target.result, name: file.name, size: file.size, type: file.type });
-      setUploading(false);
-    };
-    reader.readAsDataURL(file);
+    setUploadError("");
+    try {
+      const src = await uploadBlobToStorage(file, { kind: "documents", clientId: client?.id || a.clientId, name: file.name });
+      setUploadedDoc({ src, name: file.name, size: file.size, type: file.type });
+    } catch (error) {
+      setUploadError(`Upload failed: ${error?.message || "Storage is unavailable"}. The document was not attached.`);
+    } finally { setUploading(false); }
   };
 
   const completeStep = (stepIdx) => {
@@ -3590,15 +3754,17 @@ function UpgradeWorkflowModal({ alert: a, clients, T, onConfirm, onClose }) {
                           </button>
                         </div>
                       ) : (
-                        <button onClick={() => fileInputRef.current?.click()}
+                        <button onClick={() => fileInputRef.current?.click()} disabled={uploading}
                           style={{ padding: "20px 16px", border: `2px dashed ${T.border}`, borderRadius: 14, background: "none", cursor: "pointer", fontFamily: "inherit", display: "flex", flexDirection: "column", alignItems: "center", gap: 10, color: T.textMuted, width: "100%" }}>
                           <div style={{ width: 44, height: 44, borderRadius: 13, background: hexA(T.primary, 0.08), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center" }}>
                             <Icon name="download" size={22} />
                           </div>
-                          <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Upload Signed Contract</div>
+                          <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{uploading ? "Uploading securely…" : "Upload Signed Contract"}</div>
                           <div style={{ fontSize: 12, color: T.textMuted }}>PDF from Dropbox Sign · tap to choose</div>
                         </button>
                       )}
+
+                      {uploadError && <div style={{ background: hexA("#C0392B", 0.08), color: "#C0392B", borderRadius: 10, padding: "9px 12px", fontSize: 12, fontWeight: 600, lineHeight: 1.4 }}>{uploadError}</div>}
 
                       <div style={{ display: "flex", gap: 10 }}>
                         <button onClick={() => completeStep(2)} disabled={!uploadedDoc}
@@ -3744,7 +3910,10 @@ function useStaffLocationTracking(opts) {
           // arrived stop. Coordinates resolve async into coordRef (NEVER awaited inside this GPS
           // callback), so a geocode/network failure can never disrupt the location broadcast.
           const go = optsRef.current || {};
-          const gStops = Array.isArray(go.stops) ? go.stops : [];
+          // Location sharing uses every stop in `stops` to define the day's broadcast window, but
+          // automatic arrival is deliberately narrower: only the explicit active "Head Here" stop
+          // supplied in `geofenceStops` may cross the fence and notify its client.
+          const gStops = Array.isArray(go.geofenceStops) ? go.geofenceStops : [];
           if (typeof go.onGeofenceArrive === "function" && gStops.length) {
             const here = { lat: latitude, lng: longitude };
             let cache = null;
@@ -4379,7 +4548,7 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
     <div onClick={() => onNav("schedule")} role="button"
       style={{ position: "relative", overflow: "hidden", background: "#AE0019", color: "#fff", borderRadius: 20, padding: "18px 20px", marginBottom: 16, cursor: "pointer", boxShadow: "0 10px 30px rgba(0,0,0,0.16), inset 0 1px 0 rgba(255,255,255,0.15)" }}>
       {branding && branding.logoType === "image" && branding.logoImage && (
-        <img src={branding.logoImage} alt="" aria-hidden="true"
+        <ProtectedImage src={branding.logoImage} alt="" aria-hidden="true"
           style={{ position: "absolute", right: -30, top: "50%", transform: "translateY(-50%)", width: 188, height: 188, objectFit: "contain", opacity: 0.45, pointerEvents: "none" }} />
       )}
       <div style={{ position: "relative", zIndex: 1 }}>
@@ -4615,6 +4784,7 @@ function useKeyboardInset() {
 
 function Modal({ title, children, onClose, maxWidth = 600 }) {
   const { T } = useApp();
+  const { isPhone } = useViewport();
   const kb = useKeyboardInset();
   // When a field is focused, bring it into the visible (above-keyboard) area.
   const onBodyFocus = (e) => {
@@ -4633,19 +4803,19 @@ function Modal({ title, children, onClose, maxWidth = 600 }) {
     // minHeight:0 — reliable in WKWebView, no % to mis-resolve), with a dvh max-height
     // as a backup. The CLOSE BUTTON lives in the card's own fixed header, so it's
     // always inside the white card and never clipped by the app header or notch.
-    <div onClick={onClose} style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 200, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", paddingTop: "max(14px, env(safe-area-inset-top))", paddingLeft: 14, paddingRight: 14, paddingBottom: kb > 0 ? kb + 14 : "max(14px, env(safe-area-inset-bottom))", transition: "padding-bottom 0.18s ease", overscrollBehavior: "contain" }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: T.surface, borderRadius: 24, width: "100%", maxWidth: maxWidth, flex: "0 1 auto", minHeight: 0, maxHeight: `calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 28px - ${kb}px)`, display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: T.shadowLg, border: `1px solid ${T.border}`, animation: "spsModalIn 0.22s cubic-bezier(0.16, 1, 0.3, 1)" }}>
+    <div onClick={onClose} style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 200, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", paddingTop: `max(${isPhone ? 8 : 14}px, env(safe-area-inset-top))`, paddingLeft: `max(${isPhone ? 8 : 14}px, env(safe-area-inset-left))`, paddingRight: `max(${isPhone ? 8 : 14}px, env(safe-area-inset-right))`, paddingBottom: kb > 0 ? kb + 8 : `max(${isPhone ? 8 : 14}px, env(safe-area-inset-bottom))`, transition: "padding-bottom 0.18s ease", overscrollBehavior: "contain" }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: T.surface, borderRadius: isPhone ? 20 : 24, width: "100%", maxWidth: maxWidth, flex: "0 1 auto", minHeight: 0, maxHeight: `calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - ${isPhone ? 16 : 28}px - ${kb}px)`, display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: T.shadowLg, border: `1px solid ${T.border}`, animation: "spsModalIn 0.22s cubic-bezier(0.16, 1, 0.3, 1)" }}>
         {/* Fixed header INSIDE the card: title + close X. flexShrink:0 keeps it pinned
             to the card's top-right while the body scrolls. */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "15px 14px 13px 22px", flexShrink: 0, borderBottom: `1px solid ${T.border}` }}>
-          <div style={{ fontWeight: 700, fontSize: 20, color: T.text, letterSpacing: "-0.02em", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</div>
-          <button onClick={onClose} aria-label="Close" style={{ flexShrink: 0, width: 32, height: 32, borderRadius: "50%", border: "none", cursor: "pointer", background: T.surfaceAlt, color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <Icon name="close" size={16} />
-          </button>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: isPhone ? "12px 12px 11px 16px" : "15px 14px 13px 22px", flexShrink: 0, borderBottom: `1px solid ${T.border}` }}>
+          <div style={{ fontWeight: 700, fontSize: isPhone ? 18 : 20, color: T.text, letterSpacing: "-0.02em", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</div>
+          {onClose && <button onClick={onClose} aria-label="Close" style={{ flexShrink: 0, width: isPhone ? 40 : 32, height: isPhone ? 40 : 32, borderRadius: "50%", border: "none", cursor: "pointer", background: T.surfaceAlt, color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Icon name="close" size={isPhone ? 18 : 16} />
+          </button>}
         </div>
         {/* Scrollable body — content taller than the card scrolls here; header stays put.
             On field focus we scroll it into the visible area above the keyboard (Bug 2). */}
-        <div onFocus={onBodyFocus} style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", padding: "16px 22px 22px" }}>
+        <div onFocus={onBodyFocus} style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", padding: isPhone ? "14px 16px 18px" : "16px 22px 22px" }}>
           {children}
         </div>
       </div>
@@ -5211,6 +5381,8 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
 // ─────────────────────────────────────────────
 function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Client" }) {
   const { T, tiers, perms } = useApp();
+  const clientFormVp = useViewport();
+  const compact = clientFormVp.width <= 420;
   const [form, setForm] = useState(() => {
     const base = { ...client };
     // Make Edit match the card. Many records store the STREET LINE in `address`, leave the `street`
@@ -5324,16 +5496,16 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
 
                 {/* Address — entered in parts, combined automatically */}
                 <FieldRow label="Street Address"><Input value={form.street} onChange={e => setAddr("street", e.target.value)} placeholder="123 Main St" /></FieldRow>
-                <div style={{ display: "flex", gap: 10 }}>
-                  <div style={{ flex: 2 }}>
+                <div style={{ display: "grid", gridTemplateColumns: compact ? "repeat(2, minmax(0, 1fr))" : "2fr 1fr 1fr", gap: 10 }}>
+                  <div style={{ minWidth: 0, gridColumn: compact ? "1 / -1" : undefined }}>
                     <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 5 }}>City</label>
                     <input type="text" style={halfInput} value={form.city} onChange={e => setAddr("city", e.target.value)} placeholder="Elverson" />
                   </div>
-                  <div style={{ flex: 1 }}>
+                  <div style={{ minWidth: 0 }}>
                     <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 5 }}>State</label>
                     <input type="text" autoCapitalize="characters" style={halfInput} value={form.state} onChange={e => setAddr("state", e.target.value)} placeholder="PA" />
                   </div>
-                  <div style={{ flex: 1 }}>
+                  <div style={{ minWidth: 0 }}>
                     <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 5 }}>ZIP</label>
                     <input type="text" inputMode="numeric" style={halfInput} value={form.zip} onChange={e => setAddr("zip", e.target.value)} placeholder="19520" />
                   </div>
@@ -5401,7 +5573,7 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
                               {/* Tier pills — active fills with the tier's own configured color */}
                               <div>
                                 <label style={{ fontSize: 10.5, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.04em" }}>Plan</label>
-                                <div style={{ display: "flex", gap: 6 }}>
+                                <div style={{ display: "grid", gridTemplateColumns: compact ? "repeat(2, minmax(0, 1fr))" : "repeat(4, minmax(0, 1fr))", gap: 6 }}>
                                   {["Essential","Signature","Premium","None"].map(p => {
                                     const planVal = p === "None" ? "" : p;
                                     const active  = (curTier || "") === planVal;
@@ -5434,7 +5606,7 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
                                 <div style={{ flex: 1, minWidth: 0 }}>
                                   <label style={{ fontSize: 10.5, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.04em" }}>{m.typeLabel}</label>
                                   <select value={form[detailKey] || ""} onChange={e => set(detailKey, e.target.value)}
-                                    style={{ width: "100%", padding: "9px 11px", border: `1.5px solid ${T.border}`, borderRadius: 10, fontSize: 13.5, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", appearance: "none", WebkitAppearance: "none" }}>
+                                    style={{ width: "100%", padding: "9px 11px", border: `1.5px solid ${T.border}`, borderRadius: 10, fontSize: 13.5, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none" }}>
                                     <option value="">Select…</option>
                                     {m.typeOptions.map(o => <option key={o} value={o}>{o}</option>)}
                                   </select>
@@ -5559,8 +5731,9 @@ function ClientDocuments({ client, onChange }) {
   const { T, perms } = useApp();
   const docs = client.documents || [];
   const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
   const [editingDoc, setEditingDoc] = useState(null); // doc index being renamed/categorized
-  const [labelModal, setLabelModal] = useState(null); // { file, src, name, size, type }
+  const [labelModal, setLabelModal] = useState(null); // { file, name, size, type }
   const [labelForm, setLabelForm] = useState({ label: "", category: "Service Agreement", note: "" });
   const fileInputRef = useRef(null);
 
@@ -5578,50 +5751,51 @@ function ClientDocuments({ client, onChange }) {
   const handleFiles = (files) => {
     const file = files[0];
     if (!file) return;
-    setUploading(true);
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      setLabelModal({ src: e.target.result, name: file.name, size: file.size, type: file.type });
-      setLabelForm({
-        label: file.name.replace(/\.[^.]+$/, ""),
-        category: file.name.toLowerCase().includes("agreement") || file.name.toLowerCase().includes("contract") ? "Service Agreement" : "Other",
-        note: "",
-      });
-      setUploading(false);
-    };
-    reader.readAsDataURL(file);
+    setUploadError("");
+    setLabelModal({ file, name: file.name, size: file.size, type: file.type });
+    setLabelForm({
+      label: file.name.replace(/\.[^.]+$/, ""),
+      category: file.name.toLowerCase().includes("agreement") || file.name.toLowerCase().includes("contract") ? "Service Agreement" : "Other",
+      note: "",
+    });
   };
 
-  const confirmUpload = () => {
+  const confirmUpload = async () => {
     if (!labelModal) return;
-    const doc = {
-      id: `doc-${Date.now()}`,
-      src: labelModal.src,
-      name: labelModal.name,
-      size: labelModal.size,
-      type: labelModal.type,
-      label: labelForm.label || labelModal.name,
-      category: labelForm.category,
-      note: labelForm.note,
-      uploadedAt: Date.now(),
-    };
-    onChange([...docs, doc]);
-    setLabelModal(null);
-    setLabelForm({ label: "", category: "Service Agreement", note: "" });
+    setUploading(true);
+    setUploadError("");
+    try {
+      const src = await uploadBlobToStorage(labelModal.file, { kind: "documents", clientId: client.id, name: labelModal.name });
+      const doc = {
+        id: `doc-${Date.now()}`,
+        src,
+        name: labelModal.name,
+        size: labelModal.size,
+        type: labelModal.type,
+        label: labelForm.label || labelModal.name,
+        category: labelForm.category,
+        note: labelForm.note,
+        uploadedAt: Date.now(),
+      };
+      onChange([...docs, doc]);
+      setLabelModal(null);
+      setLabelForm({ label: "", category: "Service Agreement", note: "" });
+    } catch (error) {
+      setUploadError(`Upload failed: ${error?.message || "Storage is unavailable"}. Nothing was added to the client record.`);
+    } finally { setUploading(false); }
   };
 
   const removeDoc = (id) => onChange(docs.filter(d => d.id !== id));
 
   const updateDoc = (id, changes) => onChange(docs.map(d => d.id === id ? { ...d, ...changes } : d));
 
-  const downloadDoc = (doc) => {
-    const a = document.createElement("a");
-    a.href = doc.src;
-    a.download = doc.name || doc.label || "document";
-    a.click();
+  const downloadDoc = async (doc) => {
+    setUploadError("");
+    try { await downloadProtectedMedia(doc.src, doc.name || doc.label || "document"); }
+    catch (error) { setUploadError(`Download failed: ${error?.message || "This file is unavailable"}.`); }
   };
 
-  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", appearance: "none", WebkitAppearance: "none" };
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
   const lbl   = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
 
   // Group docs by category
@@ -5671,6 +5845,10 @@ function ClientDocuments({ client, onChange }) {
         accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.heic,.heif,application/pdf,image/*"
         style={{ display: "none" }}
         onChange={e => { handleFiles(e.target.files); e.target.value = ""; }} />
+
+      {uploadError && (
+        <div style={{ margin: "12px 18px 0", padding: "10px 12px", borderRadius: 10, background: hexA("#C0392B", 0.08), color: "#C0392B", fontSize: 12.5, fontWeight: 600, lineHeight: 1.4 }}>{uploadError}</div>
+      )}
 
       {docs.length === 0 && !uploading ? (
         <div style={{ padding: "40px 20px", display: "flex", flexDirection: "column", alignItems: "center", gap: 12, textAlign: "center" }}>
@@ -5789,7 +5967,7 @@ function ClientDocuments({ client, onChange }) {
                 onChange={e => setLabelForm(f => ({ ...f, note: e.target.value }))}
                 placeholder="e.g. Signed via Dropbox Sign, Jan 2025" />
             </div>
-            <Btn onClick={confirmUpload} block lg>Save Document</Btn>
+            <Btn onClick={confirmUpload} disabled={uploading} block lg>{uploading ? "Uploading securely…" : "Save Document"}</Btn>
           </div>
         </Modal>
       )}
@@ -5799,6 +5977,7 @@ function ClientDocuments({ client, onChange }) {
 
 function ClientDetail({ client: init, invoices, invoicing, branding, catalog, setCatalog, team, schedule, email, onBack, onUpdate, onSaveInvoice, onDeleteInvoice, onDelete, onPreviewClient, initialTab }) {
   const { T, perms, tiers } = useApp();
+  const clientVp = useViewport();
   const [client, setClient] = useState(init);
   const [tab, setTab] = useState(initialTab || "overview");
   const [editing, setEditing] = useState(false);
@@ -5945,10 +6124,10 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
         </div>
       </Card>
 
-      <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 10, padding: 4, marginBottom: 16, gap: 3 }}>
+      <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 10, padding: 4, marginBottom: 16, gap: 3, overflowX: clientVp.isPhone ? "auto" : "visible", WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
         {tabs.map(t => (
           <button key={t} onClick={() => setTab(t)} style={{
-            flex: 1, padding: "8px 4px", border: "none", borderRadius: 7,
+            flex: clientVp.isPhone ? "0 0 auto" : 1, minWidth: clientVp.isPhone ? 88 : 0, minHeight: 44, padding: "8px 10px", border: "none", borderRadius: 7,
             fontSize: 12, fontWeight: 700, textTransform: "capitalize", cursor: "pointer",
             background: tab === t ? T.surface : "transparent",
             color: tab === t ? T.primary : T.textMuted,
@@ -6023,11 +6202,11 @@ function PhotoPicker({ photos = [], onChange, label = "Photos", maxPhotos = 10, 
         {normalised.map((p, i) => (
           <div key={i} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
             <div style={{ position: "relative" }}>
-              <img src={p.src} alt={p.caption || ""} onClick={() => setViewer(i)}
+              <ProtectedImage src={p.src} alt={p.caption || ""} onClick={() => setViewer(i)}
                 style={{ width: 90, height: 90, borderRadius: 12, objectFit: "cover", cursor: "pointer", border: `1px solid ${T.border}`, display: "block" }} />
-              <button onClick={() => remove(i)}
-                style={{ position: "absolute", top: -6, right: -6, width: 22, height: 22, borderRadius: "50%", background: "#E5484D", border: `2px solid ${T.surface}`, color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}>
-                <Icon name="close" size={10} />
+              <button onClick={() => remove(i)} aria-label="Remove photo"
+                style={{ position: "absolute", top: -10, right: -10, width: 40, height: 40, borderRadius: "50%", background: "transparent", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}>
+                <span style={{ width: 22, height: 22, borderRadius: "50%", background: "#E5484D", border: `2px solid ${T.surface}`, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="close" size={10} /></span>
               </button>
             </div>
             {allowCaptions && (
@@ -6086,39 +6265,33 @@ function ClientOverview({ client, invoices = [], schedule = [], onUpdate }) {
   const MAX_VIDEO_DURATION = 20; // seconds
   const [videoError, setVideoError] = useState("");
 
-  const addVideos = (files) => {
+  const addVideos = async (files) => {
     setVideoError("");
     const incoming = Array.from(files).slice(0, 6 - siteVideos.length);
     const results = [];
-    let checked = 0;
-
-    incoming.forEach(file => {
+    const errors = [];
+    for (const file of incoming) {
       const url = URL.createObjectURL(file);
-      const vid = document.createElement("video");
-      vid.preload = "metadata";
-      vid.onloadedmetadata = () => {
-        URL.revokeObjectURL(url);
-        if (vid.duration > MAX_VIDEO_DURATION) {
-          setVideoError(`"${file.name}" is ${Math.round(vid.duration)}s — clips must be 20 seconds or under. Trim it in the Photos app first.`);
-        } else {
-          const r = new FileReader();
-          r.onload = e => {
-            results.push({ src: e.target.result, caption: "", type: file.type, name: file.name, size: file.size });
-            checked++;
-            if (checked === incoming.length) {
-              if (results.length) onUpdate({ ...client, siteVideos: [...siteVideos, ...results] });
-            }
-          };
-          r.readAsDataURL(file);
-          return;
+      try {
+        const duration = await new Promise((resolve, reject) => {
+          const vid = document.createElement("video");
+          vid.preload = "metadata";
+          vid.onloadedmetadata = () => resolve(vid.duration);
+          vid.onerror = () => reject(new Error("The video could not be read"));
+          vid.src = url;
+        });
+        if (duration > MAX_VIDEO_DURATION) {
+          errors.push(`"${file.name}" is ${Math.round(duration)}s; clips must be 20 seconds or under.`);
+          continue;
         }
-        checked++;
-        if (checked === incoming.length && results.length) {
-          onUpdate({ ...client, siteVideos: [...siteVideos, ...results] });
-        }
-      };
-      vid.src = url;
-    });
+        const src = await uploadBlobToStorage(file, { kind: "videos", clientId: client.id, name: file.name });
+        results.push({ src, caption: "", type: file.type, name: file.name, size: file.size });
+      } catch (error) {
+        errors.push(`"${file.name}" was not uploaded: ${error?.message || "Storage is unavailable"}.`);
+      } finally { URL.revokeObjectURL(url); }
+    }
+    if (results.length) onUpdate({ ...client, siteVideos: [...siteVideos, ...results] });
+    if (errors.length) setVideoError(errors.join(" "));
   };
 
   const removeVideo = (idx) => {
@@ -6189,7 +6362,7 @@ function ClientOverview({ client, invoices = [], schedule = [], onUpdate }) {
                       const cap = typeof p === "object" ? p.caption : "";
                       return (
                         <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                          <img src={src} alt={cap || ""} style={{ width: 110, height: 110, borderRadius: 14, objectFit: "cover", border: `1px solid ${T.border}` }} />
+                          <ProtectedImage src={src} alt={cap || ""} style={{ width: 110, height: 110, borderRadius: 14, objectFit: "cover", border: `1px solid ${T.border}` }} />
                           {cap && <div style={{ fontSize: 11, color: T.textMuted, textAlign: "center", maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{cap}</div>}
                         </div>
                       );
@@ -6243,7 +6416,7 @@ function ClientOverview({ client, invoices = [], schedule = [], onUpdate }) {
                   <div key={i} style={{ background: T.surfaceAlt, borderRadius: 14, overflow: "hidden", border: `1px solid ${T.border}` }}>
                     {/* Video player */}
                     <div style={{ position: "relative", background: "#000", borderRadius: "14px 14px 0 0" }}>
-                      <video
+                      <ProtectedVideo
                         src={v.src}
                         controls
                         playsInline
@@ -6639,7 +6812,7 @@ function ClientEquipment({ client, invoices, onChange }) {
             {/* Linked Invoice */}
             <div>
               <label style={lbl}>Linked Invoice <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
-              <select style={{ ...field, appearance: "none", WebkitAppearance: "none" }} value={modal.data.linkedInvoiceId || ""} onChange={e => setD("linkedInvoiceId", e.target.value)}>
+              <select style={field} value={modal.data.linkedInvoiceId || ""} onChange={e => setD("linkedInvoiceId", e.target.value)}>
                 <option value="">None</option>
                 {clientInvoices.map(iv => (
                   <option key={iv.id} value={iv.id}>{iv.number || `Invoice ${iv.id}`} — {iv.date} — {iv.total || "$0.00"}</option>
@@ -6860,7 +7033,7 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
             {photos.map((p, i) => (
               <div key={i} style={{ position: "relative" }}>
-                <img src={typeof p === "string" ? p : p.src} alt="" onClick={() => setViewer(i)} style={{ width: 88, height: 88, borderRadius: 12, objectFit: "cover", cursor: "pointer" }} />
+                <ProtectedImage src={typeof p === "string" ? p : p.src} alt="" onClick={() => setViewer(i)} style={{ width: 88, height: 88, borderRadius: 12, objectFit: "cover", cursor: "pointer" }} />
                 <button onClick={() => setPhotos(ps => ps.filter((_, idx) => idx !== i))} style={{ position: "absolute", top: -6, right: -6, background: "#C0392B", color: "#fff", border: "none", borderRadius: "50%", width: 20, height: 20, fontSize: 12, cursor: "pointer", lineHeight: 1 }}>×</button>
               </div>
             ))}
@@ -7294,9 +7467,9 @@ function StaffClientPreview({ client, invoices, invoicing, schedule, branding, o
           T={T}
           fontStack={fontStack}
           onSignOut={onClose}
-          onServiceRequest={() => {}}
-          onApproveEstimate={() => {}}
-          onUpgradeRequest={() => {}}
+          onServiceRequest={rejectPortalPreviewAction}
+          onApproveEstimate={rejectPortalPreviewAction}
+          onUpgradeRequest={rejectPortalPreviewAction}
           isStaffPreview={true}
         />
       </div>
@@ -7364,9 +7537,9 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
   const { handleProps, sheetStyle } = useSheetSwipe(onClose);
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={onClose}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center", paddingLeft: "env(safe-area-inset-left)", paddingRight: "env(safe-area-inset-right)" }} onClick={onClose}>
       <div onClick={e => e.stopPropagation()}
-        style={{ background: T.surface, borderRadius: "22px 22px 0 0", width: "100%", maxWidth: 600, padding: "4px 20px calc(28px + env(safe-area-inset-bottom))", boxShadow: "0 -8px 40px rgba(0,0,0,0.2)", ...sheetStyle }}>
+        style={{ background: T.surface, borderRadius: "22px 22px 0 0", width: "100%", maxWidth: 600, maxHeight: "calc(100dvh - max(8px, env(safe-area-inset-top)))", overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", padding: "4px 16px calc(20px + env(safe-area-inset-bottom))", boxShadow: "0 -8px 40px rgba(0,0,0,0.2)", ...sheetStyle }}>
 
         <SheetHandle handleProps={handleProps} T={T} />
         <div style={{ height: 12 }} />
@@ -7376,8 +7549,8 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
             <div style={{ fontWeight: 800, fontSize: 17, color: T.text, letterSpacing: "-0.02em" }}>On My Way</div>
             <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{client?.name} · {client?.phone}</div>
           </div>
-          <button onClick={onClose} style={{ background: T.surfaceAlt, border: "none", borderRadius: "50%", width: 32, height: 32, cursor: "pointer", color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <Icon name="close" size={16} />
+          <button onClick={onClose} aria-label="Close" style={{ background: T.surfaceAlt, border: "none", borderRadius: "50%", width: 40, height: 40, cursor: "pointer", color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <Icon name="close" size={18} />
           </button>
         </div>
 
@@ -7397,7 +7570,7 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
           <div style={{ display: "flex", gap: 7 }}>
             {QUICK_MINS.map(m => (
               <button key={m} onClick={() => setEta(m)}
-                style={{ flex: 1, padding: "7px 2px", borderRadius: 10, border: `1.5px solid ${eta === m ? T.primary : T.border}`, background: eta === m ? hexA(T.primary, 0.1) : T.surface, color: eta === m ? T.primary : T.textMuted, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>
+                style={{ flex: 1, minHeight: 40, padding: "7px 2px", borderRadius: 10, border: `1.5px solid ${eta === m ? T.primary : T.border}`, background: eta === m ? hexA(T.primary, 0.1) : T.surface, color: eta === m ? T.primary : T.textMuted, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>
                 {m}
               </button>
               ))}
@@ -7505,8 +7678,8 @@ function ArrivedModal({ stop, client, email, onClose, onArrived }) {
   };
   const { handleProps, sheetStyle } = useSheetSwipe(onClose);
   return createPortal(
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 250, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={onClose}>
-      <div onClick={e => e.stopPropagation()} style={{ background: T.surface, borderRadius: "22px 22px 0 0", width: "100%", maxWidth: 600, padding: "4px 20px calc(28px + env(safe-area-inset-bottom))", boxShadow: "0 -8px 40px rgba(0,0,0,0.2)", ...sheetStyle }}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 250, display: "flex", alignItems: "flex-end", justifyContent: "center", paddingLeft: "env(safe-area-inset-left)", paddingRight: "env(safe-area-inset-right)" }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ background: T.surface, borderRadius: "22px 22px 0 0", width: "100%", maxWidth: 600, maxHeight: "calc(100dvh - max(8px, env(safe-area-inset-top)))", overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", padding: "4px 16px calc(20px + env(safe-area-inset-bottom))", boxShadow: "0 -8px 40px rgba(0,0,0,0.2)", ...sheetStyle }}>
         <SheetHandle handleProps={handleProps} T={T} />
         <div style={{ height: 12 }} />
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
@@ -7514,7 +7687,7 @@ function ArrivedModal({ stop, client, email, onClose, onArrived }) {
             <div style={{ fontWeight: 800, fontSize: 17, color: T.text, letterSpacing: "-0.02em" }}>I'm Here</div>
             <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{client?.name}{client?.phone ? ` · ${client.phone}` : ""}</div>
           </div>
-          <button onClick={onClose} style={{ background: T.surfaceAlt, border: "none", borderRadius: "50%", width: 32, height: 32, cursor: "pointer", color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="close" size={16} /></button>
+          <button onClick={onClose} aria-label="Close" style={{ background: T.surfaceAlt, border: "none", borderRadius: "50%", width: 40, height: 40, cursor: "pointer", color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="close" size={18} /></button>
         </div>
         <div style={{ background: hexA("#16a34a", 0.08), border: `1px solid ${hexA("#16a34a", 0.2)}`, borderRadius: 14, padding: "12px 14px", marginBottom: 14, fontSize: 13, color: T.text, display: "flex", alignItems: "center", gap: 8 }}>
           <Icon name="check" size={16} /> Starts the job clock and lets {firstName} know you've arrived.
@@ -7547,10 +7720,10 @@ function PhotoViewer({ photos, index, onClose }) {
   const lc = label === "Before" ? "#F59E0B" : label === "After" ? "#16a34a" : "rgba(0,0,0,0.55)";
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)", zIndex: 400, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 20 }}>
-      <button onClick={onClose} style={{ position: "absolute", top: 16, right: 16, background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 38, height: 38, cursor: "pointer", display:"flex", alignItems:"center", justifyContent:"center", zIndex: 2 }}><Icon name="close" size={18} /></button>
+      <button onClick={onClose} aria-label="Close photo" style={{ position: "absolute", top: "max(12px, env(safe-area-inset-top))", right: "max(12px, env(safe-area-inset-right))", background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 44, height: 44, cursor: "pointer", display:"flex", alignItems:"center", justifyContent:"center", zIndex: 2 }}><Icon name="close" size={19} /></button>
       {photos.length > 1 && <button onClick={prev} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 42, height: 42, cursor: "pointer", display:"flex", alignItems:"center", justifyContent:"center", zIndex: 2 }}><Icon name="back" size={20} /></button>}
       <div onClick={e => e.stopPropagation()} style={{ position: "relative", display: "inline-block" }}>
-        <img src={cur.src} alt="" style={{ maxWidth: "92vw", maxHeight: caption ? "70vh" : "80vh", borderRadius: 10, objectFit: "contain", display: "block" }} />
+        <ProtectedImage src={cur.src} alt="" style={{ maxWidth: "92vw", maxHeight: caption ? "70vh" : "80vh", borderRadius: 10, objectFit: "contain", display: "block" }} />
         {/* Label top-left, timestamp top-right — overlaid on the photo, white, readable. */}
         {label && <div style={{ position: "absolute", top: 10, left: 10, fontSize: 12, fontWeight: 800, color: "#fff", background: lc, borderRadius: 7, padding: "4px 11px", boxShadow: "0 1px 6px rgba(0,0,0,0.4)" }}>{label}</div>}
         {at && <div style={{ position: "absolute", top: 10, right: 10, fontSize: 12.5, fontWeight: 700, color: "#fff", background: "rgba(0,0,0,0.5)", borderRadius: 7, padding: "4px 11px", textShadow: "0 1px 3px rgba(0,0,0,0.7)" }}>{at}</div>}
@@ -7559,7 +7732,7 @@ function PhotoViewer({ photos, index, onClose }) {
         <div onClick={e => e.stopPropagation()} style={{ marginTop: 14, textAlign: "center", maxWidth: "90%", color: "rgba(255,255,255,0.92)", fontSize: 14, lineHeight: 1.5 }}>{caption}</div>
       )}
       {photos.length > 1 && <button onClick={next} style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: "50%", width: 42, height: 42, cursor: "pointer", display:"flex", alignItems:"center", justifyContent:"center", zIndex: 2 }}><svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="#fff" strokeWidth={2.2} strokeLinecap="round"><path d="m9 18 6-6-6-6"/></svg></button>}
-      <div style={{ position: "absolute", bottom: 20, color: "rgba(255,255,255,0.7)", fontSize: 13 }}>{i + 1} / {photos.length}</div>
+      <div style={{ position: "absolute", bottom: "max(20px, env(safe-area-inset-bottom))", color: "rgba(255,255,255,0.7)", fontSize: 13 }}>{i + 1} / {photos.length}</div>
     </div>
   );
 }
@@ -7579,7 +7752,7 @@ function PhotoStrip({ photos, size = 56 }) {
           const lc = label === "Before" ? "#F59E0B" : label === "After" ? "#16a34a" : null;
           return (
             <div key={i} onClick={() => setViewer(i)} style={{ position: "relative", cursor: "pointer", flexShrink: 0 }}>
-              <img src={src} alt="" style={{ width: size, height: size, borderRadius: 10, objectFit: "cover", display: "block" }} />
+              <ProtectedImage src={src} alt="" style={{ width: size, height: size, borderRadius: 10, objectFit: "cover", display: "block" }} />
               {label && <div style={{ position: "absolute", bottom: 4, left: 4, fontSize: 8, fontWeight: 800, color: "#fff", background: lc, borderRadius: 4, padding: "1px 5px" }}>{label}</div>}
               <div style={{ position: "absolute", top: 4, right: 4, width: 18, height: 18, borderRadius: "50%", background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center" }}>
                 <svg viewBox="0 0 24 24" width={10} height={10} fill="none" stroke="#fff" strokeWidth={2.5} strokeLinecap="round"><path d="M15 3h6v6M14 10l7-7M9 21H3v-6M10 14l-7 7"/></svg>
@@ -7596,8 +7769,20 @@ function PhotoStrip({ photos, size = 56 }) {
 // ─────────────────────────────────────────────
 // SERVICE WORKSPACE (perform & log a stop, with profitability)
 // ─────────────────────────────────────────────
+function newCompletionAttemptKey(sid) {
+  try {
+    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") return `complete-${sid}-${globalThis.crypto.randomUUID()}`;
+    if (globalThis.crypto && typeof globalThis.crypto.getRandomValues === "function") {
+      const bytes = new Uint8Array(16); globalThis.crypto.getRandomValues(bytes);
+      return `complete-${sid}-${Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("")}`;
+    }
+  } catch (_) {}
+  return `complete-${sid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, team, clients, dayDate, arrivedAt, enRouteAt, draft, onSaveDraft, onClearDraft, onComplete, onUpdateStop, onClose, onViewClient, onOfficeAlert, me }) {
   const { T, branding, perms } = useApp();
+  const completeVp = useViewport();
   const todayStr = new Date().toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" });
   const firstName = client?.name?.split(" ")[0] || "there";
   const phone = client?.phone?.replace(/\D/g, "") || "";
@@ -7654,6 +7839,10 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
   const PHOTO_LABELS = ["Before", "After", "Detail", "Equipment", "Issue", "General"];
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const finishInFlight = useRef(false);
+  const completionAttempt = useRef({ key: "", fingerprint: "" });
 
   // The client's maintenance price (their plan rate) so the tech doesn't retype it every
   // stop. Per-client monthlyRate wins; otherwise fall back to their service-tier price.
@@ -7851,6 +8040,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
   const effRate = effHours > 0 ? num(revenue) / effHours : null;
   const profState = effRate == null ? "none" : (snapshotTarget == null ? "neutral" : (effRate >= snapshotTarget ? "good" : "low"));
   const profColor = profState === "good" ? "#16a34a" : profState === "low" ? "#E5484D" : T.textMuted;
+  const savedInvoice = normalizeCompletionInvoice(revenue);
 
   const buildEntry = () => ({
     sid: stop.sid,
@@ -7864,7 +8054,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     readingStatus,
     // legacy fields for older history cards
     ph: readings["pH"] || "—", ammonia: readings["Ammonia"] || "—", nitrite: readings["Nitrite"] || "—", temp: readings["Temperature"] || "—",
-    invoice: revenue ? `$${revenue}` : "$0",
+    invoice: savedInvoice,
     photos,  // [{ src, label }]
     treatmentsUsed, productsUsed,
     productsPurchased: productsPurchasedArr,
@@ -7883,26 +8073,42 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     },
   });
 
-  const finish = () => {
-    onComplete(stop.id, buildEntry(), stop.sid);
-    if (typeof onClearDraft === "function") onClearDraft(stop.sid); // Build 15, 7A — clear the in-progress draft once the stop is completed
-    if (officeFlag && officeFlagMsg.trim() && onOfficeAlert) {
-      onOfficeAlert({ client: client?.name || "Client", clientId: client?.id, sid: stop?.sid, message: officeFlagMsg.trim(), date: todayStr });
-    }
-    setDone(true);
-    // Post-visit summary — fire the recap text automatically when the owner has it on. Gated by the
-    // master switch + the post-visit toggle, the client's text channel, and their per-type opt-out;
-    // sendText() itself honors Test Mode (so a [TEST] run reaches the owner, not the client).
-    const acfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
-    const reportOptOut = client && client.notifyPrefs && client.notifyPrefs.reportSummary === false;
-    if (acfg.schedulerOn && acfg.postVisitOn && phone && commPref(client, "text") && !reportOptOut) {
-      sendText();
-    }
-    // The report EMAIL leg — this never existed before (email was manual-only), which is why
-    // "I don't receive email reports" in Test Mode: there was nothing to redirect. Same gates
-    // as the text, on the client's email channel.
-    if (acfg.schedulerOn && acfg.postVisitOn && (client?.email || "").trim() && commPref(client, "email") && !reportOptOut) {
-      sendEmail();
+  const finish = async () => {
+    if (finishInFlight.current || busy) return;
+    finishInFlight.current = true;
+    setSaveBusy(true);
+    setSaveError("");
+    try {
+      if (!savedInvoice) throw new Error("Enter a valid nonnegative visit amount before saving.");
+      const completionEntry = buildEntry();
+      const fingerprint = JSON.stringify(completionEntry);
+      // An exact manual retry reuses its key after a lost response. If the tech edits the draft
+      // before trying again, it becomes a distinct attempt and can never be mistaken for the
+      // already-committed report from this or another device.
+      if (!completionAttempt.current.key || completionAttempt.current.fingerprint !== fingerprint) {
+        completionAttempt.current = { key: newCompletionAttemptKey(stop.sid), fingerprint };
+      }
+      const result = await onComplete(client?.id ?? stop.clientId ?? stop.id, completionEntry, stop.sid, completionAttempt.current.key);
+      if (result && result.ok === false) throw new Error(result.error || "The completed stop was not saved.");
+      if (typeof onClearDraft === "function") onClearDraft(stop.sid); // clear only after the shared save confirms
+      const newlyApplied = !result || result.applied !== false;
+      if (newlyApplied && officeFlag && officeFlagMsg.trim() && onOfficeAlert) {
+        onOfficeAlert({ client: client?.name || "Client", clientId: client?.id, sid: stop?.sid, message: officeFlagMsg.trim(), date: todayStr });
+      }
+      setDone(true);
+      if (newlyApplied) {
+        // Post-visit messages are downstream effects of a confirmed completion. If the atomic save
+        // fails, the modal stays open and no client report claims the visit was completed.
+        const acfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
+        const reportOptOut = client && client.notifyPrefs && client.notifyPrefs.reportSummary === false;
+        if (acfg.schedulerOn && acfg.postVisitOn && phone && commPref(client, "text") && !reportOptOut) sendText();
+        if (acfg.schedulerOn && acfg.postVisitOn && (client?.email || "").trim() && commPref(client, "email") && !reportOptOut) sendEmail();
+      }
+    } catch (error) {
+      setSaveError((error && error.message) || "Couldn't save the completed stop. Nothing was changed.");
+    } finally {
+      finishInFlight.current = false;
+      setSaveBusy(false);
     }
   };
 
@@ -8012,7 +8218,11 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     try {
       const hist = Array.isArray(client?.history) ? client.history.slice(0, 5).map(h => ({ date: h.date, readings: h.readings })) : [];
       const cat = ((catalog && catalog.treatments) || []).map(t => ({ name: t.name, retail: t.retailPerOz ?? t.retail, unit: t.unit }));
-      const photoUrls = photos.map(p => p.src).filter(s => typeof s === "string" && /^https?:\/\//.test(s)); // only uploaded URLs (skip fat base64)
+      const photoUrls = (await Promise.all(photos.map(async p => {
+        const src = typeof p === "string" ? p : p?.src;
+        if (!src || src.startsWith("data:")) return "";
+        try { return await resolveProtectedMediaUrl(src); } catch { return ""; }
+      }))).filter(Boolean); // signed Storage URLs only; skip inline payloads and inaccessible objects
       const r = await fetch(`${PROD_URL}/api/ai-water-diagnosis`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ serviceType: stop.type, readings, history: hist, photoUrls, catalog: cat, division: client?.division, clientFirst: firstName }) });
       const d = await r.json().catch(() => ({}));
@@ -8307,7 +8517,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
           <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 12 }}>
             {photos.map((ph, i) => (
               <div key={i} style={{ display: "flex", gap: 10, alignItems: "center", background: T.surface, borderRadius: 12, padding: "8px 10px" }}>
-                <img src={ph.src} alt="" style={{ width: 56, height: 56, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />
+                <ProtectedImage src={ph.src} alt="" style={{ width: 56, height: 56, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   {(() => {
                     // A label that isn't one of the presets is a custom one the tech typed.
@@ -8397,7 +8607,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
       {/* Feature 3B — actual hours worked (auto from On My Way → now) + live effective hourly rate */}
       <div style={sectionGap}>
         <label style={labelStyle}>Actual Hours Worked</label>
-        <div style={{ display: "flex", gap: 10, alignItems: "stretch" }}>
+        <div style={{ display: "flex", flexDirection: completeVp.width <= 420 ? "column" : "row", gap: 10, alignItems: "stretch" }}>
           <div style={{ position: "relative", flex: 1 }}>
             <input type="text" inputMode="decimal" value={actualHours} onChange={e => setActualHours(e.target.value.replace(/[^\d.]/g, ""))} placeholder="0" style={{ ...smallInput, textAlign: "left", paddingRight: 40 }} />
             <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>hrs</span>
@@ -8437,8 +8647,8 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
               const st = readingStatus[t] || "";
               return (
                 <div key={t} style={{ background: T.surfaceAlt, borderRadius: 12, padding: "9px 11px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: completeVp.isPhone ? "wrap" : "nowrap" }}>
+                    <div style={{ flex: "1 1 140px", minWidth: 0 }}>
                       <div style={{ fontSize: 12.5, fontWeight: 700, color: T.text }}>{t}</div>
                       {range && <div style={{ fontSize: 10, color: fc || T.textMuted }}>ideal {range.ideal}{range.unit ? ` ${range.unit}` : ""}{flag === "bad" ? " · out of range" : flag === "warn" ? " · near limit" : ""}</div>}
                     </div>
@@ -8493,8 +8703,8 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
               const over = num(tx[t.id]) > here;
               const unit = t.unit || "oz";
               return (
-                <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 10, background: T.surfaceAlt, borderRadius: 10, padding: "8px 12px" }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
+                <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: completeVp.isPhone ? "wrap" : "nowrap", background: T.surfaceAlt, borderRadius: 10, padding: "8px 12px" }}>
+                  <div style={{ flex: "1 1 140px", minWidth: 0 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{t.name}</div>
                     <div style={{ fontSize: 11, color: over ? T.warning : T.textMuted }}>
                       ${num(t.costPerOz).toFixed(2)}/{unit} · {here} {unit} {usageLoc ? "here" : "on hand"}{over ? " · over!" : ""}
@@ -8529,8 +8739,8 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
               const shownPrice = willBill ? num(p.retailPer) : num(p.costPer);
               return (
                 <div key={p.id} style={{ background: T.surfaceAlt, borderRadius: 10, padding: "8px 12px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: completeVp.isPhone ? "wrap" : "nowrap" }}>
+                    <div style={{ flex: "1 1 140px", minWidth: 0 }}>
                       <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{p.name}</div>
                       <div style={{ fontSize: 11, color: over ? T.warning : T.textMuted }}>
                         ${num(p.costPer).toFixed(2)} cost · ${num(p.retailPer).toFixed(2)} retail · {here} {unit} {usageLoc ? "here" : "on hand"}{over ? " · over!" : ""}
@@ -8542,7 +8752,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
                   </div>
                   {qty > 0 && (
                     <button onClick={() => setPartBill(b => ({ ...b, [p.id]: !willBill }))}
-                      style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", padding: 0 }}>
+                      style={{ minHeight: 44, marginTop: 4, display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", padding: "8px 0" }}>
                       <div style={{ width: 34, height: 20, borderRadius: 100, background: willBill ? T.primary : T.border, position: "relative", transition: "background 0.2s", flexShrink: 0 }}>
                         <div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: willBill ? 16 : 2, transition: "left 0.2s" }} />
                       </div>
@@ -8574,8 +8784,8 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
               const willBill = productBill[p.id] !== false; // default: billed to client
               return (
                 <div key={p.id} style={{ background: T.surfaceAlt, borderRadius: 10, padding: "8px 12px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: completeVp.isPhone ? "wrap" : "nowrap" }}>
+                    <div style={{ flex: "1 1 140px", minWidth: 0 }}>
                       <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{p.name}</div>
                       <div style={{ fontSize: 11, color: T.textMuted }}>
                         ${num(p.cost).toFixed(2)} cost · ${num(p.price).toFixed(2)} sale
@@ -8587,7 +8797,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
                   </div>
                   {qty > 0 && (
                     <button onClick={() => setProductBill(b => ({ ...b, [p.id]: !willBill }))}
-                      style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", padding: 0 }}>
+                      style={{ minHeight: 44, marginTop: 4, display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", padding: "8px 0" }}>
                       <div style={{ width: 34, height: 20, borderRadius: 100, background: willBill ? T.primary : T.border, position: "relative", transition: "background 0.2s", flexShrink: 0 }}>
                         <div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: willBill ? 16 : 2, transition: "left 0.2s" }} />
                       </div>
@@ -8727,8 +8937,9 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
       </div>
       )}
 
-      <Btn onClick={finish} style={{ width: "100%", padding: "13px", fontSize: 14, borderRadius: 12 }}>
-        Finish & Save Report
+      {saveError && <div style={{ color: T.accent, fontSize: 12.5, fontWeight: 700, lineHeight: 1.45, marginBottom: 10, textAlign: "center" }}>{saveError}</div>}
+      <Btn onClick={finish} disabled={busy || saveBusy} style={{ width: "100%", padding: "13px", fontSize: 14, borderRadius: 12 }}>
+        {saveBusy ? "Saving completed stop…" : "Finish & Save Report"}
       </Btn>
     </Modal>
   );
@@ -8750,6 +8961,8 @@ const dayLabel = (dateStr) => {
 
 function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose }) {
   const { T } = useApp();
+  const addStopVp = useViewport();
+  const compact = addStopVp.width <= 360;
   const [clientSearch, setClientSearch] = useState("");
   const [selClients, setSelClients] = useState(
     Object.fromEntries((seedClientIds || []).map(id => [id, true]))
@@ -8854,7 +9067,7 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
       </div>
 
       {/* Date / Time — native pickers (calendar + clock), still manually typeable */}
-      <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
+      <div style={{ display: "flex", flexDirection: compact ? "column" : "row", gap: 10, marginBottom: 18 }}>
         <div style={{ flex: 1 }}>
           <label style={labelStyle}>Date</label>
           <input type="date" value={dateISO} onChange={e => setDateISO(e.target.value)} style={nativeInput} />
@@ -8866,7 +9079,7 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
       </div>
 
       {/* Category (header) + duration */}
-      <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
+      <div style={{ display: "flex", flexDirection: compact ? "column" : "row", gap: 10, marginBottom: 18 }}>
         <div style={{ flex: 2 }}>
           <label style={labelStyle}>Category</label>
           <Select value={stopType} onChange={e => setStopType(e.target.value)} options={catalog.stopTypes} />
@@ -9008,6 +9221,8 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
 const BULK_MAX_STOPS = 20;
 
 function BulkAddStops({ clients, catalog, team, onAdd, onClose, T }) {
+  const bulkVp = useViewport();
+  const compact = bulkVp.width <= 360;
   const [step, setStep] = useState(1);       // 1 select · 2 assign · 3 confirm · 4 done
   const [search, setSearch] = useState("");
   const [sel, setSel] = useState({});         // { [clientId]: true }
@@ -9092,7 +9307,7 @@ function BulkAddStops({ clients, catalog, team, onAdd, onClose, T }) {
 
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
   const field = { width: "100%", padding: "11px 14px", border: `1px solid ${T.border}`, borderRadius: 11, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
-  const selBox = { ...field, appearance: "none", WebkitAppearance: "none", cursor: "pointer" };
+  const selBox = { ...field, cursor: "pointer" };
   const RED = "#C0392B";
   const miniChip = (on) => ({ padding: "7px 12px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.08) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" });
   const assigneePicker = (value, onPick) => (team || []).length > 0 ? (
@@ -9156,7 +9371,7 @@ function BulkAddStops({ clients, catalog, team, onAdd, onClose, T }) {
         <>
           <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: "14px 14px 16px", marginBottom: 16 }}>
             <div style={{ fontSize: 12, fontWeight: 800, color: T.text, marginBottom: 12, textTransform: "uppercase", letterSpacing: "0.05em" }}>Set all</div>
-            <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+            <div style={{ display: "flex", flexDirection: compact ? "column" : "row", gap: 10, marginBottom: 10 }}>
               <div style={{ flex: 1 }}>
                 <label style={labelStyle}>Date</label>
                 <input type="date" value={defDate} onChange={e => setDefDate(e.target.value)} style={{ ...field, cursor: "pointer" }} />
@@ -9195,7 +9410,7 @@ function BulkAddStops({ clients, catalog, team, onAdd, onClose, T }) {
                     <option value="">Select a service…</option>
                     {serviceOptions.map(o => <option key={o} value={o}>{o}</option>)}
                   </select>
-                  <div style={{ display: "flex", gap: 10 }}>
+                  <div style={{ display: "flex", flexDirection: compact ? "column" : "row", gap: 10 }}>
                     <div style={{ flex: 1 }}>
                       <label style={labelStyle}>Date</label>
                       <input type="date" value={card.dateISO || ""} onChange={e => updateCard(id, { dateISO: e.target.value })} style={{ ...field, cursor: "pointer", borderColor: (showErrors && !card.dateISO) ? RED : T.border }} />
@@ -9566,7 +9781,7 @@ function RouteAssignmentModal({ assignment, clients, catalog, team, T, onSave, o
   const [form, setForm] = useState({ ...blank, ...(assignment || {}) });
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
-  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", appearance: "none", WebkitAppearance: "none" };
+  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
 
   const clientObj = (clients||[]).find(c => String(c.id) === String(form.clientId));
@@ -10614,6 +10829,8 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   };
 
   const deleteStop = (origDate, sid) => {
+    const deleted = (schedule || []).flatMap(d => d.stops || []).find(s => String(s.sid) === String(sid));
+    if (deleted && deleted.trackToken) writeTrackRecord(deleted, "complete");
     setSchedule(prev => {
       let copy = prev.map(d => ({ ...d, stops: d.stops.filter(s => s.sid !== sid) }));
       copy = copy.filter(d => d.stops.length > 0 || d.date === todayMDY());
@@ -10636,6 +10853,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
     });
   };
   const cancelStopMark = (stop, reason) => {
+    if (stop && stop.trackToken) writeTrackRecord(stop, "complete");
     setSchedule(prev => prev.map(d => ({ ...d, stops: d.stops.map(s => s.sid === stop.sid ? { ...s, cancelled: true, cancelReason: reason || "", cancelledAt: new Date().toISOString() } : s) })));
   };
 
@@ -10676,13 +10894,17 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   const writeTrackRecord = (stop, status) => {
     if (!stop || !stop.trackToken) return;
     try {
+      const configuredMinutes = parseInt(email && email.trackingLinkMinutes, 10);
+      const trackingMinutes = Number.isFinite(configuredMinutes) ? Math.min(1440, Math.max(5, configuredMinutes)) : 60;
+      const now = new Date();
       store.set("sps_track_" + stop.trackToken, JSON.stringify({
         sid: stop.sid,
         assigneeId: stop.assigneeId || "",
         client: (stop.client || "").split(" ")[0] || "there", // first name only — no full name / PII
         address: stop.address || "",
         status: status || "scheduled",
-        at: new Date().toISOString(),
+        at: now.toISOString(),
+        expiresAt: new Date(now.getTime() + trackingMinutes * 60000).toISOString(),
       }));
     } catch (_) {}
   };
@@ -11090,29 +11312,29 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
               {isComplete ? (
                 /* Completed — ONE consolidated row (no duplicate label, no big button).
                    Tap "Re-open" to undo; tapping the card body opens the saved report. */
-                <div style={{ padding: "9px 12px 9px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <div style={{ padding: "6px 10px 6px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: T.accent, fontWeight: 800, minWidth: 0 }}>
                     <Icon name="check" size={14} />
                     Completed
                     <span style={{ fontWeight: 600, color: T.textMuted, fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>· Report saved</span>
                   </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0, flexWrap: "wrap" }}>
                     {perms.completeStops && (
                       <button onClick={e => { e.stopPropagation(); const entry = (c?.history || []).find(h => String(h.sid) === String(s.sid)); if (entry) setHistoryEdit({ entry, clientId: c.id }); }}
                         title="Edit this visit's saved report — keeps everything you entered"
-                        style={{ background: "none", border: "none", color: T.primary, fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", padding: 2, display: "flex", alignItems: "center", gap: 4 }}>
+                        style={{ minHeight: 40, background: "none", border: "none", color: T.primary, fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", padding: "8px 5px", display: "flex", alignItems: "center", gap: 4 }}>
                         <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg> Edit
                       </button>
                     )}
                     {perms.completeStops && (
-                      <button onClick={e => { e.stopPropagation(); if (confirm("Re-open this stop? This REMOVES its completed record so you can redo it from scratch. To just change a detail, use Edit instead.")) onUncomplete(s.id, s.sid); }}
-                        style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", padding: 2, display: "flex", alignItems: "center", gap: 4 }}>
+                      <button onClick={e => { e.stopPropagation(); if (confirm("Re-open this stop? Its saved visit will be removed, and the exact stock and prior balance changed by this completion will be restored. To just change a detail, use Edit instead.")) void onUncomplete(c?.id ?? s.clientId ?? s.id, s.sid); }}
+                        style={{ minHeight: 40, background: "none", border: "none", color: T.textMuted, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", padding: "8px 5px", display: "flex", alignItems: "center", gap: 4 }}>
                         <Icon name="refresh" size={12} /> Re-open
                       </button>
                     )}
                     {perms.scheduleAddRemove && (
                       <button onClick={e => { e.stopPropagation(); if (confirm(`Delete this stop for ${c?.name || "this client"}? This can't be undone.`)) deleteStop(dayDate, s.sid); }}
-                        title="Delete stop" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 2, display: "flex", alignItems: "center", opacity: 0.55 }}>
+                        title="Delete stop" style={{ width: 40, height: 40, background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", justifyContent: "center", opacity: 0.55 }}>
                         <Icon name="trash" size={14} />
                       </button>
                     )}
@@ -11121,7 +11343,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
               ) : (
                 <>
                   {/* Status line — quiet delete tucked top-right */}
-                  <div style={{ padding: "6px 14px 0", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                  <div style={{ padding: "6px 10px 0 14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, flexWrap: "wrap" }}>
                     {arrived ? (
                       <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#16a34a", fontWeight: 700 }}>
                         <Icon name="check" size={12} /> On site
@@ -11137,22 +11359,22 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                     ) : (
                       <div style={{ fontSize: 11, color: T.textMuted }}>Not yet started</div>
                     )}
-                    <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0, flexWrap: "wrap" }}>
                       {(perms.completeStops || perms.scheduleAddRemove) && !headed && !arrived && (
                         <button onClick={e => { e.stopPropagation(); setEditStopModal({ stop: s, dayDate }); }}
-                          title="Edit time, service, tech, or date — saves without completing the stop" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 2, fontSize: 11, fontWeight: 700, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4 }}>
+                          title="Edit time, service, tech, or date — saves without completing the stop" style={{ minHeight: 40, background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: "8px 5px", fontSize: 11, fontWeight: 700, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4 }}>
                           <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg> Edit
                         </button>
                       )}
                       {(perms.completeStops || perms.scheduleAddRemove) && (
                         <button onClick={e => { e.stopPropagation(); setStopChange({ stop: s, client: c, dayDate }); }}
-                          title="Reschedule, cancel, or running late" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 2, fontSize: 11, fontWeight: 700, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4 }}>
+                          title="Reschedule, cancel, or running late" style={{ minHeight: 40, background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: "8px 5px", fontSize: 11, fontWeight: 700, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4 }}>
                           <Icon name="calendar" size={12} /> Reschedule
                         </button>
                       )}
                       {perms.scheduleAddRemove && (
                         <button onClick={e => { e.stopPropagation(); if (confirm(`Delete this stop for ${c?.name || "this client"}? This can't be undone.`)) deleteStop(dayDate, s.sid); }}
-                          title="Delete stop" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 2, display: "flex", alignItems: "center", opacity: 0.55 }}>
+                          title="Delete stop" style={{ width: 40, height: 40, background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", justifyContent: "center", opacity: 0.55 }}>
                           <Icon name="trash" size={14} />
                         </button>
                       )}
@@ -11166,25 +11388,25 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                         headed (tapped here OR via the bottom "Head to next" bar) → pressed "Heading". */}
                     {!headed ? (
                       <button onClick={e => { e.stopPropagation(); if (outOfOrder && !confirm(`Head to ${c?.name || "this stop"} now? It isn't the next stop on your route.`)) return; onEnRoute && onEnRoute(s.sid); setHeadHereModal({ stop: { ...s, trackToken: ensureTrackToken(s, "enroute") }, client: c }); }}
-                        style={{ flex: 1, minWidth: 0, background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
+                        style={{ flex: 1, minWidth: 0, minHeight: 44, background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
                         <Icon name="map" size={14} /> Head Here
                       </button>
                     ) : (
                       <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: { ...s, trackToken: ensureTrackToken(s, "enroute") }, client: c }); }}
                         title="Heading here — tap for directions again"
-                        style={{ flex: 1, minWidth: 0, background: hexA(T.primary, 0.1), color: T.primary, border: `1px solid ${hexA(T.primary, 0.3)}`, borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
+                        style={{ flex: 1, minWidth: 0, minHeight: 44, background: hexA(T.primary, 0.1), color: T.primary, border: `1px solid ${hexA(T.primary, 0.3)}`, borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
                         <Icon name="check" size={13} /> Heading
                       </button>
                     )}
                     {/* I'm Here — logs arrival (also starts the job clock); flips to pressed "Arrived" */}
                     <button onClick={e => { e.stopPropagation(); if (!arrived) setArrivedModal({ stop: { ...s, trackToken: ensureTrackToken(s, "arrived") }, client: c, key: s.sid }); }}
-                      style={{ flex: 1, minWidth: 0, background: arrived ? hexA("#16a34a", 0.12) : T.surface, color: arrived ? "#16a34a" : T.text, border: `1px solid ${arrived ? hexA("#16a34a", 0.4) : T.border}`, borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 700, cursor: arrived ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap" }}>
+                      style={{ flex: 1, minWidth: 0, minHeight: 44, background: arrived ? hexA("#16a34a", 0.12) : T.surface, color: arrived ? "#16a34a" : T.text, border: `1px solid ${arrived ? hexA("#16a34a", 0.4) : T.border}`, borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 700, cursor: arrived ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap" }}>
                       {arrived ? <><Icon name="check" size={13} /> Arrived</> : "I'm Here"}
                     </button>
                     {/* Complete — solid green action button; opens the report sheet */}
                     {perms.completeStops && (
                       <button onClick={e => { e.stopPropagation(); setCompleteModal({ stop: s, client: c, dayDate }); }}
-                        style={{ flex: 1, minWidth: 0, background: T.accent, color: "#fff", border: "none", borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap" }}>
+                        style={{ flex: 1, minWidth: 0, minHeight: 44, background: T.accent, color: "#fff", border: "none", borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap" }}>
                         <Icon name="check" size={14} /> Complete
                       </button>
                     )}
@@ -11203,15 +11425,15 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+      <div style={{ display: "flex", flexDirection: vp.isPhone ? "column" : "row", justifyContent: "space-between", alignItems: vp.isPhone ? "stretch" : "center", gap: vp.isPhone ? 10 : 16, marginBottom: 14 }}>
         <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Schedule</h2>
         {schedTab === "schedule" && (selectMode ? (
-          <button onClick={exitSelect} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Done</button>
+          <button onClick={exitSelect} style={{ minHeight: 40, alignSelf: "flex-start", background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Done</button>
         ) : perms.scheduleAddRemove ? (
-          <div style={{ display: "flex", gap: 8 }}>
-            {allStops.length > 0 && <Btn variant="ghost" sm onClick={() => setSelectMode(true)}>Select</Btn>}
-            <Btn variant="ghost" sm onClick={() => setShowBulkAdd(true)}>Bulk Add</Btn>
-            <Btn sm onClick={() => setShowAdd(true)}>+ Add Stop</Btn>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {allStops.length > 0 && <Btn variant="ghost" sm onClick={() => setSelectMode(true)} style={{ minHeight: 40 }}>Select</Btn>}
+            <Btn variant="ghost" sm onClick={() => setShowBulkAdd(true)} style={{ minHeight: 40 }}>Bulk Add</Btn>
+            <Btn sm onClick={() => setShowAdd(true)} style={{ minHeight: 40 }}>+ Add Stop</Btn>
           </div>
         ) : null)}
       </div>
@@ -11219,7 +11441,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
       {/* Tab switcher */}
       <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 11, padding: 3, gap: 3, marginBottom: 18 }}>
         {[["schedule", "Schedule"], ...(perms.scheduleReorder ? [["routes", "Route Assignments"]] : [])].map(([id, label]) => (
-          <button key={id} onClick={() => setSchedTab(id)} style={{ flex: 1, padding: "8px", border: "none", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer", background: schedTab === id ? T.surface : "transparent", color: schedTab === id ? T.primary : T.textMuted, fontFamily: "inherit", boxShadow: schedTab === id ? "0 1px 4px rgba(0,0,0,0.1)" : "none", transition: "all 0.15s" }}>
+          <button key={id} onClick={() => setSchedTab(id)} style={{ flex: 1, minHeight: 44, padding: "8px", border: "none", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer", background: schedTab === id ? T.surface : "transparent", color: schedTab === id ? T.primary : T.textMuted, fontFamily: "inherit", boxShadow: schedTab === id ? "0 1px 4px rgba(0,0,0,0.1)" : "none", transition: "all 0.15s" }}>
             {label}
           </button>
         ))}
@@ -12232,7 +12454,7 @@ function SkimmerHistoryImport({ clients, team, onImport, onGoToClients }) {
   };
 
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 };
-  const selStyle = { width: "100%", padding: "9px 11px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", appearance: "none", WebkitAppearance: "none" };
+  const selStyle = { width: "100%", padding: "9px 11px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none" };
 
   return (
     <div>
@@ -12879,7 +13101,7 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
           <div style={{ border: `1px solid ${T.border}`, borderRadius: 12, overflow: "hidden" }}>
             <div style={{ background: T.primary, color: "#fff", padding: "14px 16px", display: "flex", alignItems: "center", gap: 10 }}>
               <div style={{ width: 28, height: 28, borderRadius: 7, background: "rgba(255,255,255,0.18)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, overflow: "hidden" }}>
-                {branding.logoType === "image" && branding.logoImage ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontWeight: 800, color: "#fff" }}>{logoInitial(branding)}</span>}
+                {branding.logoType === "image" && branding.logoImage ? <ProtectedImage src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontWeight: 800, color: "#fff" }}>{logoInitial(branding)}</span>}
               </div>
               <span style={{ fontSize: 13, fontWeight: 700 }}>{email.fromName}</span>
             </div>
@@ -14638,6 +14860,8 @@ function InvoiceSendStep({ invoice, client, onClose }) {
 
 function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCatalog, presetClientId, onSave, onClose, onDelete }) {
   const { T, perms } = useApp();
+  const invoiceVp = useViewport();
+  const narrowInvoice = invoiceVp.width <= 420;
   const money = (n) => `$${(n || 0).toFixed(2)}`;
   const toISO = (mdy) => { const d = parseMDY(mdy); return d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}` : ""; };
   const fromISO = (iso) => { if (!iso) return ""; const [y, m, d] = iso.split("-"); return `${m}/${d}/${y}`; };
@@ -14858,10 +15082,10 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   return (
     <Modal title={invoice ? `Edit ${inv.number}` : "New Invoice"} onClose={onClose}>
       <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-        <div style={{ display: "flex", gap: 10 }}>
+        <div style={{ display: "flex", flexDirection: narrowInvoice ? "column" : "row", gap: 10 }}>
           <div style={{ flex: 2 }}>
             <label style={label}>Client</label>
-            <select value={inv.clientId == null ? "" : String(inv.clientId)} onChange={e => { const c = clients.find(x => String(x.id) === e.target.value); set("clientId", c ? c.id : e.target.value); }} style={{ ...field, appearance: "none", WebkitAppearance: "none" }}>
+            <select value={inv.clientId == null ? "" : String(inv.clientId)} onChange={e => { const c = clients.find(x => String(x.id) === e.target.value); set("clientId", c ? c.id : e.target.value); }} style={field}>
               {selectableClients(clients).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </div>
@@ -14878,7 +15102,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
               const active = String(inv.termsDays ?? invoicing.dueDays ?? 15) === days;
               return (
                 <button key={days} onClick={() => { set("termsDays", days); set("dueDate", addDaysMDY(inv.date, days)); }}
-                  style={{ padding: "8px 12px", borderRadius: 10, border: `1.5px solid ${active ? T.primary : T.border}`, background: active ? hexA(T.primary, 0.1) : T.surface, color: active ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                  style={{ minHeight: 40, padding: "8px 12px", borderRadius: 10, border: `1.5px solid ${active ? T.primary : T.border}`, background: active ? hexA(T.primary, 0.1) : T.surface, color: active ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
                   {lab}
                 </button>
               );
@@ -14886,7 +15110,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: 10 }}>
+        <div style={{ display: "flex", flexDirection: narrowInvoice ? "column" : "row", gap: 10 }}>
           <div style={{ flex: 1 }}><label style={label}>Issued</label><input type="date" style={field} value={toISO(inv.date)} onChange={e => { const newDate = fromISO(e.target.value); set("date", newDate); if (inv.termsDays != null) set("dueDate", addDaysMDY(newDate, inv.termsDays)); }} /></div>
           <div style={{ flex: 1 }}><label style={label}>Due</label><input type="date" style={field} value={toISO(inv.dueDate)} onChange={e => set("dueDate", fromISO(e.target.value))} /></div>
         </div>
@@ -14895,7 +15119,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           <label style={label}>Status</label>
           <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 12, padding: 4, gap: 4 }}>
             {["Draft", "Sent", "Paid"].map(s => (
-              <button key={s} onClick={() => set("status", s)} style={{ flex: 1, padding: "9px 6px", border: "none", borderRadius: 9, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600, background: inv.status === s ? T.surface : "transparent", color: inv.status === s ? invStatusColor(s, T) : T.textMuted, boxShadow: inv.status === s ? T.shadow : "none" }}>{s}</button>
+              <button key={s} onClick={() => set("status", s)} style={{ flex: 1, minHeight: 44, padding: "9px 6px", border: "none", borderRadius: 9, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600, background: inv.status === s ? T.surface : "transparent", color: inv.status === s ? invStatusColor(s, T) : T.textMuted, boxShadow: inv.status === s ? T.shadow : "none" }}>{s}</button>
             ))}
           </div>
         </div>
@@ -14943,38 +15167,38 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
                     {l.kind && l.kind !== "custom" && (
                       <span style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.04em", color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 6, padding: "2px 6px", flexShrink: 0 }}>{l.kind === "bundle" ? "Parts" : l.kind}</span>
                     )}
-                    <input style={{ ...field, marginBottom: 0 }} value={l.desc} onChange={e => setLine(l.id, "desc", e.target.value)} placeholder="Description" />
+                    <input style={{ ...field, marginBottom: 0, minWidth: 0, flex: 1 }} value={l.desc} onChange={e => setLine(l.id, "desc", e.target.value)} placeholder="Description" />
+                    <button onClick={() => removeLine(l.id)} aria-label="Remove line item" style={{ width: 40, height: 40, flexShrink: 0, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, color: T.textMuted, fontSize: 19, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>×</button>
                   </div>
                   {l.bundleNote && (
                     <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 8, paddingLeft: 2, fontStyle: "italic" }}>Includes: {l.bundleNote}</div>
                   )}
-                  <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-                    <div style={{ width: 44 }}>
+                  <div style={{ display: narrowInvoice ? "grid" : "flex", gridTemplateColumns: narrowInvoice ? "repeat(2, minmax(0, 1fr))" : undefined, gap: 8, alignItems: "flex-end" }}>
+                    <div style={{ width: narrowInvoice ? "auto" : 44, minWidth: 0 }}>
                       <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 3 }}>Qty</div>
                       <input style={{ ...small, textAlign: "center" }} value={l.qty} onChange={e => setLine(l.id, "qty", e.target.value.replace(/[^\d.]/g, ""))} />
                     </div>
-                    <div style={{ flex: 1 }}>
+                    <div style={{ flex: narrowInvoice ? undefined : 1, minWidth: 0 }}>
                       <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 3 }}>Price</div>
                       <div style={{ position: "relative" }}>
                         <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
                         <input style={{ ...small, paddingLeft: 18, textAlign: "left" }} value={l.unitPrice} onChange={e => setLine(l.id, "unitPrice", e.target.value.replace(/[^\d.]/g, ""))} placeholder="0.00" />
                       </div>
                     </div>
-                    <div style={{ width: 60 }}>
+                    <div style={{ width: narrowInvoice ? "auto" : 60, minWidth: 0 }}>
                       <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 3 }}>Cost ea</div>
                       <div style={{ position: "relative" }}>
                         <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
                         <input style={{ ...small, paddingLeft: 18, textAlign: "left" }} value={l.unitCost || ""} onChange={e => setLine(l.id, "unitCost", e.target.value.replace(/[^\d.]/g, ""))} placeholder="0" />
                       </div>
                     </div>
-                    <div style={{ textAlign: "center" }}>
+                    <div style={{ textAlign: narrowInvoice ? "left" : "center", minWidth: 0 }}>
                       <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 3 }}>Tax</div>
-                      <div onClick={() => setLine(l.id, "taxable", !l.taxable)} title="Taxable" style={{ width: 32, height: 32, borderRadius: 10, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", background: l.taxable ? T.primary : T.surface, border: `1.5px solid ${l.taxable ? T.primary : T.border}`, color: "#fff", fontWeight: 800, fontSize: 13 }}>{l.taxable ? "✓" : ""}</div>
+                      <button type="button" onClick={() => setLine(l.id, "taxable", !l.taxable)} aria-pressed={!!l.taxable} title="Taxable" style={{ width: narrowInvoice ? "100%" : 32, height: narrowInvoice ? 44 : 32, borderRadius: 10, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", background: l.taxable ? T.primary : T.surface, border: `1.5px solid ${l.taxable ? T.primary : T.border}`, color: l.taxable ? "#fff" : T.textMuted, fontWeight: 800, fontSize: 13 }}>{l.taxable ? "✓ Taxable" : (narrowInvoice ? "Not taxable" : "")}</button>
                     </div>
-                    <button onClick={() => removeLine(l.id)} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 18, cursor: "pointer", padding: "4px 2px", height: 32 }}>×</button>
                   </div>
                   {/* Per-line discount */}
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: narrowInvoice ? "wrap" : "nowrap", marginTop: 8 }}>
                     <span style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em", fontWeight: 700 }}>Discount</span>
                     <div style={{ display: "flex", background: T.surface, borderRadius: 8, padding: 2, border: `1px solid ${T.border}` }}>
                       {[["", "Off"], ["amt", "$"], ["pct", "%"]].map(([v, lab]) => (
@@ -15004,7 +15228,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         </div>
 
         {/* Invoice-wide discount */}
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: narrowInvoice ? "wrap" : "nowrap" }}>
           <label style={{ ...label, marginBottom: 0 }}>Whole Invoice Discount</label>
           <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 8, padding: 2, border: `1px solid ${T.border}` }}>
             {[["", "Off"], ["amt", "$"], ["pct", "%"]].map(([v, lab]) => (
@@ -15016,8 +15240,8 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           )}
         </div>
 
-        <div style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
-          <div style={{ width: 120 }}>
+        <div style={{ display: "flex", flexDirection: narrowInvoice ? "column" : "row", gap: 10, alignItems: narrowInvoice ? "stretch" : "flex-end" }}>
+          <div style={{ width: narrowInvoice ? "100%" : 120 }}>
             <label style={label}>Tax rate</label>
             <div style={{ position: "relative" }}>
               <input style={{ ...field, paddingRight: 24 }} value={inv.taxRate} onChange={e => set("taxRate", e.target.value.replace(/[^\d.]/g, ""))} />
@@ -15101,6 +15325,8 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
 
 // ── Catalog picker: add services/products/treatments/parts to an invoice ──
 function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCreateItem, T }) {
+  const pickerVp = useViewport();
+  const kb = useKeyboardInset();
   const [tab, setTab] = useState("services");
   const [search, setSearch] = useState("");
   const [bundle, setBundle] = useState({});   // partId -> qty (for bundling)
@@ -15141,18 +15367,18 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
   const { handleProps, sheetStyle } = useSheetSwipe(onClose);
 
   return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 300, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: T.bg, borderRadius: "20px 20px 0 0", width: "100%", maxWidth: 600, maxHeight: "85vh", display: "flex", flexDirection: "column", paddingBottom: "env(safe-area-inset-bottom)", ...sheetStyle }}>
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 300, display: "flex", alignItems: "flex-end", justifyContent: "center", paddingLeft: "env(safe-area-inset-left)", paddingRight: "env(safe-area-inset-right)", paddingBottom: kb > 0 ? kb : 0, transition: "padding-bottom 0.18s ease" }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: T.bg, borderRadius: "20px 20px 0 0", width: "100%", maxWidth: 600, maxHeight: `calc(100dvh - max(8px, env(safe-area-inset-top)) - ${kb}px)`, display: "flex", flexDirection: "column", paddingBottom: "env(safe-area-inset-bottom)", ...sheetStyle }}>
         <SheetHandle handleProps={handleProps} T={T} />
         {/* Header */}
         <div style={{ padding: "16px 18px 10px", borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
             <div style={{ fontSize: 17, fontWeight: 800, color: T.text }}>Add to Invoice</div>
-            <button onClick={onClose} style={{ background: T.surfaceAlt, border: "none", borderRadius: 9, width: 30, height: 30, fontSize: 16, color: T.textMuted, cursor: "pointer", fontFamily: "inherit" }}>×</button>
+            <button onClick={onClose} aria-label="Close catalog" style={{ background: T.surfaceAlt, border: "none", borderRadius: 11, width: 40, height: 40, fontSize: 18, color: T.textMuted, cursor: "pointer", fontFamily: "inherit" }}>×</button>
           </div>
           <div style={{ display: "flex", gap: 4, background: T.surfaceAlt, borderRadius: 10, padding: 3 }}>
             {tabs.map(([id, lab]) => (
-              <button key={id} onClick={() => { setTab(id); setBundle({}); }} style={{ flex: 1, padding: "8px 4px", border: "none", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: tab === id ? T.surface : "transparent", color: tab === id ? T.primary : T.textMuted }}>{lab}</button>
+              <button key={id} onClick={() => { setTab(id); setBundle({}); }} style={{ flex: 1, minWidth: 0, minHeight: 40, padding: "8px 3px", border: "none", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: tab === id ? T.surface : "transparent", color: tab === id ? T.primary : T.textMuted }}>{lab}</button>
             ))}
           </div>
         </div>
@@ -15166,7 +15392,7 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
                 <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 5, fontWeight: 700, textTransform: "uppercase" }}>Name</div>
                 <input style={cell} value={newItem.name} onChange={e => setNewItem(s => ({ ...s, name: e.target.value }))} placeholder="e.g. Pond Liner Repair" autoFocus />
               </div>
-              <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ display: "flex", flexDirection: pickerVp.width <= 360 ? "column" : "row", gap: 10 }}>
                 <div style={{ flex: 1 }}>
                   <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 5, fontWeight: 700, textTransform: "uppercase" }}>Price</div>
                   <input style={cell} value={newItem.price} onChange={e => setNewItem(s => ({ ...s, price: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0.00" />
@@ -15566,7 +15792,7 @@ function InvoiceSettings({ invoicing, setInvoicing, branding, setBranding, onSyn
             <div style={{ flex: 1 }}><label style={labelStyle}>Default Tax Rate (%)</label><input type="text" inputMode="decimal" style={field} value={cfg.taxRate} onChange={e => set("taxRate", e.target.value.replace(/[^\d.]/g, ""))} /></div>
             <div style={{ flex: 1 }}>
               <label style={labelStyle}>Default Payment Terms</label>
-              <select style={{ ...field, appearance: "none", WebkitAppearance: "none" }} value={String(cfg.dueDays)} onChange={e => set("dueDays", e.target.value)}>
+              <select style={field} value={String(cfg.dueDays)} onChange={e => set("dueDays", e.target.value)}>
                 <option value="0">Due on receipt</option>
                 <option value="7">Net 7</option>
                 <option value="15">Net 15</option>
@@ -15813,7 +16039,7 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
     return d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
   };
   // Consistent right-aligned column so the dollar amounts line up vertically.
-  const amtStyle = { minWidth: 96, textAlign: "right", whiteSpace: "nowrap" };
+  const amtStyle = { minWidth: 76, textAlign: "right", whiteSpace: "nowrap" };
   const totals = invoiceTotals(invoice);
   const eff = effectiveStatus(invoice);
   const accent = cfg.accent || T.primary;
@@ -15826,10 +16052,10 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
   const centered = cfg.headerStyle === "centered";
 
   const brandBlock = (light) => (
-    <div style={{ display: "flex", gap: 11, alignItems: centered ? "center" : "flex-start", justifyContent: centered ? "center" : "flex-start", flexDirection: centered ? "column" : "row", textAlign: centered ? "center" : "left", minWidth: 0, width: centered ? "100%" : "auto", flex: centered ? "none" : 1 }}>
+    <div className="sps-inv-brand" style={{ display: "flex", gap: 11, alignItems: centered ? "center" : "flex-start", justifyContent: centered ? "center" : "flex-start", flexDirection: centered ? "column" : "row", textAlign: centered ? "center" : "left", minWidth: 0, width: centered ? "100%" : "auto", flex: centered ? "none" : 1 }}>
       {cfg.showLogo !== false && (
         <div style={{ width: 40, height: 40, borderRadius: 11, background: light ? "rgba(255,255,255,0.22)" : hexA(accent, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
-          {branding.logoType === "image" && branding.logoImage ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontSize: 21, fontWeight: 800, color: light ? T.primary : "#fff" }}>{logoInitial(branding)}</span>}
+          {branding.logoType === "image" && branding.logoImage ? <ProtectedImage src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontSize: 21, fontWeight: 800, color: light ? T.primary : "#fff" }}>{logoInitial(branding)}</span>}
         </div>
       )}
       <div style={{ minWidth: 0, flex: centered ? "none" : 1, width: "100%", textAlign: centered ? "center" : "left" }}>
@@ -15842,7 +16068,7 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
   );
 
   const headerRight = (light) => (
-    <div style={{ textAlign: centered ? "center" : "right", marginTop: centered ? 10 : 0, flexShrink: 0, whiteSpace: "nowrap" }}>
+    <div className="sps-inv-meta" style={{ textAlign: centered ? "center" : "right", marginTop: centered ? 10 : 0, flexShrink: 0, whiteSpace: "nowrap" }}>
       <div style={{ fontSize: 17, fontWeight: 800, color: light ? "#fff" : accent, letterSpacing: "0.04em", lineHeight: 1 }}>{headerWord}</div>
       <div style={{ fontSize: 11.5, color: light ? "rgba(255,255,255,0.82)" : T.textMuted, marginTop: 3 }}>{invoice.number}</div>
       <span style={{ display: "inline-block", marginTop: 7, background: light ? "rgba(255,255,255,0.22)" : hexA(invStatusColor(eff, T), 0.14), color: light ? "#fff" : invStatusColor(eff, T), padding: "3px 10px", borderRadius: 100, fontSize: 9.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.06em" }}>{eff}</span>
@@ -15852,9 +16078,15 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
   return (
     <div className="sps-inv" style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: radius, overflow: "hidden", fontSize: `${scale}em` }}>
       <style>{`.sps-inv a { color: inherit !important; text-decoration: none !important; -webkit-text-decoration: none !important; }
-        .sps-inv .sps-contact { overflow-wrap: normal; word-break: normal; -webkit-hyphens: none; hyphens: none; }`}</style>
+        .sps-inv .sps-contact, .sps-inv .sps-inv-wrap { overflow-wrap: anywhere; word-break: break-word; }
+        @media (max-width: 420px) {
+          .sps-inv .sps-inv-header, .sps-inv .sps-inv-bill { flex-direction: column !important; align-items: stretch !important; }
+          .sps-inv .sps-inv-meta, .sps-inv .sps-inv-dates { text-align: left !important; }
+          .sps-inv .sps-inv-meta { margin-top: 3px !important; }
+          .sps-inv .sps-inv-date { white-space: normal !important; }
+        }`}</style>
       {cfg.headerStyle === "band" ? (
-        <div style={{ background: accent, padding: `${pad}px`, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+        <div className="sps-inv-header" style={{ background: accent, padding: `${pad}px`, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
           {brandBlock(true)}
           {headerRight(true)}
         </div>
@@ -15864,7 +16096,7 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
           {headerRight(false)}
         </div>
       ) : (
-        <div style={{ padding: `${pad}px ${pad}px 14px`, borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+        <div className="sps-inv-header" style={{ padding: `${pad}px ${pad}px 14px`, borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
           {brandBlock(false)}
           {headerRight(false)}
         </div>
@@ -15877,16 +16109,16 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
         </div>
       )}
 
-      <div style={{ padding: `18px ${pad}px`, display: "flex", justifyContent: "space-between", gap: 12, borderBottom: `1px solid ${T.border}` }}>
-        <div>
+      <div className="sps-inv-bill" style={{ padding: `18px ${pad}px`, display: "flex", justifyContent: "space-between", gap: 12, borderBottom: `1px solid ${T.border}` }}>
+        <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 4 }}>Bill To</div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{invoice.clientName || client?.name}</div>
-          {(invoice.clientAddress || client?.address) && <div style={{ fontSize: 12, color: T.textMuted }}>{invoice.clientAddress || client?.address}</div>}
-          {(invoice.clientEmail || client?.email) && <div style={{ fontSize: 12, color: T.textMuted }}>{invoice.clientEmail || client?.email}</div>}
+          <div className="sps-inv-wrap" style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{invoice.clientName || client?.name}</div>
+          {(invoice.clientAddress || client?.address) && <div className="sps-inv-wrap" style={{ fontSize: 12, color: T.textMuted }}>{invoice.clientAddress || client?.address}</div>}
+          {(invoice.clientEmail || client?.email) && <div className="sps-inv-wrap" style={{ fontSize: 12, color: T.textMuted }}>{invoice.clientEmail || client?.email}</div>}
         </div>
-        <div style={{ textAlign: "right", fontSize: 12, color: T.textMuted, flexShrink: 0 }}>
-          <div style={{ whiteSpace: "nowrap" }}>Issued: <span style={{ color: T.text, fontWeight: 600 }}>{fmtNice(invoice.date)}</span></div>
-          <div style={{ marginTop: 3, whiteSpace: "nowrap" }}>Due: <span style={{ color: T.text, fontWeight: 600 }}>{fmtNice(invoice.dueDate)}</span></div>
+        <div className="sps-inv-dates" style={{ textAlign: "right", fontSize: 12, color: T.textMuted, flexShrink: 0 }}>
+          <div className="sps-inv-date" style={{ whiteSpace: "nowrap" }}>Issued: <span style={{ color: T.text, fontWeight: 600 }}>{fmtNice(invoice.date)}</span></div>
+          <div className="sps-inv-date" style={{ marginTop: 3, whiteSpace: "nowrap" }}>Due: <span style={{ color: T.text, fontWeight: 600 }}>{fmtNice(invoice.dueDate)}</span></div>
         </div>
       </div>
 
@@ -15900,10 +16132,10 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
           const net = Math.max(0, gross - disc);
           return (
             <div key={l.id || idx} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: rowPad, borderBottom: idx < arr.length - 1 ? `1px solid ${T.border}` : "none", background: cfg.zebraRows && idx % 2 === 1 ? hexA(T.textMuted, 0.04) : "transparent" }}>
-              <div style={{ flex: 1, paddingRight: 10 }}>
-                <div style={{ fontSize: 13, color: T.text }}>{l.desc || "—"}{l.taxable && cfg.showItemTax !== false && <span style={{ color: T.textMuted }}> *</span>}</div>
+              <div style={{ flex: 1, minWidth: 0, paddingRight: 10 }}>
+                <div style={{ fontSize: 13, color: T.text, overflowWrap: "anywhere" }}>{l.desc || "—"}{l.taxable && cfg.showItemTax !== false && <span style={{ color: T.textMuted }}> *</span>}</div>
                 {cfg.showQtyPrice !== false && <div style={{ fontSize: 11, color: T.textMuted }}>{l.qty} × {money(nn(l.unitPrice))}</div>}
-                {l.bundleNote && <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 2, fontStyle: "italic" }}>Includes: {l.bundleNote}</div>}
+                {l.bundleNote && <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 2, fontStyle: "italic", overflowWrap: "anywhere" }}>Includes: {l.bundleNote}</div>}
                 {disc > 0 && <div style={{ fontSize: 11, color: T.accent, fontWeight: 700, marginTop: 2 }}>Discount {l.discountType === "pct" ? `${l.discount}%` : money(disc)} off</div>}
               </div>
               <div style={{ textAlign: "right" }}>
@@ -16192,7 +16424,7 @@ function MarkPaidModal({ invoice, client, onSave, onClose }) {
               ? <div style={{ fontSize: 13, color: T.textMuted, padding: "8px 0" }}>Loading accounts…</div>
               : accts.length === 0
                 ? <div style={{ fontSize: 12.5, color: T.textMuted }}>No bank accounts found — QuickBooks will use Undeposited Funds.</div>
-                : <select value={depositId} onChange={e => setDepositId(e.target.value)} style={{ ...field, appearance: "none", WebkitAppearance: "none" }}>
+                : <select value={depositId} onChange={e => setDepositId(e.target.value)} style={field}>
                     {accts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
                   </select>}
             <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>Records a matching payment in QuickBooks with the method, reference, and deposit account.</div>
@@ -17062,6 +17294,7 @@ function InvoicesTable({ items, onRowClick, T }) {
 // create + sync them to QuickBooks individually and run ONE bundled messaging step.
 function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
   const { T, branding, email } = useApp();
+  const batchVp = useViewport();
   const cfg = { ...DEFAULT_INVOICING, ...(invoicing || {}) };
   const prefix = (cfg.numberPrefix != null) ? cfg.numberPrefix : "INV-";
   const money = (n) => `$${(Number(n) || 0).toFixed(2)}`;
@@ -17098,14 +17331,14 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
   const LinesEditor = ({ value, onChange }) => (
     <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
       {value.map((l, i) => (
-        <div key={l.id} style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <input value={l.desc} onChange={e => onChange(value.map(x => x.id === l.id ? { ...x, desc: e.target.value } : x))} placeholder="Description" style={{ ...field, flex: 1 }} />
-          <input value={l.qty} onChange={e => onChange(value.map(x => x.id === l.id ? { ...x, qty: e.target.value.replace(/[^\d.]/g, "") } : x))} style={{ ...field, width: 46, textAlign: "center" }} />
-          <div style={{ position: "relative", width: 78 }}>
+        <div key={l.id} style={{ display: batchVp.isPhone ? "grid" : "flex", gridTemplateColumns: batchVp.isPhone ? "70px minmax(0, 1fr) 40px" : undefined, gap: 6, alignItems: "center" }}>
+          <input value={l.desc} onChange={e => onChange(value.map(x => x.id === l.id ? { ...x, desc: e.target.value } : x))} placeholder="Description" style={{ ...field, flex: batchVp.isPhone ? undefined : 1, gridColumn: batchVp.isPhone ? "1 / -1" : undefined, minWidth: 0 }} />
+          <input aria-label="Quantity" value={l.qty} onChange={e => onChange(value.map(x => x.id === l.id ? { ...x, qty: e.target.value.replace(/[^\d.]/g, "") } : x))} placeholder="Qty" style={{ ...field, width: batchVp.isPhone ? "100%" : 46, textAlign: "center" }} />
+          <div style={{ position: "relative", width: batchVp.isPhone ? "100%" : 78, minWidth: 0 }}>
             <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
-            <input value={l.unitPrice} onChange={e => onChange(value.map(x => x.id === l.id ? { ...x, unitPrice: e.target.value.replace(/[^\d.]/g, "") } : x))} placeholder="0" style={{ ...field, paddingLeft: 18, textAlign: "right" }} />
+            <input aria-label="Unit price" value={l.unitPrice} onChange={e => onChange(value.map(x => x.id === l.id ? { ...x, unitPrice: e.target.value.replace(/[^\d.]/g, "") } : x))} placeholder="0" style={{ ...field, paddingLeft: 18, textAlign: "right" }} />
           </div>
-          <button onClick={() => onChange(value.length > 1 ? value.filter(x => x.id !== l.id) : value)} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 18, cursor: "pointer", lineHeight: 1, padding: "0 2px" }}>×</button>
+          <button onClick={() => onChange(value.length > 1 ? value.filter(x => x.id !== l.id) : value)} aria-label="Remove line item" style={{ width: 40, height: 40, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, color: T.textMuted, fontSize: 18, cursor: "pointer", lineHeight: 1, padding: 0 }}>×</button>
         </div>
       ))}
       <button onClick={() => onChange([...value, newLine()])} style={{ alignSelf: "flex-start", background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4, padding: "2px 0" }}><Icon name="plus" size={13} /> Add line</button>
@@ -17428,9 +17661,9 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
   return (
     <div style={vp.isDesktop ? { flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", padding: vp.isTablet ? "18px 18px 0" : "24px 34px 0" } : undefined}>
       {/* Header */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h2 style={{ margin: 0, fontSize: 26, fontWeight: 700, color: T.text, letterSpacing: "-0.03em" }}>Invoices</h2>
-        <div style={{ display: "flex", gap: 8 }}>
+      <div style={{ display: "flex", flexDirection: vp.isPhone ? "column" : "row", justifyContent: "space-between", alignItems: vp.isPhone ? "stretch" : "center", gap: vp.isPhone ? 10 : 16, marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: vp.isPhone ? 24 : 26, fontWeight: 700, color: T.text, letterSpacing: "-0.03em" }}>Invoices</h2>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", width: vp.isPhone ? "100%" : "auto" }}>
           {/* Always visible so a manual sync is available "either way" — when QB is disconnected the
               handler shows a "Connect QuickBooks under Customize first" hint (idle button stays neutral). */}
           {(() => {
@@ -17438,7 +17671,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
             const active = qbSyncing || qbSynced;
             return (
             <button onClick={syncQuickBooks} disabled={qbSyncing} title="Sync with QuickBooks"
-              style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 13px", borderRadius: 12, border: `1.5px solid ${active ? hexA(QB_GREEN, 0.5) : T.border}`, background: active ? hexA(QB_GREEN, 0.12) : T.surface, color: active ? QB_GREEN : T.textMuted, fontWeight: 700, fontSize: 13, cursor: qbSyncing ? "default" : "pointer", fontFamily: "inherit", transition: "background 0.2s, color 0.2s, border-color 0.2s" }}>
+              style={{ minHeight: 40, display: "flex", alignItems: "center", gap: 6, padding: "8px 13px", borderRadius: 12, border: `1.5px solid ${active ? hexA(QB_GREEN, 0.5) : T.border}`, background: active ? hexA(QB_GREEN, 0.12) : T.surface, color: active ? QB_GREEN : T.textMuted, fontWeight: 700, fontSize: 13, cursor: qbSyncing ? "default" : "pointer", fontFamily: "inherit", transition: "background 0.2s, color 0.2s, border-color 0.2s" }}>
               {qbSynced ? (
                 <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2.6} strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
               ) : (
@@ -17457,12 +17690,12 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
             </div>
           )}
           <button onClick={() => setShowFilters(f => !f)}
-            style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 12, border: `1.5px solid ${activeFilterCount > 0 ? T.primary : T.border}`, background: activeFilterCount > 0 ? hexA(T.primary, 0.08) : T.surface, color: activeFilterCount > 0 ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+            style={{ minHeight: 40, display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 12, border: `1.5px solid ${activeFilterCount > 0 ? T.primary : T.border}`, background: activeFilterCount > 0 ? hexA(T.primary, 0.08) : T.surface, color: activeFilterCount > 0 ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
             <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M3 6h18M7 12h10M11 18h2"/></svg>
             Filter{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
           </button>
-          {perms.invoiceCreate && <Btn sm variant="ghost" onClick={() => setBatching(true)}>Batch</Btn>}
-          {perms.invoiceCreate && <Btn sm onClick={() => setCreating(true)}>+ New</Btn>}
+          {perms.invoiceCreate && <Btn sm variant="ghost" onClick={() => setBatching(true)} style={{ minHeight: 40 }}>Batch</Btn>}
+          {perms.invoiceCreate && <Btn sm onClick={() => setCreating(true)} style={{ minHeight: 40 }}>+ New</Btn>}
         </div>
       </div>
 
@@ -18406,22 +18639,26 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
 // ── Snapshot guardrail (Bug 0 part two) ──────────────────────────────────────
 // Before any import, merge, or restore, save a FULL snapshot of app_state to the
 // app_state_backups table so a bad bulk write is a one-tap undo. Keeps the most
-// recent few and trims the rest. Best-effort: a snapshot failure (e.g. the table
-// hasn't been created yet) is logged and NEVER blocks the operation it guards.
+// recent few and trims the rest. Routine imports treat it as best-effort; destructive
+// restore/reset flows require success and reuse the same read as their CAS baseline.
 const SNAPSHOT_KEEP = 3;
 async function snapshotState(label) {
   try {
-    const { data, error } = await supabase.from("app_state").select("key, value");
+    const { data, error } = await supabase.from("app_state").select("key, value, version");
     if (error) { console.warn("snapshot read failed:", error.message); return false; }
-    const snap = {};
-    (data || []).forEach(r => { snap[r.key] = r.value; }); // raw stringified values
+    const snap = {}, values = {}, versions = {};
+    (data || []).forEach(r => {
+      snap[r.key] = r.value; // raw stringified values
+      versions[r.key] = Number(r.version) || 0;
+      try { values[r.key] = JSON.parse(r.value); } catch { values[r.key] = r.value; }
+    });
     const { error: insErr } = await supabase.from("app_state_backups").insert({ label: label || "Auto", snapshot: snap });
     if (insErr) { console.warn("snapshot insert failed:", insErr.message); return false; }
     const { data: rows } = await supabase.from("app_state_backups").select("id").order("created_at", { ascending: false });
     if (rows && rows.length > SNAPSHOT_KEEP) {
       await supabase.from("app_state_backups").delete().in("id", rows.slice(SNAPSHOT_KEEP).map(r => r.id));
     }
-    return true;
+    return { ok: true, values, versions };
   } catch (e) { console.warn("snapshot failed:", e?.message || e); return false; }
 }
 async function loadSnapshots() {
@@ -18430,30 +18667,34 @@ async function loadSnapshots() {
     return error ? [] : (data || []);
   } catch { return []; }
 }
-async function applySnapshot(id) {
+async function applySnapshot(id, baselineVersions = null) {
   const { data, error } = await supabase.from("app_state_backups").select("snapshot").eq("id", id).single();
   if (error || !data) throw new Error(error?.message || "Snapshot not found");
   const snap = data.snapshot || {};
+  if (!baselineVersions) {
+    const { data: versionRows, error: versionError } = await supabase.from("app_state").select("key, version");
+    if (versionError) throw new Error(versionError.message || "Could not establish a safe restore baseline");
+    baselineVersions = Object.fromEntries((versionRows || []).map((row) => [row.key, Number(row.version) || 0]));
+  }
+  const operations = [];
   for (const key of Object.keys(snap)) {
+    if (preserveDuringBulkRestore(key)) continue;
     const json = typeof snap[key] === "string" ? snap[key] : JSON.stringify(snap[key]);
     // Build 15, Item 1 — never restore a corrupted team (no owner); it would drop the owner.
     if (!restoreTeamGuard(key, json)) { console.warn("[team-guard] skipped restoring sps_team with no owner"); continue; }
-    await store.set(key, json);
+    operations.push({ key, value: json, expectedVersion: baselineVersions[key] || 0 });
   }
+  const result = await store.replaceMany(operations);
+  if (!result || !result.ok) throw new Error(`Restore was not applied; ${result?.conflictKey || "shared data"} changed or the atomic save failed.`);
 }
 
 // ── Master Backup & Restore (owner-only) ─────────────────────────────────────
-// One .zip of EVERYTHING: data.json (every app_state row) + /media (each embedded
-// photo/video/doc) + manifest.json. Media lives as base64 data: URLs inside the
-// JSON, so we extract each to a real /media file and leave a slim {_media} reference
-// in data.json. "Data only" omits the /media files for a small, fast daily copy.
-// Restore rebuilds media from /media; for a data-only file it preserves whatever
-// media is currently on each record (so a data-only restore never wipes photos).
-const BACKUP_MIME_EXT = {
-  "image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png", "image/gif": "gif",
-  "image/webp": "webp", "image/heic": "heic", "image/heif": "heif",
-  "video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm", "application/pdf": "pdf",
-};
+// One .zip of EVERYTHING: data.json (every app_state row) + /media (inline media AND
+// every referenced Supabase Storage object) + manifest.json. The manifest records the
+// expected, captured, and failed media counts so an incomplete archive is never labeled
+// as a full backup. Restore uploads archive media back to Storage instead of inflating
+// client records with base64 again. Data-only restores durable refs and only preserves legacy
+// inline media when its containing record can be matched by a stable identity.
 function blobToB64(blob) {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -18469,13 +18710,12 @@ function fmtBytes(b) {
   return Math.max(1, Math.round(b / 1e3)) + " KB";
 }
 
-// ── One-time: move existing photos out of the backup into Supabase Storage ──────
-// Reads the photo-bearing backup (sps_backups), uploads every photo to the client-media bucket, and
-// links them back into the live clients (matched by client id, then by position). Owner-only, safe to
-// re-run (already-Storage photos pass through; a failed upload stays inline so nothing is lost), and
-// it snapshots the current clients to sps_backups before saving.
+// ── One-time: move legacy inline client media into protected Storage ───────────
+// Uses live clients plus any old photo backup, matches only stable client/history/equipment IDs,
+// verifies each upload, and relinks with an exact-version CAS. Failed files remain inline and a
+// concurrent client edit cancels the relink, so this owner-only migration is safe to re-run.
 function PhotoMigration() {
-  const { T } = useApp();
+  const { T, perms } = useApp();
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);     // { type, text }
   const [progress, setProgress] = useState("");
@@ -18483,56 +18723,107 @@ function PhotoMigration() {
 
   const run = async () => {
     if (busy) return;
-    setBusy(true); setMsg(null); setProgress("Reading your photo backup…");
+    setBusy(true); setMsg(null); setProgress("Reading legacy media…");
     try {
       const { data: backups, error: be } = await supabase.from("sps_backups").select("key, value");
-      if (be) throw new Error(be.message);
+      if (be) console.warn("legacy photo backup unavailable; migrating live media only:", be.message);
       const cands = (backups || []).filter(b => String(b.key).startsWith("sps_clients"));
-      if (!cands.length) throw new Error("No client backup found in sps_backups.");
       cands.sort((a, b) => (b.value || "").length - (a.value || "").length); // the one with photos is biggest
-      const backupClients = deepParse(cands[0].value);
-      if (!Array.isArray(backupClients)) throw new Error("Backup couldn't be read as a client list.");
+      const backupClients = cands.length ? deepParse(cands[0].value) : [];
+      if (!Array.isArray(backupClients)) throw new Error("The legacy client backup could not be read.");
 
-      const liveRaw = await store.get("sps_clients");
-      const liveClients = deepParse(liveRaw && liveRaw.value);
+      // Capture the live row and version directly. The final batch CAS refuses to save if another
+      // employee changes any client while uploads are running, so this migration never overwrites
+      // newer client/history/document work.
+      const { data: liveRow, error: liveError } = await supabase.from("app_state").select("key, value, version").eq("key", "sps_clients").single();
+      if (liveError || !liveRow) throw new Error(liveError?.message || "Current clients could not be read.");
+      const liveClients = deepParse(liveRow.value);
       if (!Array.isArray(liveClients)) throw new Error("Current clients couldn't be read.");
+      const baselineVersion = Number(liveRow.version);
+      if (!Number.isSafeInteger(baselineVersion) || baselineVersion < 1) throw new Error("Run the concurrency migration before moving legacy media.");
 
-      const bById = {}; backupClients.forEach(c => { if (c && c.id != null) bById[c.id] = c; });
-      let uploaded = 0, failed = 0; const cache = new Map();
-      const up = async (src) => {
-        if (!src || typeof src !== "string" || !src.startsWith("data:")) return src; // already a URL / empty → leave
+      let uploaded = 0, normalized = 0, failed = 0; const cache = new Map();
+      const up = async (src, options = {}) => {
+        if (!src || typeof src !== "string") return src;
         if (cache.has(src)) return cache.get(src);
-        const url = await uploadToStorage(src);
-        if (url && !url.startsWith("data:")) { uploaded++; cache.set(src, url); setProgress(`Uploaded ${uploaded} photo${uploaded === 1 ? "" : "s"}…`); return url; }
+        const existingLocator = parseStorageLocator(src);
+        if (existingLocator && existingLocator.bucket === CLIENT_MEDIA_BUCKET) {
+          if (src === existingLocator.ref) return src;
+          const verified = await supabase.storage.from(existingLocator.bucket).download(existingLocator.path);
+          if (!verified.error && verified.data && verified.data.size > 0) {
+            normalized += 1;
+            cache.set(src, existingLocator.ref);
+            return existingLocator.ref;
+          }
+          failed += 1;
+          return src;
+        }
+        if (!src.startsWith("data:")) return src; // unrelated external URL / bundled asset
+        const url = await uploadToStorage(src, options);
+        if (url && !url.startsWith("data:")) {
+          const locator = parseStorageLocator(url);
+          const expected = parseDataUrl(src);
+          const verified = locator ? await supabase.storage.from(locator.bucket).download(locator.path) : { data: null, error: new Error("Invalid Storage reference") };
+          if (!verified.error && verified.data && verified.data.size > 0 && (!expected || verified.data.size === expected.size)) {
+            uploaded++; cache.set(src, url); setProgress(`Uploaded ${uploaded} file${uploaded === 1 ? "" : "s"}…`); return url;
+          }
+          console.warn("legacy media verification failed:", verified.error?.message || "uploaded byte count did not match");
+        }
         failed++; return src; // upload failed → keep inline, never lose it
       };
-      const upArr = async (arr) => { if (!Array.isArray(arr)) return arr; const out = []; for (const p of arr) { if (typeof p === "string") out.push(await up(p)); else if (p && p.src) out.push({ ...p, src: await up(p.src) }); else out.push(p); } return out; };
+      const upArr = async (arr, options = {}) => {
+        if (!Array.isArray(arr)) return arr;
+        const out = [];
+        for (const item of arr) {
+          if (typeof item === "string") out.push(await up(item, options));
+          else if (item && item.src) out.push({ ...item, src: await up(item.src, { ...options, name: item.name || options.name || "media" }) });
+          else out.push(item);
+        }
+        return out;
+      };
       // Prefer the live photos (newer) if present, else the backup's; then ensure all are in Storage.
-      const fix = async (livePhotos, backupPhotos) => upArr((Array.isArray(livePhotos) && livePhotos.length) ? livePhotos : backupPhotos);
-
+      const fix = async (liveMedia, backupMedia, options, migrationOptions) =>
+        upArr(selectLegacyMediaForMigration(liveMedia, backupMedia, migrationOptions), options);
       const merged = [];
       for (const lc of liveClients) {
-        const bc = bById[lc && lc.id];
-        if (!bc) { merged.push(lc); continue; }
+        // Duplicate legacy ids are not safe evidence of ownership. Use backup fallback only when
+        // exactly one old client owns this id; otherwise migrate the live record by itself.
+        const bc = findUniqueStableMatch(backupClients, lc, ["id"]);
         const nc = { ...lc };
-        nc.sitePhotos = await fix(lc.sitePhotos, bc.sitePhotos);
-        nc.siteVideos = await fix(lc.siteVideos, bc.siteVideos);
+        const clientOptions = { clientId: lc && lc.id != null ? lc.id : "shared" };
+        nc.sitePhotos = await fix(lc.sitePhotos, bc && bc.sitePhotos, { ...clientOptions, kind: "photos" }, { recoverFromBackup: true });
+        nc.siteVideos = await fix(lc.siteVideos, bc && bc.siteVideos, { ...clientOptions, kind: "videos" }, { recoverFromBackup: true });
+        // Documents deliberately use live data only. An empty live list can mean the owner deleted
+        // a contract; reviving it from a stale recovery snapshot would undo that privacy decision.
+        nc.documents = await fix(lc.documents, bc && bc.documents, { ...clientOptions, kind: "documents" });
         if (Array.isArray(lc.history)) {
           nc.history = [];
-          for (let i = 0; i < lc.history.length; i++) { const lh = lc.history[i]; const bh = (bc.history || [])[i]; nc.history.push(lh ? { ...lh, photos: await fix(lh.photos, bh && bh.photos) } : lh); }
+          for (const lh of lc.history) {
+            const bh = findUniqueStableMatch(bc && bc.history, lh, ["completionReceiptId", "sid", "id"]);
+            nc.history.push(lh ? { ...lh, photos: await fix(lh.photos, bh && bh.photos, { ...clientOptions, kind: "history" }, { recoverFromBackup: true }) } : lh);
+          }
         }
         if (Array.isArray(lc.equipment)) {
           nc.equipment = [];
-          for (let i = 0; i < lc.equipment.length; i++) { const le = lc.equipment[i]; const bo = (bc.equipment || [])[i]; nc.equipment.push(le ? { ...le, photos: await fix(le.photos, bo && bo.photos) } : le); }
+          for (const le of lc.equipment) {
+            const bo = findUniqueStableMatch(bc && bc.equipment, le, ["id", "serialNumber"]);
+            nc.equipment.push(le ? { ...le, photos: await fix(le.photos, bo && bo.photos, { ...clientOptions, kind: "equipment" }, { recoverFromBackup: true }) } : le);
+          }
         }
         merged.push(nc);
       }
 
       setProgress("Saving…");
       try { await supabase.from("sps_backups").insert({ key: `sps_clients_premigrate_${Date.now()}`, value: JSON.stringify(liveClients) }); } catch (_) {}
-      const res = await store.set("sps_clients", JSON.stringify(merged));
-      if (!res || !res.ok) throw new Error("Couldn't save — your changes are queued; try again in a moment.");
-      setMsg({ type: "ok", text: `Restored ${uploaded} photo${uploaded === 1 ? "" : "s"} to Storage${failed ? ` (${failed} kept inline — re-run to retry)` : ""}. Reloading…` });
+      if (JSON.stringify(merged) === JSON.stringify(liveClients)) {
+        setMsg({ type: "ok", text: "No legacy inline client media needs to be moved." });
+        setProgress("");
+        return;
+      }
+      const res = await store.replaceMany([{ key: "sps_clients", value: JSON.stringify(merged), expectedVersion: baselineVersion }]);
+      if (!res || !res.ok) throw new Error("Clients changed while files were uploading, so nothing was relinked. Retry to use the latest client records.");
+      const moved = uploaded + normalized;
+      setMsg({ type: "ok", text: `Moved ${moved} legacy file reference${moved === 1 ? "" : "s"} to protected Storage${failed ? ` (${failed} kept unchanged — re-run to retry)` : ""}. Reloading…` });
       setProgress(""); setTimeout(() => window.location.reload(), 1800);
     } catch (e) {
       setMsg({ type: "error", text: (e && e.message) || "Migration failed — nothing was changed." });
@@ -18540,15 +18831,16 @@ function PhotoMigration() {
     } finally { setBusy(false); }
   };
 
+  if (!perms?.isAdmin) return null;
   return (
     <div style={{ padding: "0 18px 18px" }}>
       <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 16, display: "flex", flexDirection: "column", gap: 10 }}>
         <div>
-          <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text }}>Restore photos to cloud Storage</div>
-          <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 3, lineHeight: 1.5 }}>One-time: pulls your existing photos out of the backup, uploads them to Storage, and links them back into your clients. Safe to re-run; your backup stays intact.</div>
+          <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text }}>Move legacy client media to protected Storage</div>
+          <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 3, lineHeight: 1.5 }}>Owner-only: moves existing inline photos, videos, and documents out of client records. Failed uploads stay inline, and a concurrent client edit cancels the relink instead of being overwritten.</div>
         </div>
         {msg && <div style={{ fontSize: 12.5, fontWeight: 600, color: msg.type === "ok" ? "#157a12" : "#C0392B", background: msg.type === "ok" ? hexA("#16a34a", 0.1) : hexA("#E5484D", 0.1), borderRadius: 10, padding: "9px 12px" }}>{msg.text}</div>}
-        <Btn sm onClick={run} disabled={busy} style={{ alignSelf: "flex-start" }}>{busy ? (progress || "Working…") : "Restore photos"}</Btn>
+        <Btn sm onClick={run} disabled={busy} style={{ alignSelf: "flex-start" }}>{busy ? (progress || "Working…") : "Move legacy media"}</Btn>
       </div>
     </div>
   );
@@ -18565,34 +18857,19 @@ function BackupRestore() {
   const fileRef = useRef(null);
   useEffect(() => { loadSnapshots().then(setSnaps); }, []);
 
-  const fetchAllState = async () => {
-    const { data, error } = await supabase.from("app_state").select("key, value");
+  const fetchAllState = async ({ withVersions = false } = {}) => {
+    const { data, error } = await supabase.from("app_state").select("key, value, version");
     if (error) throw new Error(error.message);
-    const obj = {};
-    (data || []).forEach(r => { try { obj[r.key] = JSON.parse(r.value); } catch { obj[r.key] = r.value; } });
-    return obj;
-  };
-
-  // Pull every base64 data: URL into a /media file + leave a {_media} reference.
-  const extractMedia = (dataObj) => {
-    const media = []; let n = 0;
-    const walk = (v) => {
-      if (typeof v === "string" && v.startsWith("data:")) {
-        const m = v.match(/^data:([^;,]+);base64,([\s\S]*)$/);
-        if (m) {
-          const mime = m[1], b64 = m[2];
-          const ext = BACKUP_MIME_EXT[mime.toLowerCase()] || "bin";
-          const path = `media/${String(++n).padStart(5, "0")}.${ext}`;
-          media.push({ path, b64, mime, size: Math.round(b64.length * 0.75) });
-          return { _media: path, _mime: mime };
-        }
-        return v;
+    const values = {}, versions = {};
+    (data || []).forEach(r => {
+      let decoded = r.value;
+      for (let pass = 0; pass < 2 && typeof decoded === "string"; pass += 1) {
+        try { decoded = JSON.parse(decoded); } catch { break; }
       }
-      if (Array.isArray(v)) return v.map(walk);
-      if (v && typeof v === "object") { const o = {}; for (const k in v) o[k] = walk(v[k]); return o; }
-      return v;
-    };
-    return { refData: walk(dataObj), media };
+      values[r.key] = decoded;
+      versions[r.key] = Number(r.version) || 0;
+    });
+    return withVersions ? { values, versions } : values;
   };
 
   const saveZip = async (blob, filename) => {
@@ -18615,25 +18892,52 @@ function BackupRestore() {
       const dataObj = await fetchAllState();
       // Client chat threads live in their own table (sps_messages), not app_state —
       // include them so the backup is genuinely everything in a client's file.
-      const { data: msgRows } = await supabase.from("sps_messages").select("*");
+      const { data: msgRows, error: messagesError } = await supabase.from("sps_messages").select("*");
+      if (messagesError) throw new Error(`Chat history could not be read: ${messagesError.message}`);
       const messages = msgRows || [];
-      const { refData, media } = extractMedia(dataObj);
+      const { refData, media, failures, candidateCount, uniqueMediaCount } = await buildMediaArchive(dataObj, {
+        includeMedia: withMedia,
+        loadStorage: storageObjectToB64,
+        loadExternal: externalObjectToB64,
+      });
       const JSZip = (await import("jszip")).default;
       const zip = new JSZip();
       zip.file("data.json", JSON.stringify(refData));
       zip.file("messages.json", JSON.stringify(messages)); // chat history (small text — in both modes)
       const mediaBytes = media.reduce((s, m) => s + m.size, 0);
       if (withMedia) media.forEach(m => zip.file(m.path, m.b64, { base64: true }));
+      const mediaComplete = withMedia ? failures.length === 0 && media.length === uniqueMediaCount : null;
       zip.file("manifest.json", JSON.stringify({
-        backupVersion: 1, createdAt: new Date().toISOString(), appVersion: "1.0",
+        backupVersion: 2, createdAt: new Date().toISOString(), appVersion: "1.0",
         dataOnly: !withMedia, keys: Object.keys(dataObj).length, messagesCount: messages.length,
-        mediaCount: media.length, mediaBytes,
-        media: media.map(m => ({ path: m.path, mime: m.mime, size: m.size, ok: withMedia })),
+        mediaComplete,
+        mediaReferenceCount: candidateCount,
+        mediaExpectedCount: uniqueMediaCount,
+        mediaCount: withMedia ? media.length : 0,
+        mediaFailedCount: withMedia ? failures.length : 0,
+        mediaBytes: withMedia ? mediaBytes : 0,
+        media: withMedia ? [
+          ...media.map(m => ({ path: m.path, mime: m.mime, size: m.size, source: m.source, ok: true })),
+          ...failures.map(f => ({ path: f.path, source: f.source, error: f.error, ok: false })),
+        ] : [],
       }, null, 2));
       const blob = await zip.generateAsync({ type: "blob", compression: "STORE" });
-      await saveZip(blob, `SPS-Master-Backup-${new Date().toISOString().slice(0, 10)}.zip`);
-      setSummary({ keys: Object.keys(dataObj).length, messages: messages.length, mediaCount: withMedia ? media.length : 0, mediaBytes: withMedia ? mediaBytes : 0, zipBytes: blob.size, dataOnly: !withMedia });
-      setMsg({ type: "ok", text: withMedia ? "Backup ready — choose where to save it." : "Data-only backup ready (no photos/videos)." });
+      const prefix = withMedia && !mediaComplete ? "SPS-INCOMPLETE-Media-Backup" : "SPS-Master-Backup";
+      await saveZip(blob, `${prefix}-${new Date().toISOString().slice(0, 10)}.zip`);
+      setSummary({
+        keys: Object.keys(dataObj).length,
+        messages: messages.length,
+        mediaCount: withMedia ? media.length : 0,
+        mediaExpected: withMedia ? uniqueMediaCount : 0,
+        mediaFailed: withMedia ? failures.length : 0,
+        mediaBytes: withMedia ? mediaBytes : 0,
+        zipBytes: blob.size,
+        dataOnly: !withMedia,
+        complete: !withMedia || mediaComplete,
+      });
+      setMsg(withMedia && !mediaComplete
+        ? { type: "warning", text: `Incomplete media backup saved: ${failures.length} of ${uniqueMediaCount} media files could not be downloaded. The manifest lists each failure; retry on a stable connection before relying on this file as a full backup.` }
+        : { type: "ok", text: withMedia ? "Verified full backup ready — every referenced media file was included." : "Data-only backup ready (media files excluded)." });
     } catch (e) {
       setMsg({ type: "error", text: "Backup failed: " + (e.message || "unknown error") });
     } finally { setBusy(""); }
@@ -18644,49 +18948,149 @@ function BackupRestore() {
     setBusy("restore"); setMsg(null); setSummary(null);
     try {
       const JSZip = (await import("jszip")).default;
-      const zip = await JSZip.loadAsync(file);
+      // CRC verification catches a damaged ZIP before any restored object is uploaded or any
+      // app_state section is changed. JSZip otherwise defers most corruption errors until read.
+      const zip = await JSZip.loadAsync(file, { checkCRC32: true });
       const dataFile = zip.file("data.json");
       if (!dataFile) throw new Error("This doesn't look like an SPS backup (no data.json).");
       const manFile = zip.file("manifest.json");
       const manifest = manFile ? JSON.parse(await manFile.async("string")) : {};
-      if (manifest.backupVersion && manifest.backupVersion > 1) throw new Error("This backup is from a newer app version. Update the app first, then restore.");
+      if (manifest.backupVersion && manifest.backupVersion > 2) throw new Error("This backup is from a newer app version. Update the app first, then restore.");
       const refData = JSON.parse(await dataFile.async("string"));
-      const mediaInZip = Object.keys(zip.files).filter(p => p.startsWith("media/") && !zip.files[p].dir).length;
-      setConfirm({ zip, refData, keys: Object.keys(refData).length, mediaInZip, messages: manifest.messagesCount || 0, dataOnly: !!manifest.dataOnly });
+      const mediaPaths = Object.keys(zip.files).filter(p => p.startsWith("media/") && !zip.files[p].dir);
+      const declaredMediaByPath = new Map((Array.isArray(manifest.media) ? manifest.media : [])
+        .filter(item => item && item.ok !== false && typeof item.path === "string")
+        .map(item => [item.path, Number(item.size) || 0]));
+      // A valid ZIP can still contain an empty/mis-sized media entry. Preflight every archived
+      // object now so restore never uploads the early files and only later discovers corruption.
+      for (const path of mediaPaths) {
+        const bytes = await zip.files[path].async("uint8array");
+        const declaredSize = declaredMediaByPath.get(path) || 0;
+        validateBackupMediaSize(path, bytes.byteLength, declaredSize);
+      }
+      const mediaInZip = mediaPaths.length;
+      const status = backupManifestStatus(manifest);
+      const declaredMedia = Number(manifest.mediaCount) || 0;
+      const archiveShortfall = Math.max(0, declaredMedia - mediaInZip);
+      setConfirm({
+        zip,
+        refData,
+        keys: Object.keys(refData).length,
+        mediaInZip,
+        messages: manifest.messagesCount || 0,
+        dataOnly: status.dataOnly,
+        mediaComplete: status.complete && archiveShortfall === 0,
+        mediaFailures: status.failures + archiveShortfall,
+        mediaVerified: Number(manifest.backupVersion) >= 2,
+      });
     } catch (e) {
       setMsg({ type: "error", text: "Couldn't read backup: " + (e.message || "unknown error") });
     } finally { setBusy(""); }
   };
 
   const doRestore = async () => {
-    const { zip, refData } = confirm;
+    const restoreFile = confirm;
+    const { zip, refData } = restoreFile;
     setBusy("restore"); setConfirm(null); setMsg(null);
     try {
-      await snapshotState("Before restore"); // so the restore itself can be undone
-      const cur = await fetchAllState(); // to preserve media on a data-only restore
-      const rebuild = async (v, curV) => {
+      // One read supplies the undo snapshot, media-preservation values, and CAS baseline. An edit
+      // after this point changes its version and pauses the restore instead of being overwritten.
+      const baseline = await snapshotState("Before restore");
+      if (!baseline) throw new Error("Could not create the required safety snapshot. Nothing was restored.");
+      const cur = baseline.values;
+      const baselineVersions = baseline.versions;
+      const restoreRunId = `backup-${Date.now()}`;
+      const restoredMediaRefs = new Map();
+      let restoredMedia = 0;
+      let restoredInlineAssets = 0;
+      let preservedMissingMedia = 0;
+      let unavailableMissingMedia = 0;
+      const stableIdentityKeys = ["id", "sid", "completionReceiptId", "receiptId", "uploadedAt", "takenAt"];
+      const hasStableIdentity = (item) => !!(item && typeof item === "object" && !Array.isArray(item) &&
+        stableIdentityKeys.some((key) => item[key] != null && String(item[key]) !== ""));
+      const containsMediaMarker = (item) => {
+        if (!item || typeof item !== "object") return false;
+        if (!Array.isArray(item) && item._media) return true;
+        return Object.values(item).some(containsMediaMarker);
+      };
+      const rebuild = async (v, curV, path = []) => {
         if (v && typeof v === "object" && !Array.isArray(v) && v._media) {
           const f = zip.file(v._media);
-          if (f) return `data:${v._mime || "application/octet-stream"};base64,${await f.async("base64")}`;
-          if (typeof curV === "string" && curV.startsWith("data:")) return curV; // keep existing media
+          if (f) {
+            // The logo is also needed while signed out (login/reset screens) and by server-rendered
+            // emails. Keep this small branding asset inline; customer media remains private Storage.
+            const inlineBrandAsset = path.length === 2 && path[0] === "sps_branding" && path[1] === "logoImage";
+            const restoredCacheKey = `${inlineBrandAsset ? "inline" : "storage"}:${v._media}`;
+            if (restoredMediaRefs.has(restoredCacheKey)) return restoredMediaRefs.get(restoredCacheKey);
+            if (inlineBrandAsset) {
+              const b64 = await f.async("base64");
+              const inlineLogo = `data:${v._mime || "image/png"};base64,${b64}`;
+              restoredMediaRefs.set(restoredCacheKey, inlineLogo);
+              restoredInlineAssets += 1;
+              return inlineLogo;
+            }
+            const rawBlob = await f.async("blob");
+            validateBackupMediaSize(v._media, rawBlob && rawBlob.size);
+            const blob = new Blob([rawBlob], { type: v._mime || rawBlob.type || "application/octet-stream" });
+            const src = await uploadBlobToStorage(blob, { kind: "restored", clientId: restoreRunId, name: v._media.split("/").pop() || "media" });
+            restoredMediaRefs.set(restoredCacheKey, src);
+            restoredMedia += 1;
+            return src;
+          }
+          // A verified full backup must contain every referenced media file. Treat a missing entry
+          // as archive corruption and abort before app_state changes. Data-only/incomplete/legacy
+          // backups preserve the current media link (or the durable original Storage reference).
+          if (!restoreFile.dataOnly && restoreFile.mediaVerified && restoreFile.mediaComplete) {
+            throw new Error(`Backup media file is missing or corrupt: ${v._media}`);
+          }
+          if (typeof v._storageRef === "string" && v._storageRef) { preservedMissingMedia += 1; return v._storageRef; }
+          if (typeof v._externalRef === "string" && /^https?:\/\//i.test(v._externalRef)) { preservedMissingMedia += 1; return v._externalRef; }
+          // For legacy inline media, preserve a current inline value only when its containing
+          // entity was matched by a stable identity below. Never borrow a neighboring array item.
+          if (typeof curV === "string" && curV.startsWith("data:")) { preservedMissingMedia += 1; return curV; }
+          unavailableMissingMedia += 1;
           return "";
         }
-        if (Array.isArray(v)) return Promise.all(v.map((it, i) => rebuild(it, Array.isArray(curV) ? curV[i] : undefined)));
-        if (v && typeof v === "object") { const o = {}; for (const k in v) o[k] = await rebuild(v[k], (curV && typeof curV === "object") ? curV[k] : undefined); return o; }
+        if (Array.isArray(v)) {
+          const currentArray = Array.isArray(curV) ? curV : [];
+          return Promise.all(v.map((item, index) => {
+            const matched = hasStableIdentity(item)
+              ? findUniqueStableMatch(currentArray, item, stableIdentityKeys)
+              : (containsMediaMarker(item) ? undefined : currentArray[index]);
+            return rebuild(item, matched, [...path, index]);
+          }));
+        }
+        if (v && typeof v === "object") {
+          const o = {};
+          for (const k in v) o[k] = await rebuild(v[k], (curV && typeof curV === "object") ? curV[k] : undefined, [...path, k]);
+          return o;
+        }
         return v;
       };
       let ok = 0, fail = 0;
+      const operations = [];
       for (const key of Object.keys(refData)) {
         try {
-          const json = JSON.stringify(await rebuild(refData[key], cur[key]));
+          // Account access is never transferred by a bulk data restore. Team/session changes require
+          // their dedicated owner-managed flows so the signed-in owner cannot lock themselves out.
+          if (preserveDuringBulkRestore(key)) continue;
+          const json = JSON.stringify(await rebuild(refData[key], cur[key], [key]));
           // Build 15, Item 1 — never restore a corrupted team (no owner); it would drop the owner.
           if (!restoreTeamGuard(key, json)) { console.warn("[team-guard] skipped restoring sps_team with no owner"); fail++; continue; }
-          const r = await store.set(key, json); if (r && r.ok) ok++; else fail++;  // count only confirmed writes
+          operations.push({ key, value: json, expectedVersion: baselineVersions[key] || 0 });
         }
-        catch (e) { fail++; console.warn("Restore key failed:", key, e.message); }
+        catch (e) {
+          console.warn("Restore key failed:", key, e.message);
+          throw e;
+        }
       }
+      const atomicRestore = await store.replaceMany(operations);
+      if (!atomicRestore || !atomicRestore.ok) {
+        throw new Error(`Restore was not applied; ${atomicRestore?.conflictKey || "shared data"} changed or the atomic save failed.`);
+      }
+      ok = operations.length;
       // Restore chat threads — upsert by id (non-destructive: never drops current messages).
-      let msgCount = 0;
+      let msgCount = 0, msgFailed = 0;
       const msgFile = zip.file("messages.json");
       if (msgFile) {
         try {
@@ -18695,13 +19099,20 @@ function BackupRestore() {
             for (let i = 0; i < msgs.length; i += 500) {
               const batch = msgs.slice(i, i + 500);
               const { error } = await supabase.from("sps_messages").upsert(batch, { onConflict: "id" });
-              if (!error) msgCount += batch.length; else console.warn("Message batch failed:", error.message);
+              if (!error) msgCount += batch.length;
+              else { msgFailed += batch.length; console.warn("Message batch failed:", error.message); }
             }
-          }
-        } catch (e) { console.warn("Message restore failed:", e.message); }
+          } else msgFailed = Math.max(1, Number(restoreFile.messages) || 0);
+        } catch (e) {
+          msgFailed = Math.max(1, Number(restoreFile.messages) || 0);
+          console.warn("Message restore failed:", e.message);
+        }
+      } else if (Number(restoreFile.messages) > 0) {
+        msgFailed = Number(restoreFile.messages);
       }
-      setMsg({ type: "ok", text: `Restored ${ok} section${ok !== 1 ? "s" : ""}${msgCount ? ` + ${msgCount} message${msgCount !== 1 ? "s" : ""}` : ""}${fail ? ` (${fail} failed)` : ""}. Reloading…` });
-      setTimeout(() => window.location.reload(), 1800);
+      const restoreHasWarnings = !!(preservedMissingMedia || unavailableMissingMedia || msgFailed);
+      setMsg({ type: restoreHasWarnings ? "warning" : "ok", text: `Restored ${ok} section${ok !== 1 ? "s" : ""}${msgCount ? ` + ${msgCount} message${msgCount !== 1 ? "s" : ""}` : ""}${restoredMedia ? ` + ${restoredMedia} media file${restoredMedia !== 1 ? "s" : ""} re-uploaded securely` : ""}${restoredInlineAssets ? ` + ${restoredInlineAssets} signed-out branding asset restored inline` : ""}${preservedMissingMedia ? `; ${preservedMissingMedia} missing media reference${preservedMissingMedia !== 1 ? "s were" : " was"} safely preserved` : ""}${unavailableMissingMedia ? `; ${unavailableMissingMedia} unmatched legacy media item${unavailableMissingMedia !== 1 ? "s were" : " was"} unavailable and left blank rather than borrowing another record's file` : ""}${msgFailed ? `; ${msgFailed} chat message${msgFailed !== 1 ? "s" : ""} could not be restored — retry this backup after reloading` : ""}${fail ? ` (${fail} failed)` : ""}. Reloading…` });
+      setTimeout(() => window.location.reload(), restoreHasWarnings ? 6000 : 1800);
     } catch (e) {
       setMsg({ type: "error", text: "Restore failed: " + (e.message || "unknown error") }); setBusy("");
     }
@@ -18711,8 +19122,9 @@ function BackupRestore() {
     const id = revertId; setRevertId(null);
     setBusy("restore"); setMsg(null);
     try {
-      await snapshotState("Before undo"); // so the undo is itself undoable
-      await applySnapshot(id);
+      const baseline = await snapshotState("Before undo"); // so the undo is itself undoable
+      if (!baseline) throw new Error("Could not create the required safety snapshot. Nothing was reverted.");
+      await applySnapshot(id, baseline.versions);
       setMsg({ type: "ok", text: "Reverted to that snapshot. Reloading…" });
       setTimeout(() => window.location.reload(), 1500);
     } catch (e) {
@@ -18730,7 +19142,7 @@ function BackupRestore() {
   return (
     <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
       <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>
-        A complete off-device copy of everything — every client file, products & services, branding, settings, chat threads, invoices, schedule, and (with the full backup) every photo and video. Saved as a dated .zip you can keep in Files / iCloud Drive and restore from later. Use Wi-Fi for full backups.
+        A complete off-device copy of everything — every client file, product, setting, chat thread, invoice, schedule item, photo, video, and document. Full backups download and verify Storage-hosted media before they are labeled complete. Saved as a dated .zip you can keep in Files / iCloud Drive and restore later. Use Wi-Fi for full backups.
       </div>
 
       <button disabled={!!busy} onClick={() => doExport(true)} style={btn(T.primary, "#fff")}>
@@ -18767,32 +19179,36 @@ function BackupRestore() {
       )}
 
       {summary && (
-        <div style={{ background: hexA(T.accent, 0.07), border: `1px solid ${hexA(T.accent, 0.25)}`, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.text, lineHeight: 1.6 }}>
-          <b>{summary.dataOnly ? "Data-only backup" : "Full backup"} created.</b><br />
+        <div style={{ background: summary.complete ? hexA(T.accent, 0.07) : hexA(T.warning, 0.09), border: `1px solid ${summary.complete ? hexA(T.accent, 0.25) : hexA(T.warning, 0.35)}`, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.text, lineHeight: 1.6 }}>
+          <b>{summary.dataOnly ? "Data-only backup" : summary.complete ? "Verified full backup" : "Incomplete media backup"} created.</b><br />
           {summary.keys} data section{summary.keys !== 1 ? "s" : ""}
           {summary.messages ? ` · ${summary.messages} chat message${summary.messages !== 1 ? "s" : ""}` : ""}
-          {summary.dataOnly ? " · media excluded" : ` · ${summary.mediaCount} media file${summary.mediaCount !== 1 ? "s" : ""} (${fmtBytes(summary.mediaBytes)})`}
+          {summary.dataOnly ? " · media files excluded" : ` · ${summary.mediaCount} of ${summary.mediaExpected} media file${summary.mediaExpected !== 1 ? "s" : ""} captured (${fmtBytes(summary.mediaBytes)})${summary.mediaFailed ? ` · ${summary.mediaFailed} failed` : ""}`}
           {" · "}zip {fmtBytes(summary.zipBytes)}
         </div>
       )}
       {msg && (
         <div style={{ fontSize: 13, fontWeight: 600, padding: "10px 13px", borderRadius: 11, lineHeight: 1.4,
-          background: msg.type === "error" ? hexA("#C0392B", 0.08) : hexA("#16a34a", 0.1),
-          color: msg.type === "error" ? "#C0392B" : "#157a12" }}>{msg.text}</div>
+          background: msg.type === "error" ? hexA("#C0392B", 0.08) : msg.type === "warning" ? hexA("#F59E0B", 0.1) : hexA("#16a34a", 0.1),
+          color: msg.type === "error" ? "#C0392B" : msg.type === "warning" ? "#92400E" : "#157a12" }}>{msg.text}</div>
       )}
 
       {confirm && (
         <Modal title="Restore from backup?" onClose={() => setConfirm(null)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <div style={{ background: hexA(T.warning, 0.1), border: `1px solid ${hexA(T.warning, 0.3)}`, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.text, lineHeight: 1.5 }}>
-              This <b>overwrites all current data</b> with the backup: {confirm.keys} section{confirm.keys !== 1 ? "s" : ""}
+              This <b>replaces the matching data sections</b> with the backup: {confirm.keys} section{confirm.keys !== 1 ? "s" : ""}
               {confirm.messages ? `, ${confirm.messages} chat message${confirm.messages !== 1 ? "s" : ""}` : ""}
-              {confirm.dataOnly ? " (data only — your current photos/videos are kept)" : ` and ${confirm.mediaInZip} media file${confirm.mediaInZip !== 1 ? "s" : ""}`}.
-              This can't be undone — make a fresh backup first if you're unsure.
+              {confirm.dataOnly
+                ? " (data only — durable media links are retained; legacy inline media is kept only when its record can be matched safely)"
+                : confirm.mediaVerified && confirm.mediaComplete
+                  ? ` and ${confirm.mediaInZip} verified media file${confirm.mediaInZip !== 1 ? "s" : ""}`
+                  : ` and ${confirm.mediaInZip} archived media file${confirm.mediaInZip !== 1 ? "s" : ""} (this backup is incomplete or predates media verification; missing files will be preserved from current data when possible)`}.
+              Sections not present in this backup remain unchanged; team access, sign-in, and active live-tracking links stay as-is. This can't be undone — make a fresh backup first if you're unsure.
             </div>
             <div style={{ display: "flex", gap: 10 }}>
               <button onClick={() => setConfirm(null)} style={{ flex: 1, background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 12, padding: "13px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
-              <button onClick={doRestore} style={{ flex: 1, background: "#C0392B", color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Overwrite &amp; restore</button>
+              <button onClick={doRestore} style={{ flex: 1, background: "#C0392B", color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Restore backup</button>
             </div>
           </div>
         </Modal>
@@ -19360,7 +19776,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
               : <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 4, fontStyle: "italic" }}>No message left</div>}
             <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{meta}</div>
           </div>
-          {firstImg && <img src={firstImg} alt="" loading="lazy" onError={e => { e.target.style.display = "none"; }} style={{ width: 52, height: 52, borderRadius: 12, objectFit: "cover", border: `1px solid ${T.border}`, flexShrink: 0, background: T.surfaceAlt }} />}
+          {firstImg && <ProtectedImage src={firstImg} alt="" loading="lazy" onError={e => { e.target.style.display = "none"; }} style={{ width: 52, height: 52, borderRadius: 12, objectFit: "cover", border: `1px solid ${T.border}`, flexShrink: 0, background: T.surfaceAlt }} />}
         </div>
         );
       })}
@@ -19391,9 +19807,9 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
                 <label style={lbl}>Photos & video ({sel.photos.length})</label>
                 <div style={{ display: "grid", gridTemplateColumns: sel.photos.length === 1 ? "1fr" : "1fr 1fr", gap: 8 }}>
                   {sel.photos.map((u, i) => /\.(mp4|mov|webm|m4v)(\?|$)/i.test(String(u)) ? (
-                    <video key={i} src={u} controls playsInline preload="metadata" style={{ width: "100%", maxHeight: 260, borderRadius: 12, border: `1px solid ${T.border}`, background: "#000", objectFit: "cover" }} />
+                    <ProtectedVideo key={i} src={u} controls playsInline preload="metadata" style={{ width: "100%", maxHeight: 260, borderRadius: 12, border: `1px solid ${T.border}`, background: "#000", objectFit: "cover" }} />
                   ) : (
-                    <img key={i} src={u} alt="Lead attachment" loading="lazy" onClick={() => setLightbox(u)} onError={e => { e.target.style.display = "none"; }}
+                    <ProtectedImage key={i} src={u} alt="Lead attachment" loading="lazy" onClick={() => setLightbox(u)} onError={e => { e.target.style.display = "none"; }}
                       style={{ width: "100%", height: sel.photos.length === 1 ? "auto" : 150, maxHeight: 320, objectFit: "cover", borderRadius: 12, border: `1px solid ${T.border}`, cursor: "pointer", background: T.surfaceAlt }} />
                   ))}
                 </div>
@@ -19481,7 +19897,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
       {/* In-app photo lightbox — full-screen overlay, tap anywhere (or ✕) to close. No browser hop. */}
       {lightbox && createPortal(
         <div onClick={() => setLightbox(null)} style={{ position: "fixed", inset: 0, zIndex: 10050, background: "rgba(0,0,0,0.9)", display: "flex", alignItems: "center", justifyContent: "center", padding: 18 }}>
-          <img src={lightbox} alt="" style={{ maxWidth: "100%", maxHeight: "94%", borderRadius: 12, objectFit: "contain" }} />
+          <ProtectedImage src={lightbox} alt="" style={{ maxWidth: "100%", maxHeight: "94%", borderRadius: 12, objectFit: "contain" }} />
           <button onClick={() => setLightbox(null)} aria-label="Close"
             style={{ position: "absolute", top: "max(16px, env(safe-area-inset-top))", right: 16, width: 40, height: 40, borderRadius: "50%", border: "none", background: "rgba(255,255,255,0.16)", color: "#fff", fontSize: 18, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>✕</button>
         </div>,
@@ -19511,6 +19927,8 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
   const schedCtl = useSectionAutosave(scheduleCfg, setScheduleCfg);
   const localBranding = brandCtl.draft;
   const [confirmReset, setConfirmReset] = useState(false);
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetError, setResetError] = useState("");
   const [palette, setPalette, lpal] = useStoredState("sps_palette", DEFAULT_PALETTE);
   const [editingPalette, setEditingPalette] = useState(false);
   const [newPaletteHex, setNewPaletteHex] = useState("#000000");
@@ -19603,15 +20021,21 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             <div style={{ padding: "0 18px 18px" }}>
               {!confirmReset ? (
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, borderTop: `1px solid ${T.border}`, paddingTop: 16 }}>
-                  <div style={{ fontSize: 13, color: T.textMuted }}>Reset all data — clear everything and restore demo defaults. Can't be undone.</div>
+                  <div style={{ fontSize: 13, color: T.textMuted }}>Reset the main app data and settings to demo defaults. Team access and integration connections stay intact.</div>
                   <button onClick={() => setConfirmReset(true)} style={{ flexShrink: 0, background: "transparent", color: "#C0392B", border: `1.5px solid #C0392B`, borderRadius: 10, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Reset</button>
                 </div>
               ) : (
                 <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 16 }}>
-                  <div style={{ fontSize: 13, color: T.text, marginBottom: 12, fontWeight: 600 }}>This erases everything. Are you sure?</div>
+                  <div style={{ fontSize: 13, color: T.text, marginBottom: 12, fontWeight: 600 }}>This replaces the main business data with demo defaults. Are you sure?</div>
+                  {resetError && <div style={{ fontSize: 12, color: "#C0392B", marginBottom: 10 }}>{resetError}</div>}
                   <div style={{ display: "flex", gap: 10 }}>
-                    <button onClick={() => { onResetData(); setConfirmReset(false); }} style={{ background: "#C0392B", color: "#fff", border: "none", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Yes, Reset Everything</button>
-                    <button onClick={() => setConfirmReset(false)} style={{ background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+                    <button disabled={resetBusy} onClick={async () => {
+                      setResetBusy(true); setResetError("");
+                      try { await onResetData(); setConfirmReset(false); }
+                      catch (error) { setResetError((error && error.message) || "Reset paused because a section could not be saved."); }
+                      finally { setResetBusy(false); }
+                    }} style={{ background: "#C0392B", color: "#fff", border: "none", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: resetBusy ? "wait" : "pointer", fontFamily: "inherit", opacity: resetBusy ? 0.65 : 1 }}>{resetBusy ? "Resetting…" : "Yes, Reset Everything"}</button>
+                    <button disabled={resetBusy} onClick={() => { setConfirmReset(false); setResetError(""); }} style={{ background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: resetBusy ? "default" : "pointer", fontFamily: "inherit", opacity: resetBusy ? 0.65 : 1 }}>Cancel</button>
                   </div>
                 </div>
               )}
@@ -19629,7 +20053,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
           <div style={{ display: "flex", gap: 14, alignItems: "center", background: T.surfaceAlt, borderRadius: 14, padding: "14px 16px" }}>
             <div style={{ width: 52, height: 52, borderRadius: 14, background: T.surface, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
               {localBranding.logoType === "image" && localBranding.logoImage
-                ? <img src={localBranding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                ? <ProtectedImage src={localBranding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                 : <span style={{ fontSize: 26, fontWeight: 800, color: T.primary }}>{logoInitial(localBranding)}</span>}
             </div>
             <div>
@@ -20194,13 +20618,22 @@ function CopyLine({ icon, value, prominent = false }) {
 // Backed by the sps_messages table in Supabase.
 // ─────────────────────────────────────────────
 
-// Shared hook — loads messages for a given clientId, with real-time polling
-function useMessages(clientId) {
+// Shared hook — loads messages for a given clientId, with real-time polling. Real client sessions
+// use the scoped portal API; staff continue using Supabase directly under staff-only RLS.
+function useMessages(clientId, portalMode = false) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const load = async () => {
     if (!clientId) return;
+    if (portalMode) {
+      try {
+        const r = await fetch(`${PROD_URL}/api/portal-messages`, { headers: await authHeaders(), cache: "no-store" });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && Array.isArray(d.messages)) setMessages(d.messages);
+      } finally { setLoading(false); }
+      return;
+    }
     const { data, error } = await supabase
       .from("sps_messages")
       .select("*")
@@ -20215,10 +20648,20 @@ function useMessages(clientId) {
     load();
     const interval = setInterval(load, 8000); // poll every 8s
     return () => clearInterval(interval);
-  }, [clientId]);
+  }, [clientId, portalMode]);
 
   const send = async (body, sender, senderName) => {
     if (!body.trim() || !clientId) return;
+    if (portalMode) {
+      const r = await fetch(`${PROD_URL}/api/portal-messages`, {
+        method: "POST",
+        headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ body: body.trim() }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && d.message) setMessages(prev => [...prev, d.message]);
+      return !!(r.ok && d.message);
+    }
     const { data, error } = await supabase.from("sps_messages").insert({
       client_id: String(clientId),
       sender,
@@ -20231,6 +20674,14 @@ function useMessages(clientId) {
 
   const markRead = async (msgIds) => {
     if (!msgIds.length) return;
+    if (portalMode) {
+      await fetch(`${PROD_URL}/api/portal-messages`, {
+        method: "PATCH",
+        headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ ids: msgIds }),
+      });
+      return;
+    }
     await supabase.from("sps_messages").update({ read_at: new Date().toISOString() }).in("id", msgIds);
   };
 
@@ -20599,12 +21050,16 @@ function VisitCommsGroup({ group, T, fmt, fmtDay, stepOf, line }) {
   );
 }
 
-function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onSent, onOpenInvoice, onOpenService }) {
-  const { messages, loading, send, markRead } = useMessages(clientId);
+function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onSent, onOpenInvoice, onOpenService, portalMode = false, keyboardAware = false }) {
+  const { messages, loading, send, markRead } = useMessages(clientId, portalMode);
+  const kb = useKeyboardInset();
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [sendErr, setSendErr] = useState("");
   const bottomRef = useRef(null);
+  const composerInset = kb > 0
+    ? (portalMode ? Math.max(0, kb - 96) + 8 : (keyboardAware ? kb + 8 : 0))
+    : 0;
 
   // Scroll to bottom on new messages
   useEffect(() => {
@@ -20686,17 +21141,17 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
       )}
 
       {/* Input */}
-      <div style={{ borderTop: `1px solid ${T.border}`, padding: "12px 0 0", display: "flex", gap: 10, alignItems: "flex-end" }}>
+      <div style={{ borderTop: `1px solid ${T.border}`, padding: `12px 0 ${composerInset}px`, display: "flex", gap: 10, alignItems: "flex-end", transition: "padding-bottom 0.18s ease" }}>
         <textarea
           value={draft}
           onChange={e => setDraft(e.target.value)}
           onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
           placeholder="Type a message..."
           rows={1}
-          style={{ flex: 1, padding: "11px 14px", border: `1.5px solid ${T.border}`, borderRadius: 14, fontSize: 14, fontFamily: "inherit", resize: "none", outline: "none", color: T.text, background: T.surface, lineHeight: 1.5, maxHeight: 120, overflowY: "auto" }}
+          style={{ flex: 1, minWidth: 0, padding: "11px 14px", border: `1.5px solid ${T.border}`, borderRadius: 14, fontSize: 14, fontFamily: "inherit", resize: "none", outline: "none", color: T.text, background: T.surface, lineHeight: 1.5, maxHeight: 120, overflowY: "auto" }}
         />
         <button onClick={handleSend} disabled={!draft.trim() || sending}
-          style={{ width: 42, height: 42, borderRadius: 13, background: draft.trim() ? T.primary : T.surfaceAlt, border: "none", color: draft.trim() ? "#fff" : T.textMuted, cursor: (draft.trim() && !sending) ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "background 0.15s" }}>
+          style={{ width: 44, height: 44, borderRadius: 13, background: draft.trim() ? T.primary : T.surfaceAlt, border: "none", color: draft.trim() ? "#fff" : T.textMuted, cursor: (draft.trim() && !sending) ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "background 0.15s" }}>
           {sending
             ? <div style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.5)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />
             : <svg viewBox="0 0 24 24" width={18} height={18} fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>}
@@ -20726,14 +21181,16 @@ function StaffChat({ client, currentUser, T, onBack, embedded = false }) {
         sender="staff"
         senderName={currentUser?.name || "SPS"}
         T={T}
+        keyboardAware
       />
     </div>
   );
 }
 
 // ── Client messages tab ──
-function CPMessages({ client, branding, onSubmit, onClientMessage, onOpenInvoice, onOpenService, T, vp = {} }) {
+function CPMessages({ client, branding, onSubmit, onClientMessage, onOpenInvoice, onOpenService, T, vp = {}, portalMode = true }) {
   const [view, setView] = useState("messages"); // "messages" | "request"
+  const compactHeader = (vp.width || 390) <= 360;
 
   if (view === "request") {
     return (
@@ -20742,25 +21199,25 @@ function CPMessages({ client, branding, onSubmit, onClientMessage, onOpenInvoice
           style={{ background:"none", border:"none", color:T.primary, fontWeight:700, fontSize:13, cursor:"pointer", padding:"0 0 4px", display:"flex", alignItems:"center", gap:4, fontFamily:"inherit", alignSelf:"flex-start" }}>
           ← Messages
         </button>
-        <CPRequest client={client} branding={branding} onSubmit={(data) => { if (onSubmit) onSubmit(data); setView("messages"); }} T={T} />
+        <CPRequest client={client} branding={branding} onSubmit={(data) => onSubmit ? onSubmit(data) : Promise.resolve({ ok:true })} T={T} />
       </div>
     );
   }
 
   const inner = (
-    <div style={{ display:"flex", flexDirection:"column", flex:1, ...(vp.isDesktop ? {} : { padding:"0 18px" }), overflow:"hidden", pointerEvents:"all" }}>
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", paddingTop:12, paddingBottom:10, flexShrink:0 }}>
-        <div>
+    <div style={{ display:"flex", flexDirection:"column", flex:1, ...(vp.isDesktop ? {} : { padding:"0 16px" }), overflow:"hidden", pointerEvents:"all" }}>
+      <div style={{ display:"flex", flexDirection:compactHeader ? "column" : "row", justifyContent:"space-between", alignItems:compactHeader ? "stretch" : "center", gap:compactHeader ? 10 : 12, paddingTop:12, paddingBottom:10, flexShrink:0 }}>
+        <div style={{ minWidth:0, flex:1 }}>
           <div style={{ fontSize:22, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>Messages</div>
-          <div style={{ fontSize:14, color:T.textMuted, marginTop:3 }}>Chat with {branding?.companyName || "us"}</div>
+          <div style={{ fontSize:14, color:T.textMuted, marginTop:3, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>Chat with {branding?.companyName || "us"}</div>
         </div>
         <button onClick={() => setView("request")}
-          style={{ display:"flex", alignItems:"center", gap:7, background:T.primary, color:"#fff", border:"none", borderRadius:12, padding:"9px 16px", fontWeight:700, fontSize:13, cursor:"pointer", fontFamily:"inherit", flexShrink:0, boxShadow:`0 3px 12px ${hexA(T.primary,0.3)}` }}>
+          style={{ minHeight:44, display:"flex", alignItems:"center", justifyContent:"center", gap:7, background:T.primary, color:"#fff", border:"none", borderRadius:12, padding:"9px 16px", fontWeight:700, fontSize:13, cursor:"pointer", fontFamily:"inherit", flexShrink:0, boxShadow:`0 3px 12px ${hexA(T.primary,0.3)}` }}>
           <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"><path d="M12 5v14M5 12h14"/></svg>
           Request Service
         </button>
       </div>
-      <ChatThread clientId={client.id} sender="client" senderName={client.name} T={T} onSent={onClientMessage} onOpenInvoice={onOpenInvoice} onOpenService={onOpenService} />
+      <ChatThread clientId={client.id} sender="client" senderName={client.name} T={T} onSent={onClientMessage} onOpenInvoice={onOpenInvoice} onOpenService={onOpenService} portalMode={portalMode} />
     </div>
   );
 
@@ -21012,12 +21469,12 @@ function ReminderSettings({ scheduleCfg, setScheduleCfg, email, setEmail, brandi
                 <button onClick={del} style={{ background: "none", border: `1px solid ${T.border}`, color: "#C0392B", borderRadius: 10, padding: "0 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Remove</button>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1.4fr 0.7fr 1.1fr", gap: 8 }}>
-                <select value={r.month || ""} onChange={e => upd({ month: e.target.value })} style={{ ...field, appearance: "none", WebkitAppearance: "none" }}>
+                <select value={r.month || ""} onChange={e => upd({ month: e.target.value })} style={field}>
                   <option value="">Month…</option>
                   {["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"].map((mn, mi) => <option key={mn} value={mi + 1}>{mn}</option>)}
                 </select>
                 <input type="text" inputMode="numeric" value={r.day || ""} onChange={e => upd({ day: e.target.value.replace(/\D/g, "").slice(0, 2) })} placeholder="Day" style={field} />
-                <select value={r.division || "All"} onChange={e => upd({ division: e.target.value })} style={{ ...field, appearance: "none", WebkitAppearance: "none" }}>
+                <select value={r.division || "All"} onChange={e => upd({ division: e.target.value })} style={field}>
                   <option value="All">All Divisions</option>
                   {DIVISIONS.map(d => <option key={d} value={d}>{d}</option>)}
                 </select>
@@ -23818,7 +24275,7 @@ function WaterQualityTrends({ clients, T, clientId }) {
 
           {/* Client picker */}
           <select value={selectedClient} onChange={e => { setPicked(e.target.value); setSelectedParam("pH"); }}
-            style={{ width: "100%", padding: "12px 14px", border: `1.5px solid ${T.border}`, borderRadius: 14, fontSize: 15, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", appearance: "none", WebkitAppearance: "none" }}>
+            style={{ width: "100%", padding: "12px 14px", border: `1.5px solid ${T.border}`, borderRadius: 14, fontSize: 15, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none" }}>
             <option value="">Select a client...</option>
             {clientsWithReadings.sort((a,b) => (a.name||"").localeCompare(b.name||"")).map(c => (
               <option key={c.id} value={String(c.id)}>{c.name}</option>
@@ -23897,6 +24354,8 @@ function WaterQualityTrends({ clients, T, clientId }) {
 }
 
 function ServiceStopsReport({ clients, invoices, T }) {
+  const reportVp = useViewport();
+  const compact = reportVp.width <= 420;
   const now = new Date();
 
   // Period options
@@ -24116,9 +24575,9 @@ function ServiceStopsReport({ clients, invoices, T }) {
 
         {/* Custom range */}
         {mode === "custom" && (
-          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <div style={{ display: "flex", flexDirection: compact ? "column" : "row", gap: 10, alignItems: compact ? "stretch" : "center" }}>
             <input type="date" value={customStart} onChange={e => setCustomStart(e.target.value)} style={{ ...field, flex: 1 }} />
-            <span style={{ color: T.textMuted, fontSize: 13 }}>to</span>
+            <span style={{ color: T.textMuted, fontSize: 13, display: compact ? "none" : "inline" }}>to</span>
             <input type="date" value={customEnd} onChange={e => setCustomEnd(e.target.value)} style={{ ...field, flex: 1 }} />
           </div>
         )}
@@ -26230,10 +26689,10 @@ function ClientStopStatusCard({ stage, stop, tech, client, branding, T, onNav, r
 }
 
 // Build 15, Item 8 — live service-stop view for the client portal (Home + My Property).
-// Reflects the stop in REAL TIME — scheduled → on the way → arrived → complete — via Supabase
-// realtime subscriptions on staff_locations + the sps_arrivals / sps_completed app_state keys,
-// with a 60s poll fallback if realtime isn't enabled on those tables. While the tech is en
-// route it shows the live map; once complete the stop lives on in Service History.
+// Reflects the stop in REAL TIME — scheduled → on the way → arrived → complete — through the
+// same token-scoped server endpoint as the public tracking link. Portal clients never receive
+// direct staff_locations/app_state table access. While the tech is en route it shows the live map;
+// once complete the stop lives on in Service History.
 function ClientLiveTracking({ client, schedule, team, branding, T, onNav }) {
   const todayStop = useMemo(() => {
     const todayKey = fmtMDY(new Date());
@@ -26264,47 +26723,40 @@ function ClientLiveTracking({ client, schedule, team, branding, T, onNav }) {
   const [onWay, setOnWay] = useState(false); // staff stamped "On My Way" (sps_enroute) — drives the on-the-way step even before a live GPS fix
   const [nowTs, setNowTs] = useState(() => Date.now());
 
-  // Tech live location — realtime subscription + 60s poll fallback.
+  // The initial scoped portal snapshot carries a safe stage (no internal state maps). Keep that
+  // visible even before a tracking token exists or after its location-sharing window expires.
   useEffect(() => {
-    if (!tech) { setLoc(null); return; }
-    let alive = true;
-    const load = async () => { try { const { data } = await supabase.from("staff_locations").select("*").eq("staff_id", String(tech.id)).maybeSingle(); if (alive) setLoc(data || null); } catch (_) {} };
-    load();
-    let ch = null;
-    try { ch = supabase.channel(`sps-loc-${tech.id}`).on("postgres_changes", { event: "*", schema: "public", table: "staff_locations", filter: `staff_id=eq.${tech.id}` }, load).subscribe(); } catch (_) {}
-    const iv = setInterval(load, 60000);
-    return () => { alive = false; clearInterval(iv); try { if (ch) supabase.removeChannel(ch); } catch (_) {} };
-  }, [tech && tech.id]);
+    const stage = (todayStop && todayStop.portalStage) || "scheduled";
+    setComplete(stage === "complete");
+    setArrived(stage === "arrived" ? (todayStop.arrivedAt || true) : false);
+    setOnWay(stage === "enroute");
+    if (stage !== "enroute") setLoc(null);
+  }, [sid, todayStop && todayStop.portalStage, todayStop && todayStop.arrivedAt]);
 
-  // Arrived / complete — realtime on the app_state keys + 60s poll fallback.
+  // One owned stop token → one safe status/location response. Polling matches the public tracker
+  // and replaces broad realtime subscriptions that RLS now correctly denies to portal accounts.
   useEffect(() => {
-    if (!sid) { setArrived(false); setComplete(false); setOnWay(false); return; }
+    const token = todayStop && todayStop.trackToken;
+    if (!token) { setLoc(null); return; }
     let alive = true;
     const load = async () => {
       try {
-        const [a, c, e] = await Promise.all([
-          supabase.from("app_state").select("value").eq("key", "sps_arrivals").maybeSingle(),
-          supabase.from("app_state").select("value").eq("key", "sps_completed").maybeSingle(),
-          supabase.from("app_state").select("value").eq("key", "sps_enroute").maybeSingle(),
-        ]);
+        const r = await fetch(`${PROD_URL}/api/live-track?token=${encodeURIComponent(token)}`, { cache: "no-store" });
+        const d = await r.json().catch(() => ({}));
         if (!alive) return;
-        try { const av = JSON.parse(a?.data?.value || "{}")[sid]; setArrived(av || false); } catch (_) {}
-        try { setComplete(!!JSON.parse(c?.data?.value || "{}")[sid]); } catch (_) {}
-        try { setOnWay(!!JSON.parse(e?.data?.value || "{}")[sid]); } catch (_) {}
-      } catch (_) {}
+        if (r.status === 410 || d.ended) { setLoc(null); return; }
+        if (!r.ok || !d.record) { setLoc(null); return; }
+        const stage = String(d.record.status || "scheduled").toLowerCase();
+        setComplete(stage === "complete");
+        setArrived(stage === "arrived" ? (d.record.at || true) : false);
+        setOnWay(stage === "enroute");
+        setLoc(d.location || null);
+      } catch (_) { if (alive) setLoc(null); }
     };
     load();
-    let ch = null;
-    try {
-      ch = supabase.channel(`sps-stop-${sid}`)
-        .on("postgres_changes", { event: "*", schema: "public", table: "app_state", filter: "key=eq.sps_arrivals" }, load)
-        .on("postgres_changes", { event: "*", schema: "public", table: "app_state", filter: "key=eq.sps_completed" }, load)
-        .on("postgres_changes", { event: "*", schema: "public", table: "app_state", filter: "key=eq.sps_enroute" }, load)
-        .subscribe();
-    } catch (_) {}
-    const iv = setInterval(load, 60000);
-    return () => { alive = false; clearInterval(iv); try { if (ch) supabase.removeChannel(ch); } catch (_) {} };
-  }, [sid]);
+    const iv = setInterval(load, 15000);
+    return () => { alive = false; clearInterval(iv); };
+  }, [sid, todayStop && todayStop.trackToken]);
 
   // Refresh freshness / "last updated" every 30s.
   useEffect(() => { const iv = setInterval(() => setNowTs(Date.now()), 30000); return () => clearInterval(iv); }, []);
@@ -26440,23 +26892,56 @@ function ClientTrackingCard({ client, todayStop, tech, loc, schedule, branding, 
 // Google reviews (EXTERNAL browser) and unhappy clients privately to the office.
 // ─────────────────────────────────────────────
 function CPRatingPrompt({ client, branding, onRateVisit, T }) {
-  const visit = (client.history || [])[0]; // most recent completed visit
+  const latestVisit = (client.history || [])[0]; // most recent completed visit
+  const [visitSelection, setVisitSelection] = useState(null);
+  // Until the first star tap there is deliberately no stored selection, so a genuinely newer
+  // completion can replace the prompt. Once interaction begins, visitSelection stays immutable.
+  const activeSelection = retainPortalRatingVisit(visitSelection, latestVisit, client.id);
+  const visit = activeSelection && activeSelection.visit;
+  const visitRef = activeSelection && activeSelection.visitRef;
   const [stars, setStars] = useState(0);
   const [stage, setStage] = useState("ask"); // ask | positive | negative | done
   const [feedback, setFeedback] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
-  // Nothing to rate, or it's already been rated → don't show.
-  if (!onRateVisit || !visit || visit.clientRating) return null;
+  // A fresh load hides an already-rated visit. Keep this mounted while the just-confirmed thank-you
+  // state is visible; the parent adopts the server receipt before this component advances its stage.
+  if (!onRateVisit || !visit || !visitRef || (visit.clientRating && stage === "ask" && !saving)) return null;
 
   const reviewUrl = (branding.googleReviewLink || "").trim();
-  const pick = (n) => {
+  const pick = async (n) => {
+    if (saving) return;
+    const selection = retainPortalRatingVisit(visitSelection, latestVisit, client.id);
+    if (!selection) return;
+    if (!visitSelection) setVisitSelection(selection);
     setStars(n);
-    if (n >= 4) { onRateVisit({ clientId: client.id, visitDate: visit.date, rating: n }); setStage("positive"); }
-    else setStage("negative");
+    setSaveError("");
+    if (n < 4) { setStage("negative"); return; }
+    setSaving(true);
+    try {
+      await onRateVisit({ clientId: selection.clientId, visitRef: selection.visitRef, visitDate: selection.visit.date, rating: n });
+      setStage("positive");
+    } catch (error) {
+      setSaveError(error && error.message ? error.message : "Could not save your rating. Please try again.");
+    } finally {
+      setSaving(false);
+    }
   };
-  const sendNegative = () => {
-    onRateVisit({ clientId: client.id, visitDate: visit.date, rating: stars || 2, feedback: feedback.trim() });
-    setStage("done");
+  const sendNegative = async () => {
+    if (saving || !feedback.trim()) return;
+    const selection = retainPortalRatingVisit(visitSelection, latestVisit, client.id);
+    if (!selection) return;
+    setSaving(true);
+    setSaveError("");
+    try {
+      await onRateVisit({ clientId: selection.clientId, visitRef: selection.visitRef, visitDate: selection.visit.date, rating: stars || 2, feedback: feedback.trim() });
+      setStage("done");
+    } catch (error) {
+      setSaveError(error && error.message ? error.message : "Could not send your feedback. Please try again.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const card = { background: T.surface, border: `1px solid ${T.border}`, borderRadius: 20, padding: "18px 20px", boxShadow: "0 2px 12px rgba(0,0,0,0.06)" };
@@ -26484,11 +26969,12 @@ function CPRatingPrompt({ client, branding, onRateVisit, T }) {
       <div style={card}>
         <div style={{ fontSize: 16, fontWeight: 800, color: T.text }}>Thanks — we'd love to make this right.</div>
         <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4, lineHeight: 1.5 }}>Tell us what happened and we'll follow up directly.</div>
-        <textarea value={feedback} onChange={e => setFeedback(e.target.value)} placeholder="What could we have done better?"
+        <textarea value={feedback} onChange={e => setFeedback(e.target.value)} disabled={saving} placeholder="What could we have done better?"
           style={{ width: "100%", marginTop: 12, padding: "11px 13px", border: `1px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical", minHeight: 80, lineHeight: 1.5 }} />
-        <button onClick={sendNegative} disabled={!feedback.trim()}
-          style={{ marginTop: 10, width: "100%", background: T.primary, color: "#fff", border: "none", borderRadius: 13, padding: "13px", fontSize: 14.5, fontWeight: 800, cursor: feedback.trim() ? "pointer" : "default", fontFamily: "inherit", opacity: feedback.trim() ? 1 : 0.5 }}>
-          Send to {branding.companyName ? branding.companyName.split(" ")[0] : "the team"}
+        {saveError && <div role="alert" style={{ marginTop:10, fontSize:12.5, fontWeight:700, color:"#E5484D", lineHeight:1.4 }}>{saveError}</div>}
+        <button onClick={sendNegative} disabled={saving || !feedback.trim()}
+          style={{ marginTop: 10, width: "100%", background: T.primary, color: "#fff", border: "none", borderRadius: 13, padding: "13px", fontSize: 14.5, fontWeight: 800, cursor: !saving && feedback.trim() ? "pointer" : "default", fontFamily: "inherit", opacity: !saving && feedback.trim() ? 1 : 0.5 }}>
+          {saving ? "Sending…" : `Send to ${branding.companyName ? branding.companyName.split(" ")[0] : "the team"}`}
         </button>
       </div>
     );
@@ -26507,12 +26993,14 @@ function CPRatingPrompt({ client, branding, onRateVisit, T }) {
     <div style={card}>
       <div style={{ fontSize: 16, fontWeight: 800, color: T.text }}>How was your service?</div>
       <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 3 }}>{visit.type || "Service Visit"} · {visit.date}</div>
-      <div style={{ display: "flex", gap: 6, marginTop: 14, justifyContent: "center" }}>
+      <div style={{ display: "flex", gap: 4, marginTop: 14, justifyContent: "center", width: "100%" }}>
         {[1, 2, 3, 4, 5].map(n => (
-          <button key={n} onClick={() => pick(n)} aria-label={`${n} star${n > 1 ? "s" : ""}`}
-            style={{ background: "none", border: "none", cursor: "pointer", padding: 4, fontSize: 34, lineHeight: 1, color: n <= stars ? "#F5A623" : T.border, fontFamily: "inherit" }}>★</button>
+          <button key={n} onClick={() => pick(n)} disabled={saving} aria-label={`${n} star${n > 1 ? "s" : ""}`}
+            style={{ flex: "1 1 44px", minWidth: 0, maxWidth: 52, height: 44, background: "none", border: "none", cursor: saving ? "default" : "pointer", opacity: saving ? 0.65 : 1, padding: 0, fontSize: 30, lineHeight: 1, color: n <= stars ? "#F5A623" : T.border, fontFamily: "inherit" }}>★</button>
         ))}
       </div>
+      {saving && <div style={{ marginTop:8, textAlign:"center", fontSize:12.5, fontWeight:700, color:T.textMuted }}>Saving your rating…</div>}
+      {saveError && <div role="alert" style={{ marginTop:8, textAlign:"center", fontSize:12.5, fontWeight:700, color:"#E5484D", lineHeight:1.4 }}>{saveError}</div>}
     </div>
   );
 }
@@ -26717,6 +27205,8 @@ function CPUpgradeRequest({ client, currentPlan, currentTier, upgradePlan, upgra
   const [step, setStep] = useState("browse");   // browse | message | done
   const [selectedPlan, setSelectedPlan] = useState(upgradePlan);
   const [message, setMessage] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState("");
   const allTiers = tiers || CP_TIERS;
 
   // upgradeOptions passed in from CPService (all tiers strictly above current)
@@ -26724,17 +27214,25 @@ function CPUpgradeRequest({ client, currentPlan, currentTier, upgradePlan, upgra
   const chosen = allTiers[selectedPlan] || upgradeTier;
   const newItems = (chosen?.includes || []).filter(item => !(currentTier?.includes || []).includes(item));
 
-  const handleSubmit = () => {
-    if (!selectedPlan) return;
-    onSubmit({
-      clientId: client.id,
-      clientName: client.name,
-      currentPlan,
-      requestedPlan: selectedPlan,
-      message: message.trim(),
-      submittedAt: Date.now(),
-    });
-    setStep("done");
+  const handleSubmit = async () => {
+    if (!selectedPlan || sending) return;
+    setSending(true);
+    setSendError("");
+    try {
+      await onSubmit({
+        clientId: client.id,
+        clientName: client.name,
+        currentPlan,
+        requestedPlan: selectedPlan,
+        message: message.trim(),
+        submittedAt: Date.now(),
+      });
+      setStep("done");
+    } catch (error) {
+      setSendError(error && error.message ? error.message : "Could not send your upgrade request. Please try again.");
+    } finally {
+      setSending(false);
+    }
   };
 
   if (step === "done") {
@@ -26865,18 +27363,20 @@ function CPUpgradeRequest({ client, currentPlan, currentTier, upgradePlan, upgra
             <textarea
               value={message}
               onChange={e => setMessage(e.target.value)}
+              disabled={sending}
               placeholder="e.g. We added a koi pond and would love more frequent service. Interested in the weekly plan."
               style={{ width: "100%", padding: "13px 15px", border: `1.5px solid ${T.border}`, borderRadius: 13, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical", minHeight: 110, lineHeight: 1.6 }}
             />
           </div>
 
+          {sendError && <div role="alert" style={{ fontSize: 12.5, fontWeight: 700, color: "#E5484D", lineHeight: 1.4 }}>{sendError}</div>}
           <div style={{ display: "flex", gap: 10 }}>
-            <button onClick={handleSubmit}
-              style={{ flex: 1, background: chosen?.color || T.primary, color: "#fff", border: "none", borderRadius: 14, padding: "15px", fontWeight: 800, fontSize: 15, cursor: "pointer", fontFamily: "inherit", boxShadow: `0 4px 16px ${hexA(chosen?.color || T.primary, 0.3)}` }}>
-              Send Request
+            <button onClick={handleSubmit} disabled={sending}
+              style={{ flex: 1, background: chosen?.color || T.primary, color: "#fff", border: "none", borderRadius: 14, padding: "15px", fontWeight: 800, fontSize: 15, cursor: sending ? "default" : "pointer", opacity: sending ? 0.65 : 1, fontFamily: "inherit", boxShadow: `0 4px 16px ${hexA(chosen?.color || T.primary, 0.3)}` }}>
+              {sending ? "Sending…" : "Send Request"}
             </button>
-            <button onClick={() => setStep("browse")}
-              style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 14, padding: "15px 18px", fontWeight: 600, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>
+            <button onClick={() => setStep("browse")} disabled={sending}
+              style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 14, padding: "15px 18px", fontWeight: 600, fontSize: 14, cursor: sending ? "default" : "pointer", opacity: sending ? 0.65 : 1, fontFamily: "inherit" }}>
               Back
             </button>
           </div>
@@ -26911,7 +27411,7 @@ function CPLightbox({ photos, index, onClose, T }) {
           <svg viewBox="0 0 24 24" width={22} height={22} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round"><path d="m15 18-6-6 6-6"/></svg>
         </button>
       )}
-      <img src={cur.src} alt="" onClick={e => e.stopPropagation()} style={{ maxWidth: "92%", maxHeight: caption || label ? "74%" : "82%", borderRadius: 12, objectFit: "contain" }} />
+      <ProtectedImage src={cur.src} alt="" onClick={e => e.stopPropagation()} style={{ maxWidth: "92%", maxHeight: caption || label ? "74%" : "82%", borderRadius: 12, objectFit: "contain" }} />
       {(label || caption) && (
         <div onClick={e => e.stopPropagation()} style={{ marginTop: 16, textAlign: "center", maxWidth: "90%" }}>
           {label && <span style={{ display: "inline-block", fontSize: 11, fontWeight: 800, color: "#fff", background: lc, borderRadius: 6, padding: "3px 10px", marginBottom: 8 }}>{label}</span>}
@@ -27051,7 +27551,7 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
                 const lc = label === "Before" ? "#F59E0B" : label === "After" ? "#16a34a" : T.textMuted;
                 return (
                   <div key={j} onClick={() => setLightbox({ photos, index: j })} style={{ position:"relative", cursor:"pointer", borderRadius:12, overflow:"hidden", border:`1px solid ${T.border}`, aspectRatio:"1" }}>
-                    <img src={src} alt="" style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
+                    <ProtectedImage src={src} alt="" style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
                     {label && <div style={{ position:"absolute", bottom:6, left:6, fontSize:9, fontWeight:800, color:"#fff", background:lc, borderRadius:5, padding:"2px 7px" }}>{label}</div>}
                   </div>
                 );
@@ -27102,7 +27602,7 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
                 return (
                   <div key={j} onClick={() => setLightbox({ photos, index: j })} style={{ cursor:"pointer" }}>
                     <div style={{ position:"relative", borderRadius:12, overflow:"hidden", border:`1px solid ${T.border}`, aspectRatio:"1" }}>
-                      <img src={src} alt="" style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
+                      <ProtectedImage src={src} alt="" style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
                     </div>
                     {cap && <div style={{ fontSize:10.5, color:T.textMuted, marginTop:4, textAlign:"center", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{cap}</div>}
                   </div>
@@ -27282,7 +27782,7 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
               const src = typeof p === "string" ? p : p.src;
               return (
                 <div key={i} onClick={() => setLightbox({ photos: sitePhotos, index: i })} style={{ flexShrink:0, position:"relative", cursor:"pointer" }}>
-                  <img src={src} alt="" style={{ width:90, height:90, borderRadius:12, objectFit:"cover", display:"block" }} />
+                  <ProtectedImage src={src} alt="" style={{ width:90, height:90, borderRadius:12, objectFit:"cover", display:"block" }} />
                   <div style={{ position:"absolute", top:5, right:5, width:20, height:20, borderRadius:"50%", background:"rgba(0,0,0,0.45)", display:"flex", alignItems:"center", justifyContent:"center" }}>
                     <svg viewBox="0 0 24 24" width={11} height={11} fill="none" stroke="#fff" strokeWidth={2.4} strokeLinecap="round"><path d="M15 3h6v6M14 10l7-7M9 21H3v-6M10 14l-7 7"/></svg>
                   </div>
@@ -27304,7 +27804,7 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
             {siteVideos.map((v,i) => {
               const src = typeof v === "string" ? v : v.src;
               return (
-                <video key={i} src={src} controls preload="metadata" playsInline
+                <ProtectedVideo key={i} src={src} controls preload="metadata" playsInline
                   style={{ flexShrink:0, width:200, height:140, borderRadius:12, objectFit:"cover", background:"#000", border:`1px solid ${T.border}` }} />
               );
             })}
@@ -27333,7 +27833,7 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
                   <div style={{ display:"flex", gap:4, flexShrink:0 }}>
                     {photos.slice(0,2).map((ph,j) => {
                       const src = typeof ph === "string" ? ph : ph.src;
-                      return <img key={j} src={src} alt="" style={{ width:38, height:38, borderRadius:8, objectFit:"cover", border:`1px solid ${T.border}` }} />;
+                      return <ProtectedImage key={j} src={src} alt="" style={{ width:38, height:38, borderRadius:8, objectFit:"cover", border:`1px solid ${T.border}` }} />;
                     })}
                     {photos.length > 2 && <div style={{ width:38, height:38, borderRadius:8, background:T.surfaceAlt, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, color:T.textMuted }}>+{photos.length-2}</div>}
                   </div>
@@ -27356,7 +27856,7 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
             return (
               <button key={i} onClick={() => setDetailItem({ kind:"equipment", data:eq })}
                 style={{ width:"100%", textAlign:"left", fontFamily:"inherit", cursor:"pointer", background:"none", border:"none", borderBottom: last ? `1px solid ${T.border}` : "none", padding:"14px 18px", display:"flex", alignItems:"center", gap:12 }}>
-                {thumb && <img src={thumb} alt="" style={{ width:42, height:42, borderRadius:10, objectFit:"cover", border:`1px solid ${T.border}`, flexShrink:0 }} />}
+                {thumb && <ProtectedImage src={thumb} alt="" style={{ width:42, height:42, borderRadius:10, objectFit:"cover", border:`1px solid ${T.border}`, flexShrink:0 }} />}
                 <div style={{ flex:1, minWidth:0 }}>
                   <div style={{ fontSize:14, fontWeight:700, color:T.text, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{eq.name}</div>
                   <div style={{ fontSize:11, color:T.textMuted, marginTop:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{eq.installed ? `Installed ${eq.installed}` : (eq.serialNumber ? `S/N ${eq.serialNumber}` : (photos.length ? `${photos.length} photo${photos.length!==1?"s":""}` : "Tap for details"))}</div>
@@ -27397,8 +27897,8 @@ function CPProperty({ client, schedule, branding, team = [], onNav, onUpgradeReq
                   <button onClick={() => setLightbox({ photos: [doc.src], index: 0 })}
                     style={{ background: hexA(tierColor, 0.1), color: tierColor, border: "none", borderRadius: 9, padding: "8px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>View</button>
                 ) : (
-                  <a href={doc.src} download={doc.name || title}
-                    style={{ background: hexA(tierColor, 0.1), color: tierColor, borderRadius: 9, padding: "8px 15px", fontSize: 12.5, fontWeight: 700, textDecoration: "none", flexShrink: 0 }}>Download</a>
+                  <button onClick={() => downloadProtectedMedia(doc.src, doc.name || title).catch(() => {})}
+                    style={{ background: hexA(tierColor, 0.1), color: tierColor, border: "none", borderRadius: 9, padding: "8px 15px", fontSize: 12.5, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", flexShrink: 0 }}>Download</button>
                 )}
               </div>
             );
@@ -27455,6 +27955,8 @@ function CPService({ client, branding, onNav, onUpgradeRequest, T, division }) {
   const upgradeOptions = orderedTiers.slice(currentIdx + 1);
   const upgradePlan = upgradeOptions[0] || null;
   const upgradeTier = upgradePlan ? divTierSet[upgradePlan] : null;
+  const rawHeroMedia = branding.portalHeroImage || (typeof client.sitePhotos?.[0] === "string" ? client.sitePhotos[0] : client.sitePhotos?.[0]?.src) || "";
+  const protectedHeroMedia = useProtectedMediaSrc(rawHeroMedia);
 
   const CheckRow = ({ text, highlighted }) => (
     <div style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
@@ -27478,8 +27980,8 @@ function CPService({ client, branding, onNav, onUpgradeRequest, T, division }) {
       {/* Current plan hero — with optional image or logo */}
       <div style={{ background: `linear-gradient(145deg, ${tierColor} 0%, ${mix(tierColor, "#000", 0.28)} 100%)`, borderRadius: 26, padding: "28px 24px", color: "#fff", boxShadow: `0 12px 40px ${hexA(tierColor, 0.4)}`, position: "relative", overflow: "hidden", minHeight: 140 }}>
         {/* Background image (pond photo or branding) */}
-        {(branding.portalHeroImage || client.sitePhotos?.[0]?.src || (typeof client.sitePhotos?.[0] === "string" ? client.sitePhotos[0] : null)) && (
-          <div style={{ position: "absolute", inset: 0, backgroundImage: `url(${branding.portalHeroImage || (typeof client.sitePhotos[0] === "string" ? client.sitePhotos[0] : client.sitePhotos[0]?.src)})`, backgroundSize: "cover", backgroundPosition: "center", opacity: 0.22 }} />
+        {protectedHeroMedia && (
+          <div style={{ position: "absolute", inset: 0, backgroundImage: `url(${protectedHeroMedia})`, backgroundSize: "cover", backgroundPosition: "center", opacity: 0.22 }} />
         )}
         <div style={{ position: "absolute", right: -30, top: -30, width: 180, height: 180, borderRadius: "50%", background: "rgba(255,255,255,0.06)" }} />
         <div style={{ position: "absolute", left: -20, bottom: -30, width: 130, height: 130, borderRadius: "50%", background: "rgba(255,255,255,0.04)" }} />
@@ -27495,7 +27997,7 @@ function CPService({ client, branding, onNav, onUpgradeRequest, T, division }) {
             {(branding.logoImage || branding.logoEmoji) && (
               <div style={{ width: 48, height: 48, borderRadius: 14, background: "rgba(255,255,255,0.2)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, backdropFilter: "blur(8px)" }}>
                 {branding.logoType === "image" && branding.logoImage
-                  ? <img src={branding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  ? <ProtectedImage src={branding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                   : <span style={{ fontSize: 24, fontWeight: 800, color: "#fff" }}>{logoInitial(branding)}</span>}
               </div>
             )}
@@ -27578,7 +28080,7 @@ function CPService({ client, branding, onNav, onUpgradeRequest, T, division }) {
       )}
 
       {/* Contact for questions */}
-      <button onClick={() => onNav("cp_request")}
+      <button onClick={() => onNav("cp_messages")}
         style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", fontFamily: "inherit", width: "100%", boxSizing: "border-box" }}>
         <div style={{ textAlign: "left" }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Have a question about your plan?</div>
@@ -27714,7 +28216,7 @@ function CPPond({ client, T }) {
                   const cap = typeof p === "object" ? p.caption : "";
                   return (
                     <div key={i} style={{ flexShrink: 0, display: "flex", flexDirection: "column", gap: 5 }}>
-                      <img src={src} alt={cap || ""} style={{ width: 130, height: 100, borderRadius: 14, objectFit: "cover", display: "block", border: `1px solid ${T.border}` }} />
+                      <ProtectedImage src={src} alt={cap || ""} style={{ width: 130, height: 100, borderRadius: 14, objectFit: "cover", display: "block", border: `1px solid ${T.border}` }} />
                       {cap && <div style={{ fontSize: 10, color: T.textMuted, textAlign: "center", maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>{cap}</div>}
                     </div>
                   );
@@ -27730,7 +28232,7 @@ function CPPond({ client, T }) {
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 {siteVideos.map((v, i) => (
                   <div key={i} style={{ background: T.surface, borderRadius: 16, overflow: "hidden", border: `1px solid ${T.border}` }}>
-                    <video src={v.src} controls playsInline preload="metadata" style={{ width: "100%", maxHeight: 220, display: "block", background: "#000", objectFit: "contain", borderRadius: "16px 16px 0 0" }} />
+                    <ProtectedVideo src={v.src} controls playsInline preload="metadata" style={{ width: "100%", maxHeight: 220, display: "block", background: "#000", objectFit: "contain", borderRadius: "16px 16px 0 0" }} />
                     {v.caption && <div style={{ padding: "10px 14px", fontSize: 12, fontWeight: 600, color: T.text }}>{v.caption}</div>}
                   </div>
                 ))}
@@ -28054,7 +28556,7 @@ function CPInvoices({ client, invoices, branding, T, vp = {}, initialSel = null,
             {selInv ? (
               <div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:20, padding:"20px 22px" }}>
                 <div style={{ display:"flex", justifyContent:"flex-end", marginBottom:4 }}>
-                  <button onClick={() => setSel(null)} aria-label="Close" style={{ width:32, height:32, borderRadius:"50%", border:"none", background:T.surfaceAlt, color:T.textMuted, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                  <button onClick={() => setSel(null)} aria-label="Close" style={{ width:40, height:40, borderRadius:"50%", border:"none", background:T.surfaceAlt, color:T.textMuted, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
                     <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
                   </button>
                 </div>
@@ -28077,16 +28579,13 @@ function CPInvoices({ client, invoices, branding, T, vp = {}, initialSel = null,
       {!desktopShell && selInv && (
         <div style={{ position:"fixed", inset:0, zIndex:200, background:T.bg, display:"flex", flexDirection:"column" }}>
           <div style={{ height:"env(safe-area-inset-top)" }} />
-          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, padding:"12px 16px", borderBottom:`1px solid ${T.border}`, flexShrink:0 }}>
-            <button onClick={() => setSel(null)} style={{ background:"none", border:"none", color:T.primary, fontWeight:700, fontSize:14, cursor:"pointer", fontFamily:"inherit", display:"flex", alignItems:"center", gap:4, padding:0 }}>
+          <div style={{ minHeight:56, display:"flex", alignItems:"center", gap:8, padding:"6px 10px", borderBottom:`1px solid ${T.border}`, flexShrink:0 }}>
+            <button onClick={() => setSel(null)} style={{ minHeight:44, background:"none", border:"none", color:T.primary, fontWeight:700, fontSize:14, cursor:"pointer", fontFamily:"inherit", display:"flex", alignItems:"center", gap:5, padding:"0 8px" }}>
               <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
-              Invoices
-            </button>
-            <button onClick={() => setSel(null)} aria-label="Close" style={{ width:32, height:32, borderRadius:"50%", border:"none", background:T.surfaceAlt, color:T.textMuted, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
-              <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+              Back to Invoices
             </button>
           </div>
-          <div style={{ flex:1, minHeight:0, overflowY:"auto", WebkitOverflowScrolling:"touch", padding:"18px 18px calc(24px + env(safe-area-inset-bottom))" }}>
+          <div style={{ flex:1, minHeight:0, overflowY:"auto", WebkitOverflowScrolling:"touch", padding:"16px 16px calc(24px + env(safe-area-inset-bottom))" }}>
             {detail(selInv)}
           </div>
         </div>
@@ -28097,7 +28596,21 @@ function CPInvoices({ client, invoices, branding, T, vp = {}, initialSel = null,
 
 // ── CP ESTIMATES ──
 function CPEstimates({ client, estimates, branding, onApprove, T }) {
+  const [approvingId, setApprovingId] = useState(null);
+  const [approveError, setApproveError] = useState(null);
   const mine = (estimates||[]).filter(e => String(e.clientId)===String(client.id));
+  const approve = async (id) => {
+    if (approvingId != null) return;
+    setApprovingId(id);
+    setApproveError(null);
+    try {
+      await onApprove(id);
+    } catch (error) {
+      setApproveError({ id, text: error && error.message ? error.message : "Could not approve that estimate. Please try again." });
+    } finally {
+      setApprovingId(null);
+    }
+  };
   if (!mine.length) return (
     <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
       <div style={{ fontSize:26, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>Estimates</div>
@@ -28110,37 +28623,54 @@ function CPEstimates({ client, estimates, branding, onApprove, T }) {
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
       <div style={{ fontSize:26, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>Estimates</div>
-      {mine.map((e,i) => (
-        <div key={e.id} style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, padding:"16px 18px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-          <div>
-            <div style={{ fontSize:14, fontWeight:700, color:T.text }}>Estimate #{e.number||e.id}</div>
-            <div style={{ fontSize:12, color:T.textMuted, marginTop:2 }}>{e.date||""} · ${parseFloat((e.total||"0").replace(/[^0-9.-]/g,"")).toFixed(2)}</div>
+      {mine.map((e,i) => {
+        const portalStatus = String(e.status || "").trim().toLowerCase();
+        return <div key={e.id} style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, padding:"16px 18px" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:12 }}>
+            <div style={{ minWidth:0, flex:1 }}>
+              <div style={{ fontSize:14, fontWeight:700, color:T.text }}>Estimate #{e.number||e.id}</div>
+              <div style={{ fontSize:12, color:T.textMuted, marginTop:2 }}>{e.date||""} · ${parseFloat((e.total||"0").replace(/[^0-9.-]/g,"")).toFixed(2)}</div>
+            </div>
+            {portalStatus === "sent" && (
+              <button onClick={() => approve(e.id)} disabled={approvingId != null} style={{ minHeight:44, background:T.primary, color:"#fff", border:"none", borderRadius:12, padding:"9px 14px", fontWeight:700, fontSize:13, cursor:approvingId == null ? "pointer" : "default", opacity:approvingId != null ? 0.6 : 1, fontFamily:"inherit", flexShrink:0 }}>{String(approvingId) === String(e.id) ? "Approving…" : "Approve"}</button>
+            )}
+            {portalStatus === "approved" && <span style={{ fontSize:12, fontWeight:700, color:"#16a34a" }}>Approved</span>}
+            {portalStatus !== "sent" && portalStatus !== "approved" && <span style={{ fontSize:12, fontWeight:700, color:T.textMuted, textTransform:"capitalize" }}>{portalStatus || "Unavailable"}</span>}
           </div>
-          {e.status !== "approved" && (
-            <button onClick={() => onApprove(e.id)} style={{ background:T.primary, color:"#fff", border:"none", borderRadius:12, padding:"9px 16px", fontWeight:700, fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>Approve</button>
-          )}
-          {e.status === "approved" && <span style={{ fontSize:12, fontWeight:700, color:"#16a34a" }}>Approved</span>}
+          {approveError && String(approveError.id) === String(e.id) && <div role="alert" style={{ marginTop:10, fontSize:12.5, fontWeight:700, color:"#E5484D", lineHeight:1.4 }}>{approveError.text}</div>}
         </div>
-      ))}
+      })}
     </div>
   );
 }
 
 // ── CP REQUEST ──
 function CPRequest({ client, branding, onSubmit, T }) {
+  const requestVp = useViewport();
+  const compact = requestVp.width <= 420;
   const [form, setForm] = useState({ type: "", dates: "", notes: "" });
   const [picks, setPicks] = useState([]);
   const [sent, setSent] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState("");
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const serviceTypes = ["General Service Visit", "Water Quality Issue", "Equipment Problem", "Spring Opening", "Fall Closing", "Estimate / Quote", "Other"];
   const quickPicks = ["Add fish food", "Trim plants", "Algae concern", "Check water quality", "Clean filter", "Fish looking unwell", "Pump / equipment issue", "Add new plants", "Leak or water loss", "General check-up"];
   const togglePick = (p) => setPicks(ps => ps.includes(p) ? ps.filter(x => x !== p) : [...ps, p]);
 
-  const handleSend = () => {
-    if (!form.type && picks.length === 0) return;
+  const handleSend = async () => {
+    if (sending || (!form.type && picks.length === 0)) return;
     const combinedNotes = [picks.length ? `Requests: ${picks.join(", ")}` : "", form.notes].filter(Boolean).join("\n");
-    onSubmit({ ...form, type: form.type || "Service Request", notes: combinedNotes, clientId: client.id, clientName: client.name, submittedAt: Date.now() });
-    setSent(true);
+    setSending(true);
+    setSendError("");
+    try {
+      await onSubmit({ ...form, type: form.type || "Service Request", notes: combinedNotes, clientId: client.id, clientName: client.name, submittedAt: Date.now() });
+      setSent(true);
+    } catch (error) {
+      setSendError(error && error.message ? error.message : "Could not send your request. Please try again.");
+    } finally {
+      setSending(false);
+    }
   };
 
   if (sent) {
@@ -28166,17 +28696,17 @@ function CPRequest({ client, branding, onSubmit, T }) {
         <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Request Service</div>
         <div style={{ fontSize: 14, color: T.textMuted, marginTop: 4 }}>Tell us what you need and we'll be in touch.</div>
       </div>
-      <div style={{ background: T.surface, borderRadius: 22, border: `1px solid ${T.border}`, padding: "22px 20px", display: "flex", flexDirection: "column", gap: 18, boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}>
+      <div style={{ background: T.surface, borderRadius: 22, border: `1px solid ${T.border}`, padding: compact ? "18px 16px" : "22px 20px", display: "flex", flexDirection: "column", gap: 18, boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}>
         <div>
           <label style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 8 }}>Service Type <span style={{ textTransform: "none", letterSpacing: 0, fontWeight: 500 }}>(optional)</span></label>
-          <select value={form.type} onChange={e => set("type", e.target.value)} style={field}>
+          <select value={form.type} onChange={e => set("type", e.target.value)} disabled={sending} style={field}>
             <option value="">Select a type...</option>
             {serviceTypes.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
         </div>
         <div>
           <label style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 8 }}>Preferred Dates</label>
-          <input type="text" style={field} value={form.dates} onChange={e => set("dates", e.target.value)} placeholder="e.g. Anytime next week, Mon/Wed mornings" />
+          <input type="text" style={field} value={form.dates} onChange={e => set("dates", e.target.value)} disabled={sending} placeholder="e.g. Anytime next week, Mon/Wed mornings" />
         </div>
         <div>
           <label style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 8 }}>Quick Requests <span style={{ textTransform: "none", letterSpacing: 0, fontWeight: 500, color: T.textMuted }}>(tap any that apply)</span></label>
@@ -28184,8 +28714,8 @@ function CPRequest({ client, branding, onSubmit, T }) {
             {quickPicks.map(p => {
               const on = picks.includes(p);
               return (
-                <button key={p} onClick={() => togglePick(p)}
-                  style={{ padding: "9px 14px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.1) : T.surface, color: on ? T.primary : T.text, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 6, transition: "all 0.15s" }}>
+                <button key={p} onClick={() => togglePick(p)} disabled={sending}
+                  style={{ minHeight: 44, padding: "9px 14px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.1) : T.surface, color: on ? T.primary : T.text, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 6, transition: "all 0.15s" }}>
                   {on && <svg viewBox="0 0 24 24" width={13} height={13} fill="none" stroke={T.primary} strokeWidth={3} strokeLinecap="round"><path d="M20 6 9 17l-5-5"/></svg>}
                   {p}
                 </button>
@@ -28195,17 +28725,18 @@ function CPRequest({ client, branding, onSubmit, T }) {
         </div>
         <div>
           <label style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 8 }}>Notes</label>
-          <textarea style={{ ...field, minHeight: 100, resize: "vertical", lineHeight: 1.6 }} value={form.notes} onChange={e => set("notes", e.target.value)} placeholder="Anything else — describe what you're seeing or any specific concerns..." />
+          <textarea style={{ ...field, minHeight: 100, resize: "vertical", lineHeight: 1.6 }} value={form.notes} onChange={e => set("notes", e.target.value)} disabled={sending} placeholder="Anything else — describe what you're seeing or any specific concerns..." />
         </div>
-        <button onClick={handleSend} disabled={!form.type && picks.length === 0} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 14, padding: "15px", fontWeight: 800, fontSize: 15, cursor: (form.type || picks.length) ? "pointer" : "not-allowed", opacity: (form.type || picks.length) ? 1 : 0.45, fontFamily: "inherit", letterSpacing: "-0.01em", boxShadow: (form.type || picks.length) ? `0 4px 16px ${hexA(T.primary, 0.3)}` : "none", transition: "all 0.2s" }}>Send Request</button>
+        {sendError && <div role="alert" style={{ fontSize: 12.5, fontWeight: 700, color: "#E5484D", lineHeight: 1.45 }}>{sendError}</div>}
+        <button onClick={handleSend} disabled={sending || (!form.type && picks.length === 0)} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 14, padding: "15px", fontWeight: 800, fontSize: 15, cursor: !sending && (form.type || picks.length) ? "pointer" : "not-allowed", opacity: !sending && (form.type || picks.length) ? 1 : 0.55, fontFamily: "inherit", letterSpacing: "-0.01em", boxShadow: !sending && (form.type || picks.length) ? `0 4px 16px ${hexA(T.primary, 0.3)}` : "none", transition: "all 0.2s" }}>{sending ? "Sending…" : "Send Request"}</button>
       </div>
       {(branding.companyPhone || branding.companyEmail) && (
-        <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div>
+        <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, padding: compact ? "14px 16px" : "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, marginBottom: 2 }}>Need immediate help?</div>
-            <div style={{ fontSize: 13, color: T.text, fontWeight: 600 }}>{branding.companyPhone || branding.companyEmail}</div>
+            <div style={{ fontSize: 13, color: T.text, fontWeight: 600, overflowWrap: "anywhere" }}>{branding.companyPhone || branding.companyEmail}</div>
           </div>
-          <a href={branding.companyPhone ? `tel:${branding.companyPhone}` : `mailto:${branding.companyEmail}`} style={{ background: hexA(T.primary, 0.1), color: T.primary, borderRadius: 12, padding: "9px 16px", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>Call</a>
+          <a href={branding.companyPhone ? `tel:${branding.companyPhone}` : `mailto:${branding.companyEmail}`} style={{ minHeight: 44, flexShrink: 0, background: hexA(T.primary, 0.1), color: T.primary, borderRadius: 12, padding: "9px 16px", fontSize: 13, fontWeight: 700, textDecoration: "none", display: "flex", alignItems: "center", justifyContent: "center" }}>{branding.companyPhone ? "Call" : "Email"}</a>
         </div>
       )}
     </div>
@@ -28243,15 +28774,53 @@ function CommPrefBadges({ client, compact }) {
 function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignOut, isStaffPreview }) {
   const set = (k, v) => setPrefs(p => ({ ...p, [k]: v }));
   const pondLbl = pondLabel(client);
+  const vp = useViewport();
+  const compact = vp.isPhone;
   // Notification preferences live on the client record (sps_clients) so they persist
   // in app_state across devices/builds and the office can honor them. Opt-out model.
   const NOTIFY_DEFAULTS = { serviceReminders: true, onMyWay: true, invoiceReady: true, reportSummary: true, paymentNudges: true, winBack: true, broadcasts: true };
   const [notify, setNotify] = useState(() => ({ ...NOTIFY_DEFAULTS, ...(client.notifyPrefs || {}) }));
-  const toggleNotify = (k) => { const next = { ...notify, [k]: !notify[k] }; setNotify(next); if (onSavePrefs) onSavePrefs(next); };
+  const [prefBusy, setPrefBusy] = useState(false);
+  const [prefMsg, setPrefMsg] = useState(null);
+  useEffect(() => {
+    if (!prefBusy) setNotify({ ...NOTIFY_DEFAULTS, ...(client.notifyPrefs || {}) });
+  }, [client.id, client.notifyPrefs]); // eslint-disable-line react-hooks/exhaustive-deps
+  const applyNotifyPatch = (current, patch) => ({
+    ...(current || {}),
+    ...(patch || {}),
+    ...((patch && patch.channels) ? { channels: { ...((current && current.channels) || {}), ...patch.channels } } : {}),
+  });
+  const saveNotify = async (patch) => {
+    if (prefBusy) return;
+    // Staff preview has no server mutation by design; keep its controls useful without claiming a save.
+    if (!onSavePrefs) { setNotify(current => applyNotifyPatch(current, patch)); return; }
+    setPrefBusy(true);
+    setPrefMsg(null);
+    try {
+      const receipt = await onSavePrefs(patch);
+      if (!receipt || !receipt.notifyPrefs || typeof receipt.notifyPrefs !== "object") {
+        throw new Error("The server did not confirm the saved preferences. Please try again.");
+      }
+      const confirmed = receipt.notifyPrefs;
+      setNotify({ ...NOTIFY_DEFAULTS, ...confirmed });
+      setPrefMsg({ ok: true, text: "Preferences saved." });
+    } catch (error) {
+      setPrefMsg({ ok: false, text: error && error.message ? error.message : "Could not save your preferences. Please try again." });
+    } finally {
+      setPrefBusy(false);
+    }
+  };
+  const toggleNotify = (k) => {
+    if (prefBusy) return;
+    saveNotify({ [k]: !notify[k] });
+  };
   // Communication channels the client wants reached on (text / email / in-app). Opt-out: all on
   // by default; saved onto the same notifyPrefs record so the office honors it on every send.
   const channels = { text: true, email: true, app: true, ...(notify.channels || {}) };
-  const toggleChannel = (ch) => { const next = { ...notify, channels: { ...channels, [ch]: !channels[ch] } }; setNotify(next); if (onSavePrefs) onSavePrefs(next); };
+  const toggleChannel = (ch) => {
+    if (prefBusy) return;
+    saveNotify({ channels: { [ch]: !channels[ch] } });
+  };
 
   // Change password — the client is already signed in, so update directly (no reset email).
   const [pwOpen, setPwOpen] = useState(false);
@@ -28273,12 +28842,12 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
   };
 
   const OptionRow = ({ label, value, options, onChange }) => (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 0", borderBottom: `1px solid ${T.border}` }}>
+    <div style={{ display: "flex", flexDirection: compact ? "column" : "row", justifyContent: "space-between", alignItems: compact ? "stretch" : "center", gap: compact ? 10 : 14, padding: "14px 0", borderBottom: `1px solid ${T.border}` }}>
       <span style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{label}</span>
-      <div style={{ display: "flex", gap: 6 }}>
+      <div style={{ display: "grid", gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))`, gap: 6 }}>
         {options.map(([val, lbl]) => (
           <button key={val} onClick={() => onChange(val)}
-            style={{ padding: "6px 14px", borderRadius: 100, border: `1.5px solid ${value === val ? T.primary : T.border}`, background: value === val ? hexA(T.primary, 0.1) : T.surface, color: value === val ? T.primary : T.textMuted, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+            style={{ minHeight: 40, padding: compact ? "7px 5px" : "6px 14px", borderRadius: 100, border: `1.5px solid ${value === val ? T.primary : T.border}`, background: value === val ? hexA(T.primary, 0.1) : T.surface, color: value === val ? T.primary : T.textMuted, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
             {lbl}
           </button>
         ))}
@@ -28291,7 +28860,7 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
       <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", marginBottom: 20 }}>Settings</div>
 
       {/* Appearance + account */}
-      <div style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, padding: "4px 18px", marginBottom: 16 }}>
+      <div style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, padding: compact ? "4px 14px" : "4px 18px", marginBottom: 16 }}>
         <OptionRow label="Appearance" value={prefs.appearance || "system"}
           options={[["light","Light"],["dark","Dark"],["system","Auto"]]}
           onChange={v => set("appearance", v)} />
@@ -28299,9 +28868,9 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
           options={[["cp_home","Home"],["cp_property","My Property"],["cp_invoices","Invoices"]]}
           onChange={v => set("defaultPage", v)} />
         <div style={{ padding: "14px 0" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
             <span style={{ fontSize: 14, fontWeight: 600, color: T.text }}>Account</span>
-            <span style={{ fontSize: 12, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{client.email}</span>
+            <span style={{ fontSize: 12, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: compact ? "65%" : 180, minWidth: 0 }}>{client.email}</span>
           </div>
           <div style={{ fontSize: 12, color: T.textMuted, marginTop: 4 }}>{client.name}{effectiveTier(client) ? ` · ${effectiveTier(client)} Plan` : ""}</div>
           {!isStaffPreview && (<>
@@ -28325,7 +28894,7 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
       </div>
 
       {/* Notifications — one card: HOW you hear from us (channels), then WHAT we notify you about */}
-      <div style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, padding: "4px 18px", marginBottom: 16 }}>
+      <div style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, padding: compact ? "4px 14px" : "4px 18px", marginBottom: 16 }}>
         <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, padding: "14px 0 4px" }}>How you hear from us</div>
         <div style={{ fontSize: 12.5, color: T.textMuted, paddingBottom: 6, lineHeight: 1.45 }}>Pick the ways you'd like {branding.companyName || "us"} to reach you — keep them all on, or just the one you prefer.</div>
         {[
@@ -28334,13 +28903,16 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
           ["app", "In-app", "Notifications inside this portal"],
         ].map(([ch, label, hint]) => (
           <div key={ch} style={{ padding: "13px 0", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-            <div>
+            <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{label}</div>
               <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>{hint}</div>
             </div>
-            <button onClick={() => toggleChannel(ch)}
-              style={{ width: 48, height: 28, borderRadius: 100, background: channels[ch] ? T.primary : T.surfaceAlt, border: "none", cursor: "pointer", position: "relative", transition: "background 0.2s", flexShrink: 0 }}>
-              <div style={{ width: 22, height: 22, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: channels[ch] ? 23 : 3, transition: "left 0.2s", boxShadow: "0 1px 4px rgba(0,0,0,0.2)" }} />
+            <button onClick={() => toggleChannel(ch)} disabled={prefBusy}
+              aria-label={`${label}: ${channels[ch] ? "on" : "off"}`} aria-pressed={channels[ch]}
+              style={{ width: 48, height: 44, padding: 0, background: "transparent", border: "none", cursor: prefBusy ? "default" : "pointer", opacity: prefBusy ? 0.65 : 1, position: "relative", flexShrink: 0 }}>
+              <span style={{ width: 48, height: 28, borderRadius: 100, background: channels[ch] ? T.primary : T.surfaceAlt, position: "absolute", top: 8, left: 0, transition: "background 0.2s" }}>
+                <span style={{ width: 22, height: 22, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: channels[ch] ? 23 : 3, transition: "left 0.2s", boxShadow: "0 1px 4px rgba(0,0,0,0.2)" }} />
+              </span>
             </button>
           </div>
         ))}
@@ -28358,16 +28930,24 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
           ["broadcasts", "News & offers", "Occasional announcements, tips, or promotions"],
         ].map(([k, label, hint], i, arr) => (
           <div key={k} style={{ padding: "13px 0", borderBottom: i < arr.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-            <div>
+            <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{label}</div>
               <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>{hint}</div>
             </div>
-            <button onClick={() => toggleNotify(k)}
-              style={{ width: 48, height: 28, borderRadius: 100, background: notify[k] ? T.primary : T.surfaceAlt, border: "none", cursor: "pointer", position: "relative", transition: "background 0.2s", flexShrink: 0 }}>
-              <div style={{ width: 22, height: 22, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: notify[k] ? 23 : 3, transition: "left 0.2s", boxShadow: "0 1px 4px rgba(0,0,0,0.2)" }} />
+            <button onClick={() => toggleNotify(k)} disabled={prefBusy}
+              aria-label={`${label}: ${notify[k] ? "on" : "off"}`} aria-pressed={!!notify[k]}
+              style={{ width: 48, height: 44, padding: 0, background: "transparent", border: "none", cursor: prefBusy ? "default" : "pointer", opacity: prefBusy ? 0.65 : 1, position: "relative", flexShrink: 0 }}>
+              <span style={{ width: 48, height: 28, borderRadius: 100, background: notify[k] ? T.primary : T.surfaceAlt, position: "absolute", top: 8, left: 0, transition: "background 0.2s" }}>
+                <span style={{ width: 22, height: 22, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: notify[k] ? 23 : 3, transition: "left 0.2s", boxShadow: "0 1px 4px rgba(0,0,0,0.2)" }} />
+              </span>
             </button>
           </div>
         ))}
+        {(prefBusy || prefMsg) && (
+          <div role={prefMsg && !prefMsg.ok ? "alert" : "status"} style={{ padding:"10px 0 13px", fontSize:12.5, fontWeight:700, color:prefMsg ? (prefMsg.ok ? "#16a34a" : "#E5484D") : T.textMuted }}>
+            {prefBusy ? "Saving preferences…" : prefMsg.text}
+          </div>
+        )}
       </div>
 
       {!isStaffPreview && (
@@ -28393,7 +28973,7 @@ function CPDesktopSidebar({ page, settingsOpen, portalUnread, branding, client, 
       <div style={{ padding: "20px 18px 16px", display: "flex", alignItems: "center", gap: 11, borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
         <div style={{ width: 38, height: 38, borderRadius: 11, background: T.primary, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, boxShadow: `0 2px 8px ${hexA(T.primary, 0.35)}` }}>
           {branding.logoType === "image" && branding.logoImage
-            ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            ? <ProtectedImage src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
             : <span style={{ fontSize: 18, fontWeight: 800, color: "#fff" }}>{(branding.companyName || "S").trim().charAt(0).toUpperCase() || "S"}</span>}
         </div>
         <div style={{ minWidth: 0 }}>
@@ -28437,7 +29017,7 @@ function CPDesktopSidebar({ page, settingsOpen, portalUnread, branding, client, 
   );
 }
 
-function SPSClientPortal({ client, schedule, invoices, estimates, branding, invoicing = {}, deepLink, onDeepLinkHandled, team = [], T: globalT, fontStack, onSignOut, onServiceRequest, onApproveEstimate, onUpgradeRequest, onRateVisit, onClientMessage, onSavePrefs, isStaffPreview = false }) {
+function SPSClientPortal({ client, schedule, invoices, estimates, branding, invoicing = {}, mediaStatus, deepLink, onDeepLinkHandled, team = [], T: globalT, fontStack, onSignOut, onServiceRequest, onApproveEstimate, onUpgradeRequest, onRateVisit, onClientMessage, onSavePrefs, isStaffPreview = false }) {
   // Client prefs stored in localStorage — personal per-device settings
   const prefsKey = `sps_client_prefs_${client.id}`;
   const [prefs, setPrefs] = useState(() => {
@@ -28476,8 +29056,15 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
   // Persist the portal page so a reload / resync keeps clients on the screen they were on.
   const cpPageKey = `sps_cp_page_${client.id}`;
   const [page, setPage] = useState(() => {
-    try { const p = sessionStorage.getItem(cpPageKey); if (p) return p; } catch (_) {}
-    return prefs.defaultPage || branding.portalDefaultPage || "cp_home";
+    try {
+      const p = sessionStorage.getItem(cpPageKey);
+      // Older builds stored the removed cp_request route after a client tapped Contact. Send those
+      // existing sessions to Messages, where the Request Service flow now lives, instead of leaving
+      // them on a blank portal screen after this deployment.
+      if (p) return p === "cp_request" ? "cp_messages" : p;
+    } catch (_) {}
+    const initial = prefs.defaultPage || branding.portalDefaultPage || "cp_home";
+    return initial === "cp_request" ? "cp_messages" : initial;
   });
   useEffect(() => { try { sessionStorage.setItem(cpPageKey, page); } catch (_) {} }, [page, cpPageKey]);
 
@@ -28485,6 +29072,15 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
   const [portalUnread, setPortalUnread] = useState(0);
   useEffect(() => {
     const load = async () => {
+      if (!isStaffPreview) {
+        try {
+          const r = await fetch(`${PROD_URL}/api/portal-messages`, { headers: await authHeaders(), cache: "no-store" });
+          const d = await r.json().catch(() => ({}));
+          const rows = r.ok && Array.isArray(d.messages) ? d.messages : [];
+          setPortalUnread(rows.filter(m => m.sender === "staff" && !m.read_at).length);
+        } catch (_) { setPortalUnread(0); }
+        return;
+      }
       const { data } = await supabase.from("sps_messages").select("id")
         .eq("client_id", client.id).eq("sender", "staff").is("read_at", null);
       setPortalUnread(data ? data.length : 0);
@@ -28492,7 +29088,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
     load();
     const iv = setInterval(load, 15000);
     return () => clearInterval(iv);
-  }, [client.id]);
+  }, [client.id, isStaffPreview]);
   const vp = useViewport();
   const wide = vp.isTablet || vp.isDesktop;
   // Render the upgraded sidebar shell on any desktop-width viewport — INCLUDING staff "Preview
@@ -28506,6 +29102,11 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
   // desktop (sidebar) shells render them without duplication.
   const screens = (
     <SectionErrorBoundary key={settingsOpen ? "cp_settings" : page}>
+      {mediaStatus && mediaStatus.ok === false && (
+        <div role="status" style={{ marginBottom:16, padding:"11px 13px", borderRadius:12, border:"1px solid rgba(217,119,6,0.28)", background:"rgba(217,119,6,0.09)", color:T.text, fontSize:12.5, fontWeight:650, lineHeight:1.45 }}>
+          Some photos or documents are temporarily unavailable. Refresh the portal, or contact the office if this continues.
+        </div>
+      )}
       {settingsOpen && (
         <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} onSavePrefs={isStaffPreview ? undefined : onSavePrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
       )}
@@ -28513,7 +29114,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
       {!settingsOpen && page === "cp_property" && <CPProperty client={client} schedule={schedule} branding={branding} team={team} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
       {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} schedule={schedule} branding={branding} team={team} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
       {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} invoicing={invoicing} T={T} vp={vp} initialSel={cpInvoiceSel} desktopShell={isDesktopShell} />}
-      {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} onSubmit={onServiceRequest} onClientMessage={isStaffPreview ? undefined : onClientMessage} onOpenInvoice={openInvoice} onOpenService={() => setPage("cp_property")} T={T} vp={vp} />}
+      {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} onSubmit={onServiceRequest} onClientMessage={isStaffPreview ? undefined : onClientMessage} onOpenInvoice={openInvoice} onOpenService={() => setPage("cp_property")} T={T} vp={vp} portalMode={!isStaffPreview} />}
       {!settingsOpen && page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
     </SectionErrorBoundary>
   );
@@ -28527,17 +29128,22 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
         html { height: 100%; overflow: hidden; }
         body { position: fixed; top: 0; left: 0; right: 0; bottom: 0; overflow: hidden; overscroll-behavior: none; }
         #root { height: 100%; overflow: hidden; }`}
-        input, select, textarea { -webkit-appearance: none; appearance: none; font-size: 16px !important; }
+        input, select, textarea { font-size: 16px !important; max-width: 100%; color-scheme: ${effectiveMode}; }
+        input:not([type="checkbox"]):not([type="radio"]), select { min-height: 44px; }
+        select, input[type="date"], input[type="time"], input[type="datetime-local"] { -webkit-appearance: auto; appearance: auto; }
+        select { cursor: pointer; padding-right: 34px !important; }
+        input[type="date"], input[type="time"], input[type="datetime-local"] { min-width: 0; }
+        input[type="checkbox"], input[type="radio"] { -webkit-appearance: auto; appearance: auto; }
         input:focus, select:focus, textarea:focus { border-color: ${T.primary} !important; outline: none; box-shadow: 0 0 0 3px ${hexA(T.primary, 0.15)}; }
         button { transition: transform 0.08s ease, opacity 0.15s ease; }
         button:active { transform: scale(0.97); }
         /* Keep the native calendar / clock picker affordance on date & time fields */
-        input[type="date"], input[type="time"] { -webkit-appearance: none; appearance: none; position: relative; }
+        input[type="date"], input[type="time"] { -webkit-appearance: auto; appearance: auto; position: relative; }
         input[type="date"]::-webkit-calendar-picker-indicator,
         input[type="time"]::-webkit-calendar-picker-indicator {
           opacity: 1; cursor: pointer; width: 20px; height: 20px;
           padding: 2px; border-radius: 6px;
-          filter: invert(11%) sepia(98%) saturate(5000%) hue-rotate(351deg);
+          color: ${T.primary};
         }
         input[type="date"]::-webkit-calendar-picker-indicator:hover,
         input[type="time"]::-webkit-calendar-picker-indicator:hover { background: ${hexA(T.primary, 0.1)}; }
@@ -28558,23 +29164,23 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
         position: "relative", zIndex: 100, flexShrink: 0,
       }}>
         {!isStaffPreview && <div style={{ height: "env(safe-area-inset-top)" }} />}
-        <div style={{ height: 56, display: "flex", alignItems: "center", justifyContent: "space-between", paddingLeft: 16, paddingRight: 16 }}>
+        <div style={{ minHeight: 56, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, paddingLeft: 16, paddingRight: 12 }}>
           {/* Logo + name */}
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: 1 }}>
             <div style={{ width: 34, height: 34, borderRadius: 10, background: T.primary, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, boxShadow: `0 2px 8px ${hexA(T.primary, 0.35)}` }}>
               {branding.logoType === "image" && branding.logoImage
-                ? <img src={branding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                ? <ProtectedImage src={branding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                 : <span style={{ fontSize: 16, fontWeight: 800, color: "#fff" }}>{(branding.companyName || "S").trim().charAt(0).toUpperCase() || "S"}</span>}
             </div>
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", lineHeight: 1.1 }}>{branding.portalAppName || branding.companyName}</div>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 14, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", lineHeight: 1.1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.portalAppName || branding.companyName}</div>
               <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 600, letterSpacing: "0.02em" }}>Client Portal</div>
             </div>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             {/* Refresh (Settings now lives in the bottom nav) */}
             <button onClick={() => window.location.reload()}
-              style={{ width: 34, height: 34, borderRadius: 10, background: T.surfaceAlt, border: "none", color: T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              aria-label="Refresh portal" style={{ width: 44, height: 44, borderRadius: 12, background: T.surfaceAlt, border: "none", color: T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
               <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
               </svg>
@@ -28592,7 +29198,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
           </main>
         </div>
       ) : (
-        <main style={{ flex: 1, ...(isStaffPreview ? {} : { minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }), padding: "24px 18px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(env(safe-area-inset-bottom) + 96px)", fontSize: `${textScale}em` }}>
+        <main style={{ flex: 1, ...(isStaffPreview ? {} : { minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }), padding: "20px 16px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(env(safe-area-inset-bottom) + 96px)", fontSize: `${textScale}em` }}>
           {screens}
         </main>
       )}
@@ -28648,7 +29254,7 @@ function DesktopSidebar({ page, perms, navUnread, reminderDue, leadDue = 0, onNa
   const logoBox = (
     <div style={{ width: 38, height: 38, borderRadius: 11, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
       {branding.logoType === "image" && branding.logoImage
-        ? <img src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+        ? <ProtectedImage src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
         : <span style={{ fontSize: 20, fontWeight: 800, color: T.primary }}>{logoInitial(branding)}</span>}
     </div>
   );
@@ -28747,6 +29353,77 @@ function PaymentBanner({ banner, T, onOpen, onClose }) {
   );
 }
 
+const CONFLICT_SECTION_NAMES = {
+  sps_clients: "Clients",
+  sps_schedule: "Schedule",
+  sps_invoices: "Invoices",
+  sps_catalog: "Inventory",
+  sps_estimates: "Estimates",
+  sps_team: "Team settings",
+};
+
+// A CAS conflict is deliberately blocking: independent edits were already merged, but choosing a
+// winner for one field is a business decision. Keeping that choice visible prevents either device's
+// work from being silently discarded.
+function DataConflictBanner({ conflict, busy, T, onResolve }) {
+  if (!conflict) return null;
+  const section = CONFLICT_SECTION_NAMES[conflict.key] || "Shared data";
+  const conflictItems = Array.isArray(conflict.conflicts) ? conflict.conflicts : [];
+  const count = Number(conflict.count) || conflictItems.length;
+  const pathText = conflict.summary || conflictItems.map((item) => item && item.path).filter(Boolean).slice(0, 3).join(", ");
+  return (
+    <div style={{ background: hexA("#C2410C", 0.1), borderBottom: `1px solid ${hexA("#C2410C", 0.3)}`, padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, color: T.text, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 8, minWidth: 220, flex: 1 }}>
+        <Icon name="warning" size={16} style={{ color: "#C2410C", marginTop: 1, flexShrink: 0 }} />
+        <div>
+          <div style={{ fontSize: 12.5, fontWeight: 800 }}>{section} was edited on two devices</div>
+          <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2 }}>Non-overlapping work is safe. Choose which change to keep for {count || "the"} overlapping field{count === 1 ? "" : "s"}{pathText ? ` (${pathText})` : ""}.</div>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 7, flexShrink: 0 }}>
+        <button disabled={busy} onClick={() => onResolve("remote")} style={{ border: `1px solid ${T.border}`, background: T.surface, color: T.text, borderRadius: 9, padding: "7px 11px", fontSize: 11.5, fontWeight: 700, cursor: busy ? "wait" : "pointer", fontFamily: "inherit", opacity: busy ? 0.6 : 1 }}>Use shared change</button>
+        <button disabled={busy} onClick={() => onResolve("local")} style={{ border: "none", background: "#C2410C", color: "#fff", borderRadius: 9, padding: "7px 11px", fontSize: 11.5, fontWeight: 800, cursor: busy ? "wait" : "pointer", fontFamily: "inherit", opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Use my change"}</button>
+      </div>
+    </div>
+  );
+}
+
+const STOP_MUTATION_KEYS = ["sps_clients", "sps_catalog", "sps_completed", "sps_schedule"];
+
+function decodeStopStateValue(raw) {
+  let value = raw;
+  // app_state historically stored JSON text inside jsonb. Tolerate one older double-encoded row,
+  // but never coerce a malformed value into an empty default and overwrite it.
+  for (let pass = 0; pass < 2 && typeof value === "string"; pass += 1) {
+    try { value = JSON.parse(value); } catch (_) { break; }
+  }
+  return value;
+}
+
+async function readStopMutationBaseline(fallbacks) {
+  const { data, error } = await supabase.from("app_state").select("key, value, version").in("key", STOP_MUTATION_KEYS);
+  if (error) throw new Error(error.message || "Couldn't read the latest stop data.");
+  const rows = new Map((data || []).map((row) => [row.key, row]));
+  const values = {}, versions = {};
+  for (const key of STOP_MUTATION_KEYS) {
+    const row = rows.get(key);
+    if (!row) {
+      values[key] = fallbacks[key];
+      versions[key] = 0;
+      continue;
+    }
+    const version = Number(row.version);
+    if (!Number.isSafeInteger(version) || version <= 0) throw new Error("Stop safety setup is not active yet. Run the concurrency migration before completing or reopening stops.");
+    values[key] = decodeStopStateValue(row.value);
+    versions[key] = version;
+  }
+  if (!Array.isArray(values.sps_clients)) throw new Error("Shared client data is malformed; the stop was not changed.");
+  if (!values.sps_catalog || typeof values.sps_catalog !== "object" || Array.isArray(values.sps_catalog)) throw new Error("Shared inventory data is malformed; the stop was not changed.");
+  if (!values.sps_completed || typeof values.sps_completed !== "object" || Array.isArray(values.sps_completed)) throw new Error("Shared completion data is malformed; the stop was not changed.");
+  if (!Array.isArray(values.sps_schedule)) throw new Error("Shared schedule data is malformed; the stop was not changed.");
+  return { values, versions };
+}
+
 export default function App({ authEmail = "", onSignOut }) {
   const [selectedClient, setSelectedClient] = useState(null);
   const [clientOpenTab, setClientOpenTab] = useState(null); // which ClientDetail tab to open (e.g. from a Home alert)
@@ -28760,8 +29437,10 @@ export default function App({ authEmail = "", onSignOut }) {
   // <main> scroll container) so iOS doesn't clip this position:fixed overlay.
   const [previewClient, setPreviewClient] = useState(null);
   // Server-mediated client portal slice (api/portal-data): undefined = idle/loading, null = not a
-  // client (or fetch failed → fall back to local arrays), object = this client's scoped data only.
+  // client (or the request failed closed), object = this client's scoped data only.
   const [portalData, setPortalData] = useState(undefined);
+  const portalDataFenceRef = useRef(null);
+  if (!portalDataFenceRef.current) portalDataFenceRef.current = createPortalDataFence();
 
   // Persistent data — survives reloads and app updates
   const [clients, setClients, lc] = useStoredState("sps_clients", []);
@@ -28852,7 +29531,7 @@ export default function App({ authEmail = "", onSignOut }) {
     const redirPhone = tm.phone || (email.notify && email.notify.ownerPhone) || branding.companyPhone || "";
     setTestMode({ on: !!tm.on, mode: tm.mode || "redirect", email: redirEmail, phone: redirPhone, liveClientIds: (tm.liveClientIds || []).map(String) });
     // Keep the ACTOR mirror current too — comms-log entries carry who sent from this device.
-    setActor((currentUser && (currentUser.name || currentUser.email)) || (clientUser && clientUser.name) || "");
+    setActor((currentUser && (currentUser.name || currentUser.email)) || (portalData && portalData.client && portalData.client.name) || "");
   }, [email.testMode, email.notify, branding.companyEmail, branding.companyPhone, authEmail]);
   const [costs, setCosts, lco] = useStoredState("sps_costs", DEFAULT_COSTS);
   const [home, setHome, lh] = useStoredState("sps_home", DEFAULT_HOME);
@@ -28989,23 +29668,40 @@ export default function App({ authEmail = "", onSignOut }) {
   const emailKey = (authEmail || "").trim().toLowerCase();
   const anyEmail = (team || []).some(m => (m.email || "").trim());
   const currentUser = (team || []).find(m => (m.email || "").trim().toLowerCase() === emailKey) || null;
-  // client portal: if no staff match, check if email belongs to a client record
-  const clientUser = !currentUser && emailKey ? (clients || []).find(c => (c.email || "").trim().toLowerCase() === emailKey) || null : null;
   // When a signed-in email isn't staff, fetch ONLY this client's slice from api/portal-data
-  // (scoped server-side) instead of relying on the shared app_state the device loads. Falls back to
-  // null (→ local arrays) on any failure, so this is non-breaking until app_state is locked.
+  // (scoped server-side) instead of relying on the shared app_state the device loads. There is no
+  // raw-array fallback: a failed portal boundary fails closed and offers retry/sign-out below.
   useEffect(() => {
     if (!hydrated || currentUser || !emailKey) { setPortalData(undefined); return; }
     let alive = true;
-    (async () => {
+    let requestInFlight = false;
+    const load = async () => {
+      if (requestInFlight) return;
+      requestInFlight = true;
+      const ticket = portalDataFenceRef.current.beginRequest();
       try {
         const res = await fetch(`${PROD_URL}/api/portal-data`, { headers: await authHeaders() });
         const d = await res.json().catch(() => null);
-        if (alive) setPortalData(res.ok && d ? d : null);
-      } catch (_) { if (alive) setPortalData(null); }
-    })();
-    return () => { alive = false; };
+        if (alive && portalDataFenceRef.current.canApply(ticket)) {
+          setPortalData(prev => res.ok && d ? d : (prev && prev.client ? prev : null));
+        }
+      } catch (_) {
+        if (alive && portalDataFenceRef.current.canApply(ticket)) {
+          setPortalData(prev => (prev && prev.client ? prev : null));
+        }
+      } finally {
+        requestInFlight = false;
+      }
+    };
+    load();
+    // Refresh the client's owned slice so a newly-created tracking token, arrival/completion,
+    // invoice, or estimate appears without a reload. The endpoint is allowlisted and no-store.
+    const interval = setInterval(load, 30000);
+    return () => { alive = false; clearInterval(interval); };
   }, [hydrated, !!currentUser, emailKey]);
+  // Keep the existing client-only effects (widgets, push registration, splash greeting, deep links)
+  // pointed at the server-scoped portal identity. Never derive this from the shared clients array.
+  const clientUser = portalData && portalData.client ? portalData.client : null;
   // older saved team data may predate roles — guarantee an owner so admin powers always resolve
   const teamHasOwner = (team || []).some(m => m.role === "owner");
   // Build 15, Item 1 — roles come ONLY from the stored team record. Never infer "owner" from
@@ -29024,6 +29720,13 @@ export default function App({ authEmail = "", onSignOut }) {
     const day = (schedule || []).find(d => d.date === key);
     return day ? (day.stops || []).filter(s => String(s.assigneeId) === String(currentUser.id)) : [];
   }, [schedule, currentUser && currentUser.id]);
+  // `sps_enroute` intentionally retains each stop's start timestamp for time tracking. Select only
+  // the newest explicit "Head Here" stop for geofencing; once it arrives/completes, do not fall back
+  // to an older retained timestamp and accidentally notify a previous or future client.
+  const activeEnRouteStop = useMemo(
+    () => selectActiveEnRouteStop(myTodayStops, enRoute, arrivals, completedSids),
+    [myTodayStops, enRoute, arrivals, completedSids],
+  );
   // ── Geofence auto-arrival (Batch B) ──────────────────────────────────────────
   // When the tech's broadcast GPS enters the geofence of a stop, fire the SAME arrival the "I'm
   // Here" button does — stamp arrival, flip the public track record to "arrived", and send the
@@ -29034,15 +29737,19 @@ export default function App({ authEmail = "", onSignOut }) {
   const geoTrackWrite = (stop, status) => {
     if (!stop || !stop.trackToken) return;
     try {
+      const configuredMinutes = parseInt(email && email.trackingLinkMinutes, 10);
+      const trackingMinutes = Number.isFinite(configuredMinutes) ? Math.min(1440, Math.max(5, configuredMinutes)) : 60;
+      const now = new Date();
       store.set("sps_track_" + stop.trackToken, JSON.stringify({
         sid: stop.sid, assigneeId: stop.assigneeId || "",
         client: (stop.client || "").split(" ")[0] || "there",
-        address: stop.address || "", status: status || "scheduled", at: new Date().toISOString(),
+        address: stop.address || "", status: status || "scheduled", at: now.toISOString(),
+        expiresAt: new Date(now.getTime() + trackingMinutes * 60000).toISOString(),
       }));
     } catch (_) {}
   };
   const onGeofenceArrive = (sid) => {
-    if (!sid || arrivals[sid]) return;                        // already arrived (manual or prior auto)
+    if (!sid || sid !== activeEnRouteStop?.sid || arrivals[sid]) return; // only the current explicit Head Here stop
     const day = (schedule || []).find(d => (d.stops || []).some(s => s.sid === sid));
     const stop = day && (day.stops || []).find(s => s.sid === sid);
     if (!stop) return;
@@ -29079,7 +29786,14 @@ export default function App({ authEmail = "", onSignOut }) {
   };
   // Broadcast staff location while clocked in OR during the tech's scheduled route
   // window today (auto-share — no clock-in needed once location's been allowed once).
-  useStaffLocationTracking({ staffId: currentUser ? currentUser.id : null, meKey: currentUser ? (currentUser.email || "").trim().toLowerCase() : "", stops: myTodayStops, onGeofenceArrive, isArrived: (sid) => !!arrivals[sid] });
+  useStaffLocationTracking({
+    staffId: currentUser ? currentUser.id : null,
+    meKey: currentUser ? (currentUser.email || "").trim().toLowerCase() : "",
+    stops: myTodayStops,
+    geofenceStops: activeEnRouteStop ? [activeEnRouteStop] : [],
+    onGeofenceArrive,
+    isArrived: (sid) => !!arrivals[sid],
+  });
 
   // Resolve the brand logo to a base64 the native widget can render: a data: URL passes through; a
   // bundled path (e.g. /icon-192.png) is fetched + encoded. Skipped if it's too large to keep the
@@ -29331,6 +30045,32 @@ export default function App({ authEmail = "", onSignOut }) {
     return () => { if (pending) clearTimeout(pending); document.removeEventListener("sps-db-status", onStatus); };
   }, []);
 
+  const [dataConflict, setDataConflict] = useState(null);
+  const [conflictBusy, setConflictBusy] = useState(false);
+  useEffect(() => {
+    const onConflict = (event) => {
+      const detail = (event && event.detail) || {};
+      if (detail.key) setDataConflict(detail);
+    };
+    document.addEventListener("sps-conflict", onConflict);
+    try {
+      const existing = store.listConflicts && store.listConflicts();
+      if (existing && existing.length) setDataConflict(existing[0]);
+    } catch (_) {}
+    return () => document.removeEventListener("sps-conflict", onConflict);
+  }, []);
+  const resolveDataConflict = async (strategy) => {
+    if (!dataConflict || conflictBusy) return;
+    setConflictBusy(true);
+    try {
+      const result = await store.resolveConflict(dataConflict.key, strategy);
+      if (result && result.ok) {
+        const remaining = (store.listConflicts && store.listConflicts()) || [];
+        setDataConflict(remaining[0] || null);
+      }
+    } finally { setConflictBusy(false); }
+  };
+
   // Drain any queued (failed) writes as soon as connectivity comes back — on the browser's "online"
   // event and when the tab becomes visible again — so a save that failed offline lands without
   // needing a reload. (store.set already queues failures durably; this just nudges the retry.)
@@ -29352,7 +30092,7 @@ export default function App({ authEmail = "", onSignOut }) {
   // few attempts so a genuine outage can't loop, and cleared the moment a load succeeds.
   useEffect(() => {
     const onStatus = (e) => {
-      if (e.detail.type === "ok") { try { sessionStorage.removeItem("sps_init_retry"); } catch (_) {} return; }
+      if (e.detail.type === "read-ok") { try { sessionStorage.removeItem("sps_init_retry"); } catch (_) {} return; }
       if (e.detail.type !== "error" || !/reach the database/i.test(e.detail.msg || "")) return; // only the _init read failure
       let n = 0; try { n = parseInt(sessionStorage.getItem("sps_init_retry") || "0", 10) || 0; } catch (_) {}
       if (n >= 3) return; // give up auto-retry; the on-screen Retry button + banner take over
@@ -29519,10 +30259,15 @@ export default function App({ authEmail = "", onSignOut }) {
     return () => clearInterval(interval);
   }, []);
 
-  // Sign-out unbinds this device's push token server-side FIRST (while the auth token is
-  // still valid) so a handed-off phone doesn't keep receiving the previous account's pushes.
-  // No opt-out flag — the next sign-in re-registers cleanly. Best-effort, never blocks.
-  const handleSignOut = () => { unbindDevicePushToken(); setPage("dashboard"); setSelectedClient(null); setAdding(false); if (onSignOut) onSignOut(); };
+  // Sign-out unbinds this device's push token and clears native widget data FIRST, while the auth
+  // token is still valid. Cleanup is time-bounded so a native bridge/network problem cannot trap
+  // the user on the signed-in screen.
+  const handleSignOut = async () => {
+    setPage("dashboard"); setSelectedClient(null); setAdding(false);
+    const cleanup = Promise.allSettled([unbindDevicePushToken(), clearWidgetPayload()]);
+    await Promise.race([cleanup, new Promise(resolve => setTimeout(resolve, 1800))]);
+    if (onSignOut) await onSignOut();
+  };
   // first real sign-in (no emails assigned yet) claims the owner account automatically
   useEffect(() => {
     // Don't touch the team while the initial read failed — `team` is the seeded DEFAULT_TEAM right
@@ -29624,8 +30369,12 @@ export default function App({ authEmail = "", onSignOut }) {
   // this state re-fires them when the confirmed read lands (the sps-db-status "ok" event).
   const [dbOk, setDbOk] = useState(DB_READ_OK);
   useEffect(() => {
-    if (DB_READ_OK) { setDbOk(true); return; }
-    const on = (e) => { if ((((e || {}).detail) || {}).type === "ok") setDbOk(true); };
+    setDbOk(DB_READ_OK);
+    const on = (e) => {
+      const detail = (((e || {}).detail) || {});
+      if (detail.type === "read-ok") setDbOk(true);
+      else if (detail.type === "identity" || (detail.type === "error" && /reach the database/i.test(detail.msg || ""))) setDbOk(false);
+    };
     document.addEventListener("sps-db-status", on);
     return () => document.removeEventListener("sps-db-status", on);
   }, []);
@@ -30237,22 +30986,50 @@ export default function App({ authEmail = "", onSignOut }) {
   };
 
   const handleResetData = async () => {
-    await store.remove("sps_clients");
-    await store.remove("sps_branding");
-    await store.remove("sps_schedule");
-    await store.remove("sps_catalog");
-    await store.remove("sps_email");
-    await store.remove("sps_costs");
-    await store.remove("sps_home");
-    await store.remove("sps_budget");
-    await store.remove("sps_officeAlerts");
-    await store.remove("sps_schedule_cfg");
-    await store.remove("sps_roles");
-    await store.remove("sps_team");
-    await store.remove("sps_session");
-    await store.remove("sps_invoices");
-    await store.remove("sps_invoicing");
-    await store.remove("sps_completed");
+    const baseline = await snapshotState("Before factory reset");
+    if (!baseline) throw new Error("Could not create the required safety snapshot. Nothing was reset.");
+    const baselineVersions = baseline.versions;
+    // Replace each section directly and wait for every CAS confirmation. This avoids the former
+    // delete-then-autosave window where another tab or a failed request could leave a partial reset.
+    const replacements = {
+      sps_clients: DEMO_CLIENTS,
+      sps_branding: DEFAULT_BRANDING,
+      sps_schedule: DEFAULT_SCHEDULE,
+      sps_catalog: DEFAULT_CATALOG,
+      sps_email: DEFAULT_EMAIL,
+      sps_costs: DEFAULT_COSTS,
+      sps_home: DEFAULT_HOME,
+      sps_budget: DEFAULT_BUDGET,
+      sps_officeAlerts: [],
+      sps_schedule_cfg: DEFAULT_SCHEDULE_CFG,
+      sps_roles: DEFAULT_ROLES,
+      sps_invoices: DEMO_INVOICES,
+      sps_invoicing: DEFAULT_INVOICING,
+      sps_completed: {},
+      sps_arrivals: {},
+      sps_enroute: {},
+      sps_stop_drafts: {},
+      sps_reminders: {},
+      sps_estimates: [],
+      sps_leads: [],
+      sps_nav_dock: DEFAULT_DOCK,
+      sps_palette: DEFAULT_PALETTE,
+      sps_route_assignments: [],
+      sps_service_tiers: DEFAULT_TIERS,
+      sps_auto_log: {},
+      sps_digest_log: {},
+      sps_nudge_log: {},
+      sps_inbound_ai_budget: {},
+      sps_inbound_ai_budget_sms: {},
+    };
+    const resetResult = await store.replaceMany(Object.entries(replacements).map(([key, next]) => ({
+      key,
+      value: JSON.stringify(next),
+      expectedVersion: baselineVersions[key] || 0,
+    })));
+    if (!resetResult || !resetResult.ok) {
+      throw new Error(`Reset was not applied; ${resetResult?.conflictKey || "shared data"} changed or the atomic save failed.`);
+    }
     setClients(DEMO_CLIENTS);
     setBranding(DEFAULT_BRANDING);
     setSchedule(DEFAULT_SCHEDULE);
@@ -30264,11 +31041,18 @@ export default function App({ authEmail = "", onSignOut }) {
     setOfficeAlerts([]);
     setScheduleCfg(DEFAULT_SCHEDULE_CFG);
     setRoles(DEFAULT_ROLES);
-    setTeam(DEFAULT_TEAM);
-    setSession({ userId: DEFAULT_OWNER_ID });
     setInvoices(DEMO_INVOICES);
     setInvoicing(DEFAULT_INVOICING);
     setCompletedSids({});
+    setArrivals({});
+    setEnRoute({});
+    setStopDrafts({});
+    setReminderLog({});
+    setEstimatesRaw([]);
+    setLeads([]);
+    setNavDock(DEFAULT_DOCK);
+    setRouteAssignments([]);
+    setServiceTiers(DEFAULT_TIERS);
   };
 
   const handleOfficeAlert = (a) => {
@@ -30286,9 +31070,19 @@ export default function App({ authEmail = "", onSignOut }) {
   // true when the portal is running off the scoped server slice (portalData) rather than the arrays.
   const clientServerMode = () => !!(portalData && portalData.client);
   const portalAction = (action, payload) =>
-    authHeaders({ "Content-Type": "application/json" }).then(h =>
-      fetch(`${PROD_URL}/api/portal-action`, { method: "POST", headers: h, body: JSON.stringify({ action, payload }) })
-    ).catch(() => {});
+    requestPortalAction({
+      endpoint: `${PROD_URL}/api/portal-action`,
+      action,
+      payload,
+      getHeaders: authHeaders,
+    });
+  const confirmedPortalAlert = async (alert) => {
+    const receipt = await portalAction("officeAlert", { alert });
+    if (!receipt || !receipt.alert || !receipt.alert.id) {
+      throw new Error("The server did not confirm that request. Please try again.");
+    }
+    return receipt;
+  };
 
   // Email the owner for an Owner-Alerts event, if that event's email channel is on
   // (Settings > Business > Owner Alerts). The in-app alert is the durable record,
@@ -30323,15 +31117,23 @@ export default function App({ authEmail = "", onSignOut }) {
   const postClientMessage = (clientId, sender, senderName, body) => {
     if (!clientId || !body) return;
     if (sender === "staff" && TEST_MODE.on && !clientIsLive(clientId)) return; // Test Mode holds staff→client posts (pilot-live clients excepted)
+    if (sender === "client" && clientServerMode()) {
+      authHeaders({ "Content-Type": "application/json" }).then(headers =>
+        fetch(`${PROD_URL}/api/portal-messages`, { method: "POST", headers, body: JSON.stringify({ body }) })
+      ).catch(() => {});
+      return;
+    }
     supabase.from("sps_messages")
       .insert({ client_id: String(clientId), sender, sender_name: senderName || "", body })
       .then(({ error }) => { if (error) console.warn("Chat message insert failed:", error.message); }, () => {});
   };
 
   // client service requests land as office alerts so staff see them on the dashboard
-  const handleServiceRequest = (req) => {
+  const handleServiceRequest = async (req) => {
     const alert = { title: `Service Request: ${req.clientName}`, body: `${req.type}${req.dates ? " · " + req.dates : ""}${req.notes ? " — " + req.notes : ""}`, type: "request", clientId: req.clientId };
-    if (clientServerMode()) portalAction("officeAlert", { alert }); else handleOfficeAlert(alert);
+    if (clientServerMode()) return await confirmedPortalAlert(alert);
+
+    handleOfficeAlert(alert);
     notifyOwnerEmail("service_request", {
       subject: `Service request: ${req.clientName}`,
       heading: `${req.clientName} requested service`,
@@ -30341,27 +31143,47 @@ export default function App({ authEmail = "", onSignOut }) {
       actionLabel: "Open in the SPS app",
     });
     postClientMessage(req.clientId, "client", req.clientName, `I'd like to request ${req.type || "service"}${req.dates ? ` (${req.dates})` : ""}.${req.notes ? ` ${req.notes}` : ""} [[echo]]`);
+    return { ok: true };
   };
 
   // Store a client's service rating on their most recent visit, and route low
   // ratings (private feedback) straight to the office so Brandon can make it right.
-  const handleRateVisit = ({ clientId, visitDate, rating, feedback }) => {
-    if (clientServerMode()) {
-      portalAction("rateVisit", { visitDate, rating, feedback });
-    } else {
-      setClients(prev => (prev || []).map(c => {
-        if (String(c.id) !== String(clientId)) return c;
-        const hist = (c.history || []).slice();
-        const idx = visitDate ? hist.findIndex(h => h.date === visitDate) : 0;
-        const at = idx >= 0 ? idx : 0;
-        if (hist[at]) hist[at] = { ...hist[at], clientRating: rating, clientFeedback: feedback || "", ratedAt: Date.now() };
-        return { ...c, history: hist };
-      }));
+  const handleRateVisit = async ({ clientId, visitRef, visitDate, rating, feedback }) => {
+    const reference = visitRef || (visitDate ? { field: "visitDate", value: visitDate } : null);
+    if (!reference || !["completionReceiptId", "sid", "visitId", "visitDate"].includes(reference.field)) {
+      throw new Error("That service visit could not be identified. Refresh and try again.");
     }
+    if (clientServerMode()) {
+      // The server commits the visit rating and any low-rating office alert in one atomic receipt.
+      const receipt = await portalAction("rateVisit", { [reference.field]: reference.value, rating, feedback });
+      if (!receipt || !receipt.visitRef || !Number.isInteger(Number(receipt.rating))) {
+        throw new Error("The server did not confirm the saved rating. Please try again.");
+      }
+      const confirmedRating = Number(receipt.rating);
+      const confirmedFeedback = typeof receipt.feedback === "string" ? receipt.feedback : "";
+      const confirmedRatedAt = Number(receipt.ratedAt) || Date.now();
+      portalDataFenceRef.current.confirmMutation();
+      setPortalData(pd => {
+        if (!pd || !pd.client || String(pd.client.id) !== String(clientId)) return pd;
+        const history = (pd.client.history || []).map(visit => portalVisitMatchesReference(visit, receipt.visitRef)
+          ? { ...visit, clientRating: confirmedRating, clientFeedback: confirmedFeedback, ratedAt: confirmedRatedAt }
+          : visit);
+        return { ...pd, client: { ...pd.client, history } };
+      });
+      return receipt;
+    }
+
+    setClients(prev => (prev || []).map(c => {
+      if (String(c.id) !== String(clientId)) return c;
+      const hist = (c.history || []).slice();
+      const matches = hist.map((item, index) => portalVisitMatchesReference(item, reference) ? index : -1).filter(index => index >= 0);
+      if (matches.length === 1) hist[matches[0]] = { ...hist[matches[0]], clientRating: rating, clientFeedback: feedback || "", ratedAt: Date.now() };
+      return { ...c, history: hist };
+    }));
     if (rating && rating <= 3) {
-      const c = clientServerMode() ? portalData.client : (clients || []).find(x => String(x.id) === String(clientId));
+      const c = (clients || []).find(x => String(x.id) === String(clientId));
       const fbAlert = { title: `Service Feedback: ${c?.name || "Client"}`, body: `${rating}★${feedback ? ` — ${feedback}` : ""}`, type: "feedback", clientId };
-      if (clientServerMode()) portalAction("officeAlert", { alert: fbAlert }); else handleOfficeAlert(fbAlert);
+      handleOfficeAlert(fbAlert);
       notifyOwnerEmail("low_rating", {
         subject: `Low rating (${rating}★): ${c?.name || "Client"}`,
         heading: `${c?.name || "A client"} left a ${rating}★ rating`,
@@ -30369,6 +31191,7 @@ export default function App({ authEmail = "", onSignOut }) {
         rows: [["Client", c?.name || "Client"], ["Rating", `${rating} of 5`]],
       });
     }
+    return { ok: true, rating, feedback: feedback || "" };
   };
 
   const handleConfirmUpgrade = async (updatedAlert, updatedClient) => {
@@ -30405,7 +31228,7 @@ export default function App({ authEmail = "", onSignOut }) {
     }
   };
 
-  const handleUpgradeRequest = (req) => {
+  const handleUpgradeRequest = async (req) => {
     const alert = {
       title: `Upgrade Request: ${req.clientName}`,
       body: req.message || "No additional message.",
@@ -30418,20 +31241,24 @@ export default function App({ authEmail = "", onSignOut }) {
       upgradeStep: 0,
       date: new Date().toLocaleDateString("en-US"),
     };
-    if (clientServerMode()) portalAction("officeAlert", { alert }); else handleOfficeAlert(alert);
-    notifyOwnerEmail("upgrade_request", {
-      subject: `Upgrade request: ${req.clientName} → ${req.requestedPlan}`,
-      heading: `${req.clientName} wants to upgrade`,
-      message: (req.message ? `Their note:\n"${req.message}"\n\n` : "") + `Tap "Open in the SPS app" below to review and process it. On a computer? ${PROD_URL}`,
-      rows: [
-        ["Client", req.clientName],
-        ["Current plan", req.currentPlan || "None"],
-        ["Requested plan", req.requestedPlan],
-      ],
-      actionUrl: "spsway://alerts",
-      actionLabel: "Open in the SPS app",
-    });
-    postClientMessage(req.clientId, "client", req.clientName, `I'd like to upgrade to ${req.requestedPlan}${req.currentPlan ? ` (from ${req.currentPlan})` : ""}.${req.message ? ` ${req.message}` : ""} [[echo]]`);
+    if (clientServerMode()) return await confirmedPortalAlert(alert);
+    else {
+      handleOfficeAlert(alert);
+      notifyOwnerEmail("upgrade_request", {
+        subject: `Upgrade request: ${req.clientName} → ${req.requestedPlan}`,
+        heading: `${req.clientName} wants to upgrade`,
+        message: (req.message ? `Their note:\n"${req.message}"\n\n` : "") + `Tap "Open in the SPS app" below to review and process it. On a computer? ${PROD_URL}`,
+        rows: [
+          ["Client", req.clientName],
+          ["Current plan", req.currentPlan || "None"],
+          ["Requested plan", req.requestedPlan],
+        ],
+        actionUrl: "spsway://alerts",
+        actionLabel: "Open in the SPS app",
+      });
+    }
+    if (!clientServerMode()) postClientMessage(req.clientId, "client", req.clientName, `I'd like to upgrade to ${req.requestedPlan}${req.currentPlan ? ` (from ${req.currentPlan})` : ""}.${req.message ? ` ${req.message}` : ""} [[echo]]`);
+    return { ok: true };
   };
 
   const handleSaveInvoice = (inv) => {
@@ -30487,87 +31314,116 @@ export default function App({ authEmail = "", onSignOut }) {
   // Stamp the "On My Way"/Head Here start once per stop (first-wins, so re-opening doesn't reset it).
   const handleEnRoute = (sid) => { if (!sid) return; setEnRoute(a => (a[sid] ? a : { ...a, [sid]: new Date().toISOString() })); };
 
-  // mark a stop complete: prepend the visit to the client's history (with photos)
-  const handleCompleteStop = (clientId, entry, sid) => {
-    // Owner push (skipped when the OWNER completed it — no self-notifications). The client's
-    // own "visit report" push rides the portal-message webhook, not this.
-    if (!(perms && perms.isAdmin)) {
-      const _cl = (clients || []).find(c => String(c.id) === String(clientId));
-      sendPushEvent("stop_completed", { body: `${_cl?.name || "A client"} — visit completed`, collapseId: `stop-${sid || clientId}` });
+  // Completing/reopening spans three shared sections. Field staff cannot call the generic
+  // owner-only batch primitive, so a narrow staff-authorized endpoint validates the scheduled stop,
+  // derives the exact mutation server-side, and commits it with the service-role batch CAS.
+  const stopMutationFallbacks = () => ({ sps_clients: clients, sps_catalog: catalog, sps_completed: completedSids, sps_schedule: schedule });
+  const adoptStopBaseline = (values) => {
+    setClients(values.sps_clients);
+    setCatalog(values.sps_catalog);
+    setCompletedSids(values.sps_completed);
+    setSchedule(values.sps_schedule);
+  };
+  const refreshStopBaseline = async () => {
+    try {
+      const baseline = await readStopMutationBaseline(stopMutationFallbacks());
+      adoptStopBaseline(baseline.values);
+      return baseline.values;
+    } catch (error) {
+      // The transaction is already confirmed at this point. A brief follow-up read failure should
+      // not turn a successful completion into a retry (which could duplicate downstream effects).
+      console.warn("stop refresh failed:", error && error.message ? error.message : error);
+      return null;
     }
-    setClients(cs => cs.map(c => {
-      if (c.id !== clientId) return c;
-      const history = [entry, ...(c.history || [])];
-      const balance = entry.invoice && entry.invoice !== "$0"
-        ? entry.invoice : c.balance;
-      return { ...c, history, balance };
-    }));
-    // subtract used treatments + parts from inventory at the chosen location
-    const txUsed = entry.treatmentsUsed || [];
-    const ptUsed = entry.partsUsed || [];
-    const prUsed = entry.productsPurchased || []; // products are now inventory-tracked too
-    if (txUsed.length || ptUsed.length || prUsed.length) {
-      setCatalog(cat => {
-        const decFromLoc = (item, usedAmt, locId) => {
-          // Pull from the picked location first, then spill over to other locations if short
-          const stock = { ...(item.stockByLoc || {}) };
-          let toRemove = usedAmt;
-          if (locId && stock[locId] !== undefined) {
-            const take = Math.min(parseFloat(stock[locId]) || 0, toRemove);
-            stock[locId] = (parseFloat(stock[locId]) || 0) - take;
-            toRemove -= take;
-          }
-          // spill to other locations if still owed
-          if (toRemove > 0) {
-            for (const k of Object.keys(stock)) {
-              if (k === locId) continue;
-              const take = Math.min(parseFloat(stock[k]) || 0, toRemove);
-              stock[k] = (parseFloat(stock[k]) || 0) - take;
-              toRemove -= take;
-              if (toRemove <= 0) break;
-            }
-          }
-          const total = Object.values(stock).reduce((s, v) => s + (parseFloat(v) || 0), 0);
-          return { ...item, stockByLoc: stock, inventoryOz: String(total) };
-        };
-        return {
-          ...cat,
-          treatments: (cat.treatments || []).map(t => {
-            const used = txUsed.find(u => u.id === t.id);
-            return used ? decFromLoc(t, used.oz || 0, used.locId || entry.usageLoc) : t;
-          }),
-          parts: (cat.parts || []).map(p => {
-            const used = ptUsed.find(u => u.id === p.id);
-            return used ? decFromLoc(p, used.qty || 0, used.locId || entry.usageLoc) : p;
-          }),
-          products: (cat.products || []).map(p => {
-            const used = prUsed.find(u => u.id === p.id);
-            return used ? decFromLoc(p, used.qty || 0, used.locId || entry.usageLoc) : p;
-          }),
-        };
-      });
-      // Fold job-stock usage into the per-session inventory activity summary (one rollup, not a ping).
-      const locNm = (id) => ((catalog.locations || []).find(l => l.id === id) || {}).name || "";
-      const clientNm = ((clients || []).find(c => c.id === clientId) || {}).name || "";
-      txUsed.forEach(u => { if (u && (u.oz || 0) > 0) logInvChange({ action: "Used (job)", item: u.name, kind: "treatment", qty: u.oz, unit: u.unit || "oz", loc: locNm(u.locId || entry.usageLoc), note: clientNm }); });
-      ptUsed.forEach(u => { if (u && (u.qty || 0) > 0) logInvChange({ action: "Used (job)", item: u.name, kind: "part", qty: u.qty, unit: u.unit || "", loc: locNm(u.locId || entry.usageLoc), note: clientNm }); });
-      prUsed.forEach(u => { if (u && (u.qty || 0) > 0) logInvChange({ action: "Used (job)", item: u.name, kind: "product", qty: u.qty, unit: u.unit || "", loc: locNm(u.locId || entry.usageLoc), note: clientNm }); });
+  };
+  const requestStopMutation = async (body) => {
+    const response = await fetch(`${PROD_URL}/api/stop-completion`, {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.ok !== true) {
+      const error = new Error(data.error || "The stop could not be saved. Nothing was changed.");
+      error.code = data.code || "";
+      error.legacy = !!data.legacy;
+      throw error;
     }
-    if (sid) setCompletedSids(m => ({ ...m, [sid]: true }));
+    return data;
   };
 
-  // Un-finish a stop: clear its completed flag and remove the history entry it created
-  const handleUncompleteStop = (clientId, sid) => {
-    setCompletedSids(m => { const n = { ...m }; delete n[sid]; return n; });
-    setClients(cs => cs.map(c => {
-      if (c.id !== clientId) return c;
-      const hist = [...(c.history || [])];
-      // remove the entry tied to this sid, else the most recent one
-      let idx = hist.findIndex(h => h.sid === sid);
-      if (idx < 0) idx = 0;
-      if (idx >= 0) hist.splice(idx, 1);
-      return { ...c, history: hist };
-    }));
+  const handleCompleteStop = async (clientId, entry, sid, idempotencyKey) => {
+    await store.flush();
+    const blocked = store.listConflicts().find(conflict => STOP_MUTATION_KEYS.includes(conflict.key));
+    if (blocked) throw new Error("Resolve the shared data conflict at the top of the app before completing this stop.");
+    const saved = await requestStopMutation({ mode: "complete", clientId, sid, entry, idempotencyKey });
+    const refreshed = await refreshStopBaseline();
+    if (saved.applied) {
+      // External effects happen only after the endpoint confirms the completion, history, balance,
+      // and exact stock deductions were durably committed together.
+      const trackedStop = (schedule || []).flatMap(day => day.stops || []).find(stop => String(stop.sid) === String(sid));
+      try { if (trackedStop?.trackToken) geoTrackWrite(trackedStop, "complete"); } catch (_) {}
+      const savedClient = refreshed?.sps_clients?.find(item => item && String(item.id) === String(clientId));
+      const clientName = saved.clientName || savedClient?.name || "A client";
+      if (!(perms && perms.isAdmin)) {
+        try { sendPushEvent("stop_completed", { body: `${clientName} — visit completed`, collapseId: `stop-${sid || clientId}` }); } catch (_) {}
+      }
+      const locationSource = refreshed?.sps_catalog || catalog;
+      const locName = (locationId) => ((locationSource.locations || []).find(location => String(location.id) === String(locationId)) || {}).name || "";
+      const kindBySection = { treatments: "treatment", parts: "part", products: "product" };
+      try {
+        (saved.inventoryDeducted || []).forEach(line => (line.deductions || []).forEach(delta => logInvChange({
+          action: "Used (job)",
+          item: line.itemName,
+          kind: kindBySection[line.section] || line.section,
+          qty: delta.amount,
+          unit: line.unit || "",
+          loc: locName(delta.locationId),
+          note: clientName,
+        })));
+      } catch (_) {}
+    }
+    return { ok: true, applied: !!saved.applied, alreadyCompleted: !!saved.alreadyCompleted, receiptId: saved.receiptId || null };
+  };
+
+  const handleUncompleteStop = async (clientId, sid) => {
+    try {
+      await store.flush();
+      const blocked = store.listConflicts().find(conflict => STOP_MUTATION_KEYS.includes(conflict.key));
+      if (blocked) throw new Error("Resolve the shared data conflict at the top of the app before reopening this stop.");
+      let saved;
+      try {
+        saved = await requestStopMutation({ mode: "reverse", clientId, sid, allowLegacy: false });
+      } catch (error) {
+        if (error.code === "legacy-completion") {
+          const proceed = window.confirm("This stop was completed before exact reversal receipts existed. The app cannot know its prior balance or which inventory locations were used. Continue by removing only the saved visit and completed flag? Inventory and balance will remain unchanged for manual review.");
+          if (!proceed) return { ok: false, cancelled: true, legacy: true };
+          saved = await requestStopMutation({ mode: "reverse", clientId, sid, allowLegacy: true });
+        } else throw error;
+      }
+      const refreshed = await refreshStopBaseline();
+      if (saved.applied) {
+        const locationSource = refreshed?.sps_catalog || catalog;
+        const locName = (locationId) => ((locationSource.locations || []).find(location => String(location.id) === String(locationId)) || {}).name || "";
+        const kindBySection = { treatments: "treatment", parts: "part", products: "product" };
+        try {
+          (saved.inventoryRestored || []).forEach(line => logInvChange({
+            action: "Restored (reopened stop)",
+            item: line.itemName,
+            kind: kindBySection[line.section] || line.section,
+            qty: line.amount,
+            unit: line.unit || "",
+            loc: locName(line.locationId),
+            note: "Exact completion reversal",
+          }));
+        } catch (_) {}
+      }
+      return { ok: true, applied: !!saved.applied, alreadyReversed: !!saved.alreadyReversed, legacy: !!saved.legacy };
+    } catch (error) {
+      const message = (error && error.message) || "Couldn't reopen the stop. Nothing was changed.";
+      try { window.alert(message); } catch (_) {}
+      return { ok: false, error: message };
+    }
   };
 
   // Still loading the app's data. The boot splash (index.html: crimson + logo +
@@ -30586,15 +31442,14 @@ export default function App({ authEmail = "", onSignOut }) {
     );
   }
 
-  // Client portal — the signed-in email belongs to a client. Prefer the server-scoped slice
-  // (api/portal-data) so the device holds ONLY this client's data; fall back to the local arrays
-  // until app_state is locked to staff-only.
+  // Client portal — the signed-in email belongs to a client. Use only the server-scoped slice
+  // (api/portal-data), so the portal never falls back to shared app_state arrays.
   const sData = portalData && portalData.client ? portalData : null;
-  const portalClient = sData ? sData.client : clientUser;
+  const portalClient = sData ? sData.client : null;
   // Session resolving (signed-in email → staff or client slice) with no local fallback yet.
   // Branded splash — same look as the !hydrated fallback above, so the whole boot reads as ONE
   // continuous branded screen (this used to be a bare grey "Loading…" page).
-  if (!currentUser && emailKey && portalData === undefined && !clientUser) {
+  if (!currentUser && emailKey && portalData === undefined) {
     const brandColor  = (branding.accentColor && branding.accentColor.trim()) ? branding.accentColor : T.primary;
     const splashColor = (branding.splashBgColor && branding.splashBgColor.trim()) ? branding.splashBgColor : brandColor;
     return (
@@ -30607,7 +31462,7 @@ export default function App({ authEmail = "", onSignOut }) {
   if (!currentUser && portalClient) {
     // Theme/branding from the (possibly server-provided) branding, so the portal looks right even
     // once app_state is locked and the device's local branding is just the default.
-    const pBranding = sData ? { ...DEFAULT_BRANDING, ...(sData.branding || {}) } : branding;
+    const pBranding = { ...DEFAULT_BRANDING, ...(sData.branding || {}) };
     const pMode = pBranding.appearance === "system" ? (systemDark ? "dark" : "light") : (pBranding.appearance || "light");
     const pThemeDef = THEMES[pBranding.themeKey];
     const pT = pBranding.themeKey === "custom" ? buildCustomTheme(pBranding.custom, pMode) : (pThemeDef ? (pThemeDef[pMode] || pThemeDef.light) : THEMES.sps.light);
@@ -30633,34 +31488,56 @@ export default function App({ authEmail = "", onSignOut }) {
       )}
       <SPSClientPortal
         client={portalClient}
-        estimates={sData ? sData.estimates : estimatesRaw}
-        onApproveEstimate={(id, status) => {
-          if (clientServerMode()) { setPortalData(pd => ({ ...pd, estimates: (pd.estimates||[]).map(e => String(e.id)===String(id) ? {...e, status} : e) })); portalAction("approveEstimate", { id, status }); }
-          else setEstimatesRaw(prev => (prev||[]).map(e => String(e.id) === String(id) ? { ...e, status } : e));
+        estimates={sData.estimates || []}
+        onApproveEstimate={async (id, status = "approved") => {
+          if (clientServerMode()) {
+            const receipt = await portalAction("approveEstimate", { id, status });
+            if (!receipt || receipt.status !== "approved" || String(receipt.id) !== String(id)) {
+              throw new Error("The server did not confirm the estimate approval. Please try again.");
+            }
+            const confirmedStatus = receipt.status;
+            portalDataFenceRef.current.confirmMutation();
+            setPortalData(pd => pd && pd.client ? { ...pd, estimates: (pd.estimates||[]).map(e => String(e.id)===String(id) ? {...e, status:confirmedStatus} : e) } : pd);
+            return receipt;
+          }
+          setEstimatesRaw(prev => (prev||[]).map(e => String(e.id) === String(id) ? { ...e, status } : e));
+          return { ok:true, status };
         }}
-        schedule={sData ? sData.schedule : schedule}
-        invoices={sData ? sData.invoices : invoices}
-        invoicing={sData ? (sData.invoicing || invoicing) : invoicing}
+        schedule={sData.schedule || []}
+        invoices={sData.invoices || []}
+        invoicing={sData.invoicing || {}}
+        mediaStatus={sData.mediaStatus}
         deepLink={portalDeepLink}
         onDeepLinkHandled={() => setPortalDeepLink(null)}
         branding={pBranding}
-        team={sData ? (sData.team || []) : team}
+        team={sData.team || []}
         T={pT}
         fontStack={pFont}
         onSignOut={handleSignOut}
         onServiceRequest={handleServiceRequest}
         onRateVisit={handleRateVisit}
         onUpgradeRequest={handleUpgradeRequest}
-        onClientMessage={(body) => notifyOwnerEmail("client_message", {
-          subject: `New message from ${portalClient.name}`,
-          heading: `${portalClient.name} sent you a message`,
-          message: (body ? `"${body}"\n\n` : "") + `Open the app to reply: ${PROD_URL}`,
-          rows: [["Client", portalClient.name]],
-        })}
-        onSavePrefs={(notifyPrefs) => {
-          _lastLocalPrefWriteAt = Date.now();
-          if (clientServerMode()) { setPortalData(pd => ({ ...pd, client: { ...pd.client, notifyPrefs } })); portalAction("savePrefs", { notifyPrefs }); }
-          else setClients(cs => (cs || []).map(c => String(c.id) === String(portalClient.id) ? { ...c, notifyPrefs } : c));
+        onClientMessage={undefined}
+        onSavePrefs={async (notifyPrefsPatch) => {
+          if (clientServerMode()) {
+            const receipt = await portalAction("savePrefs", { notifyPrefsPatch });
+            if (!receipt || !receipt.notifyPrefs || typeof receipt.notifyPrefs !== "object") {
+              throw new Error("The server did not confirm the saved preferences. Please try again.");
+            }
+            const confirmedPrefs = receipt.notifyPrefs;
+            _lastLocalPrefWriteAt = Date.now();
+            portalDataFenceRef.current.confirmMutation();
+            setPortalData(pd => pd && pd.client ? { ...pd, client: { ...pd.client, notifyPrefs:confirmedPrefs } } : pd);
+            return receipt;
+          }
+          const current = (clients || []).find(c => String(c.id) === String(portalClient.id));
+          const notifyPrefs = {
+            ...((current && current.notifyPrefs) || {}),
+            ...(notifyPrefsPatch || {}),
+            ...((notifyPrefsPatch && notifyPrefsPatch.channels) ? { channels: { ...((current && current.notifyPrefs && current.notifyPrefs.channels) || {}), ...notifyPrefsPatch.channels } } : {}),
+          };
+          setClients(cs => (cs || []).map(c => String(c.id) === String(portalClient.id) ? { ...c, notifyPrefs } : c));
+          return { ok:true, notifyPrefs };
         }}
       />
       </>
@@ -30718,9 +31595,18 @@ export default function App({ authEmail = "", onSignOut }) {
           body { position: fixed; top: 0; left: 0; right: 0; bottom: 0; overflow: hidden; overscroll-behavior: none; }
           #root { height: 100%; overflow: hidden; }
           body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
-          input, select, textarea { transition: border-color .15s ease, box-shadow .15s ease; -webkit-appearance: none; appearance: none; border-radius: 12px; font-size: 16px !important; line-height: 1.4; }
+          input, select, textarea { transition: border-color .15s ease, box-shadow .15s ease; border-radius: 12px; font-size: 16px !important; line-height: 1.4; max-width: 100%; }
+          input:not([type="checkbox"]):not([type="radio"]), select { min-height: 44px; }
+          select, input[type="date"], input[type="time"], input[type="datetime-local"] { -webkit-appearance: auto; appearance: auto; }
+          select { cursor: pointer; padding-right: 34px !important; }
+          input[type="date"], input[type="time"], input[type="datetime-local"] { min-width: 0; }
+          input[type="checkbox"], input[type="radio"] { -webkit-appearance: auto; appearance: auto; }
           input:focus, select:focus, textarea:focus { border-color: var(--ringBorder) !important; box-shadow: 0 0 0 3.5px var(--ring); outline: none; }
           button { -webkit-tap-highlight-color: transparent; }
+          @media (max-width: 699px), (max-height: 559px) and (pointer: coarse) {
+            .sps-btn { min-height: 44px; }
+            .sps-btn-sm { min-height: 40px; }
+          }
           button, a { transition: transform .1s cubic-bezier(.34,1.56,.64,1), opacity .15s ease, background .15s ease; }
           button:active:not(:disabled) { transform: scale(0.95); opacity: 0.85; }
           @media (hover: hover) { button:hover:not(:disabled) { filter: brightness(1.05); } }
@@ -30728,7 +31614,6 @@ export default function App({ authEmail = "", onSignOut }) {
           ::-webkit-scrollbar { width: 5px; height: 5px; }
           ::-webkit-scrollbar-thumb { background: ${hexA(T.textMuted, 0.2)}; border-radius: 100px; }
           ::-webkit-scrollbar-track { background: transparent; }
-          select { background-image: none; cursor: pointer; }
           textarea { line-height: 1.6; }
           img { -webkit-user-drag: none; }
     `}</style>
@@ -30811,6 +31696,7 @@ export default function App({ authEmail = "", onSignOut }) {
           <DesktopSidebar page={page} perms={perms} navUnread={navUnread} reminderDue={reminderDueCount} leadDue={leadNewCount} onNav={handleTabNav} onSignOut={handleSignOut} currentUser={currentUser} branding={branding} syncState={syncState} onSync={manualSync} T={T} vp={vp} />
           <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
             <div style={{ height: 2, flexShrink: 0, zIndex: 99, background: syncState === "syncing" ? T.primary : syncState === "saved" ? "#16a34a" : "transparent", transition: "background 0.3s", animation: syncState === "syncing" ? "syncPulse 0.8s ease-in-out" : "none" }} />
+            <DataConflictBanner conflict={dataConflict} busy={conflictBusy} T={T} onResolve={resolveDataConflict} />
             {dbError && (
               <div style={{ background: hexA("#F59E0B", 0.1), borderBottom: `1px solid ${hexA("#F59E0B", 0.3)}`, padding: "10px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: T.text }}>
                 <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Icon name="warning" size={15} />{dbError}</span>
@@ -30855,18 +31741,26 @@ export default function App({ authEmail = "", onSignOut }) {
           body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
           input, select, textarea {
             transition: border-color .15s ease, box-shadow .15s ease;
-            -webkit-appearance: none;
-            appearance: none;
             border-radius: 12px;
             font-size: 16px !important;
             line-height: 1.4;
+            max-width: 100%;
           }
+          input:not([type="checkbox"]):not([type="radio"]), select { min-height: 44px; }
+          select, input[type="date"], input[type="time"], input[type="datetime-local"] { -webkit-appearance: auto; appearance: auto; }
+          select { cursor: pointer; padding-right: 34px !important; }
+          input[type="date"], input[type="time"], input[type="datetime-local"] { min-width: 0; }
+          input[type="checkbox"], input[type="radio"] { -webkit-appearance: auto; appearance: auto; }
           input:focus, select:focus, textarea:focus {
             border-color: var(--ringBorder) !important;
             box-shadow: 0 0 0 3.5px var(--ring);
             outline: none;
           }
           button { -webkit-tap-highlight-color: transparent; }
+          @media (max-width: 699px), (max-height: 559px) and (pointer: coarse) {
+            .sps-btn { min-height: 44px; }
+            .sps-btn-sm { min-height: 40px; }
+          }
           button, a { transition: transform .1s cubic-bezier(.34,1.56,.64,1), opacity .15s ease, background .15s ease; }
           button:active:not(:disabled) { transform: scale(0.95); opacity: 0.85; }
           @media (hover: hover) { button:hover:not(:disabled) { filter: brightness(1.05); } }
@@ -30874,7 +31768,6 @@ export default function App({ authEmail = "", onSignOut }) {
           ::-webkit-scrollbar { width: 5px; height: 5px; }
           ::-webkit-scrollbar-thumb { background: ${hexA(T.textMuted, 0.2)}; border-radius: 100px; }
           ::-webkit-scrollbar-track { background: transparent; }
-          select { background-image: none; cursor: pointer; }
           textarea { line-height: 1.6; }
           img { -webkit-user-drag: none; }
         `}</style>
@@ -30886,29 +31779,29 @@ export default function App({ authEmail = "", onSignOut }) {
         <header style={{ background: hexA(T.surface, 0.9), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, position: "relative", zIndex: 100, flexShrink: 0, borderBottom: `1px solid ${T.border}` }}>
           {/* Safe area spacer — grows to exactly the status bar height on any iPhone, zero on Android */}
           <div style={{ height: "env(safe-area-inset-top)", background: "transparent" }} />
-          <div style={{ height: 46, display: "flex", alignItems: "center", justifyContent: "space-between", paddingLeft: 16, paddingRight: 16 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+          <div style={{ minHeight: 52, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, paddingLeft: 16, paddingRight: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0, flex: 1 }}>
             <div style={{ width: 30, height: 30, borderRadius: 9, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
               {branding.logoType === "image" && branding.logoImage
-                ? <img src={branding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                ? <ProtectedImage src={branding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                 : <span style={{ fontSize: 16, fontWeight: 800, color: T.primary }}>{logoInitial(branding)}</span>}
             </div>
-            <div>
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: "-0.02em", lineHeight: 1.15, color: T.text }}>{branding.companyName}</div>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: "-0.02em", lineHeight: 1.15, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.companyName}</div>
                 {email?.testMode?.on && (
                   <span onClick={() => handleNav("settings", { settingsTab: "business" })} role="button"
                     title="Test mode is on — tap to manage it in Customize → Business"
                     style={{ fontSize: 8.5, fontWeight: 800, letterSpacing: "0.06em", color: "#B45309", background: hexA("#F59E0B", 0.16), padding: "1.5px 6px", borderRadius: 100, textTransform: "uppercase", whiteSpace: "nowrap", cursor: "pointer" }}>Test</span>
                 )}
               </div>
-              <div style={{ fontSize: 10.5, color: T.textMuted, letterSpacing: "0.01em", lineHeight: 1.2 }}>{branding.division}</div>
+              <div style={{ fontSize: 10.5, color: T.textMuted, letterSpacing: "0.01em", lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.division}</div>
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             {/* Sync button — far-right header action */}
             <button onClick={manualSync} title="Sync"
-              style={{ background: hexA(T.primary, 0.1), border: "none", color: syncState === "saved" ? "#16a34a" : T.primary, cursor: "pointer", width: 32, height: 32, borderRadius: 9, display: "flex", alignItems: "center", justifyContent: "center", transition: "color 0.3s" }}>
+              aria-label="Sync data" style={{ background: hexA(T.primary, 0.1), border: "none", color: syncState === "saved" ? "#16a34a" : T.primary, cursor: "pointer", width: 44, height: 44, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", transition: "color 0.3s" }}>
               <Icon name="refresh" size={15} style={{ animation: syncState === "syncing" ? "spin 0.7s linear infinite" : "none" }} />
             </button>
           </div>
@@ -30920,6 +31813,7 @@ export default function App({ authEmail = "", onSignOut }) {
         {/* Sync indicator strip — a 2px flex child just under the header (no layout shift) */}
         <div style={{ height: 2, flexShrink: 0, zIndex: 99, background: syncState === "syncing" ? T.primary : syncState === "saved" ? "#16a34a" : "transparent", transition: "background 0.3s", animation: syncState === "syncing" ? "syncPulse 0.8s ease-in-out" : "none" }} />
 
+        <DataConflictBanner conflict={dataConflict} busy={conflictBusy} T={T} onResolve={resolveDataConflict} />
         {dbError && (
           <div style={{ background: hexA("#F59E0B", 0.1), borderBottom: `1px solid ${hexA("#F59E0B", 0.3)}`, padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: T.text }}>
             <span style={{ display:"flex", alignItems:"center", gap:6 }}><Icon name="warning" size={15} />{dbError}</span>

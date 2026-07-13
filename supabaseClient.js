@@ -1,225 +1,1047 @@
 import { createClient } from "@supabase/supabase-js";
-import { idb } from "./idbStore";
+import { idb } from "./idbStore.js";
+import { describeStateConflicts, mergeStoredState, normalizeStoredValue } from "./stateMerge.js";
 
 const SUPABASE_URL = "https://ysqarusrewceezckawlo.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlzcWFydXNyZXdjZWV6Y2thd2xvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2MjkzODEsImV4cCI6MjA5NjIwNTM4MX0.GCX-Bt3sSoDaaF-XT2xeu4h6wR4tXO2hqOydQUkl_CQ";
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  // Keep the signed-in session alive across app launches + auto-refresh the token, so
-  // long-running native sessions don't lapse to the anon role (which RLS blocks on writes).
   auth: { persistSession: true, autoRefreshToken: true },
 });
 
-let _cache = {};
+const SNAP_KEY = "snapshot";
+const PENDING_KEY = "sps_pending_writes";
+const MAX_CAS_ATTEMPTS = 6;
+
+let _uid = null;
+let _identityVersion = 0;
+let _cache = {};       // optimistic values displayed by the app
+let _confirmed = {};   // last values confirmed by Supabase
+let _versions = {};    // database-controlled version for each confirmed value
+let _exists = {};
+let _pending = {};     // durable three-way-merge intents
+let _conflicts = {};
 let _loaded = false;
 let _loadPromise = null;
-let _lastErrorAt = 0;
-// Per-key wall-clock of the last LOCAL write into _cache. A background _init() SELECT that was ISSUED
-// before a local write must NOT overwrite that key with its now-stale row on arrival (the boot-window
-// clobber that made freshly-added products / completed stops revert). Compared against _initSelectAt.
-const _cacheAt = {};
-let _initSelectAt = 0;
-
-// Durable pending-write queue. A write that fails ALL its retries is kept here (and mirrored to
-// localStorage) so it survives a reload/app-close and is re-attempted the moment the connection
-// comes back — instead of being silently lost. Keyed by app_state key; last write per key wins.
-const PENDING_KEY = "sps_pending_writes";
-let _pending = {};
 let _flushing = false;
-// Per-key in-flight write chain. set(key) waits for the previous set of the SAME key before issuing
-// its upsert, so a slow/failed earlier write can never physically land AFTER a newer one (last-issued
-// wins). Different keys still write concurrently.
+let _ensureHydratePromise = null;
+let _pendingPersistTail = Promise.resolve();
+let _snapshotPersistTail = Promise.resolve();
+let _lastErrorAt = 0;
+let _initSelectAt = 0;
+let _cacheReadyState = { ready: false, hasData: false };
+const _cacheAt = {};
 const _chains = {};
 
-// ── Offline-first READ cache (fast boot) ───────────────────────────────────────────────────────
-// A local IndexedDB snapshot of app_state lets the app paint from last-known-good INSTANTLY instead
-// of waiting on the network SELECT of every key (dominated by the multi-MB sps_clients). Supabase
-// stays the source of truth; the durable write QUEUE above is unchanged; writes still wait for a
-// confirmed network read (DB_READ_OK). The snapshot is namespaced by signed-in user id so a shared
-// device never serves another account's data, and every IDB op degrades to a no-op (idbStore) so
-// this can never throw into the storage path — on failure we just fall back to network-first.
-let _uid = null;
-const SNAP_KEY = "snapshot";
-let _cacheReadyState = { ready: false, hasData: false };
-let _ensureHydratePromise = null;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+const sameStored = (a, b) => a === b;
+const pendingIdbKey = (uid = _uid) => (uid ? `pending-v2:${uid}` : "");
+const pendingStorageKey = (uid = _uid) => (uid ? `${PENDING_KEY}:${uid}` : "");
+const snapshotIdbKey = (uid = _uid) => (uid ? `snapshot-v2:${uid}` : SNAP_KEY);
+const newOpId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 
-function _notifyCache(hasData) {
-  _cacheReadyState = { ready: true, hasData: !!hasData };
-  try { document.dispatchEvent(new CustomEvent("sps-cache-ready", { detail: { hasData: !!hasData } })); } catch {}
+function clearObject(obj) {
+  for (const key of Object.keys(obj)) delete obj[key];
 }
 
-// Pull the last saved snapshot into _cache, filling ONLY keys we don't already hold (the durable
-// pending queue, primed synchronously at module load, always wins). Serves ONLY a snapshot stamped
-// with the CURRENT uid — never cross-account; if uid is unknown we stay network-first.
-async function _hydrateFromIDB() {
+function notify(type, msg) {
+  try { document.dispatchEvent(new CustomEvent("sps-db-status", { detail: { type, msg } })); } catch (_) {}
+}
+
+function notifyReconciled(key, forceRemote = false) {
+  try { document.dispatchEvent(new CustomEvent("sps-reconciled", { detail: { key, forceRemote } })); } catch (_) {}
+}
+
+function throttledError(msg) {
+  const now = Date.now();
+  if (now - _lastErrorAt > 10000) {
+    _lastErrorAt = now;
+    notify("error", msg);
+  }
+}
+
+function publicConflicts(conflicts) {
+  return (conflicts || []).map((item) => ({ path: item.path, kind: item.kind }));
+}
+
+function conflictSignature(item) {
+  return `${(item && item.path) || "$"}|${(item && item.kind) || "conflict"}`;
+}
+
+function notifyConflict(key, conflicts) {
+  const safe = publicConflicts(conflicts);
+  try {
+    document.dispatchEvent(new CustomEvent("sps-conflict", {
+      detail: { key, count: safe.length, paths: safe.map((item) => item.path), summary: describeStateConflicts(safe) },
+    }));
+  } catch (_) {}
+}
+
+function normalizeEnvelope(raw) {
+  if (raw && raw.v === 2 && typeof raw.localValue === "string" && raw.opId) {
+    return {
+      ...raw,
+      baseExists: !!raw.baseExists,
+      baseVersion: Number(raw.baseVersion) || 0,
+      status: raw.status === "conflict" ? "conflict" : "pending",
+      conflicts: publicConflicts(raw.conflicts),
+    };
+  }
+  // Previous builds stored only the desired whole value. Without its original base it cannot be
+  // replayed safely. It is retained and shown as a conflict unless it already equals the server.
+  const localValue = normalizeStoredValue(raw);
+  if (localValue === undefined) return null;
+  return {
+    v: 1,
+    opId: newOpId(),
+    localValue,
+    status: "legacy",
+    updatedAt: Date.now(),
+  };
+}
+
+function pendingDisplayValue(envelope) {
+  if (envelope && envelope.deleteIntent) return undefined;
+  return envelope && typeof envelope.localValue === "string" ? envelope.localValue : undefined;
+}
+
+function mergePendingSources(source) {
+  if (!source || typeof source !== "object") return;
+  for (const key of Object.keys(source)) {
+    const incoming = normalizeEnvelope(source[key]);
+    if (!incoming) continue;
+    const current = _pending[key];
+    if (!current || Number(incoming.updatedAt || 0) >= Number(current.updatedAt || 0)) _pending[key] = incoming;
+  }
+}
+
+function loadPendingFallback() {
+  const storageKey = pendingStorageKey();
+  if (!storageKey) return;
+  try {
+    // Never attach the old, unnamespaced queue to whichever account happens to sign in first.
+    // It has no trustworthy owner or merge base, so silently replaying it would be both a data leak
+    // and an overwrite risk. UID-scoped v2 queues below are the only replayable format.
+    const raw = localStorage.getItem(storageKey);
+    if (raw) mergePendingSources(JSON.parse(raw));
+  } catch (_) {}
+  for (const key of Object.keys(_pending)) {
+    const display = pendingDisplayValue(_pending[key]);
+    if (_pending[key].deleteIntent && _pending[key].status !== "conflict") delete _cache[key];
+    else if (_pending[key].deleteIntent && hasOwn(_confirmed, key)) _cache[key] = _confirmed[key];
+    else if (display !== undefined) _cache[key] = display;
+    if (_pending[key].status === "conflict" || _pending[key].status === "legacy") _conflicts[key] = _pending[key];
+  }
+}
+
+async function writePendingSnapshot(uid, data) {
+  if (!uid) return;
+  const storageKey = pendingStorageKey(uid);
+  try {
+    if (Object.keys(data).length) localStorage.setItem(storageKey, JSON.stringify(data));
+    else localStorage.removeItem(storageKey);
+  } catch (error) {
+    // Large client files can exceed localStorage. IndexedDB below remains the primary durable copy.
+    try { console.warn("store: local pending-write fallback unavailable:", error && error.message); } catch (_) {}
+  }
+  try {
+    const key = pendingIdbKey(uid);
+    if (!key) return;
+    if (Object.keys(data).length) await idb.set(key, { uid, at: Date.now(), data });
+    else await idb.del(key);
+  } catch (_) {}
+}
+
+function persistPending() {
+  // Capture both account and value now. A sign-out during this write must still preserve the old
+  // account's intent, never write it under the next signed-in account, and never drop it.
+  const uid = _uid;
+  const data = { ..._pending };
+  const run = _pendingPersistTail.then(
+    () => writePendingSnapshot(uid, data),
+    () => writePendingSnapshot(uid, data)
+  );
+  _pendingPersistTail = run.then(() => {}, () => {});
+  return run;
+}
+
+async function awaitPendingDurability() {
+  // If another local edit is staged while the current IndexedDB write is completing, wait for that
+  // newer envelope too. The network must never get ahead of the durable intent it is committing.
+  let observed;
+  do {
+    observed = _pendingPersistTail;
+    await observed;
+  } while (observed !== _pendingPersistTail);
+}
+
+function notifyCache(hasData) {
+  _cacheReadyState = { ready: true, hasData: !!hasData };
+  try { document.dispatchEvent(new CustomEvent("sps-cache-ready", { detail: { hasData: !!hasData } })); } catch (_) {}
+}
+
+async function hydrateFromIDB() {
   try {
     if (!_uid) return;
-    const snap = await idb.get(SNAP_KEY);
-    if (!snap || snap.uid !== _uid || !snap.data) return;
-    for (const k in snap.data) {
-      if (Object.prototype.hasOwnProperty.call(snap.data, k) && _cache[k] === undefined) _cache[k] = snap.data[k];
+    const identityVersion = _identityVersion;
+    const [scopedSnap, pendingSnap] = await Promise.all([idb.get(snapshotIdbKey()), idb.get(pendingIdbKey())]);
+    if (identityVersion !== _identityVersion || !_uid) return;
+    const legacySnap = await idb.get(SNAP_KEY);
+    let snap = scopedSnap;
+    if (!snap) {
+      if (legacySnap && legacySnap.uid === _uid) {
+        snap = legacySnap;
+        try { await idb.set(snapshotIdbKey(), legacySnap); } catch (_) {}
+      }
+    }
+    if (identityVersion !== _identityVersion || !_uid) return;
+    if (snap && snap.uid === _uid && snap.data) {
+      for (const key of Object.keys(snap.data)) {
+        const value = normalizeStoredValue(snap.data[key]);
+        if (value === undefined) continue;
+        if (!hasOwn(_confirmed, key)) _confirmed[key] = value;
+        if (!hasOwn(_cache, key)) _cache[key] = value;
+        if (snap.versions && Number(snap.versions[key]) > 0) {
+          _versions[key] = Number(snap.versions[key]);
+          _exists[key] = true;
+        }
+      }
+    }
+    if (pendingSnap && pendingSnap.uid === _uid) mergePendingSources(pendingSnap.data);
+    // One-time safe migration from the old global queue: only the UID stamped on the matching
+    // legacy snapshot may claim it, and only when neither scoped storage source has a newer queue.
+    // Without that ownership evidence it remains quarantined and is never displayed or replayed.
+    if (legacySnap && legacySnap.uid === _uid && Object.keys(_pending).length === 0) {
+      try {
+        const legacyRaw = localStorage.getItem(PENDING_KEY);
+        if (legacyRaw) {
+          mergePendingSources(JSON.parse(legacyRaw));
+          localStorage.removeItem(PENDING_KEY);
+          await persistPending();
+          await idb.del(SNAP_KEY);
+        }
+      } catch (_) {}
+    }
+    for (const key of Object.keys(_pending)) {
+      const value = pendingDisplayValue(_pending[key]);
+      if (_pending[key].deleteIntent && _pending[key].status !== "conflict") delete _cache[key];
+      else if (_pending[key].deleteIntent && hasOwn(_confirmed, key)) _cache[key] = _confirmed[key];
+      else if (value !== undefined) _cache[key] = value;
+      if (_pending[key].status === "conflict" || _pending[key].status === "legacy") {
+        _conflicts[key] = _pending[key];
+        notifyConflict(key, _pending[key].conflicts || [{ path: "$", kind: "legacy-base-unknown" }]);
+      }
     }
   } catch (_) {}
 }
 
-function _ensureHydrate() {
+function ensureHydrate() {
   if (_ensureHydratePromise) return _ensureHydratePromise;
-  _ensureHydratePromise = _hydrateFromIDB().then(() => { _notifyCache(Object.keys(_cache).length > 0); });
+  const identityVersion = _identityVersion;
+  _ensureHydratePromise = hydrateFromIDB().then(() => {
+    if (identityVersion === _identityVersion && _uid) notifyCache(Object.keys(_cache).length > 0);
+  });
   return _ensureHydratePromise;
 }
 
-// Persist the current _cache as the snapshot for the next cold boot (uid-stamped, fire-and-forget,
-// off the hot path). Pending values are part of _cache, so an offline optimistic edit is captured too.
-function _saveSnapshot() {
-  try { if (_uid) idb.set(SNAP_KEY, { uid: _uid, at: Date.now(), data: { ..._cache } }); } catch (_) {}
+function saveSnapshot() {
+  const uid = _uid;
+  if (!uid) return _snapshotPersistTail;
+  const snap = { uid, at: Date.now(), data: { ..._confirmed }, versions: { ..._versions } };
+  const run = _snapshotPersistTail.then(
+    () => idb.set(snapshotIdbKey(uid), snap),
+    () => idb.set(snapshotIdbKey(uid), snap)
+  );
+  _snapshotPersistTail = run.then(() => {}, () => {});
+  return run;
 }
 
-function _loadPending() {
-  try { const raw = localStorage.getItem(PENDING_KEY); if (raw) _pending = JSON.parse(raw) || {}; } catch (_) { _pending = {}; }
-  // A pending write is the freshest value we have for that key — serve it from cache too, so a
-  // reload shows the edit (not the stale DB row) while the retry is still in flight.
-  for (const k in _pending) { if (Object.prototype.hasOwnProperty.call(_pending, k)) _cache[k] = _pending[k]; }
+function resetForIdentity() {
+  _identityVersion += 1;
+  _cache = {};
+  _confirmed = {};
+  _versions = {};
+  _exists = {};
+  _pending = {};
+  _conflicts = {};
+  _loaded = false;
+  _loadPromise = null;
+  _flushing = false;
+  _ensureHydratePromise = null;
+  _cacheReadyState = { ready: false, hasData: false };
+  _initSelectAt = 0;
+  clearObject(_cacheAt);
+  clearObject(_chains);
 }
-function _savePending() {
-  try {
-    if (Object.keys(_pending).length) localStorage.setItem(PENDING_KEY, JSON.stringify(_pending));
-    else localStorage.removeItem(PENDING_KEY);
-  } catch (e) {
-    // localStorage full / private mode → the durable mirror is lost (in-session retry still works).
-    console.warn("store: could not persist pending-write queue (durability across reload lost):", e && e.message);
+
+function isAuthError(error) {
+  return /jwt|token|expired|session/i.test((error && error.message) || "");
+}
+
+async function refreshForAuthError(error) {
+  if (!isAuthError(error)) return;
+  try { await supabase.auth.refreshSession(); } catch (_) {}
+}
+
+async function readRemote(key, identityVersion = _identityVersion) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { data, error } = await supabase.from("app_state")
+      .select("key, value, version, updated_at")
+      .eq("key", key)
+      .maybeSingle();
+    if (identityVersion !== _identityVersion || !_uid) return { staleIdentity: true };
+    if (!error) {
+      if (!data) return { ok: true, exists: false, value: undefined, version: 0 };
+      return {
+        ok: true,
+        exists: true,
+        value: normalizeStoredValue(data.value),
+        version: Number(data.version) || 0,
+        updatedAt: data.updated_at || null,
+      };
+    }
+    lastError = error;
+    await refreshForAuthError(error);
+    if (attempt < 2) await sleep(300 * (attempt + 1));
+  }
+  return { ok: false, error: lastError };
+}
+
+function rpcRow(data) {
+  return Array.isArray(data) ? data[0] : data;
+}
+
+async function compareAndSwap(key, expectedVersion, value, identityVersion = _identityVersion) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { data, error } = await supabase.rpc("sps_app_state_cas", {
+      p_key: key,
+      p_expected_version: expectedVersion,
+      p_value: value,
+    });
+    if (identityVersion !== _identityVersion || !_uid) return { staleIdentity: true };
+    if (!error) {
+      const row = rpcRow(data) || {};
+      return {
+        ok: true,
+        applied: row.applied === true,
+        outcome: row.outcome || (row.applied ? "updated" : "conflict"),
+        version: row.current_version == null ? 0 : Number(row.current_version),
+        updatedAt: row.changed_at || null,
+      };
+    }
+    lastError = error;
+    await refreshForAuthError(error);
+    if (attempt < 2) await sleep(350 * (attempt + 1));
+  }
+  return { ok: false, error: lastError };
+}
+
+async function compareAndDelete(key, expectedVersion, identityVersion = _identityVersion) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { data, error } = await supabase.rpc("sps_app_state_delete_cas", {
+      p_key: key,
+      p_expected_version: expectedVersion,
+    });
+    if (identityVersion !== _identityVersion || !_uid) return { staleIdentity: true };
+    if (!error) {
+      const row = rpcRow(data) || {};
+      return { ok: true, applied: row.applied === true, outcome: row.outcome || "conflict", version: Number(row.current_version) || 0 };
+    }
+    lastError = error;
+    await refreshForAuthError(error);
+    if (attempt < 2) await sleep(350 * (attempt + 1));
+  }
+  return { ok: false, error: lastError };
+}
+
+async function compareAndSwapBatch(operations, identityVersion = _identityVersion) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { data, error } = await supabase.rpc("sps_app_state_batch_cas", {
+      p_operations: operations.map((operation) => ({
+        key: operation.key,
+        expected_version: operation.expectedVersion,
+        value: operation.value,
+      })),
+    });
+    if (identityVersion !== _identityVersion || !_uid) return { staleIdentity: true };
+    if (!error) {
+      const row = rpcRow(data) || {};
+      return {
+        ok: true,
+        applied: row.applied === true,
+        outcome: row.outcome || (row.applied ? "updated" : "conflict"),
+        conflictKey: row.conflict_key || null,
+        versions: row.current_versions && typeof row.current_versions === "object" ? row.current_versions : {},
+      };
+    }
+    lastError = error;
+    await refreshForAuthError(error);
+    if (attempt < 2) await sleep(350 * (attempt + 1));
+  }
+  return { ok: false, error: lastError };
+}
+
+function adoptRemote(key, remote, updateDisplay = true) {
+  if (remote.exists) {
+    _confirmed[key] = remote.value;
+    _versions[key] = remote.version;
+    _exists[key] = true;
+    if (updateDisplay) _cache[key] = remote.value;
+  } else {
+    delete _confirmed[key];
+    _versions[key] = 0;
+    _exists[key] = false;
+    if (updateDisplay) delete _cache[key];
   }
 }
-_loadPending();
 
-function _notify(type, msg) {
-  try { document.dispatchEvent(new CustomEvent("sps-db-status", { detail: { type, msg } })); } catch {}
-}
-
-function _throttledError(msg) {
-  const now = Date.now();
-  if (now - _lastErrorAt > 10000) { _lastErrorAt = now; _notify("error", msg); }
-}
-
-// One upsert, up to 3 attempts: a cellular blip self-heals, and an expired token is refreshed
-// (writes were silently going out as the anon role → RLS rejects them) before retrying.
-// Returns { ok, error, recovered } — recovered=true means it failed once then succeeded.
-async function _upsert(key, value) {
-  let lastErr = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const { error } = await supabase.from("app_state").upsert({ key, value, updated_at: new Date().toISOString() });
-    if (!error) return { ok: true, recovered: attempt > 0 };
-    lastErr = error;
-    const msg = (error.message || "").toLowerCase();
-    if (msg.includes("jwt") || msg.includes("token") || msg.includes("expired") || msg.includes("session")) {
-      try { await supabase.auth.refreshSession(); } catch (_) {}
-    }
-    await new Promise(r => setTimeout(r, 350 * (attempt + 1)));
-  }
-  return { ok: false, error: lastErr };
-}
-
-// Re-attempt every queued write. Called on reconnect (_init success), after any successful save,
-// and explicitly before a reload (store.flush). Single-flight so overlapping triggers don't pile up.
-async function _flush() {
-  if (_flushing) return;
-  if (!Object.keys(_pending).length) return;
-  _flushing = true;
-  try {
-    // Re-check _pending each pass so a key queued WHILE we were flushing is picked up too (not left
-    // waiting for the next external trigger). Bounded guard so a persistent failure can't spin.
-    let guard = 0;
-    while (Object.keys(_pending).length && guard++ < 100) {
-      let progressed = false;
-      for (const key of Object.keys(_pending)) {
-        const value = _pending[key];
-        if (value === undefined) continue;
-        const res = await _upsert(key, value);
-        if (res.ok) { if (_pending[key] === value) delete _pending[key]; progressed = true; }  // keep a newer queued value
-        else { _savePending(); return; } // still failing — stop and wait for the next reconnect
-      }
-      if (!progressed) break;
-    }
-    _savePending();
-    if (Object.keys(_pending).length === 0) _notify("ok", "Saved");
-  } finally { _flushing = false; }
-}
-
-async function _init() {
+async function init() {
   if (_loaded) return;
   if (_loadPromise) return _loadPromise;
-  _initSelectAt = Date.now();   // stamp when this SELECT is issued, so its (soon-stale) result can't overwrite a LOCAL write made after it
-  _loadPromise = supabase.from("app_state").select("key, value").then(({ data, error }) => {
-    if (error) { console.error("store.init failed:", error.message); _notify("error", "Cannot reach the database."); }
-    // Don't let the DB row overwrite a key that still has a pending (not-yet-saved) write, OR a key
-    // written LOCALLY after this SELECT was issued (its row is stale — the boot-window clobber).
-    else {
-      if (data) data.forEach(row => { if (_pending[row.key] === undefined && !(_cacheAt[row.key] > _initSelectAt)) _cache[row.key] = row.value; });
-      _notify("ok", "Connected"); _flush();
-      _saveSnapshot();   // refresh the cold-boot snapshot with confirmed data
-      // Tell cache-first screens fresh values landed so they can reconcile CLEAN keys (App.jsx skips
-      // any key with an unsaved local edit — never clobbers an in-progress change).
-      try { document.dispatchEvent(new CustomEvent("sps-reconciled")); } catch {}
+  const identityVersion = _identityVersion;
+  _initSelectAt = Date.now();
+  _loadPromise = (async () => {
+    try {
+      const { data, error } = await supabase.from("app_state").select("key, value, version");
+      if (identityVersion !== _identityVersion || !_uid) return;
+      if (error) {
+        console.error("store.init failed:", error.message);
+        const denied = /row.level security|permission denied|not authorized|insufficient privilege/i.test(error.message || "");
+        if (denied) notify("restricted", "Using scoped account access.");
+        else notify("error", "Cannot reach the database.");
+        return;
+      }
+      if (!data || data.length === 0) {
+        const deletedKeys = Object.keys(_confirmed).filter((key) => !_pending[key]);
+        _confirmed = {};
+        _versions = {};
+        _exists = {};
+        deletedKeys.forEach((key) => { delete _cache[key]; notifyReconciled(key, true); });
+        saveSnapshot();
+        notify("restricted", "Using scoped account access.");
+        return;
+      }
+      const remoteKeys = new Set(data.map((row) => row.key));
+      const deletedKeys = [];
+      for (const key of Object.keys(_confirmed)) {
+        if (remoteKeys.has(key)) continue;
+        delete _confirmed[key];
+        _versions[key] = 0;
+        _exists[key] = false;
+        if (!_pending[key]) {
+          delete _cache[key];
+          deletedKeys.push(key);
+        }
+      }
+      for (const row of data) {
+        const value = normalizeStoredValue(row.value);
+        if (value === undefined) continue;
+        _confirmed[row.key] = value;
+        _versions[row.key] = Number(row.version) || 0;
+        _exists[row.key] = true;
+        const pending = _pending[row.key];
+        if (pending && pending.deleteIntent && pending.status === "conflict") _cache[row.key] = value;
+        else if (!pending && !(_cacheAt[row.key] > _initSelectAt)) _cache[row.key] = value;
+      }
+      notify("read-ok", "Connected");
+      saveSnapshot();
+      notifyReconciled();
+      deletedKeys.forEach((key) => notifyReconciled(key, true));
+      flush();
+    } catch (error) {
+      if (identityVersion !== _identityVersion || !_uid) return;
+      try { console.error("store.init error:", error && error.message); } catch (_) {}
+      notify("error", "Cannot reach the database.");
+    } finally {
+      if (identityVersion === _identityVersion) _loaded = true;
     }
-    _loaded = true;
-  }).catch((e) => { try { console.error("store.init error:", e && e.message); } catch (_) {} _loaded = true; });
+  })();
   return _loadPromise;
 }
 
-// The actual write. Wrapped by store.set so calls for the same key run in issue order.
-async function _doSet(key, value) {
-  _cache[key] = value; _cacheAt[key] = Date.now();   // optimistic + stamp the write time (fences a stale in-flight _init)
-  const res = await _upsert(key, value);
-  if (res.ok) {
-    if (res.recovered) _notify("ok", "Saved");
-    if (_pending[key] !== undefined) { delete _pending[key]; _savePending(); }
-    if (Object.keys(_pending).length) _flush();   // a save just landed → drain the rest of the queue
-    return { ok: true };
+function stagePending(key, value, options = {}) {
+  const localValue = normalizeStoredValue(value);
+  if (localValue === undefined) throw new Error("store.set requires a JSON value");
+  const now = Date.now();
+  const existing = _pending[key];
+  let envelope;
+  if (existing && existing.v !== 2) {
+    // A pre-versioning queue item has no trustworthy merge base. Preserve it as a visible conflict
+    // even if the user makes another edit; silently upgrading it would discard part of that work.
+    envelope = { ...existing, opId: newOpId(), localValue, status: "legacy", updatedAt: now };
+  } else if (existing && existing.v === 2) {
+    envelope = {
+      ...existing,
+      opId: newOpId(),
+      localValue,
+      deleteIntent: false,
+      // Force belongs only to this explicit restore/reset call. A failed destructive operation must
+      // never make a later ordinary edit inherit whole-value overwrite behavior.
+      force: !!options.force,
+      forceExpectedVersion: options.force && hasOwn(options, "expectedVersion")
+        ? Math.max(0, Number(options.expectedVersion) || 0)
+        : null,
+      status: existing.status === "conflict" && !options.force ? "conflict" : "pending",
+      conflicts: existing.status === "conflict" && !options.force ? existing.conflicts : [],
+      updatedAt: now,
+    };
+  } else {
+    const optionHasBase = hasOwn(options, "baseValue");
+    const rawBase = optionHasBase ? options.baseValue : _confirmed[key];
+    const baseValue = normalizeStoredValue(rawBase);
+    envelope = {
+      v: 2,
+      opId: newOpId(),
+      baseExists: baseValue !== undefined,
+      baseValue: baseValue === undefined ? null : baseValue,
+      baseVersion: Number(_versions[key]) || 0,
+      localValue,
+      status: "pending",
+      conflicts: [],
+      force: !!options.force,
+      forceExpectedVersion: options.force && hasOwn(options, "expectedVersion")
+        ? Math.max(0, Number(options.expectedVersion) || 0)
+        : null,
+      createdAt: now,
+      updatedAt: now,
+    };
   }
-  // Failed every retry → queue it durably (survives reload) and surface the REAL reason
-  // (e.g. "new row violates row-level security policy") so a misconfig is obvious, not a mystery.
-  _pending[key] = value; _savePending();
-  console.error("store.set failed (queued for retry):", key, res.error && res.error.message);
-  _throttledError(`Save failed: ${(res.error && res.error.message) || "your changes aren't syncing — retrying."}`);
-  return { ok: false, error: res.error };
+  _pending[key] = envelope;
+  if (envelope.status === "conflict" || envelope.status === "legacy") _conflicts[key] = envelope;
+  else delete _conflicts[key];
+  _cache[key] = localValue;
+  _cacheAt[key] = now;
+  persistPending();
+  return envelope;
+}
+
+function stageDelete(key, options = {}) {
+  const now = Date.now();
+  const existing = _pending[key];
+  const optionHasBase = hasOwn(options, "baseValue");
+  const rawBase = optionHasBase
+    ? options.baseValue
+    : (existing && existing.v === 2 && existing.baseExists ? existing.baseValue : _confirmed[key]);
+  const baseValue = normalizeStoredValue(rawBase);
+  const envelope = {
+    v: 2,
+    opId: newOpId(),
+    baseExists: baseValue !== undefined,
+    baseValue: baseValue === undefined ? null : baseValue,
+    baseVersion: Number((existing && existing.baseVersion) || _versions[key]) || 0,
+    // Kept only so a legacy UI can describe the prior value; deleteIntent prevents it from being
+    // displayed or interpreted as the desired write value.
+    localValue: normalizeStoredValue((existing && existing.localValue) || _confirmed[key]) || "null",
+    deleteIntent: true,
+    force: !!options.force,
+    status: "pending",
+    conflicts: [],
+    createdAt: (existing && existing.createdAt) || now,
+    updatedAt: now,
+  };
+  _pending[key] = envelope;
+  delete _conflicts[key];
+  delete _cache[key];
+  _cacheAt[key] = now;
+  persistPending();
+  return envelope;
+}
+
+function setConflict(key, envelope, conflicts) {
+  const safe = publicConflicts(conflicts);
+  const next = { ...envelope, status: "conflict", conflicts: safe, updatedAt: Date.now() };
+  _pending[key] = next;
+  _conflicts[key] = next;
+  if (next.deleteIntent) {
+    if (hasOwn(_confirmed, key)) _cache[key] = _confirmed[key];
+    else delete _cache[key];
+  } else _cache[key] = next.localValue;
+  persistPending();
+  notifyConflict(key, safe);
+  return { ok: false, conflict: true, key, conflicts: safe };
+}
+
+function mergeEnvelopeWithRemote(key, envelope, remote, prefer = "remote") {
+  if (envelope.force) return { value: envelope.localValue, conflicts: [], merged: !sameStored(envelope.localValue, remote.value) };
+  const baseValue = envelope.baseExists ? envelope.baseValue : undefined;
+  return mergeStoredState(key, baseValue, envelope.localValue, remote.exists ? remote.value : undefined, { prefer });
+}
+
+function rebaseNewerEnvelope(key, completedEnvelope, appliedValue, appliedVersion, newer) {
+  if (!newer || newer.opId === completedEnvelope.opId) return null;
+  if (newer.force) {
+    return { ...newer, baseExists: true, baseValue: appliedValue, baseVersion: appliedVersion, status: "pending", conflicts: [] };
+  }
+  const rebased = mergeStoredState(key, completedEnvelope.localValue, newer.localValue, appliedValue, { prefer: "remote" });
+  const next = {
+    ...newer,
+    baseExists: true,
+    baseValue: appliedValue,
+    baseVersion: appliedVersion,
+    localValue: rebased.value,
+    status: rebased.conflicts.length ? "conflict" : "pending",
+    conflicts: publicConflicts(rebased.conflicts),
+    updatedAt: Date.now(),
+  };
+  if (next.status === "conflict") {
+    _conflicts[key] = next;
+    notifyConflict(key, next.conflicts);
+  }
+  return next;
+}
+
+async function finishApplied(key, envelope, value, version, identityVersion, options = {}) {
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  _confirmed[key] = value;
+  _versions[key] = version;
+  _exists[key] = true;
+  const current = _pending[key];
+  const hasNewerIntent = !!(current && current.opId !== envelope.opId);
+  if (hasNewerIntent) {
+    const rebased = rebaseNewerEnvelope(key, envelope, value, version, current);
+    if (rebased) {
+      _pending[key] = rebased;
+      _cache[key] = rebased.localValue;
+    }
+  } else {
+    delete _pending[key];
+    delete _conflicts[key];
+    _cache[key] = value;
+  }
+  await persistPending();
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  saveSnapshot();
+  // A newer local edit remains optimistic in _cache. Do not tell React to adopt the just-confirmed
+  // intermediate value; the queued follow-up commit will publish the final merged value.
+  if (options.notify !== false && !hasNewerIntent) notifyReconciled(key, true);
+  notify("save-ok", "Saved");
+  return { ok: true, value, version, merged: value !== envelope.localValue };
+}
+
+async function finishDeleted(key, envelope, identityVersion, options = {}) {
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  delete _confirmed[key];
+  _versions[key] = 0;
+  _exists[key] = false;
+  const current = _pending[key];
+  const hasNewerIntent = !!(current && current.opId !== envelope.opId);
+  if (hasNewerIntent && !current.deleteIntent) {
+    // A set issued after the delete began is a deliberate recreation. Rebase it on the now-missing
+    // row so its queued chain performs an insert instead of being cleared by the older response.
+    _pending[key] = {
+      ...current,
+      baseExists: false,
+      baseValue: null,
+      baseVersion: 0,
+      status: "pending",
+      conflicts: [],
+      updatedAt: Date.now(),
+    };
+    delete _conflicts[key];
+    _cache[key] = current.localValue;
+  } else {
+    delete _pending[key];
+    delete _conflicts[key];
+    delete _cache[key];
+  }
+  await persistPending();
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  saveSnapshot();
+  if (options.notify !== false && !hasNewerIntent) notifyReconciled(key, true);
+  notify("save-ok", "Saved");
+  return { ok: true, value: undefined, version: 0, deleted: true };
+}
+
+async function commitKey(key, identityVersion = _identityVersion) {
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  await awaitPendingDurability();
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  await ensureHydrate();
+  await init();
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  const envelope = _pending[key];
+  if (!envelope) return { ok: true, value: _confirmed[key], version: Number(_versions[key]) || 0 };
+  if (envelope.status === "conflict") return { ok: false, conflict: true, key, conflicts: envelope.conflicts || [] };
+
+  let remote;
+  if (hasOwn(_exists, key) && (_exists[key] === false || Number(_versions[key]) > 0)) {
+    remote = { ok: true, exists: !!_exists[key], value: _confirmed[key], version: Number(_versions[key]) || 0 };
+  } else {
+    remote = await readRemote(key, identityVersion);
+    if (remote.staleIdentity) return { ok: false, staleIdentity: true };
+    if (!remote.ok) return commitFailure(key, envelope, remote.error);
+    adoptRemote(key, remote, !_pending[key]);
+  }
+
+  if (envelope.v !== 2) {
+    if (remote.exists && sameStored(envelope.localValue, remote.value)) {
+      _pending[key] = envelope;
+      return finishApplied(key, envelope, remote.value, remote.version, identityVersion);
+    }
+    return setConflict(key, envelope, [{ path: "$", kind: "legacy-base-unknown" }]);
+  }
+
+  for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt += 1) {
+    if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+    const current = _pending[key];
+    if (!current || current.opId !== envelope.opId) return { ok: false, superseded: true };
+
+    if (envelope.deleteIntent) {
+      if (!remote.exists) return finishDeleted(key, envelope, identityVersion);
+      if (!envelope.force && (!envelope.baseExists || !sameStored(envelope.baseValue, remote.value))) {
+        return setConflict(key, envelope, [{ path: "$", kind: envelope.baseExists ? "delete-vs-edit" : "delete-vs-add" }]);
+      }
+      const deleted = await compareAndDelete(key, remote.version, identityVersion);
+      if (deleted.staleIdentity) return { ok: false, staleIdentity: true };
+      if (!deleted.ok) return commitFailure(key, envelope, deleted.error);
+      if (deleted.applied) return finishDeleted(key, envelope, identityVersion);
+      remote = await readRemote(key, identityVersion);
+      if (remote.staleIdentity) return { ok: false, staleIdentity: true };
+      if (!remote.ok) return commitFailure(key, envelope, remote.error);
+      adoptRemote(key, remote, false);
+      continue;
+    }
+
+    if (envelope.force && envelope.forceExpectedVersion != null) {
+      const actualVersion = remote.exists ? remote.version : 0;
+      if (actualVersion !== envelope.forceExpectedVersion) {
+        if (remote.exists && sameStored(envelope.localValue, remote.value)) {
+          return finishApplied(key, envelope, remote.value, remote.version, identityVersion);
+        }
+        return setConflict(
+          key,
+          { ...envelope, force: false },
+          [{ path: "$", kind: "restore-baseline-changed" }]
+        );
+      }
+    }
+
+    const merged = mergeEnvelopeWithRemote(key, envelope, remote);
+    if (merged.conflicts.length) return setConflict(key, envelope, merged.conflicts);
+    const candidate = normalizeStoredValue(merged.value);
+    if (candidate === undefined) return finishDeleted(key, envelope, identityVersion);
+    if (remote.exists && sameStored(candidate, remote.value)) {
+      return finishApplied(key, envelope, remote.value, remote.version, identityVersion);
+    }
+
+    const result = await compareAndSwap(key, remote.exists ? remote.version : 0, candidate, identityVersion);
+    if (result.staleIdentity) return { ok: false, staleIdentity: true };
+    if (!result.ok) return commitFailure(key, envelope, result.error);
+    if (result.applied) return finishApplied(key, envelope, candidate, result.version, identityVersion);
+
+    remote = await readRemote(key, identityVersion);
+    if (remote.staleIdentity) return { ok: false, staleIdentity: true };
+    if (!remote.ok) return commitFailure(key, envelope, remote.error);
+    adoptRemote(key, remote, false);
+  }
+  return commitFailure(key, envelope, new Error("Several people are saving this section at once. Retrying shortly."));
+}
+
+function queueFailure(key, error) {
+  persistPending();
+  try { console.error("store.set failed (kept for retry):", key, error && error.message); } catch (_) {}
+  throttledError(`Save failed: ${(error && error.message) || "your changes aren't syncing — retrying."}`);
+  return { ok: false, error };
+}
+
+function commitFailure(key, envelope, error) {
+  if (envelope && envelope.force) {
+    // A restore/reset is an exceptional destructive intent. If it did not land during the user's
+    // confirmed operation, pause it for an explicit choice instead of replaying it invisibly later.
+    return setConflict(
+      key,
+      { ...envelope, force: false },
+      [{ path: "$", kind: "destructive-operation-interrupted" }]
+    );
+  }
+  return queueFailure(key, error);
+}
+
+function enqueueCommit(key, identityVersion = _identityVersion) {
+  const prior = _chains[key] || Promise.resolve();
+  const run = (async () => {
+    try { await prior; } catch (_) {}
+    return commitKey(key, identityVersion);
+  })();
+  _chains[key] = run.then(() => {}, () => {});
+  return run;
+}
+
+async function flush() {
+  if (_flushing || !Object.keys(_pending).some((key) => _pending[key] && _pending[key].status === "pending")) return;
+  const identityVersion = _identityVersion;
+  _flushing = true;
+  try {
+    for (const key of Object.keys(_pending)) {
+      if (identityVersion !== _identityVersion || !_uid) return;
+      if (!_pending[key] || _pending[key].status !== "pending") continue;
+      await enqueueCommit(key, identityVersion);
+    }
+  } finally {
+    if (identityVersion === _identityVersion) _flushing = false;
+  }
+}
+
+async function resolveConflict(key, strategy, identityVersion = _identityVersion) {
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  const envelope = _pending[key];
+  if (!envelope) return { ok: true, value: _confirmed[key], version: Number(_versions[key]) || 0 };
+  if (strategy !== "local" && strategy !== "remote") throw new Error("Unknown conflict resolution");
+
+  for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt += 1) {
+    const current = _pending[key];
+    if (!current || current.opId !== envelope.opId) return { ok: false, superseded: true };
+    const remote = await readRemote(key, identityVersion);
+    if (remote.staleIdentity) return { ok: false, staleIdentity: true };
+    if (!remote.ok) return queueFailure(key, remote.error);
+    if (!_pending[key] || _pending[key].opId !== envelope.opId) return { ok: false, superseded: true };
+    adoptRemote(key, remote, false);
+
+    if (envelope.deleteIntent) {
+      if (strategy === "remote" || !remote.exists) {
+        if (!remote.exists) return finishDeleted(key, envelope, identityVersion);
+        return finishApplied(key, envelope, remote.value, remote.version, identityVersion);
+      }
+      const deleted = await compareAndDelete(key, remote.version, identityVersion);
+      if (deleted.staleIdentity) return { ok: false, staleIdentity: true };
+      if (!deleted.ok) return queueFailure(key, deleted.error);
+      if (deleted.applied) return finishDeleted(key, envelope, identityVersion);
+      continue;
+    }
+
+    let candidate;
+    if (envelope.v !== 2) candidate = strategy === "local" ? envelope.localValue : remote.value;
+    else {
+      const resolvedMerge = mergeEnvelopeWithRemote(key, envelope, remote, strategy);
+      const known = new Set((envelope.conflicts || []).map(conflictSignature));
+      const fresh = publicConflicts(resolvedMerge.conflicts);
+      if (known.size && fresh.some((item) => !known.has(conflictSignature(item)))) {
+        // A third writer introduced a different overlapping field after the banner appeared. Show
+        // the expanded set and require a fresh choice instead of stretching the old click to it.
+        return setConflict(key, envelope, fresh);
+      }
+      candidate = resolvedMerge.value;
+    }
+    candidate = normalizeStoredValue(candidate);
+    if (candidate === undefined) {
+      if (!remote.exists) {
+        return finishDeleted(key, envelope, identityVersion);
+      }
+      candidate = remote.value;
+    }
+    if (remote.exists && sameStored(candidate, remote.value)) {
+      return finishApplied(key, envelope, remote.value, remote.version, identityVersion);
+    }
+    const result = await compareAndSwap(key, remote.exists ? remote.version : 0, candidate, identityVersion);
+    if (result.staleIdentity) return { ok: false, staleIdentity: true };
+    if (!result.ok) return queueFailure(key, result.error);
+    if (result.applied) return finishApplied(key, envelope, candidate, result.version, identityVersion);
+  }
+  return queueFailure(key, new Error("The shared version changed again. Please choose once more."));
+}
+
+async function verifyBatchValues(operations, identityVersion) {
+  const rows = await Promise.all(operations.map((operation) => readRemote(operation.key, identityVersion)));
+  if (identityVersion !== _identityVersion || !_uid) return { staleIdentity: true };
+  if (rows.some((row) => !row.ok || row.staleIdentity)) return { matched: false };
+  const matched = rows.every((row, index) => row.exists && sameStored(row.value, operations[index].value));
+  return {
+    matched,
+    versions: matched ? Object.fromEntries(rows.map((row, index) => [operations[index].key, row.version])) : {},
+  };
+}
+
+function replaceMany(changes) {
+  if (!Array.isArray(changes) || !changes.length) return Promise.resolve({ ok: false, error: new Error("No sections to replace") });
+  const identityVersion = _identityVersion;
+  const seen = new Set();
+  let operations;
+  try {
+    operations = changes.map((change) => {
+      const key = String((change && change.key) || "");
+      const value = normalizeStoredValue(change && change.value);
+      const expectedVersion = Number(change && change.expectedVersion);
+      if (!key || seen.has(key) || value === undefined || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) {
+        throw new Error("Invalid atomic replacement request");
+      }
+      seen.add(key);
+      return { key, value, expectedVersion };
+    });
+  } catch (error) { return Promise.resolve({ ok: false, error }); }
+
+  const keys = operations.map((operation) => operation.key);
+  const priors = keys.map((key) => _chains[key] || Promise.resolve());
+  const run = (async () => {
+    try { await Promise.all(priors); } catch (_) {}
+    if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+    await ensureHydrate();
+    await init();
+    if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+    const blockedKey = keys.find((key) => _pending[key]);
+    if (blockedKey) return { ok: false, conflict: true, conflictKey: blockedKey, error: new Error("A local edit is still pending") };
+
+    let result = await compareAndSwapBatch(operations, identityVersion);
+    if (result.staleIdentity) return { ok: false, staleIdentity: true };
+    if (!result.ok || !result.applied) {
+      // A response can be lost after PostgreSQL committed the whole transaction. Re-read every key;
+      // if all exact values landed, treat it as success instead of inviting a duplicate restore.
+      const verified = await verifyBatchValues(operations, identityVersion);
+      if (verified.staleIdentity) return { ok: false, staleIdentity: true };
+      if (!verified.matched) {
+        if (!result.ok) throttledError(`Save failed: ${(result.error && result.error.message) || "the atomic replacement did not complete."}`);
+        return { ok: false, conflict: !!result.ok, conflictKey: result.conflictKey || null, error: result.error };
+      }
+      result = { ok: true, applied: true, outcome: "already-applied", versions: verified.versions };
+    }
+
+    for (const operation of operations) {
+      const key = operation.key;
+      const version = Number(result.versions[key]) || operation.expectedVersion + 1 || 1;
+      _confirmed[key] = operation.value;
+      _versions[key] = version;
+      _exists[key] = true;
+      const pending = _pending[key];
+      if (!pending) {
+        _cache[key] = operation.value;
+        continue;
+      }
+      if (pending.deleteIntent) {
+        _pending[key] = {
+          ...pending,
+          baseExists: true,
+          baseValue: operation.value,
+          baseVersion: version,
+          status: "pending",
+          conflicts: [],
+          updatedAt: Date.now(),
+        };
+        delete _cache[key];
+        continue;
+      }
+      const rebased = pending.force
+        ? { value: pending.localValue, conflicts: [] }
+        : mergeStoredState(
+          key,
+          pending.baseExists ? pending.baseValue : undefined,
+          pending.localValue,
+          operation.value,
+          { prefer: "remote" }
+        );
+      const next = {
+        ...pending,
+        baseExists: true,
+        baseValue: operation.value,
+        baseVersion: version,
+        localValue: rebased.value,
+        status: rebased.conflicts.length ? "conflict" : "pending",
+        conflicts: publicConflicts(rebased.conflicts),
+        updatedAt: Date.now(),
+      };
+      _pending[key] = next;
+      _cache[key] = next.localValue;
+      if (next.status === "conflict") {
+        _conflicts[key] = next;
+        notifyConflict(key, next.conflicts);
+      }
+    }
+    await persistPending();
+    saveSnapshot();
+    operations.forEach((operation) => { if (!_pending[operation.key]) notifyReconciled(operation.key, true); });
+    notify("save-ok", "Saved");
+    return { ok: true, atomic: true, versions: result.versions };
+  })();
+
+  const tail = run.then(() => {}, () => {});
+  keys.forEach((key) => { _chains[key] = tail; });
+  return run;
 }
 
 export const store = {
-  // Namespace the read cache to the signed-in user. MUST be called (from main.jsx, right after auth
-  // resolves) BEFORE the first get(), so a snapshot is only ever served to the account that wrote it.
-  setUser(uid) { _uid = uid || null; },
-  // Has the local snapshot finished hydrating, and did it actually contain data? The boot splash uses
-  // this to lift early ONLY when there's real cached data to show (never blank-then-wrong).
-  cacheReady() { return _cacheReadyState; },
-  // Cache-first read: serve the local snapshot instantly, kick the network read in the BACKGROUND
-  // (not awaited) so first paint doesn't wait on the multi-MB app_state SELECT. The network result
-  // reconciles in via the 'sps-reconciled' event; writes still wait for DB_READ_OK as before.
-  async get(key) {
-    await _ensureHydrate();
-    _init();
-    const val = _cache[key];
-    return val !== undefined ? { value: val } : null;
+  setUser(uid) {
+    const nextUid = uid || null;
+    if (nextUid === _uid) return;
+    resetForIdentity();
+    _uid = nextUid;
+    notify("identity", "Loading this account's shared data.");
+    if (_uid) loadPendingFallback();
   },
-  // Returns { ok: true } on a confirmed save, or { ok: false, error } when the write could not be
-  // persisted (it's been queued for durable retry). Callers MUST NOT treat a save as landed until ok.
-  // Serialized per key: this set waits for the previous set of the SAME key, so an older write can
-  // never physically land after a newer one (the concurrent-write stale-overwrite race).
-  set(key, value) {
+
+  cacheReady() { return _cacheReadyState; },
+
+  async get(key) {
+    await ensureHydrate();
+    init();
+    const value = _cache[key];
+    return value !== undefined ? { value, version: Number(_versions[key]) || 0 } : null;
+  },
+
+  set(key, value, options = {}) {
+    const identityVersion = _identityVersion;
+    stagePending(key, value, options);
+    return enqueueCommit(key, identityVersion);
+  },
+
+  async flush() { return flush(); },
+
+  listConflicts() {
+    return Object.keys(_conflicts).map((key) => ({ key, conflicts: _conflicts[key].conflicts || [] }));
+  },
+
+  async resolveConflict(key, strategy) {
+    const identityVersion = _identityVersion;
     const prior = _chains[key] || Promise.resolve();
-    const run = (async () => { try { await prior; } catch (_) {} return _doSet(key, value); })();
-    _chains[key] = run.then(() => {}, () => {});   // chain tail (never rejects)
+    const run = (async () => {
+      try { await prior; } catch (_) {}
+      if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+      return resolveConflict(key, strategy, identityVersion);
+    })();
+    _chains[key] = run.then(() => {}, () => {});
     return run;
   },
-  // Drain any queued failed writes now (e.g. on reconnect or just before a reload).
-  async flush() { return _flush(); },
-  async remove(key) {
-    delete _cache[key];
-    if (_pending[key] !== undefined) { delete _pending[key]; _savePending(); }  // don't resurrect a removed key
-    _saveSnapshot();  // and don't let the snapshot resurrect it on the next cold boot
-    await supabase.from("app_state").delete().eq("key", key);
-    return { ok: true };
+
+  replaceMany(changes) { return replaceMany(changes); },
+
+  async remove(key, options = {}) {
+    const identityVersion = _identityVersion;
+    stageDelete(key, options);
+    return enqueueCommit(key, identityVersion);
   },
-  // Wipe the on-disk snapshot (e.g. on sign-out, so a shared device never serves the prior account's
-  // cached data). Leaves the durable pending QUEUE intact — unflushed writes are still owed.
-  async clearCache() { _cacheReadyState = { ready: false, hasData: false }; _ensureHydratePromise = null; try { await idb.del(SNAP_KEY); } catch (_) {} },
-  reset() { _cache = {}; _loaded = false; _loadPromise = null; _ensureHydratePromise = null; _cacheReadyState = { ready: false, hasData: false }; },
+
+  async clearCache() {
+    const priorUid = _uid;
+    resetForIdentity();
+    _uid = null;
+    notify("identity", "Signed out.");
+    try {
+      const run = _snapshotPersistTail.then(async () => {
+        if (priorUid) await idb.del(snapshotIdbKey(priorUid));
+        const legacySnap = await idb.get(SNAP_KEY);
+        if (legacySnap && legacySnap.uid === priorUid) await idb.del(SNAP_KEY);
+      });
+      _snapshotPersistTail = run.then(() => {}, () => {});
+      await run;
+    } catch (_) {}
+  },
+
+  reset() {
+    const pending = { ..._pending };
+    _cache = {};
+    _confirmed = {};
+    _versions = {};
+    _exists = {};
+    _loaded = false;
+    _loadPromise = null;
+    _ensureHydratePromise = null;
+    _cacheReadyState = { ready: false, hasData: false };
+    clearObject(_cacheAt);
+    for (const key of Object.keys(pending)) {
+      const value = pendingDisplayValue(pending[key]);
+      if (value !== undefined) _cache[key] = value;
+    }
+  },
 };

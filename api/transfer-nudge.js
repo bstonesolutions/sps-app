@@ -18,6 +18,7 @@
 // Ledger in sps_nudge_log (separate key so the cron never rewrites the app-edited cfg).
 
 import { getItem, plaidCall, requireOwner, enabledAccountSet, filterByAccounts } from "./plaid/_plaid.js";
+import { mutateAppState, NO_APP_STATE_CHANGE, readAppStateVersioned } from "./_app-state.js";
 import { pushOwner } from "./_push.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
@@ -33,21 +34,11 @@ const pad2 = (x) => String(x).padStart(2, "0");
 
 // ── app_state (service-role) ──────────────────────────────────────────────────────────────────────
 const sbHeaders = () => ({ apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" });
-const parseVal = (v) => { try { return typeof v === "string" ? JSON.parse(v) : v; } catch { return null; } };
 async function sbGet(key, fallback) {
   try {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/app_state?key=eq.${encodeURIComponent(key)}&select=value`, { headers: sbHeaders() });
-    if (!r.ok) return fallback;
-    const rows = await r.json().catch(() => []);
-    const v = rows && rows[0] ? parseVal(rows[0].value) : null;
-    return v == null ? fallback : v;
+    const row = await readAppStateVersioned(key);
+    return row.exists && row.value != null ? row.value : fallback;
   } catch { return fallback; }
-}
-async function sbSet(key, obj) {
-  await fetch(`${SUPABASE_URL}/rest/v1/app_state?on_conflict=key`, {
-    method: "POST", headers: { ...sbHeaders(), Prefer: "resolution=merge-duplicates" },
-    body: JSON.stringify([{ key, value: JSON.stringify(obj) }]),
-  });
 }
 
 // ── ET clock (same shape as owner-digest) ─────────────────────────────────────────────────────────
@@ -355,7 +346,17 @@ export default async function handler(req, res) {
   if (channel === "sms" || channel === "both") out.sms = await sendQuo(toPhone, message, email.textingNumber);
   if (channel === "email" || channel === "both") out.email = await sendEmail(toEmail, `${branding.companyName || "SPS"} — money plan`, message, branding);
   const sent = Object.values(out).some((r) => r && r.ok);
-  if (sent) await sbSet("sps_nudge_log", { ...ledger, sent: et.mdy });
+  if (sent) {
+    try {
+      await mutateAppState("sps_nudge_log", (current) => {
+        const latest = current && typeof current === "object" && !Array.isArray(current) ? current : {};
+        return latest.sent === et.mdy ? NO_APP_STATE_CHANGE : { ...latest, sent: et.mdy };
+      });
+    } catch (error) {
+      console.error("money-plan ledger mutation failed:", error && error.message ? error.message : error);
+      return res.status(502).json({ ok: false, error: "The money plan sent, but its deduplication ledger could not be saved.", ...out });
+    }
+  }
   await logNudge(out, "money plan (auto)");
   // Push mirror — after the sent/ledger decision so a push-only success can't stamp the ledger
   // and suppress the real SMS/email retry next hour. collapseId dedupes hourly retries.

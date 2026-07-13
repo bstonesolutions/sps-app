@@ -12,28 +12,14 @@
 // Env (Vercel): SUPABASE_SERVICE_ROLE_KEY (required), CRON_SECRET (required to authorize), optional SUPABASE_URL.
 // Phase 1 = mirror only. Phase 2 will add the instant auto-reply + owner alert here.
 
+import { mutateAppState, NO_APP_STATE_CHANGE } from "./_app-state.js";
+
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
 const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const CRON_SECRET  = process.env.CRON_SECRET || "";
 
 const sbHeaders = () => ({ apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" });
 
-async function readKey(key, fallback) {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/app_state?select=value&key=eq.${encodeURIComponent(key)}`, { headers: sbHeaders() });
-  if (!r.ok) return fallback;
-  const rows = await r.json().catch(() => []);
-  const row = rows && rows[0];
-  if (!row) return fallback;
-  try { return JSON.parse(row.value); } catch { return fallback; }
-}
-async function writeKey(key, value) {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/app_state?on_conflict=key`, {
-    method: "POST",
-    headers: { ...sbHeaders(), Prefer: "resolution=merge-duplicates" },
-    body: JSON.stringify({ key, value: JSON.stringify(value), updated_at: new Date().toISOString() }),
-  });
-  return r.ok;
-}
 async function fetchUnhandledLeads() {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/leads?select=*&handled=eq.false&order=created_at.asc&limit=200`, { headers: sbHeaders() });
   if (!r.ok) return [];
@@ -99,17 +85,39 @@ export default async function handler(req, res) {
     : await fetchUnhandledLeads();
   if (!rows.length) return res.status(200).json({ ok: true, ingested: 0 });
 
-  const leads = (await readKey("sps_leads", [])) || [];
-  const seen = new Set(leads.map(l => l && l.srcId).filter(Boolean));
+  // Normalize once so CAS retries are deterministic (timestamps/ids do not change per attempt).
+  const candidates = rows.map((row) => ({ row, lead: normalize(row) }));
   let added = 0;
-  for (const row of rows) {
-    const lead = normalize(row);
-    if (lead.srcId && seen.has(lead.srcId)) { await markHandled(row.id); continue; } // already mirrored
-    leads.unshift(lead);
-    if (lead.srcId) seen.add(lead.srcId);
-    added++;
-    await markHandled(row.id);
+  let persistedSourceIds = new Set();
+  try {
+    await mutateAppState("sps_leads", (current) => {
+      const leads = Array.isArray(current) ? current : [];
+      const next = leads.slice();
+      const seen = new Set(leads.map((lead) => lead && lead.srcId).filter(Boolean).map(String));
+      const persisted = new Set();
+      let addedThisAttempt = 0;
+      for (const { row, lead } of candidates) {
+        const sourceId = lead.srcId ? String(lead.srcId) : "";
+        if (sourceId && seen.has(sourceId)) { persisted.add(sourceId); continue; }
+        next.unshift(lead);
+        if (sourceId) { seen.add(sourceId); persisted.add(sourceId); }
+        else if (row.id != null) persisted.add(String(row.id));
+        addedThisAttempt += 1;
+      }
+      added = addedThisAttempt;
+      persistedSourceIds = persisted;
+      return addedThisAttempt ? next : NO_APP_STATE_CHANGE;
+    });
+  } catch (error) {
+    console.error("lead app_state mutation failed:", error && error.message ? error.message : error);
+    return res.status(502).json({ ok: false, error: "Could not persist leads; the source rows remain queued for retry." });
   }
-  if (added) await writeKey("sps_leads", leads);
+
+  // Only acknowledge source rows after the app_state mutation has either persisted them or proven
+  // they were already present. A CAS/network failure therefore leaves handled=false for retry.
+  await Promise.all(candidates.map(({ row, lead }) => {
+    const sourceId = lead.srcId ? String(lead.srcId) : (row.id != null ? String(row.id) : "");
+    return sourceId && persistedSourceIds.has(sourceId) ? markHandled(row.id) : Promise.resolve();
+  }));
   return res.status(200).json({ ok: true, ingested: added });
 }

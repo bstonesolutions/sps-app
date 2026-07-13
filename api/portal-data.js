@@ -1,72 +1,295 @@
-// api/portal-data.js
-// Server-mediated client portal data. A signed-in CLIENT calls this; we verify their Supabase
-// token, then with the SERVICE-ROLE key return ONLY their own slice — their client record, their
-// invoices, their schedule stops, their estimates — plus display-only config (branding, invoicing,
-// and tech NAMES only). The client never receives other clients' data, the team roster's
-// rates/emails/pins, costs, or profit. This is what lets app_state be locked to staff-only without
-// breaking the portal (see SECURITY-RLS-PLAN.md).
-import { verifyUser } from "./_auth.js";
+// Server-mediated, client-safe portal snapshot. Every returned object is built from an
+// explicit public allowlist after the caller is matched by bound auth UID (or one unique
+// verified-email match for legacy client records).
+import {
+  clientOwnsInvoice,
+  lc,
+  readAppStateKeys,
+  requirePortalClient,
+  resolvePortalClient,
+  setPortalCors,
+  signPortalMedia,
+} from "./_portal-auth.js";
 
-const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
-const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-const KEYS = ["sps_clients", "sps_invoices", "sps_schedule", "sps_estimates", "sps_branding", "sps_invoicing", "sps_team"];
+const KEYS = [
+  "sps_clients",
+  "sps_invoices",
+  "sps_schedule",
+  "sps_estimates",
+  "sps_branding",
+  "sps_invoicing",
+  "sps_team",
+  "sps_arrivals",
+  "sps_completed",
+  "sps_enroute",
+];
 
-const lc = (s) => String(s || "").trim().toLowerCase();
+const own = (object, key) => Object.prototype.hasOwnProperty.call(object || {}, key);
 
-// Replicate App.jsx invoiceMatchesClient: id match, or name match when the invoice has no id.
-const invoiceMatches = (iv, client) =>
-  (iv.clientId != null && String(iv.clientId) === String(client.id)) ||
-  (iv.clientId == null && iv.clientName && lc(iv.clientName) === lc(client.name));
+function pick(object, fields) {
+  const out = {};
+  for (const field of fields) {
+    if (!own(object, field)) continue;
+    const value = object[field];
+    if (["string", "number", "boolean"].includes(typeof value) || value == null) out[field] = value;
+  }
+  return out;
+}
 
-// Replicate the app's schedule stop <-> client match.
-const stopMatches = (s, client) =>
-  String(s.id) === String(client.id) || String(s.clientId) === String(client.id) || s.client === client.name;
+function scalarMap(value, maxEntries = 40) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out = {};
+  for (const [key, item] of Object.entries(value).slice(0, maxEntries)) {
+    if (!key || key.length > 80 || ["__proto__", "prototype", "constructor"].includes(key)) continue;
+    if (["string", "number", "boolean"].includes(typeof item) || item == null) out[key] = item;
+  }
+  return out;
+}
 
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+function mediaItem(value) {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return null;
+  return pick(value, ["id", "src", "label", "caption", "name", "type", "date", "uploadedAt", "poster"]);
+}
+
+function mediaList(value, max = 100) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, max).map(mediaItem).filter(Boolean);
+}
+
+function namedPublicItems(value, max = 100) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, max).map((item) => {
+    if (typeof item === "string") return item;
+    return item && typeof item === "object" && ["string", "number"].includes(typeof item.name)
+      ? { name: String(item.name) }
+      : null;
+  }).filter(Boolean);
+}
+
+function publicHistory(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 250).map((visit) => {
+    const out = pick(visit, [
+      "id", "sid", "completionReceiptId", "date", "type", "tech", "notes", "ph", "ammonia", "nitrite", "temp",
+      "invoice", "satisfaction", "clientRating", "clientFeedback", "ratedAt",
+    ]);
+    if (visit && visit.readings) out.readings = scalarMap(visit.readings);
+    if (visit && visit.photos) out.photos = mediaList(visit.photos);
+    if (visit && visit.services) out.services = namedPublicItems(visit.services);
+    if (visit && visit.products) out.products = namedPublicItems(visit.products);
+    return out;
+  });
+}
+
+function publicEquipment(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 200).map((item) => {
+    const out = pick(item, [
+      "id", "name", "installed", "status", "serialNumber", "origin", "purchaseDate",
+      "warrantyLength", "warrantyUnit", "notes",
+    ]);
+    if (item && item.photos) out.photos = mediaList(item.photos);
+    return out;
+  });
+}
+
+function publicFishHistory(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 250).map((item) => {
+    const out = pick(item, ["id", "species", "date", "count", "health", "notes"]);
+    if (item && item.photos) out.photos = mediaList(item.photos);
+    return out;
+  });
+}
+
+function publicPurchaseHistory(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 250).map((item) => pick(item, ["id", "item", "date", "category", "price"]));
+}
+
+function publicDocuments(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 100).map((item) => pick(item, ["id", "name", "label", "type", "category", "uploadedAt", "src"]));
+}
+
+function publicNotifyPrefs(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out = pick(value, [
+    "serviceReminders", "onMyWay", "invoiceReady", "reportSummary",
+    "paymentNudges", "winBack", "broadcasts",
+  ]);
+  const channels = value.channels;
+  if (channels && typeof channels === "object" && !Array.isArray(channels)) {
+    out.channels = pick(channels, ["text", "email", "app"]);
+  }
+  return out;
+}
+
+function publicClient(client) {
+  const out = pick(client, [
+    "id", "name", "email", "address", "division", "plan", "planFreq", "monthlyRate",
+    "preferredDay", "routeDay", "routeFreq",
+    "nextService", "pondType", "pondSize", "pondGallons", "poolType", "poolSize",
+    "poolGallons", "seasonalType", "seasonalSize", "servicePond", "servicePool",
+    "serviceSeasonal",
+  ]);
+  out.plans = scalarMap(client && client.plans, 20);
+  out.planRates = scalarMap(client && client.planRates, 20);
+  out.notifyPrefs = publicNotifyPrefs(client && client.notifyPrefs);
+  out.history = publicHistory(client && client.history);
+  out.equipment = publicEquipment(client && client.equipment);
+  out.fishHistory = publicFishHistory(client && client.fishHistory);
+  out.purchaseHistory = publicPurchaseHistory(client && client.purchaseHistory);
+  out.sitePhotos = mediaList(client && client.sitePhotos);
+  out.siteVideos = mediaList(client && client.siteVideos);
+  out.documents = publicDocuments(client && client.documents);
+  return out;
+}
+
+function publicLineItem(line) {
+  return pick(line, [
+    "id", "desc", "description", "qty", "unitPrice", "taxable", "kind", "isLateFee",
+    "bundleNote", "discount", "discountType", "rate", "amount",
+  ]);
+}
+
+function publicInvoice(invoice) {
+  const out = pick(invoice, [
+    "id", "qbId", "number", "clientId", "clientName", "clientAddress", "clientEmail",
+    "date", "issueDate", "dueDate", "status", "source", "amount", "total", "subTotal", "subtotal", "taxAmount", "tax",
+    "balance", "locallyEdited", "taxRate", "discount", "discountType", "notes", "paymentLink",
+    "paidDate", "createdAt",
+  ]);
+  out.lineItems = Array.isArray(invoice && invoice.lineItems)
+    ? invoice.lineItems.slice(0, 250).map(publicLineItem)
+    : [];
+  if (invoice && invoice.payment && typeof invoice.payment === "object") {
+    out.payment = pick(invoice.payment, ["method", "date"]);
+  }
+  return out;
+}
+
+function publicEstimate(estimate) {
+  return pick(estimate, ["id", "number", "clientId", "date", "issueDate", "status", "total"]);
+}
+
+function stopMatches(stop, client, clients) {
+  if (!stop) return false;
+  const hasBoundId = stop.id != null || stop.clientId != null;
+  if (hasBoundId) {
+    return (stop.id != null && String(stop.id) === String(client.id)) ||
+      (stop.clientId != null && String(stop.clientId) === String(client.id));
+  }
+  const name = lc(client && client.name);
+  if (!name || lc(stop.client) !== name) return false;
+  // Old stops may have only a client-name snapshot. Treat that as ownership only when the name
+  // identifies exactly one client; duplicate names fail closed so a tracking token/address cannot
+  // be exposed to both records.
+  return Array.isArray(clients) && clients.filter((item) => lc(item && item.name) === name).length === 1;
+}
+
+function publicStop(stop, state = {}) {
+  const out = pick(stop, ["id", "sid", "clientId", "client", "address", "type", "time", "assigneeId", "trackToken"]);
+  const sid = stop && stop.sid;
+  const rawArrivedAt = sid != null && state.arrivals ? state.arrivals[sid] : null;
+  const arrivedAt = ["string", "number"].includes(typeof rawArrivedAt) ? rawArrivedAt : null;
+  out.portalStage = sid != null && state.completed && state.completed[sid] ? "complete"
+    : arrivedAt ? "arrived"
+      : sid != null && state.enroute && state.enroute[sid] ? "enroute"
+        : "scheduled";
+  if (arrivedAt) out.arrivedAt = arrivedAt;
+  return out;
+}
+
+function publicSchedule(value, client, clients, state) {
+  if (!Array.isArray(value)) return [];
+  return value.map((day) => ({
+    ...pick(day, ["date", "label"]),
+    stops: Array.isArray(day && day.stops)
+      ? day.stops.filter((stop) => stopMatches(stop, client, clients)).map((stop) => publicStop(stop, state))
+      : [],
+  })).filter((day) => day.stops.length > 0);
+}
+
+function publicBranding(value) {
+  const out = pick(value, [
+    "companyName", "division", "logoType", "logoEmoji", "logoImage", "themeKey", "appearance",
+    "appFont", "companyPhone", "companyEmail", "companyWebsite", "companyAddress",
+    "googleReviewLink", "portalAppName", "portalTagline", "portalHeroImage", "portalDefaultPage",
+  ]);
+  if (value && value.custom && typeof value.custom === "object") {
+    out.custom = pick(value.custom, ["fontFamily", "primary", "accent", "bg", "surface", "text"]);
+  }
+  return out;
+}
+
+function publicInvoicing(value) {
+  return pick(value, [
+    "taxRate", "dueDays", "terms", "accent", "showLogo", "showContact", "footer", "headerStyle",
+    "accentStyle", "showQtyPrice", "showItemTax", "zebraRows", "density", "cornerStyle",
+    "thankYou", "showThankYou", "showDueBanner", "labelInvoice",
+  ]);
 }
 
 export default async function handler(req, res) {
-  setCors(res);
+  setPortalCors(res, "GET, OPTIONS");
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
-  // This endpoint IS the security boundary — always require a verified user (not the fail-open gate).
-  const user = await verifyUser(req);
-  if (!user || !user.email) return res.status(401).json({ error: "Not signed in." });
-  if (!SERVICE_KEY) return res.status(500).json({ error: "Server not configured (service key)." });
+  const portal = await requirePortalClient(req, res);
+  if (!portal) return;
 
-  const email = lc(user.email);
   try {
-    const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/app_state?select=key,value&key=in.(${KEYS.join(",")})`,
-      { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` } }
-    );
-    if (!r.ok) return res.status(502).json({ error: "Could not read portal data." });
-    const rows = await r.json();
-    const get = (k) => {
-      const row = (rows || []).find((x) => x.key === k);
-      if (!row) return null;
-      try { return JSON.parse(row.value); } catch { return null; }
+    const state = await readAppStateKeys(KEYS);
+    // Re-resolve from the same snapshot used for the response so a removed/reassigned client
+    // cannot receive stale data between the initial auth lookup and this read.
+    const clients = Array.isArray(state.sps_clients) ? state.sps_clients : [];
+    const resolved = resolvePortalClient(clients, portal.user);
+    if (["duplicate_binding", "duplicate_email", "duplicate_client_id"].includes(resolved.reason)) {
+      return res.status(409).json({ error: "This sign-in matches more than one client record. Ask the office to link the correct portal account." });
+    }
+    const client = resolved.client;
+    if (!client || !["string", "number"].includes(typeof client.id) || String(client.id).trim() === "") return res.status(200).json({ client: null });
+
+    const invoices = (Array.isArray(state.sps_invoices) ? state.sps_invoices : [])
+      .filter((invoice) => clientOwnsInvoice(invoice, client, clients) && lc(invoice.status) !== "draft")
+      .map(publicInvoice);
+    const estimates = (Array.isArray(state.sps_estimates) ? state.sps_estimates : [])
+      .filter((estimate) => estimate && estimate.clientId != null && String(estimate.clientId) === String(client.id) && lc(estimate.status) !== "draft")
+      .map(publicEstimate);
+    const schedule = publicSchedule(state.sps_schedule, client, clients, {
+      arrivals: state.sps_arrivals && typeof state.sps_arrivals === "object" ? state.sps_arrivals : {},
+      completed: state.sps_completed && typeof state.sps_completed === "object" ? state.sps_completed : {},
+      enroute: state.sps_enroute && typeof state.sps_enroute === "object" ? state.sps_enroute : {},
+    });
+    const assignedIds = new Set(schedule.flatMap((day) => day.stops.map((stop) => String(stop.assigneeId || "")).filter(Boolean)));
+    const team = (Array.isArray(state.sps_team) ? state.sps_team : [])
+      .filter((member) => member && assignedIds.has(String(member.id)))
+      .map((member) => pick(member, ["id", "name"]));
+
+    const payload = {
+      client: publicClient(client),
+      invoices,
+      schedule,
+      estimates,
+      branding: publicBranding(state.sps_branding || {}),
+      invoicing: publicInvoicing(state.sps_invoicing || {}),
+      team,
     };
-
-    const clients = get("sps_clients") || [];
-    const client = clients.find((c) => lc(c.email) === email) || null;
-    if (!client) return res.status(200).json({ client: null }); // signed-in email isn't a client
-
-    const invoices = (get("sps_invoices") || []).filter((iv) => invoiceMatches(iv, client));
-    const schedule = (get("sps_schedule") || [])
-      .map((d) => ({ ...d, stops: (d.stops || []).filter((s) => stopMatches(s, client)) }))
-      .filter((d) => (d.stops || []).length > 0);
-    const estimates = (get("sps_estimates") || []).filter((e) => String(e.clientId) === String(client.id));
-    const branding = get("sps_branding") || {};
-    const invoicing = get("sps_invoicing") || {};
-    const team = (get("sps_team") || []).map((m) => ({ id: m.id, name: m.name })); // names only
-
-    return res.status(200).json({ client, invoices, schedule, estimates, branding, invoicing, team });
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "Failed to load portal data." });
+    try {
+      return res.status(200).json({ ...(await signPortalMedia(payload)), mediaStatus: { ok: true, unavailable: 0 } });
+    } catch (error) {
+      // Keep the portal usable for text/scheduling if Storage is temporarily unavailable. Private
+      // locators remain non-readable; they are never converted back to permanent public URLs.
+      console.warn("portal media signing failed:", error && error.message ? error.message : error);
+      return res.status(200).json({
+        ...((error && error.partialValue) || payload),
+        mediaStatus: { ok: false, unavailable: Math.max(1, Number(error && error.unavailableCount) || 1) },
+      });
+    }
+  } catch (error) {
+    console.error("portal-data failed:", error && error.message ? error.message : error);
+    return res.status(502).json({ error: "Could not load the client portal." });
   }
 }

@@ -94,7 +94,22 @@ function setCors(res) {
 }
 
 import { resolveFrom, VERIFIED_DOMAIN } from "./_sender.js";
-import { requireUser } from "./_auth.js";
+
+// Best-effort abuse control for the public sign-in door. Serverless instances do not share memory,
+// so Supabase/Resend provider limits remain the final backstop, but this blocks rapid repeats on a
+// warm instance without revealing whether an address belongs to an account.
+const RATE_WINDOW_MS = 15 * 60 * 1000;
+const recentAttempts = new Map();
+function withinLimit(key, limit) {
+  const now = Date.now();
+  const prior = (recentAttempts.get(key) || []).filter((at) => now - at < RATE_WINDOW_MS);
+  if (prior.length >= limit) { recentAttempts.set(key, prior); return false; }
+  prior.push(now); recentAttempts.set(key, prior);
+  if (recentAttempts.size > 500) {
+    for (const [k, times] of recentAttempts) if (!times.some((at) => now - at < RATE_WINDOW_MS)) recentAttempts.delete(k);
+  }
+  return true;
+}
 
 // LOW#6 — open-redirect allowlist. Only permit redirecting to the app's own
 // origin or the native deep-link scheme; anything else falls back to APP_URL.
@@ -122,18 +137,22 @@ export default async function handler(req, res) {
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  // Caller-auth gate — POST send path only (OPTIONS preflight and the GET
-  // "?check" health branch above stay open / unauthenticated).
-  const _u = await requireUser(req, res);
-  if (!_u) return;
-
   const { email, first, redirectTo } = req.body || {};
-  if (!email || !/.+@.+\..+/.test(email)) return res.status(400).json({ error: "A valid email is required" });
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  if (!normalizedEmail || normalizedEmail.length > 254 || !/.+@.+\..+/.test(normalizedEmail)) return res.status(400).json({ error: "A valid email is required" });
+  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  const ip = forwarded || String(req.socket && req.socket.remoteAddress || "unknown");
+  if (!withinLimit(`ip:${ip}`, 8) || !withinLimit(`email:${normalizedEmail}`, 3)) {
+    // Success-shaped on purpose: the login screen should not fall back to a second provider call,
+    // and an attacker learns nothing about whether the address exists.
+    return res.status(200).json({ sent: true });
+  }
 
   const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
   const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
   const RESEND_KEY   = process.env.RESEND_API_KEY;
-  const FROM         = resolveFrom(req.body, process.env.RESEND_FROM || `${COMPANY} <noreply@stonepropertysolutions.com>`);
+  // This endpoint is public by necessity, so callers cannot choose a verified-domain sender.
+  const FROM         = resolveFrom({}, process.env.RESEND_FROM || `${COMPANY} <noreply@stonepropertysolutions.com>`);
 
   // Not configured yet — signal the caller so it can fall back to Supabase email.
   if (!SERVICE_KEY || !RESEND_KEY) {
@@ -153,7 +172,7 @@ export default async function handler(req, res) {
     const genRes = await fetch(`${SUPABASE_URL}/auth/v1/admin/generate_link`, {
       method: "POST",
       headers: adminHeaders,
-      body: JSON.stringify({ type: "magiclink", email, redirect_to: safeRedirect(redirectTo) }),
+      body: JSON.stringify({ type: "magiclink", email: normalizedEmail, redirect_to: safeRedirect(redirectTo) }),
     });
     const genData = await genRes.json().catch(() => ({}));
 
@@ -162,9 +181,9 @@ export default async function handler(req, res) {
       // never reveal whether an address is registered and never email a non-client.
       const msg = String(genData?.msg || genData?.error_description || genData?.error || "").toLowerCase();
       if (genRes.status === 404 || genRes.status === 422 || msg.includes("not found") || msg.includes("no user")) {
-        return res.status(200).json({ sent: false, reason: "no_account" });
+        return res.status(200).json({ sent: true });
       }
-      return res.status(500).json({ error: "Could not generate the sign-in link.", details: genData });
+      return res.status(500).json({ error: "Could not generate the sign-in link." });
     }
 
     const link = genData.action_link || genData?.properties?.action_link;
@@ -178,7 +197,7 @@ export default async function handler(req, res) {
       headers: { "Authorization": `Bearer ${RESEND_KEY}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         from: FROM,
-        to: [email],
+        to: [normalizedEmail],
         subject: `Your ${COMPANY} client portal sign-in link`,
         html,
         text,

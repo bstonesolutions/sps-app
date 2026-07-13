@@ -15,6 +15,7 @@
 
 import crypto from "node:crypto";
 import { callClaude, extractJson, aiConfigured } from "./_ai.js";
+import { mutateAppState, NO_APP_STATE_CHANGE, readAppStateVersioned } from "./_app-state.js";
 import { pushOwner } from "./_push.js";
 
 export const config = { api: { bodyParser: false } }; // need the RAW body for HMAC verification
@@ -25,23 +26,11 @@ const KEY          = process.env.QUO_WEBHOOK_KEY;
 const SIGN_SECRET  = process.env.QUO_WEBHOOK_SECRET; // optional openphone signing secret (base64)
 
 const sbHeaders = () => ({ apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" });
-const parseVal = (v) => { try { return typeof v === "string" ? JSON.parse(v) : v; } catch { return null; } };
 async function sbGet(key, fallback) {
   try {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/app_state?key=eq.${encodeURIComponent(key)}&select=value`, { headers: sbHeaders() });
-    if (!r.ok) return fallback;
-    const rows = await r.json().catch(() => []);
-    const v = rows && rows[0] ? parseVal(rows[0].value) : null;
-    return v == null ? fallback : v;
+    const row = await readAppStateVersioned(key);
+    return row.exists && row.value != null ? row.value : fallback;
   } catch { return fallback; }
-}
-async function sbSet(key, obj) {
-  try {
-    await fetch(`${SUPABASE_URL}/rest/v1/app_state?on_conflict=key`, {
-      method: "POST", headers: { ...sbHeaders(), Prefer: "resolution=merge-duplicates" },
-      body: JSON.stringify([{ key, value: JSON.stringify(obj) }]),
-    });
-  } catch { /* best-effort */ }
 }
 async function inboxHas(id) {
   try {
@@ -101,7 +90,8 @@ export default async function handler(req, res) {
   }
   let body; try { body = JSON.parse(raw || "{}"); } catch { return res.status(200).json({ ok: true, skipped: "unparseable" }); }
 
-  // From here on: ALWAYS 200 (Quo retries non-2xx up to 3 days; upsert makes retries harmless).
+  // Storage/network failures return 5xx so Quo retries for up to three days; the unique inbox id
+  // makes those retries harmless and prevents an inbound customer text from being acknowledged lost.
   const out = { ok: true };
   try {
     if (body.type && body.type !== "message.received") return res.status(200).json({ ok: true, skipped: body.type });
@@ -130,10 +120,20 @@ export default async function handler(req, res) {
     let underBudget = true;
     if (!client && aiConfigured()) {
       const hourKey = new Date().toISOString().slice(0, 13);
-      const budget = (await sbGet("sps_inbound_ai_budget_sms", {})) || {};
-      const usedN = budget.h === hourKey ? (Number(budget.n) || 0) : 0;
-      underBudget = usedN < SMS_AI_HOURLY_CAP;
-      if (underBudget) await sbSet("sps_inbound_ai_budget_sms", { h: hourKey, n: usedN + 1 });
+      underBudget = false;
+      try {
+        await mutateAppState("sps_inbound_ai_budget_sms", (current) => {
+          const budget = current && typeof current === "object" && !Array.isArray(current) ? current : {};
+          const usedN = budget.h === hourKey ? (Number(budget.n) || 0) : 0;
+          underBudget = false;
+          if (usedN >= SMS_AI_HOURLY_CAP) return NO_APP_STATE_CHANGE;
+          underBudget = true;
+          return { ...budget, h: hourKey, n: usedN + 1 };
+        });
+      } catch (_) {
+        // Fail closed on the paid AI call; the inbound text is still stored as "other" below.
+        underBudget = false;
+      }
     }
     if (!client && aiConfigured() && underBudget) {
       try {
@@ -171,6 +171,7 @@ export default async function handler(req, res) {
     }
   } catch (e) {
     out.ok = false; out.error = String((e && e.message) || e);
+    return res.status(500).json(out);
   }
   return res.status(200).json(out);
 }

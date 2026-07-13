@@ -30,6 +30,7 @@
 // (over budget → stored as "other", no push — the owner can reclassify in Comms → Email).
 
 import { callClaude, extractJson, aiConfigured } from "./_ai.js";
+import { mutateAppState, NO_APP_STATE_CHANGE, readAppStateVersioned } from "./_app-state.js";
 import { pushOwner } from "./_push.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
@@ -41,22 +42,10 @@ const ALLOWED_TO = String(process.env.INBOUND_ALLOWED_TO || "inbox").toLowerCase
 const AI_HOURLY_CAP = 30;
 
 const sbHeaders = () => ({ apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" });
-const parseVal = (v) => { try { return typeof v === "string" ? JSON.parse(v) : v; } catch { return null; } };
-async function sbSet(key, obj) {
-  try {
-    await fetch(`${SUPABASE_URL}/rest/v1/app_state?on_conflict=key`, {
-      method: "POST", headers: { ...sbHeaders(), Prefer: "resolution=merge-duplicates" },
-      body: JSON.stringify([{ key, value: JSON.stringify(obj) }]),
-    });
-  } catch { /* best-effort */ }
-}
 async function sbGet(key, fallback) {
   try {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/app_state?key=eq.${encodeURIComponent(key)}&select=value`, { headers: sbHeaders() });
-    if (!r.ok) return fallback;
-    const rows = await r.json().catch(() => []);
-    const v = rows && rows[0] ? parseVal(rows[0].value) : null;
-    return v == null ? fallback : v;
+    const row = await readAppStateVersioned(key);
+    return row.exists && row.value != null ? row.value : fallback;
   } catch { return fallback; }
 }
 
@@ -160,10 +149,20 @@ export default async function handler(req, res) {
     let underBudget = true;
     if (!client && aiConfigured()) {
       const hourKey = new Date().toISOString().slice(0, 13);
-      const budget = (await sbGet("sps_inbound_ai_budget", {})) || {};
-      const used = budget.h === hourKey ? (Number(budget.n) || 0) : 0;
-      underBudget = used < AI_HOURLY_CAP;
-      if (underBudget) await sbSet("sps_inbound_ai_budget", { h: hourKey, n: used + 1 });
+      underBudget = false;
+      try {
+        await mutateAppState("sps_inbound_ai_budget", (current) => {
+          const budget = current && typeof current === "object" && !Array.isArray(current) ? current : {};
+          const used = budget.h === hourKey ? (Number(budget.n) || 0) : 0;
+          underBudget = false;
+          if (used >= AI_HOURLY_CAP) return NO_APP_STATE_CHANGE;
+          underBudget = true;
+          return { ...budget, h: hourKey, n: used + 1 };
+        });
+      } catch (_) {
+        // Fail closed on the paid AI call; the email itself still lands as "other".
+        underBudget = false;
+      }
     }
     if (!client && aiConfigured() && underBudget) {
       try {
