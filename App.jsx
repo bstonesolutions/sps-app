@@ -368,12 +368,10 @@ const qbCheckStatus = async () => {
     return !!d.connected;
   } catch { return qbIsConnected(); }
 };
-// "Sending identity" mirror of the saved Email settings, so server calls can carry a
-// custom from-name/address + texting number WITHOUT threading props through every call
-// site. The App component keeps this current via setSenderIdentity() whenever the
-// settings change. The server validates both (verified domain / on-account number),
-// so a bad value here can never impersonate an outside address or line — it falls back.
-let SENDER_IDENTITY = { fromName: "", fromAddress: "", textingNumber: "" };
+// "Sending identity" mirror of the saved email settings, so server calls can carry a custom
+// from-name/address without threading props through every call site. Texting identity is never
+// client-controlled: every Quo route uses QUO_PHONE_NUMBER from Vercel.
+let SENDER_IDENTITY = { fromName: "", fromAddress: "" };
 function setSenderIdentity(v) { SENDER_IDENTITY = { ...SENDER_IDENTITY, ...(v || {}) }; }
 
 // Test/launch safety. While ON, every client-facing email + text is HELD or REDIRECTED
@@ -394,9 +392,10 @@ function setActor(v) { ACTOR = String(v || ""); }
 // is exactly what Test Mode exists to prevent pre-launch. Returns a clean "held" result (no error)
 // so callers treat it as a no-op success, never a failure. Use ONLY for staff-originated posts;
 // a client's own inbound actions (sender:"client") should still record.
-function postToPortalSafe(row) {
+function postToPortalSafe(row, { select = false } = {}) {
   if (TEST_MODE.on && !clientIsLive(row && row.client_id)) return Promise.resolve({ data: null, error: null, held: true });
-  return supabase.from("sps_messages").insert(row);
+  const query = supabase.from("sps_messages").insert(row);
+  return select ? query.select().single() : query;
 }
 
 // Notify a client across EVERY channel they've opted into — the in-app portal thread and/or a
@@ -406,7 +405,10 @@ function postToPortalSafe(row) {
 async function notifyClientChannels(client, message, companyName, meta) {
   const out = { app: null, text: null };
   if (client && client.id != null && commPref(client, "app")) {
-    try { await postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: companyName || "", body: message }); out.app = { ok: true }; }
+    try {
+      const posted = await postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: companyName || "", body: message });
+      out.app = { ok: !posted?.error, held: !!posted?.held, acceptedForClient: !posted?.held && !posted?.error };
+    }
     catch (_) { out.app = { ok: false }; }
   }
   const phone = (client && client.phone) || "";
@@ -438,19 +440,27 @@ async function resyncWidgets() { return _widgetPush ? _widgetPush() : setWidgetS
 // Send a text via the business Quo number (server-side, from the company line).
 // Absolute PROD_URL so it works on the native app too. Returns { ok, error, missingEnv }.
 async function sendSms(to, message, meta) {
+  const phoneDigits = (value) => String(value || "").replace(/\D/g, "");
+  const explicitTest = !!(meta && meta.testSend);
+  // A test bypass is deliberately narrow: it can only target the one owner number saved in
+  // Test Mode. This stays true even when Test Mode itself is currently off.
+  if (explicitTest && (!TEST_MODE.phone || phoneDigits(to) !== phoneDigits(TEST_MODE.phone))) {
+    return { ok: false, accepted: false, sent: false, held: false, redirected: false, testOnly: true, acceptedForClient: false, error: "Test texts can only be sent to your saved Test Mode phone." };
+  }
   // Test/launch safety: hold or redirect to the owner so real clients get nothing —
   // EXCEPT pilot-live clients, who get the real text while everyone else stays protected.
   let dest = to, body = message;
-  if (TEST_MODE.on && !clientIsLive(meta && meta.clientId)) {
+  const testProtected = TEST_MODE.on && !explicitTest && !clientIsLive(meta && meta.clientId);
+  if (testProtected) {
     if (TEST_MODE.mode === "hold") {
       // Held texts still hit the Log (honest accounting, matching email broadcasts) — with no
       // recipient, since nothing was delivered anywhere.
-      if (meta && meta.clientId != null) logComm({ clientId: meta.clientId, type: meta.type, channel: "sms", body: message, ok: true, origin: `${(meta && meta.origin) || (ACTOR ? `${ACTOR} — app` : "app")} · held by Test Mode`, recipient: "" });
-      return { ok: true, held: true };
+      if (meta && (meta.clientId != null || meta.origin)) logComm({ clientId: meta.clientId ?? "", type: meta.type, channel: "sms", body: message, ok: true, origin: `${(meta && meta.origin) || (ACTOR ? `${ACTOR} — app` : "app")} · held by Test Mode`, recipient: "" });
+      return { ok: true, accepted: false, sent: false, held: true, redirected: false, testOnly: false, acceptedForClient: false };
     }
     if (!TEST_MODE.phone) {
-      if (meta && meta.clientId != null) logComm({ clientId: meta.clientId, type: meta.type, channel: "sms", body: message, ok: false, origin: `${(meta && meta.origin) || (ACTOR ? `${ACTOR} — app` : "app")} · Test Mode misconfigured (no redirect phone)`, recipient: "" });
-      return { ok: false, error: "Test mode is on, but no owner phone is set to redirect texts to." };
+      if (meta && (meta.clientId != null || meta.origin)) logComm({ clientId: meta.clientId ?? "", type: meta.type, channel: "sms", body: message, ok: false, origin: `${(meta && meta.origin) || (ACTOR ? `${ACTOR} — app` : "app")} · Test Mode misconfigured (no redirect phone)`, recipient: "" });
+      return { ok: false, accepted: false, sent: false, held: false, redirected: false, testOnly: false, acceptedForClient: false, error: "Test mode is on, but no owner phone is set to redirect texts to." };
     }
     dest = TEST_MODE.phone;
     body = `[TEST → ${to}] ${message}`;
@@ -460,20 +470,31 @@ async function sendSms(to, message, meta) {
     const r = await fetch(`${PROD_URL}/api/send-sms`, {
       method: "POST",
       headers: await authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ to: dest, message: body, from: SENDER_IDENTITY.textingNumber || "" }),
+      // clientId lets the server independently verify Pilot LIVE exceptions. The server still
+      // owns the final destination and Test Mode decision; this client-side gate is only the
+      // immediate UX/safety layer for installed and offline-prone app builds.
+      body: JSON.stringify({ to: dest, message: body, ...(meta?.clientId != null ? { clientId: String(meta.clientId) } : {}) }),
     });
     const d = await r.json().catch(() => ({}));
-    result = (r.ok && d.sent) ? { ok: true } : { ok: false, error: d.error || `Error ${r.status}`, missingEnv: !!d.missingEnv };
+    result = r.ok && d.held
+      ? { ok: true, accepted: false, sent: false, held: true, redirected: false }
+      : r.ok && (d.accepted || d.sent)
+        ? { ok: true, accepted: true, sent: true, held: false, redirected: !!d.redirected }
+        : { ok: false, accepted: false, sent: false, held: !!d.held, redirected: false, error: d.error || `Error ${r.status}`, missingEnv: !!d.missingEnv };
   } catch (e) { result = { ok: false, error: e.message || "network error" }; }
+  const redirected = (testProtected && TEST_MODE.mode !== "hold") || !!result.redirected;
+  const held = !!result.held;
+  const testOnly = explicitTest || redirected;
+  result = { ...result, held, redirected, testOnly, acceptedForClient: !!result.ok && !!result.accepted && !held && !testOnly };
   // Record the send to the owner-side comms log (best-effort, never blocks the send). Optional
-  // meta = { clientId, type } from the caller; when absent (e.g. a one-off manual text) nothing logs.
-  if (meta && meta.clientId != null) {
+  // An inbound lead may not have a clientId yet, so a meaningful origin is also enough to retain
+  // its outgoing reply in the owner log.
+  if (meta && (meta.clientId != null || meta.origin)) {
     const live = clientIsLive(meta.clientId);
-    const redirected = TEST_MODE.on && !live && TEST_MODE.mode !== "hold";
     logComm({
-      clientId: meta.clientId, type: meta.type, channel: "sms", body: message, ok: result.ok,
-      origin: `${(meta && meta.origin) || (ACTOR ? `${ACTOR} — app` : "app")}${redirected ? " · TEST redirect → you" : ""}${TEST_MODE.on && live ? " · pilot (live)" : ""}`,
-      recipient: dest,
+      clientId: meta.clientId ?? "", type: meta.type, channel: "sms", body: message, ok: result.ok,
+      origin: `${(meta && meta.origin) || (ACTOR ? `${ACTOR} — app` : "app")}${held ? " · held by server Test Mode" : redirected ? " · TEST redirect → you" : explicitTest ? " · explicit owner test" : ""}${TEST_MODE.on && live && !redirected ? " · pilot (live)" : ""}`,
+      recipient: held ? "" : redirected && phoneDigits(dest) === phoneDigits(to) ? "Saved Test Mode phone" : `${testOnly ? "Test" : "Client"} phone ending ${phoneDigits(dest).slice(-4) || "unknown"}`,
     });
   }
   return result;
@@ -2157,7 +2178,7 @@ function applyFinePerms(out, member) {
 
 // The Comms hub is visible when the viewer can see at least one of its sections (owner sees all).
 const COMMS_SECTION_FLAGS = ["commsMessages", "commsInbox", "commsReminders", "commsBroadcast", "commsSettings", "commsLog"];
-const canSeeComms = (perms) => !!perms && (perms.isAdmin || COMMS_SECTION_FLAGS.some(f => perms[f]));
+const canSeeComms = (perms) => !!perms && (perms.isAdmin || perms.editNotifications || COMMS_SECTION_FLAGS.some(f => perms[f]));
 
 // Is a nav tab visible to this permission set?
 function isTabVisible(n, perms) {
@@ -6079,7 +6100,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
             {perms.seeBalances && <span style={{ display:"flex", alignItems:"center", gap:4, fontSize:12, fontWeight:700, color: owed <= 0 ? T.accent : T.warning }}><Icon name="dollar" size={12} />${owed.toFixed(2)}{owed > 0 ? " due" : " balance"}</span>}
           </div>
 
-          {/* Quick contact. Call / Text use YOUR phone (device dialer + Messages). "Chat in app" is
+          {/* Quick contact. Call / Device text use YOUR phone (device dialer + Messages). "Chat in app" is
               the in-app thread with the client — it lands in their portal and is logged here. */}
           <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
             {(client.phone || client.email) && (
@@ -6091,9 +6112,9 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
                   </a>
                 )}
                 {client.phone && (
-                  <a href={`sms:${String(client.phone).replace(/[^\d+]/g, "")}`}
+                  <a href={`sms:${String(client.phone).replace(/[^\d+]/g, "")}`} title="Opens this device's Messages app"
                     style={{ flex: "1 1 0", minWidth: 64, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "11px", borderRadius: 12, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 13, fontWeight: 700, textDecoration: "none", fontFamily: "inherit" }}>
-                    <Icon name="message" size={14} /> Text
+                    <Icon name="message" size={14} /> Device text
                   </a>
                 )}
                 {client.email && (
@@ -7512,23 +7533,61 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
 
   const [sending, setSending] = useState(false);
   const [sendErr, setSendErr] = useState("");
+  const [partialDone, setPartialDone] = useState(false);
   const [copied, setCopied] = useState(false);
+  const onMyWayEnabled = client?.notifyPrefs?.onMyWay !== false;
+  const canText = onMyWayEnabled && !!phone && commPref(client, "text");
+  const canApp = onMyWayEnabled && !!(client && client.id != null && commPref(client, "app"));
   const copyLink = async () => {
     if (!trackUrl) return;
     try { await navigator.clipboard.writeText(trackUrl); } catch (_) {}
     setCopied(true); setTimeout(() => setCopied(false), 1800);
   };
   const handleSend = async () => {
-    const canApp = !!(client && client.id != null && commPref(client, "app"));
-    if (!phone && !canApp) return;
+    if (partialDone) { onClose(); return; }
+    if (!canText && !canApp) return;
     setSending(true); setSendErr("");
     // Mirror the same message into the in-app portal for app-preference clients.
-    if (canApp) postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: message }).then(() => {}, () => {});
-    if (phone) {
+    let appDelivered = false;
+    let appHeld = false;
+    let appError = "";
+    if (canApp) {
+      try {
+        const posted = await postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: message });
+        appDelivered = !posted?.held && !posted?.error;
+        appHeld = !!posted?.held;
+        appError = posted?.error?.message || (typeof posted?.error === "string" ? posted.error : "");
+      } catch (e) { appDelivered = false; appError = e?.message || "Couldn't reach the client portal."; }
+    }
+    if (canText) {
       const r = await sendSms(client.phone, message, { clientId: client.id, type: "On my way", origin: `visit:${stop?.sid || ""} · on my way` }); // business Quo line ONLY — never the device Messages app
       setSending(false);
-      if (!r.ok) { setSendErr(r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send the text — try again.")); return; }
-    } else setSending(false);
+      if (!r.ok) {
+        if (appDelivered) {
+          onSent(); setPartialDone(true);
+          setSendErr(`The in-app notice was posted, but the text couldn't be accepted${r.error ? `: ${r.error}` : "."}`);
+          return;
+        }
+        setSendErr(r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send the text — try again.")); return;
+      }
+      if (!r.acceptedForClient && !appDelivered) {
+        setSendErr(r.held ? "Held by Test Mode — the client was not notified." : "Test sent to you — the client was not notified.");
+        return;
+      }
+      if (!r.acceptedForClient && appDelivered) {
+        onSent(); setPartialDone(true);
+        setSendErr(r.held ? "The in-app notice was posted; Test Mode held the text." : "The in-app notice was posted; the test text went only to you.");
+        return;
+      }
+    } else {
+      setSending(false);
+      if (!appDelivered) {
+        setSendErr(appHeld
+          ? "Held by Test Mode — the client was not notified."
+          : `The in-app notice couldn't be posted${appError ? `: ${appError}` : "."}`);
+        return;
+      }
+    }
     onSent();
     onClose();
   };
@@ -7612,15 +7671,19 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
         )}
 
         {/* Actions */}
-        {!phone && (
+        {!canText && (
           <div style={{ background: hexA(T.warning, 0.08), border: `1px solid ${hexA(T.warning, 0.25)}`, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.warning, marginBottom: 14, display: "flex", gap: 8 }}>
-            <Icon name="warning" size={14} /> No phone number on file for this client.
+            <Icon name="warning" size={14} /> {!onMyWayEnabled
+              ? `${firstName} turned off On-the-way alerts, so no notification will be sent.`
+              : phone
+                ? (canApp ? `${firstName} prefers no texts — this notice will use the client portal only.` : `${firstName} prefers no texts, and in-app notices are off.`)
+                : (canApp ? "No phone on file — this notice will use the client portal." : "No phone number on file for this client.")}
           </div>
         )}
         {sendErr && <div style={{ fontSize: 12.5, fontWeight: 700, color: T.accent, marginBottom: 10, textAlign: "center" }}>{sendErr}</div>}
         <div style={{ display: "flex", gap: 10 }}>
-          <Btn onClick={handleSend} disabled={!phone || sending} block style={{ flex: 1, gap: 7 }}>
-            {sending ? "Sending…" : <><Icon name="message" size={15} /> Send Text</>}
+          <Btn onClick={handleSend} disabled={(!canText && !canApp) || sending} block style={{ flex: 1, gap: 7 }}>
+            {sending ? "Sending…" : partialDone ? "Done" : <><Icon name="message" size={15} /> {canText ? "Send Text" : "Notify in App"}</>}
           </Btn>
           <button onClick={onClose}
             style={{ background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "13px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer", color: T.text, fontFamily: "inherit" }}>
@@ -7660,19 +7723,44 @@ function ArrivedModal({ stop, client, email, onClose, onArrived }) {
   const [sending, setSending] = useState(false);
   const [sendErr, setSendErr] = useState("");
   const arrivedRef = useRef(false);
+  const appNoticeRef = useRef({ attempted: false, accepted: false, held: false, error: "" });
+  const [noticeDone, setNoticeDone] = useState(false);
+  const canText = !!phone && commPref(client, "text");
   const send = async () => {
+    if (noticeDone) { onClose(); return; }
     if (!arrivedRef.current) {         // record arrival + in-app notice once, even if a retry is needed
       arrivedRef.current = true;
       onArrived();                     // start the job clock (record arrival time)
       if (client?.id && commPref(client, "app")) {  // in-app portal notification (best-effort), if they want in-app
-        postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: message }).then(() => {}, () => {});
+        try {
+          const posted = await postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: message });
+          appNoticeRef.current = { attempted: true, accepted: !posted?.held && !posted?.error, held: !!posted?.held, error: posted?.error?.message || (typeof posted?.error === "string" ? posted.error : "") };
+        } catch (e) {
+          appNoticeRef.current = { attempted: true, accepted: false, held: false, error: e?.message || "Couldn't reach the client portal." };
+        }
       }
     }
-    if (phone && commPref(client, "text")) {  // text the client from the business Quo line ONLY — never the device
+    if (canText) {  // text the client from the business Quo line ONLY — never the device
       setSending(true); setSendErr("");
       const r = await sendSms(client.phone, message, { clientId: client.id, type: "On site", origin: `visit:${stop?.sid || ""} · arrived` });
       setSending(false);
-      if (!r.ok) { setSendErr(r.error || (r.missingEnv ? "Texting isn't set up yet — arrival was still recorded." : "Text didn't send — arrival was still recorded.")); return; }
+      if (!r.ok) {
+        if (appNoticeRef.current.accepted) { setNoticeDone(true); setSendErr("Arrival was recorded and the in-app notice was posted, but the text wasn't accepted."); return; }
+        setSendErr(r.error || (r.missingEnv ? "Texting isn't set up yet — arrival was still recorded." : "Text wasn't accepted — arrival was still recorded.")); return;
+      }
+      if (!r.acceptedForClient) {
+        setNoticeDone(true);
+        setSendErr(appNoticeRef.current.accepted
+          ? (r.held ? "Arrival recorded; the in-app notice was posted and Test Mode held the text." : "Arrival recorded; the in-app notice was posted and the test text went only to you.")
+          : (r.held ? "Arrival recorded, but Test Mode held the client notice." : "Arrival recorded; the test text went only to you, not the client."));
+        return;
+      }
+    } else if (appNoticeRef.current.attempted && !appNoticeRef.current.accepted) {
+      setNoticeDone(true);
+      setSendErr(appNoticeRef.current.held
+        ? "Arrival was recorded, but Test Mode held the in-app notice."
+        : `Arrival was recorded, but the in-app notice couldn't be posted${appNoticeRef.current.error ? `: ${appNoticeRef.current.error}` : "."}`);
+      return;
     }
     onClose();
   };
@@ -7690,12 +7778,12 @@ function ArrivedModal({ stop, client, email, onClose, onArrived }) {
           <button onClick={onClose} aria-label="Close" style={{ background: T.surfaceAlt, border: "none", borderRadius: "50%", width: 40, height: 40, cursor: "pointer", color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="close" size={18} /></button>
         </div>
         <div style={{ background: hexA("#16a34a", 0.08), border: `1px solid ${hexA("#16a34a", 0.2)}`, borderRadius: 14, padding: "12px 14px", marginBottom: 14, fontSize: 13, color: T.text, display: "flex", alignItems: "center", gap: 8 }}>
-          <Icon name="check" size={16} /> Starts the job clock and lets {firstName} know you've arrived.
+          <Icon name="check" size={16} /> Starts the job clock and sends {firstName}'s enabled client notice.
         </div>
         <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 6 }}>Message to client</div>
         <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: "12px 14px", fontSize: 13.5, color: T.text, lineHeight: 1.5, marginBottom: 16 }}>{message}</div>
         <Btn onClick={send} disabled={sending} style={{ width: "100%", padding: "13px", borderRadius: 12, gap: 7, justifyContent: "center" }}>
-          {sending ? "Sending…" : <><Icon name="check" size={15} /> {(phone && commPref(client, "text")) ? "Mark Arrived & Text Client" : "Mark Arrived"}</>}
+          {sending ? "Sending…" : noticeDone ? "Done" : <><Icon name="check" size={15} /> {canText ? "Mark Arrived & Text Client" : "Mark Arrived"}</>}
         </Btn>
         {sendErr && <div style={{ fontSize: 12, fontWeight: 700, color: T.accent, textAlign: "center", marginTop: 10 }}>{sendErr}</div>}
         {phone && !commPref(client, "text") && <div style={{ fontSize: 11, color: T.warning, textAlign: "center", marginTop: 8 }}>{firstName} prefers no texts — arrival is recorded without one.</div>}
@@ -8187,11 +8275,10 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     else short += `\n\nView your full report and photos here: ${portalUrl}`;
     const r = await sendSms(phone, short, { clientId: client?.id ?? stop?.clientId, type: "Service report", origin: `visit:${stop?.sid || ""} · report text` }); // business Quo line ONLY
     if (r.ok) postReportToPortal();   // mirror the full report into the in-app portal thread
-    const liveTx = clientIsLive(client?.id ?? stop?.clientId);
     const txtMsg = r.held ? "Test Mode (hold) — text NOT sent."
-      : TEST_MODE.on && !liveTx ? "Test Mode — text sent to you, tagged [TEST]."
-      : `Report texted to ${client?.name || "the client"}${TEST_MODE.on && liveTx ? " (pilot — live)" : ""}.`;
-    rsDone("text", r.ok ? { ok: true, text: txtMsg } : { ok: false, text: r.error || (r.missingEnv ? "Texting isn't set up yet." : "Text failed to send.") });
+      : r.redirected ? "Test Mode — text sent only to your test phone."
+      : `Report text accepted for ${client?.name || "the client"}${TEST_MODE.on && clientIsLive(client?.id ?? stop?.clientId) ? " (pilot — live)" : ""}.`;
+    rsDone("text", r.ok ? { ok: !!r.acceptedForClient, text: txtMsg } : { ok: false, text: r.error || (r.missingEnv ? "Texting isn't set up yet." : "Text failed to send.") });
   };
 
   // ── AI assist — optional; degrades to a clear "add your key" message until ANTHROPIC_API_KEY is set ──
@@ -8236,8 +8323,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     rsStart("text");
     const r = await sendSms(phone, `${aiRecap}\n\nView your full report and photos here: ${PROD_URL}`, { clientId: client?.id ?? stop?.clientId, type: "Service report", origin: `visit:${stop?.sid || ""} · report text` });
     if (r.ok) { try { postReportToPortal(); } catch (_) {} }
-    const liveAi = clientIsLive(client?.id ?? stop?.clientId);
-    rsDone("text", r.ok ? { ok: true, text: r.held ? "Test Mode (hold) — not sent." : TEST_MODE.on && !liveAi ? "Test Mode — recap sent to you, tagged [TEST]." : `Recap texted to ${client?.name || "the client"}${TEST_MODE.on && liveAi ? " (pilot — live)" : ""}.` } : { ok: false, text: r.error || "Text failed to send." });
+    rsDone("text", r.ok ? { ok: !!r.acceptedForClient, text: r.held ? "Test Mode (hold) — not sent." : r.redirected ? "Test Mode — recap sent only to your test phone." : `Recap text accepted for ${client?.name || "the client"}${TEST_MODE.on && clientIsLive(client?.id ?? stop?.clientId) ? " (pilot — live)" : ""}.` } : { ok: false, text: r.error || "Text failed to send." });
   };
 
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
@@ -9513,6 +9599,9 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", defaultEtaBuff
   const [expanded, setExpanded] = useState(false);
   const firstName = client && client.name ? client.name.split(" ")[0] : (stop.client || "there");
   const phone = ((client && (client.phone || client.contactPhone || "")) || "").replace(/[^\d+]/g, "");
+  const onMyWayEnabled = client?.notifyPrefs?.onMyWay !== false;
+  const canText = onMyWayEnabled && !!phone && commPref(client, "text");
+  const canApp = onMyWayEnabled && !!(client && client.id != null && commPref(client, "app"));
   // Build 15, 7D — fall back to the client's address when the stop's was empty at creation
   // (e.g. the client's address was added later), so "Head Here" always has a destination.
   const addr = stop.address || (client && client.address) || "";
@@ -9567,16 +9656,46 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", defaultEtaBuff
   const [omw, setOmw] = useState({ busy: false, msg: null });
   // Send via the business Quo line ONLY — never open the device Messages app.
   const sendOmwText = async () => {
-    const canApp = !!(client && client.id != null && commPref(client, "app"));
-    if (!phone && !canApp) return;
+    if (!canText && !canApp) return;
     setOmw({ busy: true, msg: null });
     const outgoing = draft;
     // Mirror the same On-My-Way message into the in-app portal for app-preference clients.
-    if (canApp) postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: outgoing }).then(() => {}, () => {});
-    if (!phone) { setOmw({ busy: false, msg: { ok: true, text: "Client notified in the app." } }); onSent && onSent(); return; }
+    let appDelivered = false;
+    let appHeld = false;
+    let appError = "";
+    if (canApp) {
+      try {
+        const posted = await postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: outgoing });
+        appDelivered = !posted?.held && !posted?.error;
+        appHeld = !!posted?.held;
+        appError = posted?.error?.message || (typeof posted?.error === "string" ? posted.error : "");
+      } catch (e) { appDelivered = false; appError = e?.message || "Couldn't reach the client portal."; }
+    }
+    if (!canText) {
+      setOmw({ busy: false, msg: appDelivered
+        ? { ok: true, text: "The in-app notice was posted; no text was sent." }
+        : { ok: false, text: appHeld ? "Held by Test Mode — no client notice was sent." : `The in-app notice couldn't be posted${appError ? `: ${appError}` : "."} No text was sent.` } });
+      if (appDelivered) onSent && onSent();
+      return;
+    }
     const r = await sendSms(phone, outgoing, { clientId: client.id, type: "On my way", origin: `visit:${stop?.sid || ""} · on my way` });
-    setOmw({ busy: false, msg: r.ok ? { ok: true, text: canApp ? "On My Way sent (text + app)." : "On My Way text sent." } : { ok: false, text: r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send — your Quo texting may not be A2P-approved yet.") } });
-    if (r.ok) onSent && onSent();
+    const clientNotified = !!r.acceptedForClient || appDelivered;
+    if (!r.ok) {
+      if (appDelivered) {
+        setOmw({ busy: false, msg: { ok: true, text: "The in-app notice was posted, but the text wasn't accepted." } });
+        onSent && onSent();
+      } else {
+        setOmw({ busy: false, msg: { ok: false, text: r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send — your Quo texting may not be A2P-approved yet.") } });
+      }
+      return;
+    }
+    const okText = r.held
+      ? (appDelivered ? "The in-app notice was posted; Test Mode held the text." : "Held by Test Mode — the client was not notified.")
+      : r.redirected
+        ? (appDelivered ? "The in-app notice was posted; the test text went only to you." : "Test sent to you — the client was not notified.")
+        : appDelivered ? "Text accepted for sending and the in-app notice was posted." : "On My Way text accepted for sending.";
+    setOmw({ busy: false, msg: { ok: clientNotified, text: okText } });
+    if (clientNotified) onSent && onSent();
   };
   const openMap = (app) => { try { localStorage.setItem("sps_map_app", app); } catch {} setPref(app); };
   const mapApps = [{ key: "apple", label: "Apple Maps", icon: "A" }, { key: "google", label: "Google Maps", icon: "G" }, { key: "waze", label: "Waze", icon: "W" }];
@@ -9587,7 +9706,7 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", defaultEtaBuff
         {addr && <div style={{ fontSize: 13, color: T.textMuted, marginTop: -8, lineHeight: 1.4, display:"flex", alignItems:"center", gap:5 }}><Icon name="location" size={13} />{addr}</div>}
         <div>
           <span style={lbl}>On My Way Text</span>
-          {phone ? <>
+          {(canText || canApp) ? <>
             {/* ETA / buffer — bump the arrival estimate; the text below follows along until you edit it. */}
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
               <button onClick={() => { etaTouchedRef.current = true; setEtaMin(e => Math.max(5, e - 5)); }} style={{ width: 40, height: 40, borderRadius: 12, border: `1.5px solid ${T.border}`, background: T.surface, fontSize: 22, fontWeight: 300, color: T.text, cursor: "pointer", flexShrink: 0 }}>−</button>
@@ -9604,11 +9723,12 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", defaultEtaBuff
             </div>
             <textarea value={draft} onChange={e => { setDraft(e.target.value); setEdited(true); }} rows={4}
               style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 10, padding: "10px 12px", fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, resize: "vertical", marginBottom: 10 }} />
-            <Btn onClick={sendOmwText} disabled={omw.busy} variant="outline" block style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}><Icon name="message" size={15} /> {omw.busy ? "Sending…" : `Send On My Way to ${firstName}`}</Btn>
-            {!commPref(client, "text") && <div style={{ fontSize: 12, color: T.warning, marginTop: 8, lineHeight: 1.4 }}>Heads up: {firstName} prefers not to be texted. Sending will still reach them — use it only if you need to.</div>}
+            <Btn onClick={sendOmwText} disabled={omw.busy || (!canText && !canApp)} variant="outline" block style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}><Icon name="message" size={15} /> {omw.busy ? "Sending…" : canText ? `Send On My Way to ${firstName}` : `Notify ${firstName} in App`}</Btn>
+            {phone && !canText && <div style={{ fontSize: 12, color: T.warning, marginTop: 8, lineHeight: 1.4 }}>{firstName} prefers no texts — only the enabled in-app notice will be used.</div>}
+            {!phone && canApp && <div style={{ fontSize: 12, color: T.textMuted, marginTop: 8, lineHeight: 1.4 }}>No phone on file — this notice will use the client portal only.</div>}
             {omw.msg && <div style={{ fontSize: 12.5, fontWeight: 700, marginTop: 8, color: omw.msg.ok ? "#16a34a" : T.accent }}>{omw.msg.text}</div>}
           </>
-            : <div style={{ fontSize: 13, color: T.textMuted, background: T.surfaceAlt, borderRadius: 10, padding: "11px 14px" }}>Add a phone number to this client to send texts.</div>}
+            : <div style={{ fontSize: 13, color: T.textMuted, background: T.surfaceAlt, borderRadius: 10, padding: "11px 14px" }}>{!onMyWayEnabled ? `${firstName} turned off On-the-way alerts.` : phone ? `${firstName} has texts and in-app notices turned off.` : "Add a phone number or enable in-app notices for this client."}</div>}
         </div>
         <div>
           <span style={lbl}>Open in Maps</span>
@@ -10665,12 +10785,26 @@ function StopChangeModal({ stop, client, dayDate, email, onReschedule, onCancelS
     setBusy(true); setResult(null);
     const recReason = (isOther ? customReason.trim() : reason) || "";
     const willNotify = notifyClient || action === "late"; // "late" IS the notice — it always notifies
-    if (willNotify) await notifyClientChannels(client, message, company, { type: "Notice", origin: `visit:${stop?.sid || ""} · ${action || "notice"}` }); // toggled off → reschedule/cancel quietly, no client notice
+    const delivery = willNotify ? await notifyClientChannels(client, message, company, { type: "Notice", origin: `visit:${stop?.sid || ""} · ${action || "notice"}` }) : null; // toggled off → reschedule/cancel quietly, no client notice
     if (action === "reschedule") onReschedule(newDateMDY, recReason, message);
     else if (action === "cancel") onCancelStop(recReason, message);
     // "late" makes no schedule change — it's only a heads-up notice.
     setBusy(false);
-    setResult({ ok: true, text: !willNotify ? "Done — the client was not notified." : channels.length ? `Client notified by ${channels.join(" + ").toLowerCase()}.` : "Recorded — this client has no text/in-app channel on file." });
+    const accepted = [];
+    if (delivery?.app?.acceptedForClient) accepted.push("in-app");
+    if (delivery?.text?.acceptedForClient) accepted.push("text");
+    const testHeld = !!delivery?.app?.held || !!delivery?.text?.held;
+    const testRedirected = !!delivery?.text?.redirected;
+    const notifyFailed = channels.length > 0 && !accepted.length && !testHeld && !testRedirected;
+    setResult({
+      ok: !notifyFailed,
+      text: !willNotify ? "Done — the client was not notified."
+        : accepted.length ? `Client notice accepted by ${accepted.join(" + ")}.`
+          : testRedirected ? "Done — Test Mode sent the text to you; the client was not notified."
+            : testHeld ? "Done — Test Mode held the notice; the client was not notified."
+              : channels.length ? "The schedule was updated, but the client notification failed."
+                : "Recorded — this client has no text/in-app channel on file.",
+    });
     setTimeout(onClose, 950);
   };
 
@@ -11350,11 +11484,11 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                       </div>
                     ) : headed ? (
                       <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: T.primary, fontWeight: 700 }}>
-                        <span style={{ width: 7, height: 7, borderRadius: "50%", background: T.primary, boxShadow: `0 0 0 3px ${hexA(T.primary, 0.18)}` }} /> On the way{sent ? " · notified" : ""}
+                        <span style={{ width: 7, height: 7, borderRadius: "50%", background: T.primary, boxShadow: `0 0 0 3px ${hexA(T.primary, 0.18)}` }} /> On the way{sent ? " · notice sent" : ""}
                       </div>
                     ) : sent ? (
                       <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: T.primary, fontWeight: 700 }}>
-                        <Icon name="check" size={12} /> Client notified
+                        <Icon name="check" size={12} /> Client notice sent
                       </div>
                     ) : (
                       <div style={{ fontSize: 11, color: T.textMuted }}>Not yet started</div>
@@ -12877,16 +13011,13 @@ function SendingIdentitySettings({ email, setEmail }) {
     (async () => {
       const out = { verifiedDomain: "", numbers: [], smsFrom: "", resendOk: false, quoOk: false, loaded: true };
       try { const r = await fetch(`${PROD_URL}/api/send-magic-link?check`); const d = await r.json(); if (d) { if (d.verifiedDomain) out.verifiedDomain = String(d.verifiedDomain).toLowerCase(); out.resendOk = !!(d.configured && d.configured.resend); } } catch (_) {}
-      try { const r = await fetch(`${PROD_URL}/api/send-sms?check`); const d = await r.json(); if (d) { out.numbers = Array.isArray(d.numbers) ? d.numbers : []; out.smsFrom = d.from || ""; out.quoOk = !!(d.configured && d.configured.quoKey && d.configured.quoNumber); } } catch (_) {}
+      try { const r = await fetch(`${PROD_URL}/api/send-sms?check&details=1`, { headers: await authHeaders() }); const d = await r.json(); if (r.ok && d) { out.numbers = Array.isArray(d.numbers) ? d.numbers : []; out.smsFrom = d.from || ""; out.quoOk = !!(d.configured && d.configured.quoKey && d.configured.quoNumber && d.configured.upstreamReachable && d.configured.numberOnAccount !== false); } } catch (_) {}
       if (alive) setIdentity(out);
     })();
     return () => { alive = false; };
   }, []);
-  const normNum = (s) => { const raw = String(s || "").trim(); if (raw.startsWith("+")) return "+" + raw.slice(1).replace(/\D/g, ""); const dd = raw.replace(/\D/g, ""); if (dd.length === 10) return "+1" + dd; if (dd.length === 11 && dd.startsWith("1")) return "+" + dd; return dd ? "+" + dd : ""; };
   const emailDomain = (email.fromAddress || "").split("@").pop().toLowerCase();
   const emailVerified = !!identity.verifiedDomain && emailDomain === identity.verifiedDomain;
-  const numNorm = normNum(email.textingNumber);
-  const numOnAccount = identity.numbers.length ? identity.numbers.some(n => n.number === numNorm) : null;
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 };
   const field = { width: "100%", padding: "10px 13px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
   const hint = { fontSize: 11, color: T.textMuted, marginTop: 6 };
@@ -12936,30 +13067,12 @@ function SendingIdentitySettings({ email, setEmail }) {
       <Card>
         <CardHeader title="Texting Number" />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
-          <div style={{ fontSize: 12, color: T.textMuted, marginTop: -2 }}>The business line your texts go out from — On My Way, arrival, invoice, lead alerts, and money-plan texts. Must be a number on your Quo account.</div>
-          {identity.numbers.length > 0 ? (
-            <div>
-              <label style={labelStyle}>Send Texts From</label>
-              <select style={field} value={numNorm && identity.numbers.some(n => n.number === numNorm) ? numNorm : ""} onChange={e => set("textingNumber", e.target.value)}>
-                <option value="">{identity.smsFrom ? `Default (${identity.smsFrom})` : "Server default"}</option>
-                {identity.numbers.map(n => <option key={n.number} value={n.number}>{n.number}{n.label ? ` — ${n.label}` : ""}</option>)}
-              </select>
-              <div style={hint}>Pick the line your texts go out from, or leave on Default to use the server's number.</div>
-            </div>
-          ) : (
-            <div>
-              <label style={labelStyle}>Texting Number</label>
-              <input type="tel" inputMode="tel" style={field} value={email.textingNumber || ""} onChange={e => set("textingNumber", e.target.value)} placeholder={identity.smsFrom || "+1 610 555 1234"} />
-              <div style={hint}>{!identity.loaded ? "Checking…" : identity.smsFrom ? `Leave blank to use the server default (${identity.smsFrom}).` : "Texting isn't configured on the server yet."}</div>
-            </div>
-          )}
-          {email.textingNumber ? (
-            <div style={{ fontSize: 12, fontWeight: 700, color: numOnAccount === false ? "#d97706" : (numOnAccount ? "#16a34a" : T.textMuted) }}>
-              {numOnAccount === false ? "Not found on your Quo account — texts from it may be rejected."
-                : numOnAccount ? "✓ On your Quo account"
-                : (numNorm ? `Will send from ${numNorm}` : "")}
-            </div>
-          ) : null}
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: -2 }}>Every SPS client text uses the single business line configured in Vercel. Staff and installed app builds cannot switch to another number in the Quo workspace.</div>
+          <div>
+            <label style={labelStyle}>SPS Business Line</label>
+            <input type="tel" readOnly style={{ ...field, background: T.surfaceAlt, cursor: "default" }} value={identity.smsFrom || ""} placeholder={!identity.loaded ? "Checking…" : "Not configured"} />
+            <div style={hint}>{!identity.loaded ? "Checking the Quo connection…" : identity.quoOk ? "✓ Verified on the connected Quo account" : "Set QUO_API_KEY and QUO_PHONE_NUMBER in Vercel, then redeploy."}</div>
+          </div>
         </div>
       </Card>
     </>
@@ -14760,20 +14873,25 @@ function InvoiceSendStep({ invoice, client, onClose }) {
   const [chatMsg, setChatMsg] = useState(fill(e.chatInvoice || DEFAULT_EMAIL.chatInvoice));
   const [sending, setSending] = useState(false);
   const [err, setErr] = useState("");
+  const [finished, setFinished] = useState(false);
 
   const send = async () => {
+    if (finished) { onClose(); return; }
     setSending(true); setErr("");
     const fails = [];
+    const protectedChannels = [];
     if (doSms && phone) {
       try {
         const r = await sendSms(phone, smsMsg, { clientId: client.id, type: "Invoice" }); // gated: honors Test Mode (hold/redirect)
         if (!r.ok) fails.push(`Text: ${r.error || "failed"}`);
+        else if (!r.acceptedForClient) protectedChannels.push(r.held ? "Test Mode held the invoice text" : "the test text went only to you");
       } catch (_) { fails.push("Text: couldn't reach server"); }
     }
     if (doChat && client?.id) {
       try {
-        const { error } = await postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: chatMsg });
+        const { error, held } = await postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: chatMsg });
         if (error) fails.push(`In-app: ${error.message}`);
+        else if (held) protectedChannels.push("Test Mode held the in-app invoice notice");
       } catch (_) { fails.push("In-app: failed"); }
     }
     if (doEmail && clientEmail) {
@@ -14797,7 +14915,11 @@ function InvoiceSendStep({ invoice, client, onClose }) {
       } catch (_) { fails.push("Email: couldn't reach server"); }
     }
     setSending(false);
-    if (fails.length) { setErr(fails.join(" · ")); return; }
+    if (fails.length || protectedChannels.length) {
+      setFinished(true);
+      setErr(`${fails.length ? `${fails.join(" · ")}. ` : ""}${protectedChannels.length ? `${protectedChannels.join(" · ")}. The client did not receive ${protectedChannels.length === 1 ? "that channel" : "those channels"}. ` : ""}Any other selected channels were processed; use Done instead of resending the whole bundle.`);
+      return;
+    }
     onClose();
   };
 
@@ -14845,13 +14967,13 @@ function InvoiceSendStep({ invoice, client, onClose }) {
           <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 8, lineHeight: 1.5 }}>Sends the branded invoice{payLink ? " with a Pay-online button" : ""} to {clientEmail}.</div>
         </Row>
 
-        {err && <div style={{ fontSize: 12.5, fontWeight: 600, color: T.accent }}>{err}</div>}
+        {err && <div style={{ fontSize: 12.5, fontWeight: 600, color: finished ? T.warning : T.accent }}>{err}</div>}
 
         <div style={{ display: "flex", gap: 10, marginTop: 2 }}>
-          <button onClick={send} disabled={sending || (!doSms && !doChat && !doEmail)} style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontWeight: 800, fontSize: 15, cursor: (sending || (!doSms && !doChat && !doEmail)) ? "default" : "pointer", fontFamily: "inherit", opacity: (sending || (!doSms && !doChat && !doEmail)) ? 0.6 : 1, boxShadow: `0 4px 16px ${hexA(T.primary, 0.3)}` }}>
-            {sending ? "Sending…" : "Send"}
+          <button onClick={send} disabled={sending || (!finished && !doSms && !doChat && !doEmail)} style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontWeight: 800, fontSize: 15, cursor: (sending || (!finished && !doSms && !doChat && !doEmail)) ? "default" : "pointer", fontFamily: "inherit", opacity: (sending || (!finished && !doSms && !doChat && !doEmail)) ? 0.6 : 1, boxShadow: `0 4px 16px ${hexA(T.primary, 0.3)}` }}>
+            {sending ? "Sending…" : finished ? "Done" : "Send"}
           </button>
-          <button onClick={onClose} disabled={sending} style={{ background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 12, padding: "13px 20px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Skip</button>
+          <button onClick={onClose} disabled={sending} style={{ background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 12, padding: "13px 20px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>{finished ? "Close" : "Skip"}</button>
         </div>
       </div>
     </Modal>
@@ -16899,8 +17021,11 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
     if (!phone) { setSentMsg("No phone number on file for this client."); return; }
     const text = buildSmsText();
     const r = await sendSms(phone, text, { clientId: client?.id, type: "Estimate" }); // business Quo line ONLY — never the device
-    if (r.ok) { set("status", "sent"); setSentMsg("Estimate texted to the client."); }
-    else { setSentMsg(r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send the text — try again.")); }
+    if (!r.ok) { setSentMsg(r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send the text — try again.")); }
+    else if (r.held) { setSentMsg("Held by Test Mode — the estimate was not texted to the client."); }
+    else if (r.redirected) { setSentMsg("Test sent to you — the estimate was not texted to the client."); }
+    else if (r.acceptedForClient) { set("status", "sent"); setSentMsg("Estimate text accepted for sending from the SPS business number."); }
+    else { setSentMsg("The estimate text was not sent to the client."); }
   };
 
   const sendViaEmail = async () => {
@@ -17315,6 +17440,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
   const [doEmail, setDoEmail] = useState(true);
   const [msgBusy, setMsgBusy] = useState(false);
   const [msgErr, setMsgErr] = useState("");
+  const [msgFinished, setMsgFinished] = useState(false);
 
   const selIds = Object.keys(sel).filter(k => sel[k]);
   const chosen = selIds.map(id => clients.find(c => String(c.id) === String(id))).filter(Boolean);
@@ -17396,19 +17522,24 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
 
   const created = progress.filter(p => p.ok);
   const sendBatch = async () => {
+    if (msgFinished) { onClose(); return; }
     setMsgBusy(true); setMsgErr("");
-    let fails = 0;
+    let fails = 0, protectedChannels = 0;
     for (const p of created) {
       const c = clients.find(x => String(x.id) === String(p.id)); if (!c) continue;
       const inv = p.invoice;
       const phone = String(c.phone || "").replace(/[^\d+]/g, "");
       const cEmail = (c.email || "").trim();
-      if (doSms && phone && commPref(c, "text")) { try { const r = await sendSms(phone, fill(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv), { clientId: c.id, type: "Invoice" }); if (!r.ok) fails++; } catch (_) { fails++; } }
-      if (doChat && c.id && commPref(c, "app")) { try { await postToPortalSafe({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) + invCardMarker(inv, "$" + ((invoiceTotals(inv).total) || 0).toFixed(2), branding.companyName) }); } catch (_) { fails++; } }
+      if (doSms && phone && commPref(c, "text")) { try { const r = await sendSms(phone, fill(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv), { clientId: c.id, type: "Invoice" }); if (!r.ok) fails++; else if (!r.acceptedForClient) protectedChannels++; } catch (_) { fails++; } }
+      if (doChat && c.id && commPref(c, "app")) { try { const posted = await postToPortalSafe({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) + invCardMarker(inv, "$" + ((invoiceTotals(inv).total) || 0).toFixed(2), branding.companyName) }); if (posted?.error) fails++; else if (posted?.held) protectedChannels++; } catch (_) { fails++; } }
       if (doEmail && cEmail && commPref(c, "email")) { try { const tt = invoiceTotals(inv); const rE = await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ ...senderEmailFields(c.id), emailSubject: fill(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, c, inv), emailIntro: fill(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, c, inv), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); logComm({ clientId: c.id, type: "Invoice", channel: "email", body: `Invoice ${inv.number || ""} emailed (batch)`, ok: rE.ok, origin: ACTOR ? `${ACTOR} — batch invoice` : "batch invoice", recipient: cEmail }); if (!rE.ok) fails++; } catch (_) { fails++; } }
     }
     setMsgBusy(false);
-    if (fails > 0) { setMsgErr(`${fails} message(s) couldn't be sent. The invoices were still created.`); return; }
+    if (fails > 0 || protectedChannels > 0) {
+      setMsgFinished(true);
+      setMsgErr(`${fails ? `${fails} channel message${fails === 1 ? "" : "s"} couldn't be accepted. ` : ""}${protectedChannels ? `${protectedChannels} client channel${protectedChannels === 1 ? " was" : "s were"} held or redirected by Test Mode. ` : ""}The invoices were still created.`);
+      return;
+    }
     onClose();
   };
 
@@ -17502,8 +17633,8 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
         <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.45, marginTop: -4 }}>Each client's own channel choices are honored automatically — anyone who's turned off a channel won't be messaged there, even if it's on above.</div>
         {msgErr && <div style={{ fontSize: 12.5, fontWeight: 600, color: T.accent }}>{msgErr}</div>}
         <div style={{ display: "flex", gap: 10 }}>
-          <button onClick={sendBatch} disabled={msgBusy || (!doSms && !doChat && !doEmail)} style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontWeight: 800, fontSize: 15, cursor: "pointer", fontFamily: "inherit", opacity: (msgBusy || (!doSms && !doChat && !doEmail)) ? 0.6 : 1 }}>{msgBusy ? "Sending…" : `Send to ${created.length}`}</button>
-          <button onClick={onClose} disabled={msgBusy} style={{ background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 12, padding: "13px 20px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Skip</button>
+          <button onClick={sendBatch} disabled={msgBusy || (!msgFinished && !doSms && !doChat && !doEmail)} style={{ flex: 1, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontWeight: 800, fontSize: 15, cursor: "pointer", fontFamily: "inherit", opacity: (msgBusy || (!msgFinished && !doSms && !doChat && !doEmail)) ? 0.6 : 1 }}>{msgBusy ? "Sending…" : msgFinished ? "Done" : `Send to ${created.length}`}</button>
+          <button onClick={onClose} disabled={msgBusy} style={{ background: T.surfaceAlt, color: T.text, border: "none", borderRadius: 12, padding: "13px 20px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>{msgFinished ? "Close" : "Skip"}</button>
         </div>
       </div>
     </Modal>
@@ -19343,10 +19474,10 @@ function NotificationSettings({ email, setEmail, branding, clients }) {
                   <label style={lbl}>Send all client texts to</label>
                   <input type="tel" inputMode="tel" value={tm.phone || ""} placeholder={base.ownerPhone || "(555) 555-5555"} onChange={e => setTM("phone", e.target.value)} style={field} />
                 </div>
-                <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5 }}>Every client email &amp; text goes to you instead, tagged <b style={{ color: "#B45309" }}>[TEST → client]</b>. Leave blank to use your Owner Alert contacts below. In-app portal messages still post (only a logged-in client sees those).</div>
+                <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5 }}>Every client email &amp; text goes to you instead, tagged <b style={{ color: "#B45309" }}>[TEST → client]</b>. Leave blank to use your Owner Alert contacts below. Client portal messages and pushes are held too, unless that client is marked Pilot LIVE.</div>
               </>
             ) : (
-              <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5 }}>No client emails or texts are sent at all. In-app portal messages still post (only a logged-in client sees those). Turn Test Mode off to go live.</div>
+              <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5 }}>No client emails, texts, portal messages, or pushes are sent. Pilot LIVE clients are the only exception. Turn Test Mode off to go live.</div>
             )}
             {/* Pilot launch: hand-picked clients go LIVE (real texts/emails/portal posts/pushes)
                 while Test Mode keeps protecting everyone else — soft-launch a few at a time. */}
@@ -19445,19 +19576,20 @@ function SyncStatus({ T, branding, team, currentUserId, email = {} }) {
   const [testEmail, setTestEmail] = useState(owner.email || branding.email || "");
   const [emailMsg, setEmailMsg] = useState(null);
   const [emailBusy, setEmailBusy] = useState(false);
-  const [testPhone, setTestPhone] = useState(owner.phone || branding.phone || "");
+  const [testPhone, setTestPhone] = useState(TEST_MODE.phone || owner.phone || branding.phone || "");
   const [smsMsg, setSmsMsg] = useState(null);
   const [smsBusy, setSmsBusy] = useState(false);
   const [widget, setWidget] = useState(() => getWidgetSync());
   const [widgetBusy, setWidgetBusy] = useState(false);
 
-  const getJSON = async (url) => {
+  const getJSON = async (url, authenticated = false) => {
     try {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 12000);
-      const r = await fetch(url, { signal: ctrl.signal });
+      const r = await fetch(url, { signal: ctrl.signal, ...(authenticated ? { headers: await authHeaders() } : {}) });
       clearTimeout(t);
-      return await r.json();
+      const data = await r.json().catch(() => null);
+      return r.ok ? data : null;
     } catch (_) { return null; }
   };
 
@@ -19478,12 +19610,23 @@ function SyncStatus({ T, branding, team, currentUserId, email = {} }) {
         return d.configured && d.configured.supabaseServiceRole ? { status: "ok", detail: "Service-role key set" } : { status: "down", detail: "SUPABASE_SERVICE_ROLE_KEY not set" }; },
       fix: { note: "Add SUPABASE_SERVICE_ROLE_KEY in Vercel → Settings → Environment Variables, then redeploy." } },
     { key: "sms", label: "Texting", icon: "message", sub: "Quo — On-My-Way + invoice texts",
-      run: async () => { const d = await getJSON(`${PROD_URL}/api/send-sms?check`);
-        if (!d) return { status: "down", detail: "Couldn't reach server" };
-        const c = d.configured || {};
-        if (c.quoKey && c.quoNumber) return { status: "ok", detail: "Number + key set" };
-        return { status: "down", detail: !c.quoKey ? "QUO_API_KEY not set" : "QUO_PHONE_NUMBER not set" }; },
-      fix: { label: "Open Quo settings ↗", run: () => openExternalBrowser("https://app.quo.com"), note: "Check A2P/Trust approval + that the number has texting credits." } },
+      run: async () => {
+        const [send, receive] = await Promise.all([getJSON(`${PROD_URL}/api/send-sms?check&details=1`, true), getJSON(`${PROD_URL}/api/sms-intake`)]);
+        if (!send || !receive) return { status: "down", detail: "Couldn't reach server" };
+        const outbound = send.configured || {};
+        const inbound = receive.configured || {};
+        if (!outbound.quoKey || !outbound.quoNumber) return { status: "down", detail: !outbound.quoKey ? "QUO_API_KEY not set" : "QUO_PHONE_NUMBER not set" };
+        if (!outbound.upstreamReachable) return { status: "down", detail: "Quo rejected the connection — check QUO_API_KEY" };
+        if (outbound.numberOnAccount === false) return { status: "down", detail: "QUO_PHONE_NUMBER isn't on the connected Quo account" };
+        if (!inbound.ready) {
+          const missing = [!inbound.schema && "inbox SQL", !inbound.key && "webhook key", !inbound.sig && "signing secret", !inbound.line && "business line"].filter(Boolean).join(" + ");
+          return { status: "warn", detail: `Outgoing works · replies need ${missing || "webhook setup"}` };
+        }
+        return inbound.observed
+          ? { status: "ok", detail: "Outgoing verified · an incoming reply has been received" }
+          : { status: "warn", detail: "Outgoing verified · incoming server ready — send one test reply to confirm the Quo webhook" };
+      },
+      fix: { label: "Open Quo settings ↗", run: () => openExternalBrowser("https://app.quo.com"), note: "For incoming replies: run SMS-INBOX-MIGRATION.sql, then set QUO_WEBHOOK_KEY + QUO_WEBHOOK_SECRET and create the signed message.received webhook." } },
     { key: "qb", label: "QuickBooks", icon: "invoice", sub: "Invoices + payments sync",
       run: async () => { const d = await getJSON(`${PROD_URL}/api/quickbooks/status`);
         if (!d) return { status: "down", detail: "Couldn't reach server" };
@@ -19537,11 +19680,13 @@ function SyncStatus({ T, branding, team, currentUserId, email = {} }) {
   };
   const sendTestSms = async () => {
     if (!testPhone.trim()) { setSmsMsg({ ok: false, text: "Enter a phone number first." }); return; }
+    const digitsOnly = (value) => String(value || "").replace(/\D/g, "");
+    if (!TEST_MODE.phone) { setSmsMsg({ ok: false, text: "Save your owner test phone in Comms → Settings first." }); return; }
+    if (digitsOnly(testPhone) !== digitsOnly(TEST_MODE.phone)) { setSmsMsg({ ok: false, text: "For safety, integration tests can only go to your saved Test Mode phone." }); return; }
     setSmsBusy(true); setSmsMsg(null);
     try {
-      const r = await fetch(`${PROD_URL}/api/send-sms`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ to: testPhone.trim(), message: `${branding.companyName || "Stone Property Solutions"}: test text — your texting integration is working.`, from: SENDER_IDENTITY.textingNumber || "" }) });
-      const d = await r.json().catch(() => ({}));
-      setSmsMsg(r.ok ? { ok: true, text: `Sent — check ${testPhone.trim()}.` } : { ok: false, text: d.error || "Send failed." });
+      const r = await sendSms(TEST_MODE.phone, `${branding.companyName || "Stone Property Solutions"}: test text — your texting integration is working.`, { testSend: true, type: "Integration test", origin: "Sync & Status texting test" });
+      setSmsMsg(r.ok ? { ok: true, text: `Accepted for sending — check your saved test phone.` } : { ok: false, text: r.error || "Send failed." });
     } catch (_) { setSmsMsg({ ok: false, text: "Couldn't reach the server." }); }
     setSmsBusy(false);
   };
@@ -19818,7 +19963,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
             {(sel.phone || sel.email || sel.service) && (
               <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, overflow: "hidden" }}>
                 {sel.service && <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "11px 14px", borderBottom: (sel.phone || sel.email) ? `1px solid ${T.border}` : "none" }}><span style={{ fontSize: 12.5, color: T.textMuted, fontWeight: 700 }}>Service</span><span style={{ fontSize: 13.5, color: T.text, fontWeight: 700, textAlign: "right" }}>{sel.service}</span></div>}
-                {sel.phone && <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "11px 14px", borderBottom: sel.email ? `1px solid ${T.border}` : "none" }}><span style={{ fontSize: 12.5, color: T.textMuted, fontWeight: 700 }}>Phone</span><span style={{ display: "flex", gap: 8, alignItems: "center", minWidth: 0 }}><span style={{ fontSize: 13.5, color: T.text, fontWeight: 700 }}>{sel.phone}</span><a href={`tel:${sel.phone}`} style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "5px 12px", textDecoration: "none" }}>Call</a><a href={`sms:${sel.phone}`} style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "5px 12px", textDecoration: "none" }}>Text</a></span></div>}
+                {sel.phone && <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "11px 14px", borderBottom: sel.email ? `1px solid ${T.border}` : "none" }}><span style={{ fontSize: 12.5, color: T.textMuted, fontWeight: 700 }}>Phone</span><span style={{ display: "flex", gap: 8, alignItems: "center", minWidth: 0 }}><span style={{ fontSize: 13.5, color: T.text, fontWeight: 700 }}>{sel.phone}</span><a href={`tel:${sel.phone}`} style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "5px 12px", textDecoration: "none" }}>Call</a><a href={`sms:${sel.phone}`} title="Opens this device's Messages app" style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "5px 12px", textDecoration: "none" }}>Device text</a></span></div>}
                 {sel.email && <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "11px 14px" }}><span style={{ fontSize: 12.5, color: T.textMuted, fontWeight: 700 }}>Email</span><span style={{ display: "flex", gap: 8, alignItems: "center", minWidth: 0 }}><span style={{ fontSize: 13, color: T.text, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sel.email}</span><a href={`mailto:${sel.email}`} style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "5px 12px", textDecoration: "none" }}>Email</a></span></div>}
               </div>
             )}
@@ -20660,16 +20805,18 @@ function useMessages(clientId, portalMode = false) {
       });
       const d = await r.json().catch(() => ({}));
       if (r.ok && d.message) setMessages(prev => [...prev, d.message]);
-      return !!(r.ok && d.message);
+      return { ok: !!(r.ok && d.message), held: false };
     }
-    const { data, error } = await supabase.from("sps_messages").insert({
+    const result = await postToPortalSafe({
       client_id: String(clientId),
       sender,
       sender_name: senderName || "",
       body: body.trim(),
-    }).select().single();
-    if (!error && data) setMessages(prev => [...prev, data]);
-    return !error;
+    }, { select: true });
+    if (result?.held) return { ok: true, held: true };
+    const data = Array.isArray(result?.data) ? result.data[0] : result?.data;
+    if (!result?.error && data) setMessages(prev => [...prev, data]);
+    return { ok: !result?.error, held: false };
   };
 
   const markRead = async (msgIds) => {
@@ -21077,8 +21224,9 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
     const body = draft.trim();
     setSending(true); setSendErr("");
     try {
-      const ok = await send(draft, sender, senderName);
-      if (ok) { setDraft(""); if (onSent) onSent(body); }   // only clear the box once it's actually sent
+      const result = await send(draft, sender, senderName);
+      if (result?.held) setSendErr("Held by Test Mode — the client was not contacted.");
+      else if (result?.ok) { setDraft(""); if (onSent) onSent(body); }   // only clear the box once it's actually sent
       else setSendErr("Message didn't send — check your connection and try again.");
     } catch {
       // A thrown rejection (dead connection / aborted fetch) must NOT leave the spinner stuck.
@@ -21271,11 +21419,12 @@ function CommunicationsHub({ scheduleCfg, setScheduleCfg, email, setEmail, brand
   const numOnly = (v, max) => v.replace(/\D/g, "").slice(0, max);
 
   const testSend = async (tpl, vars) => {
-    const def = (em.testMode && em.testMode.phone) || "";
-    const to = window.prompt("Send a test of this message to which phone number?", def);
-    if (!to || !to.trim()) return;
-    const res = await sendSms(to.trim(), fill(tpl, vars), null);
-    alert(res && res.ok ? "Test sent ✓" : `Couldn't send: ${(res && res.error) || "unknown error"}`);
+    const to = (em.testMode && em.testMode.phone) || "";
+    if (!to.trim()) { alert("Add your owner test phone under Test Mode first."); return; }
+    // Explicit tests can bypass a hold only for the configured owner test number. `sendSms`
+    // enforces that same rule centrally, even if a future caller passes the wrong destination.
+    const res = await sendSms(to.trim(), fill(tpl, vars), { testSend: true, type: "Texting test", origin: "Comms → Settings test" });
+    alert(res && res.ok ? "Test accepted for sending ✓" : `Couldn't send: ${(res && res.error) || "unknown error"}`);
   };
 
   // Dry-run: ask the scheduler what it WOULD send right now (it sends nothing on a dry run).
@@ -21333,7 +21482,7 @@ function CommunicationsHub({ scheduleCfg, setScheduleCfg, email, setEmail, brand
              : preview.master === false ? <div style={{ fontSize: 12.5, color: T.textMuted }}>Automatic sending is off — flip the master switch on to preview a live run.</div>
              : (<>
                 <div style={{ fontSize: 12.5, fontWeight: 700, color: T.text, marginBottom: 8 }}>
-                  {(preview.counts?.wouldSend || 0)} would send right now{preview.testMode?.on ? " — all redirected to you (Test Mode)" : ""}.
+                  {(preview.counts?.wouldSend || 0)} would send right now{preview.testMode?.on ? " — Test Mode safety rules apply; Pilot LIVE exceptions remain live" : ""}.
                 </div>
                 {(preview.wouldSend || []).slice(0, 12).map((m, i) => (
                   <div key={i} style={{ fontSize: 11.5, color: T.textMuted, padding: "6px 0", borderTop: i ? `1px solid ${T.border}` : "none", lineHeight: 1.45 }}>
@@ -21390,7 +21539,7 @@ function CommunicationsHub({ scheduleCfg, setScheduleCfg, email, setEmail, brand
         </div>
       </div>
       <div style={{ background: hexA(T.primary, 0.06), borderRadius: 12, padding: "12px 14px", fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>
-        Recommended first run: turn the master switch on with <b>Test Mode ON</b> — every auto-message redirects to you, tagged [TEST], so you can watch a few fire safely before a real client gets anything. Each message also respects the client's opt-out and your cooldown. Flip Test Mode off when you're confident.
+        Recommended first run: turn the master switch on with <b>Test Mode ON</b>. Protected messages follow your Hold or Redirect setting; any Pilot LIVE clients still receive their messages for real. Each message also respects the client's opt-out and your cooldown. Flip Test Mode off when you're confident.
       </div>
     </div>
   );
@@ -21520,10 +21669,11 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
   const [reviewMsg, setReviewMsg] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
   const [sendBusy, setSendBusy] = useState(false);
+  const [manualCopied, setManualCopied] = useState(false);
   const markSent = (sid, method) => setReminderLog(m => ({ ...m, [sid]: { sentAt: new Date().toISOString(), method } }));
   const undoSent = (sid) => setReminderLog(m => { const n = { ...m }; delete n[sid]; return n; });
 
-  const openReview = (entry) => { setReview(entry); setReviewMsg(buildMsg(entry)); setReminderErr(""); };
+  const openReview = (entry) => { setReview(entry); setReviewMsg(buildMsg(entry)); setReminderErr(""); setManualCopied(false); };
 
   const aiImprove = async () => {
     if (!review) return;
@@ -21545,8 +21695,19 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
     if (review.phone) {
       const r = await sendSms(review.phone, reviewMsg, { clientId: review.client?.id, type: review.kind === "payment" ? "Payment reminder" : "Reminder" }); // business Quo line ONLY
       if (!r.ok) { setReminderErr(r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send the text.")); setSendBusy(false); return; }
-    } else {
-      navigator.clipboard?.writeText(reviewMsg); // no phone on file — copy so it can be sent manually
+      if (!r.acceptedForClient) {
+        setReminderErr(r.held ? "Held by Test Mode — the client was not reminded." : "Test sent to you — the client was not reminded.");
+        setSendBusy(false);
+        return;
+      }
+    } else if (!manualCopied) {
+      try {
+        await navigator.clipboard?.writeText(reviewMsg);
+        setManualCopied(true);
+        setReminderErr("Copied to your clipboard. It is not marked sent yet — send it manually, then confirm below.");
+      } catch (_) { setReminderErr("Couldn't copy the message. Select the text and copy it manually."); }
+      setSendBusy(false);
+      return;
     }
     markSent(review.sid, "manual"); setSendBusy(false); setReview(null);
   };
@@ -21705,7 +21866,7 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
               <textarea rows={4} value={reviewMsg} onChange={e => setReviewMsg(e.target.value)} style={{ width: "100%", padding: "12px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical", lineHeight: 1.5 }} />
             </div>
             {reminderErr && <div style={{ fontSize: 12.5, fontWeight: 700, color: T.accent }}>{reminderErr}</div>}
-            <Btn onClick={sendReview} disabled={sendBusy} block lg>{sendBusy ? "Sending…" : review.phone ? "Send text" : "Copy message"}</Btn>
+            <Btn onClick={sendReview} disabled={sendBusy} block lg>{sendBusy ? "Sending…" : review.phone ? "Send text" : manualCopied ? "Mark sent manually" : "Copy message"}</Btn>
           </div>
         </Modal>
       )}
@@ -21782,19 +21943,35 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
     const list = limit ? recipients.slice(0, limit) : recipients;
     if (!list.length || !ready) return;
     setSending(true); setConfirmAll(false); setErr(""); setResult(""); setProgress({ done: 0, total: list.length, failed: 0 });
-    let done = 0, failed = 0, held = 0;
+    let done = 0, failed = 0, held = 0, redirected = 0;
     for (const c of list) {
       const r = isEmail ? await sendEmailTo(c) : await sendSms((c.phone || "").replace(/\D/g, ""), fill(c), { clientId: c.id, type: "Broadcast", origin: `${ACTOR ? `${ACTOR} — ` : ""}text broadcast` });
       if (!r.ok) failed++;
       else if (r.held) held++;
+      else if (r.redirected || (isEmail && testMode && !clientIsLive(c.id))) redirected++;
       done++;
       setProgress({ done, total: list.length, failed });
       await new Promise(res => setTimeout(res, isEmail ? 600 : 220)); // throttle: Resend caps emails at ~2/s; Quo tolerates faster
     }
     setSending(false);
+    setProgress(null);
+    const accepted = done - failed - held - redirected;
     setResult(held === list.length && held > 0
       ? `Held by Test Mode — nothing was sent (${held} would have gone out). Flip Test Mode off in Comms → Settings to go live.`
-      : `Sent to ${done - failed - held} of ${list.length}${failed ? ` · ${failed} couldn't send` : ""}${held ? ` · ${held} held by Test Mode` : ""}.${testMode ? (() => { const lv = list.filter(c => clientIsLive(c.id)).length; return lv ? ` (Test Mode — ${lv} pilot client${lv === 1 ? "" : "s"} got it for real; the rest routed to you.)` : " (Test Mode — routed to you.)"; })() : ""}`);
+      : redirected > 0 && accepted === 0 && failed === 0 && held === 0
+        ? `Test Mode — ${redirected} message${redirected === 1 ? " was" : "s were"} sent to you; no clients were contacted.`
+        : `Accepted for sending to ${accepted} of ${list.length}${redirected ? ` · ${redirected} redirected to you by Test Mode` : ""}${failed ? ` · ${failed} couldn't send` : ""}${held ? ` · ${held} held by Test Mode` : ""}.`);
+  };
+
+  const sendTextTestToOwner = async () => {
+    const sample = recipients[0];
+    if (!sample || !ready) return;
+    if (!TEST_MODE.phone) { setErr("Add your test phone in Comms → Settings first."); return; }
+    setSending(true); setErr(""); setResult("");
+    const r = await sendSms(TEST_MODE.phone, `[BROADCAST TEST → ${sample.name || "sample client"}] ${fill(sample)}`, { testSend: true, type: "Broadcast test", origin: "Comms → Broadcast test" });
+    setSending(false);
+    setResult(r.ok ? "Test accepted for your saved test phone — no clients were contacted." : "");
+    if (!r.ok) setErr(r.error || "Couldn't send the test text.");
   };
 
   const chip = (on, label, onClick) => <button key={label} onClick={onClick} style={{ padding: "8px 15px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.1) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>;
@@ -21825,7 +22002,7 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
         <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>{"{first}"} and {"{company}"} fill in per client{isEmail ? " · sent from your branded template" : ` · ${msg.length} chars${msg.length > 160 ? " (multi-part)" : ""}`}</div>
         <AIAssist kind="broadcast" channel={channel} context={{ company: branding?.companyName || "" }} value={msg} onChange={setMsg} wantSubject={isEmail} onSubject={setSubject} />
       </div>
-      {testMode && <div style={{ fontSize: 12, fontWeight: 700, color: "#B45309", background: hexA("#F59E0B", 0.12), border: `1px solid ${hexA("#F59E0B", 0.4)}`, borderRadius: 10, padding: "9px 12px" }}>Test Mode is ON — sends route to you, not the clients.{(() => { const lv = recipients.filter(c => clientIsLive(c.id)).length; return lv ? ` Exception: ${lv} pilot client${lv === 1 ? "" : "s"} in this segment will receive it FOR REAL.` : ""; })()}</div>}
+      {testMode && <div style={{ fontSize: 12, fontWeight: 700, color: "#B45309", background: hexA("#F59E0B", 0.12), border: `1px solid ${hexA("#F59E0B", 0.4)}`, borderRadius: 10, padding: "9px 12px" }}>{(() => { const lv = recipients.filter(c => clientIsLive(c.id)).length; const protectedCount = Math.max(0, total - lv); return `Test Mode is ON — ${protectedCount} message${protectedCount === 1 ? "" : "s"} ${TEST_MODE.mode === "hold" ? "will be held" : "will route to you"}.${lv ? ` ${lv} pilot client${lv === 1 ? "" : "s"} will receive it FOR REAL.` : " No clients will receive it."}`; })()}</div>}
       {err && <div style={{ fontSize: 12.5, fontWeight: 700, color: T.accent }}>{err}</div>}
       {progress ? (
         <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text }}>Sending… {progress.done}/{progress.total}{progress.failed ? ` · ${progress.failed} failed` : ""}</div>
@@ -21833,18 +22010,18 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
         <div style={{ fontSize: 13.5, fontWeight: 700, color: "#16a34a" }}>{result} <button onClick={() => { setResult(""); }} style={{ background: "none", border: "none", color: T.textMuted, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>New broadcast</button></div>
       ) : (
         <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
-          <div>
+          {isEmail && <div>
             <label style={lbl}>Test first</label>
             <input type="text" inputMode="numeric" value={testN} onChange={e => setTestN(e.target.value.replace(/\D/g, "").slice(0, 3))} style={{ ...field, width: 74 }} />
-          </div>
-          <Btn variant="ghost" disabled={sending || !ready || !total} onClick={() => send(Math.max(1, Math.min(parseInt(testN) || 1, total)))}>Send test</Btn>
+          </div>}
+          <Btn variant="ghost" disabled={sending || !ready || !total} onClick={isEmail ? () => send(Math.max(1, Math.min(parseInt(testN) || 1, total))) : sendTextTestToOwner}>{isEmail ? "Send test" : "Text test to me"}</Btn>
           <Btn disabled={sending || !ready || !total} onClick={() => setConfirmAll(true)} style={{ flex: 1, minWidth: 160 }}>{isEmail ? "Email" : "Text"} all {total}</Btn>
         </div>
       )}
       {confirmAll && (
         <Modal title={`Send ${isEmail ? "email" : "text"} broadcast`} onClose={() => setConfirmAll(false)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <div style={{ fontSize: 14, color: T.text, lineHeight: 1.5 }}>{isEmail ? "Email" : "Text"} <b>{total} client{total !== 1 ? "s" : ""}</b>?{testMode ? " (Test Mode is on — they'll route to you.)" : ""}</div>
+            <div style={{ fontSize: 14, color: T.text, lineHeight: 1.5 }}>{isEmail ? "Email" : "Text"} <b>{total} client{total !== 1 ? "s" : ""}</b>?{testMode ? (() => { const liveCount = recipients.filter(c => clientIsLive(c.id)).length; const protectedCount = Math.max(0, total - liveCount); return ` Test Mode: ${liveCount} pilot client${liveCount === 1 ? "" : "s"} receive it for real; ${protectedCount} ${TEST_MODE.mode === "hold" ? "held" : "redirected to you"}.`; })() : ""}</div>
             {isEmail && subject.trim() && <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{fillOne(subject, recipients[0] || { name: "Client" })}</div>}
             <div style={{ fontSize: 13, color: T.textMuted, background: T.surfaceAlt, borderRadius: 10, padding: "10px 12px", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{fill(recipients[0] || { name: "Client" })}</div>
             <Btn block lg onClick={() => send(0)}>{isEmail ? "Email" : "Text"} all {total}</Btn>
@@ -22011,7 +22188,7 @@ function RichEditor({ onChange, placeholder = "Write your message…", minHeight
   );
 }
 
-// Comms → Email: the owner's WORK inbox (brandon@… forwarded through in.spsway.app). AI
+// Comms → Inbox: the owner's private work email + business-line text replies. AI
 // triages every email — Lead / Bill / Client / Other — leads flow into Comms → Leads
 // automatically. Owner-only: rows come from the owner-gated api/inbox (sps_inbox has no
 // client-readable policy at all — this is private mail).
@@ -22057,6 +22234,46 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const [replyHtml, setReplyHtml] = useState("");
   const [replyBusy, setReplyBusy] = useState(false);
   const [replyMsg, setReplyMsg] = useState("");
+  const replySucceeded = /^(Sent|Text accepted)/.test(replyMsg);
+  const toggleReply = () => { setReplying(v => !v); setReplyMsg(""); };
+  const flagReplied = (id) => {
+    setRows(rs => (rs || []).map(x => x.id === id ? { ...x, replied: true } : x));
+    setOpenRow(o => o && o.id === id ? { ...o, replied: true } : o);
+  };
+  const sendOpenRowReply = async () => {
+    if (replyBusy || !openRow || !replyText.trim()) return;
+    const row = openRow;
+    setReplyBusy(true); setReplyMsg("");
+    try {
+      if (row.channel === "sms") {
+        const phone = String(row.from_phone || "").trim();
+        const phoneKey = phone.replace(/\D/g, "").slice(-10);
+        const clientMatches = phoneKey ? (clients || []).filter(c => String(c.phone || "").replace(/\D/g, "").slice(-10) === phoneKey) : [];
+        const clientId = row.ai && row.ai.clientId != null ? row.ai.clientId : (clientMatches.length === 1 ? clientMatches[0].id : undefined);
+        const sent = await sendSms(phone, replyText.trim(), { clientId, type: "Text reply", origin: "Comms → Inbox text reply" });
+        if (!sent.ok) setReplyMsg(sent.error || "Couldn't send the text.");
+        else if (sent.held) setReplyMsg("Held by Test Mode — the customer was not contacted.");
+        else if (sent.redirected) setReplyMsg("Test sent to you — the customer was not contacted.");
+        else {
+          setReplyMsg("Text accepted for sending from the SPS business number.");
+          setReplyText(""); setReplyHtml(""); setReplying(false); flagReplied(row.id);
+          // Quo already accepted the text; persisting the inbox badge is best-effort and must never
+          // turn a successful send into an error if the status update briefly fails.
+          (async () => {
+            try { await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "markReplied", id: row.id }) }); } catch (_) {}
+          })();
+        }
+      } else {
+        const r = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "reply", id: row.id, body: replyText.trim(), html: replyHtml }) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) setReplyMsg(d.error || `Couldn't send (${r.status}).`);
+        else {
+          setReplyMsg("Sent"); setReplyText(""); setReplyHtml(""); setReplying(false); flagReplied(row.id);
+        }
+      }
+    } catch (_) { setReplyMsg("Couldn't reach the server."); }
+    setReplyBusy(false);
+  };
   const [selMode, setSelMode] = useState(false);   // bulk-select mode in the inbox list
   const [sel, setSel] = useState({});              // { [emailId]: true }
   const [busyBulk, setBusyBulk] = useState(false); // a bulk action is in flight
@@ -22089,6 +22306,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     setRefreshing(false);
   };
   useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setReplying(false); setReplyText(""); setReplyHtml(""); setReplyMsg(""); }, [openRow && openRow.id]);
   const KIND = { lead: { label: "Lead", color: "#16a34a" }, bill: { label: "Bill", color: "#b45309" }, client: { label: "Client", color: "#2563eb" }, other: { label: "Other", color: null } };
   // Membership is checked against the ACTUAL leads list, not the imported stamp — if a lead
   // ever vanishes (multi-device array overwrite), "Add to Leads" reappears for a one-tap re-add.
@@ -22433,35 +22651,29 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
         {!inLeads(openRow.id) && <Btn variant="primary" sm onClick={() => addToLeads(openRow)} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={14} />Add to Leads</Btn>}
         {inLeads(openRow.id) && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 700, color: "#16a34a", alignSelf: "center" }}><Icon name="check" size={14} />In your Leads funnel</span>}
         {openRow.channel === "sms"
-          ? <Btn href={`sms:${(openRow.from_phone || "").replace(/[^\d+]/g, "")}`} variant="outline" sm style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="message" size={14} />Text back</Btn>
-          : <Btn variant="outline" sm onClick={() => { setReplying(v => !v); setReplyMsg(""); }} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="reply" size={14} />{replying ? "Hide reply" : "Reply"}</Btn>}
+          ? <Btn variant="outline" sm onClick={toggleReply} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="message" size={14} />{replying ? "Hide reply" : "Text back"}</Btn>
+          : <Btn variant="outline" sm onClick={toggleReply} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="reply" size={14} />{replying ? "Hide reply" : "Reply"}</Btn>}
         <Btn variant="ghost" sm onClick={async () => {
           try { await navigator.clipboard.writeText(openRow.body_text || ""); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch (_) {}
         }}>{copied ? <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><Icon name="check" size={13} />Copied</span> : "Copy text"}</Btn>
       </div>
       {replying && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <RichEditor onChange={(html, text) => { setReplyHtml(html); setReplyText(text); }} placeholder={`Reply to ${openRow.from_name || openRow.from_email}…`} minHeight={130} />
+          {openRow.channel === "sms" ? (
+            <div>
+              <textarea value={replyText} maxLength={1600} onChange={e => setReplyText(e.target.value)} placeholder={`Text ${openRow.from_name || openRow.from_phone || "this number"}…`}
+                style={{ width: "100%", minHeight: 116, resize: "vertical", padding: "12px 14px", border: `1.5px solid ${T.border}`, borderRadius: 12, background: T.surface, color: T.text, fontFamily: "inherit", fontSize: 16, lineHeight: 1.5, boxSizing: "border-box", outline: "none" }} />
+              <div style={{ textAlign: "right", marginTop: 3, fontSize: 11, color: T.textMuted }}>{replyText.length}/1600</div>
+            </div>
+          ) : <RichEditor onChange={(html, text) => { setReplyHtml(html); setReplyText(text); }} placeholder={`Reply to ${openRow.from_name || openRow.from_email}…`} minHeight={130} />}
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <Btn variant="primary" sm onClick={replyBusy || !replyText.trim() ? undefined : async () => {
-              setReplyBusy(true); setReplyMsg("");
-              try {
-                const r = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "reply", id: openRow.id, body: replyText.trim(), html: replyHtml }) });
-                const d = await r.json().catch(() => ({}));
-                if (!r.ok) setReplyMsg(d.error || `Couldn't send (${r.status}).`);
-                else {
-                  setReplyMsg("Sent"); setReplyText(""); setReplyHtml(""); setReplying(false);
-                  setRows(rs => (rs || []).map(x => x.id === openRow.id ? { ...x, replied: true } : x));
-                  setOpenRow(o => o ? { ...o, replied: true } : o);
-                }
-              } catch (_) { setReplyMsg("Couldn't reach the server."); }
-              setReplyBusy(false);
-            }}>{replyBusy ? "Sending…" : "Send reply"}</Btn>
-            {replyMsg && <span style={{ fontSize: 12.5, fontWeight: 700, color: replyMsg.startsWith("Sent") ? "#16a34a" : T.warning }}>{replyMsg}</span>}
+            <Btn variant="primary" sm disabled={replyBusy || !replyText.trim()} onClick={sendOpenRowReply}>{replyBusy ? "Sending…" : openRow.channel === "sms" ? "Send text" : "Send reply"}</Btn>
+            {replyMsg && <span style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</span>}
           </div>
-          <div style={{ fontSize: 11.5, color: T.textMuted }}>Sends from your Sending Identity (Comms → Settings) and quietly copies your Gmail for the record.</div>
+          <div style={{ fontSize: 11.5, color: T.textMuted }}>{openRow.channel === "sms" ? "Sends through Quo from the SPS business number — never your personal phone number." : "Sends from your Sending Identity (Comms → Settings) and quietly copies your Gmail for the record."}</div>
         </div>
       )}
+      {!replying && replyMsg && <div style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</div>}
     </div>
   );
   // ── Sent folder — the emails you composed/replied from here. Read from sps_comms_log (already
@@ -22727,35 +22939,29 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
               {!inLeads(openRow.id) && <Btn variant="primary" sm onClick={() => addToLeads(openRow)} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={14} />Add to Leads</Btn>}
               {inLeads(openRow.id) && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 700, color: "#16a34a", alignSelf: "center" }}><Icon name="check" size={14} />In your Leads funnel</span>}
               {openRow.channel === "sms"
-                ? <Btn href={`sms:${(openRow.from_phone || "").replace(/[^\d+]/g, "")}`} variant="outline" sm style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="message" size={14} />Text back</Btn>
-                : <Btn variant="outline" sm onClick={() => { setReplying(v => !v); setReplyMsg(""); }} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="reply" size={14} />{replying ? "Hide reply" : "Reply"}</Btn>}
+                ? <Btn variant="outline" sm onClick={toggleReply} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="message" size={14} />{replying ? "Hide reply" : "Text back"}</Btn>
+                : <Btn variant="outline" sm onClick={toggleReply} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="reply" size={14} />{replying ? "Hide reply" : "Reply"}</Btn>}
               <Btn variant="ghost" sm onClick={async () => {
                 try { await navigator.clipboard.writeText(openRow.body_text || ""); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch (_) {}
               }}>{copied ? <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><Icon name="check" size={13} />Copied</span> : "Copy text"}</Btn>
             </div>
             {replying && (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                <RichEditor onChange={(html, text) => { setReplyHtml(html); setReplyText(text); }} placeholder={`Reply to ${openRow.from_name || openRow.from_email}…`} minHeight={130} />
+                {openRow.channel === "sms" ? (
+                  <div>
+                    <textarea value={replyText} maxLength={1600} onChange={e => setReplyText(e.target.value)} placeholder={`Text ${openRow.from_name || openRow.from_phone || "this number"}…`}
+                      style={{ width: "100%", minHeight: 116, resize: "vertical", padding: "12px 14px", border: `1.5px solid ${T.border}`, borderRadius: 12, background: T.surface, color: T.text, fontFamily: "inherit", fontSize: 16, lineHeight: 1.5, boxSizing: "border-box", outline: "none" }} />
+                    <div style={{ textAlign: "right", marginTop: 3, fontSize: 11, color: T.textMuted }}>{replyText.length}/1600</div>
+                  </div>
+                ) : <RichEditor onChange={(html, text) => { setReplyHtml(html); setReplyText(text); }} placeholder={`Reply to ${openRow.from_name || openRow.from_email}…`} minHeight={130} />}
                 <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                  <Btn variant="primary" sm onClick={replyBusy || !replyText.trim() ? undefined : async () => {
-                    setReplyBusy(true); setReplyMsg("");
-                    try {
-                      const r = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "reply", id: openRow.id, body: replyText.trim(), html: replyHtml }) });
-                      const d = await r.json().catch(() => ({}));
-                      if (!r.ok) setReplyMsg(d.error || `Couldn't send (${r.status}).`);
-                      else {
-                        setReplyMsg("Sent"); setReplyText(""); setReplyHtml(""); setReplying(false);
-                        setRows(rs => (rs || []).map(x => x.id === openRow.id ? { ...x, replied: true } : x));
-                        setOpenRow(o => o ? { ...o, replied: true } : o);
-                      }
-                    } catch (_) { setReplyMsg("Couldn't reach the server."); }
-                    setReplyBusy(false);
-                  }}>{replyBusy ? "Sending…" : "Send reply"}</Btn>
-                  {replyMsg && <span style={{ fontSize: 12.5, fontWeight: 700, color: replyMsg.startsWith("Sent") ? "#16a34a" : T.warning }}>{replyMsg}</span>}
+                  <Btn variant="primary" sm disabled={replyBusy || !replyText.trim()} onClick={sendOpenRowReply}>{replyBusy ? "Sending…" : openRow.channel === "sms" ? "Send text" : "Send reply"}</Btn>
+                  {replyMsg && <span style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</span>}
                 </div>
-                <div style={{ fontSize: 11.5, color: T.textMuted }}>Sends from your Sending Identity (Comms → Settings) and quietly copies your Gmail for the record.</div>
+                <div style={{ fontSize: 11.5, color: T.textMuted }}>{openRow.channel === "sms" ? "Sends through Quo from the SPS business number — never your personal phone number." : "Sends from your Sending Identity (Comms → Settings) and quietly copies your Gmail for the record."}</div>
               </div>
             )}
+            {!replying && replyMsg && <div style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</div>}
           </div>
         </Modal>
       )}
@@ -22990,7 +23196,7 @@ function LogsScreen({ clients, showOwnerRows = false }) {
   );
 }
 
-function CommsScreen({ initialSection, perms = {}, currentUser, schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, setBranding, reminderLog, setReminderLog, leads, setLeads, onConvertLead, onLinkLead, openLeadId, onLeadOpened, vp = {} }) {
+function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, currentUser, schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, setBranding, reminderLog, setReminderLog, leads, setLeads, onConvertLead, onLinkLead, openLeadId, onLeadOpened, vp = {} }) {
   const { T } = useApp();
   const isAdmin = !!perms.isAdmin;
   // Debounced editors for the template cards (heavy textareas) — snappy local echo, one write
@@ -23011,7 +23217,7 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
   const SECTIONS = [
     { id: "messages", label: "Messages", icon: "message" },
     { id: "inbox", label: "Leads", icon: "funnel" },
-    { id: "email", label: "Email", icon: "mail" },
+    { id: "email", label: "Inbox", icon: "mail" },
     { id: "reminders", label: "Reminders", icon: "calendar" },
     { id: "broadcast", label: "Broadcast", icon: "mail" },
     { id: "settings", label: "Settings", icon: "sliders" },
@@ -23021,10 +23227,18 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
   const secKey = SECTIONS.map(s => s.id).join(",");
   const single = SECTIONS.length <= 1;
   const [section, setSection] = useState(SECTIONS.some(s => s.id === initialSection) ? initialSection : firstId);
-  useEffect(() => { if (SECTIONS.some(s => s.id === initialSection)) setSection(initialSection); }, [initialSection]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (SECTIONS.some(s => s.id === initialSection)) setSection(initialSection); }, [initialSection, initialSectionNonce]); // eslint-disable-line react-hooks/exhaustive-deps
   // If the permitted set changes and the current section is no longer allowed, snap to the first.
   useEffect(() => { if (!SECTIONS.some(s => s.id === section)) setSection(firstId); }, [secKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const vpx = useViewport();   // desktop → left sidebar shell; phone → sleek top section nav
+  const mobileNavRef = useRef(null);
+  useEffect(() => {
+    const nav = mobileNavRef.current;
+    const active = nav && nav.querySelector(`[data-comms-section="${section}"]`);
+    if (!nav || !active) return;
+    const left = active.offsetLeft - Math.max(0, (nav.clientWidth - active.offsetWidth) / 2);
+    try { nav.scrollTo({ left, behavior: "smooth" }); } catch (_) { nav.scrollLeft = left; }
+  }, [section, initialSectionNonce]);
   // Collapsible Comms sidebar — reclaim horizontal space on desktop (icon-only rail). Persisted.
   const [navCollapsed, setNavCollapsed] = useState(() => { try { return localStorage.getItem("sps_comms_nav_collapsed") === "1"; } catch { return false; } });
   const toggleNav = () => setNavCollapsed(c => { const n = !c; try { localStorage.setItem("sps_comms_nav_collapsed", n ? "1" : "0"); } catch (_) {} return n; });
@@ -23079,11 +23293,11 @@ function CommsScreen({ initialSection, perms = {}, currentUser, schedule, client
           // Pinned section switcher — sticks flush under the app header instead of scrolling away and
           // resting half-hidden (which read as janky). The opaque background hides content passing under it.
           <div style={{ position: "sticky", top: 0, zIndex: 30, background: T.bg, padding: `${padTop + 12}px 16px 0` }}>
-            <div style={{ display: "flex", gap: 20, overflowX: "auto", WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", borderBottom: `1px solid ${T.border}` }}>
+            <div ref={mobileNavRef} style={{ display: "flex", gap: 20, overflowX: "auto", WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", borderBottom: `1px solid ${T.border}` }}>
               {SECTIONS.map(s => {
                 const on = section === s.id;
                 return (
-                  <button key={s.id} onClick={() => setSection(s.id)} style={{ flexShrink: 0, position: "relative", display: "flex", alignItems: "center", gap: 7, padding: "10px 2px 12px", background: "none", border: "none", fontSize: 14.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", color: on ? T.text : T.textMuted }}>
+                  <button key={s.id} data-comms-section={s.id} onClick={() => setSection(s.id)} style={{ flexShrink: 0, position: "relative", display: "flex", alignItems: "center", gap: 7, padding: "10px 2px 12px", background: "none", border: "none", fontSize: 14.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", color: on ? T.text : T.textMuted }}>
                     <Icon name={s.icon} size={15} />{s.label}
                     {on && <span style={{ position: "absolute", left: 0, right: 0, bottom: -1, height: 2.5, borderRadius: 3, background: T.primary }} />}
                   </button>
@@ -29510,13 +29724,15 @@ export default function App({ authEmail = "", onSignOut }) {
   const [invoiceFilter, setInvoiceFilter] = useState("All"); // deep-link from dashboard tiles
   const [settingsTab, setSettingsTab] = useState(null); // deep-link into a Customize sub-tab (e.g. the Test pill → Business)
   const [settingsSection, setSettingsSection] = useState(null); // deep-link further: open + scroll to a specific section (e.g. Budget → Cost Settings → "budgetCosts")
+  const [commsSection, setCommsSection] = useState(null); // deep-link into Comms (e.g. Test badge → Settings)
+  const [commsSectionNonce, setCommsSectionNonce] = useState(0); // makes re-tapping the same deep-link repeatable
   const [schedNonce, setSchedNonce] = useState(0); // bump to force-remount Schedule (re-tap reset)
   const [schedule, setSchedule, ls] = useStoredState("sps_schedule", DEFAULT_SCHEDULE);
   const [catalog, setCatalog, lcat] = useStoredState("sps_catalog", DEFAULT_CATALOG);
   const [email, setEmail, lem] = useStoredState("sps_email", DEFAULT_EMAIL);
   // Keep the module-level sending identity current with saved Email settings, so every
   // server email/SMS call goes out from the configured from-address + texting number.
-  useEffect(() => { setSenderIdentity({ fromName: email.fromName, fromAddress: email.fromAddress, textingNumber: email.textingNumber }); }, [email.fromName, email.fromAddress, email.textingNumber]);
+  useEffect(() => { setSenderIdentity({ fromName: email.fromName, fromAddress: email.fromAddress }); }, [email.fromName, email.fromAddress]);
   // Keep the module-level TEST_MODE in sync so every send path can read it. Resolve the
   // redirect targets with fallbacks: explicit → Owner Alert contacts → company contacts.
   useEffect(() => {
@@ -30815,6 +31031,8 @@ export default function App({ authEmail = "", onSignOut }) {
     setInvoiceFilter(opts.invoiceFilter || "All");
     setSettingsTab(opts.settingsTab || null);
     setSettingsSection(opts.settingsSection || null);
+    setCommsSection(opts.commsSection || null);
+    if (opts.commsSection) setCommsSectionNonce(n => n + 1);
     window.scrollTo({ top: 0, behavior: "instant" });
   };
 
@@ -30829,6 +31047,7 @@ export default function App({ authEmail = "", onSignOut }) {
       setAdding(false);
       setInvoiceFilter("All");
       setSettingsTab(null);
+      setCommsSection(null);
       // Schedule keeps its day/tech in a module cache; clear it and remount so a re-tap
       // returns to today's overview (matches how re-tapping Clients returns to the list).
       if (id === "schedule") { SCHED_VIEW = { date: null, tech: null }; setSchedNonce(n => n + 1); }
@@ -30838,6 +31057,7 @@ export default function App({ authEmail = "", onSignOut }) {
     // Switching sections → just change page; leave sub-state (open client, Schedule day/tech) intact.
     setPage(id);
     setSettingsTab(null); // clear any Customize deep-link so a normal Customize tap opens its default tab
+    setCommsSection(null); // normal Comms navigation should not retain a one-time deep link
     window.scrollTo({ top: 0, behavior: "instant" });
   };
 
@@ -31223,7 +31443,8 @@ export default function App({ authEmail = "", onSignOut }) {
           .replace(/\{company\}/g, branding.companyName || "")
           .replace(/\{plan\}/g, updatedAlert.requestedPlan || "your new plan");
         const r = await sendSms(upPhone, cmsg, { clientId: updatedAlert.clientId, type: "Upgrade" });  // await so a failure is surfaced, not swallowed
-        if (!r.ok && !r.held) handleOfficeAlert({ title: "Upgrade text didn't send", body: r.error || "Couldn't text the upgrade confirmation.", type: "feedback", clientId: updatedAlert.clientId });
+        if (!r.ok) handleOfficeAlert({ title: "Upgrade text wasn't accepted", body: r.error || "Couldn't text the upgrade confirmation.", type: "feedback", clientId: updatedAlert.clientId });
+        else if (!r.acceptedForClient) handleOfficeAlert({ title: "Upgrade saved — client text held", body: r.held ? "Test Mode held the upgrade confirmation." : "The confirmation text went only to your test phone.", type: "feedback", clientId: updatedAlert.clientId });
       }
     }
   };
@@ -31659,7 +31880,7 @@ export default function App({ authEmail = "", onSignOut }) {
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} isAdmin={perms.isAdmin} />}
       {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
       {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
-      {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : undefined} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} setBranding={setBranding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} onLinkLead={handleLinkLead} openLeadId={openLeadId} onLeadOpened={() => setOpenLeadId(null)} vp={vp} />}
+      {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : commsSection || undefined} initialSectionNonce={commsSectionNonce} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} setBranding={setBranding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} onLinkLead={handleLinkLead} openLeadId={openLeadId} onLeadOpened={() => setOpenLeadId(null)} vp={vp} />}
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
       {page === "duplicates" && perms.canImport && <DuplicatesScreen clients={clients} invoices={invoices} schedule={schedule} onMerge={handleMergeClients} onGoToClients={() => handleNav("clients")} />}
@@ -31790,9 +32011,11 @@ export default function App({ authEmail = "", onSignOut }) {
               <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
                 <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: "-0.02em", lineHeight: 1.15, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.companyName}</div>
                 {email?.testMode?.on && (
-                  <span onClick={() => handleNav("settings", { settingsTab: "business" })} role="button"
-                    title="Test mode is on — tap to manage it in Customize → Business"
-                    style={{ fontSize: 8.5, fontWeight: 800, letterSpacing: "0.06em", color: "#B45309", background: hexA("#F59E0B", 0.16), padding: "1.5px 6px", borderRadius: 100, textTransform: "uppercase", whiteSpace: "nowrap", cursor: "pointer" }}>Test</span>
+                  (canSeeComms(perms) && (perms.isAdmin || perms.commsSettings || perms.editNotifications))
+                    ? <button type="button" onClick={() => handleNav("comms", { commsSection: "settings" })}
+                        aria-label="Test mode is on. Open Comms settings." title="Test mode is on — tap to manage it in Comms → Settings"
+                        style={{ minWidth: 48, minHeight: 40, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 9.5, fontWeight: 800, letterSpacing: "0.06em", color: "#B45309", background: hexA("#F59E0B", 0.16), padding: "0 8px", border: "none", borderRadius: 100, textTransform: "uppercase", whiteSpace: "nowrap", cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Test</button>
+                    : <span title="Test mode is on" style={{ fontSize: 8.5, fontWeight: 800, letterSpacing: "0.06em", color: "#B45309", background: hexA("#F59E0B", 0.16), padding: "2px 6px", borderRadius: 100, textTransform: "uppercase", whiteSpace: "nowrap" }}>Test</span>
                 )}
               </div>
               <div style={{ fontSize: 10.5, color: T.textMuted, letterSpacing: "0.01em", lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.division}</div>

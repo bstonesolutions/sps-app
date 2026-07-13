@@ -18,7 +18,8 @@
 //
 // Env (Vercel): SUPABASE_SERVICE_ROLE_KEY, QUO_API_KEY, QUO_PHONE_NUMBER, CRON_SECRET. Optional SUPABASE_URL.
 
-import { requireUser } from "./_auth.js";
+import { requireOwner } from "./_staff-auth.js";
+import { mutateAppState, NO_APP_STATE_CHANGE, readAppStateVersioned } from "./_app-state.js";
 import { pushOwner } from "./_push.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
@@ -38,22 +39,18 @@ const SERVICE_WORD = { Pond: "pond", Pool: "pool", Seasonal: "seasonal service" 
 
 // ── Supabase (service-role REST) ────────────────────────────────────────────────────────────────
 const sbHeaders = () => ({ apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" });
-const parseVal = (v) => { try { return typeof v === "string" ? JSON.parse(v) : v; } catch { return null; } };
 async function sbGet(key, fallback) {
   try {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/app_state?key=eq.${encodeURIComponent(key)}&select=value`, { headers: sbHeaders() });
-    if (!r.ok) return fallback;
-    const rows = await r.json().catch(() => []);
-    const v = rows && rows[0] ? parseVal(rows[0].value) : null;
-    return v == null ? fallback : v;
+    const row = await readAppStateVersioned(key);
+    return row.exists && row.value != null ? row.value : fallback;
   } catch { return fallback; }
 }
-async function sbSet(key, obj) {
-  await fetch(`${SUPABASE_URL}/rest/v1/app_state?on_conflict=key`, {
-    method: "POST",
-    headers: { ...sbHeaders(), Prefer: "resolution=merge-duplicates" },
-    body: JSON.stringify([{ key, value: JSON.stringify(obj) }]),
-  });
+async function sbGetRequiredObject(key) {
+  const row = await readAppStateVersioned(key);
+  if (!row.exists || !row.value || typeof row.value !== "object" || Array.isArray(row.value)) {
+    throw new Error(`${key} is missing or malformed`);
+  }
+  return row.value;
 }
 async function logComm(clientId, type, body, ok, origin = "", recipient = "") {
   if (clientId == null) return;
@@ -111,8 +108,8 @@ function invBalance(inv) {
 }
 
 // ── Quo send ──────────────────────────────────────────────────────────────────────────────────
-async function sendQuo(to, from, message) {
-  const toNum = toE164(to), fromNum = toE164(from) || toE164(QUO_FROM);
+async function sendQuo(to, message) {
+  const toNum = toE164(to), fromNum = toE164(QUO_FROM);
   if (!toNum) return { ok: false, error: "bad recipient number" };
   if (!fromNum) return { ok: false, error: "no business number" };
   try {
@@ -228,20 +225,35 @@ export default async function handler(req, res) {
   // Real (sending) runs require the Vercel cron secret — the app can never fire one. Dry runs (no
   // sends) just need a signed-in owner. If no CRON_SECRET is set yet, only dry runs are allowed.
   if (!dryRun && !cronOk) return res.status(401).json({ error: "unauthorized", hint: "real runs require CRON_SECRET; use ?dryRun=1 to preview" });
-  if (dryRun) { const u = await requireUser(req, res); if (!u) return; }
+  if (dryRun) { const u = await requireOwner(req, res, "previewing all automations"); if (!u) return; }
   if (!SERVICE_KEY) return res.status(501).json({ error: "server missing SUPABASE_SERVICE_ROLE_KEY", missingEnv: true });
 
   const now = Date.now();
-  const [cfg, email, clients, schedule, invoices, branding, reminderLog, autoLog] = await Promise.all([
-    sbGet("sps_schedule_cfg", {}), sbGet("sps_email", {}), sbGet("sps_clients", []), sbGet("sps_schedule", []),
-    sbGet("sps_invoices", []), sbGet("sps_branding", {}), sbGet("sps_reminders", {}), sbGet("sps_auto_log", {}),
-  ]);
+  let state;
+  try {
+    state = await Promise.all([
+      sbGet("sps_schedule_cfg", {}), sbGetRequiredObject("sps_email"), sbGet("sps_clients", []), sbGet("sps_schedule", []),
+      sbGet("sps_invoices", []), sbGet("sps_branding", {}), sbGet("sps_reminders", {}), sbGet("sps_auto_log", {}),
+    ]);
+  } catch (error) {
+    console.error("automation text safety lookup failed:", error && error.message ? error.message : error);
+    return res.status(503).json({ ok: false, error: "Text safety settings are temporarily unavailable. No automated messages were sent." });
+  }
+  const [cfg, email, clients, schedule, invoices, branding, reminderLog, autoLog] = state;
+  if (!email.testMode || typeof email.testMode !== "object" || Array.isArray(email.testMode)) {
+    return res.status(503).json({ ok: false, error: "Text safety settings are temporarily unavailable. No automated messages were sent." });
+  }
+  const savedTestModeOn = email.testMode.on;
+  const savedTestModeOnText = typeof savedTestModeOn === "string" ? savedTestModeOn.trim().toLowerCase() : "";
+  if (savedTestModeOn !== true && savedTestModeOn !== false && savedTestModeOnText !== "true" && savedTestModeOnText !== "false") {
+    return res.status(503).json({ ok: false, error: "Text safety settings are temporarily unavailable. No automated messages were sent." });
+  }
 
   if (!cfg.schedulerOn) return res.status(200).json({ ok: true, ran: new Date(now).toISOString(), master: false, note: "Automatic sending is off (master switch). Nothing sent." });
 
   cfg._company = (branding && branding.companyName) || "Stone Property Solutions";
   const clientsById = {}; (clients || []).forEach(c => { if (c && c.id != null) clientsById[String(c.id)] = c; });
-  const testMode = (email && email.testMode) || { on: false };
+  const testMode = { ...email.testMode, on: savedTestModeOn === true || savedTestModeOnText === "true" };
   // Pilot launch: clients on the live list get REAL automated texts while Test Mode
   // holds/redirects everyone else. Stored as strings; compared as strings, always.
   const liveSet = new Set(((testMode.liveClientIds || [])).map(String));
@@ -282,7 +294,7 @@ export default async function handler(req, res) {
 
   // 5) REAL RUN — send, then record dedup + cooldown + log
   let sent = 0; const errors = [];
-  const remNext = { ...reminderLog }, autoNext = { ...autoLog };
+  const reminderOps = [], autoOps = [];
   let sentReal = 0; // sends that actually reached a real client number (live pilots, or Test Mode off)
   for (const m of toSend) {
     let dest = m.to, body = m.message, held = false;
@@ -294,16 +306,20 @@ export default async function handler(req, res) {
     }
     let ok = true;
     if (!held) {
-      const r = await sendQuo(dest, (email && email.textingNumber) || "", body);
+      const r = await sendQuo(dest, body);
       ok = r.ok; if (!ok) errors.push({ who: m.who, error: r.error });
     }
     if (ok) {
       sent++;
       if (!held && (!testMode.on || live)) sentReal++;
       const stamp = new Date(now).toISOString();
-      if (m.dedup.ledger === "rem") remNext[m.dedup.key] = { sentAt: stamp, method: "auto" };
-      else if (m.dedup.key) { if (m.dedup.bump) autoNext[m.dedup.key] = { count: (m.dedup.bump.count || 0) + 1, lastSentAt: stamp }; else autoNext[m.dedup.key] = m.dedup.set || { sentAt: stamp }; }
-      autoNext[`cool_${m.type}_${m.clientId}`] = stamp;
+      if (m.dedup.ledger === "rem") reminderOps.push({ key: m.dedup.key, value: { sentAt: stamp, method: "auto" } });
+      else if (m.dedup.key) {
+        autoOps.push(m.dedup.bump
+          ? { key: m.dedup.key, kind: "increment", stamp }
+          : { key: m.dedup.key, kind: "set", value: m.dedup.set || { sentAt: stamp } });
+      }
+      autoOps.push({ key: `cool_${m.type}_${m.clientId}`, kind: "set", value: stamp });
       // Honest accounting: a HELD send never happened — say so, and never stamp the real
       // client number as a delivered-to recipient. Pilot-live sends are labeled as such.
       await logComm(m.clientId, m.type, m.message, true,
@@ -311,7 +327,39 @@ export default async function handler(req, res) {
         held ? "" : dest);
     }
   }
-  if (sent > 0 || errors.length) { await sbSet("sps_reminders", remNext); await sbSet("sps_auto_log", autoNext); }
+  if (reminderOps.length || autoOps.length) {
+    try {
+      await Promise.all([
+        reminderOps.length ? mutateAppState("sps_reminders", (current) => {
+          const next = current && typeof current === "object" && !Array.isArray(current) ? { ...current } : {};
+          let changed = false;
+          for (const op of reminderOps) {
+            if (JSON.stringify(next[op.key]) === JSON.stringify(op.value)) continue;
+            next[op.key] = op.value; changed = true;
+          }
+          return changed ? next : NO_APP_STATE_CHANGE;
+        }) : Promise.resolve(),
+        autoOps.length ? mutateAppState("sps_auto_log", (current) => {
+          const next = current && typeof current === "object" && !Array.isArray(current) ? { ...current } : {};
+          let changed = false;
+          for (const op of autoOps) {
+            if (op.kind === "increment") {
+              const prior = next[op.key] && typeof next[op.key] === "object" ? next[op.key] : {};
+              if (prior.lastSentAt === op.stamp) continue;
+              next[op.key] = { count: (Number(prior.count) || 0) + 1, lastSentAt: op.stamp };
+              changed = true;
+            } else if (JSON.stringify(next[op.key]) !== JSON.stringify(op.value)) {
+              next[op.key] = op.value; changed = true;
+            }
+          }
+          return changed ? next : NO_APP_STATE_CHANGE;
+        }) : Promise.resolve(),
+      ]);
+    } catch (error) {
+      console.error("automation ledger mutation failed:", error && error.message ? error.message : error);
+      return res.status(502).json({ ok: false, error: "Messages were processed, but the deduplication ledger could not be saved. Retry after database connectivity is restored.", sent });
+    }
+  }
 
   // ONE summary push per run (a full run can send up to RATE_CAP texts — never push per text).
   // Fires when anything ACTUALLY went out (real client sends — incl. pilot-live in a hold-mode

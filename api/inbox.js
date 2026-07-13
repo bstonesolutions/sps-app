@@ -113,6 +113,11 @@ export default async function handler(req, res) {
       const ok = await patch(`id=eq.${encodeURIComponent(String(b.id))}`, { lead_id: String(b.leadId) });
       return res.status(ok ? 200 : 502).json({ ok });
     }
+    if (b.action === "markReplied") {
+      if (!b.id) return res.status(400).json({ error: "Need id." });
+      const ok = await patch(`id=eq.${encodeURIComponent(String(b.id))}`, { replied: true });
+      return res.status(ok ? 200 : 502).json({ ok });
+    }
     if (b.action === "setKind") {
       // Accepts a single id or a batch of ids (bulk reclassify from the inbox select mode).
       const ids = (Array.isArray(b.ids) ? b.ids : (b.id ? [b.id] : [])).map(String).filter(Boolean).slice(0, 200);

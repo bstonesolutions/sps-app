@@ -72,7 +72,17 @@ function activeMemberForEmail(team, email) {
 
 function tabMode(member, tab) {
   const access = member && member.tabAccess;
-  return access && typeof access === "object" ? String(access[tab] || "hidden") : null;
+  if (!access || typeof access !== "object") return null;
+  if (access[tab]) return String(access[tab]);
+  // App.jsx folded the old Messages and Reminders tabs into Comms. Mirror that migration here so
+  // a still-valid legacy roster does not silently lose server permission to send business texts.
+  if (tab === "comms" && (access.messages || access.reminders)) {
+    const rank = { hidden: 0, view: 1, edit: 2 };
+    return [access.messages, access.reminders]
+      .filter(Boolean)
+      .reduce((best, mode) => ((rank[mode] || 0) > (rank[best] || 0) ? mode : best), "hidden");
+  }
+  return "hidden";
 }
 
 function legacyFlag(member, ...names) {
@@ -165,6 +175,14 @@ export async function requireStaff(req, res, feature = "this action") {
     console.error("[staff-auth] authorization unavailable:", error && error.message ? error.message : error);
     return authorizationUnavailable(res);
   }
+}
+
+export async function requireOwner(req, res, feature = "this action") {
+  const staff = await requireStaff(req, res, feature);
+  if (!staff) return null;
+  if (staff.teamRole === "owner") return staff;
+  res.status(403).json({ error: `Owner access is required for ${feature}.` });
+  return null;
 }
 
 export async function requireCapability(req, res, capability, feature = "this action") {

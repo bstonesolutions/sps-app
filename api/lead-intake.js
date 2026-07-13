@@ -74,9 +74,8 @@ export default async function handler(req, res) {
   const text = `🔔 New website lead: ${name}${bits ? ` — ${bits}` : ""}${msg ? `. “${msg}”` : ""}. It's waiting in Comms → Leads.\nOpen in app: spsway://leads\nBrowser: https://spsway.app/?open=leads`;
 
   const out = {};
-  // Same "from" resolution as the app's texts (api/send-sms): the configured Sending Identity
-  // texting number first, then the server default — so this alert comes from the same line.
-  const toNum = toE164(toPhone), fromNum = toE164(email.textingNumber) || toE164(QUO_FROM);
+  // The Vercel business number is the only allowed Quo sender, matching every client text route.
+  const toNum = toE164(toPhone), fromNum = toE164(QUO_FROM);
   if (!toNum) out.sms = { ok: false, skipped: "no owner cell set — add yours in Comms → Settings" };
   else if (toNum === fromNum) out.sms = { ok: false, skipped: "owner cell matches the business line" };
   else if (QUO_KEY && fromNum) {

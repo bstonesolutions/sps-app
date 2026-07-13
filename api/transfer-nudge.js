@@ -74,10 +74,9 @@ async function logNudge(out, origin) {
   } catch { /* best-effort */ }
 }
 
-async function sendQuo(to, message, fromOverride) {
-  // Same "from" resolution as the app's texts (api/send-sms): the configured Sending Identity
-  // texting number when set, else the server default.
-  const toNum = toE164(to), fromNum = toE164(fromOverride) || toE164(QUO_FROM);
+async function sendQuo(to, message) {
+  // The Vercel business number is the only allowed Quo sender, matching every client text route.
+  const toNum = toE164(to), fromNum = toE164(QUO_FROM);
   if (!QUO_KEY || !fromNum) return { ok: false, error: "texting not configured (QUO_API_KEY / QUO_PHONE_NUMBER)" };
   if (!toNum) return { ok: false, error: "no number found — set your Owner Alerts phone (Customize → Communications) or type one on the nudge card" };
   if (toNum === fromNum) return { ok: false, error: "owner phone matches the business texting number — set your personal number" };
@@ -313,7 +312,7 @@ export default async function handler(req, res) {
     if (preview) return res.status(200).json({ ok: true, plan, message });
     const channel = cfg.channel || "email";
     const out = {};
-    if (channel === "sms" || channel === "both") out.sms = await sendQuo(toPhone, message, email.textingNumber);
+    if (channel === "sms" || channel === "both") out.sms = await sendQuo(toPhone, message);
     if (channel === "email" || channel === "both") out.email = await sendEmail(toEmail, `${branding.companyName || "SPS"} — money plan`, message, branding);
     const sent = Object.values(out).some((r) => r && r.ok);
     await logNudge(out, "money plan (test button)");
@@ -343,7 +342,7 @@ export default async function handler(req, res) {
   const message = planMessage(plan, branding);
   const channel = cfg.channel || "email";
   const out = {};
-  if (channel === "sms" || channel === "both") out.sms = await sendQuo(toPhone, message, email.textingNumber);
+  if (channel === "sms" || channel === "both") out.sms = await sendQuo(toPhone, message);
   if (channel === "email" || channel === "both") out.email = await sendEmail(toEmail, `${branding.companyName || "SPS"} — money plan`, message, branding);
   const sent = Object.values(out).some((r) => r && r.ok);
   if (sent) {
