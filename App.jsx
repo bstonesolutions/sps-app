@@ -22202,6 +22202,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const [rows, setRows] = useState(null);
   const [err, setErr] = useState("");
   const [q, setQ] = useState("");              // inbox search
+  const [channelFilter, setChannelFilter] = useState("all"); // all | sms | email
   const [filter, setFilter] = useState("all"); // all | unread | lead | bill | client | other
   const [openRow, setOpenRow] = useState(null);
   const [copied, setCopied] = useState(false);
@@ -22311,11 +22312,17 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   // Membership is checked against the ACTUAL leads list, not the imported stamp — if a lead
   // ever vanishes (multi-device array overwrite), "Add to Leads" reappears for a one-tap re-add.
   const inLeads = (emailId) => (leads || []).some(l => l && l.srcId === `em_${emailId}`);
+  const isSmsRow = (row) => row && row.channel === "sms";
+  const inboxRows = rows || [];
+  const textCount = inboxRows.filter(isSmsRow).length;
+  const emailCount = inboxRows.length - textCount;
+  const channelRows = inboxRows.filter(r => channelFilter === "all" ? true : channelFilter === "sms" ? isSmsRow(r) : !isSmsRow(r));
   const qq = q.trim().toLowerCase();
-  const list = (rows || [])
+  const list = channelRows
     .filter(r => filter === "all" ? true : filter === "unread" ? !r.read : r.kind === filter)
-    .filter(r => !qq || [r.from_name, r.from_email, r.subject, r.body_text, r.ai && r.ai.summary].some(v => String(v || "").toLowerCase().includes(qq)));
-  const unread = (rows || []).filter(r => !r.read).length;
+    .filter(r => !qq || [r.from_name, r.from_email, r.from_phone, r.subject, r.body_text, r.ai && r.ai.summary].some(v => String(v || "").toLowerCase().includes(qq)));
+  const unread = inboxRows.filter(r => !r.read).length;
+  const channelUnread = channelRows.filter(r => !r.read).length;
   const markRead = (ids, read = true) => {
     // Instant optimistic flip; both server writes (app copy + Gmail mirror) fire in the background,
     // in parallel, and are never awaited — the UI never waits on the network or IMAP.
@@ -22392,10 +22399,17 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   };
   const deleteEmails = (rawIds, { ask = true } = {}) => {
     const ids = (rawIds || []).filter(Boolean); if (!ids.length) return;
-    if (ask && !confirm(`Delete ${ids.length} email${ids.length === 1 ? "" : "s"}? Matched messages move to your Gmail Trash (recoverable there for ~30 days).`)) return;
     // Capture the rows so we can put back any the server could NOT actually remove from Gmail —
     // deleting the app copy while the message lingers in Gmail is the exact bug we're fixing.
     const removed = (rows || []).filter(r => ids.includes(r.id));
+    const textTotal = removed.filter(r => r.channel === "sms").length;
+    const emailTotal = removed.length - textTotal;
+    const deletePrompt = textTotal && !emailTotal
+      ? `Delete ${textTotal} text${textTotal === 1 ? "" : "s"} from the SPS inbox? ${textTotal === 1 ? "It remains" : "They remain"} available in Quo.`
+      : emailTotal && !textTotal
+        ? `Delete ${emailTotal} email${emailTotal === 1 ? "" : "s"}? ${emailTotal === 1 ? "It moves" : "They move"} to Gmail Trash (recoverable there for ~30 days).`
+        : `Delete ${ids.length} messages? Emails move to Gmail Trash; texts are removed from the SPS inbox but remain in Quo.`;
+    if (ask && !confirm(deletePrompt)) return;
     const smsIds = new Set(removed.filter(r => r.channel === "sms").map(r => r.id)); // no Gmail copy → app-only delete
     // INSTANT: pull them from the list now (optimistic). We reconcile against the REAL Gmail result
     // below and restore anything that couldn't be trashed, so nothing is silently stranded.
@@ -22526,6 +22540,25 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const fmtWhen = (iso) => {
     try { const d = new Date(iso); return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " · " + d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }); } catch (_) { return ""; }
   };
+  const channelTab = (id, label, count, icon) => {
+    const on = channelFilter === id;
+    const tone = id === "sms" ? "#7c3aed" : id === "email" ? "#2563eb" : T.primary;
+    return (
+      <button key={id} type="button" onClick={() => setChannelFilter(id)} aria-pressed={on}
+        style={{ minWidth: 0, minHeight: 42, padding: "8px 9px", borderRadius: 10, border: "none", background: on ? T.surface : "transparent", color: on ? tone : T.textMuted, boxShadow: on ? "0 1px 3px rgba(0,0,0,0.1)" : "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 12.5, fontWeight: on ? 800 : 700, fontFamily: "inherit", cursor: "pointer", whiteSpace: "nowrap" }}>
+        <Icon name={icon} size={14} />
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
+        <span style={{ minWidth: 20, padding: "1px 6px", borderRadius: 100, background: on ? hexA(tone, 0.12) : hexA(T.textMuted, 0.1), color: on ? tone : T.textMuted, fontSize: 10, fontWeight: 850, lineHeight: 1.5 }}>{count}</span>
+      </button>
+    );
+  };
+  const channelSwitcher = (
+    <div aria-label="Inbox channel" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 4, padding: 4, borderRadius: 14, background: T.surfaceAlt, border: `1px solid ${T.border}` }}>
+      {channelTab("all", "All", inboxRows.length, "inbox")}
+      {channelTab("sms", "Texts", textCount, "message")}
+      {channelTab("email", "Email", emailCount, "mail")}
+    </div>
+  );
   const chip = (id, label) => (
     <button key={id} onClick={() => setFilter(id)} style={{ padding: "7px 14px", borderRadius: 100, border: `1.5px solid ${filter === id ? T.primary : T.border}`, background: filter === id ? hexA(T.primary, 0.08) : T.surface, color: filter === id ? T.primary : T.textMuted, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, whiteSpace: "nowrap" }}>{label}</button>
   );
@@ -22541,15 +22574,37 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     const k = KIND[kind] || KIND.other;
     return <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", textTransform: "uppercase", color: k.color || T.textMuted, background: k.color ? hexA(k.color, 0.1) : T.surfaceAlt, padding: "2px 8px", borderRadius: 100, flexShrink: 0 }}>{k.label}</span>;
   };
+  const channelBadge = (row) => {
+    const sms = isSmsRow(row);
+    const tone = sms ? "#7c3aed" : "#2563eb";
+    return <span title={sms ? "Text message" : "Email message"} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 9.5, fontWeight: 850, letterSpacing: "0.045em", textTransform: "uppercase", color: tone, background: hexA(tone, 0.1), padding: "2px 8px", borderRadius: 100, flexShrink: 0 }}><Icon name={sms ? "message" : "mail"} size={11} />{sms ? "Text" : "Email"}</span>;
+  };
+  const senderLabel = (row) => isSmsRow(row)
+    ? (row.from_name || row.from_phone || "Unknown number")
+    : (row.from_name || row.from_email || "Unknown sender");
+  const senderDetail = (row) => isSmsRow(row) ? (row.from_phone || row.from_name || "") : (row.from_email || "");
   // Gmail-style colored sender avatar — deterministic hue from the address so the same sender
   // always gets the same color.
   const AV = ["#B81D24", "#0E9488", "#2563eb", "#b45309", "#7c3aed", "#c2410c", "#0891b2", "#be185d"];
   const avatarColor = (seed) => { let h = 0; const s = String(seed || "?"); for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return AV[h % AV.length]; };
-  const Avatar = ({ name, email, size = 40 }) => {
+  const Avatar = ({ name, email, channel, size = 40 }) => {
+    if (channel === "sms") {
+      const tone = "#7c3aed";
+      return <div title="Text message" style={{ width: size, height: size, borderRadius: "50%", background: hexA(tone, 0.14), color: tone, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="message" size={Math.max(17, Math.round(size * 0.46))} /></div>;
+    }
     const c = avatarColor(email || name);
     return <div style={{ width: size, height: size, borderRadius: "50%", background: hexA(c, 0.15), color: c, display: "flex", alignItems: "center", justifyContent: "center", fontSize: size * 0.42, fontWeight: 800, flexShrink: 0 }}>{((name || email || "?").trim()[0] || "?").toUpperCase()}</div>;
   };
   const setupPending = err && /hasn't been created|sps_inbox/i.test(err);
+  const hasInboxFilter = !!q.trim() || channelFilter !== "all" || filter !== "all";
+  const emptyInboxTitle = channelFilter === "sms"
+    ? (hasInboxFilter ? "No matching texts" : "No texts here yet")
+    : channelFilter === "email"
+      ? (hasInboxFilter ? "No matching email" : "No email here yet")
+      : (hasInboxFilter ? "No matching messages" : "Your inbox is empty");
+  const emptyInboxCopy = hasInboxFilter
+    ? "Try a different channel, category, or search."
+    : "Incoming texts and work email will appear here with clear channel labels.";
   // Airier list rows — reused by the desktop list column and the mobile list.
   const listRows = list.map((r, i) => {
     const active = openRow && openRow.id === r.id && wide;
@@ -22558,18 +22613,18 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
         style={{ display: "flex", alignItems: "flex-start", gap: 13, padding: "15px 16px", cursor: "pointer", borderTop: i === 0 ? "none" : `1px solid ${hexA(T.border, 0.5)}`, background: (sel[r.id] || active) ? hexA(T.primary, 0.08) : (r.read ? "transparent" : hexA(T.primary, 0.03)), position: "relative" }}>
         {!r.read && <span style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: T.primary }} />}
         {selMode && <div style={{ alignSelf: "center", flexShrink: 0 }}><Checkbox checked={!!sel[r.id]} onChange={() => toggleSel(r.id)} /></div>}
-        <Avatar name={r.from_name} email={r.from_email} size={42} />
+        <Avatar name={r.from_name} email={r.from_email} channel={r.channel} size={42} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 14.5, fontWeight: r.read ? 600 : 820, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{r.from_name || r.from_email}</span>
+            <span style={{ fontSize: 14.5, fontWeight: r.read ? 600 : 820, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{senderLabel(r)}</span>
             <span style={{ fontSize: 11.5, color: r.read ? T.textMuted : T.primary, fontWeight: r.read ? 500 : 700, flexShrink: 0 }}>{fmtWhen(r.created_at)}</span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 4 }}>
-            {r.channel === "sms" && <span title="Text message" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="message" size={13} /></span>}
             <span style={{ fontSize: 13.5, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontWeight: r.read ? 550 : 750, flex: 1, minWidth: 0 }}>{r.subject || "(no subject)"}</span>
           </div>
           <div style={{ fontSize: 12.5, color: T.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginTop: 4 }}>{(r.ai && r.ai.summary) || (r.body_text || "").slice(0, 120)}</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 9 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 9, flexWrap: "wrap" }}>
+            {channelBadge(r)}
             {badge(r.kind)}
             {inLeads(r.id) && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#16a34a", flexShrink: 0 }}>→ Leads</span>}
             {r.replied && <span title="Replied" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="reply" size={12} /></span>}
@@ -22583,21 +22638,21 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   // two-pane keeps its flat divided list.
   const cardRows = list.map((r) => (
     <div key={r.id} onClick={() => { if (selMode) { toggleSel(r.id); return; } setOpenRow(r); setReplying(false); setReplyText(""); setReplyHtml(""); setReplyMsg(""); if (!r.read) markRead([r.id]); }}
-      style={{ position: "relative", display: "flex", gap: 12, padding: "13px 14px", background: sel[r.id] ? hexA(T.primary, 0.06) : T.surface, border: `1px solid ${sel[r.id] ? T.primary : (r.read ? T.border : hexA(T.primary, 0.28))}`, borderRadius: 16, boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 6px 16px rgba(0,0,0,0.05)", cursor: "pointer" }}>
+      style={{ position: "relative", display: "flex", gap: 12, padding: "13px 14px", background: sel[r.id] ? hexA(T.primary, 0.06) : T.surface, border: `1px solid ${sel[r.id] ? T.primary : (!r.read ? hexA(T.primary, 0.28) : isSmsRow(r) ? hexA("#7c3aed", 0.22) : T.border)}`, borderRadius: 16, boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 6px 16px rgba(0,0,0,0.05)", cursor: "pointer" }}>
       {!r.read && <span style={{ position: "absolute", left: -1, top: 14, bottom: 14, width: 3, borderRadius: 3, background: T.primary }} />}
       {selMode && <div style={{ alignSelf: "center", flexShrink: 0 }}><Checkbox checked={!!sel[r.id]} onChange={() => toggleSel(r.id)} /></div>}
-      <Avatar name={r.from_name} email={r.from_email} size={40} />
+      <Avatar name={r.from_name} email={r.from_email} channel={r.channel} size={40} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 14, fontWeight: r.read ? 700 : 820, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{r.from_name || r.from_email}</span>
+          <span style={{ fontSize: 14, fontWeight: r.read ? 700 : 820, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{senderLabel(r)}</span>
           <span style={{ fontSize: 11, color: r.read ? T.textMuted : T.primary, fontWeight: r.read ? 600 : 800, flexShrink: 0 }}>{fmtWhen(r.created_at)}</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
-          {r.channel === "sms" && <span title="Text message" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="message" size={12} /></span>}
           <span style={{ fontSize: 13.5, fontWeight: r.read ? 600 : 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{r.subject || "(no subject)"}</span>
         </div>
         <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3, lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{(r.ai && r.ai.summary) || (r.body_text || "").slice(0, 160)}</div>
-        <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 8, flexWrap: "wrap" }}>
+          {channelBadge(r)}
           {badge(r.kind)}
           {inLeads(r.id) && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#16a34a", flexShrink: 0 }}>→ Leads</span>}
           {r.replied && <span title="Replied" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="reply" size={12} /></span>}
@@ -22609,13 +22664,14 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const readerInner = !openRow ? null : (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
-        <Avatar name={openRow.from_name} email={openRow.from_email} size={44} />
+        <Avatar name={openRow.from_name} email={openRow.from_email} channel={openRow.channel} size={44} />
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 14.5, fontWeight: 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{openRow.from_name || openRow.from_email}</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 14.5, fontWeight: 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: "1 1 140px", minWidth: 0 }}>{senderLabel(openRow)}</span>
+            {channelBadge(openRow)}
             {badge(openRow.kind)}
           </div>
-          <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{openRow.from_email} · {fmtWhen(openRow.created_at)}</div>
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{senderDetail(openRow)} · {fmtWhen(openRow.created_at)}</div>
         </div>
       </div>
       {openRow.ai && openRow.ai.summary && (
@@ -22695,7 +22751,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   });
   const folderBar = (
     <div style={{ display: "flex", gap: 4, background: T.surfaceAlt, borderRadius: 12, padding: 4, alignSelf: "flex-start" }}>
-      {[["inbox", "Inbox", unread], ["sent", "Sent", 0]].map(([id, lbl, badge]) => {
+      {[["inbox", "Inbox", unread], ["sent", "Sent email", 0]].map(([id, lbl, badge]) => {
         const on = folder === id;
         return (
           <button key={id} type="button" onClick={() => setFolder(id)}
@@ -22726,7 +22782,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
         </div>
       )}
       {sentList.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: wide ? 8 : 72 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: wide ? 8 : 142 }}>
           {sentList.map(r => {
             const to = r.recipient || nameForSent(r) || "—";
             const parts = String(r.body || "").split(" — ");
@@ -22775,7 +22831,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
             {list.length > 0 && <button type="button" onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }} title={selMode ? "Done" : "Select"} style={{ width: 38, height: 38, borderRadius: 12, border: "none", background: selMode ? hexA(T.primary, 0.1) : "none", color: selMode ? T.primary : T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}><Icon name="check" size={18} /></button>}
           </>
         ))}
-        {wide && <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }} style={{ display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0 }}><Icon name="edit" size={14} />Compose</Btn>}
+        {wide && <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }} style={{ display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0 }}><Icon name="edit" size={14} />New email</Btn>}
       </div>
       {folder === "inbox" ? (
         <>
@@ -22785,12 +22841,13 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
           <div style={{ display: "flex", gap: 9, alignItems: "center" }}>
             <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "11px 13px", minWidth: 0 }}>
               <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke={T.textMuted} strokeWidth={2} style={{ flexShrink: 0 }}><circle cx="11" cy="11" r="7" /><path d="m21 21-4-4" /></svg>
-              <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search mail, people, tags" style={{ flex: 1, border: "none", background: "none", outline: "none", fontFamily: "inherit", fontSize: 13.5, color: T.text, minWidth: 0 }} />
+              <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search messages, people, tags" style={{ flex: 1, border: "none", background: "none", outline: "none", fontFamily: "inherit", fontSize: 13.5, color: T.text, minWidth: 0 }} />
               {q && <button onClick={() => setQ("")} title="Clear" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", display: "inline-flex", padding: 0, flexShrink: 0 }}><Icon name="close" size={15} /></button>}
             </div>
           </div>
+          {channelSwitcher}
           <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none" }}>
-            {chip("all", "All")}{chip("unread", `Unread${unread ? ` · ${unread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
+            {chip("all", "Any category")}{chip("unread", `Unread${channelUnread ? ` · ${channelUnread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
           </div>
         </>
       ) : (
@@ -22798,11 +22855,12 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
           {/* Mobile — airy: one search, pill filters; card list + floating Compose FAB below */}
           <div style={{ display: "flex", alignItems: "center", gap: 9, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: "13px 15px", boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 6px 18px rgba(0,0,0,0.05)", minWidth: 0 }}>
             <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={T.textMuted} strokeWidth={2} style={{ flexShrink: 0 }}><circle cx="11" cy="11" r="7" /><path d="m21 21-4-4" /></svg>
-            <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search mail, people, tags" style={{ flex: 1, border: "none", background: "none", outline: "none", fontFamily: "inherit", fontSize: 14, color: T.text, minWidth: 0 }} />
+            <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search messages, people, tags" style={{ flex: 1, border: "none", background: "none", outline: "none", fontFamily: "inherit", fontSize: 14, color: T.text, minWidth: 0 }} />
             {q && <button onClick={() => setQ("")} title="Clear" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", display: "inline-flex", padding: 0, flexShrink: 0 }}><Icon name="close" size={16} /></button>}
           </div>
+          {channelSwitcher}
           <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none" }}>
-            {chip("all", "All")}{chip("unread", `Unread${unread ? ` · ${unread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
+            {chip("all", "Any category")}{chip("unread", `Unread${channelUnread ? ` · ${channelUnread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
           </div>
         </>
       )}
@@ -22854,8 +22912,8 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       {err && !setupPending && <div style={{ fontSize: 13, color: T.warning, textAlign: "center", padding: 20 }}>{err}</div>}
       {rows !== null && !err && list.length === 0 && (
         <div style={{ textAlign: "center", padding: "44px 24px", color: T.textMuted }}>
-          <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginBottom: 6 }}>No email here yet</div>
-          <div style={{ fontSize: 13, lineHeight: 1.55, maxWidth: 380, margin: "0 auto" }}>Mail forwarded from your work address lands here — AI tags each one as a Lead, Bill, or client message, and leads drop straight into Comms → Leads.</div>
+          <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginBottom: 6 }}>{emptyInboxTitle}</div>
+          <div style={{ fontSize: 13, lineHeight: 1.55, maxWidth: 380, margin: "0 auto" }}>{emptyInboxCopy}</div>
         </div>
       )}
       {wide ? (
@@ -22865,6 +22923,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
             {openRow ? (
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "13px 18px", borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
+                  {channelBadge(openRow)}
                   <span style={{ fontSize: 15, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{openRow.subject || "(no subject)"}</span>
                   <button onClick={() => setOpenRow(null)} title="Close" style={{ width: 32, height: 32, borderRadius: 9, border: "none", background: "none", color: T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}><Icon name="close" size={16} /></button>
                 </div>
@@ -22872,13 +22931,13 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
               </>
             ) : (
               <div style={{ flex: 1, display: "grid", placeItems: "center", padding: 40, textAlign: "center", color: T.textMuted }}>
-                <div><span style={{ display: "inline-flex", color: T.border }}><Icon name="mail" size={40} /></span><div style={{ fontSize: 14.5, fontWeight: 750, marginTop: 12, color: T.text }}>Select an email to read</div><div style={{ fontSize: 12.5, marginTop: 4 }}>Choose a message from the list.</div></div>
+                <div><span style={{ display: "inline-flex", color: T.border }}><Icon name="inbox" size={40} /></span><div style={{ fontSize: 14.5, fontWeight: 750, marginTop: 12, color: T.text }}>Select a message to read</div><div style={{ fontSize: 12.5, marginTop: 4 }}>Choose a text or email from the list.</div></div>
               </div>
             )}
           </div>
         </div>
       ) : (
-        list.length > 0 && <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: 72 }}>{cardRows}</div>
+        list.length > 0 && <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: 142 }}>{cardRows}</div>
       )}
         </>
       ) : sentView}
@@ -22886,21 +22945,22 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       {!wide && !setupPending && rows !== null && (
         <button type="button" onClick={() => { setComposeMsg(""); setComposeOpen(true); }}
           style={{ position: "fixed", right: "max(18px, env(safe-area-inset-right))", bottom: vp.isDesktop ? "calc(env(safe-area-inset-bottom) + 24px)" : "calc(env(safe-area-inset-bottom) + 82px)", zIndex: 90, display: "inline-flex", alignItems: "center", gap: 8, background: T.primary, color: "#fff", border: "none", borderRadius: 100, padding: "14px 20px", fontFamily: "inherit", fontSize: 14, fontWeight: 780, cursor: "pointer", boxShadow: `0 8px 24px ${hexA(T.primary, 0.4)}` }}>
-          <Icon name="edit" size={17} />Compose
+          <Icon name="edit" size={17} />New email
         </button>
       )}
       {openRow && !wide && (
-        <Modal title={openRow.subject || "(no subject)"} onClose={() => setOpenRow(null)} maxWidth={640}>
+        <Modal title={isSmsRow(openRow) ? `Text · ${openRow.subject || "Message"}` : `Email · ${openRow.subject || "(no subject)"}`} onClose={() => setOpenRow(null)} maxWidth={640}>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {/* Sender header — avatar + identity, Gmail-grade */}
+            {/* Sender header — channel-aware identity for both email and text. */}
             <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
-              <Avatar name={openRow.from_name} email={openRow.from_email} size={44} />
+              <Avatar name={openRow.from_name} email={openRow.from_email} channel={openRow.channel} size={44} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ fontSize: 14.5, fontWeight: 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{openRow.from_name || openRow.from_email}</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 14.5, fontWeight: 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: "1 1 140px", minWidth: 0 }}>{senderLabel(openRow)}</span>
+                  {channelBadge(openRow)}
                   {badge(openRow.kind)}
                 </div>
-                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{openRow.from_email} · {fmtWhen(openRow.created_at)}</div>
+                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{senderDetail(openRow)} · {fmtWhen(openRow.created_at)}</div>
               </div>
             </div>
             {openRow.ai && openRow.ai.summary && (
