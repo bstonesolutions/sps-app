@@ -2179,6 +2179,7 @@ function applyFinePerms(out, member) {
 // The Comms hub is visible when the viewer can see at least one of its sections (owner sees all).
 const COMMS_SECTION_FLAGS = ["commsMessages", "commsInbox", "commsReminders", "commsBroadcast", "commsSettings", "commsLog"];
 const canSeeComms = (perms) => !!perms && (perms.isAdmin || perms.editNotifications || COMMS_SECTION_FLAGS.some(f => perms[f]));
+const badgeLabel = (count) => Number(count) > 99 ? "99+" : Number(count) || 0;
 
 // Is a nav tab visible to this permission set?
 function isTabVisible(n, perms) {
@@ -4234,40 +4235,62 @@ function ClockInOut({ me, T }) {
 // Home → Comms widget: at-a-glance unread chats / new leads / unread email + the most recent items,
 // each tappable into Comms. Self-contained fetch (messages via supabase, email via owner-gated
 // api/inbox best-effort); leads come from the app's live array.
-function HomeCommsWidget({ leads = [], clients = [], onNav, T }) {
+function HomeCommsWidget({ leads = [], clients = [], onNav, T, perms = {} }) {
+  const canChat = !!(perms.isAdmin || perms.commsMessages);
+  const canLeads = !!(perms.isAdmin || perms.commsInbox);
+  const canExternalInbox = !!perms.isAdmin;
   const [msgs, setMsgs] = useState(null);
   const [emails, setEmails] = useState(null);
   useEffect(() => {
     let alive = true;
-    (async () => { try { const { data } = await supabase.from("sps_messages").select("client_id, body, sender, created_at, read_at").order("created_at", { ascending: false }).limit(60); if (alive) setMsgs(data || []); } catch (_) { if (alive) setMsgs([]); } })();
-    (async () => { try { const r = await fetch(`${PROD_URL}/api/inbox?limit=25`, { headers: await authHeaders() }); const d = await r.json().catch(() => ({})); if (alive) setEmails(r.ok ? (d.rows || []) : []); } catch (_) { if (alive) setEmails([]); } })();
+    if (canChat) (async () => { try { const { data, error } = await supabase.from("sps_messages").select("client_id, body, sender, created_at, read_at").order("created_at", { ascending: false }).limit(60); if (alive) setMsgs(error ? [] : (data || [])); } catch (_) { if (alive) setMsgs([]); } })();
+    else setMsgs([]);
+    if (canExternalInbox) (async () => { try { const r = await fetch(`${PROD_URL}/api/inbox?limit=100`, { headers: await authHeaders() }); const d = await r.json().catch(() => ({})); if (alive) setEmails(r.ok ? (d.rows || []) : []); } catch (_) { if (alive) setEmails([]); } })();
+    else setEmails([]);
     return () => { alive = false; };
-  }, []);
+  }, [canChat, canExternalInbox]);
   const nameOf = (cid) => { const c = (clients || []).find(x => String(x.id) === String(cid)); return c ? c.name : "Client"; };
   const threadMap = {};
   (msgs || []).forEach(m => { const cid = String(m.client_id); if (!threadMap[cid]) threadMap[cid] = { cid, lastMsg: String(m.body || "").replace(/\[\[[^\]]+\]\]/g, "").trim() || "Message", at: m.created_at, unread: 0 }; if (m.sender === "client" && !m.read_at) threadMap[cid].unread++; });
   const threads = Object.values(threadMap).sort((a, b) => String(b.at).localeCompare(String(a.at)));
-  const openLeads = (leads || []).filter(l => l && !["won", "lost"].includes(l.status));
+  const openLeads = canLeads ? (leads || []).filter(l => l && !["won", "lost"].includes(l.status)) : [];
   const unreadChats = threads.reduce((s, t) => s + (t.unread > 0 ? 1 : 0), 0);
   const newLeads = openLeads.filter(l => l.status === "new").length;
-  const unreadEmail = (emails || []).filter(e => e && !e.read && e.channel !== "sms").length;
+  const unreadInbox = (emails || []).filter(e => e && !e.read).length;
   const recent = [];
-  threads.filter(t => t.unread > 0).slice(0, 4).forEach(t => recent.push({ kind: "chat", name: nameOf(t.cid), sub: t.lastMsg, at: t.at, seed: nameOf(t.cid), onClick: () => onNav("messages") }));
+  if (canChat) threads.filter(t => t.unread > 0).slice(0, 4).forEach(t => recent.push({ kind: "chat", name: nameOf(t.cid), sub: t.lastMsg, at: t.at, seed: nameOf(t.cid), onClick: () => onNav("messages") }));
   openLeads.slice(0, 4).forEach(l => recent.push({ kind: "lead", name: l.name || l.phone || "New lead", sub: l.message || l.service || "New lead", at: l.createdAt, seed: l.name || l.id, onClick: () => onNav("leads") }));
-  (emails || []).filter(e => e && !e.read).slice(0, 4).forEach(e => recent.push({ kind: e.kind === "bill" ? "bill" : "email", name: e.from_name || e.from_email || "Email", sub: e.subject || "(no subject)", at: e.created_at, seed: e.from_email || e.from_name, onClick: () => onNav("comms") }));
+  (canExternalInbox ? (emails || []) : []).filter(e => e && !e.read).slice(0, 4).forEach(e => {
+    const isText = e.channel === "sms";
+    recent.push({
+      kind: isText ? "sms" : (e.kind === "bill" ? "bill" : "email"),
+      name: e.from_name || (isText ? e.from_phone : e.from_email) || (isText ? "Text message" : "Email"),
+      sub: e.subject || e.body_text || (isText ? "Text message" : "(no subject)"),
+      at: e.created_at,
+      seed: (isText ? e.from_phone : e.from_email) || e.from_name,
+      onClick: () => onNav("comms", { commsSection: "email" }),
+    });
+  });
   recent.sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
   const top = recent.slice(0, 3);
   const AV = ["#B81D24", "#0E9488", "#2563eb", "#b45309", "#7c3aed", "#c2410c", "#0891b2", "#be185d"];
   const col = (s) => { let h = 0; const x = String(s || "?"); for (let i = 0; i < x.length; i++) h = (h * 31 + x.charCodeAt(i)) >>> 0; return AV[h % AV.length]; };
   const fmtT = (iso) => { try { const d = new Date(iso), n = new Date(); return d.toDateString() === n.toDateString() ? d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : d.toLocaleDateString("en-US", { month: "short", day: "numeric" }); } catch (_) { return ""; } };
-  const kindBadge = { lead: ["LEAD", "#16a34a"], bill: ["BILL", "#b45309"], email: ["EMAIL", "#2563eb"] };
-  const loading = msgs === null;
+  const kindBadge = { chat: ["CHAT", T.primary], lead: ["LEAD", "#16a34a"], bill: ["BILL", "#b45309"], email: ["EMAIL", "#2563eb"], sms: ["TEXT", "#7c3aed"] };
+  const tiles = [
+    canChat && ["Unread chats", unreadChats, T.primary, () => onNav("messages")],
+    canLeads && ["New leads", newLeads, "#16a34a", () => onNav("leads")],
+    canExternalInbox && ["Inbox unread", unreadInbox, "#7c3aed", () => onNav("comms", { commsSection: "email" })],
+  ].filter(Boolean);
+  const openComms = () => canChat ? onNav("messages") : canLeads ? onNav("leads") : onNav("comms", { commsSection: "email" });
+  const loading = (canChat && msgs === null) || (canExternalInbox && emails === null);
+  if (!tiles.length) return null;
   return (
     <Card key="comms" style={{ marginBottom: 16 }}>
-      <CardHeader title="Comms" action={<Btn variant="text" sm onClick={() => onNav("comms")}>Open →</Btn>} />
+      <CardHeader title="Comms" action={<Btn variant="text" sm onClick={openComms}>Open →</Btn>} />
       <div style={{ padding: "10px 16px 16px" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 4 }}>
-          {[["Unread chats", unreadChats, T.primary, () => onNav("messages")], ["New leads", newLeads, "#16a34a", () => onNav("leads")], ["Unread email", unreadEmail, "#2563eb", () => onNav("comms")]].map(([lbl, n, c, go]) => (
+        <div style={{ display: "grid", gridTemplateColumns: `repeat(${tiles.length}, minmax(0, 1fr))`, gap: 8, marginBottom: 4 }}>
+          {tiles.map(([lbl, n, c, go]) => (
             <button key={lbl} onClick={go} style={{ background: T.surfaceAlt, border: "none", borderRadius: 13, padding: "11px 8px", textAlign: "center", cursor: "pointer", fontFamily: "inherit" }}>
               <div style={{ fontSize: 20, fontWeight: 840, color: n > 0 ? c : T.textMuted }}>{n}</div>
               <div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginTop: 1 }}>{lbl}</div>
@@ -4280,7 +4303,7 @@ function HomeCommsWidget({ leads = [], clients = [], onNav, T }) {
           const c = col(r.seed); const badge = kindBadge[r.kind];
           return (
             <div key={i} onClick={r.onClick} style={{ display: "flex", alignItems: "center", gap: 11, padding: "10px 0", borderTop: `1px solid ${hexA(T.border, 0.6)}`, cursor: "pointer" }}>
-              <div style={{ width: 36, height: 36, borderRadius: "50%", flexShrink: 0, display: "grid", placeItems: "center", background: hexA(c, 0.15), color: c, fontSize: 14, fontWeight: 800 }}>{(r.name || "?").trim()[0].toUpperCase()}</div>
+              <div style={{ width: 36, height: 36, borderRadius: "50%", flexShrink: 0, display: "grid", placeItems: "center", background: hexA(c, 0.15), color: c, fontSize: 14, fontWeight: 800 }}>{r.kind === "sms" ? <Icon name="message" size={17} /> : (r.name || "?").trim()[0].toUpperCase()}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <span style={{ fontSize: 13.5, fontWeight: 750, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>{r.name}</span>
@@ -4392,7 +4415,7 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
   const available = Object.keys(HOME_WIDGETS).filter(id => !items.some(it => it.id === id));
 
   const widget = (id, compact) => {
-    if (id === "comms") return <HomeCommsWidget key="comms" leads={leads} clients={clients} onNav={onNav} T={T} />;
+    if (id === "comms") return <HomeCommsWidget key="comms" leads={leads} clients={clients} onNav={onNav} T={T} perms={perms} />;
     if (id === "stats") {
       return (
         <div key="stats" style={{ marginBottom: 16 }}>
@@ -13117,13 +13140,6 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
 
   return (
     <>
-      {/* Sending identity (from name/address + texting number) now lives in ONE place: Comms → Settings. */}
-      <Card style={{ marginBottom: 14 }}>
-        <div style={{ padding: 16, fontSize: 12.5, color: T.textMuted, lineHeight: 1.55 }}>
-          <b style={{ color: T.text }}>Sending identity moved.</b> The from-name, from-address, and texting number now live in <b style={{ color: T.text }}>Comms → Settings</b> — the one place for every number and email.
-        </div>
-      </Card>
-
       {/* Company contact — used on invoices, the portal, and tap-to-call/email */}
       <Card style={{ marginBottom: 14 }}>
         <CardHeader title="Company Contact" />
@@ -19814,11 +19830,66 @@ function SyncStatus({ T, branding, team, currentUserId, email = {} }) {
   );
 }
 
+// ── Shared Comms presentation ───────────────────────────────────────────────
+// Keep every Comms surface on the same visual rhythm. These are intentionally
+// presentation-only: the individual screens continue to own their data and actions.
+function CommsPageHeader({ title, description, icon = "inbox", meta, action, T, compact = false }) {
+  return (
+    <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: compact ? 10 : 12, flex: "1 1 250px", minWidth: 0 }}>
+        <div style={{ width: compact ? 36 : 42, height: compact ? 36 : 42, borderRadius: compact ? 11 : 13, background: hexA(T.primary, 0.09), color: T.primary, display: "grid", placeItems: "center", flexShrink: 0 }}>
+          <Icon name={icon} size={compact ? 17 : 20} />
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: compact ? 19 : 23, fontWeight: 850, color: T.text, letterSpacing: "-0.035em", lineHeight: 1.1 }}>{title}</div>
+          {description && <div style={{ fontSize: compact ? 12 : 12.5, color: T.textMuted, marginTop: 4, lineHeight: 1.45 }}>{description}</div>}
+          {meta && <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginTop: 7 }}>{meta}</div>}
+        </div>
+      </div>
+      {action && <div style={{ flexShrink: 0 }}>{action}</div>}
+    </div>
+  );
+}
+
+function CommsSearchField({ value, onChange, onClear, placeholder, T, ariaLabel }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, minHeight: 46, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: "10px 13px", boxShadow: "0 1px 2px rgba(0,0,0,0.035)", minWidth: 0 }}>
+      <span style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="search" size={17} /></span>
+      <input value={value} onChange={e => onChange(e.target.value)} aria-label={ariaLabel || placeholder} placeholder={placeholder}
+        style={{ flex: 1, minWidth: 0, border: "none", background: "transparent", outline: "none", fontFamily: "inherit", fontSize: 14, color: T.text }} />
+      {value && <button type="button" onClick={onClear || (() => onChange(""))} aria-label="Clear search" style={{ width: 30, height: 30, borderRadius: 9, border: "none", background: T.surfaceAlt, color: T.textMuted, cursor: "pointer", display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name="close" size={14} /></button>}
+    </div>
+  );
+}
+
+function CommsEmptyState({ icon = "inbox", title, copy, action, T }) {
+  return (
+    <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, padding: "42px 22px", textAlign: "center" }}>
+      <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.07), color: T.primary, display: "grid", placeItems: "center", margin: "0 auto 13px" }}><Icon name={icon} size={23} /></div>
+      <div style={{ fontSize: 15.5, fontWeight: 800, color: T.text }}>{title}</div>
+      {copy && <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.55, maxWidth: 390, margin: "6px auto 0" }}>{copy}</div>}
+      {action && <div style={{ marginTop: 17 }}>{action}</div>}
+    </div>
+  );
+}
+
+function CommsGroupHeader({ title, count, tone, T }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+      {tone && <span style={{ width: 8, height: 8, borderRadius: "50%", background: tone, flexShrink: 0 }} />}
+      <span style={{ fontSize: 12.5, fontWeight: 820, color: T.text, letterSpacing: "-0.01em" }}>{title}</span>
+      {count != null && <span style={{ minWidth: 21, height: 21, padding: "0 6px", borderRadius: 100, background: T.surfaceAlt, color: T.textMuted, fontSize: 10.5, fontWeight: 800, display: "grid", placeItems: "center" }}>{count}</span>}
+      <div style={{ flex: 1, height: 1, background: hexA(T.border, 0.75) }} />
+    </div>
+  );
+}
+
 // ── Leads (intake funnel) — the owner's pipeline of prospects → one-tap convert to client. ──
 // Owner-only (the nav entry is ownerOnly). Reads/writes the sps_leads app_state collection.
 function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, onLeadOpened, vp = {} }) {
   const { T } = useApp();
   const [filter, setFilter] = useState("active"); // active | all | <stage>
+  const [search, setSearch] = useState("");
   const [selId, setSelId] = useState(null);
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState({ ...BLANK_LEAD });
@@ -19846,7 +19917,9 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
   const sorted = [...(leads || [])].sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
   const counts = LEAD_STAGES.reduce((m, st) => { m[st.id] = sorted.filter(l => l.status === st.id).length; return m; }, {});
   const activeCount = sorted.filter(l => !["won", "lost"].includes(l.status)).length;
-  const shown = sorted.filter(l => filter === "all" ? true : filter === "active" ? !["won", "lost"].includes(l.status) : l.status === filter);
+  const searchTerm = search.trim().toLowerCase();
+  const stageFiltered = sorted.filter(l => filter === "all" ? true : filter === "active" ? !["won", "lost"].includes(l.status) : l.status === filter);
+  const shown = stageFiltered.filter(l => !searchTerm || [l.name, l.phone, l.email, l.address, l.service, l.message, l.sourceDetail].some(v => String(v || "").toLowerCase().includes(searchTerm)));
   const sel = sorted.find(l => l.id === selId) || null;
 
   const updateLead = (id, patch, note) => setLeads(ls => (ls || []).map(l => l.id === id ? { ...l, ...patch, updatedAt: new Date().toISOString(), timeline: note ? [...(l.timeline || []), { at: new Date().toISOString(), by: "owner", kind: "note", text: note }] : (l.timeline || []) } : l));
@@ -19882,16 +19955,14 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
   );
 
   const headerBar = (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 16px 10px" }}>
-      <div>
-        <div style={{ fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Leads</div>
-        <div style={{ fontSize: 12.5, color: T.textMuted }}>{activeCount} active · {sorted.length} total</div>
-      </div>
-      <Btn sm onClick={() => { setForm({ ...BLANK_LEAD }); setAdding(true); }}>+ Add lead</Btn>
+    <div style={{ padding: "16px 16px 12px" }}>
+      <CommsPageHeader T={T} compact={twoPane} icon="funnel" title="Leads" description={`${activeCount} active · ${sorted.length} total`}
+        action={<Btn sm onClick={() => { setForm({ ...BLANK_LEAD }); setAdding(true); }} style={{ gap: 6 }}><Icon name="plus" size={13} />Add lead</Btn>} />
     </div>
   );
+  const searchBar = <div style={{ padding: "0 16px 10px" }}><CommsSearchField value={search} onChange={setSearch} T={T} placeholder="Search leads, services, phone or email" /></div>;
   const filterBar = (
-    <div style={{ display: "flex", gap: 7, flexWrap: "wrap", padding: "0 16px 12px" }}>
+    <div style={{ display: "flex", gap: 7, overflowX: "auto", padding: "0 16px 12px", WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
       {chip(filter === "active", "Active", () => setFilter("active"))}
       {LEAD_STAGES.map(st => chip(filter === st.id, `${st.label}${counts[st.id] ? ` ${counts[st.id]}` : ""}`, () => setFilter(st.id), STATUS_COLOR[st.id]))}
       {chip(filter === "all", "All", () => setFilter("all"))}
@@ -19899,7 +19970,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
   );
   const listCards = (
     <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "0 16px 16px" }}>
-      {shown.length === 0 && <div style={{ textAlign: "center", color: T.textMuted, fontSize: 13.5, padding: "40px 16px", lineHeight: 1.5 }}>No leads here yet. Website leads will appear automatically once the funnel's connected — or add one manually.</div>}
+      {shown.length === 0 && <CommsEmptyState T={T} icon="funnel" title={searchTerm ? "No matching leads" : "No leads in this stage"} copy={searchTerm ? "Try another name, service, phone number, or email." : "Website leads appear here automatically, or you can add one manually."} action={!searchTerm && <Btn sm onClick={() => { setForm({ ...BLANK_LEAD }); setAdding(true); }}>Add a lead</Btn>} />}
       {shown.map(l => {
         const initials = (l.name || "?").trim().split(/\s+/).map(w => w[0]).slice(0, 2).join("").toUpperCase() || "?";
         const isNew = l.status === "new";
@@ -19912,14 +19983,16 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
           <div style={{ width: 40, height: 40, borderRadius: "50%", flexShrink: 0, background: isNew ? T.primary : hexA(T.primary, 0.12), color: isNew ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 13.5 }}>{initials}</div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <div style={{ fontSize: 15, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.name || l.phone || l.email || "New lead"}</div>
-              <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", textTransform: "uppercase", color: T.textMuted, background: T.surfaceAlt, padding: "2px 7px", borderRadius: 100, flexShrink: 0 }}>{LEAD_SOURCE_LABEL[l.source] || l.source}</span>
+              <div style={{ fontSize: 15, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{l.name || l.phone || l.email || "New lead"}</div>
               <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: 10, fontWeight: 800, color: STATUS_COLOR[l.status] || T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{LEAD_STAGES.find(s => s.id === l.status)?.label || l.status}</span>
             </div>
             {l.message
               ? <div style={{ fontSize: 13, color: T.text, marginTop: 4, lineHeight: 1.45, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{l.message}</div>
               : <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 4, fontStyle: "italic" }}>No message left</div>}
-            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{meta}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 7, minWidth: 0 }}>
+              <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", textTransform: "uppercase", color: T.textMuted, background: T.surfaceAlt, padding: "2px 7px", borderRadius: 100, flexShrink: 0 }}>{LEAD_SOURCE_LABEL[l.source] || l.source}</span>
+              <span style={{ fontSize: 11, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{meta}</span>
+            </div>
           </div>
           {firstImg && <ProtectedImage src={firstImg} alt="" loading="lazy" onError={e => { e.target.style.display = "none"; }} style={{ width: 52, height: 52, borderRadius: 12, objectFit: "cover", border: `1px solid ${T.border}`, flexShrink: 0, background: T.surfaceAlt }} />}
         </div>
@@ -19963,8 +20036,8 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
             {(sel.phone || sel.email || sel.service) && (
               <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, overflow: "hidden" }}>
                 {sel.service && <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "11px 14px", borderBottom: (sel.phone || sel.email) ? `1px solid ${T.border}` : "none" }}><span style={{ fontSize: 12.5, color: T.textMuted, fontWeight: 700 }}>Service</span><span style={{ fontSize: 13.5, color: T.text, fontWeight: 700, textAlign: "right" }}>{sel.service}</span></div>}
-                {sel.phone && <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "11px 14px", borderBottom: sel.email ? `1px solid ${T.border}` : "none" }}><span style={{ fontSize: 12.5, color: T.textMuted, fontWeight: 700 }}>Phone</span><span style={{ display: "flex", gap: 8, alignItems: "center", minWidth: 0 }}><span style={{ fontSize: 13.5, color: T.text, fontWeight: 700 }}>{sel.phone}</span><a href={`tel:${sel.phone}`} style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "5px 12px", textDecoration: "none" }}>Call</a><a href={`sms:${sel.phone}`} title="Opens this device's Messages app" style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "5px 12px", textDecoration: "none" }}>Device text</a></span></div>}
-                {sel.email && <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "11px 14px" }}><span style={{ fontSize: 12.5, color: T.textMuted, fontWeight: 700 }}>Email</span><span style={{ display: "flex", gap: 8, alignItems: "center", minWidth: 0 }}><span style={{ fontSize: 13, color: T.text, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sel.email}</span><a href={`mailto:${sel.email}`} style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "5px 12px", textDecoration: "none" }}>Email</a></span></div>}
+                {sel.phone && <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "11px 14px", borderBottom: sel.email ? `1px solid ${T.border}` : "none", flexWrap: "wrap" }}><span style={{ fontSize: 12.5, color: T.textMuted, fontWeight: 700 }}>Phone</span><span style={{ fontSize: 13.5, color: T.text, fontWeight: 700, marginLeft: "auto" }}>{sel.phone}</span><span style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}><a href={`tel:${sel.phone}`} style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "6px 12px", textDecoration: "none" }}>Call</a><a href={`sms:${sel.phone}`} title="Opens this device's Messages app" style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "6px 12px", textDecoration: "none" }}>Device text</a></span></div>}
+                {sel.email && <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "11px 14px", flexWrap: "wrap" }}><span style={{ fontSize: 12.5, color: T.textMuted, fontWeight: 700 }}>Email</span><span style={{ fontSize: 13, color: T.text, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: "1 1 180px", textAlign: "right" }}>{sel.email}</span><a href={`mailto:${sel.email}`} style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "6px 12px", textDecoration: "none" }}>Email</a></div>}
               </div>
             )}
             <div>
@@ -19981,11 +20054,11 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
   return (
     <div ref={wrapRef} style={twoPane
       ? { display: "grid", gridTemplateColumns: "minmax(320px, 400px) 1fr", gap: 16, height: "calc(100dvh - 200px)", minHeight: 460, padding: "8px 4px 0" }
-      : { maxWidth: 760, margin: "0 auto", padding: "0 0 90px" }}>
+      : { maxWidth: 760, margin: "0 auto", padding: 0 }}>
       {twoPane ? (
         <>
           <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-            <div style={{ flexShrink: 0 }}>{headerBar}{filterBar}</div>
+            <div style={{ flexShrink: 0 }}>{headerBar}{searchBar}{filterBar}</div>
             <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>{listCards}</div>
           </div>
           <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, overflow: "hidden" }}>
@@ -20001,6 +20074,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
       ) : (
         <>
           {headerBar}
+          {searchBar}
           {filterBar}
           {listCards}
         </>
@@ -20013,7 +20087,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
         <Modal title="Add Lead" onClose={() => setAdding(false)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             <div><label style={lbl}>Name</label><input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} style={field} placeholder="Name" /></div>
-            <div style={{ display: "flex", gap: 10 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10 }}>
               <div style={{ flex: 1 }}><label style={lbl}>Phone</label><input value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))} style={field} placeholder="(555) 555-5555" inputMode="tel" /></div>
               <div style={{ flex: 1 }}><label style={lbl}>Email</label><input value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} style={field} placeholder="name@email.com" inputMode="email" /></div>
             </div>
@@ -20698,6 +20772,7 @@ function Icon({ name, size = 22, filled = false }) {
     back:     <path d="M19 12H5M12 19l-7-7 7-7" />,
     forward:  <path d="M5 12h14M12 5l7 7-7 7" />,
     reply:    <><path d="M9 14 4 9l5-5" /><path d="M4 9h11a5 5 0 0 1 5 5v3" /></>,
+    search:   <><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></>,
     sparkle:  <path d="M12 2l2.1 5.6a2 2 0 0 0 1.3 1.3L21 11l-5.6 2.1a2 2 0 0 0-1.3 1.3L12 20l-2.1-5.6a2 2 0 0 0-1.3-1.3L3 11l5.6-2.1a2 2 0 0 0 1.3-1.3L12 2z" />,
     paperclip: <path d="M21 11.5 12.5 20a5 5 0 0 1-7-7L14 4.5a3.3 3.3 0 0 1 4.7 4.7L10.2 18a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8" />,
     send:     <><path d="M22 2 11 13" /><path d="M22 2l-7 20-4-9-9-4 20-7z" /></>,
@@ -20849,24 +20924,27 @@ function MessagesScreen({ clients, currentUser, T }) {
   const [selectedClientId, setSelectedClientId] = useState(null);
   const [showNewMsg, setShowNewMsg] = useState(false);
   const [newSearch, setNewSearch] = useState("");
+  const [threadSearch, setThreadSearch] = useState("");
   const selectedClient = (clients || []).find(c => String(c.id) === String(selectedClientId)) || null;
 
   // Load all threads — last message + unread count per client
   const [threadMap, setThreadMap] = useState({});
+  const [threadsLoaded, setThreadsLoaded] = useState(false);
   useEffect(() => {
     const load = async () => {
-      const { data } = await supabase
-        .from("sps_messages")
-        .select("client_id, body, sender, created_at, read_at")
-        .order("created_at", { ascending: false });
-      if (!data) return;
-      const map = {};
-      data.forEach(m => {
-        const cid = String(m.client_id);
-        if (!map[cid]) map[cid] = { lastMsg: String(m.body || "").replace(/\[\[inv(?:card)?:[^\]]+\]\]|\[\[svccard:[^\]]+\]\]|\[\[echo\]\]/g, "").trim() || "Invoice", lastAt: m.created_at, unread: 0 };
-        if (m.sender === "client" && !m.read_at) map[cid].unread++;
-      });
-      setThreadMap(map);
+      try {
+        const { data } = await supabase
+          .from("sps_messages")
+          .select("client_id, body, sender, created_at, read_at")
+          .order("created_at", { ascending: false });
+        const map = {};
+        (data || []).forEach(m => {
+          const cid = String(m.client_id);
+          if (!map[cid]) map[cid] = { lastMsg: String(m.body || "").replace(/\[\[inv(?:card)?:[^\]]+\]\]|\[\[svccard:[^\]]+\]\]|\[\[echo\]\]/g, "").trim() || "Invoice", lastAt: m.created_at, unread: 0 };
+          if (m.sender === "client" && !m.read_at) map[cid].unread++;
+        });
+        setThreadMap(map);
+      } finally { setThreadsLoaded(true); }
     };
     load();
     const interval = setInterval(load, 8000);
@@ -20892,6 +20970,8 @@ function MessagesScreen({ clients, currentUser, T }) {
     .map(([cid, meta]) => ({ client: (clients || []).find(c => String(c.id) === cid), ...meta }))
     .filter(t => t.client)
     .sort((a, b) => new Date(b.lastAt) - new Date(a.lastAt));
+  const threadTerm = threadSearch.trim().toLowerCase();
+  const visibleThreads = threads.filter(t => !threadTerm || [t.client?.name, t.client?.phone, t.client?.email, t.client?.address, t.lastMsg].some(v => String(v || "").toLowerCase().includes(threadTerm)));
   const totalUnread = threads.reduce((s, t) => s + (t.unread || 0), 0);
 
   const activeClients = selectableClients(clients);
@@ -20936,20 +21016,10 @@ function MessagesScreen({ clients, currentUser, T }) {
 
   // ── Conversation list header + body ──
   const listHeader = (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: twoPane ? "14px 16px" : 0, borderBottom: twoPane ? `1px solid ${T.border}` : "none", flexShrink: 0, marginTop: twoPane ? 0 : 2, minHeight: twoPane ? 0 : 44 }}>
-      {twoPane ? (
-        <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", display: "flex", alignItems: "center", gap: 8 }}>
-          Messages
-          {totalUnread > 0 && <span style={{ background: T.primary, color: "#fff", borderRadius: 100, fontSize: 11, fontWeight: 800, padding: "2px 8px" }}>{totalUnread}</span>}
-        </div>
-      ) : (
-        <div>{totalUnread > 0 && <span style={{ fontSize: 12, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "4px 11px" }}>{totalUnread} unread</span>}</div>
-      )}
-      <button onClick={() => setShowNewMsg(true)}
-        style={{ display: "flex", alignItems: "center", gap: 6, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: twoPane ? "8px 12px" : "10px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, boxShadow: twoPane ? "none" : `0 6px 16px ${hexA(T.primary, 0.3)}` }}>
-        <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"><path d="M12 5v14M5 12h14"/></svg>
-        {twoPane ? "New" : "New Message"}
-      </button>
+    <div style={{ padding: twoPane ? "14px 16px 12px" : "0 0 2px", borderBottom: twoPane ? `1px solid ${T.border}` : "none", flexShrink: 0 }}>
+      <CommsPageHeader T={T} compact={twoPane} icon="message" title="Client chats" description={`${threads.length} conversation${threads.length === 1 ? "" : "s"}${totalUnread ? ` · ${totalUnread} unread` : " · all caught up"}`}
+        action={<Btn sm onClick={() => setShowNewMsg(true)} style={{ gap: 6 }}><Icon name="plus" size={13} />New</Btn>} />
+      {threads.length > 0 && <div style={{ marginTop: 12 }}><CommsSearchField value={threadSearch} onChange={setThreadSearch} T={T} placeholder="Search conversations" /></div>}
     </div>
   );
   // Circular, deterministic-hue avatar (matches the Email inbox look) instead of the old red squares.
@@ -20961,7 +21031,7 @@ function MessagesScreen({ clients, currentUser, T }) {
     return (
       <button key={c.id} onClick={() => setSelectedClientId(c.id)}
         style={card
-          ? { position: "relative", display: "flex", alignItems: "center", gap: 12, padding: "13px 14px", width: "100%", background: hasUnread ? hexA(T.primary, 0.03) : T.surface, border: `1px solid ${hasUnread ? hexA(T.primary, 0.28) : T.border}`, borderRadius: 16, boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 6px 16px rgba(0,0,0,0.05)", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }
+          ? { position: "relative", display: "flex", alignItems: "center", gap: 12, padding: "13px 14px", width: "100%", background: hasUnread ? hexA(T.primary, 0.03) : T.surface, border: `1px solid ${hasUnread ? hexA(T.primary, 0.28) : T.border}`, borderRadius: 16, boxShadow: "0 1px 3px rgba(0,0,0,0.035)", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }
           : { position: "relative", display: "flex", alignItems: "center", gap: 12, padding: "13px 16px", width: "100%", background: active ? hexA(T.primary, 0.08) : (hasUnread ? hexA(T.primary, 0.04) : "none"), border: "none", borderBottom: `1px solid ${T.border}`, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
         {card && hasUnread && <span style={{ position: "absolute", left: -1, top: 14, bottom: 14, width: 3, borderRadius: 3, background: T.primary }} />}
         <div style={{ width: 44, height: 44, borderRadius: "50%", flexShrink: 0, display: "grid", placeItems: "center", background: hexA(col, 0.15), color: col, fontSize: 17, fontWeight: 800 }}>{(c.name || "?")[0].toUpperCase()}</div>
@@ -20978,22 +21048,14 @@ function MessagesScreen({ clients, currentUser, T }) {
       </button>
     );
   };
-  const listBody = threads.length === 0 ? (
-    <div style={{ background: T.surface, borderRadius: 18, border: `1px dashed ${T.border}`, padding: "48px 20px", textAlign: "center", margin: twoPane ? 12 : 0 }}>
-      <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 12px" }}>
-        <Icon name="message" size={24} />
-      </div>
-      <div style={{ fontSize: 15, fontWeight: 700, color: T.text, marginBottom: 6 }}>No conversations yet</div>
-      <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5, marginBottom: 18 }}>Start a message with any client, or wait for one to reach out through their portal.</div>
-      <button onClick={() => setShowNewMsg(true)}
-        style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "11px 22px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>
-        Start a Conversation
-      </button>
-    </div>
+  const listBody = !threadsLoaded ? (
+    <div style={{ display: "grid", placeItems: "center", padding: 46, color: T.textMuted }}><div style={{ width: 22, height: 22, border: `2px solid ${T.border}`, borderTopColor: T.primary, borderRadius: "50%", animation: "spin 0.7s linear infinite" }} /></div>
+  ) : visibleThreads.length === 0 ? (
+    <div style={{ margin: twoPane ? 12 : 0 }}><CommsEmptyState T={T} icon="message" title={threadTerm ? "No matching conversations" : "No conversations yet"} copy={threadTerm ? "Try a client name, address, or message text." : "Start a message with any client, or wait for one to reach out through their portal."} action={!threadTerm && <Btn sm onClick={() => setShowNewMsg(true)}>Start a conversation</Btn>} /></div>
   ) : twoPane ? (
-    <div>{threads.map(t => convBtn(t, false))}</div>
+    <div>{visibleThreads.map(t => convBtn(t, false))}</div>
   ) : (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: 20 }}>{threads.map(t => convBtn(t, true))}</div>
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: 20 }}>{visibleThreads.map(t => convBtn(t, true))}</div>
   );
   const listPane = twoPane ? (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
@@ -21247,7 +21309,7 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       {/* Messages */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "14px 2px", display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "14px 2px", display: "flex", flexDirection: "column", gap: 10, overscrollBehavior: "contain" }}>
         {messages.length === 0 && (
           <div style={{ textAlign: "center", padding: "40px 20px", color: T.textMuted, fontSize: 13 }}>No messages yet. Start the conversation below.</div>
         )}
@@ -21271,7 +21333,7 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
                   padding: "12px 16px",
                   fontSize: 15,
                   lineHeight: 1.5,
-                  maxWidth: "100%",
+                  maxWidth: 520,
                   wordBreak: "break-word",
                   boxShadow: isMine ? `0 2px 8px ${hexA(T.primary, 0.28)}` : `0 1px 3px ${hexA("#000", 0.07)}`,
                 }}>
@@ -21289,14 +21351,14 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
       )}
 
       {/* Input */}
-      <div style={{ borderTop: `1px solid ${T.border}`, padding: `12px 0 ${composerInset}px`, display: "flex", gap: 10, alignItems: "flex-end", transition: "padding-bottom 0.18s ease" }}>
+      <div style={{ position: "sticky", bottom: 0, zIndex: 2, borderTop: `1px solid ${T.border}`, padding: `12px 0 ${composerInset}px`, display: "flex", gap: 10, alignItems: "flex-end", transition: "padding-bottom 0.18s ease", background: T.surface }}>
         <textarea
           value={draft}
           onChange={e => setDraft(e.target.value)}
           onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
           placeholder="Type a message..."
           rows={1}
-          style={{ flex: 1, minWidth: 0, padding: "11px 14px", border: `1.5px solid ${T.border}`, borderRadius: 14, fontSize: 14, fontFamily: "inherit", resize: "none", outline: "none", color: T.text, background: T.surface, lineHeight: 1.5, maxHeight: 120, overflowY: "auto" }}
+          style={{ flex: 1, minWidth: 0, minHeight: 44, padding: "10px 14px", border: `1.5px solid ${T.border}`, borderRadius: 14, fontSize: 14, fontFamily: "inherit", resize: "none", outline: "none", color: T.text, background: T.surface, lineHeight: 1.5, maxHeight: 120, overflowY: "auto" }}
         />
         <button onClick={handleSend} disabled={!draft.trim() || sending}
           style={{ width: 44, height: 44, borderRadius: 13, background: draft.trim() ? T.primary : T.surfaceAlt, border: "none", color: draft.trim() ? "#fff" : T.textMuted, cursor: (draft.trim() && !sending) ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "background 0.15s" }}>
@@ -21311,17 +21373,19 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
 
 // ── Staff chat view (single client thread) ──
 function StaffChat({ client, currentUser, T, onBack, embedded = false }) {
+  const initials = (client?.name || "?").trim().split(/\s+/).map(w => w[0]).slice(0, 2).join("").toUpperCase() || "?";
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: embedded ? "100%" : "calc(100vh - 180px)", minHeight: 0 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, paddingBottom: 16, borderBottom: `1px solid ${T.border}` }}>
+    <div style={{ display: "flex", flexDirection: "column", height: embedded ? "100%" : "clamp(430px, calc(100dvh - 238px), 760px)", minHeight: 0 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 11, marginBottom: 10, paddingBottom: 12, borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
         {!embedded && (
-          <button onClick={onBack} style={{ background: "none", border: "none", color: T.primary, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4, fontWeight: 700, fontSize: 13, fontFamily: "inherit" }}>
-            <Icon name="back" size={16} /> Back
+          <button onClick={onBack} aria-label="Back to conversations" style={{ width: 40, height: 40, borderRadius: 12, background: T.surfaceAlt, border: "none", color: T.primary, cursor: "pointer", padding: 0, display: "grid", placeItems: "center", flexShrink: 0 }}>
+            <Icon name="back" size={17} />
           </button>
         )}
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{client.name}</div>
-          <div style={{ fontSize: 12, color: T.textMuted }}>{client.division || "Pond"} client</div>
+        <div style={{ width: 40, height: 40, borderRadius: "50%", background: hexA(T.primary, 0.11), color: T.primary, display: "grid", placeItems: "center", fontSize: 13, fontWeight: 820, flexShrink: 0 }}>{initials}</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 780, color: T.text, letterSpacing: "-0.01em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{client.name}</div>
+          <div style={{ fontSize: 12, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{[client.division ? `${client.division} client` : "Client", client.phone || client.email].filter(Boolean).join(" · ")}</div>
         </div>
       </div>
       <ChatThread
@@ -21401,12 +21465,12 @@ function CPMessages({ client, branding, onSubmit, onClientMessage, onOpenInvoice
 // settings, labels, and (immediate) save behavior as before; only relocated.
 // ── Communications hub — control center for the automated client messages ────────────────────
 // One card per sequence: turn it on, time it, edit the wording with a live preview, and text
-// yourself a test. The toggles + templates are the control surface; the scheduler (next phase) is
-// what fires them — until then this is configuration and nothing reaches a client automatically.
+// yourself a test. The toggles + templates are the control surface; the scheduler fires enabled
+// sequences on their configured cadence.
 // Every send still respects the client's per-type opt-out (notifyPrefs) and Test Mode.
 function CommunicationsHub({ scheduleCfg, setScheduleCfg, email, setEmail, branding, T }) {
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
-  const setCfg = (k, v) => setScheduleCfg({ ...cfg, [k]: v });
+  const setCfg = (k, v) => setScheduleCfg(cur => ({ ...DEFAULT_SCHEDULE_CFG, ...(cur || {}), [k]: v }));
   const em = email || {};
   const setTpl = (k, v) => setEmail && setEmail(e => ({ ...e, [k]: v }));
   const CO = (branding && branding.companyName) || "Stone Property Solutions";
@@ -21417,14 +21481,23 @@ function CommunicationsHub({ scheduleCfg, setScheduleCfg, email, setEmail, brand
   const numHint = { fontSize: 12.5, color: T.textMuted };
   const fill = (tpl, vars) => Object.entries(vars).reduce((s, [k, v]) => s.split(`{${k}}`).join(v), String(tpl || ""));
   const numOnly = (v, max) => v.replace(/\D/g, "").slice(0, max);
+  const [testBusy, setTestBusy] = useState("");
+  const [testFeedback, setTestFeedback] = useState(null);
 
-  const testSend = async (tpl, vars) => {
+  const testSend = async (key, tpl, vars) => {
+    if (testBusy) return;
     const to = (em.testMode && em.testMode.phone) || "";
-    if (!to.trim()) { alert("Add your owner test phone under Test Mode first."); return; }
+    if (!to.trim()) { setTestFeedback({ key, ok: false, text: "Add your owner test phone under Test Mode first." }); return; }
     // Explicit tests can bypass a hold only for the configured owner test number. `sendSms`
     // enforces that same rule centrally, even if a future caller passes the wrong destination.
-    const res = await sendSms(to.trim(), fill(tpl, vars), { testSend: true, type: "Texting test", origin: "Comms → Settings test" });
-    alert(res && res.ok ? "Test accepted for sending ✓" : `Couldn't send: ${(res && res.error) || "unknown error"}`);
+    setTestBusy(key); setTestFeedback(null);
+    try {
+      const res = await sendSms(to.trim(), fill(tpl, vars), { testSend: true, type: "Texting test", origin: "Comms → Settings test" });
+      setTestFeedback({ key, ok: !!(res && res.ok), text: res && res.ok ? "Test accepted for your saved test phone." : `Couldn't send: ${(res && res.error) || "unknown error"}` });
+    } catch (_) {
+      setTestFeedback({ key, ok: false, text: "Couldn't reach the texting service." });
+    }
+    setTestBusy("");
   };
 
   // Dry-run: ask the scheduler what it WOULD send right now (it sends nothing on a dry run).
@@ -21462,7 +21535,7 @@ function CommunicationsHub({ scheduleCfg, setScheduleCfg, email, setEmail, brand
   ];
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14, borderTop: `1px solid ${T.border}`, paddingTop: 16 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {/* MASTER switch + dry-run preview — the big on/off for the whole engine */}
       <div style={{ background: cfg.schedulerOn ? hexA("#16a34a", 0.08) : T.surfaceAlt, border: `1.5px solid ${cfg.schedulerOn ? hexA("#16a34a", 0.4) : T.border}`, borderRadius: 14, padding: 14 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
@@ -21524,7 +21597,8 @@ function CommunicationsHub({ scheduleCfg, setScheduleCfg, email, setEmail, brand
                     <label style={lbl}>Preview</label>
                     <div style={{ background: hexA(T.primary, 0.1), borderRadius: 14, borderTopLeftRadius: 4, padding: "11px 14px", fontSize: 13, color: T.text, lineHeight: 1.5 }}>{fill(tpl, seq.vars)}</div>
                   </div>
-                  <button onClick={() => testSend(tpl, seq.vars)} style={{ marginTop: 10, background: T.surface, border: `1.5px solid ${T.border}`, color: T.text, borderRadius: 10, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="mail" size={13} /> Send a test to my phone</button>
+                  <button onClick={() => testSend(seq.key, tpl, seq.vars)} disabled={!!testBusy} style={{ marginTop: 10, minHeight: 40, background: T.surface, border: `1.5px solid ${T.border}`, color: T.text, borderRadius: 10, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: testBusy ? "default" : "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 6, opacity: testBusy && testBusy !== seq.key ? 0.55 : 1 }}><Icon name="message" size={13} />{testBusy === seq.key ? "Sending…" : "Send a test to my phone"}</button>
+                  {testFeedback && testFeedback.key === seq.key && <div style={{ marginTop: 7, fontSize: 11.5, fontWeight: 700, color: testFeedback.ok ? "#16a34a" : "#dc2626" }}>{testFeedback.text}</div>}
                 </div>
               </div>
             )}
@@ -21547,7 +21621,7 @@ function CommunicationsHub({ scheduleCfg, setScheduleCfg, email, setEmail, brand
 
 function ReminderSettings({ scheduleCfg, setScheduleCfg, email, setEmail, branding, T }) {
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
-  const setCfg = (k, v) => setScheduleCfg({ ...cfg, [k]: v });
+  const setCfg = (k, v) => setScheduleCfg(cur => ({ ...DEFAULT_SCHEDULE_CFG, ...(cur || {}), [k]: v }));
   const tpl = (email && email.smsReminder) || DEFAULT_EMAIL.smsReminder;
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
   const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
@@ -21585,7 +21659,7 @@ function ReminderSettings({ scheduleCfg, setScheduleCfg, email, setEmail, brandi
           <textarea rows={3} value={email?.smsReminder ?? tpl}
             onChange={e => setEmail && setEmail(em => ({ ...em, smsReminder: e.target.value }))}
             style={{ ...field, resize: "vertical" }} />
-          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>Tags: {"{first}"} name, {"{company}"}, {"{date}"}. This is the same message you can edit in Customize.</div>
+          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>Tags: {"{first}"} name, {"{company}"}, {"{date}"}. This is the shared appointment-reminder template.</div>
           {(() => {
             const preview = (email?.smsReminder ?? tpl)
               .replace(/{first}/g, "Sarah")
@@ -21600,7 +21674,7 @@ function ReminderSettings({ scheduleCfg, setScheduleCfg, email, setEmail, brandi
           })()}
         </div>
         <div style={{ background: hexA(T.primary, 0.06), borderRadius: 12, padding: "12px 14px", fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>
-          Automatic sending isn't active yet — reminders show up here when due, and you tap Send to fire off the text. When automated SMS is connected later, flip this to fully hands-off.
+          Reminders always appear in the review queue. If automatic sending is enabled below, due messages can also send on schedule while still honoring Test Mode, opt-outs, and the cooldown.
         </div>
       </>)}
 
@@ -21617,13 +21691,13 @@ function ReminderSettings({ scheduleCfg, setScheduleCfg, email, setEmail, brandi
                 <input value={r.name || ""} onChange={e => upd({ name: e.target.value })} placeholder="Name (e.g. Pond Closing)" style={{ ...field, flex: 1 }} />
                 <button onClick={del} style={{ background: "none", border: `1px solid ${T.border}`, color: "#C0392B", borderRadius: 10, padding: "0 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Remove</button>
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1.4fr 0.7fr 1.1fr", gap: 8 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.4fr) minmax(80px, 0.7fr)", gap: 8 }}>
                 <select value={r.month || ""} onChange={e => upd({ month: e.target.value })} style={field}>
                   <option value="">Month…</option>
                   {["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"].map((mn, mi) => <option key={mn} value={mi + 1}>{mn}</option>)}
                 </select>
                 <input type="text" inputMode="numeric" value={r.day || ""} onChange={e => upd({ day: e.target.value.replace(/\D/g, "").slice(0, 2) })} placeholder="Day" style={field} />
-                <select value={r.division || "All"} onChange={e => upd({ division: e.target.value })} style={field}>
+                <select value={r.division || "All"} onChange={e => upd({ division: e.target.value })} style={{ ...field, gridColumn: "1 / -1" }}>
                   <option value="All">All Divisions</option>
                   {DIVISIONS.map(d => <option key={d} value={d}>{d}</option>)}
                 </select>
@@ -21646,7 +21720,7 @@ function ReminderSettings({ scheduleCfg, setScheduleCfg, email, setEmail, brandi
 
 function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, reminderLog, setReminderLog, T }) {
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
-  const setCfg = (k, v) => setScheduleCfg({ ...cfg, [k]: v });
+  const setCfg = (k, v) => setScheduleCfg(cur => ({ ...DEFAULT_SCHEDULE_CFG, ...(cur || {}), [k]: v }));
   const now = new Date();
   const queue = buildReminderQueue(schedule, clients, cfg, reminderLog, now);
   const seasonal = buildSeasonalQueue(cfg, clients, reminderLog, now);
@@ -21715,7 +21789,7 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
   const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
 
-  const KIND_BADGE = { payment: { label: "Payment", color: "#C0392B" }, seasonal: { label: "Seasonal", color: "#7c3aed" }, service: { label: "Service", color: T.primary } };
+  const KIND_BADGE = { payment: { label: "Payment", color: "#C0392B" }, seasonal: { label: "Seasonal", color: "#B45309" }, service: { label: "Service", color: T.primary } };
   const card = (entry, isDue) => {
     const k = entry.kind === "payment" ? "payment" : entry.isSeasonal ? "seasonal" : "service";
     const badge = KIND_BADGE[k];
@@ -21723,18 +21797,19 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
       ? `Invoice ${entry.number || "—"} · ${entry.amount} · ${entry.daysOverdue}d overdue`
       : `${entry.stop?.type || "Service"} · ${entry.date}${entry.stop?.time ? ` · ${entry.stop.time}` : ""}`;
     return (
-      <div key={entry.sid} onClick={() => isDue && openReview(entry)} style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, padding: "13px 15px", display: "flex", alignItems: "center", gap: 12, cursor: isDue ? "pointer" : "default" }}>
+      <div key={entry.sid} onClick={() => isDue && openReview(entry)} style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, padding: "13px 14px", display: "flex", alignItems: "center", gap: 12, cursor: isDue ? "pointer" : "default", boxShadow: "0 1px 3px rgba(0,0,0,0.035)" }}>
+        <div style={{ width: 40, height: 40, borderRadius: 12, background: hexA(badge.color, 0.11), color: badge.color, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name={k === "payment" ? "mail" : "message"} size={17} /></div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", textTransform: "uppercase", color: badge.color, background: hexA(badge.color, 0.12), padding: "2px 7px", borderRadius: 100, flexShrink: 0 }}>{badge.label}</span>
             <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.client?.name || entry.stop?.client || "Client"}</div>
           </div>
-          <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sub}</div>
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: 4, lineHeight: 1.4 }}>{sub}</div>
           {!entry.phone && <div style={{ fontSize: 11, color: T.warning, marginTop: 3 }}>No phone — message copies to clipboard</div>}
           {!isDue && entry.sendTime && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>Sends {entry.sendTime.toLocaleDateString("en-US", { month: "short", day: "numeric" })} at {entry.sendTime.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}</div>}
         </div>
         {isDue ? (
-          <button onClick={(e) => { e.stopPropagation(); openReview(entry); }} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "8px 15px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Review</button>
+          <button onClick={(e) => { e.stopPropagation(); openReview(entry); }} style={{ minHeight: 44, background: T.primary, color: "#fff", border: "none", borderRadius: 11, padding: "8px 15px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Review</button>
         ) : (
           <span style={{ fontSize: 11, color: T.textMuted, fontWeight: 600, flexShrink: 0 }}>Queued</span>
         )}
@@ -21744,17 +21819,19 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-      <div>
-        <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Reminders</div>
-        <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>
-          {`${queue.due.length + payments.due.length + seasonal.due.length} due now${queue.upcoming.length ? ` · ${queue.upcoming.length} queued` : ""}`}
-        </div>
+      <CommsPageHeader T={T} icon="calendar" title="Reminders" description="Review appointment, payment, and seasonal messages before they go out." />
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 }}>
+        {[
+          [queue.due.length + payments.due.length + seasonal.due.length, "Due now", T.primary],
+          [queue.upcoming.length, "Queued", "#2563eb"],
+          [queue.sent.length + seasonal.sent.length, "Recent", "#16a34a"],
+        ].map(([n, label, tone]) => <div key={label} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: "11px 10px", textAlign: "center" }}><div style={{ fontSize: 20, fontWeight: 850, color: Number(n) ? tone : T.textMuted }}>{n}</div><div style={{ fontSize: 10.5, fontWeight: 750, color: T.textMuted, marginTop: 1 }}>{label}</div></div>)}
       </div>
 
       {reminderErr && (
         <div style={{ background: hexA(T.accent, 0.1), color: T.accent, borderRadius: 12, padding: "11px 14px", fontSize: 12.5, fontWeight: 700, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
           <span>{reminderErr}</span>
-          <button onClick={() => setReminderErr("")} style={{ background: "none", border: "none", color: T.accent, cursor: "pointer", fontWeight: 800, fontFamily: "inherit", fontSize: 14 }}>✕</button>
+          <button onClick={() => setReminderErr("")} aria-label="Dismiss" style={{ width: 40, height: 40, borderRadius: 10, background: "transparent", border: "none", color: T.accent, cursor: "pointer", fontWeight: 800, fontFamily: "inherit", fontSize: 14, flexShrink: 0 }}>✕</button>
         </div>
       )}
 
@@ -21764,9 +21841,7 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
         {/* Due now */}
         {queue.due.length > 0 && (
           <div>
-            <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 10, display: "flex", alignItems: "center", gap: 7 }}>
-              <span style={{ width: 8, height: 8, borderRadius: "50%", background: T.primary }} /> Due Now ({queue.due.length})
-            </div>
+            <CommsGroupHeader T={T} title="Appointment reminders due" count={queue.due.length} tone={T.primary} />
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {queue.due.map(e => card(e, true))}
             </div>
@@ -21776,7 +21851,7 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
         {/* Upcoming */}
         {queue.upcoming.length > 0 && (
           <div>
-            <div style={{ fontSize: 13, fontWeight: 800, color: T.textMuted, marginBottom: 10 }}>Queued ({queue.upcoming.length})</div>
+            <CommsGroupHeader T={T} title="Queued" count={queue.upcoming.length} tone="#2563eb" />
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {queue.upcoming.slice(0, 20).map(e => card(e, false))}
             </div>
@@ -21786,7 +21861,7 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
         {/* Sent */}
         {queue.sent.length > 0 && (
           <div>
-            <div style={{ fontSize: 13, fontWeight: 800, color: T.textMuted, marginBottom: 10 }}>Recently Sent ({queue.sent.length})</div>
+            <CommsGroupHeader T={T} title="Recently sent" count={queue.sent.length} tone="#16a34a" />
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {queue.sent.slice(0, 10).map(e => (
                 <div key={e.sid} style={{ background: T.surfaceAlt, borderRadius: 14, padding: "12px 16px", display: "flex", alignItems: "center", gap: 12 }}>
@@ -21794,26 +21869,19 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
                     <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{e.client?.name || e.stop.client || "Client"}</div>
                     <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>Reminded · {e.date}</div>
                   </div>
-                  <button onClick={() => undoSent(e.sid)} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>Undo</button>
+                  <button onClick={() => undoSent(e.sid)} style={{ minWidth: 44, minHeight: 40, background: "none", border: "none", color: T.textMuted, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Undo</button>
                 </div>
               ))}
             </div>
           </div>
         )}
 
-        {queue.due.length === 0 && queue.upcoming.length === 0 && queue.sent.length === 0 && (
-          <div style={{ textAlign: "center", padding: "30px 20px", color: T.textMuted, fontSize: 14 }}>
-            No upcoming stops to remind about yet. Schedule some visits and they'll show up here.
-          </div>
-        )}
       </>)}
 
       {/* Payment reminders (overdue invoices) — independent of the appointment-reminders toggle */}
       {payments.due.length > 0 && (
         <div>
-          <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 10, display: "flex", alignItems: "center", gap: 7 }}>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#C0392B" }} /> Payment Reminders Due ({payments.due.length})
-          </div>
+          <CommsGroupHeader T={T} title="Payment reminders due" count={payments.due.length} tone="#C0392B" />
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {payments.due.map(e => card(e, true))}
           </div>
@@ -21823,9 +21891,7 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
       {/* Seasonal reminders coming due — independent of the appointment-reminders toggle */}
       {seasonal.due.length > 0 && (
         <div>
-          <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 10, display: "flex", alignItems: "center", gap: 7 }}>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#F59E0B" }} /> Seasonal Reminders Due ({seasonal.due.length})
-          </div>
+          <CommsGroupHeader T={T} title="Seasonal reminders due" count={seasonal.due.length} tone="#B45309" />
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {seasonal.due.map(e => card(e, true))}
           </div>
@@ -21833,7 +21899,7 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
       )}
       {seasonal.sent.length > 0 && (
         <div>
-          <div style={{ fontSize: 13, fontWeight: 800, color: T.textMuted, marginBottom: 10 }}>Seasonal Sent ({seasonal.sent.length})</div>
+          <CommsGroupHeader T={T} title="Seasonal sent" count={seasonal.sent.length} tone="#16a34a" />
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {seasonal.sent.slice(0, 10).map(e => (
               <div key={e.sid} style={{ background: T.surfaceAlt, borderRadius: 14, padding: "12px 16px", display: "flex", alignItems: "center", gap: 12 }}>
@@ -21841,11 +21907,14 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
                   <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{e.client?.name || "Client"}</div>
                   <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{e.stop.type} · sent</div>
                 </div>
-                <button onClick={() => undoSent(e.sid)} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>Undo</button>
+                <button onClick={() => undoSent(e.sid)} style={{ minWidth: 44, minHeight: 40, background: "none", border: "none", color: T.textMuted, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Undo</button>
               </div>
             ))}
           </div>
         </div>
+      )}
+      {queue.due.length === 0 && queue.upcoming.length === 0 && queue.sent.length === 0 && payments.due.length === 0 && seasonal.due.length === 0 && seasonal.sent.length === 0 && (
+        <CommsEmptyState T={T} icon="calendar" title="Nothing needs attention" copy={cfg.remindersOn ? "Upcoming visits and overdue invoices will appear here when a reminder is due." : "Appointment reminders are off. Payment and seasonal reminders will still appear when needed."} />
       )}
 
       {review && (
@@ -21891,8 +21960,10 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
   const [sending, setSending] = useState(false);
   const [progress, setProgress] = useState(null);
   const [result, setResult] = useState("");
+  const [resultStatus, setResultStatus] = useState("success");
   const [err, setErr] = useState("");
   const [confirmAll, setConfirmAll] = useState(false);
+  const [confirmPilot, setConfirmPilot] = useState(false);
   const testMode = !!(email && email.testMode && email.testMode.on);
   const isEmail = channel === "email";
 
@@ -21942,7 +22013,7 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
   const send = async (limit) => {
     const list = limit ? recipients.slice(0, limit) : recipients;
     if (!list.length || !ready) return;
-    setSending(true); setConfirmAll(false); setErr(""); setResult(""); setProgress({ done: 0, total: list.length, failed: 0 });
+    setSending(true); setConfirmAll(false); setConfirmPilot(false); setErr(""); setResult(""); setProgress({ done: 0, total: list.length, failed: 0 });
     let done = 0, failed = 0, held = 0, redirected = 0;
     for (const c of list) {
       const r = isEmail ? await sendEmailTo(c) : await sendSms((c.phone || "").replace(/\D/g, ""), fill(c), { clientId: c.id, type: "Broadcast", origin: `${ACTOR ? `${ACTOR} — ` : ""}text broadcast` });
@@ -21956,6 +22027,7 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
     setSending(false);
     setProgress(null);
     const accepted = done - failed - held - redirected;
+    setResultStatus(failed ? "error" : (held || redirected) ? "warning" : "success");
     setResult(held === list.length && held > 0
       ? `Held by Test Mode — nothing was sent (${held} would have gone out). Flip Test Mode off in Comms → Settings to go live.`
       : redirected > 0 && accepted === 0 && failed === 0 && held === 0
@@ -21970,53 +22042,62 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
     setSending(true); setErr(""); setResult("");
     const r = await sendSms(TEST_MODE.phone, `[BROADCAST TEST → ${sample.name || "sample client"}] ${fill(sample)}`, { testSend: true, type: "Broadcast test", origin: "Comms → Broadcast test" });
     setSending(false);
+    setResultStatus(r.ok ? "success" : "error");
     setResult(r.ok ? "Test accepted for your saved test phone — no clients were contacted." : "");
     if (!r.ok) setErr(r.error || "Couldn't send the test text.");
   };
 
-  const chip = (on, label, onClick) => <button key={label} onClick={onClick} style={{ padding: "8px 15px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.1) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>;
+  const channelTone = isEmail ? "#2563eb" : "#7c3aed";
+  const pilotN = Math.max(1, Math.min(parseInt(testN) || 1, total || 1));
+  const chip = (on, label, onClick) => <button key={label} onClick={onClick} style={{ minHeight: 40, padding: "8px 15px", borderRadius: 100, border: `1.5px solid ${on ? channelTone : T.border}`, background: on ? hexA(channelTone, 0.09) : T.surface, color: on ? channelTone : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>;
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
   const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
-  const chanBtn = (id, label) => <button key={id} onClick={() => setChannel(id)} style={{ flex: 1, padding: "9px 4px", borderRadius: 9, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 700, background: channel === id ? T.primary : "transparent", color: channel === id ? "#fff" : T.textMuted, transition: "all 0.12s" }}>{label}</button>;
+  const chanBtn = (id, label, icon, tone) => { const on = channel === id; return <button key={id} onClick={() => setChannel(id)} style={{ flex: 1, minHeight: 42, padding: "9px 8px", borderRadius: 10, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 780, background: on ? T.surface : "transparent", color: on ? tone : T.textMuted, boxShadow: on ? "0 1px 4px rgba(0,0,0,0.09)" : "none", transition: "all 0.12s", display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}><Icon name={icon} size={14} />{label}</button>; };
+  const panel = { background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, padding: 16, boxShadow: "0 1px 3px rgba(0,0,0,0.035)" };
 
   return (
-    <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 18 }}>
-      <div style={{ display: "flex", gap: 3, background: T.surfaceAlt, borderRadius: 12, padding: 3 }}>{chanBtn("text", "Text")}{chanBtn("email", "Email")}</div>
-      <div style={{ fontSize: 12.5, color: T.textMuted, lineHeight: 1.5 }}>{isEmail
-        ? "Email a whole group of clients at once. Only clients who allow email and have an address are included; opt-outs are skipped, and every email carries an unsubscribe footer."
-        : "Text a whole group of clients at once. Only clients who allow texts and have a number are included; opt-outs are skipped automatically."}</div>
-      <div>
-        <label style={lbl}>Who</label>
-        <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>{SEGS.map(s => chip(seg === s.id, s.label, () => setSeg(s.id)))}</div>
-        <div style={{ fontSize: 13.5, fontWeight: 800, color: T.primary, marginTop: 10 }}>{total} recipient{total !== 1 ? "s" : ""}</div>
+    <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 14, maxWidth: 820, margin: "0 auto" }}>
+      <CommsPageHeader T={T} icon="mail" title="Broadcast" description="Reach a client group with one carefully reviewed message." />
+      <div style={{ display: "flex", gap: 4, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 14, padding: 4 }}>{chanBtn("text", "Text message", "message", "#7c3aed")}{chanBtn("email", "Email", "mail", "#2563eb")}</div>
+      <div style={panel}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12 }}>
+          <div><div style={{ fontSize: 14.5, fontWeight: 800, color: T.text }}>1. Choose recipients</div><div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{isEmail ? "Clients with an allowed email address" : "Clients with an allowed text number"} · opt-outs skipped</div></div>
+          <span style={{ minWidth: 42, height: 32, borderRadius: 100, background: hexA(channelTone, 0.1), color: channelTone, fontSize: 14, fontWeight: 850, display: "grid", placeItems: "center", padding: "0 10px" }}>{total}</span>
+        </div>
+        <div style={{ display: "flex", gap: 7, overflowX: "auto", WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>{SEGS.map(s => chip(seg === s.id, s.label, () => setSeg(s.id)))}</div>
       </div>
-      {isEmail && (
+      <div style={{ ...panel, display: "flex", flexDirection: "column", gap: 13 }}>
+        <div><div style={{ fontSize: 14.5, fontWeight: 800, color: T.text }}>2. Write the {isEmail ? "email" : "text"}</div><div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>Previewed with the first eligible client; names fill separately for everyone.</div></div>
+        {isEmail && <div><label style={lbl}>Subject</label><input type="text" value={subject} onChange={e => setSubject(e.target.value)} placeholder="A quick note from {company}" style={field} /></div>}
         <div>
-          <label style={lbl}>Subject</label>
-          <input type="text" value={subject} onChange={e => setSubject(e.target.value)} placeholder="A quick note from {company}" style={field} />
+          <label style={lbl}>{isEmail ? "Body" : "Message"}</label>
+          <textarea rows={isEmail ? 6 : 4} value={msg} onChange={e => setMsg(e.target.value)} placeholder="Hi {first}, ..." style={{ ...field, resize: "vertical", lineHeight: 1.5 }} />
+          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>{"{first}"} and {"{company}"} fill in per client{isEmail ? " · branded unsubscribe footer included" : ` · ${msg.length} chars${msg.length > 160 ? " (multi-part)" : ""}`}</div>
+          <AIAssist kind="broadcast" channel={channel} context={{ company: branding?.companyName || "" }} value={msg} onChange={setMsg} wantSubject={isEmail} onSubject={setSubject} />
         </div>
-      )}
-      <div>
-        <label style={lbl}>{isEmail ? "Body" : "Message"}</label>
-        <textarea rows={isEmail ? 6 : 4} value={msg} onChange={e => setMsg(e.target.value)} placeholder="Hi {first}, ..." style={{ ...field, resize: "vertical", lineHeight: 1.5 }} />
-        <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>{"{first}"} and {"{company}"} fill in per client{isEmail ? " · sent from your branded template" : ` · ${msg.length} chars${msg.length > 160 ? " (multi-part)" : ""}`}</div>
-        <AIAssist kind="broadcast" channel={channel} context={{ company: branding?.companyName || "" }} value={msg} onChange={setMsg} wantSubject={isEmail} onSubject={setSubject} />
+        {ready && total > 0 && <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: "11px 13px", fontSize: 13, color: T.text, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{isEmail && subject.trim() ? <><b>{fillOne(subject, recipients[0])}</b><br /><br /></> : null}{fill(recipients[0])}</div>}
       </div>
-      {testMode && <div style={{ fontSize: 12, fontWeight: 700, color: "#B45309", background: hexA("#F59E0B", 0.12), border: `1px solid ${hexA("#F59E0B", 0.4)}`, borderRadius: 10, padding: "9px 12px" }}>{(() => { const lv = recipients.filter(c => clientIsLive(c.id)).length; const protectedCount = Math.max(0, total - lv); return `Test Mode is ON — ${protectedCount} message${protectedCount === 1 ? "" : "s"} ${TEST_MODE.mode === "hold" ? "will be held" : "will route to you"}.${lv ? ` ${lv} pilot client${lv === 1 ? "" : "s"} will receive it FOR REAL.` : " No clients will receive it."}`; })()}</div>}
-      {err && <div style={{ fontSize: 12.5, fontWeight: 700, color: T.accent }}>{err}</div>}
-      {progress ? (
-        <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text }}>Sending… {progress.done}/{progress.total}{progress.failed ? ` · ${progress.failed} failed` : ""}</div>
-      ) : result ? (
-        <div style={{ fontSize: 13.5, fontWeight: 700, color: "#16a34a" }}>{result} <button onClick={() => { setResult(""); }} style={{ background: "none", border: "none", color: T.textMuted, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>New broadcast</button></div>
-      ) : (
-        <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
-          {isEmail && <div>
-            <label style={lbl}>Test first</label>
-            <input type="text" inputMode="numeric" value={testN} onChange={e => setTestN(e.target.value.replace(/\D/g, "").slice(0, 3))} style={{ ...field, width: 74 }} />
+      <div style={{ ...panel, display: "flex", flexDirection: "column", gap: 12 }}>
+        <div><div style={{ fontSize: 14.5, fontWeight: 800, color: T.text }}>3. Review and send</div><div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>Nothing sends until you confirm the final audience.</div></div>
+        {testMode && <div style={{ fontSize: 12, fontWeight: 700, color: "#B45309", background: hexA("#F59E0B", 0.12), border: `1px solid ${hexA("#F59E0B", 0.35)}`, borderRadius: 11, padding: "10px 12px" }}>{(() => { const lv = recipients.filter(c => clientIsLive(c.id)).length; const protectedCount = Math.max(0, total - lv); return `Test Mode is ON — ${protectedCount} message${protectedCount === 1 ? "" : "s"} ${TEST_MODE.mode === "hold" ? "will be held" : "will route to you"}.${lv ? ` ${lv} pilot client${lv === 1 ? "" : "s"} will receive it for real.` : " No clients will receive it."}`; })()}</div>}
+        {err && <div style={{ fontSize: 12.5, fontWeight: 700, color: "#dc2626", background: hexA("#dc2626", 0.08), borderRadius: 11, padding: "10px 12px" }}>{err}</div>}
+        {progress ? <div><div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12.5, fontWeight: 750, color: T.text, marginBottom: 7 }}><span>Sending</span><span>{progress.done}/{progress.total}{progress.failed ? ` · ${progress.failed} failed` : ""}</span></div><div style={{ height: 7, background: T.surfaceAlt, borderRadius: 100, overflow: "hidden" }}><div style={{ width: `${Math.round((progress.done / Math.max(1, progress.total)) * 100)}%`, height: "100%", background: channelTone, transition: "width 0.2s" }} /></div></div>
+        : result ? <div style={{ fontSize: 12.5, fontWeight: 700, lineHeight: 1.5, color: resultStatus === "error" ? "#dc2626" : resultStatus === "warning" ? "#B45309" : "#16a34a", background: hexA(resultStatus === "error" ? "#dc2626" : resultStatus === "warning" ? "#F59E0B" : "#16a34a", 0.09), borderRadius: 11, padding: "10px 12px" }}>{result}<button onClick={() => setResult("")} style={{ marginLeft: 6, minHeight: 32, background: "none", border: "none", color: T.textMuted, fontWeight: 750, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>Start another</button></div>
+        : <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 9 }}>
+            {isEmail ? <button type="button" disabled={sending || !ready || !total} onClick={() => setConfirmPilot(true)} style={{ minHeight: 46, border: `1px solid ${T.border}`, borderRadius: 12, background: T.surfaceAlt, color: T.text, padding: "9px 13px", fontFamily: "inherit", fontSize: 12.5, fontWeight: 750, cursor: (sending || !ready || !total) ? "default" : "pointer", opacity: (sending || !ready || !total) ? 0.45 : 1 }}>Pilot: email first {pilotN}</button>
+            : <Btn variant="ghost" disabled={sending || !ready || !total} onClick={sendTextTestToOwner}>Text test to me</Btn>}
+            <Btn disabled={sending || !ready || !total} onClick={() => setConfirmAll(true)}>{isEmail ? "Email" : "Text"} all {total}</Btn>
           </div>}
-          <Btn variant="ghost" disabled={sending || !ready || !total} onClick={isEmail ? () => send(Math.max(1, Math.min(parseInt(testN) || 1, total))) : sendTextTestToOwner}>{isEmail ? "Send test" : "Text test to me"}</Btn>
-          <Btn disabled={sending || !ready || !total} onClick={() => setConfirmAll(true)} style={{ flex: 1, minWidth: 160 }}>{isEmail ? "Email" : "Text"} all {total}</Btn>
-        </div>
+        {isEmail && !progress && !result && <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}><label style={{ ...lbl, marginBottom: 0 }}>Pilot size</label><input aria-label="Pilot batch size" type="text" inputMode="numeric" value={testN} onChange={e => setTestN(e.target.value.replace(/\D/g, "").slice(0, 3))} style={{ ...field, width: 70 }} /><span style={{ fontSize: 11.5, color: T.textMuted }}>This is a real send to the first eligible clients, subject to Test Mode.</span></div>}
+      </div>
+      {confirmPilot && (
+        <Modal title="Send pilot email batch" onClose={() => setConfirmPilot(false)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ fontSize: 14, color: T.text, lineHeight: 1.55 }}>Send this email to the first <b>{pilotN} eligible client{pilotN === 1 ? "" : "s"}</b>? This is a real client batch, not an owner-only test. Test Mode rules still apply.</div>
+            <div style={{ fontSize: 12.5, color: T.textMuted, background: T.surfaceAlt, borderRadius: 11, padding: "10px 12px", lineHeight: 1.5 }}>{recipients.slice(0, pilotN).map(c => c.name || c.email).join(", ") || "No eligible recipients"}</div>
+            <Btn block lg onClick={() => send(pilotN)}>Email first {pilotN}</Btn>
+          </div>
+        </Modal>
       )}
       {confirmAll && (
         <Modal title={`Send ${isEmail ? "email" : "text"} broadcast`} onClose={() => setConfirmAll(false)}>
@@ -22204,6 +22285,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const [q, setQ] = useState("");              // inbox search
   const [channelFilter, setChannelFilter] = useState("all"); // all | sms | email
   const [filter, setFilter] = useState("all"); // all | unread | lead | bill | client | other
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [openRow, setOpenRow] = useState(null);
   const [copied, setCopied] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -22301,12 +22383,16 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     try {
       const r = await fetch(`${PROD_URL}/api/inbox?limit=100`, { headers: await authHeaders() });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) { setErr(d.error || `Error ${r.status}`); setRows([]); }
+      if (!r.ok) { setErr(d.error || `Error ${r.status}`); setRows(prev => prev === null ? [] : prev); }
       else setRows(d.rows || []);
-    } catch (_) { setErr("Couldn't reach the server."); setRows([]); }
+    } catch (_) { setErr("Couldn't reach the server."); setRows(prev => prev === null ? [] : prev); }
     setRefreshing(false);
   };
   useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (rows === null || err || refreshing) return;
+    window.dispatchEvent(new CustomEvent("sps-inbox-unread", { detail: { count: (rows || []).filter(r => !r.read).length } }));
+  }, [rows, err, refreshing]);
   useEffect(() => { setReplying(false); setReplyText(""); setReplyHtml(""); setReplyMsg(""); }, [openRow && openRow.id]);
   const KIND = { lead: { label: "Lead", color: "#16a34a" }, bill: { label: "Bill", color: "#b45309" }, client: { label: "Client", color: "#2563eb" }, other: { label: "Other", color: null } };
   // Membership is checked against the ACTUAL leads list, not the imported stamp — if a lead
@@ -22321,6 +22407,9 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const list = channelRows
     .filter(r => filter === "all" ? true : filter === "unread" ? !r.read : r.kind === filter)
     .filter(r => !qq || [r.from_name, r.from_email, r.from_phone, r.subject, r.body_text, r.ai && r.ai.summary].some(v => String(v || "").toLowerCase().includes(qq)));
+  useEffect(() => {
+    if (openRow && !list.some(r => r.id === openRow.id)) setOpenRow(null);
+  }, [channelFilter, filter, q]); // eslint-disable-line react-hooks/exhaustive-deps
   const unread = inboxRows.filter(r => !r.read).length;
   const channelUnread = channelRows.filter(r => !r.read).length;
   const markRead = (ids, read = true) => {
@@ -22560,13 +22649,13 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     </div>
   );
   const chip = (id, label) => (
-    <button key={id} onClick={() => setFilter(id)} style={{ padding: "7px 14px", borderRadius: 100, border: `1.5px solid ${filter === id ? T.primary : T.border}`, background: filter === id ? hexA(T.primary, 0.08) : T.surface, color: filter === id ? T.primary : T.textMuted, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, whiteSpace: "nowrap" }}>{label}</button>
+    <button key={id} onClick={() => setFilter(id)} aria-pressed={filter === id} style={{ minHeight: 40, padding: "7px 14px", borderRadius: 100, border: `1.5px solid ${filter === id ? T.primary : T.border}`, background: filter === id ? hexA(T.primary, 0.08) : T.surface, color: filter === id ? T.primary : T.textMuted, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, whiteSpace: "nowrap" }}>{label}</button>
   );
   // Compact icon button for secondary actions (Import / Refresh / Select) — used on phones so the
   // header doesn't stack three text buttons and wrap. Matches the app's Icon style.
   const iconBtn = (icon, label, onClick, active) => (
-    <button type="button" title={label} onClick={onClick}
-      style={{ width: 38, height: 38, borderRadius: 11, border: `1px solid ${active ? T.primary : T.border}`, background: active ? hexA(T.primary, 0.1) : T.surface, color: active ? T.primary : T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0, fontFamily: "inherit" }}>
+    <button type="button" title={label} aria-label={label} onClick={onClick}
+      style={{ width: 44, height: 44, borderRadius: 12, border: `1px solid ${active ? T.primary : T.border}`, background: active ? hexA(T.primary, 0.1) : T.surface, color: active ? T.primary : T.textMuted, display: "grid", placeItems: "center", cursor: onClick ? "pointer" : "default", flexShrink: 0, fontFamily: "inherit", opacity: onClick ? 1 : 0.55 }}>
       <Icon name={icon} size={16} />
     </button>
   );
@@ -22596,13 +22685,15 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     return <div style={{ width: size, height: size, borderRadius: "50%", background: hexA(c, 0.15), color: c, display: "flex", alignItems: "center", justifyContent: "center", fontSize: size * 0.42, fontWeight: 800, flexShrink: 0 }}>{((name || email || "?").trim()[0] || "?").toUpperCase()}</div>;
   };
   const setupPending = err && /hasn't been created|sps_inbox/i.test(err);
-  const hasInboxFilter = !!q.trim() || channelFilter !== "all" || filter !== "all";
+  const showMobileCompose = !wide && !setupPending && rows !== null && (folder === "sent" || channelFilter !== "sms");
+  const hasSearchOrCategory = !!q.trim() || filter !== "all";
+  const hasInboxFilter = hasSearchOrCategory || channelFilter !== "all";
   const emptyInboxTitle = channelFilter === "sms"
-    ? (hasInboxFilter ? "No matching texts" : "No texts here yet")
+    ? (hasSearchOrCategory ? "No matching texts" : "No texts here yet")
     : channelFilter === "email"
-      ? (hasInboxFilter ? "No matching email" : "No email here yet")
-      : (hasInboxFilter ? "No matching messages" : "Your inbox is empty");
-  const emptyInboxCopy = hasInboxFilter
+      ? (hasSearchOrCategory ? "No matching emails" : "No emails here yet")
+      : (hasSearchOrCategory ? "No matching messages" : "Your inbox is empty");
+  const emptyInboxCopy = hasSearchOrCategory
     ? "Try a different channel, category, or search."
     : "Incoming texts and work email will appear here with clear channel labels.";
   // Airier list rows — reused by the desktop list column and the mobile list.
@@ -22638,7 +22729,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   // two-pane keeps its flat divided list.
   const cardRows = list.map((r) => (
     <div key={r.id} onClick={() => { if (selMode) { toggleSel(r.id); return; } setOpenRow(r); setReplying(false); setReplyText(""); setReplyHtml(""); setReplyMsg(""); if (!r.read) markRead([r.id]); }}
-      style={{ position: "relative", display: "flex", gap: 12, padding: "13px 14px", background: sel[r.id] ? hexA(T.primary, 0.06) : T.surface, border: `1px solid ${sel[r.id] ? T.primary : (!r.read ? hexA(T.primary, 0.28) : isSmsRow(r) ? hexA("#7c3aed", 0.22) : T.border)}`, borderRadius: 16, boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 6px 16px rgba(0,0,0,0.05)", cursor: "pointer" }}>
+      style={{ position: "relative", display: "flex", gap: 12, padding: "13px 14px", background: sel[r.id] ? hexA(T.primary, 0.06) : T.surface, border: `1px solid ${sel[r.id] ? T.primary : (!r.read ? hexA(T.primary, 0.28) : isSmsRow(r) ? hexA("#7c3aed", 0.22) : T.border)}`, borderRadius: 16, boxShadow: "0 2px 8px rgba(0,0,0,0.045)", cursor: "pointer" }}>
       {!r.read && <span style={{ position: "absolute", left: -1, top: 14, bottom: 14, width: 3, borderRadius: 3, background: T.primary }} />}
       {selMode && <div style={{ alignSelf: "center", flexShrink: 0 }}><Checkbox checked={!!sel[r.id]} onChange={() => toggleSel(r.id)} /></div>}
       <Avatar name={r.from_name} email={r.from_email} channel={r.channel} size={40} />
@@ -22738,10 +22829,10 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     setSentErr("");
     try {
       const { data, error } = await supabase.from("sps_comms_log").select("*").eq("channel", "email").order("created_at", { ascending: false }).limit(120);
-      if (error) { setSentErr("Couldn't load your sent mail."); setSentRows([]); return; }
+      if (error) { setSentErr("Couldn't load your sent mail."); setSentRows(prev => prev === null ? [] : prev); return; }
       const rows = (data || []).filter(r => /work-email (compose|reply)/i.test(r.origin || "") || /^Email (sent|reply)$/i.test(r.type || ""));
       setSentRows(rows);
-    } catch (_) { setSentErr("Couldn't load your sent mail."); setSentRows([]); }
+    } catch (_) { setSentErr("Couldn't load your sent mail."); setSentRows(prev => prev === null ? [] : prev); }
   };
   useEffect(() => { if (folder === "sent" && sentRows === null) loadSent(); }, [folder]); // eslint-disable-line react-hooks/exhaustive-deps
   const nameForSent = (r) => { if (r.client_id) { const c = (clients || []).find(x => String(x.id) === String(r.client_id)); if (c) return c.name; } return ""; };
@@ -22750,14 +22841,14 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     return `${r.recipient || ""} ${nameForSent(r)} ${r.body || ""} ${r.origin || ""}`.toLowerCase().includes(qq);
   });
   const folderBar = (
-    <div style={{ display: "flex", gap: 4, background: T.surfaceAlt, borderRadius: 12, padding: 4, alignSelf: "flex-start" }}>
+    <div style={{ display: "flex", gap: 4, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 13, padding: 4, alignSelf: "flex-start", flex: wide ? "0 0 auto" : "1 1 100%", width: wide ? "auto" : "100%" }}>
       {[["inbox", "Inbox", unread], ["sent", "Sent email", 0]].map(([id, lbl, badge]) => {
         const on = folder === id;
         return (
           <button key={id} type="button" onClick={() => setFolder(id)}
-            style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "8px 16px", borderRadius: 9, border: "none", background: on ? T.surface : "transparent", color: on ? T.text : T.textMuted, fontSize: 13.5, fontWeight: on ? 800 : 650, cursor: "pointer", fontFamily: "inherit", boxShadow: on ? "0 1px 2px rgba(0,0,0,0.08)" : "none" }}>
+            style={{ minHeight: 42, flex: wide ? "0 0 auto" : 1, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "8px 14px", borderRadius: 9, border: "none", background: on ? T.surface : "transparent", color: on ? T.text : T.textMuted, fontSize: 13.5, fontWeight: on ? 800 : 650, cursor: "pointer", fontFamily: "inherit", boxShadow: on ? "0 1px 2px rgba(0,0,0,0.06)" : "none", whiteSpace: "nowrap" }}>
             <Icon name={id === "inbox" ? "mail" : "send"} size={15} />{lbl}
-            {badge > 0 && <span style={{ fontSize: 10.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.12), borderRadius: 100, padding: "1px 7px" }}>{badge}</span>}
+            {badge > 0 && <span style={{ fontSize: 10.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.12), borderRadius: 100, padding: "1px 7px" }}>{badgeLabel(badge)}</span>}
           </button>
         );
       })}
@@ -22766,23 +22857,16 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const sentView = (
     <>
       <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-        <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: wide ? T.surfaceAlt : T.surface, border: `1px solid ${T.border}`, borderRadius: wide ? 12 : 14, padding: wide ? "11px 13px" : "13px 15px", boxShadow: wide ? "none" : "0 1px 2px rgba(0,0,0,0.04), 0 6px 18px rgba(0,0,0,0.05)", minWidth: 0 }}>
-          <svg viewBox="0 0 24 24" width={wide ? 15 : 16} height={wide ? 15 : 16} fill="none" stroke={T.textMuted} strokeWidth={2} style={{ flexShrink: 0 }}><circle cx="11" cy="11" r="7" /><path d="m21 21-4-4" /></svg>
-          <input value={sentQ} onChange={e => setSentQ(e.target.value)} placeholder="Search sent mail" style={{ flex: 1, border: "none", background: "none", outline: "none", fontFamily: "inherit", fontSize: wide ? 13.5 : 14, color: T.text, minWidth: 0 }} />
-          {sentQ && <button onClick={() => setSentQ("")} title="Clear" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", display: "inline-flex", padding: 0, flexShrink: 0 }}><Icon name="close" size={15} /></button>}
-        </div>
-        <Btn variant="ghost" sm onClick={loadSent}>Refresh</Btn>
+        <div style={{ flex: 1, minWidth: 0 }}><CommsSearchField value={sentQ} onChange={setSentQ} placeholder="Search sent mail" T={T} /></div>
+        {wide ? <Btn variant="ghost" sm onClick={loadSent}>Refresh</Btn> : iconBtn("refresh", "Refresh sent email", loadSent, false)}
       </div>
       {sentRows === null && <div style={{ textAlign: "center", padding: 40, color: T.textMuted, fontSize: 13 }}>Loading your sent mail…</div>}
-      {sentErr && <div style={{ fontSize: 13, color: T.warning, textAlign: "center", padding: 20 }}>{sentErr}</div>}
+      {sentErr && <CommsEmptyState icon="warning" title="Sent email couldn't load" copy={sentErr} action={<Btn variant="outline" sm onClick={loadSent}>Try again</Btn>} T={T} />}
       {sentRows !== null && !sentErr && sentList.length === 0 && (
-        <div style={{ textAlign: "center", padding: "44px 24px", color: T.textMuted }}>
-          <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginBottom: 6 }}>No sent email yet</div>
-          <div style={{ fontSize: 13, lineHeight: 1.55, maxWidth: 380, margin: "0 auto" }}>Emails you compose or reply to from here show up in Sent, newest first.</div>
-        </div>
+        <CommsEmptyState icon="send" title={sentQ ? "Nothing matches" : "No sent email yet"} copy={sentQ ? "Try a different search." : "Emails you compose or reply to from here show up in Sent, newest first."} action={!sentQ ? <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }}>New email</Btn> : null} T={T} />
       )}
-      {sentList.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: wide ? 8 : 142 }}>
+      {!sentErr && sentList.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: wide ? 8 : (showMobileCompose ? 72 : 12) }}>
           {sentList.map(r => {
             const to = r.recipient || nameForSent(r) || "—";
             const parts = String(r.body || "").split(" — ");
@@ -22792,7 +22876,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
             const isReply = /reply/i.test(r.type || "");
             return (
               <div key={r.id} onClick={() => setOpenSent(open ? null : r.id)}
-                style={{ display: "flex", gap: 12, padding: "13px 14px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 6px 16px rgba(0,0,0,0.05)", cursor: "pointer" }}>
+                style={{ display: "flex", gap: 12, padding: "13px 14px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, boxShadow: "0 2px 8px rgba(0,0,0,0.045)", cursor: "pointer" }}>
                 <Avatar name={nameForSent(r) || to} email={r.recipient} size={40} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -22815,6 +22899,17 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   );
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <CommsPageHeader
+        title={folder === "inbox" ? "Unified inbox" : "Sent email"}
+        description={folder === "inbox" ? `${unread} unread · business texts and work email, clearly separated` : "Email you compose and reply to from SPS Way."}
+        icon={folder === "inbox" ? "inbox" : "send"}
+        meta={folder === "inbox" ? <>
+          <span style={{ color: "#7c3aed", background: hexA("#7c3aed", 0.1), borderRadius: 100, padding: "3px 9px", fontSize: 10.5, fontWeight: 800 }}>{textCount} text{textCount === 1 ? "" : "s"}</span>
+          <span style={{ color: "#2563eb", background: hexA("#2563eb", 0.1), borderRadius: 100, padding: "3px 9px", fontSize: 10.5, fontWeight: 800 }}>{emailCount} email{emailCount === 1 ? "" : "s"}</span>
+        </> : null}
+        action={wide ? <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="edit" size={14} />New email</Btn> : null}
+        T={T}
+      />
       {/* Folder switch (Inbox / Sent) + context actions — one clean toolbar row */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         {folderBar}
@@ -22823,46 +22918,32 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
           <>
             <Btn variant="ghost" sm onClick={importState.running ? undefined : () => setImportOpen(o => !o)}>{importState.running ? "Importing…" : "Import"}</Btn>
             <Btn variant="ghost" sm onClick={refreshing ? undefined : load}>{refreshing ? "Refreshing…" : "Refresh"}</Btn>
-            {list.length > 0 && <Btn variant={selMode ? "primary" : "ghost"} sm onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }}>{selMode ? "Done" : "Select"}</Btn>}
+            {(list.length > 0 || selMode) && <Btn variant={selMode ? "primary" : "ghost"} sm onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }}>{selMode ? "Done" : "Select"}</Btn>}
           </>
         ) : (
           <>
-            <button type="button" onClick={refreshing ? undefined : load} title="Refresh" style={{ width: 38, height: 38, borderRadius: 12, border: "none", background: "none", color: T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}><Icon name="refresh" size={18} /></button>
-            {list.length > 0 && <button type="button" onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }} title={selMode ? "Done" : "Select"} style={{ width: 38, height: 38, borderRadius: 12, border: "none", background: selMode ? hexA(T.primary, 0.1) : "none", color: selMode ? T.primary : T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}><Icon name="check" size={18} /></button>}
+            {iconBtn("refresh", refreshing ? "Refreshing" : "Refresh inbox", refreshing ? null : load, false)}
+            {(list.length > 0 || selMode) && iconBtn("check", selMode ? "Finish selecting" : "Select messages", () => { if (selMode) exitSelect(); else setSelMode(true); }, selMode)}
           </>
         ))}
-        {wide && <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }} style={{ display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0 }}><Icon name="edit" size={14} />New email</Btn>}
       </div>
       {folder === "inbox" ? (
         <>
-      {wide ? (
-        <>
-          {/* Desktop: search + pill filters */}
-          <div style={{ display: "flex", gap: 9, alignItems: "center" }}>
-            <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "11px 13px", minWidth: 0 }}>
-              <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke={T.textMuted} strokeWidth={2} style={{ flexShrink: 0 }}><circle cx="11" cy="11" r="7" /><path d="m21 21-4-4" /></svg>
-              <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search messages, people, tags" style={{ flex: 1, border: "none", background: "none", outline: "none", fontFamily: "inherit", fontSize: 13.5, color: T.text, minWidth: 0 }} />
-              {q && <button onClick={() => setQ("")} title="Clear" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", display: "inline-flex", padding: 0, flexShrink: 0 }}><Icon name="close" size={15} /></button>}
-            </div>
-          </div>
-          {channelSwitcher}
-          <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none" }}>
-            {chip("all", "Any category")}{chip("unread", `Unread${channelUnread ? ` · ${channelUnread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
-          </div>
-        </>
-      ) : (
-        <>
-          {/* Mobile — airy: one search, pill filters; card list + floating Compose FAB below */}
-          <div style={{ display: "flex", alignItems: "center", gap: 9, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: "13px 15px", boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 6px 18px rgba(0,0,0,0.05)", minWidth: 0 }}>
-            <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={T.textMuted} strokeWidth={2} style={{ flexShrink: 0 }}><circle cx="11" cy="11" r="7" /><path d="m21 21-4-4" /></svg>
-            <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search messages, people, tags" style={{ flex: 1, border: "none", background: "none", outline: "none", fontFamily: "inherit", fontSize: 14, color: T.text, minWidth: 0 }} />
-            {q && <button onClick={() => setQ("")} title="Clear" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", display: "inline-flex", padding: 0, flexShrink: 0 }}><Icon name="close" size={16} /></button>}
-          </div>
-          {channelSwitcher}
-          <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none" }}>
-            {chip("all", "Any category")}{chip("unread", `Unread${channelUnread ? ` · ${channelUnread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
-          </div>
-        </>
+      <div style={{ display: "grid", gridTemplateColumns: wide ? "minmax(260px, 1fr) minmax(330px, 0.8fr)" : "1fr", gap: 10, alignItems: "center" }}>
+        <CommsSearchField value={q} onChange={setQ} placeholder="Search messages, people, tags" T={T} />
+        {channelSwitcher}
+      </div>
+      {!wide && (
+        <button type="button" onClick={() => setFiltersOpen(v => !v)} aria-expanded={filtersOpen}
+          style={{ minHeight: 44, width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "9px 12px", background: T.surface, border: `1px solid ${filter !== "all" ? T.primary : T.border}`, borderRadius: 12, color: filter !== "all" ? T.primary : T.textMuted, fontFamily: "inherit", fontSize: 12.5, fontWeight: 750, cursor: "pointer" }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}><Icon name="funnel" size={15} />{filter === "all" ? "Category filters" : `Filtered by ${KIND[filter]?.label || "Unread"}`}</span>
+          <span style={{ display: "inline-flex", transform: filtersOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}><Icon name="chevronD" size={15} /></span>
+        </button>
+      )}
+      {(wide || filtersOpen || filter !== "all") && (
+        <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none" }}>
+          {chip("all", "All categories")}{chip("unread", `Unread${channelUnread ? ` · ${channelUnread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
+        </div>
       )}
       {selMode && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "8px 12px" }}>
@@ -22870,8 +22951,8 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
           <span style={{ fontSize: 12.5, fontWeight: 700, color: T.textMuted }}>{selIds.length} selected</span>
           {selIds.length > 0 && (
             <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginLeft: "auto" }}>
-              <Btn variant="ghost" sm onClick={busyBulk ? undefined : () => markRead(selIds, true)}>Mark read</Btn>
-              <Btn variant="ghost" sm onClick={busyBulk ? undefined : () => markRead(selIds, false)}>Unread</Btn>
+              <Btn variant="ghost" sm onClick={busyBulk ? undefined : () => { markRead(selIds, true); exitSelect(); }}>Mark read</Btn>
+              <Btn variant="ghost" sm onClick={busyBulk ? undefined : () => { markRead(selIds, false); exitSelect(); }}>Unread</Btn>
               <span style={{ width: 1, height: 20, background: T.border, alignSelf: "center" }} />
               {["lead", "bill", "client", "other"].map(k => (
                 <button key={k} type="button" onClick={busyBulk ? undefined : () => bulkSetKind(k)}
@@ -22904,19 +22985,14 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       )}
       {rows === null && <div style={{ textAlign: "center", padding: 40, color: T.textMuted, fontSize: 13 }}>Loading your inbox…</div>}
       {setupPending && (
-        <div style={{ textAlign: "center", padding: "44px 24px", color: T.textMuted }}>
-          <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginBottom: 6 }}>Almost wired up</div>
-          <div style={{ fontSize: 13, lineHeight: 1.6, maxWidth: 400, margin: "0 auto" }}>The inbox table isn't created yet — finish the one-time setup (SQL + Gmail forwarding) and your work email starts flowing in here, AI-sorted into Leads, Bills, and the rest.</div>
-        </div>
+        <CommsEmptyState icon="warning" title="Almost wired up" copy="The inbox table isn't created yet. Finish the one-time setup and work email will start flowing here, automatically sorted." T={T} />
       )}
-      {err && !setupPending && <div style={{ fontSize: 13, color: T.warning, textAlign: "center", padding: 20 }}>{err}</div>}
+      {err && !setupPending && <CommsEmptyState icon="warning" title="Inbox couldn't refresh" copy={err} action={<Btn variant="outline" sm onClick={load}>Try again</Btn>} T={T} />}
       {rows !== null && !err && list.length === 0 && (
-        <div style={{ textAlign: "center", padding: "44px 24px", color: T.textMuted }}>
-          <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginBottom: 6 }}>{emptyInboxTitle}</div>
-          <div style={{ fontSize: 13, lineHeight: 1.55, maxWidth: 380, margin: "0 auto" }}>{emptyInboxCopy}</div>
-        </div>
+        <CommsEmptyState icon={channelFilter === "sms" ? "message" : channelFilter === "email" ? "mail" : "inbox"} title={emptyInboxTitle} copy={emptyInboxCopy}
+          action={hasInboxFilter ? <Btn variant="outline" sm onClick={() => { setQ(""); setChannelFilter("all"); setFilter("all"); setFiltersOpen(false); }}>Clear filters</Btn> : null} T={T} />
       )}
-      {wide ? (
+      {list.length > 0 && (wide ? (
         <div style={{ display: "grid", gridTemplateColumns: "minmax(300px, 360px) 1fr", gap: 12, alignItems: "start" }}>
           <div style={{ border: `1px solid ${T.border}`, borderRadius: 16, overflow: "hidden", background: T.surface, maxHeight: "calc(100dvh - 250px)", overflowY: "auto" }}>{listRows}</div>
           <div style={{ border: `1px solid ${T.border}`, borderRadius: 16, background: T.surface, minHeight: "calc(100dvh - 250px)", maxHeight: "calc(100dvh - 250px)", overflow: "hidden", display: "flex", flexDirection: "column" }}>
@@ -22937,14 +23013,14 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
           </div>
         </div>
       ) : (
-        list.length > 0 && <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: 142 }}>{cardRows}</div>
-      )}
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: showMobileCompose ? 72 : 12 }}>{cardRows}</div>
+      ))}
         </>
       ) : sentView}
       {/* Floating Compose FAB (mobile) — sits above the bottom nav, matching the mockup. */}
-      {!wide && !setupPending && rows !== null && (
-        <button type="button" onClick={() => { setComposeMsg(""); setComposeOpen(true); }}
-          style={{ position: "fixed", right: "max(18px, env(safe-area-inset-right))", bottom: vp.isDesktop ? "calc(env(safe-area-inset-bottom) + 24px)" : "calc(env(safe-area-inset-bottom) + 82px)", zIndex: 90, display: "inline-flex", alignItems: "center", gap: 8, background: T.primary, color: "#fff", border: "none", borderRadius: 100, padding: "14px 20px", fontFamily: "inherit", fontSize: 14, fontWeight: 780, cursor: "pointer", boxShadow: `0 8px 24px ${hexA(T.primary, 0.4)}` }}>
+      {showMobileCompose && (
+        <button type="button" aria-label="Compose a new email" onClick={() => { setComposeMsg(""); setComposeOpen(true); }}
+          style={{ position: "fixed", right: "max(18px, env(safe-area-inset-right))", bottom: vp.isDesktop ? "calc(env(safe-area-inset-bottom) + 24px)" : "calc(env(safe-area-inset-bottom) + 82px)", zIndex: 90, minHeight: 52, display: "inline-flex", alignItems: "center", gap: 8, background: T.primary, color: "#fff", border: "none", borderRadius: 100, padding: "13px 19px", fontFamily: "inherit", fontSize: 14, fontWeight: 780, cursor: "pointer", boxShadow: `0 7px 20px ${hexA(T.primary, 0.22)}` }}>
           <Icon name="edit" size={17} />New email
         </button>
       )}
@@ -23118,14 +23194,24 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
 function LogsScreen({ clients, showOwnerRows = false }) {
   const { T } = useApp();
   const [rows, setRows] = useState(null);
+  const [loadErr, setLoadErr] = useState("");
+  const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState("all"); // all | sms | email | auto | alerts | failed
   const [q, setQ] = useState("");
   const [openId, setOpenId] = useState(null);
   const load = async () => {
+    if (loading) return;
+    setLoading(true);
+    setLoadErr("");
     try {
-      const { data } = await supabase.from("sps_comms_log").select("*").order("created_at", { ascending: false }).limit(250);
+      const { data, error } = await supabase.from("sps_comms_log").select("*").order("created_at", { ascending: false }).limit(250);
+      if (error) throw error;
       setRows(data || []);
-    } catch (_) { setRows([]); }
+    } catch (_) {
+      setLoadErr("We couldn't load communication activity right now.");
+      setRows(prev => prev === null ? [] : prev);
+    }
+    setLoading(false);
   };
   useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const nameOf = (cid) => {
@@ -23160,19 +23246,19 @@ function LogsScreen({ clients, showOwnerRows = false }) {
     const o = String(r.origin || "").toLowerCase();
     if (/work-email compose/.test(o)) return "You wrote this in Email";
     if (/work-email reply/.test(o)) return "You replied in Email";
+    if (/test mode/.test(o)) return "Held by Test Mode (not actually sent)";
+    if (/nudge|payment/.test(o)) return "Payment reminder";
+    if (/seasonal/.test(o)) return "Seasonal outreach";
+    if (/win-?back/.test(o)) return "Win-back check-in";
+    if (/post-visit|recap|summary/.test(o)) return "Post-visit recap";
     if (/on-my-way|on my way/.test(o)) return "Auto-sent when the tech headed out";
     if (/geofence|arriv/.test(o)) return "Auto-sent on arrival";
     if (/remind/.test(o)) return "Automatic appointment reminder";
-    if (/nudge|payment/.test(o)) return "Payment reminder";
-    if (/win-?back/.test(o)) return "Win-back check-in";
-    if (/seasonal/.test(o)) return "Seasonal outreach";
-    if (/post-visit|recap|summary/.test(o)) return "Post-visit recap";
     if (/invoice/.test(o)) return "Invoice sent";
     if (/broadcast/.test(o)) return "Broadcast to clients";
     if (/lead/.test(o)) return "New-lead alert";
     if (/digest|report/.test(o)) return "Your report";
     if (/alert/.test(o)) return "Alert to you";
-    if (/test mode/.test(o)) return "Held by Test Mode (not actually sent)";
     return (r.origin && r.origin !== "—") ? r.origin : "Sent from the app";
   };
   const timeOnly = (iso) => { try { return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }); } catch (_) { return ""; } };
@@ -23192,41 +23278,29 @@ function LogsScreen({ clients, showOwnerRows = false }) {
   const groups = [];
   let ck = null;
   list.forEach(r => { const k = dayKey(r.created_at); if (k !== ck) { groups.push({ key: k, label: dayLabel(r.created_at), rows: [] }); ck = k; } groups[groups.length - 1].rows.push(r); });
-  const chColor = (r) => r.ok === false ? "#dc2626" : (r.channel === "email" ? T.primary : "#16a34a");
+  const chColor = (r) => r.ok === false ? "#dc2626" : (r.channel === "email" ? "#2563eb" : "#7c3aed");
   const chip = (id, label) => (
-    <button key={id} onClick={() => setFilter(id)} style={{ padding: "7px 13px", borderRadius: 100, border: `1.5px solid ${filter === id ? T.primary : T.border}`, background: filter === id ? hexA(T.primary, 0.08) : T.surface, color: filter === id ? T.primary : T.textMuted, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, whiteSpace: "nowrap" }}>{label}</button>
+    <button key={id} onClick={() => setFilter(id)} aria-pressed={filter === id} style={{ minHeight: 40, padding: "7px 13px", borderRadius: 100, border: `1.5px solid ${filter === id ? T.primary : T.border}`, background: filter === id ? hexA(T.primary, 0.08) : T.surface, color: filter === id ? T.primary : T.textMuted, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, whiteSpace: "nowrap" }}>{label}</button>
   );
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      {/* Prominent search — find a past send by person or content */}
-      <div style={{ display: "flex", alignItems: "center", gap: 9, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: "12px 14px", boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 6px 18px rgba(0,0,0,0.05)", minWidth: 0 }}>
-        <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke={T.textMuted} strokeWidth={2} style={{ flexShrink: 0 }}><circle cx="11" cy="11" r="7" /><path d="m21 21-4-4" /></svg>
-        <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search sent messages by person or content" style={{ flex: 1, border: "none", background: "none", outline: "none", fontFamily: "inherit", fontSize: 14, color: T.text, minWidth: 0 }} />
-        {q && <button onClick={() => setQ("")} title="Clear" style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", display: "inline-flex", padding: 0, flexShrink: 0 }}><Icon name="close" size={16} /></button>}
-      </div>
+      <CommsPageHeader title="Activity" description="A searchable history of every text and email sent from SPS Way." icon="history" action={
+        <button type="button" onClick={load} disabled={loading} aria-label="Refresh activity" title="Refresh activity" style={{ width: 44, height: 44, borderRadius: 12, border: `1px solid ${T.border}`, background: T.surface, color: T.textMuted, display: "grid", placeItems: "center", cursor: loading ? "default" : "pointer", opacity: loading ? 0.6 : 1 }}><span style={{ display: "inline-flex", animation: loading ? "spin 0.7s linear infinite" : "none" }}><Icon name="refresh" size={17} /></span></button>
+      } T={T} />
+      <CommsSearchField value={q} onChange={setQ} placeholder="Search by person or message" T={T} />
       <div style={{ display: "flex", gap: 8, alignItems: "center", overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none" }}>
         {chip("all", "All")}{chip("sms", "Texts")}{chip("email", "Emails")}{chip("auto", "Automated")}{showOwnerRows && chip("alerts", "Alerts to you")}{chip("failed", "Failed")}
-        <div style={{ flex: 1, minWidth: 8 }} />
-        <Btn variant="ghost" sm onClick={load}>Refresh</Btn>
       </div>
       {rows === null && <div style={{ textAlign: "center", padding: 40, color: T.textMuted, fontSize: 13 }}>Loading your activity…</div>}
-      {rows !== null && list.length === 0 && (
-        <div style={{ textAlign: "center", padding: "48px 24px", color: T.textMuted }}>
-          <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginBottom: 6 }}>{(q || filter !== "all") ? "Nothing matches" : "Nothing here yet"}</div>
-          <div style={{ fontSize: 13, lineHeight: 1.55, maxWidth: 380, margin: "0 auto" }}>{(q || filter !== "all") ? "Try a different search or filter." : "Every text and email the app sends — yours and the automatic ones — shows up here as a daily timeline."}</div>
-        </div>
-      )}
-      {groups.map(g => (
+      {loadErr && <CommsEmptyState icon="warning" title="Activity couldn't load" copy={loadErr} action={<Btn variant="outline" sm onClick={load}>Try again</Btn>} T={T} />}
+      {rows !== null && !loadErr && list.length === 0 && <CommsEmptyState icon="history" title={(q || filter !== "all") ? "Nothing matches" : "Nothing here yet"} copy={(q || filter !== "all") ? "Try a different search or filter." : "Every text and email the app sends will appear here as a daily timeline."} action={(q || filter !== "all") ? <Btn variant="outline" sm onClick={() => { setQ(""); setFilter("all"); }}>Clear filters</Btn> : null} T={T} />}
+      {!loadErr && groups.map(g => (
         <div key={g.key} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 2px 0" }}>
-            <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: "0.02em", color: T.text }}>{g.label}</span>
-            <span style={{ fontSize: 11, fontWeight: 700, color: T.textMuted }}>{g.rows.length}</span>
-            <div style={{ flex: 1, height: 1, background: hexA(T.border, 0.7) }} />
-          </div>
+          <CommsGroupHeader title={g.label} count={g.rows.length} T={T} />
           {g.rows.map(r => {
             const open = openId === r.id;
             return (
-              <div key={r.id} onClick={() => setOpenId(open ? null : r.id)} style={{ display: "flex", gap: 12, padding: "12px 14px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.04)", cursor: "pointer" }}>
+              <div key={r.id} onClick={() => setOpenId(open ? null : r.id)} style={{ display: "flex", gap: 12, padding: "12px 14px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, boxShadow: "0 2px 8px rgba(0,0,0,0.035)", cursor: "pointer" }}>
                 <div style={{ width: 38, height: 38, borderRadius: 11, background: hexA(chColor(r), 0.12), color: chColor(r), display: "grid", placeItems: "center", flexShrink: 0 }}>
                   <Icon name={r.channel === "email" ? "mail" : "message"} size={16} />
                 </div>
@@ -23249,7 +23323,7 @@ function LogsScreen({ clients, showOwnerRows = false }) {
           })}
         </div>
       ))}
-      {rows !== null && rows.length > 0 && (
+      {rows !== null && !loadErr && rows.length > 0 && (
         <div style={{ fontSize: 11.5, color: T.textMuted, textAlign: "center", padding: "4px 0 12px" }}>Showing the last {rows.length} sends.</div>
       )}
     </div>
@@ -23270,18 +23344,18 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
     inbox:     isAdmin || !!perms.commsInbox,
     reminders: isAdmin || !!perms.commsReminders,
     broadcast: isAdmin || !!perms.commsBroadcast,
-    settings:  isAdmin || !!perms.commsSettings || !!perms.editNotifications, // editNotifications keeps its old access (identity + Test Mode + alerts moved here)
+    settings:  isAdmin || !!perms.commsSettings || !!perms.editNotifications,
     log:       isAdmin || !!perms.commsLog,
     email:     isAdmin, // the owner's private work inbox — owner only, no per-staff grant
   };
   const SECTIONS = [
-    { id: "messages", label: "Messages", icon: "message" },
+    { id: "messages", label: "Chat", icon: "message" },
     { id: "inbox", label: "Leads", icon: "funnel" },
     { id: "email", label: "Inbox", icon: "mail" },
     { id: "reminders", label: "Reminders", icon: "calendar" },
     { id: "broadcast", label: "Broadcast", icon: "mail" },
     { id: "settings", label: "Settings", icon: "sliders" },
-    { id: "log", label: "Log", icon: "history" },
+    { id: "log", label: "Activity", icon: "history" },
   ].filter(s => CAN[s.id]);
   const firstId = SECTIONS[0] ? SECTIONS[0].id : "messages";
   const secKey = SECTIONS.map(s => s.id).join(",");
@@ -23296,8 +23370,14 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
     const nav = mobileNavRef.current;
     const active = nav && nav.querySelector(`[data-comms-section="${section}"]`);
     if (!nav || !active) return;
-    const left = active.offsetLeft - Math.max(0, (nav.clientWidth - active.offsetWidth) / 2);
-    try { nav.scrollTo({ left, behavior: "smooth" }); } catch (_) { nav.scrollLeft = left; }
+    try {
+      active.scrollIntoView({ behavior: "smooth", inline: "nearest", block: "nearest" });
+    } catch (_) {
+      const left = active.offsetLeft;
+      const right = left + active.offsetWidth;
+      if (left < nav.scrollLeft) nav.scrollLeft = left;
+      else if (right > nav.scrollLeft + nav.clientWidth) nav.scrollLeft = right - nav.clientWidth;
+    }
   }, [section, initialSectionNonce]);
   // Collapsible Comms sidebar — reclaim horizontal space on desktop (icon-only rail). Persisted.
   const [navCollapsed, setNavCollapsed] = useState(() => { try { return localStorage.getItem("sps_comms_nav_collapsed") === "1"; } catch { return false; } });
@@ -23315,7 +23395,8 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
       {section === "messages" && CAN.messages && <div style={{ padding: "0 16px" }}><MessagesScreen clients={clients} currentUser={currentUser} T={T} /></div>}
       {section === "reminders" && CAN.reminders && <div style={{ padding: "0 16px" }}><RemindersScreen schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} /></div>}
       {section === "inbox" && CAN.inbox && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={onConvertLead} onLink={onLinkLead} openLeadId={openLeadId} onLeadOpened={onLeadOpened} vp={vp} />}
-      {section === "settings" && CAN.settings && <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 18 }}>
+      {section === "settings" && CAN.settings && <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 18, maxWidth: 920, margin: "0 auto" }}>
+        <CommsPageHeader title="Communication settings" description="Sending identity, safety controls, reminders, automation, and message templates." icon="sliders" T={T} />
         {/* THE control room — every number + email the app sends from / alerts you at lives here.
             Gates preserve the pre-consolidation surfaces: identity + Test Mode + alerts stay on
             editNotifications; digest/reminders/automations stay on commsSettings; owner sees all. */}
@@ -23325,11 +23406,11 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
           <Card><CardHeader title="Test Mode, Your Contacts & Alerts" /><NotificationSettings email={email} setEmail={setEmail} branding={branding} clients={clients} /></Card>
         )}
         {(perms.isAdmin || perms.commsSettings) && <OwnerDigestSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} branding={branding} T={T} />}
-        {(perms.isAdmin || perms.commsSettings) && <ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />}
-        {(perms.isAdmin || perms.commsSettings) && <CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} />}
+        {(perms.isAdmin || perms.commsSettings) && <Card><div style={{ padding: 18 }}><ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /></div></Card>}
+        {(perms.isAdmin || perms.commsSettings) && <Card><div style={{ padding: 18 }}><CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /></div></Card>}
         {/* Message + email templates now live HERE (moved out of Customize so all comms editing
             is in one place). EmailSettings = client texts/emails; InviteEmailSettings = staff invite + login emails. */}
-        {(perms.isAdmin || perms.editNotifications) && <Card><CardHeader title="Message & Email Templates" /><EmailSettings email={emailTpl} setEmail={setEmailTpl} branding={brandTpl} setBranding={setBrandTpl} /></Card>}
+        {(perms.isAdmin || perms.editNotifications) && <div><EmailSettings email={emailTpl} setEmail={setEmailTpl} branding={brandTpl} setBranding={setBrandTpl} /></div>}
         {(perms.isAdmin || perms.editSettings || perms.canInvoice) && <Card><CardHeader title="Staff Invite & Login Emails" /><InviteEmailSettings email={emailTpl} setEmail={setEmailTpl} branding={brandTpl} /></Card>}
       </div>}
       {section === "broadcast" && CAN.broadcast && <BroadcastSection clients={clients} invoices={invoices} email={email} branding={branding} T={T} />}
@@ -23347,26 +23428,24 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
     // above the tabs as a white sliver. The nav restores the spacing via its own paddingTop.
     const padTop = vpx.isPhone ? 22 : 28;
     return (
-      <div style={{ maxWidth: 780, margin: single ? "0 auto" : `-${padTop}px auto 0` }}>
-        {single && SECTIONS[0] && <div style={{ padding: "14px 16px 0", fontSize: 26, fontWeight: 840, color: T.text, letterSpacing: "-0.035em" }}>{SECTIONS[0].label}</div>}
+      <div style={{ maxWidth: 780, marginTop: single ? 0 : -padTop, marginLeft: vpx.isPhone ? -16 : "auto", marginRight: vpx.isPhone ? -16 : "auto" }}>
         {!single && (
           // Pinned section switcher — sticks flush under the app header instead of scrolling away and
           // resting half-hidden (which read as janky). The opaque background hides content passing under it.
-          <div style={{ position: "sticky", top: 0, zIndex: 30, background: T.bg, padding: `${padTop + 12}px 16px 0` }}>
-            <div ref={mobileNavRef} style={{ display: "flex", gap: 20, overflowX: "auto", WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", borderBottom: `1px solid ${T.border}` }}>
+          <div style={{ position: "sticky", top: 0, zIndex: 30, background: hexA(T.bg, 0.97), backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)", padding: `${padTop + 8}px 12px 6px` }}>
+            <div ref={mobileNavRef} style={{ display: "flex", gap: 4, overflowX: "auto", WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", scrollPadding: 4, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 14, padding: 4 }}>
               {SECTIONS.map(s => {
                 const on = section === s.id;
                 return (
-                  <button key={s.id} data-comms-section={s.id} onClick={() => setSection(s.id)} style={{ flexShrink: 0, position: "relative", display: "flex", alignItems: "center", gap: 7, padding: "10px 2px 12px", background: "none", border: "none", fontSize: 14.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", color: on ? T.text : T.textMuted }}>
+                  <button key={s.id} data-comms-section={s.id} onClick={() => setSection(s.id)} aria-current={on ? "page" : undefined} style={{ minHeight: 42, flexShrink: 0, scrollSnapAlign: "start", display: "flex", alignItems: "center", gap: 7, padding: "9px 12px", background: on ? T.surface : "transparent", border: "none", borderRadius: 10, boxShadow: on ? "0 1px 3px rgba(0,0,0,0.07)" : "none", fontSize: 13.5, fontWeight: on ? 800 : 700, cursor: "pointer", fontFamily: "inherit", color: on ? T.primary : T.textMuted }}>
                     <Icon name={s.icon} size={15} />{s.label}
-                    {on && <span style={{ position: "absolute", left: 0, right: 0, bottom: -1, height: 2.5, borderRadius: 3, background: T.primary }} />}
                   </button>
                 );
               })}
             </div>
           </div>
         )}
-        <div style={{ paddingBottom: 90, paddingTop: 16 }}>{content}</div>
+        <div style={{ paddingTop: 16 }}>{content}</div>
       </div>
     );
   }
@@ -26611,7 +26690,7 @@ function NavSheet({ page, perms, navUnread, reminderDue, leadDue = 0, navDock, s
                 style={{ display: "flex", alignItems: "center", gap: 11, padding: "15px 14px", border: `1.5px solid ${active ? T.primary : T.border}`, borderRadius: 14, background: active ? hexA(T.primary, 0.08) : T.surface, color: active ? T.primary : T.text, cursor: "pointer", fontFamily: "inherit", textAlign: "left", position: "relative" }}>
                 <Icon name={n.icon} size={20} />
                 <span style={{ fontWeight: 700, fontSize: 14 }}>{n.label}</span>
-                {badge > 0 && <span style={{ position: "absolute", top: 8, right: 10, minWidth: 18, height: 18, borderRadius: 9, background: T.primary, color: "#fff", fontSize: 11, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 5px" }}>{badge}</span>}
+                {badge > 0 && <span style={{ position: "absolute", top: 8, right: 10, minWidth: 18, height: 18, borderRadius: 9, background: T.primary, color: "#fff", fontSize: 11, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 5px" }}>{badgeLabel(badge)}</span>}
               </button>
             );
           })}
@@ -29491,7 +29570,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
                   ? <svg viewBox="0 0 24 24" width={21} height={21} fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round"><path d="M12 21s7-5.5 7-11a7 7 0 0 0-14 0c0 5.5 7 11 7 11z" /><path d="M9 11l3-2.4 3 2.4" /><path d="M10.2 10.4V13h3.6v-2.6" /></svg>
                   : <CIcon name={n.icon} size={21} />}
                 {badge > 0 && !active && (
-                  <span style={{ position: "absolute", top: -1, right: 1, minWidth: 15, height: 15, borderRadius: 8, background: "#E5484D", color: "#fff", fontSize: 9.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px", border: `2px solid ${T.surface}` }}>{badge}</span>
+                  <span style={{ position: "absolute", top: -1, right: 1, minWidth: 15, height: 15, borderRadius: 8, background: "#E5484D", color: "#fff", fontSize: 9.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px", border: `2px solid ${T.surface}` }}>{badgeLabel(badge)}</span>
                 )}
               </span>
               <span style={{ fontSize: 10, fontWeight: active ? 700 : 500, letterSpacing: "-0.01em", whiteSpace: "nowrap" }}>{n.label}</span>
@@ -29560,10 +29639,10 @@ function DesktopSidebar({ page, perms, navUnread, reminderDue, leadDue = 0, onNa
               style={{ display: "flex", alignItems: "center", gap: 12, justifyContent: collapsed ? "center" : "flex-start", padding: collapsed ? "11px 0" : "11px 13px", border: "none", borderRadius: 11, background: active ? T.primary : "transparent", color: active ? "#fff" : T.text, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%", fontWeight: active ? 700 : 600, fontSize: 14, letterSpacing: "-0.01em" }}>
               <span style={{ position: "relative", display: "inline-flex", flexShrink: 0 }}>
                 <Icon name={n.icon} size={19} />
-                {badge > 0 && collapsed && <span style={{ position: "absolute", top: -6, right: -9, minWidth: 15, height: 15, borderRadius: 8, background: active ? "#fff" : T.primary, color: active ? T.primary : "#fff", fontSize: 9, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px", border: `2px solid ${active ? T.primary : T.surface}` }}>{badge}</span>}
+                {badge > 0 && collapsed && <span style={{ position: "absolute", top: -6, right: -9, minWidth: 15, height: 15, borderRadius: 8, background: active ? "#fff" : T.primary, color: active ? T.primary : "#fff", fontSize: 9, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px", border: `2px solid ${active ? T.primary : T.surface}` }}>{badgeLabel(badge)}</span>}
               </span>
               {!collapsed && <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n.label}</span>}
-              {badge > 0 && !collapsed && <span style={{ minWidth: 18, height: 18, borderRadius: 9, background: active ? "rgba(255,255,255,0.25)" : T.primary, color: "#fff", fontSize: 11, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 5px", flexShrink: 0 }}>{badge}</span>}
+              {badge > 0 && !collapsed && <span style={{ minWidth: 18, height: 18, borderRadius: 9, background: active ? "rgba(255,255,255,0.25)" : T.primary, color: "#fff", fontSize: 11, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 5px", flexShrink: 0 }}>{badgeLabel(badge)}</span>}
             </button>
           );
         })}
@@ -30382,6 +30461,8 @@ export default function App({ authEmail = "", onSignOut }) {
 
   // Track unread message count for nav badge
   const [navUnread, setNavUnread] = useState(0);
+  const [inboxUnread, setInboxUnread] = useState(0);
+  const navUnreadTotal = navUnread + (perms.isAdmin ? inboxUnread : 0);
   // Count of reminders due now, for the nav badge + dashboard alert
   const reminderDueCount = useMemo(() => {
     try { return buildReminderQueue(schedule, clients, scheduleCfg, reminderLog, new Date()).due.length; }
@@ -30527,13 +30608,32 @@ export default function App({ authEmail = "", onSignOut }) {
   }, [page, perms]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const load = async () => {
-      const { data } = await supabase.from("sps_messages").select("id").eq("sender", "client").is("read_at", null);
-      setNavUnread(data ? data.length : 0);
+      const { count, error } = await supabase.from("sps_messages").select("id", { count: "exact", head: true }).eq("sender", "client").is("read_at", null);
+      if (!error) setNavUnread(count || 0);
     };
     load();
     const interval = setInterval(load, 15000);
     return () => clearInterval(interval);
   }, []);
+  useEffect(() => {
+    if (!perms.isAdmin) { setInboxUnread(0); return undefined; }
+    let alive = true;
+    const load = async () => {
+      try {
+        const r = await fetch(`${PROD_URL}/api/inbox?limit=100`, { headers: await authHeaders() });
+        const d = await r.json().catch(() => ({}));
+        if (alive && r.ok) setInboxUnread((d.rows || []).filter(row => row && !row.read).length);
+      } catch (_) {}
+    };
+    const onLocalUpdate = (event) => {
+      const count = Number(event && event.detail && event.detail.count);
+      if (Number.isFinite(count)) setInboxUnread(Math.max(0, count));
+    };
+    window.addEventListener("sps-inbox-unread", onLocalUpdate);
+    load();
+    const interval = setInterval(load, 30000);
+    return () => { alive = false; clearInterval(interval); window.removeEventListener("sps-inbox-unread", onLocalUpdate); };
+  }, [perms.isAdmin]);
 
   // Sign-out unbinds this device's push token and clears native widget data FIRST, while the auth
   // token is still valid. Cleanup is time-bounded so a native bridge/network problem cannot trap
@@ -31974,7 +32074,7 @@ export default function App({ authEmail = "", onSignOut }) {
       <AppCtx.Provider value={{ T, branding, perms, email, tiers: serviceTiers || DEFAULT_TIERS }}>
         <div style={{ fontFamily: fontStack, background: T.bg, position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden", display: "flex", flexDirection: "row", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ["--ring"]: hexA(T.primary, 0.22), ["--ringBorder"]: T.primary }}>
           {shellCss}
-          <DesktopSidebar page={page} perms={perms} navUnread={navUnread} reminderDue={reminderDueCount} leadDue={leadNewCount} onNav={handleTabNav} onSignOut={handleSignOut} currentUser={currentUser} branding={branding} syncState={syncState} onSync={manualSync} T={T} vp={vp} />
+          <DesktopSidebar page={page} perms={perms} navUnread={navUnreadTotal} reminderDue={reminderDueCount} leadDue={leadNewCount} onNav={handleTabNav} onSignOut={handleSignOut} currentUser={currentUser} branding={branding} syncState={syncState} onSync={manualSync} T={T} vp={vp} />
           <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
             <div style={{ height: 2, flexShrink: 0, zIndex: 99, background: syncState === "syncing" ? T.primary : syncState === "saved" ? "#16a34a" : "transparent", transition: "background 0.3s", animation: syncState === "syncing" ? "syncPulse 0.8s ease-in-out" : "none" }} />
             <DataConflictBanner conflict={dataConflict} busy={conflictBusy} T={T} onResolve={resolveDataConflict} />
@@ -32118,7 +32218,7 @@ export default function App({ authEmail = "", onSignOut }) {
             return n ? { id: n.id, label: n.label, icon: n.icon, onClick: () => handleTabNav(n.id) } : null;
           }).filter(Boolean);
           const dockedSet = new Set(docked);
-          const commsBadge = (perms.isAdmin || perms.commsMessages ? navUnread : 0) + (perms.isAdmin || perms.commsReminders ? reminderDueCount : 0) + (perms.isAdmin || perms.commsInbox ? leadNewCount : 0);
+          const commsBadge = (perms.isAdmin || perms.commsMessages ? navUnreadTotal : 0) + (perms.isAdmin || perms.commsReminders ? reminderDueCount : 0) + (perms.isAdmin || perms.commsInbox ? leadNewCount : 0);
           const menuBadge = dockedSet.has("comms") ? 0 : commsBadge;
           const tabs = [
             ...primary.map(t => ({ ...t, active: page === t.id, badge: t.id === "comms" ? commsBadge : 0 })),
@@ -32133,7 +32233,7 @@ export default function App({ authEmail = "", onSignOut }) {
                     {t.id === "__menu"
                       ? <svg viewBox="0 0 24 24" width={21} height={21} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
                       : <Icon name={t.icon} size={21} />}
-                    {t.badge > 0 && <span style={{ position: "absolute", top: -1, right: 1, minWidth: 15, height: 15, borderRadius: 8, background: "#E5484D", color: "#fff", fontSize: 9.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px", border: `2px solid ${T.surface}` }}>{t.badge}</span>}
+                    {t.badge > 0 && <span style={{ position: "absolute", top: -1, right: 1, minWidth: 15, height: 15, borderRadius: 8, background: "#E5484D", color: "#fff", fontSize: 9.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px", border: `2px solid ${T.surface}` }}>{badgeLabel(t.badge)}</span>}
                   </span>
                   <span style={{ fontSize: 10, fontWeight: t.active ? 700 : 500, letterSpacing: "-0.01em" }}>{t.label}</span>
                 </button>
@@ -32147,7 +32247,7 @@ export default function App({ authEmail = "", onSignOut }) {
           <NavSheet
             page={page}
             perms={perms}
-            navUnread={navUnread}
+            navUnread={navUnreadTotal}
             reminderDue={reminderDueCount} leadDue={leadNewCount}
             navDock={navDock}
             setNavDock={setNavDock}
