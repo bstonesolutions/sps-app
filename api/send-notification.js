@@ -9,8 +9,15 @@
 // CORS is permissive so the native app (capacitor://localhost) can call it
 // cross-origin via the absolute PROD_URL; the web build calls it same-origin.
 
+import { brandLogoSource } from "../brandAssets.js";
+
 const escapeHtml = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+const absoluteLogoSource = (branding) => brandLogoSource(branding, {
+  absolute: true,
+  publicUrl: process.env.PUBLIC_APP_URL || "https://spsway.app",
+});
 
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -21,8 +28,6 @@ function setCors(res) {
 function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = "", actionUrl = "", actionLabel = "", footerHtml = "", logoSrc = "" }) {
   const accent = /^#?[0-9a-fA-F]{3,8}$/.test(branding.accent || "") ? branding.accent : "#B81D24";
   const company = escapeHtml(branding.companyName || "Stone Property Solutions");
-  // Monogram (company initial) in the header — matches the app's logo mark for consistent branding.
-  const initial = escapeHtml((((branding.companyName || "Stone Property Solutions").trim())[0] || "S").toUpperCase());
   // Wrap phone/email as explicitly white, non-underlined links so Apple Mail doesn't
   // auto-detect them and render blue underlined "links" — they read as plain text.
   const noLink = "color:#fff;text-decoration:none";
@@ -35,10 +40,10 @@ function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = ""
       <td style="padding:6px 0;font-size:13px;color:#6b7280;white-space:nowrap;vertical-align:top">${escapeHtml(k)}</td>
       <td style="padding:6px 0 6px 14px;font-size:13px;color:#111827;font-weight:700;vertical-align:top">${escapeHtml(v)}</td>
     </tr>`).join("");
-  // Real company logo when the caller provides one (cid: or https:); monogram tile is the fallback.
-  const logoTile = logoSrc
-    ? `<img src="${escapeHtml(logoSrc)}" alt="${company}" width="40" height="40" style="width:40px;height:40px;border-radius:11px;background:#fff;object-fit:contain;display:block;flex-shrink:0" />`
-    : `<div style="width:40px;height:40px;border-radius:11px;background:#fff;text-align:center;line-height:40px;flex-shrink:0;font-size:21px;font-weight:800;color:${accent}">${initial}</div>`;
+  // Always use a real image. If a caller omits branding, the canonical hosted app icon
+  // keeps transactional and notification emails consistent with the installed app.
+  const resolvedLogoSrc = logoSrc || absoluteLogoSource(branding);
+  const logoTile = `<img src="${escapeHtml(resolvedLogoSrc)}" alt="${company}" width="40" height="40" style="width:40px;height:40px;border-radius:11px;background:#fff;object-fit:contain;display:block;flex-shrink:0" />`;
   return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:8px;color:#111827">
     <div style="background:${accent};border-radius:14px 14px 0 0;padding:18px 20px;color:#fff;display:flex;align-items:center;gap:12px">
       ${logoTile}
@@ -129,16 +134,16 @@ export default async function handler(req, res) {
       if (uEmail) listUnsub = `<mailto:${uEmail}?subject=Unsubscribe>`;
     }
 
-    // Real company logo in the header when one is set — same CID mechanism as the photos above
-    // and the invoice/digest emails. Monogram tile stays as the fallback.
+    // Use the real logo when supplied and the canonical hosted app icon otherwise.
+    // Data images are CID attachments for broad email-client support.
     let logoSrc = "";
-    const li = (branding.logoType === "image" && branding.logoImage) || "";
+    const li = absoluteLogoSource(branding);
     const lm = /^data:(image\/[a-zA-Z+]+);base64,(.+)$/.exec(li || "");
     if (lm) {
       const ext = (lm[1].split("/")[1] || "png").replace("jpeg", "jpg");
       attachments.push({ filename: `logo.${ext}`, content: lm[2], content_type: lm[1], content_id: "splogo@sps" });
       logoSrc = "cid:splogo@sps";
-    } else if (/^https?:\/\//.test(li)) logoSrc = li;
+    } else if (/^https?:\/\//i.test(li)) logoSrc = li;
 
     const html = buildHtml({ branding, heading: heading || subject, message, rows, photosHtml, actionUrl, actionLabel, footerHtml, logoSrc });
     const textLines = [heading || subject, "", message || ""];

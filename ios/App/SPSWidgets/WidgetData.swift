@@ -13,7 +13,7 @@ struct WidgetPayload: Codable {
     var appFont: String?   // the app's chosen font key (rounded/system/grotesk) — widgets match it
     var logoImage: String? // the brand logo as a base64 data: URL — rendered in the widget header
     var logoName: String?  // full business name — shown when there's no clean logo image
-    var logoMono: String?  // single-letter monogram, last-resort fallback when there's no name either
+    var logoMono: String?  // retained only to decode payloads written by older app builds
 
     // Owner
     var profitWeek: Double?

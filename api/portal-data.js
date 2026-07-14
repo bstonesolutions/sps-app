@@ -10,6 +10,7 @@ import {
   setPortalCors,
   signPortalMedia,
 } from "./_portal-auth.js";
+import { estimateTotals, formatEstimateMoney } from "../estimateMath.js";
 
 const KEYS = [
   "sps_clients",
@@ -170,8 +171,52 @@ function publicInvoice(invoice) {
   return out;
 }
 
+function publicEstimateItem(line) {
+  return pick(line, ["id", "desc", "description", "qty", "price", "unitPrice", "kind", "amount"]);
+}
+
+function estimateMoneyNumber(value) {
+  const parsed = Number.parseFloat(String(value == null ? "" : value).replace(/[^0-9.-]/g, ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function publicEstimate(estimate) {
-  return pick(estimate, ["id", "number", "clientId", "date", "issueDate", "status", "total"]);
+  const out = pick(estimate, [
+    "id", "number", "clientId", "title", "service", "date", "issueDate", "status",
+    "notes", "validDays", "createdAt", "sentAt", "approvedAt",
+  ]);
+  out.items = Array.isArray(estimate && estimate.items)
+    ? estimate.items.slice(0, 250).map(publicEstimateItem)
+    : [];
+
+  // Never expose or display caller-supplied aggregate fields without checking them. Rebuild the
+  // client-facing numbers from the sanitized line items and the estimate's explicit tax snapshot.
+  const computed = estimateTotals({
+    items: out.items,
+    taxEnabled: estimate && estimate.taxEnabled === true,
+    taxRate: estimate && estimate.taxRate,
+  });
+  // Older estimates occasionally stored only aggregate values. Keep those readable without ever
+  // making a legacy estimate taxable: new/itemized estimates are still rebuilt from their lines.
+  const hasItemizedPricing = out.items.length > 0;
+  const legacyTax = estimate && estimate.taxEnabled === true ? estimateMoneyNumber(estimate.taxAmount ?? estimate.tax) : 0;
+  const legacyTotal = estimateMoneyNumber(estimate && estimate.total);
+  const legacySubtotal = estimateMoneyNumber(estimate && estimate.subtotal) || Math.max(0, legacyTotal - legacyTax);
+  const totals = hasItemizedPricing ? computed : {
+    subtotal: legacySubtotal,
+    taxEnabled: estimate && estimate.taxEnabled === true,
+    taxRate: Math.max(0, estimateMoneyNumber(estimate && estimate.taxRate)),
+    tax: legacyTax,
+    total: legacyTotal || legacySubtotal + legacyTax,
+  };
+  out.subtotal = totals.subtotal;
+  out.taxEnabled = totals.taxEnabled;
+  out.taxRate = totals.taxRate;
+  out.taxAmount = totals.tax;
+  out.tax = totals.tax;
+  // Keep the existing portal total contract string-shaped while still deriving it server-side.
+  out.total = formatEstimateMoney(totals.total);
+  return out;
 }
 
 function stopMatches(stop, client, clients) {

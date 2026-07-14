@@ -32,13 +32,15 @@ const fillVars = (str, vars) => String(str || "")
 
 // Turn the plain-text body into a simple branded HTML email, replacing the
 // {link} token with a tappable button (and a raw URL fallback).
-function buildHtml(body, link) {
+function buildHtml(body, link, company) {
   const button = `<a href="${link}" style="display:inline-block;background:#B81D24;color:#ffffff;text-decoration:none;font-weight:700;padding:13px 26px;border-radius:12px;font-size:15px">Sign in</a>`;
+  const appUrl = String(process.env.PUBLIC_APP_URL || "https://spsway.app").replace(/\/+$/, "");
+  const logoUrl = `${appUrl}/icon-192.png`;
   let html = escapeHtml(body);
   if (html.includes("{link}")) html = html.replace(/\{link\}/g, button);
   else html += `\n\n${button}`;
   html = html.replace(/\n/g, "<br>");
-  return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.6;color:#1f2937;max-width:520px;margin:0 auto;padding:8px">${html}<div style="margin-top:18px;font-size:12px;color:#9ca3af;word-break:break-all">If the button doesn't work, copy this link:<br>${link}</div></div>`;
+  return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.6;color:#1f2937;max-width:520px;margin:0 auto;padding:8px"><div style="display:flex;align-items:center;gap:12px;background:#B81D24;color:#fff;border-radius:14px 14px 0 0;padding:16px 18px"><img src="${logoUrl}" width="42" height="42" alt="${escapeHtml(company || "Stone Property Solutions")}" style="display:block;width:42px;height:42px;border-radius:11px;object-fit:cover;background:#fff"><div style="font-size:16px;font-weight:800">${escapeHtml(company || "Stone Property Solutions")}</div></div><div style="border:1px solid #e5e7eb;border-top:0;border-radius:0 0 14px 14px;padding:22px">${html}<div style="margin-top:18px;font-size:12px;color:#9ca3af;word-break:break-all">If the button doesn't work, copy this link:<br>${link}</div></div></div>`;
 }
 
 // CORS so the native app (capacitor://localhost) can call this cross-origin via the
@@ -131,7 +133,7 @@ export default async function handler(req, res) {
     const finalSubject = fillVars(subject || tpl.subject, vars);
     const filledBody   = fillVars(body || tpl.body, vars);
     const text = filledBody.includes("{link}") ? filledBody.replace(/\{link\}/g, link) : `${filledBody}\n\n${link}`;
-    const html = buildHtml(filledBody, link);
+    const html = buildHtml(filledBody, link, vars.company);
 
     // 4) Deliver via Resend.
     const sendRes = await fetch("https://api.resend.com/emails", {

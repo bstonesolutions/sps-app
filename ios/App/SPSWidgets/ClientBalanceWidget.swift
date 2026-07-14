@@ -36,7 +36,7 @@ struct ClientBalanceView: View {
     private var isPaidUp: Bool { (due ?? -1) <= 0 && due != nil }
 
     var body: some View {
-        content.environment(\.spsFontDesign, fontDesign).environment(\.spsLogo, SPSLogo(imageB64: p?.logoImage, mono: p?.logoMono ?? "S", name: p?.logoName ?? "")).widgetURL(URL(string: "spsway://invoices"))
+        content.environment(\.spsFontDesign, fontDesign).environment(\.spsLogo, SPSLogo(imageB64: p?.logoImage, mono: p?.logoMono ?? "", name: p?.logoName ?? "")).widgetURL(URL(string: "spsway://invoices"))
     }
 
     @ViewBuilder

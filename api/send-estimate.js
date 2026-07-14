@@ -1,6 +1,6 @@
 // api/send-estimate.js
 // Emails a client a branded estimate (line items, total, notes, validity, approve CTA) through Resend,
-// with the business's REAL logo inlined (cid, monogram fallback) and the estimate PDF attached so the
+// with the business's real logo inlined (and the app icon as a reliable fallback) and the estimate PDF attached so the
 // client can save it to their phone/computer. Modeled on send-invoice.js.
 //
 // Required env (set in Vercel): RESEND_API_KEY
@@ -8,20 +8,29 @@
 
 import { resolveFrom } from "./_sender.js";
 import { requireUser } from "./_auth.js";
+import { brandLogoSource } from "../brandAssets.js";
+import { estimateLineAmount, estimateTotals, formatEstimateMoney } from "../estimateMath.js";
 
 const escapeHtml = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-const money = (n) => "$" + (Number(n) || 0).toFixed(2);
+const money = formatEstimateMoney;
+
+const absoluteLogoSource = (branding) => brandLogoSource(branding, {
+  absolute: true,
+  publicUrl: process.env.PUBLIC_APP_URL || "https://spsway.app",
+});
+
+const logoImage = (src, company) => `<img src="${escapeHtml(src)}" alt="${escapeHtml(company || "Stone Property Solutions")}" width="40" height="40" style="width:40px;height:40px;border-radius:11px;object-fit:contain;background:#fff;display:block;flex-shrink:0" />`;
 
 function buildEstimateHtml({ clientName, branding, estimate, logoHtml }) {
   const accent = /^#?[0-9a-fA-F]{3,8}$/.test(branding.accent || "") ? branding.accent : "#B81D24";
   const company = escapeHtml(branding.companyName || "");
-  const initial = escapeHtml((((branding.companyName || "Stone Property Solutions").trim())[0] || "S").toUpperCase());
   const items = Array.isArray(estimate.items) ? estimate.items : [];
+  const totals = estimateTotals(estimate);
   const rows = items.filter((it) => (it.desc || "").trim()).map((it) => {
     const qty = Number(it.qty) || 1;
-    const price = Number(it.price) || 0;
-    const amount = qty * price;
+    const price = Number(it.price ?? it.unitPrice) || 0;
+    const amount = estimateLineAmount(it);
     const qtyBit = qty !== 1 ? `<div style="font-size:12px;color:#6b7280">${qty} &times; ${money(price)}</div>` : "";
     return `<tr>
       <td style="padding:9px 0;border-bottom:1px solid #eef0f2;vertical-align:top">
@@ -31,9 +40,10 @@ function buildEstimateHtml({ clientName, branding, estimate, logoHtml }) {
     </tr>`;
   }).join("");
 
-  const totalStr = (typeof estimate.total === "string" && estimate.total.trim().startsWith("$"))
-    ? estimate.total
-    : money(estimate.total != null && estimate.total !== "" ? estimate.total : items.reduce((s, it) => s + (Number(it.qty) || 1) * (Number(it.price) || 0), 0));
+  const totalRow = (label, value, opts = {}) => `<tr>
+    <td style="padding:${opts.big ? "10px 0 0" : "3px 0"};font-size:${opts.big ? 17 : 13}px;${opts.big ? "font-weight:800;color:#111827" : "color:#6b7280"}">${escapeHtml(label)}</td>
+    <td style="padding:${opts.big ? "10px 0 0" : "3px 0"};text-align:right;font-size:${opts.big ? 17 : 13}px;${opts.big ? `font-weight:800;color:${accent}` : "color:#374151"};white-space:nowrap">${escapeHtml(value)}</td>
+  </tr>`;
 
   const _noLink = "color:#fff;text-decoration:none";
   const contactBits = [
@@ -45,7 +55,7 @@ function buildEstimateHtml({ clientName, branding, estimate, logoHtml }) {
 
   return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:8px;color:#111827">
     <div style="background:${accent};border-radius:14px 14px 0 0;padding:18px 20px;color:#fff;display:flex;align-items:center;gap:12px">
-      ${logoHtml || `<div style="width:40px;height:40px;border-radius:11px;background:#fff;text-align:center;line-height:40px;flex-shrink:0;font-size:21px;font-weight:800;color:${accent}">${initial}</div>`}
+      ${logoHtml || logoImage(absoluteLogoSource(branding), branding.companyName)}
       <div>
         <div style="font-size:17px;font-weight:800">${company}</div>
         ${contactBits ? `<div style="font-size:11px;opacity:0.85;margin-top:2px">${contactBits}</div>` : ""}
@@ -57,11 +67,10 @@ function buildEstimateHtml({ clientName, branding, estimate, logoHtml }) {
       <div style="font-size:13px;color:#374151;margin-top:12px">Hi ${escapeHtml((clientName || "").split(" ")[0] || clientName || "there")},</div>
       <div style="font-size:13px;color:#374151;margin:6px 0 14px">Here's your estimate from ${company}. A PDF copy is attached for your records.</div>
       <table style="width:100%;border-collapse:collapse">${rows || `<tr><td style="font-size:13px;color:#6b7280;padding:8px 0">No line items.</td></tr>`}</table>
-      <table style="width:100%;border-collapse:collapse;margin-top:6px">
-        <tr>
-          <td style="padding:10px 0 0;font-size:17px;font-weight:800;color:#111827">Total</td>
-          <td style="padding:10px 0 0;text-align:right;font-size:17px;font-weight:800;color:${accent};white-space:nowrap">${escapeHtml(totalStr)}</td>
-        </tr>
+      <table style="width:100%;border-collapse:collapse;margin-top:10px">
+        ${totalRow("Subtotal", money(totals.subtotal))}
+        ${totals.taxEnabled ? totalRow(`Sales tax${totals.taxRate ? ` (${totals.taxRate}%)` : ""}`, money(totals.tax)) : ""}
+        ${totalRow("Total", money(totals.total), { big: true })}
       </table>
       ${estimate.notes ? `<div style="font-size:13px;color:#374151;margin-top:16px;line-height:1.55;background:#f8f8fa;border-radius:10px;padding:12px 14px"><b style="color:#111827">Notes</b><br>${escapeHtml(estimate.notes)}</div>` : ""}
       ${estimate.validDays ? `<div style="font-size:12px;color:#6b7280;margin-top:12px">Valid for ${escapeHtml(String(estimate.validDays))} days.</div>` : ""}
@@ -74,17 +83,19 @@ function buildEstimateHtml({ clientName, branding, estimate, logoHtml }) {
 }
 
 function buildEstimateText({ clientName, branding, estimate }) {
+  const totals = estimateTotals(estimate);
   const lines = [];
   lines.push(`Estimate from ${branding.companyName || ""}`.trim());
   if (estimate.service) lines.push(`Service: ${estimate.service}`);
   lines.push("");
   (Array.isArray(estimate.items) ? estimate.items : []).filter((it) => (it.desc || "").trim()).forEach((it) => {
-    const qty = Number(it.qty) || 1, price = Number(it.price) || 0;
-    lines.push(`- ${it.desc}  ${money(qty * price)}`);
+    const qty = Number(it.qty) || 1, price = Number(it.price ?? it.unitPrice) || 0;
+    lines.push(`- ${it.desc}${qty !== 1 ? `  (${qty} x ${money(price)})` : ""}  ${money(estimateLineAmount(it))}`);
   });
   lines.push("");
-  const totalStr = (typeof estimate.total === "string" && estimate.total.trim().startsWith("$")) ? estimate.total : money(estimate.total);
-  lines.push(`Total: ${totalStr}`);
+  lines.push(`Subtotal: ${money(totals.subtotal)}`);
+  if (totals.taxEnabled) lines.push(`Sales tax${totals.taxRate ? ` (${totals.taxRate}%)` : ""}: ${money(totals.tax)}`);
+  lines.push(`Total: ${money(totals.total)}`);
   if (estimate.notes) { lines.push(""); lines.push(`Notes: ${estimate.notes}`); }
   if (estimate.validDays) lines.push(`Valid for ${estimate.validDays} days.`);
   lines.push("");
@@ -130,18 +141,19 @@ export default async function handler(req, res) {
   try {
     const subject = subjectPrefix + ((emailSubject && String(emailSubject).trim()) || `Estimate from ${branding.companyName || "your service provider"}`.trim());
 
-    // Inline the real uploaded logo as a cid attachment (reliable across mail clients); monogram fallback.
+    // Inline an uploaded data-image as a CID attachment. Relative/missing images use the
+    // canonical hosted app icon so every mail client gets the real SPS mark, never a monogram.
     const attachments = [];
     let logoHtml = "";
-    const li = branding.logoImage || "";
-    if (branding.logoType === "image" && li) {
+    const li = absoluteLogoSource(branding);
+    if (li) {
       const lm = /^data:(image\/[a-zA-Z+]+);base64,(.+)$/.exec(li);
       if (lm) {
         const ext = (lm[1].split("/")[1] || "png").replace("jpeg", "jpg");
         attachments.push({ filename: `logo.${ext}`, content: lm[2], content_type: lm[1], content_id: "splogo@sps" });
-        logoHtml = `<img src="cid:splogo@sps" alt="" style="width:40px;height:40px;border-radius:11px;object-fit:cover;background:#fff;flex-shrink:0" />`;
+        logoHtml = logoImage("cid:splogo@sps", branding.companyName);
       } else if (/^https?:\/\//i.test(li)) {
-        logoHtml = `<img src="${escapeHtml(li)}" alt="" style="width:40px;height:40px;border-radius:11px;object-fit:cover;background:#fff;flex-shrink:0" />`;
+        logoHtml = logoImage(li, branding.companyName);
       }
     }
 

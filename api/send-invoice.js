@@ -5,15 +5,22 @@
 // Required env (set in Vercel): RESEND_API_KEY
 // Optional env: RESEND_FROM (defaults to the verified SPS domain address)
 
+import { brandLogoSource } from "../brandAssets.js";
+
 const escapeHtml = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const money = (n) => "$" + (Number(n) || 0).toFixed(2);
 
+const absoluteLogoSource = (branding) => brandLogoSource(branding, {
+  absolute: true,
+  publicUrl: process.env.PUBLIC_APP_URL || "https://spsway.app",
+});
+
+const logoImage = (src, company) => `<img src="${escapeHtml(src)}" alt="${escapeHtml(company || "Stone Property Solutions")}" width="40" height="40" style="width:40px;height:40px;border-radius:11px;object-fit:contain;background:#fff;display:block;flex-shrink:0" />`;
+
 function buildInvoiceHtml({ clientName, branding, invoice, payLink, intro, logoHtml, appUrl }) {
   const accent = /^#?[0-9a-fA-F]{3,8}$/.test(branding.accent || "") ? branding.accent : "#B81D24";
   const company = escapeHtml(branding.companyName || "");
-  // Monogram (company initial) — matches the app's logo mark for consistent branding.
-  const initial = escapeHtml((((branding.companyName || "Stone Property Solutions").trim())[0] || "S").toUpperCase());
   const rows = (invoice.lineItems || []).map((li) => {
     const qty = Number(li.qty) || 0;
     const price = Number(li.unitPrice) || 0;
@@ -45,7 +52,7 @@ function buildInvoiceHtml({ clientName, branding, invoice, payLink, intro, logoH
 
   return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:8px;color:#111827">
     <div style="background:${accent};border-radius:14px 14px 0 0;padding:18px 20px;color:#fff;display:flex;align-items:center;gap:12px">
-      ${logoHtml || `<div style="width:40px;height:40px;border-radius:11px;background:#fff;text-align:center;line-height:40px;flex-shrink:0;font-size:21px;font-weight:800;color:${accent}">${initial}</div>`}
+      ${logoHtml || logoImage(absoluteLogoSource(branding), branding.companyName)}
       <div>
         <div style="font-size:17px;font-weight:800">${company}</div>
         ${contactBits ? `<div style="font-size:11px;opacity:0.85;margin-top:2px">${contactBits}</div>` : ""}
@@ -144,19 +151,19 @@ export default async function handler(req, res) {
   try {
     const subject = subjectPrefix + ((emailSubject && String(emailSubject).trim()) || `Invoice ${invoice.number || ""} from ${branding.companyName || "your service provider"}`.trim());
 
-    // Embed the real uploaded logo as an inline cid attachment (reliable across mail clients,
-    // unlike data: URIs) — buildInvoiceHtml falls back to the monogram when there's no image.
+    // Embed an uploaded data-image as a CID attachment. Relative/missing images use the
+    // canonical hosted app icon so every mail client gets the real SPS mark, never a monogram.
     const attachments = [];
     let logoHtml = "";
-    const li = branding.logoImage || "";
-    if (branding.logoType === "image" && li) {
+    const li = absoluteLogoSource(branding);
+    if (li) {
       const lm = /^data:(image\/[a-zA-Z+]+);base64,(.+)$/.exec(li);
       if (lm) {
         const ext = (lm[1].split("/")[1] || "png").replace("jpeg", "jpg");
         attachments.push({ filename: `logo.${ext}`, content: lm[2], content_type: lm[1], content_id: "splogo@sps" });
-        logoHtml = `<img src="cid:splogo@sps" alt="" style="width:40px;height:40px;border-radius:11px;object-fit:cover;background:#fff;flex-shrink:0" />`;
+        logoHtml = logoImage("cid:splogo@sps", branding.companyName);
       } else if (/^https?:\/\//i.test(li)) {
-        logoHtml = `<img src="${escapeHtml(li)}" alt="" style="width:40px;height:40px;border-radius:11px;object-fit:cover;background:#fff;flex-shrink:0" />`;
+        logoHtml = logoImage(li, branding.companyName);
       }
     }
     const appUrl = (typeof req.body.appUrl === "string" && req.body.appUrl) ? req.body.appUrl : "spsway://invoices";

@@ -49,7 +49,7 @@ export default async function handler(req, res) {
   const html = `<!doctype html><html><body style="margin:0;padding:24px;background:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">
       <table role="presentation" style="max-width:460px;width:100%;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.06);">
-        <tr><td style="background:${CRIMSON};padding:22px 26px;text-align:center;color:#fff;font-size:18px;font-weight:800;">${escapeHtml(COMPANY)}</td></tr>
+        <tr><td style="background:${CRIMSON};padding:18px 26px;text-align:center;color:#fff;"><img src="${String(process.env.PUBLIC_APP_URL || "https://spsway.app").replace(/\/+$/, "")}/icon-192.png" width="48" height="48" alt="${escapeHtml(COMPANY)}" style="display:block;width:48px;height:48px;border-radius:12px;object-fit:cover;margin:0 auto 8px"><div style="font-size:18px;font-weight:800;">${escapeHtml(COMPANY)}</div></td></tr>
         <tr><td style="padding:26px;color:#1f2937;font-size:15px;line-height:1.6;">
           <p style="margin:0 0 10px;font-weight:700;font-size:16px;">✅ Email is working.</p>
           <p style="margin:0;">This is a test message from your ${escapeHtml(COMPANY)} app to confirm Resend delivery is wired up correctly. Sent ${escapeHtml(when)}.</p>

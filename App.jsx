@@ -8,6 +8,8 @@ import { CLIENT_MEDIA_BUCKET, backupManifestStatus, buildMediaArchive, buildStor
 import { createPortalDataFence, portalVisitMatchesReference, portalVisitReference, rejectPortalPreviewAction, requestPortalAction, retainPortalRatingVisit } from "./portalActionClient";
 import { selectActiveEnRouteStop } from "./geofenceSafety";
 import { assessInboundLead, findMisfiledImportedLead } from "./leadQualification";
+import { brandLogoSource } from "./brandAssets";
+import { estimateLineAmount, estimateTotals, formatEstimateMoney, withEstimateTotals } from "./estimateMath";
 
 // True only on a genuine fresh launch of the app shell (hard close / first open).
 // sessionStorage is wiped when the PWA is killed/swiped away, but survives reloads
@@ -46,6 +48,28 @@ async function sendBrandedAuthEmail(payload) {
 // ── PDF generation (jsPDF) ──
 // Loaded lazily so it doesn't block initial render
 const loadJsPDF = () => import("jspdf").then(m => m.jsPDF || m.default);
+const blobAsDataUrl = (blob) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(String(reader.result || ""));
+  reader.onerror = () => reject(reader.error || new Error("Logo could not be read"));
+  reader.readAsDataURL(blob);
+});
+async function loadBrandLogoData(branding) {
+  const sources = [brandLogoSource(branding), "/icon-192.png"];
+  for (const src of [...new Set(sources)]) {
+    if (/^data:image\/(?:png|jpe?g|webp);/i.test(src)) return src;
+    if (/^data:image\//i.test(src)) continue;
+    try {
+      const response = await fetch(src, { cache: "force-cache" });
+      if (response.ok) {
+        const blob = await response.blob();
+        if (/^image\/(?:png|jpe?g|webp)$/i.test(blob.type || "")) return await blobAsDataUrl(blob);
+      }
+    } catch (_) {}
+  }
+  return "";
+}
+const pdfLogoFormat = (dataUrl) => /^data:image\/jpe?g/i.test(dataUrl) ? "JPEG" : /^data:image\/webp/i.test(dataUrl) ? "WEBP" : "PNG";
 // Save a built jsPDF doc the native-safe way: on touch devices (iOS/iPadOS WKWebView, Android) open the
 // share sheet (AirPrint / Save to Files) from the doc's blob; on desktop download it. NEVER call
 // doc.save() on native — it navigates the WKWebView away, which reads as "the whole screen closed" (this
@@ -650,23 +674,33 @@ const openExternalBrowser = (url) => {
 // Build the estimate PDF and return the jsPDF doc (not saved) — so both "Download PDF" and the
 // email path (which grabs its base64 to attach) share one layout.
 function buildEstimatePDFDoc(estimate, branding, invoicing) {
-  return loadJsPDF().then(JsPDF => {
+  return Promise.all([loadJsPDF(), loadBrandLogoData(branding)]).then(([JsPDF, logoData]) => {
     const doc = new JsPDF({ unit: "pt", format: "letter" });
     const primary = branding?.accentColor || "#B81D24";
     const W = doc.internal.pageSize.getWidth();
+    const totals = estimateTotals(estimate, invoicing?.taxRate || DEFAULT_INVOICING.taxRate);
     let y = 40;
 
     // Header bar
     doc.setFillColor(primary);
     doc.rect(0, 0, W, 70, "F");
+    let headerX = 40;
+    if (logoData) {
+      try {
+        doc.setFillColor("#ffffff");
+        doc.roundedRect(40, 14, 42, 42, 9, 9, "F");
+        doc.addImage(logoData, pdfLogoFormat(logoData), 42, 16, 38, 38);
+        headerX = 94;
+      } catch (_) {}
+    }
     doc.setTextColor("#ffffff");
     doc.setFontSize(22);
     doc.setFont("helvetica", "bold");
-    doc.text(branding?.companyName || "Stone Property Solutions", 40, 38);
+    doc.text(branding?.companyName || "Stone Property Solutions", headerX, 38);
     doc.setFontSize(10);
     doc.setFont("helvetica", "normal");
     const contact = [branding?.companyPhone, branding?.companyEmail].filter(Boolean).join("  ·  ");
-    if (contact) doc.text(contact, 40, 56);
+    if (contact) doc.text(contact, headerX, 56);
     y = 100;
 
     // Estimate title + info
@@ -678,7 +712,7 @@ function buildEstimatePDFDoc(estimate, branding, invoicing) {
     doc.setFontSize(10);
     doc.setFont("helvetica", "normal");
     doc.setTextColor("#6B7280");
-    doc.text(`Date: ${estimate.date || ""}   ·   Valid: ${estimate.validDays || 30} days`, 40, y);
+    doc.text(`${estimate.number ? `Estimate: ${estimate.number}   ·   ` : ""}Date: ${estimate.date || ""}   ·   Valid: ${estimate.validDays || 30} days`, 40, y);
     y += 10;
     doc.text(`Prepared for: ${estimate.clientName || ""}`, 40, y);
     y += 30;
@@ -698,25 +732,38 @@ function buildEstimatePDFDoc(estimate, branding, invoicing) {
     // Line items
     doc.setFont("helvetica", "normal");
     (estimate.items || []).filter(it => it.desc).forEach(item => {
-      const qty = parseInt(item.qty) || 1;
+      const qty = parseFloat(item.qty) || 1;
       const price = parseFloat(item.price || 0);
-      const amt = (qty * price).toFixed(2);
+      const amt = estimateLineAmount(item);
       doc.setTextColor("#1D1D1F");
       doc.text(String(item.desc), 52, y);
       doc.text(String(qty), W - 160, y, { align: "right" });
       doc.text(`$${price.toFixed(2)}`, W - 100, y, { align: "right" });
-      doc.text(`$${amt}`, W - 40, y, { align: "right" });
+      doc.text(formatEstimateMoney(amt), W - 40, y, { align: "right" });
       y += 20;
       doc.setDrawColor("#E5E7EB");
       doc.line(40, y - 4, W - 40, y - 4);
     });
 
-    // Total
+    // Totals
     y += 10;
+    doc.setFontSize(10);
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor("#6B7280");
+    doc.text("Subtotal", W - 150, y);
+    doc.text(formatEstimateMoney(totals.subtotal), W - 40, y, { align: "right" });
+    y += 17;
+    if (totals.taxEnabled) {
+      doc.text(`Sales tax (${totals.taxRate}%)`, W - 150, y);
+      doc.text(formatEstimateMoney(totals.tax), W - 40, y, { align: "right" });
+      y += 17;
+    }
+    doc.setDrawColor("#E5E7EB");
+    doc.line(W - 150, y - 6, W - 40, y - 6);
     doc.setFontSize(13);
     doc.setFont("helvetica", "bold");
     doc.setTextColor(primary);
-    doc.text(`Total: ${estimate.total || "$0.00"}`, W - 40, y, { align: "right" });
+    doc.text(`Total: ${formatEstimateMoney(totals.total)}`, W - 40, y, { align: "right" });
     y += 30;
 
     // Notes
@@ -747,7 +794,7 @@ function generateEstimatePDF(estimate, branding, invoicing) {
 }
 
 function generateStatementPDF(client, invoices, branding) {
-  return loadJsPDF().then(JsPDF => {
+  return Promise.all([loadJsPDF(), loadBrandLogoData(branding)]).then(([JsPDF, logoData]) => {
     const doc = new JsPDF({ unit: "pt", format: "letter" });
     const primary = branding?.accentColor || "#B81D24";
     const W = doc.internal.pageSize.getWidth();
@@ -756,13 +803,22 @@ function generateStatementPDF(client, invoices, branding) {
     // Header
     doc.setFillColor(primary);
     doc.rect(0, 0, W, 70, "F");
+    let headerX = 40;
+    if (logoData) {
+      try {
+        doc.setFillColor("#ffffff");
+        doc.roundedRect(40, 14, 42, 42, 9, 9, "F");
+        doc.addImage(logoData, pdfLogoFormat(logoData), 42, 16, 38, 38);
+        headerX = 94;
+      } catch (_) {}
+    }
     doc.setTextColor("#ffffff");
     doc.setFontSize(20);
     doc.setFont("helvetica", "bold");
-    doc.text(branding?.companyName || "Stone Property Solutions", 40, 38);
+    doc.text(branding?.companyName || "Stone Property Solutions", headerX, 38);
     doc.setFontSize(10);
     doc.setFont("helvetica", "normal");
-    doc.text("Account Statement", 40, 56);
+    doc.text("Account Statement", headerX, 56);
     y = 100;
 
     // Client info
@@ -828,7 +884,7 @@ function generateStatementPDF(client, invoices, branding) {
 // Full client dossier — contact, plan, property, equipment, service history, financials, notes.
 // A printable record for a new tech, a client meeting, or the file. Reuses the same branded look.
 function generateClientProfilePDF(client, invoices, branding, tiers, opts = {}) {
-  return loadJsPDF().then(JsPDF => {
+  return Promise.all([loadJsPDF(), loadBrandLogoData(branding)]).then(([JsPDF, logoData]) => {
     const doc = new JsPDF({ unit: "pt", format: "letter" });
     const primary = branding?.accentColor || "#B81D24";
     const W = doc.internal.pageSize.getWidth();
@@ -862,10 +918,19 @@ function generateClientProfilePDF(client, invoices, branding, tiers, opts = {}) 
 
     // Header band
     doc.setFillColor(primary); doc.rect(0, 0, W, 70, "F");
+    let headerX = M;
+    if (logoData) {
+      try {
+        doc.setFillColor("#ffffff");
+        doc.roundedRect(M, 14, 42, 42, 9, 9, "F");
+        doc.addImage(logoData, pdfLogoFormat(logoData), M + 2, 16, 38, 38);
+        headerX = M + 54;
+      } catch (_) {}
+    }
     doc.setTextColor("#ffffff"); doc.setFont("helvetica", "bold"); doc.setFontSize(20);
-    doc.text(branding?.companyName || "Stone Property Solutions", M, 38);
+    doc.text(branding?.companyName || "Stone Property Solutions", headerX, 38);
     doc.setFont("helvetica", "normal"); doc.setFontSize(10);
-    doc.text("Client Profile", M, 56);
+    doc.text("Client Profile", headerX, 56);
     doc.text(new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }), W - M, 56, { align: "right" });
     y = 96;
 
@@ -1846,7 +1911,7 @@ const DEFAULT_BRANDING = {
   googleReviewLink: "",   // g.page/r/.../review link — opens in the EXTERNAL browser (signed-in session)
   division: "All Divisions",
   logoType: "image",
-  logoEmoji: "",          // legacy field; the non-image logo now renders a clean monogram
+  logoEmoji: "",          // legacy field retained for saved-data compatibility; no longer rendered
   logoImage: "/icon-192.png",
   themeKey: "sps",
   appearance: "system",
@@ -3126,10 +3191,6 @@ const DEFAULT_INVOICING = {
 // date helpers (MM/DD/YYYY)
 const parseMDY = (s) => { const [m, d, y] = (s || "").split("/").map(Number); return (m && d && y) ? new Date(y, m - 1, d) : null; };
 const fmtMDY = (dt) => `${String(dt.getMonth() + 1).padStart(2, "0")}/${String(dt.getDate()).padStart(2, "0")}/${dt.getFullYear()}`;
-
-// First initial of the company name — the clean monogram shown anywhere there's no image
-// logo (replaces the old emoji logo). Always a single uppercase letter, never an emoji.
-const logoInitial = (b) => (((b && b.companyName) || "S").trim().charAt(0) || "S").toUpperCase();
 
 // Responsive viewport hook — the foundation for adapting layout to phone / tablet / desktop.
 // Returns { width, height, isPhone, isTablet, isDesktop }. Width handles normal portrait layouts;
@@ -4598,10 +4659,8 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
   const heroCard = (
     <div onClick={() => onNav("schedule")} role="button"
       style={{ position: "relative", overflow: "hidden", background: "#AE0019", color: "#fff", borderRadius: 20, padding: "18px 20px", marginBottom: 16, cursor: "pointer", boxShadow: "0 10px 30px rgba(0,0,0,0.16), inset 0 1px 0 rgba(255,255,255,0.15)" }}>
-      {branding && branding.logoType === "image" && branding.logoImage && (
-        <ProtectedImage src={branding.logoImage} alt="" aria-hidden="true"
-          style={{ position: "absolute", right: -30, top: "50%", transform: "translateY(-50%)", width: 188, height: 188, objectFit: "contain", opacity: 0.45, pointerEvents: "none" }} />
-      )}
+      <ProtectedImage src={brandLogoSource(branding)} alt="" aria-hidden="true"
+        style={{ position: "absolute", right: -30, top: "50%", transform: "translateY(-50%)", width: 188, height: 188, objectFit: "contain", opacity: 0.45, pointerEvents: "none" }} />
       <div style={{ position: "relative", zIndex: 1 }}>
         <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.1em", opacity: 0.82 }}>TODAY</div>
         <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginTop: 5 }}>
@@ -13251,7 +13310,7 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
           <div style={{ border: `1px solid ${T.border}`, borderRadius: 12, overflow: "hidden" }}>
             <div style={{ background: T.primary, color: "#fff", padding: "14px 16px", display: "flex", alignItems: "center", gap: 10 }}>
               <div style={{ width: 28, height: 28, borderRadius: 7, background: "rgba(255,255,255,0.18)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, overflow: "hidden" }}>
-                {branding.logoType === "image" && branding.logoImage ? <ProtectedImage src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontWeight: 800, color: "#fff" }}>{logoInitial(branding)}</span>}
+                <ProtectedImage src={brandLogoSource(branding)} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
               </div>
               <span style={{ fontSize: 13, fontWeight: 700 }}>{email.fromName}</span>
             </div>
@@ -15483,7 +15542,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
 }
 
 // ── Catalog picker: add services/products/treatments/parts to an invoice ──
-function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCreateItem, T }) {
+function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCreateItem, T, title = "Add to Invoice", allowCreate = true }) {
   const pickerVp = useViewport();
   const kb = useKeyboardInset();
   const [tab, setTab] = useState("services");
@@ -15515,7 +15574,7 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
   };
 
   const saveNewItem = () => {
-    if (!newItem.name.trim()) return;
+    if (!newItem.name.trim() || typeof onCreateItem !== "function") return;
     const created = onCreateItem(creating.type, newItem);
     if (created) onAddCatalog(kindOf(), created);
     setCreating(null);
@@ -15532,7 +15591,7 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
         {/* Header */}
         <div style={{ padding: "16px 18px 10px", borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-            <div style={{ fontSize: 17, fontWeight: 800, color: T.text }}>Add to Invoice</div>
+            <div style={{ fontSize: 17, fontWeight: 800, color: T.text }}>{title}</div>
             <button onClick={onClose} aria-label="Close catalog" style={{ background: T.surfaceAlt, border: "none", borderRadius: 11, width: 40, height: 40, fontSize: 18, color: T.textMuted, cursor: "pointer", fontFamily: "inherit" }}>×</button>
           </div>
           <div style={{ display: "flex", gap: 4, background: T.surfaceAlt, borderRadius: 10, padding: 3 }}>
@@ -15596,10 +15655,10 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
                 {filtered.length === 0 && <div style={{ textAlign: "center", padding: "24px", color: T.textMuted, fontSize: 13 }}>No {tab} found</div>}
               </div>
               {/* Create new */}
-              <button onClick={() => { setCreating({ type: tab === "services" ? "service" : tab === "products" ? "product" : tab === "treatments" ? "treatment" : "part" }); setNewItem({ name: search, price: "", cost: "" }); }}
+              {allowCreate && <button onClick={() => { setCreating({ type: tab === "services" ? "service" : tab === "products" ? "product" : tab === "treatments" ? "treatment" : "part" }); setNewItem({ name: search, price: "", cost: "" }); }}
                 style={{ marginTop: 12, width: "100%", padding: "11px", borderRadius: 10, border: `1.5px dashed ${T.border}`, background: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
                 + Create new {tab === "services" ? "service" : tab === "products" ? "product" : tab === "treatments" ? "treatment" : "part"}
-              </button>
+              </button>}
             </>
           )}
         </div>
@@ -16214,7 +16273,7 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
     <div className="sps-inv-brand" style={{ display: "flex", gap: 11, alignItems: centered ? "center" : "flex-start", justifyContent: centered ? "center" : "flex-start", flexDirection: centered ? "column" : "row", textAlign: centered ? "center" : "left", minWidth: 0, width: centered ? "100%" : "auto", flex: centered ? "none" : 1 }}>
       {cfg.showLogo !== false && (
         <div style={{ width: 40, height: 40, borderRadius: 11, background: light ? "rgba(255,255,255,0.22)" : hexA(accent, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
-          {branding.logoType === "image" && branding.logoImage ? <ProtectedImage src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontSize: 21, fontWeight: 800, color: light ? T.primary : "#fff" }}>{logoInitial(branding)}</span>}
+          <ProtectedImage src={brandLogoSource(branding)} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
         </div>
       )}
       <div style={{ minWidth: 0, flex: centered ? "none" : 1, width: "100%", textAlign: centered ? "center" : "left" }}>
@@ -16332,7 +16391,7 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
 
 // Draw a clean, branded invoice into a jsPDF document (vector text, multi-page aware).
 async function buildInvoicePdf({ invoice, client, totals, branding, cfg, eff, accent }) {
-  const JsPDF = await loadJsPDF();
+  const [JsPDF, logoData] = await Promise.all([loadJsPDF(), loadBrandLogoData(branding)]);
   const doc = new JsPDF({ unit: "pt", format: "letter" });
   const W = doc.internal.pageSize.getWidth();
   const H = doc.internal.pageSize.getHeight();
@@ -16344,15 +16403,24 @@ async function buildInvoicePdf({ invoice, client, totals, branding, cfg, eff, ac
   // Header band
   doc.setFillColor(accentHex);
   doc.rect(0, 0, W, 86, "F");
+  let brandX = M;
+  if (logoData) {
+    try {
+      doc.setFillColor("#ffffff");
+      doc.roundedRect(M, 16, 48, 48, 10, 10, "F");
+      doc.addImage(logoData, pdfLogoFormat(logoData), M + 3, 19, 42, 42);
+      brandX = M + 60;
+    } catch (_) {}
+  }
   doc.setTextColor("#ffffff");
   doc.setFont("helvetica", "bold"); doc.setFontSize(20);
-  doc.text(String(branding.companyName || ""), M, 36);
+  doc.text(String(branding.companyName || "Stone Property Solutions"), brandX, 36);
   doc.setFont("helvetica", "normal"); doc.setFontSize(9);
   let hy = 52;
-  if (branding.division) { doc.text(String(branding.division), M, hy); hy += 12; }
+  if (branding.division) { doc.text(String(branding.division), brandX, hy); hy += 12; }
   const contact = [branding.companyPhone, branding.companyEmail, branding.companyWebsite].filter(Boolean).join("   ·   ");
-  if (contact) { doc.text(contact, M, hy); hy += 12; }
-  if (branding.companyAddress) { doc.text(String(branding.companyAddress), M, hy); }
+  if (contact) { doc.text(contact, brandX, hy); hy += 12; }
+  if (branding.companyAddress) { doc.text(String(branding.companyAddress), brandX, hy); }
   doc.setFont("helvetica", "bold"); doc.setFontSize(18);
   doc.text(String(cfg.labelInvoice || "INVOICE"), W - M, 36, { align: "right" });
   doc.setFont("helvetica", "normal"); doc.setFontSize(10);
@@ -16867,12 +16935,30 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
 // ESTIMATE BUILDER
 // ─────────────────────────────────────────────
 
+const ESTIMATE_STATUSES = [
+  { id: "draft", label: "Draft" },
+  { id: "sent", label: "Sent" },
+  { id: "approved", label: "Approved" },
+  { id: "declined", label: "Declined" },
+];
+const estimateStatusLabel = (status) => ESTIMATE_STATUSES.find((item) => item.id === status)?.label || "Draft";
+const nextEstimateNumber = (estimates) => {
+  const highest = (estimates || []).reduce((max, estimate) => {
+    const value = parseInt(String(estimate && estimate.number || "").replace(/[^0-9]/g, ""), 10) || 0;
+    return Math.max(max, value);
+  }, 1000);
+  return `EST-${highest + 1}`;
+};
+
 function EstimatesScreen({ clients, catalog, branding, email, invoicing, T, estimates: estimatesProp, setEstimates: setEstimatesProp }) {
+  const vp = useViewport();
   const [estimatesLocal, setEstimatesLocal] = useStoredState("sps_estimates", []);
   const estimates = estimatesProp !== undefined ? estimatesProp : estimatesLocal;
   const setEstimates = setEstimatesProp || setEstimatesLocal;
   const [view, setView] = useState("list"); // list | new | detail
   const [selected, setSelected] = useState(null);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("active");
 
   // Persist without leaving the editor — used by "Download PDF" so exporting saves your edits but
   // doesn't kick you back to the list (that close was the reported bug).
@@ -16881,6 +16967,7 @@ function EstimatesScreen({ clients, catalog, branding, email, invoicing, T, esti
       const exists = (prev||[]).some(e => e.id === est.id);
       return exists ? prev.map(e => e.id === est.id ? est : e) : [est, ...(prev||[])];
     });
+    setSelected(est);
   };
   const saveEstimate = (est) => { persistEstimate(est); setView("list"); };
 
@@ -16902,26 +16989,40 @@ function EstimatesScreen({ clients, catalog, branding, email, invoicing, T, esti
         onSave={saveEstimate}
         onPersist={persistEstimate}
         onDelete={deleteEstimate}
+        nextNumber={nextEstimateNumber(estimates)}
         onBack={() => { setView("list"); setSelected(null); }}
       />
     );
   }
 
-  const est = estimates || [];
-  const open   = est.filter(e => e.status === "draft" || e.status === "sent");
-  const closed = est.filter(e => e.status === "approved" || e.status === "declined");
+  const est = [...(estimates || [])].sort((a, b) => String(b.createdAt || b.date || b.id || "").localeCompare(String(a.createdAt || a.date || a.id || "")));
+  const term = search.trim().toLowerCase();
+  const counts = ESTIMATE_STATUSES.reduce((out, item) => ({ ...out, [item.id]: est.filter((estimate) => (estimate.status || "draft") === item.id).length }), {});
+  const filtered = est.filter((estimate) => {
+    const status = estimate.status || "draft";
+    const matchesFilter = filter === "all" || (filter === "active" ? ["draft", "sent"].includes(status) : status === filter);
+    const haystack = [estimate.number, estimate.clientName, estimate.title].filter(Boolean).join(" ").toLowerCase();
+    return matchesFilter && (!term || haystack.includes(term));
+  });
 
   const statusColor = (s) => ({
     draft: T.textMuted, sent: T.primary, approved: T.accent, declined: T.warning
   }[s] || T.textMuted);
 
-  const statusLabel = (s) => ({ draft: "Draft", sent: "Sent", approved: "Approved", declined: "Declined" }[s] || s);
+  const activeCount = (counts.draft || 0) + (counts.sent || 0);
+  const approvedValue = est.filter((estimate) => estimate.status === "approved").reduce((sum, estimate) => sum + estimateTotals(estimate, invoicing?.taxRate).total, 0);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 4 }}>
-        <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Estimates</div>
-        <Btn onClick={() => setView("new")} sm style={{ gap: 5 }}><Icon name="plus" size={13} /> New</Btn>
+    <div style={{ display: "flex", flexDirection: "column", gap: vp.isPhone ? 14 : 18 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, paddingTop: 2 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 11, minWidth: 0 }}>
+          <div style={{ width: 40, height: 40, borderRadius: 12, background: hexA(T.primary, 0.09), color: T.primary, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name="clipboard" size={19} /></div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: vp.isPhone ? 21 : 24, fontWeight: 850, color: T.text, letterSpacing: "-0.035em" }}>Estimates</div>
+            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{activeCount} active · {counts.approved || 0} approved</div>
+          </div>
+        </div>
+        <Btn onClick={() => setView("new")} sm style={{ gap: 5, minHeight: 40 }}><Icon name="plus" size={13} /> New estimate</Btn>
       </div>
 
       {est.length === 0 && (
@@ -16933,68 +17034,117 @@ function EstimatesScreen({ clients, catalog, branding, email, invoicing, T, esti
         </div>
       )}
 
-      {open.length > 0 && (
-        <div>
-          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>Active</div>
-          <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
-            {open.map((e, i) => (
-              <button key={e.id} onClick={() => { setSelected(e); setView("detail"); }}
-                style={{ width: "100%", padding: "15px 18px", background: "none", border: "none", borderBottom: i < open.length-1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{e.clientName || "No client"}</div>
-                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{e.title || "Estimate"} · {fmtDate(e.date)}</div>
-                </div>
-                <div style={{ textAlign: "right", flexShrink: 0 }}>
-                  <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>{e.total || "$0.00"}</div>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: statusColor(e.status), textTransform: "uppercase", marginTop: 2 }}>{statusLabel(e.status)}</div>
-                </div>
-              </button>
+      {est.length > 0 && (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: vp.isPhone ? "repeat(2, minmax(0, 1fr))" : "repeat(3, minmax(0, 1fr))", gap: 8 }}>
+            {[
+              ["Active", activeCount, "Waiting or being prepared"],
+              ["Approved", counts.approved || 0, approvedValue > 0 ? formatEstimateMoney(approvedValue) : "Client accepted"],
+              ["Total", est.length, "All estimates"],
+            ].map(([label, value, sub], index) => (
+              <div key={label} style={{ display: vp.isPhone && index === 2 ? "none" : "block", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: "11px 13px" }}>
+                <div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 750, textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</div>
+                <div style={{ fontSize: 19, fontWeight: 850, color: T.text, marginTop: 2 }}>{value}</div>
+                <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{sub}</div>
+              </div>
             ))}
           </div>
-        </div>
-      )}
 
-      {closed.length > 0 && (
-        <div>
-          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10 }}>Closed</div>
-          <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden", opacity: 0.7 }}>
-            {closed.map((e, i) => (
-              <button key={e.id} onClick={() => { setSelected(e); setView("detail"); }}
-                style={{ width: "100%", padding: "15px 18px", background: "none", border: "none", borderBottom: i < closed.length-1 ? `1px solid ${T.border}` : "none", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{e.clientName || "No client"}</div>
-                  <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{e.title || "Estimate"} · {fmtDate(e.date)}</div>
-                </div>
-                <div style={{ textAlign: "right", flexShrink: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{e.total || "$0.00"}</div>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: statusColor(e.status), textTransform: "uppercase", marginTop: 2 }}>{statusLabel(e.status)}</div>
-                </div>
-              </button>
-            ))}
+          <div style={{ position: "relative" }}>
+            <span style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", color: T.textMuted, display: "inline-flex" }}><Icon name="search" size={17} /></span>
+            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search client, title or estimate number" style={{ width: "100%", minHeight: 44, boxSizing: "border-box", padding: "10px 40px", border: `1px solid ${T.border}`, borderRadius: 13, background: T.surface, color: T.text, fontSize: 16, fontFamily: "inherit", outline: "none" }} />
+            {search && <button onClick={() => setSearch("")} aria-label="Clear search" style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", width: 30, height: 30, borderRadius: 9, border: "none", background: T.surfaceAlt, color: T.textMuted, cursor: "pointer" }}>×</button>}
           </div>
-        </div>
+
+          <div style={{ display: "flex", gap: 7, overflowX: "auto", paddingBottom: 2, scrollbarWidth: "none" }}>
+            {[["active", `Active ${activeCount}`], ...ESTIMATE_STATUSES.map((item) => [item.id, `${item.label} ${counts[item.id] || 0}`]), ["all", `All ${est.length}`]].map(([id, label]) => {
+              const on = filter === id;
+              return <button key={id} onClick={() => setFilter(id)} aria-pressed={on} style={{ flexShrink: 0, minHeight: 38, padding: "7px 12px", borderRadius: 100, border: `1.5px solid ${on ? T.primary : T.border}`, background: on ? hexA(T.primary, 0.08) : T.surface, color: on ? T.primary : T.textMuted, fontSize: 12, fontWeight: 750, fontFamily: "inherit", cursor: "pointer" }}>{label}</button>;
+            })}
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {filtered.map((estimate) => {
+              const totals = estimateTotals(estimate, invoicing?.taxRate);
+              const status = estimate.status || "draft";
+              return (
+                <button key={estimate.id} onClick={() => { setSelected(estimate); setView("detail"); }} style={{ width: "100%", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 15, padding: vp.isPhone ? "13px 14px" : "14px 16px", display: "flex", gap: 12, alignItems: "center", cursor: "pointer", fontFamily: "inherit", textAlign: "left", boxShadow: "0 1px 3px rgba(0,0,0,0.035)" }}>
+                  <div style={{ width: 38, height: 38, borderRadius: 12, background: hexA(statusColor(status), 0.1), color: statusColor(status), display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name="clipboard" size={17} /></div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+                      <span style={{ fontSize: 14, fontWeight: 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{estimate.clientName || "No client selected"}</span>
+                      <span style={{ fontSize: 9.5, fontWeight: 850, textTransform: "uppercase", letterSpacing: "0.05em", color: statusColor(status), background: hexA(statusColor(status), 0.09), borderRadius: 100, padding: "3px 7px", flexShrink: 0 }}>{estimateStatusLabel(status)}</span>
+                    </div>
+                    <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{estimate.number || "Estimate"} · {estimate.title || "Untitled"} · {fmtDate(estimate.date)}</div>
+                    {totals.taxEnabled && <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 3 }}>{totals.taxRate}% tax included</div>}
+                  </div>
+                  <div style={{ textAlign: "right", flexShrink: 0 }}>
+                    <div style={{ fontSize: 16, fontWeight: 850, color: T.text }}>{formatEstimateMoney(totals.total)}</div>
+                    <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 2 }}>{(estimate.items || []).filter((item) => item.desc).length} item{(estimate.items || []).filter((item) => item.desc).length === 1 ? "" : "s"}</div>
+                  </div>
+                </button>
+              );
+            })}
+            {filtered.length === 0 && <div style={{ textAlign: "center", padding: "34px 18px", color: T.textMuted, fontSize: 13 }}>No estimates match this view.</div>}
+          </div>
+        </>
       )}
     </div>
   );
 }
 
-function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, T, onSave, onPersist, onDelete, onBack }) {
+function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, T, onSave, onPersist, onDelete, onBack, nextNumber }) {
+  const { perms = {} } = useApp();
+  const vp = useViewport();
   const isNew = !estimate;
-  const [form, setForm] = useState(() => estimate || {
-    id: Date.now(),
-    clientId: "",
-    clientName: "",
-    title: "",
-    date: new Date().toISOString().split("T")[0],
-    validDays: 30,
-    status: "draft",
-    items: [{ id: Date.now(), desc: "", qty: 1, price: "" }],
-    notes: "",
-    total: "$0.00",
+  const configuredTaxRate = String(invoicing?.taxRate ?? "").trim();
+  const defaultTaxRate = configuredTaxRate || String(DEFAULT_INVOICING.taxRate);
+  const [form, setForm] = useState(() => {
+    const base = estimate ? {
+      ...estimate,
+      items: Array.isArray(estimate.items) && estimate.items.length
+        ? estimate.items.map((item) => {
+            const qty = Number.parseFloat(item.qty) || 1;
+            const amountOnly = Number.parseFloat(String(item.amount ?? "").replace(/[^0-9.-]/g, "")) || 0;
+            return {
+              ...item,
+              desc: item.desc ?? item.description ?? "",
+              qty: String(item.qty ?? "1"),
+              price: String(item.price ?? item.unitPrice ?? (amountOnly ? amountOnly / qty : "")),
+            };
+          })
+        : (() => {
+            const savedTotal = Number.parseFloat(String(estimate.subtotal ?? estimate.total ?? "").replace(/[^0-9.-]/g, "")) || 0;
+            return [{ id: `eli_${Date.now()}`, desc: savedTotal ? (estimate.title || estimate.service || "Estimate total") : "", qty: "1", price: savedTotal ? savedTotal.toFixed(2) : "" }];
+          })(),
+      // Missing means legacy: keep tax off so a historical quote never changes after rollout.
+      taxEnabled: estimate.taxEnabled === true,
+      taxRate: String(estimate.taxRate ?? defaultTaxRate),
+    } : {
+      id: `est_${Date.now()}`,
+      number: nextNumber || "EST-1001",
+      clientId: "",
+      clientName: "",
+      title: "",
+      date: new Date().toISOString().split("T")[0],
+      validDays: 30,
+      status: "draft",
+      items: [{ id: `eli_${Date.now()}`, desc: "", qty: "1", price: "" }],
+      notes: "",
+      taxEnabled: true,
+      taxRate: defaultTaxRate,
+      createdAt: Date.now(),
+    };
+    return withEstimateTotals(base, defaultTaxRate);
   });
   const [sending, setSending] = useState(false);
+  const [smsSending, setSmsSending] = useState(false);
   const [sentMsg, setSentMsg] = useState("");
   const [pdfBusy, setPdfBusy] = useState(false);
+  const [picker, setPicker] = useState(false);
+  const totals = estimateTotals(form, defaultTaxRate);
+  const canSend = perms.invoiceSend !== false;
+  const canDelete = perms.invoiceDelete !== false;
   // Warm the jsPDF chunk so the native share sheet opens inside the tap's user-gesture window
   // (iOS blocks navigator.share if an await stalls the gesture). Same trick the invoice export uses.
   useEffect(() => { loadJsPDF().catch(() => {}); }, []);
@@ -17005,215 +17155,286 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
     if (pdfBusy) return;
     setPdfBusy(true); setSentMsg("");
     try {
-      if (onPersist) onPersist(form); // save edits, but stay on the estimate (no close)
-      const r = await generateEstimatePDF(form, branding, invoicing);
+      const normalized = withEstimateTotals(form, defaultTaxRate);
+      setForm(normalized);
+      if (onPersist) onPersist(normalized); // save edits, but stay on the estimate (no close)
+      const r = await generateEstimatePDF(normalized, branding, invoicing);
       if (r === "downloaded") setSentMsg("Estimate PDF saved to your downloads.");
     } catch (e) {
       setSentMsg("Couldn't export the PDF: " + ((e && e.message) || "unknown error"));
     } finally { setPdfBusy(false); }
   };
 
-  const set = (k, v) => setForm(f => {
-    const next = { ...f, [k]: v };
-    // recalculate total when items change
-    if (k === "items") {
-      const t = v.reduce((s, item) => s + (parseFloat(item.price||0) * (parseInt(item.qty)||1)), 0);
-      next.total = `$${t.toFixed(2)}`;
+  const revise = (current, patch, contentChanged = true) => {
+    const next = { ...current, ...patch };
+    if (contentChanged && ["sent", "approved", "declined"].includes(String(current.status || "").toLowerCase())) {
+      next.status = "draft";
+      delete next.approvedAt;
+      delete next.declinedAt;
+      delete next.sentAt;
     }
-    return next;
-  });
+    return withEstimateTotals(next, defaultTaxRate);
+  };
+  const set = (key, value, contentChanged = true) => setForm((current) => revise(current, { [key]: value }, contentChanged));
 
   const setItem = (idx, key, val) => {
     const items = form.items.map((it, i) => i === idx ? { ...it, [key]: val } : it);
     set("items", items);
   };
-  const addItem = () => set("items", [...form.items, { id: Date.now(), desc: "", qty: 1, price: "" }]);
+  const addItem = () => set("items", [...form.items, { id: `eli_${Date.now()}`, desc: "", qty: "1", price: "" }]);
   const removeItem = (idx) => set("items", form.items.filter((_, i) => i !== idx));
+
+  const addCatalogLine = (kind, item) => {
+    const price = kind === "treatment" ? item.retailPerOz : kind === "part" ? item.retailPer : item.price;
+    const line = { id: `eli_${Date.now()}`, desc: item.name || "", qty: "1", price: String(price || ""), kind, refId: item.id };
+    set("items", [...form.items.filter((entry) => entry.desc || entry.price), line]);
+    setPicker(false);
+  };
+  const addBundledParts = (selected) => {
+    const parts = (selected || []).filter((entry) => entry.part);
+    if (!parts.length) return;
+    const price = parts.reduce((sum, entry) => sum + (parseFloat(entry.part.retailPer) || 0) * (parseFloat(entry.qty) || 1), 0);
+    const names = parts.map((entry) => `${entry.part.name}${(parseFloat(entry.qty) || 1) > 1 ? ` ×${entry.qty}` : ""}`).join(", ");
+    set("items", [...form.items.filter((entry) => entry.desc || entry.price), { id: `eli_${Date.now()}`, desc: `Parts & Materials — ${names}`, qty: "1", price: price.toFixed(2), kind: "bundle" }]);
+    setPicker(false);
+  };
 
   const selectClient = (id) => {
     const c = (clients||[]).find(c => String(c.id) === String(id));
-    setForm(f => ({ ...f, clientId: id, clientName: c?.name || "" }));
+    setForm((current) => revise(current, { clientId: id, clientName: c?.name || "" }));
+  };
+
+  const normalizedForSend = () => withEstimateTotals(form, defaultTaxRate);
+  const validateForSend = (client) => {
+    if (!client) return "Choose a client before sending this estimate.";
+    if (!(form.items || []).some((item) => String(item.desc || "").trim())) return "Add at least one line item before sending.";
+    return "";
+  };
+  const markSent = (current) => {
+    const sent = withEstimateTotals({ ...current, status: "sent", sentAt: new Date().toISOString() }, defaultTaxRate);
+    setForm(sent);
+    if (onPersist) onPersist(sent);
   };
 
   // Build the estimate text for SMS
-  const buildSmsText = () => {
+  const buildSmsText = (estimateForSend) => {
+    const sentTotals = estimateTotals(estimateForSend, defaultTaxRate);
     const lines = [
       `Estimate from ${branding.companyName}`,
-      form.title ? `Service: ${form.title}` : "",
+      estimateForSend.number ? `Estimate: ${estimateForSend.number}` : "",
+      estimateForSend.title ? `Service: ${estimateForSend.title}` : "",
       "",
-      ...form.items.filter(it => it.desc).map(it => `• ${it.desc}: $${(parseFloat(it.price||0)*(parseInt(it.qty)||1)).toFixed(2)}`),
+      ...estimateForSend.items.filter(it => it.desc).map(it => `• ${it.desc}: ${formatEstimateMoney(estimateLineAmount(it))}`),
       "",
-      `Total: ${form.total}`,
-      form.notes ? `Notes: ${form.notes}` : "",
-      `Valid for ${form.validDays} days.`,
+      `Subtotal: ${formatEstimateMoney(sentTotals.subtotal)}`,
+      sentTotals.taxEnabled ? `Sales tax (${sentTotals.taxRate}%): ${formatEstimateMoney(sentTotals.tax)}` : "",
+      `Total: ${formatEstimateMoney(sentTotals.total)}`,
+      estimateForSend.notes ? `Notes: ${estimateForSend.notes}` : "",
+      `Valid for ${estimateForSend.validDays} days.`,
       "",
       `To approve, reply YES. Questions? Call ${branding.companyPhone || "us"}.`,
-    ].filter(l => l !== null);
+    ].filter(Boolean);
     return lines.join("\n");
   };
 
   const sendViaSms = async () => {
+    if (smsSending) return;
     const client = (clients||[]).find(c => String(c.id) === String(form.clientId));
+    const validation = validateForSend(client);
+    if (validation) { setSentMsg(validation); return; }
     const phone = (client?.phone||"").replace(/\D/g,"");
     if (!phone) { setSentMsg("No phone number on file for this client."); return; }
-    const text = buildSmsText();
-    const r = await sendSms(phone, text, { clientId: client?.id, type: "Estimate" }); // business Quo line ONLY — never the device
-    if (!r.ok) { setSentMsg(r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send the text — try again.")); }
-    else if (r.held) { setSentMsg("Held by Test Mode — the estimate was not texted to the client."); }
-    else if (r.redirected) { setSentMsg("Test sent to you — the estimate was not texted to the client."); }
-    else if (r.acceptedForClient) { set("status", "sent"); setSentMsg("Estimate text accepted for sending from the SPS business number."); }
-    else { setSentMsg("The estimate text was not sent to the client."); }
+    const current = normalizedForSend();
+    const text = buildSmsText(current);
+    setSmsSending(true); setSentMsg("");
+    try {
+      const r = await sendSms(phone, text, { clientId: client?.id, type: "Estimate" }); // business Quo line ONLY — never the device
+      if (!r.ok) { setSentMsg(r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send the text — try again.")); }
+      else if (r.held) { setSentMsg("Held by Test Mode — the estimate was not texted to the client."); }
+      else if (r.redirected) { setSentMsg("Test sent to you — the estimate was not texted to the client."); }
+      else if (r.acceptedForClient) { markSent(current); setSentMsg("Estimate text accepted for sending from the SPS business number."); }
+      else { setSentMsg("The estimate text was not sent to the client."); }
+    } catch (_) {
+      setSentMsg("Couldn't reach the texting server. Nothing was sent.");
+    } finally {
+      setSmsSending(false);
+    }
   };
 
   const sendViaEmail = async () => {
     const client = (clients||[]).find(c => String(c.id) === String(form.clientId));
+    const validation = validateForSend(client);
+    if (validation) { setSentMsg(validation); return; }
     const em = (client?.email || "").trim();
     if (!em) { setSentMsg("No email on file for this client."); return; }
     if (sending) return;
     setSending(true); setSentMsg("");
     try {
+      const current = normalizedForSend();
+      const sentTotals = estimateTotals(current, defaultTaxRate);
       // Attach the same PDF the "Download PDF" button makes, so the client can save it (best-effort).
       let pdf = null;
       try {
-        const doc = await buildEstimatePDFDoc(form, branding, invoicing);
+        const doc = await buildEstimatePDFDoc(current, branding, invoicing);
         const b64 = (doc.output("datauristring").split("base64,")[1] || "");
-        if (b64) pdf = { filename: estimatePdfName(form), content: b64 };
+        if (b64) pdf = { filename: estimatePdfName(current), content: b64 };
       } catch (_) { /* PDF optional — still send the branded email */ }
       const r = await fetch(`${PROD_URL}/api/send-estimate`, {
         method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           ...senderEmailFields(client?.id),
           to: em,
-          clientName: form.clientName || client?.name || "",
+          clientName: current.clientName || client?.name || "",
           emailSubject: `Estimate from ${branding.companyName || "Stone Property Solutions"}`,
           estimate: {
-            service: form.title || "",
-            items: (form.items || []).map(it => ({ desc: it.desc, qty: it.qty, price: it.price })),
-            total: form.total,
-            notes: form.notes || "",
-            validDays: form.validDays,
+            number: current.number || "",
+            date: current.date || "",
+            service: current.title || "",
+            items: (current.items || []).map(it => ({ desc: it.desc, qty: it.qty, price: it.price, kind: it.kind })),
+            taxEnabled: sentTotals.taxEnabled,
+            taxRate: sentTotals.taxRate,
+            subtotal: sentTotals.subtotal,
+            taxAmount: sentTotals.tax,
+            tax: sentTotals.tax,
+            total: formatEstimateMoney(sentTotals.total),
+            notes: current.notes || "",
+            validDays: current.validDays,
           },
           branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary },
           ...(pdf ? { pdf } : {}),
         }),
       });
       const d = await r.json().catch(() => ({}));
-      if (r.ok && d.sent) { set("status", "sent"); setSentMsg(pdf ? "Estimate emailed to the client — with a PDF attached." : "Estimate emailed to the client."); }
+      if (r.ok && d.sent) { markSent(current); setSentMsg(pdf ? "Estimate emailed to the client — with a PDF attached." : "Estimate emailed to the client."); }
       else if (r.ok && d.held) { setSentMsg("Held by Test Mode — not sent to the client."); }
       else { setSentMsg(d.error || "Email failed to send."); }
     } catch (_) { setSentMsg("Couldn't reach the server."); }
     finally { setSending(false); }
   };
 
-  const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", outline: "none", color: T.text, background: T.surface };
+  const field = { width: "100%", minHeight: 44, padding: "10px 12px", border: `1px solid ${T.border}`, borderRadius: 11, fontSize: vp.isPhone ? 16 : 14, fontFamily: "inherit", boxSizing: "border-box", outline: "none", color: T.text, background: T.surface };
+  const label = { fontSize: 10.5, fontWeight: 750, textTransform: "uppercase", letterSpacing: "0.055em", color: T.textMuted, display: "block", marginBottom: 5 };
+  const card = { background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, padding: vp.isPhone ? 14 : 17 };
+  const statusTone = { draft: T.textMuted, sent: T.primary, approved: T.accent, declined: T.warning }[form.status] || T.textMuted;
+  const saveCurrent = () => onSave(withEstimateTotals(form, defaultTaxRate));
+  const confirmDelete = () => {
+    if (!confirm(`Delete ${form.number || "this estimate"}? This cannot be undone.`)) return;
+    onDelete(form.id);
+  };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 4 }}>
-        <button onClick={onBack} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4, fontFamily: "inherit" }}>
-          <Icon name="back" size={14} /> Back
-        </button>
-        <div style={{ display: "flex", gap: 8 }}>
-          {!isNew && <Btn variant="danger" sm onClick={() => onDelete(form.id)}>Delete</Btn>}
-          <Btn sm onClick={() => onSave(form)}>Save</Btn>
-        </div>
-      </div>
-
-      {/* Client + title */}
-      <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, padding: "18px 18px", display: "flex", flexDirection: "column", gap: 14 }}>
-        <div>
-          <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 6 }}>Client</label>
-          <select value={form.clientId} onChange={e => selectClient(e.target.value)} style={field}>
-            <option value="">Select a client...</option>
-            {selectableClients(clients).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-        </div>
-        <div>
-          <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 6 }}>Estimate Title</label>
-          <input type="text" style={field} value={form.title} onChange={e => set("title", e.target.value)} placeholder="e.g. Spring Pond Opening, New Installation..." />
-        </div>
-        <div style={{ display: "flex", gap: 10 }}>
-          <div style={{ flex: 1 }}>
-            <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 6 }}>Date</label>
-            <input type="date" style={field} value={form.date} onChange={e => set("date", e.target.value)} />
+    <>
+      <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
+        <div style={{ position: "sticky", top: 0, zIndex: 12, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "8px 0 10px", background: T.bg }}>
+          <button onClick={onBack} style={{ minHeight: 40, background: "none", border: "none", color: T.primary, fontWeight: 750, fontSize: 13, cursor: "pointer", padding: "0 5px 0 0", display: "flex", alignItems: "center", gap: 5, fontFamily: "inherit" }}><Icon name="back" size={15} /> Estimates</button>
+          <div style={{ minWidth: 0, textAlign: "center" }}>
+            <div style={{ fontSize: 14, fontWeight: 850, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isNew ? "New estimate" : form.number || "Estimate"}</div>
+            <div style={{ fontSize: 10.5, fontWeight: 750, color: statusTone, marginTop: 1 }}>{estimateStatusLabel(form.status)}</div>
           </div>
-          <div style={{ flex: 1 }}>
-            <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 6 }}>Valid (days)</label>
-            <input type="number" style={field} value={form.validDays} onChange={e => set("validDays", e.target.value)} min={1} />
-          </div>
+          <Btn sm onClick={saveCurrent} style={{ minHeight: 40, minWidth: 66 }}>Save</Btn>
         </div>
-      </div>
 
-      {/* Line items */}
-      <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, overflow: "hidden" }}>
-        <div style={{ padding: "14px 18px", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Line Items</div>
-          <button onClick={addItem} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontFamily: "inherit" }}>
-            <Icon name="plus" size={14} /> Add
-          </button>
-        </div>
-        {form.items.map((item, idx) => (
-          <div key={item.id} style={{ padding: "14px 18px", borderBottom: idx < form.items.length-1 ? `1px solid ${T.border}` : "none", display: "flex", flexDirection: "column", gap: 8 }}>
-            <input style={field} value={item.desc} onChange={e => setItem(idx, "desc", e.target.value)} placeholder="Description of service or item..." />
-            <div style={{ display: "flex", gap: 8 }}>
-              <div style={{ flex: 1 }}>
-                <input type="number" style={field} value={item.qty} onChange={e => setItem(idx, "qty", e.target.value)} placeholder="Qty" min={1} />
+        {estimate && estimate.status !== "draft" && form.status === "draft" && (
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "10px 12px", background: hexA(T.primary, 0.07), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 12, color: T.text, fontSize: 12, lineHeight: 1.45 }}>
+            <Icon name="info" size={14} style={{ color: T.primary, marginTop: 1, flexShrink: 0 }} />
+            Pricing or scope changed, so this estimate returned to Draft. Send it again when the revision is ready.
+          </div>
+        )}
+
+        <div style={{ display: "grid", gridTemplateColumns: vp.isDesktop ? "minmax(0, 1.6fr) minmax(290px, 0.75fr)" : "1fr", gap: 13, alignItems: "start" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 13, minWidth: 0 }}>
+            <div style={{ ...card, display: "flex", flexDirection: "column", gap: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                <div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>Estimate details</div>
+                <div style={{ fontSize: 11, color: T.textMuted }}>{form.number}</div>
               </div>
-              <div style={{ flex: 2 }}>
-                <input type="number" style={{ ...field, paddingLeft: 28, backgroundImage: "none" }} value={item.price} onChange={e => setItem(idx, "price", e.target.value)} placeholder="0.00" step="0.01" />
+              <div>
+                <label style={label}>Client</label>
+                <select value={form.clientId} onChange={e => selectClient(e.target.value)} style={field}>
+                  <option value="">Select a client…</option>
+                  {selectableClients(clients).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
               </div>
-              {form.items.length > 1 && (
-                <button onClick={() => removeItem(idx)} style={{ background: "none", border: "none", color: T.warning, cursor: "pointer", padding: "0 4px", display: "flex", alignItems: "center" }}>
-                  <Icon name="close" size={16} />
-                </button>
-              )}
+              <div>
+                <label style={label}>Estimate title</label>
+                <input type="text" style={field} value={form.title} onChange={e => set("title", e.target.value)} placeholder="Spring pond opening, liner repair…" />
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: vp.width <= 390 ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 9 }}>
+                <div><label style={label}>Issued date</label><input type="date" style={field} value={form.date} onChange={e => set("date", e.target.value)} /></div>
+                <div><label style={label}>Valid for</label><div style={{ position: "relative" }}><input type="number" inputMode="numeric" style={{ ...field, paddingRight: 50 }} value={form.validDays} onChange={e => set("validDays", e.target.value)} min={1} /><span style={{ position: "absolute", right: 11, top: "50%", transform: "translateY(-50%)", color: T.textMuted, fontSize: 12 }}>days</span></div></div>
+              </div>
             </div>
-            <div style={{ fontSize: 12, color: T.textMuted, textAlign: "right" }}>
-              Subtotal: <strong>${(parseFloat(item.price||0) * (parseInt(item.qty)||1)).toFixed(2)}</strong>
+
+            <div style={{ ...card, padding: 0, overflow: "hidden" }}>
+              <div style={{ padding: "13px 14px", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                <div><div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>Scope & pricing</div><div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>Add services, materials, or custom work.</div></div>
+                <button onClick={() => setPicker(true)} style={{ minHeight: 38, padding: "7px 10px", borderRadius: 10, border: "none", background: T.primary, color: "#fff", fontSize: 11.5, fontWeight: 800, fontFamily: "inherit", cursor: "pointer", flexShrink: 0 }}><Icon name="plus" size={12} /> Catalog</button>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                {form.items.map((item, idx) => (
+                  <div key={item.id} style={{ padding: vp.isPhone ? "12px 14px" : "13px 16px", borderBottom: idx < form.items.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", flexDirection: "column", gap: 8 }}>
+                    <div style={{ display: "flex", alignItems: "flex-end", gap: 7 }}>
+                      <div style={{ flex: 1, minWidth: 0 }}><label style={label}>Description</label><input style={field} value={item.desc} onChange={e => setItem(idx, "desc", e.target.value)} placeholder="Service or item description" /></div>
+                      <button onClick={() => removeItem(idx)} disabled={form.items.length === 1} aria-label="Remove line item" style={{ width: 42, height: 44, flexShrink: 0, borderRadius: 11, border: `1px solid ${T.border}`, background: T.surfaceAlt, color: T.textMuted, cursor: form.items.length === 1 ? "default" : "pointer", opacity: form.items.length === 1 ? 0.35 : 1, display: "grid", placeItems: "center" }}><Icon name="close" size={15} /></button>
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: vp.width <= 360 ? "minmax(68px, 0.65fr) minmax(105px, 1.35fr)" : "minmax(72px, 0.7fr) minmax(110px, 1.2fr) minmax(90px, 0.8fr)", gap: 7, alignItems: "end" }}>
+                      <div><label style={label}>Qty</label><input inputMode="decimal" style={{ ...field, textAlign: "center" }} value={item.qty} onChange={e => setItem(idx, "qty", e.target.value.replace(/[^\d.]/g, ""))} /></div>
+                      <div><label style={label}>Unit price</label><div style={{ position: "relative" }}><span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: T.textMuted, fontSize: 13 }}>$</span><input inputMode="decimal" style={{ ...field, paddingLeft: 23 }} value={item.price} onChange={e => setItem(idx, "price", e.target.value.replace(/[^\d.]/g, ""))} placeholder="0.00" /></div></div>
+                      <div style={{ textAlign: "right", paddingBottom: vp.width <= 360 ? 0 : 11, gridColumn: vp.width <= 360 ? "1 / -1" : undefined, display: vp.width <= 360 ? "flex" : "block", justifyContent: vp.width <= 360 ? "space-between" : undefined, alignItems: "baseline" }}><div style={{ ...label, marginBottom: vp.width <= 360 ? 0 : 3 }}>Amount</div><div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>{formatEstimateMoney(estimateLineAmount(item))}</div></div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ padding: "11px 14px", borderTop: `1px solid ${T.border}`, background: T.surfaceAlt }}>
+                <button onClick={addItem} style={{ width: "100%", minHeight: 40, borderRadius: 10, border: `1.5px dashed ${T.border}`, background: T.surface, color: T.primary, fontSize: 12.5, fontWeight: 800, fontFamily: "inherit", cursor: "pointer" }}>+ Add custom line</button>
+              </div>
+            </div>
+
+            <div style={card}>
+              <label style={label}>Notes or scope details</label>
+              <textarea style={{ ...field, minHeight: 96, resize: "vertical", lineHeight: 1.5 }} value={form.notes} onChange={e => set("notes", e.target.value)} placeholder="Work details, exclusions, payment schedule, or next steps…" />
             </div>
           </div>
-        ))}
-        <div style={{ padding: "14px 18px", display: "flex", justifyContent: "space-between", background: T.surfaceAlt }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Total</div>
-          <div style={{ fontSize: 20, fontWeight: 800, color: T.text }}>{form.total}</div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 13, position: vp.isDesktop ? "sticky" : "static", top: vp.isDesktop ? 72 : undefined }}>
+            <div style={card}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+                <div><div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>Sales tax</div><div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{totals.taxEnabled ? `${totals.taxRate}% added automatically` : "Removed from this estimate"}</div></div>
+                <Toggle on={totals.taxEnabled} onChange={(on) => set("taxEnabled", on)} />
+              </div>
+              {totals.taxEnabled && <div style={{ marginTop: 12 }}><label style={label}>Tax rate</label><div style={{ position: "relative", maxWidth: 120 }}><input inputMode="decimal" style={{ ...field, paddingRight: 28 }} value={form.taxRate} onChange={e => set("taxRate", e.target.value.replace(/[^\d.]/g, ""))} /><span style={{ position: "absolute", right: 11, top: "50%", transform: "translateY(-50%)", color: T.textMuted, fontSize: 13 }}>%</span></div></div>}
+              <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${T.border}`, display: "flex", flexDirection: "column", gap: 7 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: T.textMuted }}><span>Subtotal</span><span>{formatEstimateMoney(totals.subtotal)}</span></div>
+                {totals.taxEnabled && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: T.textMuted }}><span>Sales tax ({totals.taxRate}%)</span><span>{formatEstimateMoney(totals.tax)}</span></div>}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", fontSize: 17, fontWeight: 850, color: T.text, borderTop: `1px solid ${T.border}`, paddingTop: 9 }}><span>Total</span><span style={{ color: T.primary, fontSize: 21 }}>{formatEstimateMoney(totals.total)}</span></div>
+              </div>
+            </div>
+
+            <div style={card}>
+              <label style={label}>Status</label>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 7 }}>
+                {ESTIMATE_STATUSES.map(({ id, label: statusLabel }) => {
+                  const on = form.status === id;
+                  return <button key={id} onClick={() => set("status", id, false)} aria-pressed={on} style={{ minHeight: 40, border: `1.5px solid ${on ? T.primary : T.border}`, borderRadius: 10, background: on ? hexA(T.primary, 0.08) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 750, fontSize: 11.5, fontFamily: "inherit", cursor: "pointer" }}>{statusLabel}</button>;
+                })}
+              </div>
+            </div>
+
+            <div style={{ ...card, display: "flex", flexDirection: "column", gap: 8 }}>
+              <div><div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>Share with client</div><div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>Sending saves the estimate as Sent after the server confirms delivery.</div></div>
+              {canSend && <Btn onClick={sendViaEmail} disabled={sending} block style={{ gap: 7 }}><Icon name="mail" size={15} /> {sending ? "Sending…" : "Email estimate"}</Btn>}
+              {canSend && <Btn onClick={sendViaSms} disabled={smsSending} variant="outline" block style={{ gap: 7 }}><Icon name="message" size={15} /> {smsSending ? "Sending…" : "Text estimate"}</Btn>}
+              <Btn onClick={downloadPdf} disabled={pdfBusy} variant="ghost" block style={{ gap: 7 }}><Icon name="download" size={15} /> {pdfBusy ? "Preparing…" : "Download PDF"}</Btn>
+              {sentMsg && <div role="status" style={{ fontSize: 11.5, color: T.textMuted, textAlign: "center", lineHeight: 1.45, padding: "4px 2px" }}>{sentMsg}</div>}
+            </div>
+
+            {!isNew && canDelete && <button onClick={confirmDelete} style={{ minHeight: 42, background: "transparent", border: `1px solid ${hexA("#E5484D", 0.28)}`, borderRadius: 11, color: "#C0392B", fontSize: 12.5, fontWeight: 750, fontFamily: "inherit", cursor: "pointer" }}>Delete estimate</button>}
+          </div>
         </div>
       </div>
 
-      {/* Notes */}
-      <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, padding: "18px 18px" }}>
-        <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 8 }}>Notes (optional)</label>
-        <textarea style={{ ...field, minHeight: 80, resize: "vertical", lineHeight: 1.5 }} value={form.notes} onChange={e => set("notes", e.target.value)} placeholder="Scope of work, terms, or any extra detail..." />
-      </div>
-
-      {/* Status */}
-      <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, padding: "18px 18px" }}>
-        <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 10 }}>Status</label>
-        <div style={{ display: "flex", gap: 8 }}>
-          {["draft","sent","approved","declined"].map(s => (
-            <button key={s} onClick={() => set("status", s)} style={{ flex: 1, padding: "9px 4px", border: `1.5px solid ${form.status === s ? T.primary : T.border}`, borderRadius: 11, background: form.status === s ? hexA(T.primary, 0.1) : T.surface, color: form.status === s ? T.primary : T.textMuted, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit", textTransform: "capitalize" }}>
-              {s}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Send options */}
-      <div style={{ background: T.surface, borderRadius: 18, border: `1px solid ${T.border}`, padding: "18px 18px", display: "flex", flexDirection: "column", gap: 10 }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: T.text, marginBottom: 2 }}>Send to Client</div>
-        <Btn onClick={sendViaSms} variant="outline" block style={{ gap: 7 }}>
-          <Icon name="message" size={15} /> Send via Text Message
-        </Btn>
-        <Btn onClick={sendViaEmail} disabled={sending} variant="ghost" block style={{ gap: 7 }}>
-          <Icon name="mail" size={15} /> {sending ? "Sending…" : "Send via Email"}
-        </Btn>
-        <Btn onClick={downloadPdf} disabled={pdfBusy} variant="ghost" block style={{ gap: 7 }}>
-          <Icon name="download" size={15} /> {pdfBusy ? "Preparing…" : "Download PDF"}
-        </Btn>
-        {sentMsg && <div style={{ fontSize: 12, color: T.textMuted, textAlign: "center", lineHeight: 1.5 }}>{sentMsg}</div>}
-      </div>
-
-      <Btn onClick={() => onSave(form)} block>Save Estimate</Btn>
-    </div>
+      {picker && <CatalogPickerSheet catalog={catalog} title="Add to Estimate" allowCreate={false} onClose={() => setPicker(false)} onAddCatalog={addCatalogLine} onAddBundle={addBundledParts} T={T} />}
+    </>
   );
 }
 
@@ -20389,9 +20610,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
           {/* Live preview */}
           <div style={{ display: "flex", gap: 14, alignItems: "center", background: T.surfaceAlt, borderRadius: 14, padding: "14px 16px" }}>
             <div style={{ width: 52, height: 52, borderRadius: 14, background: T.surface, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
-              {localBranding.logoType === "image" && localBranding.logoImage
-                ? <ProtectedImage src={localBranding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                : <span style={{ fontSize: 26, fontWeight: 800, color: T.primary }}>{logoInitial(localBranding)}</span>}
+              <ProtectedImage src={brandLogoSource(localBranding)} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
             </div>
             <div>
               <div style={{ fontWeight: 800, fontSize: 16, color: T.text, letterSpacing: "-0.01em" }}>{localBranding.companyName || "Company Name"}</div>
@@ -20429,39 +20648,19 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
             <div style={{ fontSize: 11, color: T.textMuted, marginTop: 5 }}>The page staff land on after the splash screen.</div>
           </FieldRow>
 
-          {/* Logo type */}
           <FieldRow label="Logo">
-            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-              {["image", "emoji"].map(opt => (
-                <button key={opt} onClick={() => set("logoType", opt)}
-                  style={{ flex: 1, padding: "9px 12px", border: `1.5px solid ${localBranding.logoType === opt ? T.primary : T.border}`, borderRadius: 10, background: localBranding.logoType === opt ? hexA(T.primary, 0.08) : T.surface, color: localBranding.logoType === opt ? T.primary : T.text, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
-                  {opt === "image" ? "Upload Image" : "Monogram"}
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <label style={{ background: T.primary, color: "#fff", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+                <Icon name="download" size={14} /> Upload Logo
+                <input type="file" accept="image/*" ref={fileRef} onChange={handleLogoUpload} style={{ display: "none" }} />
+              </label>
+              {localBranding.logoImage && localBranding.logoImage !== "/icon-192.png" && (
+                <button onClick={() => { set("logoImage", "/icon-192.png"); set("logoType", "image"); }} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                  Use app icon
                 </button>
-              ))}
+              )}
             </div>
-
-            {localBranding.logoType === "image" && (
-              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                <label style={{ background: T.primary, color: "#fff", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
-                  <Icon name="download" size={14} /> Upload Logo
-                  <input type="file" accept="image/*" ref={fileRef} onChange={handleLogoUpload} style={{ display: "none" }} />
-                </label>
-                {localBranding.logoImage && localBranding.logoImage !== "/icon-192.png" && (
-                  <button onClick={() => { set("logoImage", "/icon-192.png"); }} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-                    Reset to default
-                  </button>
-                )}
-              </div>
-            )}
-
-            {localBranding.logoType === "emoji" && (
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <div style={{ width: 44, height: 44, borderRadius: 10, background: T.primary, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                  <span style={{ fontSize: 22, fontWeight: 800, color: "#fff" }}>{logoInitial(localBranding)}</span>
-                </div>
-                <div style={{ fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>A clean monogram from your company name's first letter. Switch to <b>Upload Image</b> for a custom logo.</div>
-              </div>
-            )}
+            <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 8, lineHeight: 1.5 }}>The current app icon is used everywhere unless you upload a replacement logo. There is no letter-monogram fallback.</div>
           </FieldRow>
 
           {/* App icon hint */}
@@ -24869,7 +25068,7 @@ function WaterQualityTrends({ clients, T, clientId }) {
   );
 }
 
-function ServiceStopsReport({ clients, invoices, T }) {
+function ServiceStopsReport({ clients, invoices, branding, T }) {
   const reportVp = useViewport();
   const compact = reportVp.width <= 420;
   const now = new Date();
@@ -24940,7 +25139,7 @@ function ServiceStopsReport({ clients, invoices, T }) {
   const generatePDF = async () => {
     setGenerating(true);
     try {
-      const { jsPDF } = await import("jspdf");
+      const [{ jsPDF }, logoData] = await Promise.all([import("jspdf"), loadBrandLogoData(branding)]);
       const doc = new jsPDF({ unit: "pt", format: "letter" });
       const W = doc.internal.pageSize.getWidth();
       const MARGIN = 40;
@@ -24952,13 +25151,22 @@ function ServiceStopsReport({ clients, invoices, T }) {
       // Header
       doc.setFillColor("#AF011A");
       doc.rect(0, 0, W, 60, "F");
+      let headerX = MARGIN;
+      if (logoData) {
+        try {
+          doc.setFillColor("#ffffff");
+          doc.roundedRect(MARGIN, 10, 40, 40, 8, 8, "F");
+          doc.addImage(logoData, pdfLogoFormat(logoData), MARGIN + 2, 12, 36, 36);
+          headerX = MARGIN + 52;
+        } catch (_) {}
+      }
       doc.setTextColor("#ffffff");
       doc.setFontSize(18);
       doc.setFont("helvetica", "bold");
-      doc.text("Stone Property Solutions", MARGIN, 30);
+      doc.text(branding?.companyName || "Stone Property Solutions", headerX, 30);
       doc.setFontSize(10);
       doc.setFont("helvetica", "normal");
-      doc.text("Service Stops Report", MARGIN, 46);
+      doc.text("Service Stops Report", headerX, 46);
       doc.text(`${range.label}  ·  ${totalStops} stop${totalStops !== 1 ? "s" : ""}  ·  ${uniqueClients} client${uniqueClients !== 1 ? "s" : ""}`, W - MARGIN, 46, { align: "right" });
       y = 80;
 
@@ -25194,7 +25402,7 @@ function ServiceStopsReport({ clients, invoices, T }) {
   );
 }
 
-function ReportsScreen({ clients, invoices, schedule, costs, T, budget = {} }) {
+function ReportsScreen({ clients, invoices, schedule, costs, branding, T, budget = {} }) {
   const [period, setPeriod] = useState("month"); // month | quarter | year | all
 
   const now = new Date();
@@ -25410,7 +25618,7 @@ function ReportsScreen({ clients, invoices, schedule, costs, T, budget = {} }) {
       </div>
 
       {reportTab === "stops" && (
-        <ServiceStopsReport clients={clients} invoices={invoices} T={T} />
+        <ServiceStopsReport clients={clients} invoices={invoices} branding={branding} T={T} />
       )}
       {reportTab === "water" && (
         <WaterQualityTrends clients={clients} T={T} />
@@ -28509,14 +28717,9 @@ function CPService({ client, branding, onNav, onUpgradeRequest, T, division }) {
               <div style={{ fontSize: plan ? 36 : 26, fontWeight: 900, letterSpacing: "-0.03em", lineHeight: 1.05 }}>{plan || "No tier assigned"}</div>
               <div style={{ fontSize: 14, opacity: 0.8, marginTop: 8, fontWeight: 500 }}>{tier?.tagline || (plan ? "" : "Choose a plan below to get started")}</div>
             </div>
-            {/* Logo or branded icon */}
-            {(branding.logoImage || branding.logoEmoji) && (
-              <div style={{ width: 48, height: 48, borderRadius: 14, background: "rgba(255,255,255,0.2)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, backdropFilter: "blur(8px)" }}>
-                {branding.logoType === "image" && branding.logoImage
-                  ? <ProtectedImage src={branding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                  : <span style={{ fontSize: 24, fontWeight: 800, color: "#fff" }}>{logoInitial(branding)}</span>}
-              </div>
-            )}
+            <div style={{ width: 48, height: 48, borderRadius: 14, background: "rgba(255,255,255,0.2)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, backdropFilter: "blur(8px)" }}>
+              <ProtectedImage src={brandLogoSource(branding)} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            </div>
           </div>
           {/* Price + frequency pills */}
           <div style={{ marginTop: 16, display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -29112,6 +29315,7 @@ function CPInvoices({ client, invoices, branding, T, vp = {}, initialSel = null,
 
 // ── CP ESTIMATES ──
 function CPEstimates({ client, estimates, branding, onApprove, T }) {
+  const vp = useViewport();
   const [approvingId, setApprovingId] = useState(null);
   const [approveError, setApproveError] = useState(null);
   const mine = (estimates||[]).filter(e => String(e.clientId)===String(client.id));
@@ -29138,22 +29342,66 @@ function CPEstimates({ client, estimates, branding, onApprove, T }) {
   );
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
-      <div style={{ fontSize:26, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>Estimates</div>
+      <div>
+        <div style={{ fontSize:26, fontWeight:800, color:T.text, letterSpacing:"-0.03em" }}>Estimates</div>
+        <div style={{ fontSize:13, color:T.textMuted, marginTop:4 }}>Review the work, pricing, and tax before approving.</div>
+      </div>
       {mine.map((e,i) => {
         const portalStatus = String(e.status || "").trim().toLowerCase();
-        return <div key={e.id} style={{ background:T.surface, borderRadius:18, border:`1px solid ${T.border}`, padding:"16px 18px" }}>
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:12 }}>
+        const numeric = value => Number(String(value == null ? "" : value).replace(/[^0-9.-]/g, "")) || 0;
+        const computed = estimateTotals(e, 0);
+        const hasLines = Array.isArray(e.items) && e.items.length > 0;
+        const taxEnabled = e.taxEnabled === true;
+        const taxRate = numeric(e.taxRate);
+        const subtotal = hasLines ? computed.subtotal : (numeric(e.subtotal) || Math.max(0, numeric(e.total) - numeric(e.taxAmount ?? e.tax)));
+        const tax = taxEnabled ? (hasLines ? computed.tax : numeric(e.taxAmount ?? e.tax)) : 0;
+        const total = hasLines ? computed.total : (numeric(e.total) || subtotal + tax);
+        const lines = (e.items || []).filter(item => item && (item.desc || item.description || estimateLineAmount(item)));
+        const statusColor = portalStatus === "approved" ? "#16803A" : portalStatus === "declined" ? "#B42318" : T.primary;
+        return <div key={e.id} style={{ background:T.surface, borderRadius:20, border:`1px solid ${portalStatus === "sent" ? hexA(T.primary,0.28) : T.border}`, overflow:"hidden", boxShadow:"0 5px 22px rgba(15,23,42,0.055)" }}>
+          <div style={{ padding:vp.isPhone ? "16px" : "18px 20px", display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12, background:portalStatus === "sent" ? hexA(T.primary,0.035) : T.surface }}>
             <div style={{ minWidth:0, flex:1 }}>
-              <div style={{ fontSize:14, fontWeight:700, color:T.text }}>Estimate #{e.number||e.id}</div>
-              <div style={{ fontSize:12, color:T.textMuted, marginTop:2 }}>{e.date||""} · ${parseFloat((e.total||"0").replace(/[^0-9.-]/g,"")).toFixed(2)}</div>
+              <div style={{ display:"flex", alignItems:"center", flexWrap:"wrap", gap:7 }}>
+                <div style={{ fontSize:11, fontWeight:800, letterSpacing:"0.07em", textTransform:"uppercase", color:T.textMuted }}>{e.number || `Estimate ${i + 1}`}</div>
+                <span style={{ borderRadius:999, padding:"3px 7px", background:hexA(statusColor,0.1), color:statusColor, fontSize:9.5, fontWeight:850, letterSpacing:"0.05em", textTransform:"uppercase" }}>{portalStatus || "Unavailable"}</span>
+              </div>
+              <div style={{ fontSize:18, fontWeight:850, color:T.text, letterSpacing:"-0.02em", marginTop:7, lineHeight:1.25 }}>{e.title || e.service || "Service estimate"}</div>
+              <div style={{ fontSize:11.5, color:T.textMuted, marginTop:5 }}>{e.date || e.issueDate || ""}{e.validDays ? ` · Valid for ${e.validDays} days` : ""}</div>
             </div>
-            {portalStatus === "sent" && (
-              <button onClick={() => approve(e.id)} disabled={approvingId != null} style={{ minHeight:44, background:T.primary, color:"#fff", border:"none", borderRadius:12, padding:"9px 14px", fontWeight:700, fontSize:13, cursor:approvingId == null ? "pointer" : "default", opacity:approvingId != null ? 0.6 : 1, fontFamily:"inherit", flexShrink:0 }}>{String(approvingId) === String(e.id) ? "Approving…" : "Approve"}</button>
-            )}
-            {portalStatus === "approved" && <span style={{ fontSize:12, fontWeight:700, color:"#16a34a" }}>Approved</span>}
-            {portalStatus !== "sent" && portalStatus !== "approved" && <span style={{ fontSize:12, fontWeight:700, color:T.textMuted, textTransform:"capitalize" }}>{portalStatus || "Unavailable"}</span>}
+            <div style={{ textAlign:"right", flexShrink:0 }}>
+              <div style={{ fontSize:10, fontWeight:750, color:T.textMuted, textTransform:"uppercase", letterSpacing:"0.05em" }}>Total</div>
+              <div style={{ fontSize:20, fontWeight:900, color:T.text, letterSpacing:"-0.03em", marginTop:2 }}>{formatEstimateMoney(total)}</div>
+            </div>
           </div>
+
+          <div style={{ borderTop:`1px solid ${T.border}`, padding:vp.isPhone ? "14px 16px 16px" : "16px 20px 18px" }}>
+            {lines.length > 0 && <div style={{ display:"flex", flexDirection:"column", gap:0, marginBottom:14 }}>
+              {lines.map((item, lineIndex) => (
+                <div key={item.id || lineIndex} style={{ display:"grid", gridTemplateColumns:"minmax(0,1fr) auto", gap:12, padding:"9px 0", borderBottom:`1px solid ${T.border}` }}>
+                  <div style={{ minWidth:0 }}>
+                    <div style={{ fontSize:13, fontWeight:700, color:T.text, lineHeight:1.35 }}>{item.desc || item.description || "Estimate item"}</div>
+                    <div style={{ fontSize:10.5, color:T.textMuted, marginTop:2 }}>{numeric(item.qty) || 1} × {formatEstimateMoney(numeric(item.price ?? item.unitPrice))}</div>
+                  </div>
+                  <div style={{ fontSize:13, fontWeight:800, color:T.text, whiteSpace:"nowrap" }}>{formatEstimateMoney(estimateLineAmount(item))}</div>
+                </div>
+              ))}
+            </div>}
+
+            <div style={{ marginLeft:"auto", maxWidth:300, display:"flex", flexDirection:"column", gap:7 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", gap:16, fontSize:12.5, color:T.textMuted }}><span>Subtotal</span><span>{formatEstimateMoney(subtotal)}</span></div>
+              {taxEnabled && <div style={{ display:"flex", justifyContent:"space-between", gap:16, fontSize:12.5, color:T.textMuted }}><span>Sales tax ({taxRate}%)</span><span>{formatEstimateMoney(tax)}</span></div>}
+              {!taxEnabled && <div style={{ display:"flex", justifyContent:"space-between", gap:16, fontSize:11.5, color:T.textMuted }}><span>Sales tax</span><span>Not applied</span></div>}
+              <div style={{ display:"flex", justifyContent:"space-between", gap:16, paddingTop:8, borderTop:`1px solid ${T.border}`, fontSize:15, fontWeight:850, color:T.text }}><span>Total</span><span style={{ color:T.primary }}>{formatEstimateMoney(total)}</span></div>
+            </div>
+
+            {e.notes && <div style={{ marginTop:14, padding:"11px 12px", borderRadius:12, background:T.surfaceAlt }}><div style={{ fontSize:10, fontWeight:800, color:T.textMuted, textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:4 }}>Scope notes</div><div style={{ fontSize:12.5, color:T.text, lineHeight:1.5, whiteSpace:"pre-wrap" }}>{e.notes}</div></div>}
+
+            {portalStatus === "sent" && (
+              <button onClick={() => approve(e.id)} disabled={approvingId != null} style={{ width:"100%", minHeight:48, marginTop:16, background:T.primary, color:"#fff", border:"none", borderRadius:13, padding:"11px 16px", fontWeight:800, fontSize:14, cursor:approvingId == null ? "pointer" : "default", opacity:approvingId != null ? 0.6 : 1, fontFamily:"inherit", boxShadow:approvingId == null ? `0 5px 16px ${hexA(T.primary,0.26)}` : "none" }}>{String(approvingId) === String(e.id) ? "Approving…" : `Approve ${formatEstimateMoney(total)} estimate`}</button>
+            )}
+            {portalStatus === "approved" && <div style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:7, minHeight:46, marginTop:16, borderRadius:13, background:hexA("#16803A",0.09), color:"#16803A", fontSize:13, fontWeight:800 }}><Icon name="check" size={15} /> Approved</div>}
           {approveError && String(approveError.id) === String(e.id) && <div role="alert" style={{ marginTop:10, fontSize:12.5, fontWeight:700, color:"#E5484D", lineHeight:1.4 }}>{approveError.text}</div>}
+          </div>
         </div>
       })}
     </div>
@@ -29488,9 +29736,7 @@ function CPDesktopSidebar({ page, settingsOpen, portalUnread, branding, client, 
       {/* Logo + portal name */}
       <div style={{ padding: "20px 18px 16px", display: "flex", alignItems: "center", gap: 11, borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
         <div style={{ width: 38, height: 38, borderRadius: 11, background: T.primary, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, boxShadow: `0 2px 8px ${hexA(T.primary, 0.35)}` }}>
-          {branding.logoType === "image" && branding.logoImage
-            ? <ProtectedImage src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-            : <span style={{ fontSize: 18, fontWeight: 800, color: "#fff" }}>{(branding.companyName || "S").trim().charAt(0).toUpperCase() || "S"}</span>}
+          <ProtectedImage src={brandLogoSource(branding)} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
         </div>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", lineHeight: 1.18, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{branding.portalAppName || branding.companyName}</div>
@@ -29684,9 +29930,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
           {/* Logo + name */}
           <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: 1 }}>
             <div style={{ width: 34, height: 34, borderRadius: 10, background: T.primary, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, boxShadow: `0 2px 8px ${hexA(T.primary, 0.35)}` }}>
-              {branding.logoType === "image" && branding.logoImage
-                ? <ProtectedImage src={branding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                : <span style={{ fontSize: 16, fontWeight: 800, color: "#fff" }}>{(branding.companyName || "S").trim().charAt(0).toUpperCase() || "S"}</span>}
+              <ProtectedImage src={brandLogoSource(branding)} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
             </div>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 14, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", lineHeight: 1.1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.portalAppName || branding.companyName}</div>
@@ -29769,9 +30013,7 @@ function DesktopSidebar({ page, perms, navUnread, reminderDue, leadDue = 0, onNa
   const W = collapsed ? 66 : (vp?.isTablet ? 208 : 244);
   const logoBox = (
     <div style={{ width: 38, height: 38, borderRadius: 11, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
-      {branding.logoType === "image" && branding.logoImage
-        ? <ProtectedImage src={branding.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-        : <span style={{ fontSize: 20, fontWeight: 800, color: T.primary }}>{logoInitial(branding)}</span>}
+      <ProtectedImage src={brandLogoSource(branding)} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
     </div>
   );
   const toggleBtn = (
@@ -30167,7 +30409,7 @@ export default function App({ authEmail = "", onSignOut }) {
     try {
       if (typeof localStorage !== "undefined") {
         localStorage.setItem("sps_brand_logo", JSON.stringify({
-          type: branding.logoType, emoji: branding.logoEmoji, image: branding.logoImage, name: branding.companyName,
+          type: "image", image: brandLogoSource(branding), name: branding.companyName,
         }));
       }
     } catch (e) {}
@@ -30394,13 +30636,12 @@ export default function App({ authEmail = "", onSignOut }) {
     isArrived: (sid) => !!arrivals[sid],
   });
 
-  // Resolve the brand logo to a base64 the native widget can render: a data: URL passes through; a
-  // bundled path (e.g. /icon-192.png) is fetched + encoded. Skipped if it's too large to keep the
-  // App Group payload lean — the widget then falls back to the company-initial monogram.
+  // Resolve the brand logo to base64 for native widgets. The shared resolver always supplies the
+  // current app icon when no uploaded image is available, so widgets never need a letter fallback.
   const [widgetLogo, setWidgetLogo] = useState("");
   useEffect(() => {
     let alive = true;
-    const li = branding.logoType === "image" ? (branding.logoImage || "") : "";
+    const li = brandLogoSource(branding);
     const accept = (u) => { if (alive) setWidgetLogo(typeof u === "string" && u.startsWith("data:") && u.length < 180000 ? u : ""); };
     if (!li) { setWidgetLogo(""); return; }
     if (li.startsWith("data:")) { accept(li); return () => { alive = false; }; }
@@ -30412,7 +30653,7 @@ export default function App({ authEmail = "", onSignOut }) {
       } catch (_) { if (alive) setWidgetLogo(""); }
     })();
     return () => { alive = false; };
-  }, [branding.logoType, branding.logoImage]);
+  }, [branding.logoImage]);
 
   // ── Native iOS home-screen widgets ───────────────────────────────────────────
   // Push a small OWNER snapshot into the App Group shared store so the WidgetKit
@@ -30510,8 +30751,8 @@ export default function App({ authEmail = "", onSignOut }) {
         updated_at: now.toISOString(),
         app_font: branding.appFont, // widgets render in the app's chosen font (rounded/system/grotesk)
         logo_image: widgetLogo,                 // the real brand logo (base64) for the widget header
-        logo_name: branding.companyName || "",  // full business name — shown when there's no clean logo
-        logo_mono: logoInitial(branding),       // single-letter monogram, last-resort fallback
+        logo_name: branding.companyName || "Stone Property Solutions",
+        logo_mono: "",
         profit_week: r2(wk.profit),
         // Bank truth when available — the widget's month profit matches the Budget/Home/Reports
         // (categorized real transactions); ops profit is the fallback. Week stays ops (the bank
@@ -30580,7 +30821,7 @@ export default function App({ authEmail = "", onSignOut }) {
           .filter(iv => !["Paid", "paid"].includes(effectiveStatus(iv)) && iv.status !== "Draft" && iv.status !== "draft")
           .sort((a, b) => ((parseMDY(a.dueDate) || 0) - (parseMDY(b.dueDate) || 0)));
 
-        const payload = { role: "client", updated_at: new Date().toISOString(), app_font: branding.appFont, logo_image: widgetLogo, logo_name: branding.companyName || "", logo_mono: logoInitial(branding) };
+        const payload = { role: "client", updated_at: new Date().toISOString(), app_font: branding.appFont, logo_image: widgetLogo, logo_name: branding.companyName || "Stone Property Solutions", logo_mono: "" };
         if (nextV) {
           payload.next_visit_at = toISO(nextV.date, nextV.stop.time);
           if (!nextV.stop.time) payload.next_visit_untimed = true; // widget shows the day only — no fake clock time
@@ -32294,7 +32535,7 @@ export default function App({ authEmail = "", onSignOut }) {
       ))}
       {page === "schedule" && <SectionErrorBoundary key={"schedule-" + schedNonce}><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <SectionErrorBoundary key="inventory"><InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} /></SectionErrorBoundary>}
-      {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} T={T} budget={budget} />}
+      {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} branding={branding} T={T} budget={budget} />}
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} isAdmin={perms.isAdmin} />}
       {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
       {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
@@ -32421,9 +32662,7 @@ export default function App({ authEmail = "", onSignOut }) {
           <div style={{ minHeight: 52, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, paddingLeft: 16, paddingRight: 12 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0, flex: 1 }}>
             <div style={{ width: 30, height: 30, borderRadius: 9, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
-              {branding.logoType === "image" && branding.logoImage
-                ? <ProtectedImage src={branding.logoImage} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                : <span style={{ fontSize: 16, fontWeight: 800, color: T.primary }}>{logoInitial(branding)}</span>}
+              <ProtectedImage src={brandLogoSource(branding)} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
             </div>
             <div style={{ minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>

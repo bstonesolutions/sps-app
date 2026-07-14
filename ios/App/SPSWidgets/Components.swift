@@ -6,8 +6,8 @@ import SwiftUI
 import WidgetKit
 
 struct LogoMark: View {
-    // The real brand logo from the app: render the decoded image when present, else the company
-    // monogram in the crimson square. A fixed 22×22 frame keeps the header row consistent.
+    // The real brand logo from the app. A neutral building glyph is used only for malformed legacy
+    // payloads that contain neither the logo nor the company name; never invent a letter mark.
     @Environment(\.spsLogo) var logo
     var body: some View {
         if let ui = sps_decodeLogo(logo.imageB64) {
@@ -21,8 +21,8 @@ struct LogoMark: View {
                 .fill(Brand.crimson)
                 .frame(width: 22, height: 22)
                 .overlay(
-                    Text(logo.mono.isEmpty ? "S" : logo.mono)
-                        .font(.system(size: 16, weight: .black, design: .rounded))
+                    Image(systemName: "building.2.fill")
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundColor(.white)
                 )
         }
@@ -38,7 +38,7 @@ struct Header: View {
         //  • A clean logo decodes  → image + the section title.
         //  • No clean logo, a name → the business name owns the row (a "complicated" logo just shows
         //    the name instead of cramming an unreadable image into 22pt).
-        //  • No name at all        → the single-letter monogram square + the section title.
+        //  • No name at all        → a neutral legacy-state glyph + the section title.
         HStack(alignment: .center, spacing: 8) {
             if let ui = sps_decodeLogo(logo.imageB64) {
                 Image(uiImage: ui)

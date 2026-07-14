@@ -4,6 +4,7 @@ import { supabase, store } from "./supabaseClient";
 import { PROD_URL } from "./config";
 import { Capacitor } from "@capacitor/core";
 import App, { LiveTrack } from "./App.jsx";
+import { brandLogoSource } from "./brandAssets";
 
 // Remove the static boot splash (in index.html) once a real React screen is up. Hold it at least
 // ~1.8s (matches the app path) so the full welcome motion always plays and it never flashes, then
@@ -198,16 +199,13 @@ function Login() {
     setBusy(false);
   };
 
-  const hasImg = brand && brand.type === "image" && brand.image;
   const kb = useKeyboardInset();
 
   return (
     <div ref={wrapRef} onTouchMove={(e) => e.preventDefault()} style={{ ...wrap, position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", touchAction: "none", overscrollBehavior: "none", transition: "padding 0.18s ease", ...kbLift(kb) }}>
       <div style={card}>
         <div style={{ display: "flex", justifyContent: "center", marginBottom: 8 }}>
-          {hasImg
-            ? <img src={brand.image} alt="" style={{ width: 72, height: 72, borderRadius: 18, objectFit: "cover" }} />
-            : <div style={{ width: 72, height: 72, borderRadius: 18, background: "#f1f5f9", display: "flex", alignItems: "center", justifyContent: "center" }}><span style={{ fontSize: 32, fontWeight: 800, color: "#B81D24" }}>{((brand && brand.name) || "S").trim().charAt(0).toUpperCase() || "S"}</span></div>}
+          <img src={brandLogoSource({ logoImage: brand && brand.image })} alt="Stone Property Solutions" style={{ width: 72, height: 72, borderRadius: 18, objectFit: "cover" }} />
         </div>
         <h1 style={{ fontSize: 20, fontWeight: 800, textAlign: "center", margin: "0 0 4px", color: "#111" }}>{(brand && brand.name) || "Stone Property Solutions"}</h1>
 
@@ -265,7 +263,6 @@ function SetPassword({ email, recovery, onDone }) {
   useEffect(() => {
     try { const raw = localStorage.getItem("sps_brand_logo"); if (raw) setBrand(JSON.parse(raw)); } catch (e) {}
   }, []);
-  const hasImg = brand && brand.type === "image" && brand.image;
   const kb = useKeyboardInset();
 
   const submit = async () => {
@@ -281,9 +278,7 @@ function SetPassword({ email, recovery, onDone }) {
     <div style={{ ...wrap, position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", transition: "padding 0.18s ease", ...kbLift(kb) }}>
       <div style={card}>
         <div style={{ display: "flex", justifyContent: "center", marginBottom: 8 }}>
-          {hasImg
-            ? <img src={brand.image} alt="" style={{ width: 72, height: 72, borderRadius: 18, objectFit: "cover" }} />
-            : <div style={{ width: 72, height: 72, borderRadius: 18, background: "#f1f5f9", display: "flex", alignItems: "center", justifyContent: "center" }}><span style={{ fontSize: 32, fontWeight: 800, color: "#B81D24" }}>{((brand && brand.name) || "S").trim().charAt(0).toUpperCase() || "S"}</span></div>}
+          <img src={brandLogoSource({ logoImage: brand && brand.image })} alt="Stone Property Solutions" style={{ width: 72, height: 72, borderRadius: 18, objectFit: "cover" }} />
         </div>
         <h1 style={{ fontSize: 20, fontWeight: 800, textAlign: "center", margin: "0 0 4px", color: "#111" }}>{recovery ? "Reset your password" : "Create your password"}</h1>
         <p style={{ textAlign: "center", color: "#6b7280", fontSize: 13, margin: "0 0 20px", lineHeight: 1.5 }}>
