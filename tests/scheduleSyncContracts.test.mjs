@@ -10,12 +10,14 @@ test("staff schedule sync listens live and refreshes on foreground/open-page fal
 
   assert.match(app, /const SCHEDULE_SYNC_KEYS = \["sps_schedule", "sps_completed", "sps_arrivals", "sps_enroute", "sps_route_assignments", "sps_schedule_cfg"\]/);
   assert.match(app, /const SCHEDULE_REFRESH_KEYS = Array\.from\(new Set\(\[\.\.\.SCHEDULE_SYNC_KEYS, \.\.\.STOP_MUTATION_KEYS\]\)\)/);
-  assert.match(app, /Promise\.all\(SCHEDULE_REFRESH_KEYS\.map\(\(key\) => store\.refresh\(key\)\)\)/);
-  assert.match(app, /SCHEDULE_SYNC_KEYS\.forEach\(\(key\) =>/);
+  assert.match(app, /store\.refreshChanged\(SCHEDULE_REFRESH_KEYS, \{ reconcileUnchanged \}\)/);
+  assert.match(app, /targetedKeys\.map\(\(key\) => store\.refresh\(key\)\)/);
+  assert.match(app, /SCHEDULE_REFRESH_KEYS\.forEach\(\(key\) =>/);
+  assert.match(app, /\(\) => pullSchedule\(\[key\]\)/);
   assert.match(app, /filter:\s*`key=eq\.\$\{key\}`/);
   assert.match(app, /addEventListener\("visibilitychange",\s*onVisible\)/);
-  assert.match(app, /addEventListener\("focus",\s*pullSchedule\)/);
-  assert.match(app, /addEventListener\("online",\s*pullSchedule\)/);
+  assert.match(app, /addEventListener\("focus",\s*onFocus\)/);
+  assert.match(app, /addEventListener\("online",\s*onOnline\)/);
   assert.match(app, /addListener\("appStateChange",\s*onActive\)/);
   assert.match(app, /schedulePageRef\.current\s*===\s*"schedule"/);
   assert.match(app, /page\s*===\s*"schedule"\s*&&\s*schedulePullRef\.current/);
@@ -25,6 +27,8 @@ test("targeted refresh is serialized with writes and uses the dirty-aware reconc
   const client = await read("supabaseClient.js");
 
   assert.match(client, /function enqueueRefresh\(key,[\s\S]*?const prior = _chains\[key\]/);
+  assert.match(client, /\.select\("key, version"\)[\s\S]*?\.in\("key", safeKeys\)/);
+  assert.match(client, /changedKeys\.map\(\(key\) => enqueueRefresh\(key, identityVersion\)\)/);
   assert.match(client, /adoptRemote\(key, remote, !_pending\[key\]\)/);
   assert.match(client, /notifyReconciled\(key, false, !remote\.exists\)/);
   assert.doesNotMatch(client, /refreshKey[\s\S]*?notifyReconciled\(key, true/);

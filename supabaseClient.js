@@ -311,6 +311,28 @@ async function readRemote(key, identityVersion = _identityVersion) {
   return { ok: false, error: lastError };
 }
 
+async function readRemoteVersions(keys, identityVersion = _identityVersion) {
+  const safeKeys = Array.from(new Set((keys || []).filter((key) => typeof key === "string" && key)));
+  if (!safeKeys.length) return { ok: true, versions: new Map() };
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { data, error } = await supabase.from("app_state")
+      .select("key, version")
+      .in("key", safeKeys);
+    if (identityVersion !== _identityVersion || !_uid) return { staleIdentity: true };
+    if (!error) {
+      return {
+        ok: true,
+        versions: new Map((data || []).map((row) => [row.key, Number(row.version) || 0])),
+      };
+    }
+    lastError = error;
+    await refreshForAuthError(error);
+    if (attempt < 2) await sleep(300 * (attempt + 1));
+  }
+  return { ok: false, error: lastError };
+}
+
 function rpcRow(data) {
   return Array.isArray(data) ? data[0] : data;
 }
@@ -841,6 +863,52 @@ function enqueueRefresh(key, identityVersion = _identityVersion) {
   return run;
 }
 
+async function refreshChangedKeys(keys, options = {}, identityVersion = _identityVersion) {
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  const safeKeys = Array.from(new Set((keys || []).filter((key) => typeof key === "string" && key)));
+  if (!safeKeys.length) return { ok: true, changedKeys: [], results: [] };
+  try {
+    await ensureHydrate();
+    await init();
+    if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+
+    // Poll only the tiny version counters. Full JSON values are fetched through enqueueRefresh only
+    // for rows whose version/existence changed, preserving the same dirty-aware, per-key ordering as
+    // realtime refreshes and writes.
+    const probe = await readRemoteVersions(safeKeys, identityVersion);
+    if (probe.staleIdentity) return { ok: false, staleIdentity: true };
+    if (!probe.ok) {
+      throttledError(`Refresh check failed: ${(probe.error && probe.error.message) || "the latest shared versions could not be loaded."}`);
+      return { ok: false, error: probe.error };
+    }
+
+    const changedKeys = safeKeys.filter((key) => {
+      const remoteExists = probe.versions.has(key);
+      const localExists = hasOwn(_exists, key) ? !!_exists[key] : hasOwn(_confirmed, key);
+      return remoteExists !== localExists
+        || (remoteExists && Number(probe.versions.get(key) || 0) !== Number(_versions[key] || 0));
+    });
+    if (options.reconcileUnchanged) {
+      safeKeys.forEach((key) => {
+        if (!changedKeys.includes(key) && !_pending[key]) notifyReconciled(key, false, !probe.versions.has(key));
+      });
+    }
+    const results = await Promise.all(changedKeys.map((key) => enqueueRefresh(key, identityVersion)));
+    if (results.some((result) => result && result.staleIdentity)) {
+      return { ok: false, staleIdentity: true, changedKeys, results };
+    }
+    return {
+      ok: results.every((result) => result && result.ok),
+      changedKeys,
+      results,
+    };
+  } catch (error) {
+    if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+    throttledError(`Refresh check failed: ${(error && error.message) || "the latest shared versions could not be loaded."}`);
+    return { ok: false, error };
+  }
+}
+
 async function flush() {
   if (_flushing || !Object.keys(_pending).some((key) => _pending[key] && _pending[key].status === "pending")) return;
   const identityVersion = _identityVersion;
@@ -1055,6 +1123,12 @@ export const store = {
   refresh(key) {
     if (!key || typeof key !== "string") return Promise.resolve({ ok: false, error: new Error("A storage key is required") });
     return enqueueRefresh(key, _identityVersion);
+  },
+
+  // Efficient fallback sync for groups of large shared records. One version-only query determines
+  // which rows need the existing full, dirty-aware refresh path.
+  refreshChanged(keys, options = {}) {
+    return refreshChangedKeys(keys, options, _identityVersion);
   },
 
   set(key, value, options = {}) {

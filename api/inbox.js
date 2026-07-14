@@ -5,6 +5,9 @@
 // at all — the shared supabase client gets nothing, and this endpoint is the only door.
 //
 //   GET  ?limit=100&kind=lead&unimported=1   → { ok, rows: [...] } (newest first)
+//   GET  ?summary=unread                    → { ok, unread, capped }
+//        Lightweight nav-badge summary. It selects IDs only so the recurring badge refresh never
+//        downloads large email bodies or HTML from Supabase.
 //   POST { action: "markRead", ids: [...] }
 //   POST { action: "markImported", id, leadId }   ← the app stamps this AFTER the lead is
 //        confirmed in sps_leads (two-phase, like the website bridge — a merge that never
@@ -103,6 +106,19 @@ export default async function handler(req, res) {
   try {
     if (req.method === "GET") {
       const q = req.query || {};
+      if (q.summary === "unread") {
+        // The app renders 99+ once this reaches 100, so there is no value in counting beyond 100.
+        // Selecting only the primary key also avoids fetching TOAST-backed body/html columns.
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?select=id&or=(read.eq.false,read.is.null)&limit=100`, { headers: sbHeaders() });
+        if (!r.ok) {
+          const t = await r.text().catch(() => "");
+          const hint = /relation .*sps_inbox|42P01/i.test(t) ? "The sps_inbox table hasn't been created yet — run the SQL in CLAUDE.md." : t.slice(0, 200);
+          return res.status(502).json({ error: hint });
+        }
+        const rows = (await r.json().catch(() => [])) || [];
+        const unread = Array.isArray(rows) ? rows.length : 0;
+        return res.status(200).json({ ok: true, unread, capped: unread >= 100 });
+      }
       const limit = Math.min(200, Math.max(1, parseInt(q.limit, 10) || 100));
       let filter = `order=created_at.desc&limit=${limit}`;
       if (q.kind && /^[a-z]+$/.test(String(q.kind))) filter += `&kind=eq.${q.kind}`;

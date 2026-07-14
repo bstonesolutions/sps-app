@@ -5327,7 +5327,7 @@ function ClientsTable({ items, clientSpend, tiers, onSelect, T }) {
           <tr>
             {cols.map(c => (
               <th key={c.key} onClick={() => click(c.key)}
-                style={{ position: "sticky", top: 0, background: T.bg, width: c.w, textAlign: c.align, padding: "10px 14px", borderBottom: `1.5px solid ${T.border}`, color: sort.key === c.key ? T.primary : T.textMuted, fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", cursor: "pointer", whiteSpace: "nowrap", userSelect: "none", zIndex: 1 }}>
+                style={{ position: "sticky", top: 0, background: T.bg, width: c.w, textAlign: c.align, padding: "8px 12px", borderBottom: `1.5px solid ${T.border}`, color: sort.key === c.key ? T.primary : T.textMuted, fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", cursor: "pointer", whiteSpace: "nowrap", userSelect: "none", zIndex: 1 }}>
                 {c.label}{sort.key === c.key ? (sort.dir === "asc" ? " ↑" : " ↓") : ""}
               </th>
             ))}
@@ -5343,12 +5343,12 @@ function ClientsTable({ items, clientSpend, tiers, onSelect, T }) {
                 style={{ cursor: "pointer", borderBottom: `1px solid ${T.border}`, opacity: inactive ? 0.6 : 1 }}
                 onMouseEnter={e => e.currentTarget.style.background = hexA(T.primary, 0.04)}
                 onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
-                <td style={{ padding: "11px 14px", fontWeight: 700, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.name}</td>
-                <td style={{ padding: "11px 14px", color: T.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.address || "—"}</td>
-                <td style={{ padding: "11px 14px", color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{divOf(c)}</td>
-                <td style={{ padding: "11px 14px", whiteSpace: "nowrap" }}>{tier ? <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 100, background: pm.bg, color: pm.color || pm.text }}>{tier}</span> : <span style={{ fontSize: 11, color: T.textMuted }}>No tier</span>}</td>
-                <td style={{ padding: "11px 14px", whiteSpace: "nowrap", color: inactive ? T.textMuted : "#16a34a", fontWeight: 600, fontSize: 12.5 }}>{c.status || "Active"}</td>
-                <td style={{ padding: "11px 14px", textAlign: "right", fontWeight: 700, color: T.text, whiteSpace: "nowrap" }}>{money(clientSpend(c))}</td>
+                <td style={{ padding: "9px 12px", fontWeight: 700, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.name}</td>
+                <td style={{ padding: "9px 12px", color: T.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.address || "—"}</td>
+                <td style={{ padding: "9px 12px", color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{divOf(c)}</td>
+                <td style={{ padding: "9px 12px", whiteSpace: "nowrap" }}>{tier ? <span style={{ fontSize: 10.5, fontWeight: 700, padding: "2px 8px", borderRadius: 100, background: pm.bg, color: pm.color || pm.text }}>{tier}</span> : <span style={{ fontSize: 10.5, color: T.textMuted }}>No tier</span>}</td>
+                <td style={{ padding: "9px 12px", whiteSpace: "nowrap", color: inactive ? T.textMuted : "#16a34a", fontWeight: 600, fontSize: 12 }}>{c.status || "Active"}</td>
+                <td style={{ padding: "9px 12px", textAlign: "right", fontWeight: 700, color: T.text, whiteSpace: "nowrap" }}>{money(clientSpend(c))}</td>
               </tr>
             );
           })}
@@ -5411,6 +5411,10 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
     });
 
   const activeFilterCount = [filterTier !== "all", filterDiv !== "all", sortBy !== "alpha"].filter(Boolean).length;
+  const activeClientCount = clients.filter(c => c.status !== "Inactive").length;
+  // The all-clients landing view should read like a dense directory. The selected-client
+  // record is a separate component and deliberately remains untouched.
+  const compactList = !!vp.isPhone || view === "split";
 
   const selectedIds = Object.keys(selected).filter(k => selected[k]).map(Number);
   const selCount = selectedIds.length;
@@ -5437,51 +5441,64 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
   return (
     <div style={{ width: "100%" }}>
     <div style={{ maxWidth: 1040, margin: "0 auto", width: "100%", boxSizing: "border-box" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", rowGap: 10, marginBottom: 14 }}>
-        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>Clients</h2>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <div style={{ minWidth: 0 }}>
+          <h2 style={{ margin: 0, fontSize: compactList ? 20 : 22, lineHeight: 1.1, fontWeight: 800, color: T.text, letterSpacing: "-0.025em" }}>Clients</h2>
+          <div style={{ marginTop: 2, fontSize: 11.5, lineHeight: 1.2, color: T.textMuted, fontWeight: 600 }}>
+            {activeClientCount} active{clients.length !== activeClientCount ? ` · ${clients.length} total` : ""}
+          </div>
+        </div>
         {selectMode ? (
-          <button onClick={exitSelect} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Done</button>
+          <button onClick={exitSelect} style={{ minHeight: 36, padding: "7px 10px", background: hexA(T.primary, 0.08), border: "none", borderRadius: 10, color: T.primary, fontWeight: 750, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>Done</button>
         ) : (perms.editClients || (perms.canImport && (onImport || onImportHistory || onFindDuplicates))) ? (
-          <div style={{ display: "flex", gap: 8 }}>
-            {perms.editClients && <Btn variant="ghost" sm onClick={() => setSelectMode(true)}>Select</Btn>}
-            {perms.editClients && <Btn sm onClick={onAdd}>+ Add</Btn>}
-            {perms.canImport && (onImport || onImportHistory || onFindDuplicates) && <Btn variant="ghost" sm onClick={() => setModal("import")}>Import</Btn>}
+          <div style={{ display: "flex", gap: 5, alignItems: "center", flexShrink: 0 }}>
+            {perms.editClients && <button onClick={() => setSelectMode(true)} style={{ height: 36, padding: "0 9px", border: "none", borderRadius: 10, background: "transparent", color: T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Select</button>}
+            {perms.editClients && <button onClick={onAdd} style={{ height: 36, padding: "0 11px", border: "none", borderRadius: 10, background: T.primary, color: "#fff", fontWeight: 750, fontSize: 12, cursor: "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 4 }}><span style={{ fontSize: 16, lineHeight: 1, marginTop: -1 }}>+</span>Add</button>}
+            {perms.canImport && (onImport || onImportHistory || onFindDuplicates) && <button onClick={() => setModal("import")} aria-label="Import and client tools" title="Import and client tools" style={{ width: 36, height: 36, padding: 0, border: `1px solid ${T.border}`, borderRadius: 10, background: T.surface, color: T.textMuted, cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center" }}><Icon name="download" size={14} /></button>}
           </div>
         ) : null}
       </div>
 
-      <div style={{ position: "relative", marginBottom: 14 }}>
-        <span style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", color: T.textMuted, display:"flex", pointerEvents:"none" }}>
-          <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-        </span>
-        <input type="search" placeholder="Search by name or address…"
-          value={search} onChange={e => setSearch(e.target.value)}
-          style={{ width: "100%", padding: "11px 14px 11px 38px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, boxSizing: "border-box", outline: "none", fontFamily: "inherit", color: T.text, background: T.surface }} />
+      <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 8 }}>
+        <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
+          <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: T.textMuted, display:"flex", pointerEvents:"none" }}>
+            <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          </span>
+          <input type="search" placeholder="Search clients…"
+            value={search} onChange={e => setSearch(e.target.value)}
+            style={{ width: "100%", height: 44, padding: "9px 12px 9px 36px", border: `1px solid ${T.border}`, borderRadius: 11, fontSize: 14, boxSizing: "border-box", outline: "none", fontFamily: "inherit", color: T.text, background: T.surface }} />
+        </div>
+        <button onClick={() => setShowFilters(f => !f)} aria-label="Filter clients" title="Filter clients"
+          style={{ position: "relative", width: 44, height: 44, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0, borderRadius: 11, border: `1px solid ${activeFilterCount > 0 ? T.primary : T.border}`, background: activeFilterCount > 0 ? hexA(T.primary, 0.08) : T.surface, color: activeFilterCount > 0 ? T.primary : T.textMuted, cursor: "pointer" }}>
+          <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M3 6h18M7 12h10M11 18h2"/></svg>
+          {activeFilterCount > 0 && <span style={{ position: "absolute", top: 5, right: 5, minWidth: 14, height: 14, borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px", background: T.primary, color: "#fff", fontSize: 8.5, fontWeight: 800 }}>{activeFilterCount}</span>}
+        </button>
       </div>
 
       {/* Filter + Sort bar */}
-      <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 9, alignItems: "center", minWidth: 0 }}>
         {vp.isDesktop && onSetView && (
-          <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 11, padding: 3, gap: 2, flexShrink: 0 }}>
+          <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 9, padding: 2, gap: 1, flexShrink: 0 }}>
             {[["split", "Split"], ["table", "Table"]].map(([id, lbl]) => (
               <button key={id} onClick={() => onSetView(id)}
-                style={{ padding: "6px 13px", border: "none", borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer", background: view === id ? T.surface : "transparent", color: view === id ? T.primary : T.textMuted, fontFamily: "inherit", boxShadow: view === id ? "0 1px 3px rgba(0,0,0,0.12)" : "none" }}>{lbl}</button>
+                style={{ height: 28, padding: "0 9px", border: "none", borderRadius: 7, fontSize: 11, fontWeight: 700, cursor: "pointer", background: view === id ? T.surface : "transparent", color: view === id ? T.primary : T.textMuted, fontFamily: "inherit", boxShadow: view === id ? "0 1px 3px rgba(0,0,0,0.1)" : "none" }}>{lbl}</button>
             ))}
           </div>
         )}
-        <button onClick={() => setShowFilters(f => !f)}
-          style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 12, border: `1.5px solid ${activeFilterCount > 0 ? T.primary : T.border}`, background: activeFilterCount > 0 ? hexA(T.primary, 0.07) : T.surface, color: activeFilterCount > 0 ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>
-          <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M3 6h18M7 12h10M11 18h2"/></svg>
-          {activeFilterCount > 0 ? `Filters (${activeFilterCount})` : "Filter"}
-        </button>
         {/* Quick sort pills */}
-        <div style={{ display: "flex", gap: 6, overflowX: "auto", WebkitOverflowScrolling: "touch", flex: 1 }}>
+        <div style={{ display: "flex", gap: 5, overflowX: "auto", WebkitOverflowScrolling: "touch", flex: 1, minWidth: 0, scrollbarWidth: "none" }}>
           {[["alpha","A–Z"],["alpha_desc","Z–A"],["spent_desc","Most Spent"],["spent_asc","Least Spent"]].map(([val, lbl]) => (
             <button key={val} onClick={() => setSortBy(val)}
-              style={{ flexShrink: 0, padding: "7px 12px", borderRadius: 100, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 600, background: sortBy === val ? T.primary : T.surfaceAlt, color: sortBy === val ? "#fff" : T.textMuted, transition: "all 0.15s" }}>
+              style={{ flexShrink: 0, height: 30, padding: "0 10px", borderRadius: 100, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 650, background: sortBy === val ? T.primary : T.surfaceAlt, color: sortBy === val ? "#fff" : T.textMuted, transition: "all 0.15s" }}>
               {lbl}
             </button>
           ))}
+          {inactiveCount > 0 && (
+            <button onClick={() => setShowInactive(s => !s)}
+              style={{ flexShrink: 0, height: 30, padding: "0 10px", borderRadius: 100, border: `1px solid ${showInactive ? T.primary : "transparent"}`, cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 650, background: showInactive ? hexA(T.primary, 0.08) : T.surfaceAlt, color: showInactive ? T.primary : T.textMuted }}>
+              {showInactive ? "Hide inactive" : `Inactive ${inactiveCount}`}
+            </button>
+          )}
         </div>
       </div>
 
@@ -5547,19 +5564,8 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
         </div>
       )}
 
-      {/* Show inactive toggle — legacy, now handled in filter panel */}
-      {!search && inactiveCount > 0 && !showFilters && (
-        <button onClick={() => setShowInactive(s => !s)}
-          style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: showInactive ? T.primary : T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit", padding: "0 0 12px", marginTop: -6 }}>
-          <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
-            {showInactive ? <><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></> : <><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></>}
-          </svg>
-          {showInactive ? `Hiding ${inactiveCount} inactive` : `Show ${inactiveCount} inactive`}
-        </button>
-      )}
-
       {selectMode && (
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, padding: "8px 14px", background: T.surfaceAlt, borderRadius: 10 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, padding: "7px 10px", background: T.surfaceAlt, borderRadius: 10 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }} onClick={toggleAll}>
             <Checkbox checked={allSelected} onChange={toggleAll} />
             <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Select all ({filtered.length})</span>
@@ -5579,7 +5585,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
           <ClientsTable items={filtered} clientSpend={clientSpend} tiers={tiers} onSelect={onSelect} T={T} />
         )
       ) : (
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 300px), 1fr))", alignItems: "start", gap: 12, width: "100%", paddingBottom: selectMode && selCount > 0 ? 90 : 0 }}>
+      <div style={{ display: "grid", gridTemplateColumns: compactList ? "minmax(0, 1fr)" : "repeat(auto-fit, minmax(min(100%, 300px), 1fr))", alignItems: "start", gap: compactList ? 7 : 9, width: "100%", paddingBottom: selectMode && selCount > 0 ? 90 : 0 }}>
         {filtered.length === 0 && (
           <div style={{ gridColumn: "1 / -1", textAlign: "center", padding: "40px 20px", color: T.textMuted }}>
             <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="clients" size={26} /></div>
@@ -5592,44 +5598,42 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
           const pm = planMeta(tier, T, tiers);
           const isSel = !!selected[c.id];
           const isActive = selectedId != null && String(c.id) === String(selectedId);
+          const services = clientServices(c, tiers);
+          const nextService = nextServiceFor(c, schedule);
+          const accent = tier ? (pm.color || pm.text || T.primary) : T.border;
           return (
             <div key={c.id}
               onClick={() => selectMode ? toggle(c.id) : onSelect(c)}
-              style={{ background: isActive ? hexA(T.primary, 0.05) : T.surface, border: `1px solid ${(isSel || isActive) ? T.primary : T.border}`, borderRadius: 16, padding: "14px 15px", cursor: "pointer", display: "flex", gap: 11, alignItems: "flex-start", transition: "box-shadow 0.15s, border-color 0.15s", boxShadow: isActive ? `0 2px 10px ${hexA(T.primary, 0.12)}` : "0 1px 4px rgba(0,0,0,0.04)" }}
+              style={{ position: "relative", overflow: "hidden", background: isActive ? hexA(T.primary, 0.045) : T.surface, border: `1px solid ${(isSel || isActive) ? T.primary : T.border}`, borderRadius: compactList ? 12 : 14, padding: compactList ? "9px 10px 9px 12px" : "11px 12px 11px 14px", cursor: "pointer", display: "flex", gap: selectMode ? 8 : 0, alignItems: "center", transition: "box-shadow 0.15s, border-color 0.15s, background 0.15s", boxShadow: isActive ? `0 2px 9px ${hexA(T.primary, 0.11)}` : "0 1px 3px rgba(0,0,0,0.035)" }}
               onMouseEnter={e => e.currentTarget.style.boxShadow = "0 4px 16px rgba(0,0,0,0.09)"}
-              onMouseLeave={e => e.currentTarget.style.boxShadow = "0 1px 4px rgba(0,0,0,0.04)"}
+              onMouseLeave={e => e.currentTarget.style.boxShadow = isActive ? `0 2px 9px ${hexA(T.primary, 0.11)}` : "0 1px 3px rgba(0,0,0,0.035)"}
             >
+              <div aria-hidden="true" style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: accent }} />
               {selectMode && <Checkbox checked={isSel} onChange={() => toggle(c.id)} />}
-              {/* Division color bar instead of emoji */}
-              <div style={{ width: 4, alignSelf: "stretch", borderRadius: 4, background: pm.bg, flexShrink: 0, minHeight: 44 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
-                  <span style={{ fontWeight: 700, fontSize: 15, letterSpacing: "-0.01em", color: c.status === "Inactive" ? T.textMuted : T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{c.name}</span>
-                  {c.status === "Inactive" && <span style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 6, padding: "1px 6px", flexShrink: 0 }}>Inactive</span>}
+                <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                  <span style={{ flex: 1, fontWeight: 750, fontSize: compactList ? 13.5 : 14.5, lineHeight: 1.22, letterSpacing: "-0.012em", color: c.status === "Inactive" ? T.textMuted : T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{c.name}</span>
+                  {c.status === "Inactive" && <span style={{ fontSize: 9, lineHeight: 1.3, fontWeight: 750, color: T.textMuted, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 6, padding: "1px 5px", flexShrink: 0 }}>Inactive</span>}
+                  {tier
+                    ? <span style={{ maxWidth: compactList ? 88 : 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 9.5, lineHeight: 1.35, fontWeight: 750, padding: "2px 6px", borderRadius: 7, background: pm.bg, color: pm.color || pm.text, flexShrink: 0 }}>{tier}</span>
+                    : <span style={{ fontSize: 9.5, lineHeight: 1.35, fontWeight: 700, color: T.textMuted, background: T.surfaceAlt, borderRadius: 7, padding: "2px 6px", flexShrink: 0 }}>No tier</span>
+                  }
+                  <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{ flexShrink: 0, opacity: 0.65 }}><path d="m9 18 6-6-6-6"/></svg>
                 </div>
-                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.address || "No address"}</div>
-                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
-                  {clientServices(c, tiers).map((s, si) => (
-                    <span key={si} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <div style={{ fontSize: compactList ? 11 : 11.5, lineHeight: 1.3, color: T.textMuted, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.address || "No address"}</div>
+                <div style={{ fontSize: compactList ? 9.75 : 10.5, lineHeight: 1.3, color: T.textMuted, marginTop: 3, display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+                  {services.map((s, si) => (
+                    <span key={si} style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
                       {si > 0 && <span style={{ opacity: 0.3 }}>·</span>}
-                      <span style={{ fontWeight: 600, color: T.text }}>{s.div}</span>
+                      <span style={{ fontWeight: 650, color: T.text }}>{s.div}</span>
                       {s.type && <><span style={{ opacity: 0.3 }}>·</span><span>{s.type}</span></>}
                     </span>
                   ))}
                   {c.preferredDay && (
-                    <><span style={{ opacity: 0.3 }}>·</span><span style={{ color: c.preferredDayOverride ? T.primary : T.textMuted, fontWeight: c.preferredDayOverride ? 700 : 400 }}>{c.preferredDay.slice(0,3)}{c.preferredDayOverride ? " ★" : ""}</span></>
+                    <><span style={{ opacity: 0.3 }}>·</span><span style={{ color: c.preferredDayOverride ? T.primary : T.textMuted, fontWeight: c.preferredDayOverride ? 700 : 450 }}>{c.preferredDay.slice(0,3)}{c.preferredDayOverride ? " ★" : ""}</span></>
                   )}
+                  {nextService && <span style={{ marginLeft: "auto", paddingLeft: 6, color: T.textMuted, fontWeight: 650, whiteSpace: "nowrap" }}>Next {nextService}</span>}
                 </div>
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 5, alignItems: "flex-end", flexShrink: 0 }}>
-                {tier
-                  ? <Badge label={tier} bg={pm.bg} color={pm.color || pm.text} sm />
-                  : <span style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, border: `1px solid ${T.border}`, borderRadius: 8, padding: "2px 7px" }}>No tier</span>
-                }
-                {(() => { const ns = nextServiceFor(c, schedule); return ns && <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 600 }}>{ns}</div>; })()}
-              </div>
-              <div style={{ color: T.textMuted, flexShrink: 0 }}>
-                <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="m9 18 6-6-6-6"/></svg>
               </div>
             </div>
           );
@@ -19881,10 +19885,13 @@ function ServiceTiersManager({ tiers, setTiers, clients, setClients, T }) {
 const SNAPSHOT_KEEP = 3;
 async function snapshotState(label) {
   try {
-    const { data, error } = await supabase.from("app_state").select("key, value, version");
+    // Live-tracking bearer rows are ephemeral and are deliberately preserved (never restored) by
+    // bulk operations. Excluding them here avoids copying expired tokens into every safety backup.
+    const { data, error } = await supabase.from("app_state").select("key, value, version").not("key", "like", "sps_track_*");
     if (error) { console.warn("snapshot read failed:", error.message); return false; }
     const snap = {}, values = {}, versions = {};
     (data || []).forEach(r => {
+      if (String(r.key || "").startsWith("sps_track_")) return; // defense if a REST filter is ignored
       snap[r.key] = r.value; // raw stringified values
       versions[r.key] = Number(r.version) || 0;
       try { values[r.key] = JSON.parse(r.value); } catch { values[r.key] = r.value; }
@@ -31890,30 +31897,48 @@ export default function App({ authEmail = "", onSignOut }) {
   // user's owner status, so validateTeamWrite can fence role/owner changes to owners only.
   useEffect(() => { setActorIsOwner(effRole(currentUser) === "owner"); }, [currentUser && currentUser.id, currentUser && currentUser.role]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Keep the shared schedule current across the browser and installed app. The storage refresh is
-  // serialized with schedule writes and reconciles through useStoredState, so a live/foreground pull
-  // can never replace an edit that is still being typed or waiting for CAS confirmation.
+  // Keep the shared schedule current across the browser and installed app. Live events refresh only
+  // the changed section; foreground/poll fallbacks first compare tiny version counters and download
+  // only sections that actually changed. Every full refresh still uses the storage layer's serialized,
+  // dirty-aware path, so an in-progress edit or pending CAS can never be replaced.
   const schedulePageRef = useRef(page);
   const schedulePullRef = useRef(null);
   schedulePageRef.current = page;
   useEffect(() => {
-    if (!hydrated || !currentUser || typeof store.refresh !== "function") return;
+    if (!hydrated || !currentUser || typeof store.refresh !== "function" || typeof store.refreshChanged !== "function") return;
     let alive = true;
     let channel = null;
     let nativeHandle = null;
     let inFlight = null;
-    let pullAgain = false;
+    let probeAgain = false;
+    const queuedKeys = new Set();
+    let firstProbe = true;
 
-    const pullSchedule = () => {
+    const pullSchedule = (keys = null) => {
       if (!alive) return Promise.resolve(null);
-      if (inFlight) { pullAgain = true; return inFlight; }
-      inFlight = Promise.all(SCHEDULE_REFRESH_KEYS.map((key) => store.refresh(key)))
+      const targetedKeys = Array.isArray(keys) ? Array.from(new Set(keys.filter((key) => SCHEDULE_REFRESH_KEYS.includes(key)))) : null;
+      if (inFlight) {
+        if (targetedKeys) targetedKeys.forEach((key) => queuedKeys.add(key));
+        else probeAgain = true;
+        return inFlight;
+      }
+      const reconcileUnchanged = !targetedKeys && firstProbe;
+      if (!targetedKeys) firstProbe = false;
+      inFlight = (targetedKeys
+        ? Promise.all(targetedKeys.map((key) => store.refresh(key)))
+        : store.refreshChanged(SCHEDULE_REFRESH_KEYS, { reconcileUnchanged }))
         .catch(() => null)
         .finally(() => {
           inFlight = null;
-          if (pullAgain && alive) {
-            pullAgain = false;
-            Promise.resolve().then(pullSchedule);
+          if (!alive) return;
+          if (probeAgain) {
+            probeAgain = false;
+            queuedKeys.clear();
+            Promise.resolve().then(() => pullSchedule());
+          } else if (queuedKeys.size) {
+            const nextKeys = Array.from(queuedKeys);
+            queuedKeys.clear();
+            Promise.resolve().then(() => pullSchedule(nextKeys));
           }
         });
       return inFlight;
@@ -31922,16 +31947,18 @@ export default function App({ authEmail = "", onSignOut }) {
 
     const onVisible = () => { if (!document.hidden) pullSchedule(); };
     const onActive = (state) => { if (state && state.isActive) pullSchedule(); };
-    window.addEventListener("focus", pullSchedule);
-    window.addEventListener("online", pullSchedule);
+    const onFocus = () => pullSchedule();
+    const onOnline = () => pullSchedule();
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("online", onOnline);
     document.addEventListener("visibilitychange", onVisible);
 
     // Realtime is the fast path. The foreground/open-page pulls below remain the fallback if the
     // socket was suspended by iOS or temporarily disconnected.
     try {
       let liveChannel = supabase.channel("sps-schedule-live");
-      SCHEDULE_SYNC_KEYS.forEach((key) => {
-        liveChannel = liveChannel.on("postgres_changes", { event: "*", schema: "public", table: "app_state", filter: `key=eq.${key}` }, pullSchedule);
+      SCHEDULE_REFRESH_KEYS.forEach((key) => {
+        liveChannel = liveChannel.on("postgres_changes", { event: "*", schema: "public", table: "app_state", filter: `key=eq.${key}` }, () => pullSchedule([key]));
       });
       channel = liveChannel.subscribe();
     } catch (_) {}
@@ -31956,8 +31983,8 @@ export default function App({ authEmail = "", onSignOut }) {
       alive = false;
       if (schedulePullRef.current === pullSchedule) schedulePullRef.current = null;
       clearInterval(poll);
-      window.removeEventListener("focus", pullSchedule);
-      window.removeEventListener("online", pullSchedule);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("online", onOnline);
       document.removeEventListener("visibilitychange", onVisible);
       try { if (channel) supabase.removeChannel(channel); } catch (_) {}
       try { if (nativeHandle) nativeHandle.remove(); } catch (_) {}
@@ -32508,32 +32535,52 @@ export default function App({ authEmail = "", onSignOut }) {
     }
   }, [page, perms]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
+    const canReadMessages = !!(perms.isAdmin || perms.commsMessages);
+    if (!canReadMessages) { setNavUnread(0); return undefined; }
+    let inFlight = false;
     const load = async () => {
-      const { count, error } = await supabase.from("sps_messages").select("id", { count: "exact", head: true }).eq("sender", "client").is("read_at", null);
-      if (!error) setNavUnread(count || 0);
+      if (document.hidden || inFlight) return;
+      inFlight = true;
+      try {
+        const { count, error } = await supabase.from("sps_messages").select("id", { count: "exact", head: true }).eq("sender", "client").is("read_at", null);
+        if (!error) setNavUnread(count || 0);
+      } finally { inFlight = false; }
     };
     load();
+    const onVisible = () => { if (!document.hidden) load(); };
+    document.addEventListener("visibilitychange", onVisible);
     const interval = setInterval(load, 15000);
-    return () => clearInterval(interval);
-  }, []);
+    return () => { clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
+  }, [perms.isAdmin, perms.commsMessages]);
   useEffect(() => {
     if (!perms.isAdmin) { setInboxUnread(0); return undefined; }
     let alive = true;
+    let inFlight = false;
     const load = async () => {
+      if (document.hidden || inFlight) return;
+      inFlight = true;
       try {
-        const r = await fetch(`${PROD_URL}/api/inbox?limit=100`, { headers: await authHeaders() });
+        const r = await fetch(`${PROD_URL}/api/inbox?summary=unread`, { headers: await authHeaders() });
         const d = await r.json().catch(() => ({}));
-        if (alive && r.ok) setInboxUnread((d.rows || []).filter(row => row && !row.read).length);
-      } catch (_) {}
+        if (alive && r.ok) setInboxUnread(Math.max(0, Number(d.unread) || 0));
+      } catch (_) {
+      } finally { inFlight = false; }
     };
     const onLocalUpdate = (event) => {
       const count = Number(event && event.detail && event.detail.count);
       if (Number.isFinite(count)) setInboxUnread(Math.max(0, count));
     };
     window.addEventListener("sps-inbox-unread", onLocalUpdate);
+    const onVisible = () => { if (!document.hidden) load(); };
+    document.addEventListener("visibilitychange", onVisible);
     load();
     const interval = setInterval(load, 30000);
-    return () => { alive = false; clearInterval(interval); window.removeEventListener("sps-inbox-unread", onLocalUpdate); };
+    return () => {
+      alive = false;
+      clearInterval(interval);
+      window.removeEventListener("sps-inbox-unread", onLocalUpdate);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [perms.isAdmin]);
 
   // Sign-out unbinds this device's push token and clears native widget data FIRST, while the auth

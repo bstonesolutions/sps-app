@@ -33,15 +33,18 @@ function installDatabase(initialRows, options = {}) {
   let casCalls = 0;
   let deleteCalls = 0;
   let readCalls = 0;
+  let versionProbeCalls = 0;
 
   supabase.auth.refreshSession = async () => ({ data: {}, error: null });
   supabase.from = (table) => {
     assert.equal(table, "app_state");
     return {
-      select() {
+      select(columns) {
         let selectedKey = null;
+        let selectedKeys = null;
         const builder = {
           eq(field, value) { assert.equal(field, "key"); selectedKey = value; return builder; },
+          in(field, values) { assert.equal(field, "key"); selectedKeys = new Set(values); return builder; },
           async maybeSingle() {
             readCalls += 1;
             if (options.beforeRead) await options.beforeRead({ call: readCalls, key: selectedKey, rows });
@@ -50,7 +53,10 @@ function installDatabase(initialRows, options = {}) {
             return { data: row ? { key: selectedKey, ...row } : null, error: null };
           },
           then(resolve, reject) {
-            const data = [...rows.entries()].map(([key, row]) => ({ key, ...row }));
+            if (columns === "key, version") versionProbeCalls += 1;
+            const data = [...rows.entries()]
+              .filter(([key]) => !selectedKeys || selectedKeys.has(key))
+              .map(([key, row]) => columns === "key, version" ? { key, version: row.version } : { key, ...row });
             return Promise.resolve({ data, error: null }).then(resolve, reject);
           },
         };
@@ -101,7 +107,7 @@ function installDatabase(initialRows, options = {}) {
     }
     throw new Error(`Unexpected RPC ${name}`);
   };
-  return { rows, get casCalls() { return casCalls; }, get deleteCalls() { return deleteCalls; }, get readCalls() { return readCalls; } };
+  return { rows, get casCalls() { return casCalls; }, get deleteCalls() { return deleteCalls; }, get readCalls() { return readCalls; }, get versionProbeCalls() { return versionProbeCalls; } };
 }
 
 async function loadAs(uid, key) {
@@ -154,6 +160,47 @@ test("targeted refresh adopts a clean remote schedule and publishes a safe recon
   } finally {
     document.removeEventListener("sps-reconciled", onReconciled);
   }
+});
+
+test("group refresh probes versions and downloads only changed shared records", async () => {
+  const schedule = [{ date: "07/13/2026", stops: [{ sid: "base" }] }];
+  const completed = { base: true };
+  const db = installDatabase({
+    sps_schedule: { value: json(schedule), version: 2, updated_at: null },
+    sps_completed: { value: json(completed), version: 4, updated_at: null },
+  });
+  await loadAs("schedule-version-probe", "sps_schedule");
+
+  const nextCompleted = { ...completed, remote: true };
+  db.rows.set("sps_completed", { value: json(nextCompleted), version: 5, updated_at: null });
+  const result = await store.refreshChanged(["sps_schedule", "sps_completed"]);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.changedKeys, ["sps_completed"]);
+  assert.equal(db.versionProbeCalls, 1);
+  assert.equal(db.readCalls, 1);
+  assert.deepEqual(JSON.parse((await store.get("sps_completed")).value), nextCompleted);
+
+  const unchanged = await store.refreshChanged(["sps_schedule", "sps_completed"]);
+  assert.equal(unchanged.ok, true);
+  assert.deepEqual(unchanged.changedKeys, []);
+  assert.equal(db.versionProbeCalls, 2);
+  assert.equal(db.readCalls, 1);
+});
+
+test("group version probe detects remote deletion through the dirty-aware refresh path", async () => {
+  const schedule = [{ date: "07/13/2026", stops: [{ sid: "base" }] }];
+  const db = installDatabase({ sps_schedule: { value: json(schedule), version: 3, updated_at: null } });
+  await loadAs("schedule-version-delete", "sps_schedule");
+
+  db.rows.delete("sps_schedule");
+  const result = await store.refreshChanged(["sps_schedule"]);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.changedKeys, ["sps_schedule"]);
+  assert.equal(db.versionProbeCalls, 1);
+  assert.equal(db.readCalls, 1);
+  assert.equal(await store.get("sps_schedule"), null);
 });
 
 test("targeted refresh reconciles React even when the store already has the remote version", async () => {

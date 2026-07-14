@@ -21,6 +21,7 @@
 import { requireOwner } from "./_staff-auth.js";
 import { mutateAppState, NO_APP_STATE_CHANGE, readAppStateVersioned } from "./_app-state.js";
 import { pushOwner } from "./_push.js";
+import { pruneExpiredTrackingRecords } from "./_tracking-cleanup.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
 const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -229,6 +230,19 @@ export default async function handler(req, res) {
   if (!SERVICE_KEY) return res.status(501).json({ error: "server missing SUPABASE_SERVICE_ROLE_KEY", missingEnv: true });
 
   const now = Date.now();
+  // Expired tracking links are already unusable; prune their small bearer records during the
+  // existing hourly cron instead of letting them accumulate in app_state and every snapshot.
+  // Dry-run previews never mutate data, and cleanup failure never blocks text safety or sending.
+  let trackingMaintenance = { ok: true, skipped: "dry run", deleted: 0 };
+  if (!dryRun) {
+    try {
+      trackingMaintenance = await pruneExpiredTrackingRecords({ now });
+      if (trackingMaintenance.deleted > 0) console.info(`[maintenance] removed ${trackingMaintenance.deleted} expired tracking record(s)`);
+    } catch (error) {
+      trackingMaintenance = { ok: false, deleted: 0, error: error && error.message ? error.message : "tracking cleanup failed" };
+      console.warn("tracking cleanup failed:", trackingMaintenance.error);
+    }
+  }
   let state;
   try {
     state = await Promise.all([
@@ -249,7 +263,7 @@ export default async function handler(req, res) {
     return res.status(503).json({ ok: false, error: "Text safety settings are temporarily unavailable. No automated messages were sent." });
   }
 
-  if (!cfg.schedulerOn) return res.status(200).json({ ok: true, ran: new Date(now).toISOString(), master: false, note: "Automatic sending is off (master switch). Nothing sent." });
+  if (!cfg.schedulerOn) return res.status(200).json({ ok: true, ran: new Date(now).toISOString(), master: false, maintenance: { tracking: trackingMaintenance }, note: "Automatic sending is off (master switch). Nothing sent." });
 
   cfg._company = (branding && branding.companyName) || "Stone Property Solutions";
   const clientsById = {}; (clients || []).forEach(c => { if (c && c.id != null) clientsById[String(c.id)] = c; });
@@ -372,6 +386,7 @@ export default async function handler(req, res) {
 
   return res.status(200).json({
     ok: true, ran: new Date(now).toISOString(), master: true,
+    maintenance: { tracking: trackingMaintenance },
     testMode: { on: !!testMode.on, mode: testMode.mode || "redirect" },
     counts: { due: due.length, sent, errors: errors.length, cooledDown: cooled.length, capped: capped.length },
     errors, capped: capped.map(m => ({ type: m.type, client: m.who })),
