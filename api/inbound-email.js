@@ -29,9 +29,11 @@
 // spam to random@in.spsway.app is skipped outright; (2) AI triage is capped per hour
 // (over budget → stored as "other", no push — the owner can reclassify in Comms → Email).
 
+import crypto from "node:crypto";
 import { callClaude, extractJson, aiConfigured } from "./_ai.js";
 import { mutateAppState, NO_APP_STATE_CHANGE, readAppStateVersioned } from "./_app-state.js";
 import { pushOwner } from "./_push.js";
+import { assessInboundLead } from "../leadQualification.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
 const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -73,11 +75,20 @@ const htmlToText = (h) => String(h || "")
   .replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
   .replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
 
+const normalizedMessageId = (value) => String(value || "").trim().replace(/^<|>$/g, "").toLowerCase();
+const inboxIdFor = (messageId, fallback) => {
+  const normalized = normalizedMessageId(messageId);
+  return normalized
+    ? `mail_${crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 32)}`
+    : String(fallback);
+};
+
 const TRIAGE_SYSTEM = `You triage the work-email inbox for a pond/pool service business owner. Classify ONE email and reply with STRICT JSON only, no prose:
-{"kind":"lead"|"bill"|"client"|"other","confidence":0..1,"summary":"one plain sentence",
+{"kind":"lead"|"bill"|"client"|"other","confidence":0..1,"intent":"new_business"|"existing_service"|"billing"|"other","automated":true|false,"evidence":"exact short excerpt from the email",
+ "summary":"one plain sentence",
  "lead":{"name":"","phone":"","email":"","service":"","message":""},   // only when kind=lead: extract what the person wants, service guess (Pond/Pool/Seasonal), contact details found in the email
  "bill":{"vendor":"","amount":"","dueDate":""}}                        // only when kind=bill: invoice/statement/utility/supplier charge aimed at the BUSINESS
-Rules: "lead" = a person asking about getting service, a quote, an estimate, availability. "bill" = money the business owes (invoices TO the business, statements, utilities, suppliers, subscriptions). "client" = an existing customer writing about their own service (the caller tells you if the sender matched the client list). Marketing blasts, newsletters, receipts for tiny purchases, spam, notifications = "other". Never invent contact details.`;
+Rules: "lead" = a real person explicitly asking about NEW service, a quote, an estimate, pricing, or availability. Service reports, repair/work-order notices, visit updates, software notifications, and messages about existing service are NEVER leads. "bill" = money the business owes (invoices TO the business, statements, utilities, suppliers, subscriptions). "client" = an existing customer writing about their own service (the caller tells you if the sender matched the client list). Marketing blasts, newsletters, receipts for tiny purchases, spam, notifications = "other". Set automated=true for no-reply/software/platform mail. Evidence must quote the exact request/quote/new-service wording that proves the classification. Never invent contact details.`;
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -126,8 +137,27 @@ export default async function handler(req, res) {
     // emails look like they do in Gmail — text stays the AI/preview/search form.
     const html = String(em.html || "").replace(/<script[\s\S]*?<\/script>/gi, "").slice(0, 300000);
     const messageId = String(em.message_id || (body.data && body.data.message_id) || "").slice(0, 300);
+    const inboxId = inboxIdFor(messageId, emailId);
 
-    const [clients, emailCfg] = await Promise.all([sbGet("sps_clients", []), sbGet("sps_email", {})]);
+    // Live forwarding and Gmail history can see the same physical email under different provider
+    // ids. A shared Message-ID-derived key prevents future races; the Message-ID lookup also
+    // catches legacy rows that were stored under a Resend id before canonical ids existed.
+    try {
+      const checks = [fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?id=eq.${encodeURIComponent(inboxId)}&select=id&limit=1`, { headers: sbHeaders() })];
+      if (messageId) checks.push(fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?message_id=eq.${encodeURIComponent(messageId)}&select=id&limit=1`, { headers: sbHeaders() }));
+      const responses = await Promise.all(checks);
+      for (const response of responses) {
+        if (response.ok && ((await response.json().catch(() => [])) || []).length) return res.status(200).json({ ok: true, duplicate: true });
+      }
+    } catch (_) { /* insert remains idempotent on the canonical primary key */ }
+
+    const [clientRead, emailCfg] = await Promise.all([
+      readAppStateVersioned("sps_clients")
+        .then((row) => ({ ok: row.exists && Array.isArray(row.value), value: row.exists && Array.isArray(row.value) ? row.value : [] }))
+        .catch(() => ({ ok: false, value: [] })),
+      sbGet("sps_email", {}),
+    ]);
+    const clients = clientRead.value;
 
     // LOOP GUARD: replies the app itself sends are BCC'd back to the owner for record-keeping,
     // and Gmail's forward rule dutifully bounces that copy here. Never re-ingest our own sends.
@@ -140,14 +170,50 @@ export default async function handler(req, res) {
     if (fromEmail && selfAddrs.includes(fromEmail)) return res.status(200).json({ ok: true, skipped: "own send — loop guard" });
 
     // Existing client? (from_email against the client list — decided BEFORE the AI call.)
-    const client = (Array.isArray(clients) ? clients : []).find(c => String(c.email || "").trim().toLowerCase() === fromEmail && fromEmail);
+    const clientMatches = clientRead.ok && fromEmail
+      ? clients.filter(c => String(c.email || "").trim().toLowerCase() === fromEmail)
+      : [];
+    const client = clientMatches.length === 1 ? clientMatches[0] : null;
+    const ambiguousClient = clientMatches.length > 1;
 
-    // Triage. Client mail skips the AI (we already know what it is); AI failure degrades to
-    // "other". Hourly budget caps spam-driven spend — over budget, mail still stores as
-    // "other" (reclassify in Comms → Email), it just doesn't bill or buzz.
-    let kind = client ? "client" : "other", ai = null;
+    // Atomically claim the canonical Inbox row BEFORE spending AI budget. Only the insert winner
+    // may triage or push; overlapping Resend deliveries and Gmail backfill cannot double-charge or
+    // double-notify. The provisional classification is deliberately safe if optional triage fails.
+    let kind = client ? "client" : "other", ai = client
+      ? { summary: `From client ${client.name}`, clientId: String(client.id) }
+      : ambiguousClient
+      ? { summary: "This email address matches more than one client. Review it before replying." }
+      : null;
+    const provisionalKind = kind;
+    const provisionalAi = ai;
+    const row = {
+      id: String(inboxId),
+      from_name: fromName.slice(0, 120), from_email: fromEmail.slice(0, 200),
+      subject, body_text: text, body_html: html, message_id: messageId,
+      kind: provisionalKind, ai: provisionalAi,
+      lead_id: "", read: false, source_type: "email_forwarded",
+    };
+    const ir = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?on_conflict=id`, {
+      method: "POST",
+      headers: { ...sbHeaders(), Prefer: "resolution=ignore-duplicates,return=representation" },
+      body: JSON.stringify([row]),
+    });
+    if (!ir.ok) {
+      const t = await ir.text().catch(() => "");
+      out.stored = false;
+      out.error = /relation .*sps_inbox|42P01/i.test(t) ? "sps_inbox table missing — run the SQL in CLAUDE.md" : t.slice(0, 200);
+      // 5xx ON PURPOSE: Resend retries for ~28h when the durable Inbox claim itself fails.
+      return res.status(502).json(out);
+    }
+    const claimed = await ir.json().catch(() => []);
+    if (!Array.isArray(claimed) || !claimed.length) return res.status(200).json({ ok: true, duplicate: true });
+    out.stored = true;
+    out.kind = provisionalKind;
+
+    // Client mail skips the AI (we already know what it is); AI failure leaves the durable row as
+    // "other". Hourly budget caps spam-driven spend and is consumed only by the claim winner.
     let underBudget = true;
-    if (!client && aiConfigured()) {
+    if (!client && !ambiguousClient && clientRead.ok && aiConfigured()) {
       const hourKey = new Date().toISOString().slice(0, 13);
       underBudget = false;
       try {
@@ -164,7 +230,8 @@ export default async function handler(req, res) {
         underBudget = false;
       }
     }
-    if (!client && aiConfigured() && underBudget) {
+    let triageReady = false;
+    if (!client && !ambiguousClient && clientRead.ok && aiConfigured() && underBudget) {
       try {
         const reply = await callClaude({
           system: TRIAGE_SYSTEM,
@@ -174,40 +241,48 @@ export default async function handler(req, res) {
         const j = extractJson(reply);
         if (j && ["lead", "bill", "client", "other"].includes(j.kind)) {
           ai = j;
-          kind = j.kind === "client" ? "other" : j.kind; // AI can't declare "client" — only the list match can
+          triageReady = true;
+          if (j.kind === "lead") {
+            const verdict = assessInboundLead({ from_email: fromEmail, from_name: fromName, subject, body_text: text, ai: j }, clients);
+            kind = verdict.eligible ? "lead" : verdict.kind;
+            if (!verdict.eligible) ai = { ...j, autoLead: false, leadRejectedReason: verdict.reason, ...(verdict.client ? { clientId: String(verdict.client.id) } : {}) };
+          } else {
+            kind = j.kind === "client" ? "other" : j.kind; // AI can't declare "client" — only deterministic matching can
+          }
         }
       } catch (_) { /* AI down → "other"; the owner can reclassify in the Email tab */ }
     }
-
-    // Store (upsert on the Resend id — retries and replays collapse into one row).
-    const row = {
-      id: String(emailId),
-      from_name: fromName.slice(0, 120), from_email: fromEmail.slice(0, 200),
-      subject, body_text: text, body_html: html, message_id: messageId,
-      kind, ai: ai || (client ? { summary: `From client ${client.name}`, clientId: String(client.id) } : null),
-      lead_id: "", read: false, source_type: "email_forwarded",
-    };
-    // ignore-duplicates (ON CONFLICT DO NOTHING): a concurrent retry can never reset the
-    // owner's read/lead_id flags back to fresh — first write wins, forever.
-    const ir = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?on_conflict=id`, {
-      method: "POST", headers: { ...sbHeaders(), Prefer: "resolution=ignore-duplicates" },
-      body: JSON.stringify([row]),
-    });
-    if (!ir.ok) {
-      const t = await ir.text().catch(() => "");
-      out.stored = false;
-      out.error = /relation .*sps_inbox|42P01/i.test(t) ? "sps_inbox table missing — run the SQL in CLAUDE.md" : t.slice(0, 200);
-      // 5xx ON PURPOSE: Resend retries for ~28h, so mail arriving before the table exists (or
-      // during a Supabase blip) is delivered later instead of silently lost.
-      return res.status(502).json(out);
+    if (triageReady) {
+      try {
+        const pr = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?id=eq.${encodeURIComponent(inboxId)}&kind=eq.other&lead_id=eq.`, {
+          method: "PATCH",
+          headers: { ...sbHeaders(), Prefer: "return=representation" },
+          body: JSON.stringify({ kind, ai }),
+        });
+        const patched = pr.ok ? await pr.json().catch(() => []) : [];
+        if (Array.isArray(patched) && patched.some((saved) => String(saved && saved.id) === String(inboxId))) {
+          out.kind = kind;
+          out.triaged = true;
+        } else {
+          // The message itself is already durable. Keep the safe provisional classification and
+          // never push a lead/bill classification the server did not confirm.
+          kind = provisionalKind;
+          ai = provisionalAi;
+          out.kind = provisionalKind;
+          out.triaged = false;
+        }
+      } catch (_) {
+        kind = provisionalKind;
+        ai = provisionalAi;
+        out.kind = provisionalKind;
+        out.triaged = false;
+      }
     }
-    out.stored = true;
-    out.kind = kind;
 
     // Alerts — best-effort pushes through the same toggles as everything else.
     if (kind === "lead") {
       const who = (ai && ai.lead && ai.lead.name) || fromName || fromEmail;
-      out.push = await pushOwner("new_lead", `Email lead: ${who}`, (ai && ai.summary) || subject || "Open Comms → Email", "comms", { collapseId: `em-${emailId}` });
+      out.push = await pushOwner("new_lead", `Possible email lead: ${who}`, (ai && ai.summary) || subject || "Review in Comms → Inbox", "comms", { collapseId: `em-${inboxId}` });
     } else if (kind === "bill") {
       const b = (ai && ai.bill) || {};
       out.push = await pushOwner("bill_received", "Bill received", [b.vendor, b.amount, b.dueDate ? `due ${b.dueDate}` : ""].filter(Boolean).join(" — ") || subject, "comms", { collapseId: `em-${emailId}` });

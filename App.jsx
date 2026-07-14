@@ -7,6 +7,7 @@ import { normalizeCompletionInvoice } from "./stopCompletion";
 import { CLIENT_MEDIA_BUCKET, backupManifestStatus, buildMediaArchive, buildStorageObjectPath, findUniqueStableMatch, makeStorageRef, parseDataUrl, parseStorageLocator, selectLegacyMediaForMigration, validateBackupMediaSize } from "./mediaBackup";
 import { createPortalDataFence, portalVisitMatchesReference, portalVisitReference, rejectPortalPreviewAction, requestPortalAction, retainPortalRatingVisit } from "./portalActionClient";
 import { selectActiveEnRouteStop } from "./geofenceSafety";
+import { assessInboundLead, findMisfiledImportedLead } from "./leadQualification";
 
 // True only on a genuine fresh launch of the app shell (hard close / first open).
 // sessionStorage is wiped when the PWA is killed/swiped away, but survives reloads
@@ -1059,6 +1060,12 @@ function useStoredState(key, initial) {
       const res = await store.get(key);               // clean key → take the freshly-read DB value
       if (res && res.value != null && res.value !== lastPersisted.current) {
         try { const parsed = JSON.parse(res.value); lastPersisted.current = res.value; setValue(parsed); } catch (_) {}
+      } else if ((!res || res.value == null) && detail.key === key && detail.remoteMissing) {
+        // A targeted refresh confirmed that this row was deleted. Reset only when the React value
+        // was clean above; a just-entered local edit takes the dirty branch and safely recreates it.
+        const initialJson = JSON.stringify(initial);
+        lastPersisted.current = initialJson;
+        setValue(initial);
       }
     };
     document.addEventListener("sps-reconciled", onReconciled);
@@ -10999,8 +11006,14 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   // (kept on the schedule, rendered struck-through) so the change stays on the record.
   const rescheduleStopTo = (stop, fromDate, toDateMDY, reason) => {
     setSchedule(prev => {
-      let copy = prev.map(d => ({ ...d, stops: d.stops.filter(s => s.sid !== stop.sid) }));
-      const moved = { ...stop, cancelled: false, rescheduledFrom: fromDate, rescheduleReason: reason || "", rescheduledAt: new Date().toISOString() };
+      // The modal can remain open while another device refreshes this stop. Resolve the live stop
+      // by sid inside the functional update: never resurrect a remotely deleted stop and never
+      // spread an old modal snapshot over newer time/tech/service edits.
+      const currentDay = (prev || []).find(d => (d.stops || []).some(s => String(s.sid) === String(stop.sid)));
+      const currentStop = currentDay && (currentDay.stops || []).find(s => String(s.sid) === String(stop.sid));
+      if (!currentDay || !currentStop) return prev;
+      let copy = prev.map(d => ({ ...d, stops: d.stops.filter(s => String(s.sid) !== String(stop.sid)) }));
+      const moved = { ...currentStop, cancelled: false, rescheduledFrom: currentDay.date || fromDate, rescheduleReason: reason || "", rescheduledAt: new Date().toISOString() };
       const existing = copy.find(d => d.date === toDateMDY);
       if (existing) { existing.stops = [...existing.stops, moved]; if (cfg.sort === "time") existing.stops.sort((a, b) => to24(a.time) - to24(b.time)); }
       else copy.push({ date: toDateMDY, day: dayLabel(toDateMDY), stops: [moved] });
@@ -11027,6 +11040,14 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
     if (s) setEditStopModal({ stop: s, dayDate: focusStop.date });
     if (clearFocus) clearFocus();
   }, [focusStop]);
+
+  // A live refresh can remove a stop while one of its editing modals is open. Close only those
+  // stale editors so a delayed tap cannot act on a stop that no longer exists on the shared route.
+  useEffect(() => {
+    const exists = (sid) => (schedule || []).some(d => (d.stops || []).some(s => String(s.sid) === String(sid)));
+    if (stopChange && !exists(stopChange.stop && stopChange.stop.sid)) setStopChange(null);
+    if (editStopModal && !exists(editStopModal.stop && editStopModal.stop.sid)) setEditStopModal(null);
+  }, [schedule]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleOmwSent = (key) => setSentStops(s => ({ ...s, [key]: true }));
 
@@ -19833,17 +19854,22 @@ function SyncStatus({ T, branding, team, currentUserId, email = {} }) {
 // ── Shared Comms presentation ───────────────────────────────────────────────
 // Keep every Comms surface on the same visual rhythm. These are intentionally
 // presentation-only: the individual screens continue to own their data and actions.
+const CommsDensityContext = createContext(false);
+const useCompactComms = () => useContext(CommsDensityContext);
+
 function CommsPageHeader({ title, description, icon = "inbox", meta, action, T, compact = false }) {
+  const contextDense = useCompactComms();
+  const dense = compact || contextDense;
   return (
     <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: compact ? 10 : 12, flex: "1 1 250px", minWidth: 0 }}>
-        <div style={{ width: compact ? 36 : 42, height: compact ? 36 : 42, borderRadius: compact ? 11 : 13, background: hexA(T.primary, 0.09), color: T.primary, display: "grid", placeItems: "center", flexShrink: 0 }}>
-          <Icon name={icon} size={compact ? 17 : 20} />
+      <div style={{ display: "flex", alignItems: "center", gap: dense ? 9 : 12, flex: "1 1 250px", minWidth: 0 }}>
+        <div style={{ width: dense ? 34 : 42, height: dense ? 34 : 42, borderRadius: dense ? 10 : 13, background: hexA(T.primary, 0.09), color: T.primary, display: "grid", placeItems: "center", flexShrink: 0 }}>
+          <Icon name={icon} size={dense ? 16 : 20} />
         </div>
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: compact ? 19 : 23, fontWeight: 850, color: T.text, letterSpacing: "-0.035em", lineHeight: 1.1 }}>{title}</div>
-          {description && <div style={{ fontSize: compact ? 12 : 12.5, color: T.textMuted, marginTop: 4, lineHeight: 1.45 }}>{description}</div>}
-          {meta && <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginTop: 7 }}>{meta}</div>}
+          <div style={{ fontSize: dense ? 19 : 23, fontWeight: 850, color: T.text, letterSpacing: "-0.035em", lineHeight: 1.1 }}>{title}</div>
+          {description && <div style={{ fontSize: dense ? 11.5 : 12.5, color: T.textMuted, marginTop: dense ? 2 : 4, lineHeight: 1.4 }}>{description}</div>}
+          {meta && <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginTop: dense ? 4 : 7 }}>{meta}</div>}
         </div>
       </div>
       {action && <div style={{ flexShrink: 0 }}>{action}</div>}
@@ -19852,20 +19878,22 @@ function CommsPageHeader({ title, description, icon = "inbox", meta, action, T, 
 }
 
 function CommsSearchField({ value, onChange, onClear, placeholder, T, ariaLabel }) {
+  const dense = useCompactComms();
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, minHeight: 46, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: "10px 13px", boxShadow: "0 1px 2px rgba(0,0,0,0.035)", minWidth: 0 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: dense ? 8 : 10, height: dense ? 42 : 46, boxSizing: "border-box", background: T.surface, border: `1px solid ${T.border}`, borderRadius: dense ? 12 : 14, padding: dense ? "0 10px" : "0 13px", boxShadow: "0 1px 2px rgba(0,0,0,0.035)", minWidth: 0 }}>
       <span style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="search" size={17} /></span>
       <input value={value} onChange={e => onChange(e.target.value)} aria-label={ariaLabel || placeholder} placeholder={placeholder}
-        style={{ flex: 1, minWidth: 0, border: "none", background: "transparent", outline: "none", fontFamily: "inherit", fontSize: 14, color: T.text }} />
+        style={{ flex: 1, minWidth: 0, minHeight: 0, height: "100%", padding: 0, border: "none", background: "transparent", outline: "none", fontFamily: "inherit", fontSize: 16, color: T.text }} />
       {value && <button type="button" onClick={onClear || (() => onChange(""))} aria-label="Clear search" style={{ width: 30, height: 30, borderRadius: 9, border: "none", background: T.surfaceAlt, color: T.textMuted, cursor: "pointer", display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name="close" size={14} /></button>}
     </div>
   );
 }
 
 function CommsEmptyState({ icon = "inbox", title, copy, action, T }) {
+  const dense = useCompactComms();
   return (
-    <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, padding: "42px 22px", textAlign: "center" }}>
-      <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.07), color: T.primary, display: "grid", placeItems: "center", margin: "0 auto 13px" }}><Icon name={icon} size={23} /></div>
+    <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, padding: dense ? "28px 18px" : "42px 22px", textAlign: "center" }}>
+      <div style={{ width: dense ? 44 : 52, height: dense ? 44 : 52, borderRadius: dense ? 13 : 16, background: hexA(T.primary, 0.07), color: T.primary, display: "grid", placeItems: "center", margin: `0 auto ${dense ? 10 : 13}px` }}><Icon name={icon} size={dense ? 20 : 23} /></div>
       <div style={{ fontSize: 15.5, fontWeight: 800, color: T.text }}>{title}</div>
       {copy && <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.55, maxWidth: 390, margin: "6px auto 0" }}>{copy}</div>}
       {action && <div style={{ marginTop: 17 }}>{action}</div>}
@@ -19888,6 +19916,7 @@ function CommsGroupHeader({ title, count, tone, T }) {
 // Owner-only (the nav entry is ownerOnly). Reads/writes the sps_leads app_state collection.
 function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, onLeadOpened, vp = {} }) {
   const { T } = useApp();
+  const dense = useCompactComms();
   const [filter, setFilter] = useState("active"); // active | all | <stage>
   const [search, setSearch] = useState("");
   const [selId, setSelId] = useState(null);
@@ -19895,6 +19924,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
   const [form, setForm] = useState({ ...BLANK_LEAD });
   const [dupModal, setDupModal] = useState(null); // { lead, dup } — convert hit an existing client
   const [lightbox, setLightbox] = useState(null);  // full-screen photo URL (in-app, no browser hop)
+  const [leadRepair, setLeadRepair] = useState({ busy: false, error: "", undo: null, message: "" });
   // Deep-link: reopen a specific lead (e.g. returning from a cancelled convert).
   useEffect(() => {
     if (openLeadId) { setSelId(openLeadId); if (onLeadOpened) onLeadOpened(); }
@@ -19915,6 +19945,8 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
   const norm = (s) => String(s || "").replace(/[^\d]/g, "").slice(-10);
   const lcs = (s) => String(s || "").trim().toLowerCase();
   const sorted = [...(leads || [])].sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  const misfiledImports = sorted.map((lead) => ({ lead, match: findMisfiledImportedLead(lead, clients) }))
+    .filter((item) => item.match && /^em_.+/.test(String(item.lead.srcId || "")) && item.lead.status !== "won" && !item.lead.convertedClientId);
   const counts = LEAD_STAGES.reduce((m, st) => { m[st.id] = sorted.filter(l => l.status === st.id).length; return m; }, {});
   const activeCount = sorted.filter(l => !["won", "lost"].includes(l.status)).length;
   const searchTerm = search.trim().toLowerCase();
@@ -19924,13 +19956,86 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
 
   const updateLead = (id, patch, note) => setLeads(ls => (ls || []).map(l => l.id === id ? { ...l, ...patch, updatedAt: new Date().toISOString(), timeline: note ? [...(l.timeline || []), { at: new Date().toISOString(), by: "owner", kind: "note", text: note }] : (l.timeline || []) } : l));
   const setStatus = (lead, status) => updateLead(lead.id, { status }, `Moved to ${LEAD_STAGES.find(s => s.id === status)?.label || status}`);
-  const removeLead = (id) => {
-    if (!confirm("Delete this lead? This can't be undone.")) return;
+  const repairSpec = (lead, kind) => ({
+    id: String(lead.srcId).slice(3),
+    kind,
+    leadId: String(lead.id || ""),
+    expectedUpdatedAt: String(lead.updatedAt || ""),
+    expectedStatus: String(lead.status || ""),
+    expectedConvertedClientId: String(lead.convertedClientId || ""),
+  });
+  const removeLead = async (id) => {
+    const lead = (leads || []).find(l => l.id === id);
+    const linkedInboxLead = lead && /^em_.+/.test(String(lead.srcId || ""));
+    if (!confirm(linkedInboxLead
+      ? "Remove this from Leads? The original message will stay safely in Inbox, and you can undo the removal."
+      : "Delete this lead? This can't be undone.")) return;
+    // Email/SMS leads have a linked private-inbox row. Remove + unlink them through the owner-only
+    // CAS endpoint so the funnel and Inbox cannot disagree or resurrect the deleted lead.
+    if (linkedInboxLead) {
+      setLeadRepair(s => ({ ...s, busy: true, error: "", message: "" }));
+      try {
+        const r = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "repairImportedLeads", repairs: [repairSpec(lead, "other")] }) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          if (Array.isArray(d.leads)) setLeads(d.leads);
+          throw new Error(d.error || "Couldn't delete that lead.");
+        }
+        setLeads(Array.isArray(d.leads) ? d.leads : (leads || []).filter(l => l.id !== id));
+        setSelId(null);
+        const inboxNote = d.inboxUpdated === false ? " Its Inbox label could not update yet." : "";
+        setLeadRepair({ busy: false, error: "", undo: Array.isArray(d.removed) && d.removed.length ? d.removed : null, message: `Lead removed from the funnel.${inboxNote}` });
+      } catch (error) {
+        setLeadRepair(s => ({ ...s, busy: false, error: error.message || "Couldn't delete that lead." }));
+      }
+      return;
+    }
     // A website lead deleted before its import was acknowledged would re-import on every open
     // ("zombie") — mark it handled at the source too. Best-effort: seen-and-rejected is handled.
-    const lead = (leads || []).find(l => l.id === id);
     if (lead && lead.srcId) (async () => { try { await fetch(`${PROD_URL}/api/leads-sync`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ imported: [lead.srcId] }) }); } catch (_) {} })();
     setLeads(ls => (ls || []).filter(l => l.id !== id)); setSelId(null);
+  };
+
+  const repairMisfiledImports = async () => {
+    if (!misfiledImports.length || leadRepair.busy) return;
+    const n = misfiledImports.length;
+    if (!confirm(`Remove ${n} clearly misfiled service notice${n === 1 ? "" : "s"} from Leads? ${n === 1 ? "It" : "They"} will stay safely in Inbox under Client or Other.`)) return;
+    setLeadRepair({ busy: true, error: "", undo: null, message: "" });
+    try {
+      const repairs = misfiledImports.map(({ lead, match }) => repairSpec(lead, match.kind));
+      const r = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "repairImportedLeads", repairs }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        if (Array.isArray(d.leads)) setLeads(d.leads);
+        throw new Error(d.error || "Couldn't repair those leads.");
+      }
+      setLeads(Array.isArray(d.leads) ? d.leads : (leads || []).filter((lead) => !misfiledImports.some((item) => item.lead.id === lead.id)));
+      setSelId(null);
+      const removedCount = Number.isInteger(d.removedCount) ? d.removedCount : n;
+      const inboxNote = d.inboxUpdated === false ? " The Leads funnel is fixed, but one or more Inbox labels could not update yet." : "";
+      setLeadRepair({ busy: false, error: "", undo: Array.isArray(d.removed) && d.removed.length ? d.removed : null, message: `${removedCount} service notice${removedCount === 1 ? " was" : "s were"} removed from Leads.${inboxNote}` });
+    } catch (error) {
+      setLeadRepair({ busy: false, error: error.message || "Couldn't repair those leads.", undo: null, message: "" });
+    }
+  };
+
+  const undoLeadRepair = async () => {
+    const records = leadRepair.undo;
+    if (!Array.isArray(records) || !records.length || leadRepair.busy) return;
+    setLeadRepair(s => ({ ...s, busy: true, error: "" }));
+    try {
+      const r = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "restoreImportedLeads", records }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        if (Array.isArray(d.leads)) setLeads(d.leads);
+        throw new Error(d.error || "Couldn't undo the repair.");
+      }
+      setLeads(Array.isArray(d.leads) ? d.leads : [...records, ...(leads || [])]);
+      const inboxNote = d.inboxUpdated === false ? " The lead is restored, but its Inbox label could not update yet." : "";
+      setLeadRepair({ busy: false, error: "", undo: null, message: `Restored.${inboxNote}` });
+    } catch (error) {
+      setLeadRepair(s => ({ ...s, busy: false, error: error.message || "Couldn't undo the repair." }));
+    }
   };
   const dupClient = (lead) => (clients || []).find(c => (lead.phone && norm(c.phone) && norm(c.phone) === norm(lead.phone)) || (lead.email && lcs(c.email) && lcs(c.email) === lcs(lead.email)));
 
@@ -19951,25 +20056,37 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
   const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
   const chip = (on, label, onClick, color) => (
-    <button type="button" onClick={onClick} style={{ padding: "7px 13px", borderRadius: 100, border: `1.5px solid ${on ? (color || T.primary) : T.border}`, background: on ? hexA(color || T.primary, 0.1) : T.surface, color: on ? (color || T.primary) : T.textMuted, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+    <button type="button" onClick={onClick} style={{ minHeight: 40, padding: dense ? "6px 11px" : "7px 13px", borderRadius: 100, border: `1.5px solid ${on ? (color || T.primary) : T.border}`, background: on ? hexA(color || T.primary, 0.1) : T.surface, color: on ? (color || T.primary) : T.textMuted, fontWeight: 700, fontSize: dense ? 12 : 12.5, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
   );
 
   const headerBar = (
-    <div style={{ padding: "16px 16px 12px" }}>
+    <div style={{ padding: dense ? "10px 12px 8px" : "16px 16px 12px" }}>
       <CommsPageHeader T={T} compact={twoPane} icon="funnel" title="Leads" description={`${activeCount} active · ${sorted.length} total`}
         action={<Btn sm onClick={() => { setForm({ ...BLANK_LEAD }); setAdding(true); }} style={{ gap: 6 }}><Icon name="plus" size={13} />Add lead</Btn>} />
     </div>
   );
-  const searchBar = <div style={{ padding: "0 16px 10px" }}><CommsSearchField value={search} onChange={setSearch} T={T} placeholder="Search leads, services, phone or email" /></div>;
+  const repairBar = (misfiledImports.length > 0 || leadRepair.error || leadRepair.message) ? (
+    <div style={{ padding: dense ? "0 12px 8px" : "0 16px 10px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, padding: dense ? "8px 10px" : "10px 12px", borderRadius: 12, border: `1px solid ${leadRepair.error ? hexA("#dc2626", 0.35) : hexA("#F59E0B", 0.35)}`, background: leadRepair.error ? hexA("#dc2626", 0.06) : hexA("#F59E0B", 0.08) }}>
+        <span style={{ display: "inline-flex", color: leadRepair.error ? "#dc2626" : "#B45309", flexShrink: 0 }}><Icon name={leadRepair.error ? "warning" : "sparkle"} size={15} /></span>
+        <div style={{ minWidth: 0, flex: 1, fontSize: dense ? 11.5 : 12.5, lineHeight: 1.4, color: T.text, fontWeight: 650 }}>
+          {leadRepair.error || leadRepair.message || `${misfiledImports.length} imported service notice${misfiledImports.length === 1 ? " looks" : "s look"} like client activity, not new leads.`}
+        </div>
+        {misfiledImports.length > 0 && !leadRepair.undo && <button type="button" disabled={leadRepair.busy} onClick={repairMisfiledImports} style={{ minHeight: 38, padding: "6px 10px", border: "none", borderRadius: 9, background: T.primary, color: "#fff", fontSize: 11.5, fontWeight: 800, fontFamily: "inherit", cursor: leadRepair.busy ? "wait" : "pointer", flexShrink: 0 }}>{leadRepair.busy ? "Fixing…" : `Fix ${misfiledImports.length}`}</button>}
+        {leadRepair.undo && <button type="button" disabled={leadRepair.busy} onClick={undoLeadRepair} style={{ minHeight: 38, padding: "6px 10px", border: `1px solid ${T.border}`, borderRadius: 9, background: T.surface, color: T.primary, fontSize: 11.5, fontWeight: 800, fontFamily: "inherit", cursor: leadRepair.busy ? "wait" : "pointer", flexShrink: 0 }}>Undo</button>}
+      </div>
+    </div>
+  ) : null;
+  const searchBar = <div style={{ padding: dense ? "0 12px 8px" : "0 16px 10px" }}><CommsSearchField value={search} onChange={setSearch} T={T} placeholder="Search leads, services, phone or email" /></div>;
   const filterBar = (
-    <div style={{ display: "flex", gap: 7, overflowX: "auto", padding: "0 16px 12px", WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
+    <div style={{ display: "flex", gap: dense ? 6 : 7, overflowX: "auto", padding: dense ? "0 12px 8px" : "0 16px 12px", WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
       {chip(filter === "active", "Active", () => setFilter("active"))}
       {LEAD_STAGES.map(st => chip(filter === st.id, `${st.label}${counts[st.id] ? ` ${counts[st.id]}` : ""}`, () => setFilter(st.id), STATUS_COLOR[st.id]))}
       {chip(filter === "all", "All", () => setFilter("all"))}
     </div>
   );
   const listCards = (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "0 16px 16px" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: dense ? 7 : 10, padding: dense ? "0 12px 12px" : "0 16px 16px" }}>
       {shown.length === 0 && <CommsEmptyState T={T} icon="funnel" title={searchTerm ? "No matching leads" : "No leads in this stage"} copy={searchTerm ? "Try another name, service, phone number, or email." : "Website leads appear here automatically, or you can add one manually."} action={!searchTerm && <Btn sm onClick={() => { setForm({ ...BLANK_LEAD }); setAdding(true); }}>Add a lead</Btn>} />}
       {shown.map(l => {
         const initials = (l.name || "?").trim().split(/\s+/).map(w => w[0]).slice(0, 2).join("").toUpperCase() || "?";
@@ -19979,22 +20096,22 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
         const meta = [l.service, ago(l.createdAt), nPhotos ? `📷 ${nPhotos}` : ""].filter(Boolean).join(" · ");
         const active = twoPane && sel && sel.id === l.id;
         return (
-        <div key={l.id} onClick={() => setSelId(l.id)} style={{ background: active ? hexA(T.primary, 0.06) : T.surface, border: `1px solid ${active ? hexA(T.primary, 0.4) : T.border}`, borderLeft: `3px solid ${STATUS_COLOR[l.status] || T.border}`, borderRadius: 16, padding: "13px 15px", cursor: "pointer", display: "flex", alignItems: "flex-start", gap: 12, boxShadow: "0 2px 10px rgba(0,0,0,0.04)" }}>
-          <div style={{ width: 40, height: 40, borderRadius: "50%", flexShrink: 0, background: isNew ? T.primary : hexA(T.primary, 0.12), color: isNew ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 13.5 }}>{initials}</div>
+        <div key={l.id} onClick={() => setSelId(l.id)} style={{ background: active ? hexA(T.primary, 0.06) : T.surface, border: `1px solid ${active ? hexA(T.primary, 0.4) : T.border}`, borderLeft: `3px solid ${STATUS_COLOR[l.status] || T.border}`, borderRadius: dense ? 14 : 16, padding: dense ? "9px 11px" : "13px 15px", cursor: "pointer", display: "flex", alignItems: "flex-start", gap: dense ? 8 : 12, boxShadow: "0 2px 10px rgba(0,0,0,0.04)" }}>
+          <div style={{ width: dense ? 34 : 40, height: dense ? 34 : 40, borderRadius: "50%", flexShrink: 0, background: isNew ? T.primary : hexA(T.primary, 0.12), color: isNew ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: dense ? 12 : 13.5 }}>{initials}</div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <div style={{ fontSize: 15, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{l.name || l.phone || l.email || "New lead"}</div>
+              <div style={{ fontSize: dense ? 14 : 15, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{l.name || l.phone || l.email || "New lead"}</div>
               <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: 10, fontWeight: 800, color: STATUS_COLOR[l.status] || T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{LEAD_STAGES.find(s => s.id === l.status)?.label || l.status}</span>
             </div>
             {l.message
-              ? <div style={{ fontSize: 13, color: T.text, marginTop: 4, lineHeight: 1.45, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{l.message}</div>
+              ? <div style={{ fontSize: dense ? 12.5 : 13, color: T.text, marginTop: dense ? 2 : 4, lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: dense ? 1 : 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{l.message}</div>
               : <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 4, fontStyle: "italic" }}>No message left</div>}
-            <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 7, minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: dense ? 5 : 7, minWidth: 0 }}>
               <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", textTransform: "uppercase", color: T.textMuted, background: T.surfaceAlt, padding: "2px 7px", borderRadius: 100, flexShrink: 0 }}>{LEAD_SOURCE_LABEL[l.source] || l.source}</span>
               <span style={{ fontSize: 11, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{meta}</span>
             </div>
           </div>
-          {firstImg && <ProtectedImage src={firstImg} alt="" loading="lazy" onError={e => { e.target.style.display = "none"; }} style={{ width: 52, height: 52, borderRadius: 12, objectFit: "cover", border: `1px solid ${T.border}`, flexShrink: 0, background: T.surfaceAlt }} />}
+          {firstImg && <ProtectedImage src={firstImg} alt="" loading="lazy" onError={e => { e.target.style.display = "none"; }} style={{ width: dense ? 42 : 52, height: dense ? 42 : 52, borderRadius: dense ? 10 : 12, objectFit: "cover", border: `1px solid ${T.border}`, flexShrink: 0, background: T.surfaceAlt }} />}
         </div>
         );
       })}
@@ -20058,7 +20175,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
       {twoPane ? (
         <>
           <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-            <div style={{ flexShrink: 0 }}>{headerBar}{searchBar}{filterBar}</div>
+            <div style={{ flexShrink: 0 }}>{headerBar}{repairBar}{searchBar}{filterBar}</div>
             <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>{listCards}</div>
           </div>
           <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, overflow: "hidden" }}>
@@ -20074,6 +20191,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
       ) : (
         <>
           {headerBar}
+          {repairBar}
           {searchBar}
           {filterBar}
           {listCards}
@@ -20921,6 +21039,7 @@ function fmtMsgTime(ts) {
 
 // ── STAFF: Full messages inbox ──
 function MessagesScreen({ clients, currentUser, T }) {
+  const dense = useCompactComms();
   const [selectedClientId, setSelectedClientId] = useState(null);
   const [showNewMsg, setShowNewMsg] = useState(false);
   const [newSearch, setNewSearch] = useState("");
@@ -21016,10 +21135,10 @@ function MessagesScreen({ clients, currentUser, T }) {
 
   // ── Conversation list header + body ──
   const listHeader = (
-    <div style={{ padding: twoPane ? "14px 16px 12px" : "0 0 2px", borderBottom: twoPane ? `1px solid ${T.border}` : "none", flexShrink: 0 }}>
+    <div style={{ padding: twoPane ? (dense ? "10px 12px 8px" : "14px 16px 12px") : "0 0 2px", borderBottom: twoPane ? `1px solid ${T.border}` : "none", flexShrink: 0 }}>
       <CommsPageHeader T={T} compact={twoPane} icon="message" title="Client chats" description={`${threads.length} conversation${threads.length === 1 ? "" : "s"}${totalUnread ? ` · ${totalUnread} unread` : " · all caught up"}`}
         action={<Btn sm onClick={() => setShowNewMsg(true)} style={{ gap: 6 }}><Icon name="plus" size={13} />New</Btn>} />
-      {threads.length > 0 && <div style={{ marginTop: 12 }}><CommsSearchField value={threadSearch} onChange={setThreadSearch} T={T} placeholder="Search conversations" /></div>}
+      {threads.length > 0 && <div style={{ marginTop: dense ? 8 : 12 }}><CommsSearchField value={threadSearch} onChange={setThreadSearch} T={T} placeholder="Search conversations" /></div>}
     </div>
   );
   // Circular, deterministic-hue avatar (matches the Email inbox look) instead of the old red squares.
@@ -21031,17 +21150,17 @@ function MessagesScreen({ clients, currentUser, T }) {
     return (
       <button key={c.id} onClick={() => setSelectedClientId(c.id)}
         style={card
-          ? { position: "relative", display: "flex", alignItems: "center", gap: 12, padding: "13px 14px", width: "100%", background: hasUnread ? hexA(T.primary, 0.03) : T.surface, border: `1px solid ${hasUnread ? hexA(T.primary, 0.28) : T.border}`, borderRadius: 16, boxShadow: "0 1px 3px rgba(0,0,0,0.035)", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }
-          : { position: "relative", display: "flex", alignItems: "center", gap: 12, padding: "13px 16px", width: "100%", background: active ? hexA(T.primary, 0.08) : (hasUnread ? hexA(T.primary, 0.04) : "none"), border: "none", borderBottom: `1px solid ${T.border}`, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+          ? { position: "relative", display: "flex", alignItems: "center", gap: dense ? 8 : 12, padding: dense ? "9px 11px" : "13px 14px", minHeight: 58, width: "100%", background: hasUnread ? hexA(T.primary, 0.03) : T.surface, border: `1px solid ${hasUnread ? hexA(T.primary, 0.28) : T.border}`, borderRadius: dense ? 14 : 16, boxShadow: "0 1px 3px rgba(0,0,0,0.035)", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }
+          : { position: "relative", display: "flex", alignItems: "center", gap: dense ? 8 : 12, padding: dense ? "10px 12px" : "13px 16px", width: "100%", background: active ? hexA(T.primary, 0.08) : (hasUnread ? hexA(T.primary, 0.04) : "none"), border: "none", borderBottom: `1px solid ${T.border}`, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
         {card && hasUnread && <span style={{ position: "absolute", left: -1, top: 14, bottom: 14, width: 3, borderRadius: 3, background: T.primary }} />}
-        <div style={{ width: 44, height: 44, borderRadius: "50%", flexShrink: 0, display: "grid", placeItems: "center", background: hexA(col, 0.15), color: col, fontSize: 17, fontWeight: 800 }}>{(c.name || "?")[0].toUpperCase()}</div>
+        <div style={{ width: dense ? 36 : 44, height: dense ? 36 : 44, borderRadius: "50%", flexShrink: 0, display: "grid", placeItems: "center", background: hexA(col, 0.15), color: col, fontSize: dense ? 14 : 17, fontWeight: 800 }}>{(c.name || "?")[0].toUpperCase()}</div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-            <span style={{ flex: 1, minWidth: 0, fontSize: 14.5, fontWeight: hasUnread ? 820 : 650, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.name}</span>
+            <span style={{ flex: 1, minWidth: 0, fontSize: dense ? 14 : 14.5, fontWeight: hasUnread ? 820 : 650, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.name}</span>
             <span style={{ fontSize: 11, color: hasUnread ? T.primary : T.textMuted, fontWeight: hasUnread ? 700 : 500, flexShrink: 0 }}>{fmtMsgTime(t.lastAt)}</span>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 3 }}>
-            <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: hasUnread ? T.text : T.textMuted, fontWeight: hasUnread ? 650 : 400, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.lastMsg || "No messages yet"}</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: dense ? 1 : 3 }}>
+            <span style={{ flex: 1, minWidth: 0, fontSize: dense ? 12.5 : 13, color: hasUnread ? T.text : T.textMuted, fontWeight: hasUnread ? 650 : 400, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.lastMsg || "No messages yet"}</span>
             {hasUnread && <span style={{ minWidth: 18, height: 18, borderRadius: 9, background: T.primary, color: "#fff", fontSize: 10.5, fontWeight: 800, display: "grid", placeItems: "center", padding: "0 5px", flexShrink: 0 }}>{t.unread}</span>}
           </div>
         </div>
@@ -21055,7 +21174,7 @@ function MessagesScreen({ clients, currentUser, T }) {
   ) : twoPane ? (
     <div>{visibleThreads.map(t => convBtn(t, false))}</div>
   ) : (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: 20 }}>{visibleThreads.map(t => convBtn(t, true))}</div>
+    <div style={{ display: "flex", flexDirection: "column", gap: dense ? 7 : 10, paddingBottom: 20 }}>{visibleThreads.map(t => convBtn(t, true))}</div>
   );
   const listPane = twoPane ? (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
@@ -21063,7 +21182,7 @@ function MessagesScreen({ clients, currentUser, T }) {
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>{listBody}</div>
     </div>
   ) : (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>{listHeader}{listBody}</div>
+    <div style={{ display: "flex", flexDirection: "column", gap: dense ? 9 : 16 }}>{listHeader}{listBody}</div>
   );
 
   const chatPane = selectedClient
@@ -22276,6 +22395,7 @@ function RichEditor({ onChange, placeholder = "Write your message…", minHeight
 function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const { T } = useApp();
   const vp = useViewport();
+  const dense = useCompactComms();
   // Two-pane (list + reading pane) ONLY when there's genuinely room — this section sits inside the
   // global sidebar AND the Comms sidebar, so isDesktop (>=700, incl. portrait iPad) is too narrow and
   // would crush the reader. Below this, use the clean single-column list + full-screen modal reader.
@@ -22634,7 +22754,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     const tone = id === "sms" ? "#7c3aed" : id === "email" ? "#2563eb" : T.primary;
     return (
       <button key={id} type="button" onClick={() => setChannelFilter(id)} aria-pressed={on}
-        style={{ minWidth: 0, minHeight: 42, padding: "8px 9px", borderRadius: 10, border: "none", background: on ? T.surface : "transparent", color: on ? tone : T.textMuted, boxShadow: on ? "0 1px 3px rgba(0,0,0,0.1)" : "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 12.5, fontWeight: on ? 800 : 700, fontFamily: "inherit", cursor: "pointer", whiteSpace: "nowrap" }}>
+        style={{ minWidth: 0, minHeight: dense ? 40 : 42, padding: dense ? "6px 7px" : "8px 9px", borderRadius: 10, border: "none", background: on ? T.surface : "transparent", color: on ? tone : T.textMuted, boxShadow: on ? "0 1px 3px rgba(0,0,0,0.1)" : "none", display: "flex", alignItems: "center", justifyContent: "center", gap: dense ? 4 : 6, fontSize: dense ? 12 : 12.5, fontWeight: on ? 800 : 700, fontFamily: "inherit", cursor: "pointer", whiteSpace: "nowrap" }}>
         <Icon name={icon} size={14} />
         <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
         <span style={{ minWidth: 20, padding: "1px 6px", borderRadius: 100, background: on ? hexA(tone, 0.12) : hexA(T.textMuted, 0.1), color: on ? tone : T.textMuted, fontSize: 10, fontWeight: 850, lineHeight: 1.5 }}>{count}</span>
@@ -22642,7 +22762,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     );
   };
   const channelSwitcher = (
-    <div aria-label="Inbox channel" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 4, padding: 4, borderRadius: 14, background: T.surfaceAlt, border: `1px solid ${T.border}` }}>
+    <div aria-label="Inbox channel" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 4, padding: dense ? 3 : 4, borderRadius: dense ? 12 : 14, background: T.surfaceAlt, border: `1px solid ${T.border}` }}>
       {channelTab("all", "All", inboxRows.length, "inbox")}
       {channelTab("sms", "Texts", textCount, "message")}
       {channelTab("email", "Email", emailCount, "mail")}
@@ -22655,7 +22775,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   // header doesn't stack three text buttons and wrap. Matches the app's Icon style.
   const iconBtn = (icon, label, onClick, active) => (
     <button type="button" title={label} aria-label={label} onClick={onClick}
-      style={{ width: 44, height: 44, borderRadius: 12, border: `1px solid ${active ? T.primary : T.border}`, background: active ? hexA(T.primary, 0.1) : T.surface, color: active ? T.primary : T.textMuted, display: "grid", placeItems: "center", cursor: onClick ? "pointer" : "default", flexShrink: 0, fontFamily: "inherit", opacity: onClick ? 1 : 0.55 }}>
+      style={{ width: dense ? 40 : 44, height: dense ? 40 : 44, borderRadius: dense ? 10 : 12, border: `1px solid ${active ? T.primary : T.border}`, background: active ? hexA(T.primary, 0.1) : T.surface, color: active ? T.primary : T.textMuted, display: "grid", placeItems: "center", cursor: onClick ? "pointer" : "default", flexShrink: 0, fontFamily: "inherit", opacity: onClick ? 1 : 0.55 }}>
       <Icon name={icon} size={16} />
     </button>
   );
@@ -22701,10 +22821,10 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     const active = openRow && openRow.id === r.id && wide;
     return (
       <div key={r.id} onClick={() => { if (selMode) { toggleSel(r.id); return; } setOpenRow(r); setReplying(false); setReplyText(""); setReplyHtml(""); setReplyMsg(""); if (!r.read) markRead([r.id]); }}
-        style={{ display: "flex", alignItems: "flex-start", gap: 13, padding: "15px 16px", cursor: "pointer", borderTop: i === 0 ? "none" : `1px solid ${hexA(T.border, 0.5)}`, background: (sel[r.id] || active) ? hexA(T.primary, 0.08) : (r.read ? "transparent" : hexA(T.primary, 0.03)), position: "relative" }}>
+        style={{ display: "flex", alignItems: "flex-start", gap: dense ? 9 : 13, padding: dense ? "11px 12px" : "15px 16px", cursor: "pointer", borderTop: i === 0 ? "none" : `1px solid ${hexA(T.border, 0.5)}`, background: (sel[r.id] || active) ? hexA(T.primary, 0.08) : (r.read ? "transparent" : hexA(T.primary, 0.03)), position: "relative" }}>
         {!r.read && <span style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: T.primary }} />}
         {selMode && <div style={{ alignSelf: "center", flexShrink: 0 }}><Checkbox checked={!!sel[r.id]} onChange={() => toggleSel(r.id)} /></div>}
-        <Avatar name={r.from_name} email={r.from_email} channel={r.channel} size={42} />
+        <Avatar name={r.from_name} email={r.from_email} channel={r.channel} size={dense ? 36 : 42} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{ fontSize: 14.5, fontWeight: r.read ? 600 : 820, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{senderLabel(r)}</span>
@@ -22729,20 +22849,20 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   // two-pane keeps its flat divided list.
   const cardRows = list.map((r) => (
     <div key={r.id} onClick={() => { if (selMode) { toggleSel(r.id); return; } setOpenRow(r); setReplying(false); setReplyText(""); setReplyHtml(""); setReplyMsg(""); if (!r.read) markRead([r.id]); }}
-      style={{ position: "relative", display: "flex", gap: 12, padding: "13px 14px", background: sel[r.id] ? hexA(T.primary, 0.06) : T.surface, border: `1px solid ${sel[r.id] ? T.primary : (!r.read ? hexA(T.primary, 0.28) : isSmsRow(r) ? hexA("#7c3aed", 0.22) : T.border)}`, borderRadius: 16, boxShadow: "0 2px 8px rgba(0,0,0,0.045)", cursor: "pointer" }}>
+      style={{ position: "relative", display: "flex", gap: dense ? 8 : 12, padding: dense ? "9px 11px" : "13px 14px", background: sel[r.id] ? hexA(T.primary, 0.06) : T.surface, border: `1px solid ${sel[r.id] ? T.primary : (!r.read ? hexA(T.primary, 0.28) : isSmsRow(r) ? hexA("#7c3aed", 0.22) : T.border)}`, borderRadius: dense ? 14 : 16, boxShadow: "0 2px 8px rgba(0,0,0,0.045)", cursor: "pointer" }}>
       {!r.read && <span style={{ position: "absolute", left: -1, top: 14, bottom: 14, width: 3, borderRadius: 3, background: T.primary }} />}
       {selMode && <div style={{ alignSelf: "center", flexShrink: 0 }}><Checkbox checked={!!sel[r.id]} onChange={() => toggleSel(r.id)} /></div>}
-      <Avatar name={r.from_name} email={r.from_email} channel={r.channel} size={40} />
+      <Avatar name={r.from_name} email={r.from_email} channel={r.channel} size={dense ? 34 : 40} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 14, fontWeight: r.read ? 700 : 820, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{senderLabel(r)}</span>
+          <span style={{ fontSize: dense ? 13.5 : 14, fontWeight: r.read ? 700 : 820, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{senderLabel(r)}</span>
           <span style={{ fontSize: 11, color: r.read ? T.textMuted : T.primary, fontWeight: r.read ? 600 : 800, flexShrink: 0 }}>{fmtWhen(r.created_at)}</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
           <span style={{ fontSize: 13.5, fontWeight: r.read ? 600 : 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{r.subject || "(no subject)"}</span>
         </div>
-        <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3, lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{(r.ai && r.ai.summary) || (r.body_text || "").slice(0, 160)}</div>
-        <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 8, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 12, color: T.textMuted, marginTop: dense ? 2 : 3, lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: dense ? 1 : 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{(r.ai && r.ai.summary) || (r.body_text || "").slice(0, 160)}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: dense ? 5 : 8, flexWrap: "wrap" }}>
           {channelBadge(r)}
           {badge(r.kind)}
           {inLeads(r.id) && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#16a34a", flexShrink: 0 }}>→ Leads</span>}
@@ -22841,12 +22961,12 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     return `${r.recipient || ""} ${nameForSent(r)} ${r.body || ""} ${r.origin || ""}`.toLowerCase().includes(qq);
   });
   const folderBar = (
-    <div style={{ display: "flex", gap: 4, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 13, padding: 4, alignSelf: "flex-start", flex: wide ? "0 0 auto" : "1 1 100%", width: wide ? "auto" : "100%" }}>
-      {[["inbox", "Inbox", unread], ["sent", "Sent email", 0]].map(([id, lbl, badge]) => {
+    <div style={{ display: "flex", gap: 4, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: dense ? 11 : 13, padding: dense ? 3 : 4, alignSelf: "flex-start", flex: wide ? "0 0 auto" : "1 1 auto", minWidth: 0, width: "auto" }}>
+      {[["inbox", "Inbox", unread], ["sent", dense && !wide ? "Sent" : "Sent email", 0]].map(([id, lbl, badge]) => {
         const on = folder === id;
         return (
           <button key={id} type="button" onClick={() => setFolder(id)}
-            style={{ minHeight: 42, flex: wide ? "0 0 auto" : 1, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "8px 14px", borderRadius: 9, border: "none", background: on ? T.surface : "transparent", color: on ? T.text : T.textMuted, fontSize: 13.5, fontWeight: on ? 800 : 650, cursor: "pointer", fontFamily: "inherit", boxShadow: on ? "0 1px 2px rgba(0,0,0,0.06)" : "none", whiteSpace: "nowrap" }}>
+            style={{ minHeight: dense ? 40 : 42, minWidth: 0, flex: wide ? "0 0 auto" : 1, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: dense ? 5 : 7, padding: dense ? "6px 8px" : "8px 14px", borderRadius: 9, border: "none", background: on ? T.surface : "transparent", color: on ? T.text : T.textMuted, fontSize: dense ? 12.5 : 13.5, fontWeight: on ? 800 : 650, cursor: "pointer", fontFamily: "inherit", boxShadow: on ? "0 1px 2px rgba(0,0,0,0.06)" : "none", whiteSpace: "nowrap" }}>
             <Icon name={id === "inbox" ? "mail" : "send"} size={15} />{lbl}
             {badge > 0 && <span style={{ fontSize: 10.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.12), borderRadius: 100, padding: "1px 7px" }}>{badgeLabel(badge)}</span>}
           </button>
@@ -22866,7 +22986,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
         <CommsEmptyState icon="send" title={sentQ ? "Nothing matches" : "No sent email yet"} copy={sentQ ? "Try a different search." : "Emails you compose or reply to from here show up in Sent, newest first."} action={!sentQ ? <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }}>New email</Btn> : null} T={T} />
       )}
       {!sentErr && sentList.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: wide ? 8 : (showMobileCompose ? 72 : 12) }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: dense ? 7 : 10, paddingBottom: wide ? 8 : 12 }}>
           {sentList.map(r => {
             const to = r.recipient || nameForSent(r) || "—";
             const parts = String(r.body || "").split(" — ");
@@ -22898,7 +23018,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     </>
   );
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: dense ? 8 : 12 }}>
       <CommsPageHeader
         title={folder === "inbox" ? "Unified inbox" : "Sent email"}
         description={folder === "inbox" ? `${unread} unread · business texts and work email, clearly separated` : "Email you compose and reply to from SPS Way."}
@@ -22907,13 +23027,15 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
           <span style={{ color: "#7c3aed", background: hexA("#7c3aed", 0.1), borderRadius: 100, padding: "3px 9px", fontSize: 10.5, fontWeight: 800 }}>{textCount} text{textCount === 1 ? "" : "s"}</span>
           <span style={{ color: "#2563eb", background: hexA("#2563eb", 0.1), borderRadius: 100, padding: "3px 9px", fontSize: 10.5, fontWeight: 800 }}>{emailCount} email{emailCount === 1 ? "" : "s"}</span>
         </> : null}
-        action={wide ? <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="edit" size={14} />New email</Btn> : null}
+        action={wide
+          ? <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="edit" size={14} />New email</Btn>
+          : showMobileCompose ? iconBtn("edit", "Compose a new email", () => { setComposeMsg(""); setComposeOpen(true); }, true) : null}
         T={T}
       />
       {/* Folder switch (Inbox / Sent) + context actions — one clean toolbar row */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: dense ? 6 : 10, flexWrap: wide ? "wrap" : "nowrap", minWidth: 0 }}>
         {folderBar}
-        <div style={{ flex: 1 }} />
+        {wide && <div style={{ flex: 1 }} />}
         {folder === "inbox" && (wide ? (
           <>
             <Btn variant="ghost" sm onClick={importState.running ? undefined : () => setImportOpen(o => !o)}>{importState.running ? "Importing…" : "Import"}</Btn>
@@ -22929,13 +23051,13 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       </div>
       {folder === "inbox" ? (
         <>
-      <div style={{ display: "grid", gridTemplateColumns: wide ? "minmax(260px, 1fr) minmax(330px, 0.8fr)" : "1fr", gap: 10, alignItems: "center" }}>
+      <div style={{ display: "grid", gridTemplateColumns: wide ? "minmax(260px, 1fr) minmax(330px, 0.8fr)" : "1fr", gap: dense ? 7 : 10, alignItems: "center" }}>
         <CommsSearchField value={q} onChange={setQ} placeholder="Search messages, people, tags" T={T} />
         {channelSwitcher}
       </div>
       {!wide && (
         <button type="button" onClick={() => setFiltersOpen(v => !v)} aria-expanded={filtersOpen}
-          style={{ minHeight: 44, width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "9px 12px", background: T.surface, border: `1px solid ${filter !== "all" ? T.primary : T.border}`, borderRadius: 12, color: filter !== "all" ? T.primary : T.textMuted, fontFamily: "inherit", fontSize: 12.5, fontWeight: 750, cursor: "pointer" }}>
+          style={{ minHeight: dense ? 40 : 44, width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: dense ? "7px 10px" : "9px 12px", background: T.surface, border: `1px solid ${filter !== "all" ? T.primary : T.border}`, borderRadius: 12, color: filter !== "all" ? T.primary : T.textMuted, fontFamily: "inherit", fontSize: 12.5, fontWeight: 750, cursor: "pointer" }}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}><Icon name="funnel" size={15} />{filter === "all" ? "Category filters" : `Filtered by ${KIND[filter]?.label || "Unread"}`}</span>
           <span style={{ display: "inline-flex", transform: filtersOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}><Icon name="chevronD" size={15} /></span>
         </button>
@@ -23013,17 +23135,10 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
           </div>
         </div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: showMobileCompose ? 72 : 12 }}>{cardRows}</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: dense ? 7 : 10, paddingBottom: 12 }}>{cardRows}</div>
       ))}
         </>
       ) : sentView}
-      {/* Floating Compose FAB (mobile) — sits above the bottom nav, matching the mockup. */}
-      {showMobileCompose && (
-        <button type="button" aria-label="Compose a new email" onClick={() => { setComposeMsg(""); setComposeOpen(true); }}
-          style={{ position: "fixed", right: "max(18px, env(safe-area-inset-right))", bottom: vp.isDesktop ? "calc(env(safe-area-inset-bottom) + 24px)" : "calc(env(safe-area-inset-bottom) + 82px)", zIndex: 90, minHeight: 52, display: "inline-flex", alignItems: "center", gap: 8, background: T.primary, color: "#fff", border: "none", borderRadius: 100, padding: "13px 19px", fontFamily: "inherit", fontSize: 14, fontWeight: 780, cursor: "pointer", boxShadow: `0 7px 20px ${hexA(T.primary, 0.22)}` }}>
-          <Icon name="edit" size={17} />New email
-        </button>
-      )}
       {openRow && !wide && (
         <Modal title={isSmsRow(openRow) ? `Text · ${openRow.subject || "Message"}` : `Email · ${openRow.subject || "(no subject)"}`} onClose={() => setOpenRow(null)} maxWidth={640}>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -23332,6 +23447,20 @@ function LogsScreen({ clients, showOwnerRows = false }) {
 
 function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, currentUser, schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, setBranding, reminderLog, setReminderLog, leads, setLeads, onConvertLead, onLinkLead, openLeadId, onLeadOpened, vp = {} }) {
   const { T } = useApp();
+  const vpx = useViewport();   // desktop → left sidebar shell; phone → sleek top section nav
+  const [commsDensity, setCommsDensityState] = useState(() => {
+    try {
+      const saved = localStorage.getItem("sps_comms_density_v1");
+      if (saved === "compact" || saved === "comfortable") return saved;
+      return window.innerWidth < 700 ? "compact" : "comfortable";
+    } catch (_) { return "comfortable"; }
+  });
+  const compactComms = commsDensity === "compact";
+  const setCommsDensity = (value) => {
+    const next = value === "compact" ? "compact" : "comfortable";
+    setCommsDensityState(next);
+    try { localStorage.setItem("sps_comms_density_v1", next); } catch (_) {}
+  };
   const isAdmin = !!perms.isAdmin;
   // Debounced editors for the template cards (heavy textareas) — snappy local echo, one write
   // per burst instead of per keystroke, functional-merge commit (no clobber of other cards).
@@ -23364,20 +23493,36 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
   useEffect(() => { if (SECTIONS.some(s => s.id === initialSection)) setSection(initialSection); }, [initialSection, initialSectionNonce]); // eslint-disable-line react-hooks/exhaustive-deps
   // If the permitted set changes and the current section is no longer allowed, snap to the first.
   useEffect(() => { if (!SECTIONS.some(s => s.id === section)) setSection(firstId); }, [secKey]); // eslint-disable-line react-hooks/exhaustive-deps
-  const vpx = useViewport();   // desktop → left sidebar shell; phone → sleek top section nav
   const mobileNavRef = useRef(null);
+  const commsRootRef = useRef(null);
   useEffect(() => {
     const nav = mobileNavRef.current;
     const active = nav && nav.querySelector(`[data-comms-section="${section}"]`);
-    if (!nav || !active) return;
-    try {
-      active.scrollIntoView({ behavior: "smooth", inline: "nearest", block: "nearest" });
-    } catch (_) {
+    if (nav && active) {
       const left = active.offsetLeft;
       const right = left + active.offsetWidth;
-      if (left < nav.scrollLeft) nav.scrollLeft = left;
-      else if (right > nav.scrollLeft + nav.clientWidth) nav.scrollLeft = right - nav.clientWidth;
+      let target = nav.scrollLeft;
+      if (left < nav.scrollLeft + 4) target = Math.max(0, left - 4);
+      else if (right > nav.scrollLeft + nav.clientWidth - 4) target = Math.max(0, right - nav.clientWidth + 4);
+      if (target !== nav.scrollLeft) {
+        try { nav.scrollTo({ left: target, behavior: "smooth" }); }
+        catch (_) { nav.scrollLeft = target; }
+      }
     }
+    // <main> is the app's real scroll container. Reset that element when changing Comms sections;
+    // window.scrollTo/scrollIntoView either do nothing here or can tuck the new heading under tabs.
+    let scroller = commsRootRef.current && commsRootRef.current.parentElement;
+    while (scroller) {
+      let overflow = "";
+      try { overflow = getComputedStyle(scroller).overflowY; } catch (_) {}
+      if (/(auto|scroll)/.test(overflow)) break;
+      scroller = scroller.parentElement;
+    }
+    if (!scroller) return undefined;
+    const reset = () => { scroller.scrollTop = 0; };
+    reset();
+    const frame = typeof requestAnimationFrame === "function" ? requestAnimationFrame(reset) : null;
+    return () => { if (frame != null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(frame); };
   }, [section, initialSectionNonce]);
   // Collapsible Comms sidebar — reclaim horizontal space on desktop (icon-only rail). Persisted.
   const [navCollapsed, setNavCollapsed] = useState(() => { try { return localStorage.getItem("sps_comms_nav_collapsed") === "1"; } catch { return false; } });
@@ -23391,12 +23536,27 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
   );
 
   const content = (
+    <CommsDensityContext.Provider value={compactComms}>
     <>
-      {section === "messages" && CAN.messages && <div style={{ padding: "0 16px" }}><MessagesScreen clients={clients} currentUser={currentUser} T={T} /></div>}
-      {section === "reminders" && CAN.reminders && <div style={{ padding: "0 16px" }}><RemindersScreen schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} /></div>}
+      {section === "messages" && CAN.messages && <div style={{ padding: `0 ${compactComms ? 12 : 16}px` }}><MessagesScreen clients={clients} currentUser={currentUser} T={T} /></div>}
+      {section === "reminders" && CAN.reminders && <div style={{ padding: `0 ${compactComms ? 12 : 16}px` }}><RemindersScreen schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} /></div>}
       {section === "inbox" && CAN.inbox && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={onConvertLead} onLink={onLinkLead} openLeadId={openLeadId} onLeadOpened={onLeadOpened} vp={vp} />}
-      {section === "settings" && CAN.settings && <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 18, maxWidth: 920, margin: "0 auto" }}>
+      {section === "settings" && CAN.settings && <div style={{ padding: `0 ${compactComms ? 12 : 16}px`, display: "flex", flexDirection: "column", gap: compactComms ? 12 : 18, maxWidth: 920, margin: "0 auto" }}>
         <CommsPageHeader title="Communication settings" description="Sending identity, safety controls, reminders, automation, and message templates." icon="sliders" T={T} />
+        <Card>
+          <div style={{ padding: compactComms ? "12px 14px" : "16px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>Comms display size</div>
+              <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2 }}>Compact fits more conversations on screen. Roomy adds more breathing space.</div>
+            </div>
+            <div style={{ display: "flex", gap: 4, padding: 4, borderRadius: 11, background: T.surfaceAlt, border: `1px solid ${T.border}` }}>
+              {[["compact", "Compact"], ["comfortable", "Roomy"]].map(([value, label]) => {
+                const on = commsDensity === value;
+                return <button key={value} type="button" onClick={() => setCommsDensity(value)} style={{ minHeight: 38, padding: "6px 12px", border: "none", borderRadius: 8, background: on ? T.surface : "transparent", color: on ? T.primary : T.textMuted, boxShadow: on ? "0 1px 2px rgba(0,0,0,0.08)" : "none", fontFamily: "inherit", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>{label}</button>;
+              })}
+            </div>
+          </div>
+        </Card>
         {/* THE control room — every number + email the app sends from / alerts you at lives here.
             Gates preserve the pre-consolidation surfaces: identity + Test Mode + alerts stay on
             editNotifications; digest/reminders/automations stay on commsSettings; owner sees all. */}
@@ -23414,45 +23574,48 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
         {(perms.isAdmin || perms.editSettings || perms.canInvoice) && <Card><CardHeader title="Staff Invite & Login Emails" /><InviteEmailSettings email={emailTpl} setEmail={setEmailTpl} branding={brandTpl} /></Card>}
       </div>}
       {section === "broadcast" && CAN.broadcast && <BroadcastSection clients={clients} invoices={invoices} email={email} branding={branding} T={T} />}
-      {section === "email" && CAN.email && <div style={{ padding: "0 16px" }}><EmailInboxSection leads={leads} setLeads={setLeads} clients={clients} invoices={invoices} /></div>}
-      {section === "log" && CAN.log && <div style={{ padding: "0 16px" }}><LogsScreen clients={clients} showOwnerRows={!!perms.isAdmin} /></div>}
+      {section === "email" && CAN.email && <div style={{ padding: `0 ${compactComms ? 12 : 16}px` }}><EmailInboxSection leads={leads} setLeads={setLeads} clients={clients} invoices={invoices} /></div>}
+      {section === "log" && CAN.log && <div style={{ padding: `0 ${compactComms ? 12 : 16}px` }}><LogsScreen clients={clients} showOwnerRows={!!perms.isAdmin} /></div>}
     </>
+    </CommsDensityContext.Provider>
   );
 
   // Phone + tablet (incl. portrait iPad) / single-section: big title + sleek underline top-nav, then
   // content. The left-sidebar shell only kicks in on a genuinely wide desktop so it never stacks with
   // the app's global sidebar and crushes the content column.
   if (vpx.width < 1080 || single) {
-    // <main> has a top padding (22px phone / 28px tablet). Cancel it here so the sticky section nav
-    // pins FLUSH under the app header — otherwise that padding band lets the search bar peek through
-    // above the tabs as a white sliver. The nav restores the spacing via its own paddingTop.
-    const padTop = vpx.isPhone ? 22 : 28;
     return (
-      <div style={{ maxWidth: 780, marginTop: single ? 0 : -padTop, marginLeft: vpx.isPhone ? -16 : "auto", marginRight: vpx.isPhone ? -16 : "auto" }}>
+      <div ref={commsRootRef} style={{ maxWidth: 780, marginTop: 0, marginLeft: vpx.isPhone ? -16 : "auto", marginRight: vpx.isPhone ? -16 : "auto" }}>
         {!single && (
           // Pinned section switcher — sticks flush under the app header instead of scrolling away and
           // resting half-hidden (which read as janky). The opaque background hides content passing under it.
-          <div style={{ position: "sticky", top: 0, zIndex: 30, background: hexA(T.bg, 0.97), backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)", padding: `${padTop + 8}px 12px 6px` }}>
-            <div ref={mobileNavRef} style={{ display: "flex", gap: 4, overflowX: "auto", WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", scrollPadding: 4, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 14, padding: 4 }}>
+          <div style={{ position: "sticky", top: 0, zIndex: 30, background: hexA(T.bg, 0.97), backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)", padding: "8px 12px 6px" }}>
+            <div style={{ display: "flex", alignItems: "stretch", gap: 6, minWidth: 0 }}>
+            <div ref={mobileNavRef} style={{ minWidth: 0, flex: 1, display: "flex", gap: 4, overflowX: "auto", WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", scrollPadding: 4, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: compactComms ? 12 : 14, padding: compactComms ? 3 : 4 }}>
               {SECTIONS.map(s => {
                 const on = section === s.id;
                 return (
-                  <button key={s.id} data-comms-section={s.id} onClick={() => setSection(s.id)} aria-current={on ? "page" : undefined} style={{ minHeight: 42, flexShrink: 0, scrollSnapAlign: "start", display: "flex", alignItems: "center", gap: 7, padding: "9px 12px", background: on ? T.surface : "transparent", border: "none", borderRadius: 10, boxShadow: on ? "0 1px 3px rgba(0,0,0,0.07)" : "none", fontSize: 13.5, fontWeight: on ? 800 : 700, cursor: "pointer", fontFamily: "inherit", color: on ? T.primary : T.textMuted }}>
+                  <button key={s.id} data-comms-section={s.id} onClick={() => setSection(s.id)} aria-current={on ? "page" : undefined} style={{ minHeight: compactComms ? 40 : 42, flexShrink: 0, scrollSnapAlign: "start", display: "flex", alignItems: "center", gap: compactComms ? 5 : 7, padding: compactComms ? "6px 9px" : "9px 12px", background: on ? T.surface : "transparent", border: "none", borderRadius: 10, boxShadow: on ? "0 1px 3px rgba(0,0,0,0.07)" : "none", fontSize: compactComms ? 12.5 : 13.5, fontWeight: on ? 800 : 700, cursor: "pointer", fontFamily: "inherit", color: on ? T.primary : T.textMuted }}>
                     <Icon name={s.icon} size={15} />{s.label}
                   </button>
                 );
               })}
             </div>
+            <button type="button" onClick={() => setCommsDensity(compactComms ? "comfortable" : "compact")} title={`Comms spacing: ${compactComms ? "Compact" : "Roomy"}. Switch to ${compactComms ? "Roomy" : "Compact"}.`} aria-label={`Comms spacing: ${compactComms ? "compact" : "roomy"}. Tap to change.`}
+              style={{ width: 46, minWidth: 46, height: 46, padding: 0, border: `1px solid ${compactComms ? hexA(T.primary, 0.35) : T.border}`, borderRadius: compactComms ? 12 : 14, background: compactComms ? hexA(T.primary, 0.08) : T.surface, color: compactComms ? T.primary : T.textMuted, display: "grid", placeItems: "center", fontFamily: "inherit", cursor: "pointer", flexShrink: 0 }}>
+              <Icon name="sliders" size={16} />
+            </button>
+            </div>
           </div>
         )}
-        <div style={{ paddingTop: 16 }}>{content}</div>
+        <div style={{ paddingTop: compactComms ? 8 : 16 }}>{content}</div>
       </div>
     );
   }
 
   // Desktop: a clean left section-nav (sidebar, collapsible) + a wide content area.
   return (
-    <div style={{ display: "grid", gridTemplateColumns: navCollapsed ? "58px 1fr" : "224px 1fr", maxWidth: 1720, margin: "0 auto", minHeight: "calc(100dvh - 130px)" }}>
+    <div ref={commsRootRef} style={{ display: "grid", gridTemplateColumns: navCollapsed ? "58px 1fr" : "224px 1fr", maxWidth: 1720, margin: "0 auto", minHeight: "calc(100dvh - 130px)" }}>
       <aside style={{ borderRight: `1px solid ${T.border}`, padding: navCollapsed ? "16px 8px" : "16px 12px", display: "flex", flexDirection: "column", gap: 2 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: navCollapsed ? "2px 0 14px" : "2px 2px 14px", justifyContent: navCollapsed ? "center" : "space-between" }}>
           {!navCollapsed && <div style={{ fontSize: 15.5, fontWeight: 820, color: T.text, letterSpacing: "-0.02em" }}>Comms</div>}
@@ -29742,6 +29905,8 @@ function DataConflictBanner({ conflict, busy, T, onResolve }) {
 }
 
 const STOP_MUTATION_KEYS = ["sps_clients", "sps_catalog", "sps_completed", "sps_schedule"];
+const SCHEDULE_SYNC_KEYS = ["sps_schedule", "sps_completed", "sps_arrivals", "sps_enroute", "sps_route_assignments", "sps_schedule_cfg"];
+const SCHEDULE_REFRESH_KEYS = Array.from(new Set([...SCHEDULE_SYNC_KEYS, ...STOP_MUTATION_KEYS]));
 
 function decodeStopStateValue(raw) {
   let value = raw;
@@ -29936,7 +30101,7 @@ export default function App({ authEmail = "", onSignOut }) {
   // normally-sized Mac window reflows to the desktop shell instead of a narrow column.
   const isDesktopWeb = vp.width >= (isMacApp ? 1024 : 1200) && isWebDesktopEnv;
   const [reminderLog, setReminderLog, lrem] = useStoredState("sps_reminders", {}); // { [sid]: { sentAt, method } }
-  const hydrated = lc && lb && ls && lcat && lem && lco && lh && lbud && loa && lscfg && lrol && ltm && lsesh && linv && linvc && lcomp && lrem && larr;
+  const hydrated = lc && lb && ls && lcat && lem && lco && lh && lbud && loa && lld && lscfg && lrol && ltm && lsesh && linv && linvc && lcomp && lrem && larr;
 
   // Backfill newer catalog/cost fields for anyone with older saved data
   useEffect(() => {
@@ -30066,6 +30231,85 @@ export default function App({ authEmail = "", onSignOut }) {
   // Build 15, Item 1 — keep the module-scoped team-write guard in sync with the signed-in
   // user's owner status, so validateTeamWrite can fence role/owner changes to owners only.
   useEffect(() => { setActorIsOwner(effRole(currentUser) === "owner"); }, [currentUser && currentUser.id, currentUser && currentUser.role]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep the shared schedule current across the browser and installed app. The storage refresh is
+  // serialized with schedule writes and reconciles through useStoredState, so a live/foreground pull
+  // can never replace an edit that is still being typed or waiting for CAS confirmation.
+  const schedulePageRef = useRef(page);
+  const schedulePullRef = useRef(null);
+  schedulePageRef.current = page;
+  useEffect(() => {
+    if (!hydrated || !currentUser || typeof store.refresh !== "function") return;
+    let alive = true;
+    let channel = null;
+    let nativeHandle = null;
+    let inFlight = null;
+    let pullAgain = false;
+
+    const pullSchedule = () => {
+      if (!alive) return Promise.resolve(null);
+      if (inFlight) { pullAgain = true; return inFlight; }
+      inFlight = Promise.all(SCHEDULE_REFRESH_KEYS.map((key) => store.refresh(key)))
+        .catch(() => null)
+        .finally(() => {
+          inFlight = null;
+          if (pullAgain && alive) {
+            pullAgain = false;
+            Promise.resolve().then(pullSchedule);
+          }
+        });
+      return inFlight;
+    };
+    schedulePullRef.current = pullSchedule;
+
+    const onVisible = () => { if (!document.hidden) pullSchedule(); };
+    const onActive = (state) => { if (state && state.isActive) pullSchedule(); };
+    window.addEventListener("focus", pullSchedule);
+    window.addEventListener("online", pullSchedule);
+    document.addEventListener("visibilitychange", onVisible);
+
+    // Realtime is the fast path. The foreground/open-page pulls below remain the fallback if the
+    // socket was suspended by iOS or temporarily disconnected.
+    try {
+      let liveChannel = supabase.channel("sps-schedule-live");
+      SCHEDULE_SYNC_KEYS.forEach((key) => {
+        liveChannel = liveChannel.on("postgres_changes", { event: "*", schema: "public", table: "app_state", filter: `key=eq.${key}` }, pullSchedule);
+      });
+      channel = liveChannel.subscribe();
+    } catch (_) {}
+
+    // Native WebViews reliably report appStateChange even when the browser-style visibility event
+    // is delayed. Dynamic import keeps this a clean no-op on the normal website.
+    import("@capacitor/app")
+      .then((m) => m.App && m.App.addListener("appStateChange", onActive))
+      .then((handle) => {
+        if (!handle) return;
+        if (!alive) { try { handle.remove(); } catch (_) {} }
+        else nativeHandle = handle;
+      })
+      .catch(() => {});
+
+    pullSchedule();
+    const poll = setInterval(() => {
+      if (schedulePageRef.current === "schedule" && !document.hidden) pullSchedule();
+    }, 30000);
+
+    return () => {
+      alive = false;
+      if (schedulePullRef.current === pullSchedule) schedulePullRef.current = null;
+      clearInterval(poll);
+      window.removeEventListener("focus", pullSchedule);
+      window.removeEventListener("online", pullSchedule);
+      document.removeEventListener("visibilitychange", onVisible);
+      try { if (channel) supabase.removeChannel(channel); } catch (_) {}
+      try { if (nativeHandle) nativeHandle.remove(); } catch (_) {}
+    };
+  }, [hydrated, currentUser && currentUser.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Opening Schedule should pull immediately instead of waiting for the next realtime/poll event.
+  useEffect(() => {
+    if (page === "schedule" && schedulePullRef.current) schedulePullRef.current();
+  }, [page]);
   // (The boot splash from index.html is removed once the app is ready — see the
   // boot-splash removal effect below, keyed on `hydrated`.)
   // Today's stops for the signed-in tech — powers auto-share-on-route below.
@@ -30957,9 +31201,10 @@ export default function App({ authEmail = "", onSignOut }) {
     })();
   }, [hydrated, currentUser, dbOk]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Work-email leads — the same loss-proof two-phase as the website bridge above: AI-triaged
-  // "lead" emails (sps_inbox, via the owner-only api/inbox) merge into sps_leads deduped by
-  // srcId, and are acked (markImported) ONLY once present in the SERVER-CONFIRMED sps_leads.
+  // Possible email/SMS leads use a stricter second gate in the app before entering the funnel.
+  // The server already rejects automation, service notices, existing clients, weak confidence,
+  // and missing quoted evidence; repeating the same check here prevents an older/stale API route
+  // from silently importing operational mail. Rejected rows stay safely in Inbox for manual review.
   const _emailLeadSyncRef = useRef(false);
   useEffect(() => {
     if (!hydrated || !dbOk || _emailLeadSyncRef.current) return;
@@ -30972,8 +31217,20 @@ export default function App({ authEmail = "", onSignOut }) {
         const d = await r.json().catch(() => ({}));
         const rows = Array.isArray(d.rows) ? d.rows : [];
         if (!rows.length) return;
+        const assessed = rows.map(row => ({ row, verdict: assessInboundLead(row, clients || []) }));
+        const eligibleRows = assessed.filter(item => item.verdict.eligible).map(item => item.row);
+        const rejected = assessed.filter(item => !item.verdict.eligible);
+        if (rejected.length) {
+          const byKind = { client: [], other: [] };
+          rejected.forEach(({ row, verdict }) => byKind[verdict.kind === "client" ? "client" : "other"].push(row.id));
+          for (const kind of ["client", "other"]) {
+            if (!byKind[kind].length) continue;
+            await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "setKind", ids: byKind[kind], kind }) }).catch(() => {});
+          }
+        }
+        if (!eligibleRows.length) return;
         const have = new Set((leads || []).map(l => l && l.srcId).filter(Boolean));
-        const fresh = rows.filter(row => row && row.id && !have.has(`em_${row.id}`));
+        const fresh = eligibleRows.filter(row => row && row.id && !have.has(`em_${row.id}`));
         if (fresh.length) {
           const mapped = fresh.map(row => {
             const at = row.created_at || new Date().toISOString();
@@ -30988,7 +31245,7 @@ export default function App({ authEmail = "", onSignOut }) {
               service: L.service || "", message: L.message || `${row.subject && !isSms ? `${row.subject} — ` : ""}${(row.body_text || "").slice(0, 600)}`,
               mappedDivision: leadDivisionFromService(L.service),
               status: "new", createdAt: at, updatedAt: at,
-              timeline: [{ at, by: "system", kind: "captured", text: `Work email${row.ai && row.ai.summary ? ` — ${row.ai.summary}` : ""}` }],
+              timeline: [{ at, by: "system", kind: "captured", text: `${isSms ? "Business text" : "Work email"}${row.ai && row.ai.summary ? ` — ${row.ai.summary}` : ""}` }],
             };
           }).reverse();
           setLeads(ls => {
@@ -31006,7 +31263,7 @@ export default function App({ authEmail = "", onSignOut }) {
           confirmed = new Set((Array.isArray(arr) ? arr : []).map(l => l && l.srcId).filter(Boolean));
         } catch (_) { confirmed = null; }
         if (confirmed) {
-          for (const row of rows) {
+          for (const row of eligibleRows) {
             if (!confirmed.has(`em_${row.id}`)) continue;
             await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "markImported", id: row.id, leadId: `lead_e${row.id}` }) }).catch(() => {});
           }
@@ -31999,6 +32256,7 @@ export default function App({ authEmail = "", onSignOut }) {
           img { -webkit-user-drag: none; }
     `}</style>
   );
+  const isCommsRoute = ["comms", "reminders", "messages", "leads"].includes(page);
   const pageBody = (
     <>
       {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onOpenAlert={handleOpenAlert} onOpenStop={handleOpenStop} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} completedSids={completedSids} budget={budget} leads={leads} vp={vp} />}
@@ -32203,7 +32461,7 @@ export default function App({ authEmail = "", onSignOut }) {
             <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 10, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, display:"flex", alignItems:"center", gap:5 }}>Retry</button>
           </div>
         )}
-        <main style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", alignSelf: "center", padding: vp.isPhone ? "22px 16px" : "28px 32px", maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(env(safe-area-inset-bottom) + 96px)" }}>
+        <main style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", alignSelf: "center", padding: isCommsRoute ? (vp.isPhone ? "0 16px" : "0 32px") : (vp.isPhone ? "22px 16px" : "28px 32px"), maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(env(safe-area-inset-bottom) + 96px)" }}>
           {pageBody}
         </main>
 

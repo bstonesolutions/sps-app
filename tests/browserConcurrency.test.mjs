@@ -32,6 +32,7 @@ function installDatabase(initialRows, options = {}) {
   const rows = new Map(Object.entries(initialRows).map(([key, row]) => [key, { ...row }]));
   let casCalls = 0;
   let deleteCalls = 0;
+  let readCalls = 0;
 
   supabase.auth.refreshSession = async () => ({ data: {}, error: null });
   supabase.from = (table) => {
@@ -42,6 +43,9 @@ function installDatabase(initialRows, options = {}) {
         const builder = {
           eq(field, value) { assert.equal(field, "key"); selectedKey = value; return builder; },
           async maybeSingle() {
+            readCalls += 1;
+            if (options.beforeRead) await options.beforeRead({ call: readCalls, key: selectedKey, rows });
+            if (options.readError) return { data: null, error: options.readError };
             const row = rows.get(selectedKey);
             return { data: row ? { key: selectedKey, ...row } : null, error: null };
           },
@@ -97,7 +101,7 @@ function installDatabase(initialRows, options = {}) {
     }
     throw new Error(`Unexpected RPC ${name}`);
   };
-  return { rows, get casCalls() { return casCalls; }, get deleteCalls() { return deleteCalls; } };
+  return { rows, get casCalls() { return casCalls; }, get deleteCalls() { return deleteCalls; }, get readCalls() { return readCalls; } };
 }
 
 async function loadAs(uid, key) {
@@ -124,6 +128,158 @@ test("browser CAS merges independent cross-device edits instead of overwriting",
   assert.equal(saved[0].phone, "222");
   assert.equal(saved[1].city, "Remote City");
   assert.equal(db.rows.get("sps_clients").version, 3);
+});
+
+test("targeted refresh adopts a clean remote schedule and publishes a safe reconcile", async () => {
+  const base = [{ date: "07/13/2026", stops: [{ sid: "base" }] }];
+  const remote = [{ date: "07/13/2026", stops: [{ sid: "base" }, { sid: "remote" }] }];
+  const db = installDatabase({ sps_schedule: { value: json(base), version: 1, updated_at: null } });
+  await loadAs("schedule-refresh-clean", "sps_schedule");
+
+  const reconciles = [];
+  const onReconciled = (event) => { if (event.detail && event.detail.key) reconciles.push(event.detail); };
+  document.addEventListener("sps-reconciled", onReconciled);
+  try {
+    db.rows.set("sps_schedule", { value: json(remote), version: 2, updated_at: null });
+    const result = await store.refresh("sps_schedule");
+    const cached = await store.get("sps_schedule");
+
+    assert.equal(result.ok, true);
+    assert.equal(result.changed, true);
+    assert.equal(result.pending, false);
+    assert.equal(result.version, 2);
+    assert.deepEqual(JSON.parse(cached.value), remote);
+    assert.equal(cached.version, 2);
+    assert.deepEqual(reconciles, [{ key: "sps_schedule", forceRemote: false, remoteMissing: false }]);
+  } finally {
+    document.removeEventListener("sps-reconciled", onReconciled);
+  }
+});
+
+test("targeted refresh reconciles React even when the store already has the remote version", async () => {
+  const current = [{ date: "07/13/2026", stops: [{ sid: "current" }] }];
+  installDatabase({ sps_schedule: { value: json(current), version: 3, updated_at: null } });
+  await loadAs("schedule-refresh-missed-boot-event", "sps_schedule");
+
+  const reconciles = [];
+  const onReconciled = (event) => { if (event.detail && event.detail.key) reconciles.push(event.detail); };
+  document.addEventListener("sps-reconciled", onReconciled);
+  try {
+    const result = await store.refresh("sps_schedule");
+
+    assert.equal(result.ok, true);
+    assert.equal(result.changed, false);
+    assert.deepEqual(reconciles, [{ key: "sps_schedule", forceRemote: false, remoteMissing: false }]);
+  } finally {
+    document.removeEventListener("sps-reconciled", onReconciled);
+  }
+});
+
+test("targeted refresh reports a clean remote deletion without preserving stale cache", async () => {
+  const base = [{ date: "07/13/2026", stops: [{ sid: "base" }] }];
+  const db = installDatabase({ sps_schedule: { value: json(base), version: 4, updated_at: null } });
+  await loadAs("schedule-refresh-delete", "sps_schedule");
+
+  const reconciles = [];
+  const onReconciled = (event) => { if (event.detail && event.detail.key) reconciles.push(event.detail); };
+  document.addEventListener("sps-reconciled", onReconciled);
+  try {
+    db.rows.delete("sps_schedule");
+    const result = await store.refresh("sps_schedule");
+    const cached = await store.get("sps_schedule");
+
+    assert.equal(result.ok, true);
+    assert.equal(result.exists, false);
+    assert.equal(cached, null);
+    assert.deepEqual(reconciles, [{ key: "sps_schedule", forceRemote: false, remoteMissing: true }]);
+  } finally {
+    document.removeEventListener("sps-reconciled", onReconciled);
+  }
+});
+
+test("refresh preserves an optimistic schedule edit and the queued CAS merges the remote change", async () => {
+  const baseStop = { sid: "base", clientId: "c1", time: "8:00 AM" };
+  const base = [{ date: "07/13/2026", stops: [baseStop] }];
+  let releaseRead;
+  let readStarted;
+  const started = new Promise((resolve) => { readStarted = resolve; });
+  const gate = new Promise((resolve) => { releaseRead = resolve; });
+  const db = installDatabase(
+    { sps_schedule: { value: json(base), version: 1, updated_at: null } },
+    { beforeRead: async ({ call }) => { if (call === 1) { readStarted(); await gate; } } }
+  );
+  await loadAs("schedule-refresh-pending", "sps_schedule");
+
+  const remote = [{ date: "07/13/2026", stops: [baseStop, { sid: "remote", clientId: "c2" }] }];
+  db.rows.set("sps_schedule", { value: json(remote), version: 2, updated_at: null });
+  const refresh = store.refresh("sps_schedule");
+  await started;
+
+  const local = [{ date: "07/13/2026", stops: [baseStop, { sid: "local", clientId: "c3" }] }];
+  const save = store.set("sps_schedule", json(local), { baseValue: json(base) });
+  assert.deepEqual(JSON.parse((await store.get("sps_schedule")).value), local);
+
+  releaseRead();
+  const refreshResult = await refresh;
+  const saveResult = await save;
+  const stored = JSON.parse(db.rows.get("sps_schedule").value);
+  const savedSids = stored.flatMap((day) => day.stops || []).map((stop) => stop.sid);
+
+  assert.equal(refreshResult.ok, true);
+  assert.equal(refreshResult.pending, true);
+  assert.equal(saveResult.ok, true);
+  assert.deepEqual(new Set(savedSids), new Set(["base", "remote", "local"]));
+  assert.equal(db.rows.get("sps_schedule").version, 3);
+});
+
+test("failed targeted refresh leaves the confirmed schedule cache untouched", async () => {
+  const base = [{ date: "07/13/2026", stops: [{ sid: "base" }] }];
+  const readError = new Error("temporary network failure");
+  const db = installDatabase(
+    { sps_schedule: { value: json(base), version: 7, updated_at: null } },
+    { readError }
+  );
+  await loadAs("schedule-refresh-error", "sps_schedule");
+
+  const result = await store.refresh("sps_schedule");
+  const cached = await store.get("sps_schedule");
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, readError);
+  assert.deepEqual(JSON.parse(cached.value), base);
+  assert.equal(cached.version, 7);
+  assert.equal(db.readCalls, 3);
+});
+
+test("a refresh started by a prior signed-in identity cannot land after an account switch", async () => {
+  const base = [{ date: "07/13/2026", stops: [{ sid: "base" }] }];
+  let releaseRead;
+  let readStarted;
+  const started = new Promise((resolve) => { readStarted = resolve; });
+  const gate = new Promise((resolve) => { releaseRead = resolve; });
+  const db = installDatabase(
+    { sps_schedule: { value: json(base), version: 1, updated_at: null } },
+    { beforeRead: async ({ call }) => { if (call === 1) { readStarted(); await gate; } } }
+  );
+  await loadAs("schedule-refresh-old-user", "sps_schedule");
+
+  db.rows.set("sps_schedule", { value: json([{ date: "07/13/2026", stops: [{ sid: "other-account" }] }]), version: 2, updated_at: null });
+  const keyedReconciles = [];
+  const onReconciled = (event) => { if (event.detail && event.detail.key) keyedReconciles.push(event.detail); };
+  document.addEventListener("sps-reconciled", onReconciled);
+  try {
+    const refresh = store.refresh("sps_schedule");
+    await started;
+    store.setUser("schedule-refresh-new-user");
+    releaseRead();
+    const result = await refresh;
+
+    assert.equal(result.ok, false);
+    assert.equal(result.staleIdentity, true);
+    assert.deepEqual(keyedReconciles, []);
+  } finally {
+    document.removeEventListener("sps-reconciled", onReconciled);
+  }
 });
 
 test("browser pauses on a same-field conflict until an employee chooses", async () => {

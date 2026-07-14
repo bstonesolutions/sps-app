@@ -22,6 +22,7 @@ let _exists = {};
 let _pending = {};     // durable three-way-merge intents
 let _conflicts = {};
 let _loaded = false;
+let _initialReadConfirmed = false;
 let _loadPromise = null;
 let _flushing = false;
 let _ensureHydratePromise = null;
@@ -49,8 +50,8 @@ function notify(type, msg) {
   try { document.dispatchEvent(new CustomEvent("sps-db-status", { detail: { type, msg } })); } catch (_) {}
 }
 
-function notifyReconciled(key, forceRemote = false) {
-  try { document.dispatchEvent(new CustomEvent("sps-reconciled", { detail: { key, forceRemote } })); } catch (_) {}
+function notifyReconciled(key, forceRemote = false, remoteMissing = false) {
+  try { document.dispatchEvent(new CustomEvent("sps-reconciled", { detail: { key, forceRemote, remoteMissing } })); } catch (_) {}
 }
 
 function throttledError(msg) {
@@ -266,6 +267,7 @@ function resetForIdentity() {
   _pending = {};
   _conflicts = {};
   _loaded = false;
+  _initialReadConfirmed = false;
   _loadPromise = null;
   _flushing = false;
   _ensureHydratePromise = null;
@@ -448,6 +450,7 @@ async function init() {
         if (pending && pending.deleteIntent && pending.status === "conflict") _cache[row.key] = value;
         else if (!pending && !(_cacheAt[row.key] > _initSelectAt)) _cache[row.key] = value;
       }
+      _initialReadConfirmed = true;
       notify("read-ok", "Connected");
       saveSnapshot();
       notifyReconciled();
@@ -772,6 +775,72 @@ function enqueueCommit(key, identityVersion = _identityVersion) {
   return run;
 }
 
+async function refreshKey(key, identityVersion = _identityVersion) {
+  if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+  try {
+    await ensureHydrate();
+    await init();
+    if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+
+    const remote = await readRemote(key, identityVersion);
+    if (remote.staleIdentity) return { ok: false, staleIdentity: true };
+    if (!remote.ok) {
+      throttledError(`Refresh failed: ${(remote.error && remote.error.message) || "the latest shared data could not be loaded."}`);
+      return { ok: false, error: remote.error };
+    }
+
+    const priorExists = hasOwn(_confirmed, key) || !!_exists[key];
+    const priorValue = _confirmed[key];
+    const priorVersion = Number(_versions[key]) || 0;
+    const changed = priorExists !== remote.exists
+      || priorVersion !== Number(remote.version || 0)
+      || (remote.exists && !sameStored(priorValue, remote.value));
+
+    // A local edit may already be staged or committing. Update its confirmed merge target, but keep
+    // the optimistic value on screen; the serialized CAS path will merge/rebase it safely. Replacing
+    // _cache here would make a foreground/realtime pull erase work that has not landed yet.
+    adoptRemote(key, remote, !_pending[key]);
+    saveSnapshot();
+    // Do not let a successful one-key refresh certify an earlier FAILED full-app read. Doing so
+    // would lift App.jsx's write fence while other sections still hold their defaults. Once the
+    // initial shared snapshot was confirmed, this lighter signal can clear a transient refresh error.
+    if (_initialReadConfirmed) notify("refresh-ok", "Connected");
+
+    if (!_pending[key]) {
+      // Deliberately NOT forceRemote: React may have a just-entered edit whose effect has not staged
+      // its pending envelope yet. useStoredState detects that dirty value and merges it first;
+      // otherwise it adopts this refreshed cache value. Always send this keyed signal even when the
+      // database version is unchanged: the initial cache-first reconcile may have arrived before the
+      // hook listener mounted, leaving React one snapshot behind the already-current store cache.
+      notifyReconciled(key, false, !remote.exists);
+    }
+    return {
+      ok: true,
+      changed,
+      pending: !!_pending[key],
+      exists: remote.exists,
+      value: remote.value,
+      version: Number(remote.version) || 0,
+    };
+  } catch (error) {
+    if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+    throttledError(`Refresh failed: ${(error && error.message) || "the latest shared data could not be loaded."}`);
+    return { ok: false, error };
+  }
+}
+
+function enqueueRefresh(key, identityVersion = _identityVersion) {
+  // Share the per-key chain with writes. This prevents an older, slower refresh from landing after
+  // a newer save and makes refresh-vs-edit ordering deterministic across visibility/realtime events.
+  const prior = _chains[key] || Promise.resolve();
+  const run = (async () => {
+    try { await prior; } catch (_) {}
+    return refreshKey(key, identityVersion);
+  })();
+  _chains[key] = run.then(() => {}, () => {});
+  return run;
+}
+
 async function flush() {
   if (_flushing || !Object.keys(_pending).some((key) => _pending[key] && _pending[key].status === "pending")) return;
   const identityVersion = _identityVersion;
@@ -980,6 +1049,14 @@ export const store = {
     return value !== undefined ? { value, version: Number(_versions[key]) || 0 } : null;
   },
 
+  // Pull one shared section again without reloading the app. Reads are serialized with writes for
+  // the same key and never replace an optimistic/pending value, so foreground and realtime refreshes
+  // cannot erase an in-progress edit.
+  refresh(key) {
+    if (!key || typeof key !== "string") return Promise.resolve({ ok: false, error: new Error("A storage key is required") });
+    return enqueueRefresh(key, _identityVersion);
+  },
+
   set(key, value, options = {}) {
     const identityVersion = _identityVersion;
     stagePending(key, value, options);
@@ -1035,6 +1112,7 @@ export const store = {
     _versions = {};
     _exists = {};
     _loaded = false;
+    _initialReadConfirmed = false;
     _loadPromise = null;
     _ensureHydratePromise = null;
     _cacheReadyState = { ready: false, hasData: false };

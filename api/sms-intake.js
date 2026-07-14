@@ -17,6 +17,7 @@ import crypto from "node:crypto";
 import { callClaude, extractJson, aiConfigured } from "./_ai.js";
 import { mutateAppState, NO_APP_STATE_CHANGE, readAppStateVersioned } from "./_app-state.js";
 import { pushOwner } from "./_push.js";
+import { assessInboundLead } from "../leadQualification.js";
 
 export const config = { api: { bodyParser: false } }; // need the RAW body for HMAC verification
 
@@ -27,10 +28,6 @@ const SIGN_SECRET  = process.env.QUO_WEBHOOK_SECRET; // Quo's base64 signing sec
 const QUO_NUMBER   = process.env.QUO_PHONE_NUMBER;
 
 const sbHeaders = () => ({ apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" });
-async function sbGet(key, fallback) {
-  const row = await readAppStateVersioned(key);
-  return row.exists && row.value != null ? row.value : fallback;
-}
 async function inboxStatus() {
   if (!SERVICE_KEY) return { schema: false, observed: false, lastInboundAt: null };
   try {
@@ -134,8 +131,8 @@ function verifySig(raw, header, secretB64) {
 }
 
 const TRIAGE_SYSTEM = `You triage inbound TEXT MESSAGES to a pond/pool service business. Classify ONE text, reply STRICT JSON only:
-{"kind":"lead"|"bill"|"other","confidence":0..1,"summary":"one plain sentence","lead":{"name":"","phone":"","service":"","message":""}}
-"lead" = someone asking about service, a quote, availability, or a new customer inquiry. "bill" = a payment/collections text the business owes. Everything else (spam, codes, notifications) = "other". Never invent details.`;
+{"kind":"lead"|"bill"|"other","confidence":0..1,"intent":"new_business"|"existing_service"|"billing"|"other","automated":true|false,"evidence":"exact short excerpt from the text","summary":"one plain sentence","lead":{"name":"","phone":"","service":"","message":""}}
+"lead" = a real person explicitly asking about NEW service, a quote, an estimate, pricing, or availability. Existing-service updates, automated notices, spam, codes, and notifications are "other". "bill" = a payment/collections text the business owes. Evidence must quote the exact request/quote/new-service wording that proves the classification. Never invent details.`;
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -191,9 +188,9 @@ export default async function handler(req, res) {
 
     // Existing client? Keep this lookup bounded so a slow shared-state read cannot make Quo retry
     // a message that was actually stored. On timeout we store it unlinked for a human to review.
-    const clientRead = await settleWithin(sbGet("sps_clients", []), Math.min(1400, remaining(5000)));
-    const clientLookupOk = clientRead.completed && !clientRead.error;
-    const clients = clientLookupOk ? clientRead.value : [];
+    const clientRead = await settleWithin(readAppStateVersioned("sps_clients"), Math.min(1400, remaining(5000)));
+    const clientLookupOk = clientRead.completed && !clientRead.error && clientRead.value?.exists && Array.isArray(clientRead.value.value);
+    const clients = clientLookupOk ? clientRead.value.value : [];
     const fp = last10(fromPhone);
     const matches = fp ? (Array.isArray(clients) ? clients : []).filter(c => last10(c.phone) === fp) : [];
     // Duplicate phone numbers make ownership ambiguous. Never attach a private text to whichever
@@ -256,13 +253,20 @@ export default async function handler(req, res) {
         );
         const j = triageRun.completed && !triageRun.error ? extractJson(triageRun.value) : null;
         if (j && ["lead", "bill", "other"].includes(j.kind) && remaining(900) > 100) {
+          let nextKind = j.kind;
+          let nextAi = j;
+          if (j.kind === "lead") {
+            const verdict = assessInboundLead({ channel: "sms", from_phone: fromPhone, body_text: text, ai: j }, clients);
+            nextKind = verdict.eligible ? "lead" : verdict.kind;
+            if (!verdict.eligible) nextAi = { ...j, autoLead: false, leadRejectedReason: verdict.reason, ...(verdict.client ? { clientId: String(verdict.client.id) } : {}) };
+          }
           try {
             const patch = await timedFetch(`${SUPABASE_URL}/rest/v1/sps_inbox?id=eq.${encodeURIComponent(id)}`, {
               method: "PATCH",
               headers: { ...sbHeaders(), Prefer: "return=minimal" },
-              body: JSON.stringify({ kind: j.kind, ai: j }),
+              body: JSON.stringify({ kind: nextKind, ai: nextAi }),
             }, Math.min(800, remaining(700)));
-            if (patch.ok) { ai = j; kind = j.kind; out.kind = kind; out.triaged = true; }
+            if (patch.ok) { ai = nextAi; kind = nextKind; out.kind = kind; out.triaged = true; }
           } catch (_) { out.triaged = false; }
         }
       }
@@ -272,7 +276,7 @@ export default async function handler(req, res) {
     let pushPromise = null;
     if (remaining(150) > 100 && kind === "lead") {
       const who = (ai && ai.lead && ai.lead.name) || fmtPhone(fromPhone);
-      pushPromise = pushOwner("new_lead", `Text lead: ${who}`, text.slice(0, 180) || "Open Comms → Inbox", "comms", { collapseId: `sms-${eventId}` });
+      pushPromise = pushOwner("new_lead", `Possible text lead: ${who}`, text.slice(0, 180) || "Review in Comms → Inbox", "comms", { collapseId: `sms-${eventId}` });
     } else if (remaining(150) > 100 && client) {
       pushPromise = pushOwner("client_message", `Text from ${client.name}`, text.slice(0, 180), "comms", { collapseId: `sms-${eventId}` });
     }

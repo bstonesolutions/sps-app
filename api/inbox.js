@@ -19,6 +19,7 @@
 import { requireOwner } from "./plaid/_plaid.js";
 import { resolveFrom } from "./_sender.js";
 import { appendToGmailSent } from "./_gmail.js";
+import { mutateAppState, NO_APP_STATE_CHANGE, readAppStateVersioned } from "./_app-state.js";
 
 // Sending also drops a copy into Gmail "Sent" over IMAP — give the function room for that round-trip.
 export const config = { maxDuration: 30 };
@@ -28,6 +29,28 @@ const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const RESEND_KEY   = process.env.RESEND_API_KEY;
 const sbHeaders = () => ({ apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" });
 const parseVal = (v) => { try { return typeof v === "string" ? JSON.parse(v) : v; } catch { return null; } };
+const INBOX_OPERATION_FIELD = "_spsInboxOperation";
+const INBOX_OPERATION_TTL_MS = 90_000;
+const newOperationId = (type) => `${type}_${Date.now()}_${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`;
+const operationMarker = (lead) => {
+  const marker = lead && lead[INBOX_OPERATION_FIELD];
+  return marker && typeof marker === "object" ? marker : null;
+};
+const operationIsFresh = (marker) => {
+  const startedAt = Number(marker && marker.startedAt);
+  return !Number.isFinite(startedAt) || startedAt > Date.now() - INBOX_OPERATION_TTL_MS;
+};
+const withoutOperationMarker = (lead) => {
+  if (!lead || typeof lead !== "object" || !Object.prototype.hasOwnProperty.call(lead, INBOX_OPERATION_FIELD)) return lead;
+  const clean = { ...lead };
+  delete clean[INBOX_OPERATION_FIELD];
+  return clean;
+};
+const operationConflict = () => {
+  const error = new Error("lead_inbox_operation_in_progress");
+  error.code = "LEAD_INBOX_OPERATION_IN_PROGRESS";
+  return error;
+};
 async function sbGet(key, fallback) {
   try {
     const r = await fetch(`${SUPABASE_URL}/rest/v1/app_state?key=eq.${encodeURIComponent(key)}&select=value`, { headers: sbHeaders() });
@@ -95,12 +118,53 @@ export default async function handler(req, res) {
 
     if (req.method !== "POST") return res.status(405).json({ error: "GET or POST" });
     const b = req.body || {};
-    const patch = async (idFilter, fields) => {
-      const r = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?${idFilter}`, {
-        method: "PATCH", headers: sbHeaders(), body: JSON.stringify(fields),
-      });
-      return r.ok;
+    const patch = async (idFilter, fields, expectedIds = null) => {
+      try {
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?${idFilter}`, {
+          method: "PATCH",
+          headers: expectedIds ? { ...sbHeaders(), Prefer: "return=representation" } : sbHeaders(),
+          body: JSON.stringify(fields),
+        });
+        if (!r.ok) return false;
+        if (!expectedIds) return true;
+        const rows = await r.json().catch(() => []);
+        const returned = new Set((Array.isArray(rows) ? rows : []).map((row) => String((row && row.id) || "")));
+        return expectedIds.every((id) => returned.has(String(id)));
+      } catch (_) { return false; }
     };
+    const eqFilter = (field, value) => value == null
+      ? `${field}=is.null`
+      : `${field}=eq.${encodeURIComponent(String(value))}`;
+    const readInboxRows = async (ids) => {
+      try {
+        const safeIds = (Array.isArray(ids) ? ids : []).map(String).filter(Boolean);
+        if (!safeIds.length) return { ok: true, rows: [] };
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?select=id,kind,lead_id&id=in.(${safeIds.map(encodeURIComponent).join(",")})`, { headers: sbHeaders() });
+        return r.ok ? { ok: true, rows: (await r.json().catch(() => [])) || [] } : { ok: false, rows: [] };
+      } catch (_) { return { ok: false, rows: [] }; }
+    };
+    const inboxMatches = async (expectedRows) => {
+      const expected = Array.isArray(expectedRows) ? expectedRows : [];
+      const current = await readInboxRows(expected.map((row) => row.id));
+      if (!current.ok || current.rows.length !== expected.length) return false;
+      const byId = new Map(current.rows.map((row) => [String(row.id), row]));
+      return expected.every((row) => {
+        const saved = byId.get(String(row.id));
+        return saved && String(saved.kind == null ? "" : saved.kind) === String(row.kind == null ? "" : row.kind)
+          && String(saved.lead_id == null ? "" : saved.lead_id) === String(row.lead_id == null ? "" : row.lead_id);
+      });
+    };
+    const clearOwnedLeadMarkers = async (operationId) => mutateAppState("sps_leads", (current) => {
+      const leads = Array.isArray(current) ? current : [];
+      let changed = false;
+      const next = leads.map((lead) => {
+        const marker = operationMarker(lead);
+        if (!marker || marker.id !== operationId) return lead;
+        changed = true;
+        return withoutOperationMarker(lead);
+      });
+      return changed ? next : NO_APP_STATE_CHANGE;
+    });
     if (b.action === "markRead") {
       // b.read: true (default) or false — same action handles "mark unread".
       const ids = (Array.isArray(b.ids) ? b.ids : []).map(String).filter(Boolean).slice(0, 200);
@@ -124,6 +188,382 @@ export default async function handler(req, res) {
       if (!ids.length || !["lead", "bill", "client", "other"].includes(b.kind)) return res.status(400).json({ error: "Need id(s) + a valid kind." });
       const ok = await patch(`id=in.(${ids.map(encodeURIComponent).join(",")})`, { kind: b.kind });
       return res.status(ok ? 200 : 502).json({ ok });
+    }
+    if (b.action === "repairImportedLeads") {
+      // Linked, owner-confirmed cleanup for false email/SMS leads. Removing the funnel records and
+      // unlinking their inbox rows in one server request avoids the split state the old client-side
+      // delete path could leave behind. The CAS mutation preserves concurrent lead edits.
+      const repairs = (Array.isArray(b.repairs) ? b.repairs : []).slice(0, 200)
+        .map((item) => ({
+          id: String((item && item.id) || ""),
+          kind: item && item.kind === "client" ? "client" : "other",
+          leadId: String((item && item.leadId) || ""),
+          hasExpectedUpdatedAt: !!item && Object.prototype.hasOwnProperty.call(item, "expectedUpdatedAt"),
+          expectedUpdatedAt: String((item && item.expectedUpdatedAt) || ""),
+          hasExpectedStatus: !!item && Object.prototype.hasOwnProperty.call(item, "expectedStatus"),
+          expectedStatus: String((item && item.expectedStatus) || ""),
+          hasExpectedConvertedClientId: !!item && Object.prototype.hasOwnProperty.call(item, "expectedConvertedClientId"),
+          expectedConvertedClientId: String((item && item.expectedConvertedClientId) || ""),
+        }))
+        .filter((item, index, all) => item.id && item.leadId && all.findIndex((candidate) => candidate.id === item.id) === index);
+      if (!repairs.length) return res.status(400).json({ error: "No linked leads selected." });
+      const originalRead = await readInboxRows(repairs.map((item) => item.id));
+      if (!originalRead.ok) return res.status(502).json({ error: "Inbox could not be checked. Nothing was changed; try again." });
+      const originalInbox = originalRead.rows;
+      const originalById = new Map(originalInbox.map((row) => [String(row.id), row]));
+      if (repairs.some((item) => !originalById.has(item.id))) {
+        return res.status(409).json({ error: "One of those source messages no longer exists. Nothing was changed; refresh and try again." });
+      }
+      const repairById = new Map(repairs.map((item) => [item.id, item]));
+      const staleInbox = repairs.some((repair) => {
+        const row = originalById.get(repair.id);
+        const kind = String((row && row.kind) || "").toLowerCase();
+        const leadId = String((row && row.lead_id) || "");
+        const stillLinked = kind === "lead" && leadId === repair.leadId;
+        const alreadyRepaired = ["client", "other"].includes(kind) && !leadId;
+        // A previous partial Fix (or a deliberate owner reclassification) already chose a safe
+        // repaired category. Preserve that newer choice instead of overwriting it with stale UI.
+        if (alreadyRepaired) repair.kind = kind;
+        return !stillLinked && !alreadyRepaired;
+      });
+      if (staleInbox) {
+        return res.status(409).json({ ok: false, error: "That Inbox message was reclassified or linked somewhere else. Nothing was changed; refresh before using Fix." });
+      }
+      const sourceIds = new Set(repairs.map((item) => `em_${item.id}`));
+      const operationId = newOperationId("repair");
+      const lockedSnapshots = [];
+
+      // Claim the lead records through app_state CAS before touching Inbox. The marker serializes a
+      // stale Fix against Undo without another table or SQL migration. A crashed marker can be taken
+      // over after its short lease; normal completion or failure always clears it.
+      try {
+        await mutateAppState("sps_leads", (current) => {
+          const leads = Array.isArray(current) ? current : [];
+          const counts = new Map();
+          for (const lead of leads) {
+            const srcId = String((lead && lead.srcId) || "");
+            if (sourceIds.has(srcId)) counts.set(srcId, (counts.get(srcId) || 0) + 1);
+          }
+          if ([...counts.values()].some((count) => count > 1)) {
+            const conflict = new Error("duplicate_lead_source");
+            conflict.code = "LEAD_CHANGED_SINCE_REVIEW";
+            throw conflict;
+          }
+          lockedSnapshots.length = 0;
+          let marked = false;
+          const next = leads.map((lead) => {
+            const srcId = String((lead && lead.srcId) || "");
+            if (!sourceIds.has(srcId)) return lead;
+            const repair = repairById.get(srcId.slice(3));
+            const changed = (repair.leadId && String(lead.id || "") !== repair.leadId)
+              || String(lead.status || "").toLowerCase() === "won"
+              || !!lead.convertedClientId
+              || (repair.hasExpectedUpdatedAt && String(lead.updatedAt || "") !== repair.expectedUpdatedAt)
+              || (repair.hasExpectedStatus && String(lead.status || "") !== repair.expectedStatus)
+              || (repair.hasExpectedConvertedClientId && String(lead.convertedClientId || "") !== repair.expectedConvertedClientId);
+            if (changed) {
+              const conflict = new Error("lead_changed_since_review");
+              conflict.code = "LEAD_CHANGED_SINCE_REVIEW";
+              throw conflict;
+            }
+            const marker = operationMarker(lead);
+            if (marker && marker.id !== operationId && operationIsFresh(marker)) throw operationConflict();
+            const clean = withoutOperationMarker(lead);
+            lockedSnapshots.push(clean);
+            marked = true;
+            return { ...clean, [INBOX_OPERATION_FIELD]: { id: operationId, type: "repair", startedAt: Date.now() } };
+          });
+          return marked ? next : NO_APP_STATE_CHANGE;
+        });
+      } catch (error) {
+        const busy = error && error.code === "LEAD_INBOX_OPERATION_IN_PROGRESS";
+        const changed = error && error.code === "LEAD_CHANGED_SINCE_REVIEW";
+        if (busy || changed) {
+          return res.status(409).json({ ok: false, error: busy
+            ? "Another Fix or Undo is already finishing for that message. Wait a moment, then try again."
+            : "That lead changed or was converted on another device. Nothing was changed; refresh and review it again." });
+        }
+        // The CAS response can be lost after Postgres committed the marker. Recover only when every
+        // source that existed in our updater is still the exact record owned by this operation.
+        try {
+          const latest = await readAppStateVersioned("sps_leads");
+          const leads = latest.exists && Array.isArray(latest.value) ? latest.value : [];
+          const currentSources = leads.filter((lead) => sourceIds.has(String((lead && lead.srcId) || "")));
+          const snapshotBySource = new Map(lockedSnapshots.map((lead) => [String((lead && lead.srcId) || ""), lead]));
+          const recovered = currentSources.length === lockedSnapshots.length
+            && currentSources.every((lead) => {
+              const snapshot = snapshotBySource.get(String((lead && lead.srcId) || ""));
+              return snapshot && String(lead.id || "") === String(snapshot.id || "") && operationMarker(lead)?.id === operationId;
+            });
+          if (!recovered) {
+            const ownedCount = currentSources.filter((lead) => operationMarker(lead)?.id === operationId).length;
+            return res.status(ownedCount ? 500 : 502).json({ ok: false, ...(ownedCount ? { partial: true } : {}), error: ownedCount
+              ? "The safety lock only partially settled. Wait a moment, then use Fix again."
+              : "The safety lock could not be confirmed. Wait a moment, then try again." });
+          }
+        } catch (_) {
+          return res.status(502).json({ ok: false, error: "The safety lock could not be confirmed. Wait a moment, then try again." });
+        }
+      }
+
+      const inboxResults = await Promise.all(originalInbox.map((row) => {
+        const repair = repairById.get(String(row.id));
+        return patch(
+          `id=eq.${encodeURIComponent(String(row.id))}&${eqFilter("kind", row.kind)}&${eqFilter("lead_id", row.lead_id)}`,
+          { kind: repair.kind, lead_id: "" },
+          [String(row.id)],
+        );
+      }));
+      const repairedInbox = originalInbox.map((row) => ({
+        id: String(row.id),
+        kind: repairById.get(String(row.id)).kind,
+        lead_id: "",
+      }));
+      // A zero-row PATCH can mean a concurrent request already wrote the exact desired state.
+      // Accept that state as complete; it is safe for either request to finish the idempotent CAS.
+      const inboxUpdated = inboxResults.every(Boolean) || await inboxMatches(repairedInbox);
+      if (!inboxUpdated) {
+        // Keep every funnel record intact and keep any Inbox progress already made. Rolling a row
+        // backward is unsafe here: another device may have observed that repaired row and removed
+        // its lead. The next Fix retries only the unfinished work and converges forward.
+        let release;
+        try { release = await clearOwnedLeadMarkers(operationId); }
+        catch (_) {
+          return res.status(500).json({ ok: false, partial: true, error: "Inbox only partially updated and the safety lock is still settling. Wait a moment, then use Fix again." });
+        }
+        if (await inboxMatches(originalInbox)) {
+          return res.status(502).json({ ok: false, unchanged: true, error: "Inbox could not be updated, so the cleanup did not run. Nothing changed; try again.", leads: release.value });
+        }
+        return res.status(500).json({ ok: false, partial: true, error: "Inbox labels only partially updated. This request did not remove any leads, and Fix is still available to finish safely.", leads: release.value });
+      }
+
+      // With every source still protected by our marker, remove only the exact records this request
+      // claimed. An opposing Undo cannot observe an unmarked lead and race this final CAS.
+      const lockedBySource = new Map(lockedSnapshots.map((lead) => [String((lead && lead.srcId) || ""), JSON.stringify(lead)]));
+      let mutation;
+      try {
+        mutation = await mutateAppState("sps_leads", (current) => {
+          const leads = Array.isArray(current) ? current : [];
+          const next = [];
+          for (const lead of leads) {
+            const srcId = String((lead && lead.srcId) || "");
+            if (!lead || !sourceIds.has(srcId)) { next.push(lead); continue; }
+            const marker = operationMarker(lead);
+            if (!marker || marker.id !== operationId) throw operationConflict();
+            if (JSON.stringify(withoutOperationMarker(lead)) !== lockedBySource.get(srcId)) {
+              const conflict = new Error("lead_changed_since_review");
+              conflict.code = "LEAD_CHANGED_SINCE_REVIEW";
+              throw conflict;
+            }
+          }
+          return next.length === leads.length ? NO_APP_STATE_CHANGE : next;
+        });
+      } catch (error) {
+        let currentLeads = null;
+        try {
+          const latest = await readAppStateVersioned("sps_leads");
+          if (latest.exists) currentLeads = latest.value;
+        } catch (_) { /* explicit partial response below */ }
+        // A lost CAS response may have applied even though the network failed. The durable state is
+        // authoritative; preserve the exact pre-lock snapshots so Undo remains truthful.
+        const sourceStillExists = Array.isArray(currentLeads)
+          ? currentLeads.some((lead) => sourceIds.has(String((lead && lead.srcId) || "")))
+          : true;
+        if (!sourceStillExists && await inboxMatches(repairedInbox)) {
+          return res.status(200).json({ ok: true, removed: lockedSnapshots, removedCount: lockedSnapshots.length, leads: currentLeads, inboxUpdated: true, recovered: true });
+        }
+        let release = null;
+        try { release = await clearOwnedLeadMarkers(operationId); }
+        catch (_) { /* a stale marker remains recoverable after its short lease */ }
+        const releaseStillHasSource = release && Array.isArray(release.value)
+          ? release.value.some((lead) => sourceIds.has(String((lead && lead.srcId) || "")))
+          : true;
+        if (!releaseStillHasSource && await inboxMatches(repairedInbox)) {
+          return res.status(200).json({ ok: true, removed: lockedSnapshots, removedCount: lockedSnapshots.length, leads: release.value, inboxUpdated: true, recovered: true });
+        }
+        const changedAfterLock = error && error.code === "LEAD_CHANGED_SINCE_REVIEW";
+        return res.status(changedAfterLock ? 409 : 500).json({
+          ok: false,
+          partial: true,
+          inboxUpdated: true,
+          error: changedAfterLock
+            ? "That lead changed while Fix was running. It was not removed; refresh and review the repaired Inbox label."
+            : release
+              ? "Inbox labels were saved, but the lead cleanup could not finish. No lead was removed; use Fix again to retry safely."
+              : "Inbox labels were saved, but the safety lock is still settling. Wait a moment, then use Fix again.",
+          ...(release && Array.isArray(release.value) ? { leads: release.value } : {}),
+        });
+      }
+      return res.status(200).json({ ok: true, removed: lockedSnapshots, removedCount: lockedSnapshots.length, leads: mutation.value, inboxUpdated: true });
+    }
+    if (b.action === "restoreImportedLeads") {
+      // Short-lived Undo from the Leads screen. Only records returned by the repair action are
+      // accepted, and only email/SMS-linked srcIds can be restored through this door.
+      const records = (Array.isArray(b.records) ? b.records : []).slice(0, 200)
+        .filter((lead) => lead && /^em_.+/.test(String(lead.srcId || "")) && lead.id)
+        .filter((lead, index, all) => all.findIndex((candidate) => String(candidate.srcId) === String(lead.srcId)) === index);
+      if (!records.length) return res.status(400).json({ error: "No repaired leads to restore." });
+      const inboxIds = records.map((lead) => String(lead.srcId).slice(3));
+      const originalRead = await readInboxRows(inboxIds);
+      if (!originalRead.ok) return res.status(502).json({ error: "Inbox could not be checked. Undo did not run; try again." });
+      const originalInbox = originalRead.rows;
+      const originalById = new Map(originalInbox.map((row) => [String(row.id), row]));
+      if (inboxIds.some((id) => !originalById.has(id))) {
+        return res.status(409).json({ error: "A source message no longer exists. Undo did not run; refresh and try again." });
+      }
+      const staleInbox = records.some((record) => {
+        const row = originalById.get(String(record.srcId).slice(3));
+        const kind = String((row && row.kind) || "").toLowerCase();
+        const leadId = String((row && row.lead_id) || "");
+        const repairedState = ["client", "other"].includes(kind) && !leadId;
+        const alreadyRestored = kind === "lead" && leadId === String(record.id);
+        return !repairedState && !alreadyRestored;
+      });
+      if (staleInbox) {
+        return res.status(409).json({ ok: false, error: "That Inbox message was reclassified or linked somewhere else. Undo did not run; refresh and review it." });
+      }
+      const operationId = newOperationId("undo");
+      const added = [];
+      try {
+        await mutateAppState("sps_leads", (current) => {
+          const leads = Array.isArray(current) ? current : [];
+          const recordBySource = new Map(records.map((record) => [String(record.srcId), record]));
+          const counts = new Map();
+          for (const lead of leads) {
+            const srcId = String((lead && lead.srcId) || "");
+            if (recordBySource.has(srcId)) counts.set(srcId, (counts.get(srcId) || 0) + 1);
+          }
+          if ([...counts.values()].some((count) => count > 1)) {
+            const conflict = new Error("lead_source_reused");
+            conflict.code = "LEAD_SOURCE_REUSED";
+            throw conflict;
+          }
+          for (const record of records) {
+            const matches = leads.filter((lead) => String((lead && lead.srcId) || "") === String(record.srcId));
+            if (matches.length === 1 && String(matches[0].id || "") !== String(record.id)) {
+              const conflict = new Error("lead_source_reused");
+              conflict.code = "LEAD_SOURCE_REUSED";
+              throw conflict;
+            }
+            const marker = matches.length ? operationMarker(matches[0]) : null;
+            if (marker && marker.id !== operationId && operationIsFresh(marker)) throw operationConflict();
+          }
+          added.length = 0;
+          const markedExisting = leads.map((lead) => {
+            const record = recordBySource.get(String((lead && lead.srcId) || ""));
+            if (!record) return lead;
+            const clean = withoutOperationMarker(lead);
+            return { ...clean, [INBOX_OPERATION_FIELD]: { id: operationId, type: "undo", startedAt: Date.now() } };
+          });
+          const existingSources = new Set(leads.map((lead) => String((lead && lead.srcId) || "")));
+          const add = records.filter((record) => !existingSources.has(String(record.srcId))).map((record) => {
+            const clean = withoutOperationMarker(record);
+            added.push(clean);
+            return { ...clean, [INBOX_OPERATION_FIELD]: { id: operationId, type: "undo", startedAt: Date.now() } };
+          });
+          return [...add, ...markedExisting];
+        });
+      } catch (error) {
+        const reused = error && error.code === "LEAD_SOURCE_REUSED";
+        const busy = error && error.code === "LEAD_INBOX_OPERATION_IN_PROGRESS";
+        if (reused || busy) {
+          return res.status(409).json({ error: reused
+            ? "That source message is linked to a different lead now. Undo did not run; refresh and review it."
+            : "Another Fix or Undo is already finishing for that message. Wait a moment, then try again." });
+        }
+        // As with Fix, a failed HTTP response does not prove the marker CAS failed. Continue only
+        // when every requested source is the exact lead now owned by this operation.
+        try {
+          const latest = await readAppStateVersioned("sps_leads");
+          const leads = latest.exists && Array.isArray(latest.value) ? latest.value : [];
+          const ownedCount = records.filter((record) => leads.some((lead) => String((lead && lead.srcId) || "") === String(record.srcId)
+            && String((lead && lead.id) || "") === String(record.id)
+            && operationMarker(lead)?.id === operationId)).length;
+          if (ownedCount !== records.length) {
+            return res.status(ownedCount ? 500 : 502).json({ ok: false, ...(ownedCount ? { partial: true } : {}), error: ownedCount
+              ? "Undo's safety lock only partially settled. Wait a moment, then try again."
+              : "Undo could not be confirmed. Wait a moment, then try again." });
+          }
+        } catch (_) {
+          return res.status(502).json({ ok: false, error: "Undo could not be confirmed. Wait a moment, then try again." });
+        }
+      }
+      const inboxResults = await Promise.all(records.map((lead) => {
+        const inboxId = String(lead.srcId).slice(3);
+        const original = originalById.get(inboxId);
+        return patch(
+          `id=eq.${encodeURIComponent(inboxId)}&${eqFilter("kind", original.kind)}&${eqFilter("lead_id", original.lead_id)}`,
+          { kind: "lead", lead_id: String(lead.id) },
+          [inboxId],
+        );
+      }));
+      // A concurrent Undo may have restored the exact links after our conditional PATCH lost the
+      // race (or after the response was lost). In that case the desired durable state already exists:
+      // the desired state is complete even if our PATCH did not return its row.
+      const restoredInbox = records.map((lead) => ({
+        id: String(lead.srcId).slice(3),
+        kind: "lead",
+        lead_id: String(lead.id),
+      }));
+      const inboxUpdated = inboxResults.every(Boolean) || await inboxMatches(restoredInbox);
+      if (!inboxUpdated) {
+        // Restoration remains additive. Clear only our marker, keep every lead and successful link,
+        // and let a retry finish forward without deleting data another request could rely on.
+        try {
+          const release = await clearOwnedLeadMarkers(operationId);
+          const leads = Array.isArray(release.value) ? release.value : [];
+          const allPresent = records.every((record) => leads.some((lead) => String((lead && lead.srcId) || "") === String(record.srcId)
+            && String((lead && lead.id) || "") === String(record.id)));
+          const inboxComplete = await inboxMatches(restoredInbox);
+          return res.status(500).json({
+            ok: false,
+            partial: true,
+            inboxUpdated: inboxComplete,
+            error: allPresent
+              ? "The lead was restored, but its Inbox link only partially saved. Use Undo again to finish safely."
+              : "Undo only partially saved and the restored lead could not be confirmed. Use Undo again to finish safely.",
+            leads,
+          });
+        } catch (_) {
+          const inboxComplete = await inboxMatches(restoredInbox);
+          return res.status(500).json({ ok: false, partial: true, inboxUpdated: inboxComplete, error: "Undo partially saved and its safety lock is still settling. Wait a moment, then use Undo again." });
+        }
+      }
+
+      // The Inbox link is durable; publish the restored lead by clearing only this operation's
+      // marker. A stale Fix cannot remove it before this CAS completes.
+      try {
+        const finalized = await clearOwnedLeadMarkers(operationId);
+        const leads = Array.isArray(finalized.value) ? finalized.value : [];
+        const allPresent = records.every((record) => leads.some((lead) => String((lead && lead.srcId) || "") === String(record.srcId)
+          && String((lead && lead.id) || "") === String(record.id)));
+        const inboxComplete = await inboxMatches(restoredInbox);
+        if (allPresent && inboxComplete) {
+          return res.status(200).json({ ok: true, restoredCount: added.length, leads, inboxUpdated: true });
+        }
+        return res.status(500).json({
+          ok: false,
+          partial: true,
+          inboxUpdated: inboxComplete,
+          error: !allPresent && inboxComplete
+            ? "The Inbox link saved, but the restored lead could not be confirmed. Use Undo again to finish safely."
+            : allPresent
+              ? "The lead was restored, but its Inbox link could not be confirmed. Use Undo again to finish safely."
+              : "Undo could not confirm both the restored lead and its Inbox link. Use Undo again to finish safely.",
+          leads,
+        });
+      } catch (_) {
+        try {
+          const latest = await readAppStateVersioned("sps_leads");
+          const leads = latest.exists && Array.isArray(latest.value) ? latest.value : [];
+          const stillOwned = leads.some((lead) => operationMarker(lead)?.id === operationId);
+          const allPresent = records.every((record) => leads.some((lead) => String((lead && lead.srcId) || "") === String(record.srcId) && String((lead && lead.id) || "") === String(record.id)));
+          if (!stillOwned && allPresent && await inboxMatches(restoredInbox)) {
+            return res.status(200).json({ ok: true, restoredCount: added.length, leads, inboxUpdated: true, recovered: true });
+          }
+        } catch (_) { /* explicit settling error below */ }
+        return res.status(500).json({ ok: false, partial: true, inboxUpdated: true, error: "Undo saved, but its safety lock is still settling. Wait a moment, then refresh." });
+      }
     }
     if (b.action === "delete") {
       // Owner deletes mail from their own inbox (single or bulk). Hard delete — sps_inbox is the
