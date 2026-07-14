@@ -23206,6 +23206,183 @@ function RichEditor({ onChange, placeholder = "Write your message…", minHeight
   );
 }
 
+// A phone-first mailbox row with Apple Mail-style reveal actions. Pointer movement stays local to
+// the row (the parent inbox only hears about the final open/closed state), so dragging one message
+// never forces the entire mailbox to repaint on every pixel.
+function InboxSwipeRow({ rowId, ariaLabel, revealed, disabled, selected, read, isText, onReveal, onClose, onActivate, onToggleRead, onMore, onDelete, T, children }) {
+  const frontRef = useRef(null);
+  const offsetRef = useRef(0);
+  const gestureRef = useRef(null);
+  const suppressClickUntil = useRef(0);
+  const rafRef = useRef(0);
+  const [revealSide, setRevealSide] = useState(null); // "left" actions or "right" read toggle
+  const LEFT_REVEAL = -148;
+  const RIGHT_REVEAL = 86;
+
+  const paint = (next, animate = false) => {
+    offsetRef.current = next;
+    const el = frontRef.current;
+    if (!el) return;
+    el.style.transition = animate ? "transform 220ms cubic-bezier(.2,.8,.2,1)" : "none";
+    el.style.transform = `translate3d(${next}px,0,0)`;
+  };
+  const schedulePaint = (next) => {
+    offsetRef.current = next;
+    cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(() => {
+      const el = frontRef.current;
+      if (!el) return;
+      el.style.transition = "none";
+      el.style.transform = `translate3d(${next}px,0,0)`;
+    });
+  };
+  const close = () => { setRevealSide(null); paint(0, true); onClose && onClose(rowId); };
+
+  useEffect(() => {
+    if (!revealed || disabled) { setRevealSide(null); paint(0, true); }
+  }, [revealed, disabled]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
+
+  const onPointerDown = (e) => {
+    if (disabled || (e.pointerType === "mouse" && e.button !== 0)) return;
+    gestureRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      base: offsetRef.current,
+      axis: null,
+      moved: false,
+      safariEdge: e.clientX < 24,
+    };
+    if (frontRef.current) frontRef.current.style.transition = "none";
+  };
+  const onPointerMove = (e) => {
+    const g = gestureRef.current;
+    if (!g || g.pointerId !== e.pointerId || disabled) return;
+    const dx = e.clientX - g.startX;
+    const dy = e.clientY - g.startY;
+    if (!g.axis) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) < 7) return;
+      if (Math.abs(dy) >= Math.abs(dx) || (g.safariEdge && dx > 0)) { g.axis = "vertical"; return; }
+      g.axis = "horizontal";
+      if (frontRef.current) frontRef.current.style.willChange = "transform";
+      try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {}
+    }
+    if (g.axis !== "horizontal") return;
+    e.preventDefault();
+    g.moved = g.moved || Math.abs(dx) > 5;
+    const raw = g.base + dx;
+    // A little resistance past the action widths keeps the gesture feeling physical without
+    // allowing the content to slide completely off-screen.
+    const next = raw < LEFT_REVEAL ? LEFT_REVEAL + (raw - LEFT_REVEAL) * 0.14
+      : raw > RIGHT_REVEAL ? RIGHT_REVEAL + (raw - RIGHT_REVEAL) * 0.14
+        : raw;
+    schedulePaint(Math.max(LEFT_REVEAL - 24, Math.min(RIGHT_REVEAL + 18, next)));
+  };
+  const finishPointer = (e) => {
+    const g = gestureRef.current;
+    if (!g || g.pointerId !== e.pointerId) return;
+    gestureRef.current = null;
+    if (g.axis !== "horizontal") {
+      if (frontRef.current) frontRef.current.style.willChange = "auto";
+      return;
+    }
+    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) {}
+    cancelAnimationFrame(rafRef.current);
+    suppressClickUntil.current = Date.now() + 280;
+    const current = offsetRef.current;
+    const target = current <= -42 ? LEFT_REVEAL : current >= 34 ? RIGHT_REVEAL : 0;
+    setRevealSide(target < 0 ? "left" : target > 0 ? "right" : null);
+    paint(target, true);
+    if (target) onReveal && onReveal(rowId);
+    else onClose && onClose(rowId);
+  };
+  const cancelPointer = (e) => {
+    const g = gestureRef.current;
+    if (!g || g.pointerId !== e.pointerId) return;
+    gestureRef.current = null;
+    cancelAnimationFrame(rafRef.current);
+    setRevealSide(null);
+    paint(0, true);
+    onClose && onClose(rowId);
+  };
+  const activate = (e) => {
+    if (Date.now() < suppressClickUntil.current) { e.preventDefault(); e.stopPropagation(); return; }
+    if (revealed || Math.abs(offsetRef.current) > 2) { close(); return; }
+    onActivate && onActivate();
+  };
+  const action = (handler) => (e) => {
+    e.preventDefault(); e.stopPropagation();
+    setRevealSide(null); paint(0, true); onClose && onClose(rowId); handler && handler();
+  };
+
+  return (
+    <div style={{ position: "relative", overflow: "hidden", background: T.surfaceAlt, touchAction: "pan-y" }}>
+      <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "stretch", justifyContent: "space-between" }}>
+        <button type="button" tabIndex={revealed && revealSide === "right" && !disabled ? 0 : -1} aria-hidden={revealSide !== "right"} onClick={action(onToggleRead)} aria-label={read ? "Mark unread" : "Mark read"}
+          style={{ width: RIGHT_REVEAL, border: "none", background: "#2879d9", color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, fontFamily: "inherit", fontSize: 10.5, fontWeight: 800, cursor: "pointer" }}>
+          <Icon name={read ? "mail" : "check"} size={18} />{read ? "Unread" : "Read"}
+        </button>
+        <div style={{ display: "flex", marginLeft: "auto" }}>
+          <button type="button" tabIndex={revealed && revealSide === "left" && !disabled ? 0 : -1} aria-hidden={revealSide !== "left"} onClick={action(onMore)} aria-label="More message actions"
+            style={{ width: 68, border: "none", background: "#737780", color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, fontFamily: "inherit", fontSize: 10.5, fontWeight: 800, cursor: "pointer" }}>
+            <span aria-hidden="true" style={{ fontSize: 20, lineHeight: 0.6, letterSpacing: 1 }}>•••</span>More
+          </button>
+          <button type="button" tabIndex={revealed && revealSide === "left" && !disabled ? 0 : -1} aria-hidden={revealSide !== "left"} onClick={action(onDelete)} aria-label={isText ? "Remove text from inbox" : "Move email to Trash"}
+            style={{ width: 80, border: "none", background: "#d9282f", color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, fontFamily: "inherit", fontSize: 10.5, fontWeight: 800, cursor: "pointer" }}>
+            <Icon name="trash" size={18} />{isText ? "Remove" : "Trash"}
+          </button>
+        </div>
+      </div>
+      <div ref={frontRef} role="button" tabIndex={0} aria-label={`${disabled ? `${selected ? "Selected" : "Not selected"}. ` : ""}${ariaLabel || "Message"}`} aria-pressed={disabled ? !!selected : undefined} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={finishPointer} onPointerCancel={cancelPointer} onClick={activate}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); if (revealed) close(); else onActivate && onActivate(); } }}
+        onTransitionEnd={() => { if (frontRef.current && offsetRef.current === 0) { frontRef.current.style.transition = "none"; frontRef.current.style.transform = "none"; frontRef.current.style.willChange = "auto"; } }}
+        style={{ position: "relative", zIndex: 1, background: T.surface, transform: "none", touchAction: "pan-y", WebkitTapHighlightColor: "transparent", cursor: "pointer" }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// Small reusable action sheet for mailbox management. It keeps destructive and classification
+// choices thumb-reachable on phones without relying on blocking browser dialogs.
+function InboxActionSheet({ title, onClose, children, T }) {
+  const { handleProps, sheetStyle } = useSheetSwipe(onClose);
+  const sheetRef = useRef(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    const priorFocus = document.activeElement;
+    requestAnimationFrame(() => { try { sheetRef.current && sheetRef.current.focus(); } catch (_) {} });
+    const onKey = (e) => {
+      if (e.key === "Escape") { closeRef.current(); return; }
+      if (e.key !== "Tab" || !sheetRef.current) return;
+      const focusable = [...sheetRef.current.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+      if (!focusable.length) { e.preventDefault(); sheetRef.current.focus(); return; }
+      const first = focusable[0], last = focusable[focusable.length - 1];
+      if (e.shiftKey && (document.activeElement === first || document.activeElement === sheetRef.current)) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => { window.removeEventListener("keydown", onKey); try { priorFocus && priorFocus.focus && priorFocus.focus(); } catch (_) {} };
+  }, []);
+  return createPortal(
+    <>
+      <style>{`@keyframes inboxSheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }`}</style>
+      <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 310, background: "rgba(0,0,0,0.42)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)" }} />
+      <div ref={sheetRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label={title} style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 311, width: "100%", maxWidth: 640, margin: "0 auto", boxSizing: "border-box", background: T.surface, borderRadius: "22px 22px 0 0", boxShadow: "0 -10px 44px rgba(0,0,0,0.22)", paddingBottom: "max(14px, env(safe-area-inset-bottom))", animation: "inboxSheetUp 0.24s cubic-bezier(.22,1,.36,1)", outline: "none", ...sheetStyle }}>
+        <SheetHandle handleProps={handleProps} T={T} />
+        <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "2px 16px 12px 20px", borderBottom: `1px solid ${T.border}` }}>
+          <div style={{ flex: 1, minWidth: 0, fontSize: 18, fontWeight: 850, color: T.text, letterSpacing: "-0.02em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</div>
+          <button type="button" onClick={onClose} aria-label="Close" style={{ width: 36, height: 36, borderRadius: "50%", border: "none", background: T.surfaceAlt, color: T.textMuted, display: "grid", placeItems: "center", cursor: "pointer" }}><Icon name="close" size={16} /></button>
+        </div>
+        <div style={{ padding: "14px 16px 4px", maxHeight: "64dvh", overflowY: "auto", WebkitOverflowScrolling: "touch" }}>{children}</div>
+      </div>
+    </>,
+    document.body
+  );
+}
+
 // Comms → Inbox: the owner's private work email + business-line text replies. AI
 // triages every email — Lead / Bill / Client / Other — leads flow into Comms → Leads
 // automatically. Owner-only: rows come from the owner-gated api/inbox (sps_inbox has no
@@ -23214,6 +23391,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const { T } = useApp();
   const vp = useViewport();
   const dense = useCompactComms();
+  const phone = vp.isPhone;
   // Two-pane (list + reading pane) ONLY when there's genuinely room — this section sits inside the
   // global sidebar AND the Comms sidebar, so isDesktop (>=700, incl. portrait iPad) is too narrow and
   // would crush the reader. Below this, use the clean single-column list + full-screen modal reader.
@@ -23299,6 +23477,19 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const [sel, setSel] = useState({});              // { [emailId]: true }
   const [busyBulk, setBusyBulk] = useState(false); // a bulk action is in flight
   const [gmailNote, setGmailNote] = useState("");  // honest note when a delete couldn't reach Gmail
+  const [openSwipeId, setOpenSwipeId] = useState(null);
+  const [manageRow, setManageRow] = useState(null);
+  const [bulkSortOpen, setBulkSortOpen] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState(null); // { ids, prompt }
+  const [inboxNotice, setInboxNotice] = useState("");
+  const noticeTimer = useRef(null);
+  const deletingIdsRef = useRef(new Set());
+  const notifyInbox = (message) => {
+    setInboxNotice(message);
+    clearTimeout(noticeTimer.current);
+    noticeTimer.current = setTimeout(() => setInboxNotice(""), 3200);
+  };
+  useEffect(() => () => clearTimeout(noticeTimer.current), []);
   const [composeOpen, setComposeOpen] = useState(false);
   const [compose, setCompose] = useState({ to: "", subject: "" });
   const [composeHtml, setComposeHtml] = useState("");   // rich body (HTML) from the editor
@@ -23322,7 +23513,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       const r = await fetch(`${PROD_URL}/api/inbox?limit=100`, { headers: await authHeaders() });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) { setErr(d.error || `Error ${r.status}`); setRows(prev => prev === null ? [] : prev); }
-      else setRows(d.rows || []);
+      else setRows((d.rows || []).filter(row => !deletingIdsRef.current.has(String(row.id))));
     } catch (_) { setErr("Couldn't reach the server."); setRows(prev => prev === null ? [] : prev); }
     setRefreshing(false);
   };
@@ -23335,7 +23526,8 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const KIND = { lead: { label: "Lead", color: "#16a34a" }, bill: { label: "Bill", color: "#b45309" }, client: { label: "Client", color: "#2563eb" }, other: { label: "Other", color: null } };
   // Membership is checked against the ACTUAL leads list, not the imported stamp — if a lead
   // ever vanishes (multi-device array overwrite), "Add to Leads" reappears for a one-tap re-add.
-  const inLeads = (emailId) => (leads || []).some(l => l && l.srcId === `em_${emailId}`);
+  const leadSourceIds = useMemo(() => new Set((leads || []).filter(Boolean).map(l => l.srcId)), [leads]);
+  const inLeads = (emailId) => leadSourceIds.has(`em_${emailId}`);
   const isSmsRow = (row) => row && row.channel === "sms";
   const inboxRows = rows || [];
   const textCount = inboxRows.filter(isSmsRow).length;
@@ -23346,29 +23538,101 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     .filter(r => filter === "all" ? true : filter === "unread" ? !r.read : r.kind === filter)
     .filter(r => !qq || [r.from_name, r.from_email, r.from_phone, r.subject, r.body_text, r.ai && r.ai.summary].some(v => String(v || "").toLowerCase().includes(qq)));
   useEffect(() => {
+    if (!openRow) return;
+    const fresh = inboxRows.find(r => r.id === openRow.id);
+    if (!fresh) setOpenRow(null);
+    else if (fresh !== openRow) setOpenRow(fresh);
+  }, [rows]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
     if (openRow && !list.some(r => r.id === openRow.id)) setOpenRow(null);
   }, [channelFilter, filter, q]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    setOpenSwipeId(null);
+  }, [channelFilter, filter, q, folder, selMode]);
+  useEffect(() => {
+    if (!openSwipeId) return undefined;
+    const closeSwipe = () => setOpenSwipeId(null);
+    window.addEventListener("scroll", closeSwipe, true);
+    return () => window.removeEventListener("scroll", closeSwipe, true);
+  }, [openSwipeId]);
   const unread = inboxRows.filter(r => !r.read).length;
   const channelUnread = channelRows.filter(r => !r.read).length;
   const markRead = (ids, read = true) => {
-    // Instant optimistic flip; both server writes (app copy + Gmail mirror) fire in the background,
-    // in parallel, and are never awaited — the UI never waits on the network or IMAP.
+    // Flip instantly, then require the SPS Inbox write to confirm. Gmail mirroring is reported
+    // separately: it must never turn an unconfirmed app write into a fake success.
+    const before = new Map((rows || []).filter(r => ids.includes(r.id)).map(r => [r.id, !!r.read]));
     setRows(rs => (rs || []).map(r => ids.includes(r.id) ? { ...r, read } : r));
     setOpenRow(o => (o && ids.includes(o.id) ? { ...o, read } : o));
-    (async () => {
+    setGmailNote("");
+    return (async () => {
+      const rollback = () => {
+        setRows(rs => (rs || []).map(r => ids.includes(r.id) && r.read === read && before.has(r.id) ? { ...r, read: before.get(r.id) } : r));
+        setOpenRow(o => (o && ids.includes(o.id) && o.read === read && before.has(o.id) ? { ...o, read: before.get(o.id) } : o));
+      };
       try {
         const h = await authHeaders({ "Content-Type": "application/json" });
-        fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: h, body: JSON.stringify({ action: "markRead", ids, read }) }).catch(() => {});
-        fetch(`${PROD_URL}/api/gmail-action`, { method: "POST", headers: h, body: JSON.stringify({ action: read ? "markRead" : "markUnread", ids }) }).catch(() => {});
-      } catch (_) {}
+        const mirrorGmail = async () => {
+          const updated = [], skipped = [];
+          let ok = true;
+          for (let i = 0; i < ids.length; i += 50) {
+            try {
+              const response = await fetch(`${PROD_URL}/api/gmail-action`, { method: "POST", headers: h, body: JSON.stringify({ action: read ? "markRead" : "markUnread", ids: ids.slice(i, i + 50) }) });
+              const receipt = await response.json().catch(() => ({}));
+              if (Array.isArray(receipt.updated)) updated.push(...receipt.updated);
+              if (Array.isArray(receipt.skipped)) skipped.push(...receipt.skipped);
+              if (!response.ok || receipt.ok !== true) ok = false;
+            } catch (_) { ok = false; }
+          }
+          return { ok, updated, skipped };
+        };
+        const [appResult, gmailResult] = await Promise.allSettled([
+          fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: h, body: JSON.stringify({ action: "markRead", ids, read }) }),
+          mirrorGmail(),
+        ]);
+        let appOk = appResult.status === "fulfilled" && appResult.value.ok;
+        if (appOk) {
+          const receipt = await appResult.value.json().catch(() => ({}));
+          appOk = receipt.ok === true;
+        }
+        if (!appOk) {
+          rollback();
+          setGmailNote(`Couldn't mark ${ids.length === 1 ? "that message" : "those messages"} ${read ? "read" : "unread"} — the change was not saved. Try again.`);
+          return { ok: false, gmailOk: false };
+        }
+        let gmailOk = gmailResult.status === "fulfilled" && gmailResult.value.ok;
+        if (gmailOk) {
+          const d = gmailResult.value;
+          const updated = new Set((Array.isArray(d.updated) ? d.updated : []).map(String));
+          const smsSkipped = new Set((Array.isArray(d.skipped) ? d.skipped : []).filter(s => s && s.reason === "sms").map(s => String(s.id)));
+          gmailOk = ids.every(id => {
+            const row = before.has(id) ? (rows || []).find(r => r.id === id) : null;
+            return row && row.channel === "sms" ? smsSkipped.has(String(id)) : updated.has(String(id));
+          });
+        }
+        if (!gmailOk) setGmailNote(`Saved in SPS Inbox, but Gmail couldn't mirror the ${read ? "read" : "unread"} state yet. Your message is still safe.`);
+        return { ok: true, gmailOk };
+      } catch (_) {
+        rollback();
+        setGmailNote(`Couldn't mark ${ids.length === 1 ? "that message" : "those messages"} ${read ? "read" : "unread"} — the change was not saved. Try again.`);
+        return { ok: false, gmailOk: false };
+      }
     })();
   };
   // Reclassify an email — the owner's override on the AI's call. "lead" goes through
   // addToLeads instead (label + funnel + ack in one tap).
   const setKindOf = async (row, kind) => {
+    const priorKind = row.kind;
     setRows(rs => (rs || []).map(r => r.id === row.id ? { ...r, kind } : r));
     setOpenRow(o => (o && o.id === row.id ? { ...o, kind } : o));
-    try { await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "setKind", id: row.id, kind }) }); } catch (_) {}
+    try {
+      const response = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "setKind", id: row.id, kind }) });
+      const receipt = await response.json().catch(() => ({}));
+      if (response.ok && receipt.ok === true) return true;
+    } catch (_) {}
+    setRows(rs => (rs || []).map(r => r.id === row.id && r.kind === kind ? { ...r, kind: priorKind } : r));
+    setOpenRow(o => (o && o.id === row.id && o.kind === kind ? { ...o, kind: priorKind } : o));
+    setGmailNote("Couldn't change that message's category — the change was not saved. Try again.");
+    return false;
   };
   const addToLeads = async (row) => {
     const at = row.created_at || new Date().toISOString();
@@ -23411,24 +23675,39 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const allVisibleSelected = list.length > 0 && list.every(r => sel[r.id]);
   const toggleSel = (id) => setSel(s => ({ ...s, [id]: !s[id] }));
   const toggleSelectAll = () => { if (allVisibleSelected) setSel({}); else setSel(Object.fromEntries(list.map(r => [r.id, true]))); };
-  const exitSelect = () => { setSelMode(false); setSel({}); };
+  const exitSelect = () => { setSelMode(false); setSel({}); setBulkSortOpen(false); };
   const bulkSetKind = async (kind) => {
     const ids = selIds; if (!ids.length || busyBulk) return;
     if (kind === "lead") {                       // route each through addToLeads so it also enters the funnel + acks
       setBusyBulk(true);
-      for (const id of ids) { const row = (rows || []).find(r => r.id === id); if (row && !inLeads(id)) await addToLeads(row); }
+      // Each lead is staged locally before its first await. Run the server confirmations together
+      // so a 20-message selection no longer incurs the old 1.5-second delay twenty times in a row.
+      await Promise.all(ids.map(async (id) => { const row = (rows || []).find(r => r.id === id); if (row && !inLeads(id)) await addToLeads(row); }));
       setBusyBulk(false); exitSelect(); return;
     }
+    const priorKinds = new Map((rows || []).filter(r => ids.includes(r.id)).map(r => [r.id, r.kind]));
     setRows(rs => (rs || []).map(r => ids.includes(r.id) ? { ...r, kind } : r));
     setBusyBulk(true);
-    try { await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "setKind", ids, kind }) }); } catch (_) {}
-    setBusyBulk(false); exitSelect();
+    let saved = false;
+    try {
+      const response = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "setKind", ids, kind }) });
+      const receipt = await response.json().catch(() => ({}));
+      saved = response.ok && receipt.ok === true;
+    } catch (_) {}
+    setBusyBulk(false);
+    if (saved) exitSelect();
+    else {
+      setRows(rs => (rs || []).map(r => ids.includes(r.id) && r.kind === kind && priorKinds.has(r.id) ? { ...r, kind: priorKinds.get(r.id) } : r));
+      setGmailNote("Couldn't change those message categories — nothing was saved. Try again.");
+    }
   };
   const deleteEmails = (rawIds, { ask = true } = {}) => {
-    const ids = (rawIds || []).filter(Boolean); if (!ids.length) return;
+    const requestedKeys = new Set((rawIds || []).filter(Boolean).map(String));
     // Capture the rows so we can put back any the server could NOT actually remove from Gmail —
     // deleting the app copy while the message lingers in Gmail is the exact bug we're fixing.
-    const removed = (rows || []).filter(r => ids.includes(r.id));
+    const removed = (rows || []).filter(r => requestedKeys.has(String(r.id)));
+    const ids = removed.map(r => r.id); if (!ids.length) return;
+    const idKeys = new Set(ids.map(String));
     const textTotal = removed.filter(r => r.channel === "sms").length;
     const emailTotal = removed.length - textTotal;
     const deletePrompt = textTotal && !emailTotal
@@ -23436,16 +23715,18 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       : emailTotal && !textTotal
         ? `Delete ${emailTotal} email${emailTotal === 1 ? "" : "s"}? ${emailTotal === 1 ? "It moves" : "They move"} to Gmail Trash (recoverable there for ~30 days).`
         : `Delete ${ids.length} messages? Emails move to Gmail Trash; texts are removed from the SPS inbox but remain in Quo.`;
-    if (ask && !confirm(deletePrompt)) return;
-    const smsIds = new Set(removed.filter(r => r.channel === "sms").map(r => r.id)); // no Gmail copy → app-only delete
+    if (ask) { setDeleteConfirm({ ids, prompt: deletePrompt }); return; }
+    const smsIds = new Set(removed.filter(r => r.channel === "sms").map(r => String(r.id))); // no Gmail copy → app-only delete
+    ids.forEach(id => deletingIdsRef.current.add(String(id)));
     // INSTANT: pull them from the list now (optimistic). We reconcile against the REAL Gmail result
     // below and restore anything that couldn't be trashed, so nothing is silently stranded.
-    setRows(rs => (rs || []).filter(r => !ids.includes(r.id)));
-    setOpenRow(o => (o && ids.includes(o.id) ? null : o));
+    setRows(rs => (rs || []).filter(r => !idKeys.has(String(r.id))));
+    setOpenRow(o => (o && idKeys.has(String(o.id)) ? null : o));
     exitSelect(); setGmailNote("");
     (async () => {
       const restore = (keepIds) => {
-        const back = removed.filter(r => keepIds.includes(r.id));
+        const keepKeys = new Set((keepIds || []).map(String));
+        const back = removed.filter(r => keepKeys.has(String(r.id)));
         if (!back.length) return;
         setRows(rs => {
           const cur = rs || [];
@@ -23453,40 +23734,82 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
           return merged.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
         });
       };
+      const release = () => ids.forEach(id => deletingIdsRef.current.delete(String(id)));
       try {
         const h = await authHeaders({ "Content-Type": "application/json" });
         // Trash the real Gmail messages FIRST (needs the sps_inbox rows to resolve the match). SMS
         // rows have no Gmail counterpart, so they're never sent to IMAP.
-        const gmailIds = ids.filter(id => !smsIds.has(id));
-        let trashRes = null, callFailed = false;
+        const gmailIds = ids.filter(id => !smsIds.has(String(id)));
+        const updated = new Set();
+        const skipped = [];
+        let callFailed = false;
         if (gmailIds.length) {
-          try {
-            const tr = await fetch(`${PROD_URL}/api/gmail-action`, { method: "POST", headers: h, body: JSON.stringify({ action: "trash", ids: gmailIds }) });
-            trashRes = await tr.json().catch(() => null);
-            if (!tr.ok) callFailed = true;
-          } catch (_) { callFailed = true; }
+          // The Gmail bridge deliberately caps one IMAP operation at 50 rows. Chunk larger mailbox
+          // selections so "Select All" never silently processes only the first half.
+          for (let i = 0; i < gmailIds.length; i += 50) {
+            try {
+              const tr = await fetch(`${PROD_URL}/api/gmail-action`, { method: "POST", headers: h, body: JSON.stringify({ action: "trash", ids: gmailIds.slice(i, i + 50) }) });
+              const result = await tr.json().catch(() => ({}));
+              (Array.isArray(result.updated) ? result.updated : []).forEach(id => updated.add(String(id)));
+              if (Array.isArray(result.skipped)) skipped.push(...result.skipped);
+              if (!tr.ok) callFailed = true;
+            } catch (_) { callFailed = true; }
+          }
         }
-        const updated = (trashRes && Array.isArray(trashRes.updated)) ? trashRes.updated.map(String) : [];
-        const skipped = (trashRes && Array.isArray(trashRes.skipped)) ? trashRes.skipped : [];
-        // Safe to hard-delete the app copy: SMS rows, rows Gmail moved to Trash, and rows the server
-        // says have no Gmail copy at all (sms/no-row). Everything else STAYS so it can be retried.
-        const benign = skipped.filter(s => s && (s.reason === "sms" || s.reason === "no-row")).map(s => String(s.id));
-        const okIds = [...new Set([...smsIds, ...updated, ...benign])].filter(id => ids.includes(id));
-        const failIds = ids.filter(id => !okIds.includes(id));
-        if (okIds.length) {
-          try { await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: h, body: JSON.stringify({ action: "delete", ids: okIds }) }); } catch (_) {}
+        // Only two cases are safe to remove from SPS: a text (which has no Gmail copy), or an email
+        // Gmail explicitly confirmed it moved. A missing lookup row is NOT benign because a
+        // temporary Supabase lookup failure is also reported as "no-row" by the Gmail bridge.
+        const safeToRemove = ids.filter(id => smsIds.has(String(id)) || updated.has(String(id)));
+        const appDeleted = new Set();
+        if (safeToRemove.length) {
+          // A second immediate attempt handles a transient API edge without making the message
+          // reappear after Gmail already moved it to Trash.
+          for (let attempt = 0; attempt < 2 && appDeleted.size < safeToRemove.length; attempt++) {
+            const pending = safeToRemove.filter(id => !appDeleted.has(String(id)));
+            try {
+              const appDelete = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: h, body: JSON.stringify({ action: "delete", ids: pending }) });
+              const receipt = await appDelete.json().catch(() => ({}));
+              if (Array.isArray(receipt.deletedIds)) {
+                const pendingKeys = new Set(pending.map(String));
+                receipt.deletedIds.map(String).filter(id => pendingKeys.has(id)).forEach(id => appDeleted.add(id));
+                // A confirmed partial delete means the remainder did not exist at commit time;
+                // retrying cannot make that ambiguous state safer.
+                if (receipt.deletedIds.length || appDelete.status === 409) break;
+              } else if (appDelete.ok && receipt.ok === true && Number(receipt.deleted) === pending.length) {
+                pending.forEach(id => appDeleted.add(String(id))); // compatibility with the prior API receipt
+              }
+            } catch (_) {}
+          }
         }
+        const failIds = ids.filter(id => !appDeleted.has(String(id)));
         if (failIds.length) {
           restore(failIds);
-          const movedGmail = updated.length;
-          const hardErr = callFailed || failIds.some(id => { const s = skipped.find(x => String(x.id) === String(id)); return s && ["search-error", "op-error"].includes(s.reason); });
-          setGmailNote(hardErr
-            ? `Couldn't reach Gmail to delete ${failIds.length === 1 ? "that email" : `${failIds.length} emails`} — ${failIds.length === 1 ? "it's" : "they're"} still here, so nothing was lost. Try again in a moment.`
-            : `${failIds.length === 1 ? "That email is" : `${failIds.length} emails are`} still here — couldn't find ${failIds.length === 1 ? "it" : "them"} in your Gmail to delete.${movedGmail ? ` (${movedGmail} other${movedGmail === 1 ? "" : "s"} moved to Gmail Trash.)` : ""}`);
+          const appFailedSafe = safeToRemove.filter(id => !appDeleted.has(String(id)));
+          const movedButAppFailed = appFailedSafe.filter(id => updated.has(String(id)));
+          const appOnlyFailed = appFailedSafe.some(id => smsIds.has(String(id)));
+          const gmailMovedButAppFailed = movedButAppFailed.length > 0;
+          if (gmailMovedButAppFailed) {
+            setGmailNote(`${movedButAppFailed.length === 1 ? "Gmail moved that email to Trash" : `Gmail moved ${movedButAppFailed.length} emails to Trash`}, but SPS couldn't finish removing ${movedButAppFailed.length === 1 ? "the inbox copy" : "their inbox copies"}. ${movedButAppFailed.length === 1 ? "It is" : "They are"} still shown here so the failure isn't hidden.`);
+          } else if (appOnlyFailed) {
+            setGmailNote(`Couldn't remove ${failIds.length === 1 ? "that text" : "those texts"} from SPS Inbox — ${failIds.length === 1 ? "it is" : "they are"} still available here and in Quo.`);
+          } else {
+            const hardErr = callFailed || failIds.some(id => { const s = skipped.find(x => String(x.id) === String(id)); return s && ["search-error", "op-error"].includes(s.reason); });
+            setGmailNote(hardErr
+              ? `Couldn't reach Gmail to delete ${failIds.length === 1 ? "that email" : `${failIds.length} emails`} — ${failIds.length === 1 ? "it's" : "they're"} still here, so nothing was lost. Try again in a moment.`
+              : `${failIds.length === 1 ? "That email is" : `${failIds.length} emails are`} still here — Gmail did not confirm moving ${failIds.length === 1 ? "it" : "them"} to Trash.`);
+          }
+        } else if (textTotal && !emailTotal) {
+          notifyInbox(`Removed ${textTotal === 1 ? "text" : `${textTotal} texts`} from SPS Inbox · Still available in Quo`);
+        } else if (emailTotal && !textTotal) {
+          notifyInbox(`${emailTotal === 1 ? "Email" : `${emailTotal} emails`} moved to Gmail Trash`);
+        } else {
+          notifyInbox(`${ids.length} messages deleted`);
         }
+        release();
       } catch (_) {
         // Total failure (e.g. couldn't get an auth token) — restore everything, delete nothing.
         restore(ids);
+        release();
         setGmailNote("Couldn't delete right now — nothing was removed. Try again.");
       }
     })();
@@ -23586,6 +23909,21 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       {channelTab("email", "Email", emailCount, "mail")}
     </div>
   );
+  const mobileQuickBtn = (key, label, count, icon, active, onClick) => (
+    <button key={key} type="button" aria-pressed={active} onClick={onClick}
+      style={{ minHeight: dense ? 36 : 38, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 5, flexShrink: 0, whiteSpace: "nowrap", padding: dense ? "6px 10px" : "7px 12px", borderRadius: 100, border: `1px solid ${active ? T.primary : T.border}`, background: active ? hexA(T.primary, 0.09) : T.surface, color: active ? T.primary : T.textMuted, fontFamily: "inherit", fontSize: dense ? 11.5 : 12, fontWeight: active ? 820 : 700, cursor: "pointer" }}>
+      <Icon name={icon} size={13} />{label}{count != null && <span style={{ minWidth: 17, padding: "0 4px", borderRadius: 100, background: active ? hexA(T.primary, 0.13) : T.surfaceAlt, fontSize: 9.5, fontWeight: 850, lineHeight: 1.6 }}>{badgeLabel(count)}</span>}
+    </button>
+  );
+  const mobileQuickFilters = (
+    <div aria-label="Quick inbox filters" style={{ display: "flex", gap: 7, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
+      {mobileQuickBtn("all", "All", inboxRows.length, "inbox", channelFilter === "all" && filter === "all", () => { setChannelFilter("all"); setFilter("all"); setFiltersOpen(false); })}
+      {mobileQuickBtn("unread", "Unread", unread, "mail", channelFilter === "all" && filter === "unread", () => { setChannelFilter("all"); setFilter("unread"); setFiltersOpen(false); })}
+      {mobileQuickBtn("sms", "Texts", textCount, "message", channelFilter === "sms", () => { setChannelFilter("sms"); setFilter("all"); setFiltersOpen(false); })}
+      {mobileQuickBtn("email", "Email", emailCount, "mail", channelFilter === "email", () => { setChannelFilter("email"); setFilter("all"); setFiltersOpen(false); })}
+      {mobileQuickBtn("filters", "Filter", null, "funnel", filtersOpen || ["lead", "bill", "client", "other"].includes(filter), () => setFiltersOpen(v => !v))}
+    </div>
+  );
   const chip = (id, label) => (
     <button key={id} onClick={() => setFilter(id)} aria-pressed={filter === id} style={{ minHeight: 40, padding: "7px 14px", borderRadius: 100, border: `1.5px solid ${filter === id ? T.primary : T.border}`, background: filter === id ? hexA(T.primary, 0.08) : T.surface, color: filter === id ? T.primary : T.textMuted, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, whiteSpace: "nowrap" }}>{label}</button>
   );
@@ -23634,11 +23972,17 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const emptyInboxCopy = hasSearchOrCategory
     ? "Try a different channel, category, or search."
     : "Incoming texts and work email will appear here with clear channel labels.";
+  const openMessage = (r) => {
+    setOpenSwipeId(null);
+    setOpenRow(r);
+    setReplying(false); setReplyText(""); setReplyHtml(""); setReplyMsg("");
+    if (!r.read) markRead([r.id]);
+  };
   // Airier list rows — reused by the desktop list column and the mobile list.
   const listRows = list.map((r, i) => {
     const active = openRow && openRow.id === r.id && wide;
     return (
-      <div key={r.id} onClick={() => { if (selMode) { toggleSel(r.id); return; } setOpenRow(r); setReplying(false); setReplyText(""); setReplyHtml(""); setReplyMsg(""); if (!r.read) markRead([r.id]); }}
+      <div key={r.id} onClick={() => { if (selMode) { toggleSel(r.id); return; } openMessage(r); }}
         style={{ display: "flex", alignItems: "flex-start", gap: dense ? 9 : 13, padding: dense ? "11px 12px" : "15px 16px", cursor: "pointer", borderTop: i === 0 ? "none" : `1px solid ${hexA(T.border, 0.5)}`, background: (sel[r.id] || active) ? hexA(T.primary, 0.08) : (r.read ? "transparent" : hexA(T.primary, 0.03)), position: "relative" }}>
         {!r.read && <span style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: T.primary }} />}
         {selMode && <div style={{ alignSelf: "center", flexShrink: 0 }}><Checkbox checked={!!sel[r.id]} onChange={() => toggleSel(r.id)} /></div>}
@@ -23662,33 +24006,47 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       </div>
     );
   });
-  // Mobile: each email as its own rounded, shadowed card (the approved mockup look) — airy and
-  // tappable, unread gets a red rail + a tinted border. Separate from listRows so the desktop
-  // two-pane keeps its flat divided list.
-  const cardRows = list.map((r) => (
-    <div key={r.id} onClick={() => { if (selMode) { toggleSel(r.id); return; } setOpenRow(r); setReplying(false); setReplyText(""); setReplyHtml(""); setReplyMsg(""); if (!r.read) markRead([r.id]); }}
-      style={{ position: "relative", display: "flex", gap: dense ? 8 : 12, padding: dense ? "9px 11px" : "13px 14px", background: sel[r.id] ? hexA(T.primary, 0.06) : T.surface, border: `1px solid ${sel[r.id] ? T.primary : (!r.read ? hexA(T.primary, 0.28) : isSmsRow(r) ? hexA("#7c3aed", 0.22) : T.border)}`, borderRadius: dense ? 14 : 16, boxShadow: "0 2px 8px rgba(0,0,0,0.045)", cursor: "pointer" }}>
-      {!r.read && <span style={{ position: "absolute", left: -1, top: 14, bottom: 14, width: 3, borderRadius: 3, background: T.primary }} />}
-      {selMode && <div style={{ alignSelf: "center", flexShrink: 0 }}><Checkbox checked={!!sel[r.id]} onChange={() => toggleSel(r.id)} /></div>}
-      <Avatar name={r.from_name} email={r.from_email} channel={r.channel} size={dense ? 34 : 40} />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: dense ? 13.5 : 14, fontWeight: r.read ? 700 : 820, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{senderLabel(r)}</span>
-          <span style={{ fontSize: 11, color: r.read ? T.textMuted : T.primary, fontWeight: r.read ? 600 : 800, flexShrink: 0 }}>{fmtWhen(r.created_at)}</span>
+  // Phone mailbox: one compact, divided surface instead of a stack of floating cards. Channel and
+  // category remain explicit, but live on the preview line so more actual messages fit onscreen.
+  const mobileRows = list.map((r, i) => {
+    const sms = isSmsRow(r);
+    const channelTone = sms ? "#7c3aed" : "#2563eb";
+    const kind = KIND[r.kind] || KIND.other;
+    const selected = !!sel[r.id];
+    return (
+      <InboxSwipeRow key={r.id} rowId={r.id} ariaLabel={`${r.read ? "" : "Unread "}${sms ? "text" : "email"} from ${senderLabel(r)}: ${r.subject || (sms ? "Message" : "No subject")}`} revealed={openSwipeId === r.id} disabled={selMode} selected={selected} read={!!r.read} isText={sms} T={T}
+        onReveal={(id) => setOpenSwipeId(id)} onClose={(id) => setOpenSwipeId(cur => cur === id ? null : cur)}
+        onActivate={() => selMode ? toggleSel(r.id) : openMessage(r)}
+        onToggleRead={() => { markRead([r.id], !r.read); }}
+        onMore={() => setManageRow(r)}
+        onDelete={() => { deleteEmails([r.id], { ask: false }); }}>
+        <div style={{ position: "relative", display: "flex", alignItems: "flex-start", gap: dense ? 9 : 11, minHeight: dense ? 72 : 84, boxSizing: "border-box", padding: dense ? "9px 11px 9px 14px" : "11px 12px 11px 16px", borderTop: i === 0 ? "none" : `1px solid ${hexA(T.border, 0.62)}`, background: selected ? hexA(T.primary, 0.07) : (r.read ? T.surface : hexA(T.primary, 0.018)) }}>
+          {!r.read && !selMode && <span aria-label="Unread" style={{ position: "absolute", left: 5, top: dense ? 17 : 20, width: 6, height: 6, borderRadius: "50%", background: T.primary }} />}
+          {selMode ? (
+            <span aria-hidden="true" style={{ width: dense ? 32 : 36, height: dense ? 32 : 36, borderRadius: "50%", border: `2px solid ${selected ? T.primary : T.border}`, background: selected ? T.primary : T.surface, color: "#fff", display: "grid", placeItems: "center", flexShrink: 0, marginTop: 1 }}>
+              {selected && <Icon name="check" size={17} />}
+            </span>
+          ) : <Avatar name={r.from_name} email={r.from_email} channel={r.channel} size={dense ? 32 : 36} />}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+              <span style={{ flex: 1, minWidth: 0, fontSize: dense ? 13.5 : 14.5, fontWeight: r.read ? 690 : 850, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{senderLabel(r)}</span>
+              {r.replied && <span title="Replied" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="reply" size={12} /></span>}
+              <span style={{ fontSize: dense ? 10.5 : 11, color: r.read ? T.textMuted : T.primary, fontWeight: r.read ? 600 : 800, flexShrink: 0 }}>{fmtWhen(r.created_at)}</span>
+            </div>
+            <div style={{ marginTop: 2, fontSize: dense ? 12.5 : 13.5, lineHeight: 1.25, fontWeight: r.read ? 560 : 760, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.subject || (sms ? "Text message" : "(no subject)")}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0, marginTop: dense ? 3 : 5, fontSize: dense ? 10.5 : 11.5, lineHeight: 1.25, color: T.textMuted }}>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 3, color: channelTone, fontWeight: 820, flexShrink: 0 }}><Icon name={sms ? "message" : "mail"} size={11} />{sms ? "Text" : "Email"}</span>
+              <span aria-hidden="true" style={{ color: T.border }}>·</span>
+              <span style={{ color: kind.color || T.textMuted, fontWeight: 750, flexShrink: 0 }}>{kind.label}</span>
+              {inLeads(r.id) && <><span aria-hidden="true" style={{ color: T.border }}>·</span><span style={{ color: "#16a34a", fontWeight: 750, flexShrink: 0 }}>In Leads</span></>}
+              <span aria-hidden="true" style={{ color: T.border }}>·</span>
+              <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{(r.ai && r.ai.summary) || (r.body_text || "").slice(0, 150)}</span>
+            </div>
+          </div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
-          <span style={{ fontSize: 13.5, fontWeight: r.read ? 600 : 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{r.subject || "(no subject)"}</span>
-        </div>
-        <div style={{ fontSize: 12, color: T.textMuted, marginTop: dense ? 2 : 3, lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: dense ? 1 : 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{(r.ai && r.ai.summary) || (r.body_text || "").slice(0, 160)}</div>
-        <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: dense ? 5 : 8, flexWrap: "wrap" }}>
-          {channelBadge(r)}
-          {badge(r.kind)}
-          {inLeads(r.id) && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#16a34a", flexShrink: 0 }}>→ Leads</span>}
-          {r.replied && <span title="Replied" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="reply" size={12} /></span>}
-        </div>
-      </div>
-    </div>
-  ));
+      </InboxSwipeRow>
+    );
+  });
   // The open-email body — rendered in a desktop reading pane OR a mobile modal.
   const readerInner = !openRow ? null : (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -23835,23 +24193,49 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       )}
     </>
   );
+  const sheetActionStyle = (tone = T.text, danger = false) => ({
+    width: "100%", minHeight: 48, display: "flex", alignItems: "center", gap: 11,
+    padding: "11px 13px", border: `1px solid ${danger ? hexA("#d9282f", 0.24) : T.border}`,
+    borderRadius: 13, background: danger ? hexA("#d9282f", 0.06) : T.surface,
+    color: tone, fontFamily: "inherit", fontSize: 13.5, fontWeight: 760,
+    textAlign: "left", cursor: "pointer",
+  });
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: dense ? 8 : 12 }}>
-      <CommsPageHeader
-        title={folder === "inbox" ? "Unified inbox" : "Sent email"}
-        description={folder === "inbox" ? `${unread} unread · business texts and work email, clearly separated` : "Email you compose and reply to from SPS Way."}
-        icon={folder === "inbox" ? "inbox" : "send"}
-        meta={folder === "inbox" ? <>
-          <span style={{ color: "#7c3aed", background: hexA("#7c3aed", 0.1), borderRadius: 100, padding: "3px 9px", fontSize: 10.5, fontWeight: 800 }}>{textCount} text{textCount === 1 ? "" : "s"}</span>
-          <span style={{ color: "#2563eb", background: hexA("#2563eb", 0.1), borderRadius: 100, padding: "3px 9px", fontSize: 10.5, fontWeight: 800 }}>{emailCount} email{emailCount === 1 ? "" : "s"}</span>
-        </> : null}
-        action={wide
-          ? <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="edit" size={14} />New email</Btn>
-          : showMobileCompose ? iconBtn("edit", "Compose a new email", () => { setComposeMsg(""); setComposeOpen(true); }, true) : null}
-        T={T}
-      />
+    <div style={{ display: "flex", flexDirection: "column", gap: dense ? 8 : 12, paddingBottom: phone && selMode ? 76 : 0 }}>
+      {phone ? (selMode && folder === "inbox" ? (
+        <div style={{ minHeight: 42, display: "grid", gridTemplateColumns: "1fr auto 1fr", alignItems: "center", gap: 10 }}>
+          <button type="button" onClick={exitSelect} style={{ justifySelf: "start", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13.5, fontWeight: 800, padding: "8px 2px", cursor: "pointer" }}>Cancel</button>
+          <div style={{ fontSize: 15, fontWeight: 850, color: T.text, whiteSpace: "nowrap" }}>{selIds.length ? `${selIds.length} Selected` : "Select messages"}</div>
+          <button type="button" onClick={toggleSelectAll} style={{ justifySelf: "end", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13.5, fontWeight: 800, padding: "8px 2px", cursor: "pointer" }}>{allVisibleSelected ? "Clear" : "Select All"}</button>
+        </div>
+      ) : (
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: dense ? 22 : 25, lineHeight: 1.06, fontWeight: 880, color: T.text, letterSpacing: "-0.04em" }}>{folder === "inbox" ? "Inbox" : "Sent"}</div>
+            <div style={{ marginTop: 3, fontSize: dense ? 11 : 12, color: T.textMuted, lineHeight: 1.35 }}>{folder === "inbox" ? `${unread ? `${unread} unread` : "All caught up"} · ${textCount} text${textCount === 1 ? "" : "s"} · ${emailCount} email${emailCount === 1 ? "" : "s"}` : "Email sent from SPS Way"}</div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 7, flexShrink: 0 }}>
+            {folder === "inbox" && (list.length > 0 || selMode) && <button type="button" onClick={() => setSelMode(true)} style={{ minHeight: 40, padding: "7px 8px", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13.5, fontWeight: 820, cursor: "pointer" }}>Edit</button>}
+            {showMobileCompose && iconBtn("edit", "Compose a new email", () => { setComposeMsg(""); setComposeOpen(true); }, true)}
+          </div>
+        </div>
+      )) : (
+        <CommsPageHeader
+          title={folder === "inbox" ? "Unified inbox" : "Sent email"}
+          description={folder === "inbox" ? `${unread} unread · business texts and work email, clearly separated` : "Email you compose and reply to from SPS Way."}
+          icon={folder === "inbox" ? "inbox" : "send"}
+          meta={folder === "inbox" ? <>
+            <span style={{ color: "#7c3aed", background: hexA("#7c3aed", 0.1), borderRadius: 100, padding: "3px 9px", fontSize: 10.5, fontWeight: 800 }}>{textCount} text{textCount === 1 ? "" : "s"}</span>
+            <span style={{ color: "#2563eb", background: hexA("#2563eb", 0.1), borderRadius: 100, padding: "3px 9px", fontSize: 10.5, fontWeight: 800 }}>{emailCount} email{emailCount === 1 ? "" : "s"}</span>
+          </> : null}
+          action={wide
+            ? <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="edit" size={14} />New email</Btn>
+            : showMobileCompose ? iconBtn("edit", "Compose a new email", () => { setComposeMsg(""); setComposeOpen(true); }, true) : null}
+          T={T}
+        />
+      )}
       {/* Folder switch (Inbox / Sent) + context actions — one clean toolbar row */}
-      <div style={{ display: "flex", alignItems: "center", gap: dense ? 6 : 10, flexWrap: wide ? "wrap" : "nowrap", minWidth: 0 }}>
+      {!(phone && selMode) && <div style={{ display: "flex", alignItems: "center", gap: dense ? 6 : 10, flexWrap: wide ? "wrap" : "nowrap", minWidth: 0 }}>
         {folderBar}
         {wide && <div style={{ flex: 1 }} />}
         {folder === "inbox" && (wide ? (
@@ -23860,32 +24244,42 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
             <Btn variant="ghost" sm onClick={refreshing ? undefined : load}>{refreshing ? "Refreshing…" : "Refresh"}</Btn>
             {(list.length > 0 || selMode) && <Btn variant={selMode ? "primary" : "ghost"} sm onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }}>{selMode ? "Done" : "Select"}</Btn>}
           </>
+        ) : phone ? (
+          <>{iconBtn("refresh", refreshing ? "Refreshing" : "Refresh inbox", refreshing ? null : load, false)}</>
         ) : (
           <>
             {iconBtn("refresh", refreshing ? "Refreshing" : "Refresh inbox", refreshing ? null : load, false)}
             {(list.length > 0 || selMode) && iconBtn("check", selMode ? "Finish selecting" : "Select messages", () => { if (selMode) exitSelect(); else setSelMode(true); }, selMode)}
           </>
         ))}
-      </div>
+      </div>}
       {folder === "inbox" ? (
         <>
+      {!(phone && selMode) && <>
       <div style={{ display: "grid", gridTemplateColumns: wide ? "minmax(260px, 1fr) minmax(330px, 0.8fr)" : "1fr", gap: dense ? 7 : 10, alignItems: "center" }}>
         <CommsSearchField value={q} onChange={setQ} placeholder="Search messages, people, tags" T={T} />
-        {channelSwitcher}
+        {!phone && channelSwitcher}
       </div>
-      {!wide && (
+      {phone && mobileQuickFilters}
+      {!phone && !wide && (
         <button type="button" onClick={() => setFiltersOpen(v => !v)} aria-expanded={filtersOpen}
           style={{ minHeight: dense ? 40 : 44, width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: dense ? "7px 10px" : "9px 12px", background: T.surface, border: `1px solid ${filter !== "all" ? T.primary : T.border}`, borderRadius: 12, color: filter !== "all" ? T.primary : T.textMuted, fontFamily: "inherit", fontSize: 12.5, fontWeight: 750, cursor: "pointer" }}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}><Icon name="funnel" size={15} />{filter === "all" ? "Category filters" : `Filtered by ${KIND[filter]?.label || "Unread"}`}</span>
           <span style={{ display: "inline-flex", transform: filtersOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}><Icon name="chevronD" size={15} /></span>
         </button>
       )}
-      {(wide || filtersOpen || filter !== "all") && (
+      {(!phone && (wide || filtersOpen || filter !== "all")) && (
         <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none" }}>
           {chip("all", "All categories")}{chip("unread", `Unread${channelUnread ? ` · ${channelUnread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
         </div>
       )}
-      {selMode && (
+      {phone && (filtersOpen || ["lead", "bill", "client", "other"].includes(filter)) && (
+        <div style={{ display: "flex", gap: 7, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
+          {chip("all", "All categories")}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
+        </div>
+      )}
+      </>}
+      {selMode && !phone && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "8px 12px" }}>
           <button type="button" onClick={toggleSelectAll} style={{ background: "none", border: "none", color: T.primary, fontWeight: 800, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit", padding: 0 }}>{allVisibleSelected ? "Clear" : "Select all"}</button>
           <span style={{ fontSize: 12.5, fontWeight: 700, color: T.textMuted }}>{selIds.length} selected</span>
@@ -23953,10 +24347,77 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
           </div>
         </div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: dense ? 7 : 10, paddingBottom: 12 }}>{cardRows}</div>
+        <div style={{ border: `1px solid ${T.border}`, borderRadius: dense ? 14 : 17, overflow: "hidden", background: T.surface, boxShadow: "0 2px 10px rgba(0,0,0,0.035)", marginBottom: 12 }}>{mobileRows}</div>
       ))}
         </>
       ) : sentView}
+      {phone && selMode && folder === "inbox" && createPortal(
+        <div style={{ position: "fixed", left: "max(12px, env(safe-area-inset-left))", right: "max(12px, env(safe-area-inset-right))", bottom: "calc(76px + env(safe-area-inset-bottom))", zIndex: 98, maxWidth: 560, height: 58, margin: "0 auto", padding: "0 8px", boxSizing: "border-box", display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", alignItems: "stretch", background: hexA(T.surface, 0.97), border: `1px solid ${T.border}`, borderRadius: 18, boxShadow: "0 8px 28px rgba(0,0,0,0.18)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}>
+          {[
+            ["check", "Read", () => { markRead(selIds, true); exitSelect(); }],
+            ["mail", "Unread", () => { markRead(selIds, false); exitSelect(); }],
+            ["funnel", "Category", () => setBulkSortOpen(true)],
+            ["trash", "Delete", bulkDelete],
+          ].map(([icon, label, action]) => (
+            <button key={label} type="button" disabled={!selIds.length || busyBulk} onClick={action}
+              style={{ border: "none", background: "transparent", color: label === "Delete" ? "#d9282f" : T.text, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2, fontFamily: "inherit", fontSize: 10, fontWeight: 780, cursor: selIds.length && !busyBulk ? "pointer" : "default", opacity: selIds.length && !busyBulk ? 1 : 0.34 }}>
+              <Icon name={icon} size={18} />{label}
+            </button>
+          ))}
+        </div>,
+        document.body
+      )}
+      {inboxNotice && createPortal(
+        <div role="status" aria-live="polite" style={{ position: "fixed", left: 16, right: 16, bottom: `calc(${phone && selMode ? 144 : 84}px + env(safe-area-inset-bottom))`, zIndex: 280, maxWidth: 520, margin: "0 auto", padding: "11px 14px", borderRadius: 13, background: "rgba(28,28,30,0.94)", color: "#fff", boxShadow: "0 8px 28px rgba(0,0,0,0.24)", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)", fontSize: 12.5, fontWeight: 720, textAlign: "center", pointerEvents: "none" }}>{inboxNotice}</div>,
+        document.body
+      )}
+      {manageRow && (
+        <InboxActionSheet title={isSmsRow(manageRow) ? "Manage text" : "Manage email"} onClose={() => setManageRow(null)} T={T}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+            <button type="button" onClick={() => { markRead([manageRow.id], !manageRow.read); setManageRow(null); }} style={sheetActionStyle(T.text)}>
+              <span style={{ width: 30, height: 30, borderRadius: 9, background: hexA("#2879d9", 0.1), color: "#2879d9", display: "grid", placeItems: "center" }}><Icon name={manageRow.read ? "mail" : "check"} size={16} /></span>
+              {manageRow.read ? "Mark as unread" : "Mark as read"}
+            </button>
+            <button type="button" onClick={() => { setSel({ [manageRow.id]: true }); setSelMode(true); setManageRow(null); }} style={sheetActionStyle(T.text)}>
+              <span style={{ width: 30, height: 30, borderRadius: 9, background: hexA(T.primary, 0.1), color: T.primary, display: "grid", placeItems: "center" }}><Icon name="check" size={16} /></span>
+              Select this message
+            </button>
+            <div style={{ marginTop: 5, fontSize: 10.5, fontWeight: 800, letterSpacing: "0.07em", textTransform: "uppercase", color: T.textMuted }}>Category</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
+              {["lead", "bill", "client", "other"].map(k => {
+                const kk = KIND[k]; const on = manageRow.kind === k;
+                return <button key={k} type="button" onClick={() => { if (!on) { if (k === "lead") addToLeads(manageRow); else setKindOf(manageRow, k); } setManageRow(null); }}
+                  style={{ minHeight: 44, borderRadius: 12, border: `1.5px solid ${on ? (kk.color || T.text) : T.border}`, background: on ? hexA(kk.color || T.text, 0.09) : T.surface, color: on ? (kk.color || T.text) : T.textMuted, fontFamily: "inherit", fontSize: 12.5, fontWeight: 780, cursor: on ? "default" : "pointer" }}>{kk.label}{on ? " · Current" : ""}</button>;
+              })}
+            </div>
+            {!inLeads(manageRow.id) && <button type="button" onClick={() => { addToLeads(manageRow); setManageRow(null); }} style={sheetActionStyle("#16a34a")}><span style={{ width: 30, height: 30, borderRadius: 9, background: hexA("#16a34a", 0.1), color: "#16a34a", display: "grid", placeItems: "center" }}><Icon name="plus" size={16} /></span>Add to Leads</button>}
+            <button type="button" onClick={() => { const r = manageRow; setManageRow(null); deleteEmails([r.id]); }} style={sheetActionStyle("#d9282f", true)}>
+              <span style={{ width: 30, height: 30, borderRadius: 9, background: hexA("#d9282f", 0.1), color: "#d9282f", display: "grid", placeItems: "center" }}><Icon name="trash" size={16} /></span>
+              {isSmsRow(manageRow) ? "Remove from SPS Inbox" : "Move to Gmail Trash"}
+            </button>
+          </div>
+        </InboxActionSheet>
+      )}
+      {bulkSortOpen && (
+        <InboxActionSheet title={`Categorize ${selIds.length} message${selIds.length === 1 ? "" : "s"}`} onClose={() => setBulkSortOpen(false)} T={T}>
+          <div style={{ fontSize: 12.5, lineHeight: 1.45, color: T.textMuted, marginBottom: 12 }}>Choose where the selected messages belong.</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 9 }}>
+            {["lead", "bill", "client", "other"].map(k => {
+              const kk = KIND[k];
+              return <button key={k} type="button" disabled={busyBulk} onClick={() => { setBulkSortOpen(false); bulkSetKind(k); }} style={{ minHeight: 50, borderRadius: 13, border: `1.5px solid ${hexA(kk.color || T.textMuted, 0.35)}`, background: hexA(kk.color || T.textMuted, 0.07), color: kk.color || T.text, fontFamily: "inherit", fontSize: 13, fontWeight: 800, cursor: busyBulk ? "default" : "pointer", opacity: busyBulk ? 0.55 : 1 }}>{kk.label}</button>;
+            })}
+          </div>
+        </InboxActionSheet>
+      )}
+      {deleteConfirm && (
+        <InboxActionSheet title={deleteConfirm.ids.length === 1 ? "Delete message?" : `Delete ${deleteConfirm.ids.length} messages?`} onClose={() => setDeleteConfirm(null)} T={T}>
+          <div style={{ fontSize: 13.5, color: T.text, lineHeight: 1.55 }}>{deleteConfirm.prompt}</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 9, marginTop: 17 }}>
+            <button type="button" onClick={() => setDeleteConfirm(null)} style={{ minHeight: 46, borderRadius: 13, border: `1px solid ${T.border}`, background: T.surfaceAlt, color: T.text, fontFamily: "inherit", fontSize: 13, fontWeight: 780, cursor: "pointer" }}>Cancel</button>
+            <button type="button" onClick={() => { const ids = deleteConfirm.ids; setDeleteConfirm(null); deleteEmails(ids, { ask: false }); }} style={{ minHeight: 46, borderRadius: 13, border: "none", background: "#d9282f", color: "#fff", fontFamily: "inherit", fontSize: 13, fontWeight: 820, cursor: "pointer" }}>Delete</button>
+          </div>
+        </InboxActionSheet>
+      )}
       {openRow && !wide && (
         <Modal title={isSmsRow(openRow) ? `Text · ${openRow.subject || "Message"}` : `Email · ${openRow.subject || "(no subject)"}`} onClose={() => setOpenRow(null)} maxWidth={640}>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>

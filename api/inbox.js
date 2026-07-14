@@ -570,8 +570,16 @@ export default async function handler(req, res) {
       // system of record, so there's no soft-delete; the UI confirms before calling this.
       const ids = (Array.isArray(b.ids) ? b.ids : (b.id ? [b.id] : [])).map(String).filter(Boolean).slice(0, 200);
       if (!ids.length) return res.status(400).json({ error: "No ids." });
-      const r = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?id=in.(${ids.map(encodeURIComponent).join(",")})`, { method: "DELETE", headers: sbHeaders() });
-      return res.status(r.ok ? 200 : 502).json({ ok: r.ok, deleted: r.ok ? ids.length : 0 });
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?id=in.(${ids.map(encodeURIComponent).join(",")})&select=id`, {
+        method: "DELETE",
+        headers: { ...sbHeaders(), Prefer: "return=representation" },
+      });
+      if (!r.ok) return res.status(502).json({ ok: false, deleted: 0, deletedIds: [], error: "Inbox delete was not saved." });
+      const deletedRows = await r.json().catch(() => []);
+      const deletedIds = (Array.isArray(deletedRows) ? deletedRows : []).map(row => String(row && row.id || "")).filter(Boolean);
+      const deletedSet = new Set(deletedIds);
+      const complete = ids.every(id => deletedSet.has(id));
+      return res.status(complete ? 200 : 409).json({ ok: complete, deleted: deletedIds.length, deletedIds, missingIds: ids.filter(id => !deletedSet.has(id)) });
     }
     if (b.action === "reply") {
       if (!RESEND_KEY) return res.status(501).json({ error: "Email sending isn't configured (RESEND_API_KEY).", missingEnv: true });

@@ -151,6 +151,19 @@ function installHarness({
       }
       return response(updated);
     }
+    if (target.includes("/rest/v1/sps_inbox?") && method === "DELETE") {
+      const ids = idsFromFilter(target);
+      events.push(`inbox:delete:${ids.join(",")}`);
+      assert.equal(options.headers.Prefer, "return=representation");
+      const deleted = [];
+      for (const id of ids) {
+        const row = rows.get(String(id));
+        if (!row) continue;
+        deleted.push({ id: row.id });
+        rows.delete(String(id));
+      }
+      return response(deleted);
+    }
     throw new Error(`Unexpected fetch: ${method} ${target}`);
   };
 
@@ -167,6 +180,31 @@ const linkedLead = (id, messageId) => ({
   name: `Lead ${id}`,
   source: "email",
   status: "new",
+});
+
+test("Inbox delete confirms every row returned by the database", async () => {
+  const harness = installHarness({ inbox: [{ id: "message-1" }, { id: "message-2" }] });
+  const res = makeRes();
+
+  await inboxHandler(post({ action: "delete", ids: ["message-1", "message-2"] }), res);
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, { ok: true, deleted: 2, deletedIds: ["message-1", "message-2"], missingIds: [] });
+  assert.equal(harness.inboxRow("message-1"), undefined);
+  assert.equal(harness.inboxRow("message-2"), undefined);
+});
+
+test("Inbox delete reports a partial database result instead of claiming success", async () => {
+  const harness = installHarness({ inbox: [{ id: "message-1" }] });
+  const res = makeRes();
+
+  await inboxHandler(post({ action: "delete", ids: ["message-1", "missing"] }), res);
+
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.ok, false);
+  assert.deepEqual(res.body.deletedIds, ["message-1"]);
+  assert.deepEqual(res.body.missingIds, ["missing"]);
+  assert.equal(harness.inboxRow("message-1"), undefined);
 });
 
 test("repair updates every Inbox row before removing linked leads through CAS", async () => {
