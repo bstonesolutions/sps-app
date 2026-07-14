@@ -9,7 +9,8 @@ import { createPortalDataFence, portalVisitMatchesReference, portalVisitReferenc
 import { selectActiveEnRouteStop } from "./geofenceSafety";
 import { assessInboundLead, findMisfiledImportedLead } from "./leadQualification";
 import { brandLogoSource } from "./brandAssets";
-import { estimateLineAmount, estimateTotals, formatEstimateMoney, withEstimateTotals } from "./estimateMath";
+import { estimateHasValidDays, estimateHasValidTaxRate, estimateLineAmount, estimateLineCost, estimateLineHasKnownCost, estimateLineQuantity, estimateLineUnitPrice, estimateNumberIsValid, estimateNumberValue, estimateProfitTotals, estimateTotals, formatEstimateMoney, withEstimateRevision, withEstimateTotals } from "./estimateMath";
+import { catalogItemFinancials, estimateLineFromCatalog, estimateLineFromPartsBundle } from "./estimateCatalog";
 
 // True only on a genuine fresh launch of the app shell (hard close / first open).
 // sessionStorage is wiped when the PWA is killed/swiped away, but survives reloads
@@ -897,18 +898,22 @@ async function buildEstimatePDFDoc(estimate, branding, invoicing, client = null)
   // Wrapped, dynamically sized line items with safe continuation pages.
   const lineItems = (estimate.items || []).filter((item) => String(item.desc || "").trim());
   lineItems.forEach((item) => {
-    const qty = parseFloat(item.qty) || 1;
-    const price = parseFloat(item.price || 0);
+    const qty = estimateLineQuantity(item);
+    const price = estimateLineUnitPrice(item);
     const amount = estimateLineAmount(item);
+    const unit = String(item.unit || "").trim();
+    const shortUnit = ({ pieces: "pc", piece: "pc" })[unit] || unit;
+    const unitLabel = shortUnit && !["service", "each", "bundle"].includes(shortUnit) ? ` ${shortUnit}` : "";
     doc.setFont("helvetica", "normal");
     doc.setFontSize(10);
-    const descriptionLines = doc.splitTextToSize(String(item.desc), descriptionWidth);
+    const description = item.bundleNote && !String(item.desc).includes(String(item.bundleNote)) ? `${item.desc}\nIncludes: ${item.bundleNote}` : String(item.desc);
+    const descriptionLines = doc.splitTextToSize(description, descriptionWidth);
     const rowHeight = Math.max(34, descriptionLines.length * 13 + 17);
     ensureSpace(rowHeight, true);
     doc.setTextColor("#111827");
     doc.text(descriptionLines, M + 12, y);
     doc.setTextColor("#374151");
-    doc.text(String(qty), qtyX, y, { align: "right" });
+    doc.text(`${qty}${unitLabel}`, qtyX, y, { align: "right" });
     doc.text(money(price), priceX, y, { align: "right" });
     doc.setFont("helvetica", "bold");
     doc.text(money(amount), amountX - 2, y, { align: "right" });
@@ -14194,7 +14199,7 @@ function CatalogManager({ catalog, setCatalog }) {
   const addInvAmount = () => setTxModal(m => ({ ...m, data: { ...m.data, inventoryOz: String(Math.max(0, num(m.data.inventoryOz) + num(m.addOz))) }, addOz: "" }));
 
   // ---- services: add / edit / delete ----
-  const openAddSvc = () => setSvcModal({ mode: "add", data: { id: `s${Date.now()}`, name: "", price: "", price_type: "flat", target_hourly_rate: "", products: [], treatments: [], tests: [], division: catDiv } });
+  const openAddSvc = () => setSvcModal({ mode: "add", data: { id: `s${Date.now()}`, name: "", price: "", cost: "", price_type: "flat", target_hourly_rate: "", products: [], treatments: [], tests: [], division: catDiv } });
   const openEditSvc = (s) => setSvcModal({ mode: "edit", data: { ...s, products: s.products || [], tests: s.tests || [] } });
   const saveSvc = () => {
     const d = svcModal.data;
@@ -14267,7 +14272,7 @@ function CatalogManager({ catalog, setCatalog }) {
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: (s.products?.length || s.tests?.length) ? 8 : 0 }}>
                 <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}><span style={{ fontSize: 14, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</span><DivBadge division={s.division} /></span>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
-                  {s.price && <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>${s.price}</span>}
+                  {s.price && <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>${s.price}{s.cost != null && String(s.cost).trim() !== "" ? <span style={{ fontWeight: 400, color: T.textMuted }}> · ${s.cost} cost</span> : null}</span>}
                   <Icon name="edit" size={14} />
                 </div>
               </div>
@@ -14493,7 +14498,7 @@ function CatalogManager({ catalog, setCatalog }) {
                       ))}
                     </div>
                   </div>
-                  <div style={{ display: "flex", gap: 10 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
                     <div style={{ flex: 1 }}>
                       <label style={labelStyle}>{ptype === "hourly" ? "Hourly Rate" : "Price"}</label>
                       <div style={{ position: "relative" }}>
@@ -14503,6 +14508,14 @@ function CatalogManager({ catalog, setCatalog }) {
                       </div>
                     </div>
                     <div style={{ flex: 1 }}>
+                      <label style={labelStyle}>{ptype === "hourly" ? "Direct Cost / hr" : "Est. Direct Cost"}</label>
+                      <div style={{ position: "relative" }}>
+                        <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>$</span>
+                        <input style={{ ...chipInput, paddingLeft: 22, paddingRight: ptype === "hourly" ? 36 : 12 }} inputMode="decimal" value={svcModal.data.cost ?? ""} onChange={e => setSvc("cost", e.target.value.replace(/[^\d.]/g, ""))} placeholder="0" />
+                        {ptype === "hourly" && <span style={{ position: "absolute", right: 11, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>/hr</span>}
+                      </div>
+                    </div>
+                    <div style={{ gridColumn: "1 / -1", maxWidth: 230 }}>
                       <label style={labelStyle}>Target $/hr</label>
                       <div style={{ position: "relative" }}>
                         <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>$</span>
@@ -14511,7 +14524,7 @@ function CatalogManager({ catalog, setCatalog }) {
                       </div>
                     </div>
                   </div>
-                  <div style={{ fontSize: 11, color: T.textMuted, marginTop: -10 }}>Target hourly rate is this service's profitability benchmark — used to flag undercharged jobs (Feature 3B). Optional.</div>
+                  <div style={{ fontSize: 11, color: T.textMuted, marginTop: -10, lineHeight: 1.45 }}>Direct cost drives projected estimate and invoice profit. Target hourly rate remains the benchmark used to flag undercharged completed jobs. Both are optional.</div>
                 </>
               );
             })()}
@@ -15696,6 +15709,7 @@ function InvoiceSendStep({ invoice, client, onClose }) {
 
 function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCatalog, presetClientId, onSave, onClose, onDelete }) {
   const { T, perms } = useApp();
+  const canSeeLineCost = !!(perms.isAdmin || perms.seeProfit || perms.seeInventoryCost);
   const invoiceVp = useViewport();
   const narrowInvoice = invoiceVp.width <= 420;
   const money = (n) => `$${(n || 0).toFixed(2)}`;
@@ -16021,13 +16035,13 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
                         <input style={{ ...small, paddingLeft: 18, textAlign: "left" }} value={l.unitPrice} onChange={e => setLine(l.id, "unitPrice", e.target.value.replace(/[^\d.]/g, ""))} placeholder="0.00" />
                       </div>
                     </div>
-                    <div style={{ width: narrowInvoice ? "auto" : 60, minWidth: 0 }}>
+                    {canSeeLineCost && <div style={{ width: narrowInvoice ? "auto" : 60, minWidth: 0 }}>
                       <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 3 }}>Cost ea</div>
                       <div style={{ position: "relative" }}>
                         <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
                         <input style={{ ...small, paddingLeft: 18, textAlign: "left" }} value={l.unitCost || ""} onChange={e => setLine(l.id, "unitCost", e.target.value.replace(/[^\d.]/g, ""))} placeholder="0" />
                       </div>
-                    </div>
+                    </div>}
                     <div style={{ textAlign: narrowInvoice ? "left" : "center", minWidth: 0 }}>
                       <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 3 }}>Tax</div>
                       <button type="button" onClick={() => setLine(l.id, "taxable", !l.taxable)} aria-pressed={!!l.taxable} title="Taxable" style={{ width: narrowInvoice ? "100%" : 32, height: narrowInvoice ? 44 : 32, borderRadius: 10, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", background: l.taxable ? T.primary : T.surface, border: `1.5px solid ${l.taxable ? T.primary : T.border}`, color: l.taxable ? "#fff" : T.textMuted, fontWeight: 800, fontSize: 13 }}>{l.taxable ? "✓ Taxable" : (narrowInvoice ? "Not taxable" : "")}</button>
@@ -16152,6 +16166,8 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           onAddCatalog={addCatalogLine}
           onAddBundle={addBundledParts}
           onCreateItem={onCreateCatalogItem}
+          showCosts={canSeeLineCost}
+          showInventory={!!(perms.isAdmin || perms.seeInventory)}
           T={T}
         />
       )}
@@ -16160,7 +16176,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
 }
 
 // ── Catalog picker: add services/products/treatments/parts to an invoice ──
-function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCreateItem, T, title = "Add to Invoice", allowCreate = true }) {
+function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCreateItem, T, title = "Add to Invoice", allowCreate = true, showCosts = true, showInventory = false }) {
   const pickerVp = useViewport();
   const kb = useKeyboardInset();
   const [tab, setTab] = useState("services");
@@ -16170,6 +16186,9 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
   const [newItem, setNewItem] = useState({ name: "", price: "", cost: "" });
   const n = (v) => parseFloat(v) || 0;
   const money = (v) => `$${(n(v)).toFixed(2)}`;
+  const newItemPriceValid = estimateNumberIsValid(newItem.price);
+  const newItemCostValid = String(newItem.cost ?? "").trim() === "" || estimateNumberIsValid(newItem.cost);
+  const newItemReady = !!newItem.name.trim() && newItemPriceValid && newItemCostValid;
 
   const tabs = [["services", "Services"], ["products", "Products"], ["treatments", "Treatments"], ["parts", "Parts"]];
   const lists = {
@@ -16180,21 +16199,24 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
   };
   const filtered = (lists[tab] || []).filter(it => !search || (it.name || "").toLowerCase().includes(search.toLowerCase()));
 
-  const priceOf = (it) => tab === "treatments" ? it.retailPerOz : tab === "parts" ? it.retailPer : it.price;
-  const costOf  = (it) => tab === "treatments" ? it.costPerOz   : tab === "parts" ? it.costPer   : it.cost;
   const kindOf  = () => tab === "services" ? "service" : tab === "products" ? "product" : tab === "treatments" ? "treatment" : "part";
 
   const toggleBundle = (id) => setBundle(b => { const c = { ...b }; if (c[id]) delete c[id]; else c[id] = "1"; return c; });
   const bundleCount = Object.keys(bundle).length;
+  const selectedBundleParts = Object.entries(bundle)
+    .map(([id, qty]) => ({ part: (catalog.parts || []).find(p => p.id === id), qty }))
+    .filter(entry => entry.part);
+  const bundleMissingRetail = selectedBundleParts.some(({ part }) => !catalogItemFinancials("part", part).priceKnown);
+  const bundleInvalidQuantity = selectedBundleParts.some(({ qty }) => !estimateNumberIsValid(qty) || !(estimateNumberValue(qty) > 0));
   const confirmBundle = () => {
-    const selected = Object.entries(bundle).map(([id, qty]) => ({ part: (catalog.parts || []).find(p => p.id === id), qty })).filter(x => x.part);
-    onAddBundle(selected);
+    if (bundleMissingRetail || bundleInvalidQuantity) return;
+    onAddBundle(selectedBundleParts);
   };
 
   const saveNewItem = () => {
-    if (!newItem.name.trim() || typeof onCreateItem !== "function") return;
+    if (!newItemReady || typeof onCreateItem !== "function") return;
     const created = onCreateItem(creating.type, newItem);
-    if (created) onAddCatalog(kindOf(), created);
+    if (created) onAddCatalog(creating.type, created);
     setCreating(null);
     setNewItem({ name: "", price: "", cost: "" });
   };
@@ -16212,9 +16234,9 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
             <div style={{ fontSize: 17, fontWeight: 800, color: T.text }}>{title}</div>
             <button onClick={onClose} aria-label="Close catalog" style={{ background: T.surfaceAlt, border: "none", borderRadius: 11, width: 40, height: 40, fontSize: 18, color: T.textMuted, cursor: "pointer", fontFamily: "inherit" }}>×</button>
           </div>
-          <div style={{ display: "flex", gap: 4, background: T.surfaceAlt, borderRadius: 10, padding: 3 }}>
+          <div style={{ display: "flex", gap: 4, background: T.surfaceAlt, borderRadius: 10, padding: 3, overflowX: "auto", scrollbarWidth: "none" }}>
             {tabs.map(([id, lab]) => (
-              <button key={id} onClick={() => { setTab(id); setBundle({}); }} style={{ flex: 1, minWidth: 0, minHeight: 40, padding: "8px 3px", border: "none", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: tab === id ? T.surface : "transparent", color: tab === id ? T.primary : T.textMuted }}>{lab}</button>
+              <button key={id} onClick={() => { setTab(id); setBundle({}); setCreating(null); }} style={{ flex: "1 0 auto", minWidth: id === "treatments" ? 94 : 76, minHeight: 40, padding: "8px 8px", border: "none", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: tab === id ? T.surface : "transparent", color: tab === id ? T.primary : T.textMuted }}>{lab}</button>
             ))}
           </div>
         </div>
@@ -16233,15 +16255,17 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
                   <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 5, fontWeight: 700, textTransform: "uppercase" }}>Price</div>
                   <input style={cell} value={newItem.price} onChange={e => setNewItem(s => ({ ...s, price: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0.00" />
                 </div>
-                <div style={{ flex: 1 }}>
+                {showCosts && <div style={{ flex: 1 }}>
                   <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 5, fontWeight: 700, textTransform: "uppercase" }}>Our cost</div>
                   <input style={cell} value={newItem.cost} onChange={e => setNewItem(s => ({ ...s, cost: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0.00" />
-                </div>
+                </div>}
               </div>
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={saveNewItem} style={{ flex: 1, padding: "12px", borderRadius: 10, border: "none", background: T.primary, color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Save & Add</button>
+                <button onClick={saveNewItem} disabled={!newItemReady} style={{ flex: 1, padding: "12px", borderRadius: 10, border: "none", background: T.primary, color: "#fff", fontWeight: 700, fontSize: 14, cursor: newItemReady ? "pointer" : "default", fontFamily: "inherit", opacity: newItemReady ? 1 : 0.5 }}>Save & Add</button>
                 <button onClick={() => setCreating(null)} style={{ padding: "12px 18px", borderRadius: 10, border: "none", background: T.surfaceAlt, color: T.textMuted, fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
               </div>
+              {!newItemPriceValid && <div style={{ fontSize: 11.5, color: T.warning, fontWeight: 700, textAlign: "center" }}>Enter a valid retail price. Use 0 only when the item is intentionally free.</div>}
+              {!newItemCostValid && <div style={{ fontSize: 11.5, color: T.warning, fontWeight: 700, textAlign: "center" }}>Enter a valid cost or leave it blank if it is not known yet.</div>}
             </div>
           ) : (
             <>
@@ -16250,8 +16274,10 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
                 {filtered.map(it => {
                   const isBundling = tab === "parts";
                   const selected = !!bundle[it.id];
-                  const price = priceOf(it), cost = costOf(it);
-                  const profit = n(price) - n(cost);
+                  const financials = catalogItemFinancials(kindOf(), it);
+                  const profit = n(financials.price) - n(financials.cost);
+                  const requestedQty = selected && estimateNumberIsValid(bundle[it.id]) ? estimateNumberValue(bundle[it.id]) : 1;
+                  const shortOnStock = showInventory && financials.inventoryTracked && financials.onHand < requestedQty;
                   return (
                     <div key={it.id}
                       onClick={() => isBundling ? toggleBundle(it.id) : onAddCatalog(kindOf(), it)}
@@ -16262,10 +16288,25 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{it.name}</div>
                         <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>
-                          {money(price)}{it.unit ? `/${it.unit}` : ""}
-                          {n(cost) > 0 && <span style={{ color: profit >= 0 ? T.accent : "#E5484D", fontWeight: 700 }}> · {profit >= 0 ? "+" : ""}{money(profit)} profit</span>}
+                          {financials.priceKnown ? `${money(financials.price)}/${financials.unit}` : <span style={{ color: T.warning, fontWeight: 700 }}>Retail price not set</span>}
+                          {showCosts && (financials.costKnown
+                            ? <span style={{ color: profit >= 0 ? T.accent : "#E5484D", fontWeight: 700 }}> · {profit >= 0 ? "+" : ""}{money(profit)} profit</span>
+                            : <span style={{ color: T.warning, fontWeight: 700 }}> · cost not set</span>)}
                         </div>
+                        {showInventory && financials.inventoryTracked && <div style={{ fontSize: 10.5, color: shortOnStock ? T.warning : T.textMuted, marginTop: 3, fontWeight: shortOnStock ? 750 : 500 }}>{financials.onHand} {financials.unit} on hand{shortOnStock ? " · below selected quantity" : ""}</div>}
                       </div>
+                      {isBundling && selected && (
+                        <label onClick={(event) => event.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 5, color: T.textMuted, fontSize: 10.5, fontWeight: 700, flexShrink: 0 }}>
+                          Qty
+                          <input
+                            aria-label={`${it.name} quantity`}
+                            inputMode="decimal"
+                            value={bundle[it.id]}
+                            onChange={(event) => setBundle(current => ({ ...current, [it.id]: event.target.value.replace(/[^\d.]/g, "") }))}
+                            style={{ width: 52, minHeight: 34, boxSizing: "border-box", border: `1px solid ${shortOnStock || !estimateNumberIsValid(bundle[it.id]) || !(estimateNumberValue(bundle[it.id]) > 0) ? T.warning : T.border}`, borderRadius: 8, background: T.surface, color: T.text, textAlign: "center", fontFamily: "inherit", fontSize: 13, fontWeight: 750 }}
+                          />
+                        </label>
+                      )}
                       {!isBundling && <span style={{ fontSize: 20, color: T.primary, fontWeight: 300 }}>+</span>}
                     </div>
                   );
@@ -16284,7 +16325,9 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
         {/* Bundle footer for parts */}
         {!creating && tab === "parts" && bundleCount > 0 && (
           <div style={{ padding: "12px 16px", borderTop: `1px solid ${T.border}`, background: T.surface }}>
-            <button onClick={confirmBundle} style={{ width: "100%", padding: "13px", borderRadius: 12, border: "none", background: T.primary, color: "#fff", fontWeight: 800, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>
+            {bundleMissingRetail && <div style={{ marginBottom: 8, fontSize: 11.5, color: T.warning, fontWeight: 700, textAlign: "center", lineHeight: 1.4 }}>Set a retail price on every selected part before creating the bundle. Use 0 only for an intentionally free part.</div>}
+            {bundleInvalidQuantity && <div style={{ marginBottom: 8, fontSize: 11.5, color: T.warning, fontWeight: 700, textAlign: "center", lineHeight: 1.4 }}>Every selected part needs a valid quantity greater than zero.</div>}
+            <button onClick={confirmBundle} disabled={bundleMissingRetail || bundleInvalidQuantity} style={{ width: "100%", padding: "13px", borderRadius: 12, border: "none", background: T.primary, color: "#fff", fontWeight: 800, fontSize: 14, cursor: bundleMissingRetail || bundleInvalidQuantity ? "default" : "pointer", fontFamily: "inherit", opacity: bundleMissingRetail || bundleInvalidQuantity ? 0.5 : 1 }}>
               Add {bundleCount} part{bundleCount !== 1 ? "s" : ""} as one line
             </button>
           </div>
@@ -17568,8 +17611,18 @@ const nextEstimateNumber = (estimates) => {
   return `EST-${highest + 1}`;
 };
 
-function EstimatesScreen({ clients, catalog, branding, email, invoicing, T, estimates: estimatesProp, setEstimates: setEstimatesProp }) {
+// New tab permissions distinguish view-only from edit access. Legacy members do not
+// have tabAccess, so keep their existing canInvoice behavior until they are migrated.
+const canManageEstimates = (perms = {}) => !!(
+  perms.isAdmin
+  || (perms.tabAccess ? perms.tabAccess.estimates === "edit" : perms.canInvoice)
+);
+
+function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoicing, T, estimates: estimatesProp, setEstimates: setEstimatesProp }) {
+  const { perms = {} } = useApp();
   const vp = useViewport();
+  const showProfit = !!(perms.isAdmin || perms.seeProfit);
+  const canManage = canManageEstimates(perms);
   const [estimatesLocal, setEstimatesLocal] = useStoredState("sps_estimates", []);
   const estimates = estimatesProp !== undefined ? estimatesProp : estimatesLocal;
   const setEstimates = setEstimatesProp || setEstimatesLocal;
@@ -17581,6 +17634,7 @@ function EstimatesScreen({ clients, catalog, branding, email, invoicing, T, esti
   // Persist without leaving the editor — used by "Download PDF" so exporting saves your edits but
   // doesn't kick you back to the list (that close was the reported bug).
   const persistEstimate = (est) => {
+    if (!canManage) return;
     setEstimates(prev => {
       const exists = (prev||[]).some(e => e.id === est.id);
       return exists ? prev.map(e => e.id === est.id ? est : e) : [est, ...(prev||[])];
@@ -17590,6 +17644,7 @@ function EstimatesScreen({ clients, catalog, branding, email, invoicing, T, esti
   const saveEstimate = (est) => { persistEstimate(est); setView("list"); };
 
   const deleteEstimate = (id) => {
+    if (!canManage) return;
     setEstimates(prev => (prev||[]).filter(e => e.id !== id));
     setView("list");
   };
@@ -17600,6 +17655,7 @@ function EstimatesScreen({ clients, catalog, branding, email, invoicing, T, esti
         estimate={view === "detail" ? selected : null}
         clients={clients}
         catalog={catalog}
+        setCatalog={setCatalog}
         branding={branding}
         email={email}
         invoicing={invoicing}
@@ -17607,6 +17663,7 @@ function EstimatesScreen({ clients, catalog, branding, email, invoicing, T, esti
         onSave={saveEstimate}
         onPersist={persistEstimate}
         onDelete={deleteEstimate}
+        canManage={canManage}
         nextNumber={nextEstimateNumber(estimates)}
         onBack={() => { setView("list"); setSelected(null); }}
       />
@@ -17640,15 +17697,17 @@ function EstimatesScreen({ clients, catalog, branding, email, invoicing, T, esti
             <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{activeCount} active · {counts.approved || 0} approved</div>
           </div>
         </div>
-        <Btn onClick={() => setView("new")} sm style={{ gap: 5, minHeight: 40 }}><Icon name="plus" size={13} /> New estimate</Btn>
+        {canManage
+          ? <Btn onClick={() => setView("new")} sm style={{ gap: 5, minHeight: 40 }}><Icon name="plus" size={13} /> New estimate</Btn>
+          : <span style={{ borderRadius: 100, padding: "7px 10px", background: T.surfaceAlt, color: T.textMuted, fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.045em" }}>View only</span>}
       </div>
 
       {est.length === 0 && (
         <div style={{ textAlign: "center", padding: "60px 20px" }}>
           <div style={{ width: 60, height: 60, borderRadius: 18, background: hexA(T.primary, 0.08), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px" }}><Icon name="invoice" size={28} /></div>
           <div style={{ fontSize: 17, fontWeight: 800, color: T.text, marginBottom: 6 }}>No estimates yet</div>
-          <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 20 }}>Build and send professional estimates to clients.</div>
-          <Btn onClick={() => setView("new")} style={{ gap: 6 }}><Icon name="plus" size={14} /> Create First Estimate</Btn>
+          <div style={{ fontSize: 13, color: T.textMuted, marginBottom: canManage ? 20 : 0 }}>{canManage ? "Build and send professional estimates to clients." : "No estimates are available to view yet."}</div>
+          {canManage && <Btn onClick={() => setView("new")} style={{ gap: 6 }}><Icon name="plus" size={14} /> Create First Estimate</Btn>}
         </div>
       )}
 
@@ -17684,6 +17743,7 @@ function EstimatesScreen({ clients, catalog, branding, email, invoicing, T, esti
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {filtered.map((estimate) => {
               const totals = estimateTotals(estimate, invoicing?.taxRate);
+              const financials = estimateProfitTotals(estimate);
               const status = estimate.status || "draft";
               return (
                 <button key={estimate.id} onClick={() => { setSelected(estimate); setView("detail"); }} style={{ width: "100%", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 15, padding: vp.isPhone ? "13px 14px" : "14px 16px", display: "flex", gap: 12, alignItems: "center", cursor: "pointer", fontFamily: "inherit", textAlign: "left", boxShadow: "0 1px 3px rgba(0,0,0,0.035)" }}>
@@ -17698,7 +17758,11 @@ function EstimatesScreen({ clients, catalog, branding, email, invoicing, T, esti
                   </div>
                   <div style={{ textAlign: "right", flexShrink: 0 }}>
                     <div style={{ fontSize: 16, fontWeight: 850, color: T.text }}>{formatEstimateMoney(totals.total)}</div>
-                    <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 2 }}>{(estimate.items || []).filter((item) => item.desc).length} item{(estimate.items || []).filter((item) => item.desc).length === 1 ? "" : "s"}</div>
+                    {showProfit && financials.costComplete
+                      ? <div style={{ fontSize: 10.5, color: financials.profit >= 0 ? T.accent : "#C0392B", fontWeight: 750, marginTop: 2 }}>{formatEstimateMoney(financials.profit)} profit · {financials.margin == null ? "—" : `${financials.margin.toFixed(1)}%`}</div>
+                      : showProfit && financials.missingCostLines > 0
+                        ? <div style={{ fontSize: 10.5, color: T.warning, fontWeight: 700, marginTop: 2 }}>{financials.missingCostLines} cost{financials.missingCostLines === 1 ? "" : "s"} missing</div>
+                        : <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 2 }}>{(estimate.items || []).filter((item) => item.desc).length} item{(estimate.items || []).filter((item) => item.desc).length === 1 ? "" : "s"}</div>}
                   </div>
                 </button>
               );
@@ -17711,33 +17775,46 @@ function EstimatesScreen({ clients, catalog, branding, email, invoicing, T, esti
   );
 }
 
-function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, T, onSave, onPersist, onDelete, onBack, nextNumber }) {
+function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email, invoicing, T, onSave, onPersist, onDelete, onBack, nextNumber, canManage: canManageProp }) {
   const { perms = {} } = useApp();
   const vp = useViewport();
+  const showProfit = !!(perms.isAdmin || perms.seeProfit);
+  const showInventory = !!(perms.isAdmin || perms.seeInventory);
+  const canManage = canManageProp ?? canManageEstimates(perms);
   const isNew = !estimate;
   const configuredTaxRate = String(invoicing?.taxRate ?? "").trim();
   const defaultTaxRate = configuredTaxRate || String(DEFAULT_INVOICING.taxRate);
+  const newLineId = () => `eli_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const emptyEstimateLine = () => ({ id: newLineId(), desc: "", qty: "1", price: "", unitCost: "", costKnown: false, kind: "custom" });
   const [form, setForm] = useState(() => {
     const base = estimate ? {
       ...estimate,
       items: Array.isArray(estimate.items) && estimate.items.length
-        ? estimate.items.map((item) => {
-            const qty = Number.parseFloat(item.qty) || 1;
+        ? estimate.items.map((item, index) => {
+            const parsedQty = Number.parseFloat(item.qty);
+            const qty = Number.isFinite(parsedQty) ? parsedQty : 1;
             const amountOnly = Number.parseFloat(String(item.amount ?? "").replace(/[^0-9.-]/g, "")) || 0;
+            const storedCost = item.unitCost ?? item.cost;
+            const hasStoredCost = estimateNumberIsValid(storedCost);
             return {
               ...item,
+              id: item.id || `eli_${estimate.id || "legacy"}_${index + 1}`,
               desc: item.desc ?? item.description ?? "",
               qty: String(item.qty ?? "1"),
-              price: String(item.price ?? item.unitPrice ?? (amountOnly ? amountOnly / qty : "")),
+              price: String(item.price ?? item.unitPrice ?? (amountOnly ? amountOnly / (qty || 1) : "")),
+              unitCost: hasStoredCost ? String(storedCost) : "",
+              costKnown: item.costKnown === true || (item.costKnown !== false && hasStoredCost),
+              kind: item.kind || "custom",
             };
           })
         : (() => {
             const savedTotal = Number.parseFloat(String(estimate.subtotal ?? estimate.total ?? "").replace(/[^0-9.-]/g, "")) || 0;
-            return [{ id: `eli_${Date.now()}`, desc: savedTotal ? (estimate.title || estimate.service || "Estimate total") : "", qty: "1", price: savedTotal ? savedTotal.toFixed(2) : "" }];
+            return [{ ...emptyEstimateLine(), desc: savedTotal ? (estimate.title || estimate.service || "Estimate total") : "", price: savedTotal ? savedTotal.toFixed(2) : "" }];
           })(),
       // Missing means legacy: keep tax off so a historical quote never changes after rollout.
       taxEnabled: estimate.taxEnabled === true,
       taxRate: String(estimate.taxRate ?? defaultTaxRate),
+      validDays: estimate.validDays == null || String(estimate.validDays).trim() === "" ? 30 : estimate.validDays,
     } : {
       id: `est_${Date.now()}`,
       number: nextNumber || "EST-1001",
@@ -17747,7 +17824,7 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
       date: new Date().toISOString().split("T")[0],
       validDays: 30,
       status: "draft",
-      items: [{ id: `eli_${Date.now()}`, desc: "", qty: "1", price: "" }],
+      items: [emptyEstimateLine()],
       notes: "",
       taxEnabled: true,
       taxRate: defaultTaxRate,
@@ -17758,11 +17835,37 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
   const [sending, setSending] = useState(false);
   const [smsSending, setSmsSending] = useState(false);
   const [sentMsg, setSentMsg] = useState("");
+  const [formError, setFormError] = useState("");
   const [pdfBusy, setPdfBusy] = useState(false);
+  const shareBusyRef = useRef(false);
   const [picker, setPicker] = useState(false);
+  const shareBusy = sending || smsSending || pdfBusy;
   const totals = estimateTotals(form, defaultTaxRate);
-  const canSend = perms.invoiceSend !== false;
-  const canDelete = perms.invoiceDelete !== false;
+  const financials = estimateProfitTotals(form);
+  const canEmailEstimate = canManage && perms.invoiceSend !== false;
+  // Estimate texts still use the shared Quo endpoint, whose server permission is sendTexts.
+  // Keep the UI aligned so a staff member never sees an action that the server must reject.
+  const canTextEstimate = canEmailEstimate && perms.sendTexts !== false;
+  const canDelete = canManage && perms.invoiceDelete !== false;
+  const validateEstimateSettings = () => {
+    if (!estimateHasValidDays(form)) return "Valid for must be a whole number of at least 1 day.";
+    if (!estimateHasValidTaxRate(form)) return "Enter a valid sales tax rate, or turn sales tax off for this estimate.";
+    return "";
+  };
+  const validateEstimateLines = () => {
+    const settingsValidation = validateEstimateSettings();
+    if (settingsValidation) return settingsValidation;
+    const lines = (form.items || []).filter((item) => String(item.desc || "").trim() || String(item.price ?? "").trim() || String(item.unitCost ?? "").trim() || item.refId);
+    if (!lines.length) return "Add at least one line item first.";
+    if (lines.some((item) => !String(item.desc || "").trim())) return "Every priced estimate line needs a description.";
+    if (lines.some((item) => item.price == null || String(item.price).trim() === "")) return "Every estimate line needs a retail price. Enter 0 for no-charge work.";
+    if (lines.some((item) => !estimateNumberIsValid(item.price))) return "Every retail price must be a valid number. Use 0 only for no-charge work.";
+    if (lines.some((item) => item.kind === "bundle" && (item.retailComplete === false || (item.bundleItems || []).some((child) => child.priceKnown === false)))) return "Every part in a bundle needs a retail price. Update the catalog and rebuild that bundle; use 0 only for an intentionally free part.";
+    if (lines.some((item) => String(item.qty ?? "").trim() !== "" && (!estimateNumberIsValid(item.qty) || !(estimateNumberValue(item.qty) > 0)))) return "Every estimate quantity must be a valid number greater than zero.";
+    if (lines.some((item) => String(item.unitCost ?? "").trim() !== "" && !estimateNumberIsValid(item.unitCost))) return "Every entered cost must be a valid number. Leave it blank if the cost is not known yet.";
+    if (lines.some((item) => estimateLineUnitPrice(item) < 0 || (estimateNumberIsValid(item.unitCost) && estimateNumberValue(item.unitCost) < 0))) return "Estimate prices and costs cannot be negative.";
+    return "";
+  };
   // Warm the jsPDF chunk so the native share sheet opens inside the tap's user-gesture window
   // (iOS blocks navigator.share if an await stalls the gesture). Same trick the invoice export uses.
   useEffect(() => { loadJsPDF().catch(() => {}); }, []);
@@ -17770,55 +17873,82 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
   // estimate, which is exactly the "export kicks me out of the estimate" bug. Generates from live form
   // state, so the PDF reflects unsaved edits; use "Save Estimate" to persist.
   const downloadPdf = async () => {
-    if (pdfBusy) return;
+    if (shareBusyRef.current) return;
+    const lineValidation = validateEstimateLines();
+    if (lineValidation) { setFormError(lineValidation); setSentMsg(lineValidation); return; }
+    shareBusyRef.current = true;
+    setFormError("");
     setPdfBusy(true); setSentMsg("");
     try {
       const normalized = withEstimateTotals(form, defaultTaxRate);
       const client = (clients || []).find((entry) => String(entry.id) === String(normalized.clientId));
       setForm(normalized);
-      if (onPersist) onPersist(normalized); // save edits, but stay on the estimate (no close)
+      if (canManage && onPersist) onPersist(normalized); // view-only exports must never write
       const r = await generateEstimatePDF(normalized, branding, invoicing, client);
       if (r === "downloaded") setSentMsg("Estimate PDF saved to your downloads.");
     } catch (e) {
       setSentMsg("Couldn't export the PDF: " + ((e && e.message) || "unknown error"));
-    } finally { setPdfBusy(false); }
+    } finally { shareBusyRef.current = false; setPdfBusy(false); }
   };
 
   const revise = (current, patch, contentChanged = true) => {
-    const next = { ...current, ...patch };
-    if (contentChanged && ["sent", "approved", "declined"].includes(String(current.status || "").toLowerCase())) {
-      next.status = "draft";
-      delete next.approvedAt;
-      delete next.declinedAt;
-      delete next.sentAt;
-    }
-    return withEstimateTotals(next, defaultTaxRate);
+    return withEstimateRevision(current, patch, defaultTaxRate, { customerVisible: contentChanged });
   };
-  const set = (key, value, contentChanged = true) => setForm((current) => revise(current, { [key]: value }, contentChanged));
+  const set = (key, value, contentChanged = true) => {
+    if (!canManage || shareBusyRef.current) return;
+    setFormError("");
+    setForm((current) => revise(current, { [key]: value }, contentChanged));
+  };
 
   const setItem = (idx, key, val) => {
     const items = form.items.map((it, i) => i === idx ? { ...it, [key]: val } : it);
     set("items", items);
   };
-  const addItem = () => set("items", [...form.items, { id: `eli_${Date.now()}`, desc: "", qty: "1", price: "" }]);
+  const setItemCost = (idx, val) => {
+    if (!canManage || shareBusyRef.current) return;
+    setFormError("");
+    const items = form.items.map((it, i) => i === idx ? { ...it, unitCost: val, costKnown: estimateNumberIsValid(val) } : it);
+    set("items", items, false);
+  };
+  const addItem = () => set("items", [...form.items, emptyEstimateLine()]);
   const removeItem = (idx) => set("items", form.items.filter((_, i) => i !== idx));
+  const populatedItems = () => form.items.filter((entry) => String(entry.desc || "").trim() || String(entry.price || "").trim() || entry.refId);
 
   const addCatalogLine = (kind, item) => {
-    const price = kind === "treatment" ? item.retailPerOz : kind === "part" ? item.retailPer : item.price;
-    const line = { id: `eli_${Date.now()}`, desc: item.name || "", qty: "1", price: String(price || ""), kind, refId: item.id };
-    set("items", [...form.items.filter((entry) => entry.desc || entry.price), line]);
+    const line = estimateLineFromCatalog(kind, item, newLineId());
+    set("items", [...populatedItems(), line]);
     setPicker(false);
   };
   const addBundledParts = (selected) => {
-    const parts = (selected || []).filter((entry) => entry.part);
-    if (!parts.length) return;
-    const price = parts.reduce((sum, entry) => sum + (parseFloat(entry.part.retailPer) || 0) * (parseFloat(entry.qty) || 1), 0);
-    const names = parts.map((entry) => `${entry.part.name}${(parseFloat(entry.qty) || 1) > 1 ? ` ×${entry.qty}` : ""}`).join(", ");
-    set("items", [...form.items.filter((entry) => entry.desc || entry.price), { id: `eli_${Date.now()}`, desc: `Parts & Materials — ${names}`, qty: "1", price: price.toFixed(2), kind: "bundle" }]);
+    const line = estimateLineFromPartsBundle(selected, newLineId());
+    if (!line) return;
+    if (line.retailComplete === false) {
+      const message = "Every selected part needs a retail price before it can be bundled. Update the catalog, then try again.";
+      setFormError(message);
+      setSentMsg(message);
+      return;
+    }
+    set("items", [...populatedItems(), line]);
     setPicker(false);
   };
 
+  const createCatalogItem = (type, data) => {
+    if (!canManage || shareBusyRef.current || !setCatalog) return null;
+    const id = `${type[0]}${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const base = { id, name: data.name.trim(), division: "All" };
+    let item;
+    if (type === "service") item = { ...base, price: data.price || "", cost: data.cost || "", price_type: "flat", target_hourly_rate: "", products: [], treatments: [], tests: [] };
+    else if (type === "product") item = { ...base, price: data.price || "", cost: data.cost || "" };
+    else if (type === "treatment") item = { ...base, retailPerOz: data.price || "", costPerOz: data.cost || "", unit: "oz", stockByLoc: {} };
+    else if (type === "part") item = { ...base, retailPer: data.price || "", costPer: data.cost || "", unit: "pieces", stockByLoc: {} };
+    else return null;
+    const key = type === "service" ? "services" : type === "product" ? "products" : type === "treatment" ? "treatments" : "parts";
+    setCatalog((current) => ({ ...current, [key]: [...(current[key] || []), item] }));
+    return item;
+  };
+
   const selectClient = (id) => {
+    if (!canManage || shareBusyRef.current) return;
     const c = (clients||[]).find(c => String(c.id) === String(id));
     setForm((current) => revise(current, { clientId: id, clientName: c?.name || "" }));
   };
@@ -17826,8 +17956,7 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
   const normalizedForSend = () => withEstimateTotals(form, defaultTaxRate);
   const validateForSend = (client) => {
     if (!client) return "Choose a client before sending this estimate.";
-    if (!(form.items || []).some((item) => String(item.desc || "").trim())) return "Add at least one line item before sending.";
-    return "";
+    return validateEstimateLines();
   };
   const markSent = (current) => {
     const sent = withEstimateTotals({ ...current, status: "sent", sentAt: new Date().toISOString() }, defaultTaxRate);
@@ -17843,7 +17972,13 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
       estimateForSend.number ? `Estimate: ${estimateForSend.number}` : "",
       estimateForSend.title ? `Service: ${estimateForSend.title}` : "",
       "",
-      ...estimateForSend.items.filter(it => it.desc).map(it => `• ${it.desc}: ${formatEstimateMoney(estimateLineAmount(it))}`),
+      ...estimateForSend.items.filter(it => it.desc).map(it => {
+        const qty = estimateLineQuantity(it);
+        const unit = String(it.unit || "").trim();
+        const showUnit = unit && !["service", "each", "bundle"].includes(unit);
+        const quantity = qty !== 1 || showUnit ? ` (${qty}${showUnit ? ` ${unit}` : ""} × ${formatEstimateMoney(it.price)})` : "";
+        return `• ${it.desc}${quantity}: ${formatEstimateMoney(estimateLineAmount(it))}`;
+      }),
       "",
       `Subtotal: ${formatEstimateMoney(sentTotals.subtotal)}`,
       sentTotals.taxEnabled ? `Sales tax (${sentTotals.taxRate}%): ${formatEstimateMoney(sentTotals.tax)}` : "",
@@ -17857,12 +17992,14 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
   };
 
   const sendViaSms = async () => {
-    if (smsSending) return;
+    if (!canTextEstimate || shareBusyRef.current) return;
     const client = (clients||[]).find(c => String(c.id) === String(form.clientId));
     const validation = validateForSend(client);
-    if (validation) { setSentMsg(validation); return; }
+    if (validation) { setFormError(validation); setSentMsg(validation); return; }
+    setFormError("");
     const phone = (client?.phone||"").replace(/\D/g,"");
     if (!phone) { setSentMsg("No phone number on file for this client."); return; }
+    shareBusyRef.current = true;
     const current = normalizedForSend();
     const text = buildSmsText(current);
     setSmsSending(true); setSentMsg("");
@@ -17876,17 +18013,20 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
     } catch (_) {
       setSentMsg("Couldn't reach the texting server. Nothing was sent.");
     } finally {
+      shareBusyRef.current = false;
       setSmsSending(false);
     }
   };
 
   const sendViaEmail = async () => {
+    if (!canEmailEstimate || shareBusyRef.current) return;
     const client = (clients||[]).find(c => String(c.id) === String(form.clientId));
     const validation = validateForSend(client);
-    if (validation) { setSentMsg(validation); return; }
+    if (validation) { setFormError(validation); setSentMsg(validation); return; }
+    setFormError("");
     const em = (client?.email || "").trim();
     if (!em) { setSentMsg("No email on file for this client."); return; }
-    if (sending) return;
+    shareBusyRef.current = true;
     setSending(true); setSentMsg("");
     try {
       const current = normalizedForSend();
@@ -17909,7 +18049,7 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
             number: current.number || "",
             date: current.date || "",
             service: current.title || "",
-            items: (current.items || []).map(it => ({ desc: it.desc, qty: it.qty, price: it.price, kind: it.kind })),
+            items: (current.items || []).map(it => ({ desc: it.desc, qty: it.qty, price: it.price, kind: it.kind, unit: it.unit, bundleNote: it.bundleNote })),
             taxEnabled: sentTotals.taxEnabled,
             taxRate: sentTotals.taxRate,
             subtotal: sentTotals.subtotal,
@@ -17928,21 +18068,42 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
       else if (r.ok && d.held) { setSentMsg("Held by Test Mode — not sent to the client."); }
       else { setSentMsg(d.error || "Email failed to send."); }
     } catch (_) { setSentMsg("Couldn't reach the server."); }
-    finally { setSending(false); }
+    finally { shareBusyRef.current = false; setSending(false); }
   };
 
   const field = { width: "100%", minHeight: 44, padding: "10px 12px", border: `1px solid ${T.border}`, borderRadius: 11, fontSize: vp.isPhone ? 16 : 14, fontFamily: "inherit", boxSizing: "border-box", outline: "none", color: T.text, background: T.surface };
   const label = { fontSize: 10.5, fontWeight: 750, textTransform: "uppercase", letterSpacing: "0.055em", color: T.textMuted, display: "block", marginBottom: 5 };
   const card = { background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, padding: vp.isPhone ? 14 : 17 };
   const statusTone = { draft: T.textMuted, sent: T.primary, approved: T.accent, declined: T.warning }[form.status] || T.textMuted;
-  const saveCurrent = () => onSave(withEstimateTotals(form, defaultTaxRate));
+  const setEstimateStatus = (nextStatus) => {
+    if (!canManage || shareBusyRef.current) return;
+    if (nextStatus !== "draft") {
+      const lineValidation = validateEstimateLines();
+      if (lineValidation) { setFormError(lineValidation); setSentMsg(lineValidation); return; }
+    }
+    setFormError("");
+    setSentMsg("");
+    set("status", nextStatus, false);
+  };
+  const saveCurrent = () => {
+    if (!canManage || shareBusyRef.current) return;
+    const settingsValidation = validateEstimateSettings();
+    if (settingsValidation) { setFormError(settingsValidation); setSentMsg(settingsValidation); return; }
+    if (form.status !== "draft") {
+      const lineValidation = validateEstimateLines();
+      if (lineValidation) { setFormError(lineValidation); setSentMsg(lineValidation); return; }
+    }
+    setFormError("");
+    onSave(withEstimateTotals(form, defaultTaxRate));
+  };
   const confirmDelete = () => {
+    if (!canDelete || shareBusyRef.current) return;
     if (!confirm(`Delete ${form.number || "this estimate"}? This cannot be undone.`)) return;
     onDelete(form.id);
   };
 
   return (
-    <>
+    <fieldset disabled={shareBusy} aria-busy={shareBusy} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
         <div style={{ position: "sticky", top: 0, zIndex: 12, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "8px 0 10px", background: T.bg }}>
           <button onClick={onBack} style={{ minHeight: 40, background: "none", border: "none", color: T.primary, fontWeight: 750, fontSize: 13, cursor: "pointer", padding: "0 5px 0 0", display: "flex", alignItems: "center", gap: 5, fontFamily: "inherit" }}><Icon name="back" size={15} /> Estimates</button>
@@ -17950,8 +18111,12 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
             <div style={{ fontSize: 14, fontWeight: 850, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isNew ? "New estimate" : form.number || "Estimate"}</div>
             <div style={{ fontSize: 10.5, fontWeight: 750, color: statusTone, marginTop: 1 }}>{estimateStatusLabel(form.status)}</div>
           </div>
-          <Btn sm onClick={saveCurrent} style={{ minHeight: 40, minWidth: 66 }}>Save</Btn>
+          {canManage
+            ? <Btn sm onClick={saveCurrent} style={{ minHeight: 40, minWidth: 66 }}>Save</Btn>
+            : <span style={{ minWidth: 66, textAlign: "right", color: T.textMuted, fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.045em" }}>View only</span>}
         </div>
+
+        {formError && <div role="alert" style={{ display: "flex", alignItems: "flex-start", gap: 7, marginTop: -5, padding: "9px 11px", borderRadius: 11, border: `1px solid ${hexA(T.warning, 0.28)}`, background: hexA(T.warning, 0.08), color: T.warning, fontSize: 11.5, fontWeight: 700, lineHeight: 1.45 }}><Icon name="info" size={13} style={{ flexShrink: 0, marginTop: 1 }} />{formError}</div>}
 
         {estimate && estimate.status !== "draft" && form.status === "draft" && (
           <div style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "10px 12px", background: hexA(T.primary, 0.07), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 12, color: T.text, fontSize: 12, lineHeight: 1.45 }}>
@@ -17961,7 +18126,7 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
         )}
 
         <div style={{ display: "grid", gridTemplateColumns: vp.isDesktop ? "minmax(0, 1.6fr) minmax(290px, 0.75fr)" : "1fr", gap: 13, alignItems: "start" }}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 13, minWidth: 0 }}>
+          <fieldset disabled={!canManage} style={{ display: "flex", flexDirection: "column", gap: 13, minWidth: 0, border: 0, padding: 0, margin: 0 }}>
             <div style={{ ...card, display: "flex", flexDirection: "column", gap: 12 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
                 <div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>Estimate details</div>
@@ -17985,27 +18150,74 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
             </div>
 
             <div style={{ ...card, padding: 0, overflow: "hidden" }}>
-              <div style={{ padding: "13px 14px", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-                <div><div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>Scope & pricing</div><div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>Add services, materials, or custom work.</div></div>
-                <button onClick={() => setPicker(true)} style={{ minHeight: 38, padding: "7px 10px", borderRadius: 10, border: "none", background: T.primary, color: "#fff", fontSize: 11.5, fontWeight: 800, fontFamily: "inherit", cursor: "pointer", flexShrink: 0 }}><Icon name="plus" size={12} /> Catalog</button>
+              <div style={{ padding: "13px 14px", borderBottom: `1px solid ${T.border}`, display: "flex", flexDirection: vp.width <= 360 ? "column" : "row", justifyContent: "space-between", alignItems: vp.width <= 360 ? "stretch" : "center", gap: 10 }}>
+                <div><div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>Scope & pricing</div><div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>Pull from services and inventory, or add one-time work.</div></div>
+                <button onClick={() => setPicker(true)} style={{ minHeight: 38, padding: "7px 10px", borderRadius: 10, border: "none", background: T.primary, color: "#fff", fontSize: 11.5, fontWeight: 800, fontFamily: "inherit", cursor: "pointer", flexShrink: 0 }}><Icon name="plus" size={12} /> {vp.width <= 360 ? "Add from catalog" : "Catalog / inventory"}</button>
               </div>
               <div style={{ display: "flex", flexDirection: "column" }}>
-                {form.items.map((item, idx) => (
-                  <div key={item.id} style={{ padding: vp.isPhone ? "12px 14px" : "13px 16px", borderBottom: idx < form.items.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", flexDirection: "column", gap: 8 }}>
-                    <div style={{ display: "flex", alignItems: "flex-end", gap: 7 }}>
-                      <div style={{ flex: 1, minWidth: 0 }}><label style={label}>Description</label><input style={field} value={item.desc} onChange={e => setItem(idx, "desc", e.target.value)} placeholder="Service or item description" /></div>
-                      <button onClick={() => removeItem(idx)} disabled={form.items.length === 1} aria-label="Remove line item" style={{ width: 42, height: 44, flexShrink: 0, borderRadius: 11, border: `1px solid ${T.border}`, background: T.surfaceAlt, color: T.textMuted, cursor: form.items.length === 1 ? "default" : "pointer", opacity: form.items.length === 1 ? 0.35 : 1, display: "grid", placeItems: "center" }}><Icon name="close" size={15} /></button>
+                {form.items.map((item, idx) => {
+                  const costKnown = estimateLineHasKnownCost(item);
+                  const lineRevenue = estimateLineAmount(item);
+                  const lineCost = estimateLineCost(item);
+                  const lineProfit = lineRevenue - lineCost;
+                  const lineMargin = lineRevenue > 0 ? (lineProfit / lineRevenue) * 100 : 0;
+                  const kindLabel = ({ service: "Service", product: "Product", treatment: "Treatment", part: "Part", bundle: "Parts bundle", custom: "Custom" })[item.kind] || "Custom";
+                  const compactFields = vp.width <= 420;
+                  const lineQty = String(item.qty ?? "").trim() === "" ? 1 : (Number.parseFloat(item.qty) || 0);
+                  const inventoryStatus = (() => {
+                    if (!showInventory) return null;
+                    if (item.kind === "bundle" && Array.isArray(item.bundleItems)) {
+                      const missingChildren = [];
+                      const checks = item.bundleItems.map((child) => {
+                        const live = (catalog?.parts || []).find((part) => String(part.id) === String(child.refId));
+                        if (!live) { missingChildren.push(child.name || "Bundled part"); return null; }
+                        const stock = catalogItemFinancials("part", live);
+                        const required = (Number.parseFloat(child.qty) || 1) * Math.max(1, lineQty);
+                        return stock.inventoryTracked ? { name: child.name || live.name, required, onHand: stock.onHand, unit: stock.unit } : null;
+                      }).filter(Boolean);
+                      const shortages = checks.filter((entry) => entry.required > entry.onHand);
+                      const warnings = [];
+                      if (missingChildren.length) warnings.push(`Removed from catalog: ${missingChildren.join(", ")}. Saved estimate pricing remains unchanged`);
+                      if (shortages.length) warnings.push(`Low stock: ${shortages.map((entry) => `${entry.name} needs ${entry.required} ${entry.unit}; ${entry.onHand} on hand`).join(" · ")}`);
+                      if (warnings.length) return { warning: true, text: warnings.join(" · ") };
+                      return checks.length ? { warning: false, text: "Bundled parts are linked to live inventory." } : null;
+                    }
+                    const key = item.kind === "product" ? "products" : item.kind === "treatment" ? "treatments" : item.kind === "part" ? "parts" : null;
+                    if (!key || !item.refId) return null;
+                    const live = (catalog?.[key] || []).find((entry) => String(entry.id) === String(item.refId));
+                    if (!live) return { warning: true, text: "Catalog item was removed; this estimate keeps its saved price and cost." };
+                    const stock = catalogItemFinancials(item.kind, live);
+                    if (!stock.inventoryTracked) return null;
+                    const warning = lineQty > stock.onHand;
+                    return { warning, text: `${stock.onHand} ${stock.unit} on hand${warning ? ` · estimate needs ${lineQty}` : ""}` };
+                  })();
+                  return (
+                    <div key={item.id} style={{ padding: vp.isPhone ? "12px 14px" : "13px 16px", borderBottom: idx < form.items.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", flexDirection: "column", gap: 8 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, minHeight: 18 }}>
+                        <span style={{ display: "inline-flex", alignItems: "center", borderRadius: 100, padding: "3px 7px", background: item.refId || item.kind === "bundle" ? hexA(T.primary, 0.08) : T.surfaceAlt, color: item.refId || item.kind === "bundle" ? T.primary : T.textMuted, fontSize: 9.5, fontWeight: 850, textTransform: "uppercase", letterSpacing: "0.04em" }}>{kindLabel}</span>
+                        {(item.refId || item.kind === "bundle") && <span style={{ color: T.textMuted, fontSize: 10.5 }}>Catalog pricing saved to this estimate</span>}
+                      </div>
+                      <div style={{ display: "flex", alignItems: "flex-end", gap: 7 }}>
+                        <div style={{ flex: 1, minWidth: 0 }}><label style={label}>Description</label><input style={field} value={item.desc} onChange={e => setItem(idx, "desc", e.target.value)} placeholder="Service or item description" /></div>
+                        <button onClick={() => removeItem(idx)} disabled={form.items.length === 1} aria-label="Remove line item" style={{ width: 42, height: 44, flexShrink: 0, borderRadius: 11, border: `1px solid ${T.border}`, background: T.surfaceAlt, color: T.textMuted, cursor: form.items.length === 1 ? "default" : "pointer", opacity: form.items.length === 1 ? 0.35 : 1, display: "grid", placeItems: "center" }}><Icon name="close" size={15} /></button>
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: showProfit ? (compactFields ? "minmax(58px, 0.55fr) repeat(2, minmax(86px, 1fr))" : "minmax(70px, 0.6fr) repeat(2, minmax(105px, 1fr)) minmax(90px, 0.75fr)") : (compactFields ? "minmax(68px, 0.65fr) minmax(110px, 1.35fr)" : "minmax(72px, 0.7fr) minmax(110px, 1.2fr) minmax(90px, 0.8fr)"), gap: 7, alignItems: "end" }}>
+                        <div><label style={label}>{item.kind === "bundle" ? "Bundle" : `Qty${item.unit && item.unit !== "service" && item.unit !== "each" ? ` (${item.unit})` : ""}`}</label><input inputMode="decimal" disabled={item.kind === "bundle"} title={item.kind === "bundle" ? "Part quantities are saved inside this bundle" : undefined} style={{ ...field, textAlign: "center", background: item.kind === "bundle" ? T.surfaceAlt : T.surface, color: item.kind === "bundle" ? T.textMuted : T.text }} value={item.kind === "bundle" ? (String(item.qty ?? "").trim() || "1") : item.qty} onChange={e => setItem(idx, "qty", e.target.value.replace(/[^\d.]/g, ""))} /></div>
+                        <div><label style={label}>Retail ea</label><div style={{ position: "relative" }}><span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: T.textMuted, fontSize: 13 }}>$</span><input inputMode="decimal" style={{ ...field, paddingLeft: 23 }} value={item.price} onChange={e => setItem(idx, "price", e.target.value.replace(/[^\d.]/g, ""))} placeholder="0.00" /></div></div>
+                        {showProfit && <div><label style={label}>Cost ea</label><div style={{ position: "relative" }}><span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: T.textMuted, fontSize: 13 }}>$</span><input inputMode="decimal" aria-label={`${item.desc || "Line item"} cost`} style={{ ...field, paddingLeft: 23, borderColor: costKnown ? T.border : hexA(T.warning, 0.55) }} value={item.unitCost || ""} onChange={e => setItemCost(idx, e.target.value.replace(/[^\d.]/g, ""))} placeholder="Required" /></div></div>}
+                        <div style={{ textAlign: "right", paddingBottom: compactFields ? 0 : 11, gridColumn: compactFields ? "1 / -1" : undefined, display: compactFields ? "flex" : "block", justifyContent: compactFields ? "space-between" : undefined, alignItems: "baseline" }}><div style={{ ...label, marginBottom: compactFields ? 0 : 3 }}>Line total</div><div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>{formatEstimateMoney(lineRevenue)}</div></div>
+                      </div>
+                      {showProfit && (costKnown
+                        ? <div style={{ fontSize: 10.5, color: lineProfit >= 0 ? T.accent : "#C0392B", fontWeight: 750 }}>Projected profit {formatEstimateMoney(lineProfit)} · {lineRevenue > 0 ? `${lineMargin.toFixed(1)}% margin` : "margin n/a"} <span style={{ color: T.textMuted, fontWeight: 500 }}>· internal only</span></div>
+                        : <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10.5, color: T.warning, fontWeight: 750 }}><Icon name="info" size={11} /> Add cost to calculate this line's profit.</div>)}
+                      {inventoryStatus && <div style={{ display: "flex", alignItems: "flex-start", gap: 5, fontSize: 10.5, color: inventoryStatus.warning ? T.warning : T.textMuted, fontWeight: inventoryStatus.warning ? 750 : 550, lineHeight: 1.4 }}><Icon name={inventoryStatus.warning ? "info" : "box"} size={11} style={{ flexShrink: 0, marginTop: 1 }} /> {inventoryStatus.text}</div>}
+                      {item.kind === "bundle" && <div style={{ fontSize: 10, color: T.textMuted }}>To change bundled part quantities, remove this line and rebuild the bundle from the catalog.</div>}
                     </div>
-                    <div style={{ display: "grid", gridTemplateColumns: vp.width <= 360 ? "minmax(68px, 0.65fr) minmax(105px, 1.35fr)" : "minmax(72px, 0.7fr) minmax(110px, 1.2fr) minmax(90px, 0.8fr)", gap: 7, alignItems: "end" }}>
-                      <div><label style={label}>Qty</label><input inputMode="decimal" style={{ ...field, textAlign: "center" }} value={item.qty} onChange={e => setItem(idx, "qty", e.target.value.replace(/[^\d.]/g, ""))} /></div>
-                      <div><label style={label}>Unit price</label><div style={{ position: "relative" }}><span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: T.textMuted, fontSize: 13 }}>$</span><input inputMode="decimal" style={{ ...field, paddingLeft: 23 }} value={item.price} onChange={e => setItem(idx, "price", e.target.value.replace(/[^\d.]/g, ""))} placeholder="0.00" /></div></div>
-                      <div style={{ textAlign: "right", paddingBottom: vp.width <= 360 ? 0 : 11, gridColumn: vp.width <= 360 ? "1 / -1" : undefined, display: vp.width <= 360 ? "flex" : "block", justifyContent: vp.width <= 360 ? "space-between" : undefined, alignItems: "baseline" }}><div style={{ ...label, marginBottom: vp.width <= 360 ? 0 : 3 }}>Amount</div><div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>{formatEstimateMoney(estimateLineAmount(item))}</div></div>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
               <div style={{ padding: "11px 14px", borderTop: `1px solid ${T.border}`, background: T.surfaceAlt }}>
-                <button onClick={addItem} style={{ width: "100%", minHeight: 40, borderRadius: 10, border: `1.5px dashed ${T.border}`, background: T.surface, color: T.primary, fontSize: 12.5, fontWeight: 800, fontFamily: "inherit", cursor: "pointer" }}>+ Add custom line</button>
+                <button onClick={addItem} style={{ width: "100%", minHeight: 40, borderRadius: 10, border: `1.5px dashed ${T.border}`, background: T.surface, color: T.primary, fontSize: 12.5, fontWeight: 800, fontFamily: "inherit", cursor: "pointer" }}>+ Add one-time custom line</button>
               </div>
             </div>
 
@@ -18013,36 +18225,53 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
               <label style={label}>Notes or scope details</label>
               <textarea style={{ ...field, minHeight: 96, resize: "vertical", lineHeight: 1.5 }} value={form.notes} onChange={e => set("notes", e.target.value)} placeholder="Work details, exclusions, payment schedule, or next steps…" />
             </div>
-          </div>
+          </fieldset>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 13, position: vp.isDesktop ? "sticky" : "static", top: vp.isDesktop ? 72 : undefined }}>
-            <div style={card}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-                <div><div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>Sales tax</div><div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{totals.taxEnabled ? `${totals.taxRate}% added automatically` : "Removed from this estimate"}</div></div>
-                <Toggle on={totals.taxEnabled} onChange={(on) => set("taxEnabled", on)} />
+            {showProfit && <div style={card}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+                <div><div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>Projected job profit</div><div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 2 }}>Internal only · before sales tax</div></div>
+                {financials.costComplete && <span style={{ borderRadius: 100, padding: "4px 7px", background: hexA(financials.profit >= 0 ? T.accent : "#C0392B", 0.09), color: financials.profit >= 0 ? T.accent : "#C0392B", fontSize: 10, fontWeight: 850 }}>{financials.margin == null ? "No margin" : `${financials.margin.toFixed(1)}%`}</span>}
               </div>
-              {totals.taxEnabled && <div style={{ marginTop: 12 }}><label style={label}>Tax rate</label><div style={{ position: "relative", maxWidth: 120 }}><input inputMode="decimal" style={{ ...field, paddingRight: 28 }} value={form.taxRate} onChange={e => set("taxRate", e.target.value.replace(/[^\d.]/g, ""))} /><span style={{ position: "absolute", right: 11, top: "50%", transform: "translateY(-50%)", color: T.textMuted, fontSize: 13 }}>%</span></div></div>}
-              <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${T.border}`, display: "flex", flexDirection: "column", gap: 7 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: T.textMuted }}><span>Subtotal</span><span>{formatEstimateMoney(totals.subtotal)}</span></div>
-                {totals.taxEnabled && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: T.textMuted }}><span>Sales tax ({totals.taxRate}%)</span><span>{formatEstimateMoney(totals.tax)}</span></div>}
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", fontSize: 17, fontWeight: 850, color: T.text, borderTop: `1px solid ${T.border}`, paddingTop: 9 }}><span>Total</span><span style={{ color: T.primary, fontSize: 21 }}>{formatEstimateMoney(totals.total)}</span></div>
+              <div style={{ marginTop: 13, paddingTop: 11, borderTop: `1px solid ${T.border}`, display: "flex", flexDirection: "column", gap: 7 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: T.textMuted }}><span>Revenue</span><span>{formatEstimateMoney(financials.revenue)}</span></div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: T.textMuted }}><span>{financials.costComplete ? "Estimated cost" : "Known cost so far"}</span><span>{formatEstimateMoney(financials.cost)}</span></div>
+                {financials.costComplete
+                  ? <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderTop: `1px solid ${T.border}`, paddingTop: 9, fontSize: 14, fontWeight: 850, color: T.text }}><span>Gross profit</span><span style={{ color: financials.profit >= 0 ? T.accent : "#C0392B", fontSize: 18 }}>{formatEstimateMoney(financials.profit)}</span></div>
+                  : financials.missingCostLines > 0
+                    ? <div style={{ display: "flex", gap: 7, alignItems: "flex-start", marginTop: 2, padding: "9px 10px", borderRadius: 10, background: hexA(T.warning, 0.08), color: T.warning, fontSize: 11, fontWeight: 700, lineHeight: 1.4 }}><Icon name="info" size={13} style={{ flexShrink: 0, marginTop: 1 }} /> Add cost to {financials.missingCostLines} line{financials.missingCostLines === 1 ? "" : "s"} before relying on profit or margin.</div>
+                    : <div style={{ fontSize: 11, color: T.textMuted, lineHeight: 1.4 }}>Add a service, product, treatment, part, or custom line to see projected profit.</div>}
               </div>
-            </div>
+            </div>}
+            <fieldset disabled={!canManage} style={{ display: "flex", flexDirection: "column", gap: 13, border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+              <div style={card}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+                  <div><div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>Sales tax</div><div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{totals.taxEnabled ? `${totals.taxRate}% applied to the entire estimate` : "Removed from this estimate"}</div></div>
+                  <Toggle on={totals.taxEnabled} onChange={(on) => set("taxEnabled", on)} />
+                </div>
+                {totals.taxEnabled && <div style={{ marginTop: 12 }}><label style={label}>Tax rate</label><div style={{ position: "relative", maxWidth: 120 }}><input inputMode="decimal" style={{ ...field, paddingRight: 28 }} value={form.taxRate} onChange={e => set("taxRate", e.target.value.replace(/[^\d.]/g, ""))} /><span style={{ position: "absolute", right: 11, top: "50%", transform: "translateY(-50%)", color: T.textMuted, fontSize: 13 }}>%</span></div></div>}
+                <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${T.border}`, display: "flex", flexDirection: "column", gap: 7 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: T.textMuted }}><span>Subtotal</span><span>{formatEstimateMoney(totals.subtotal)}</span></div>
+                  {totals.taxEnabled && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: T.textMuted }}><span>Sales tax ({totals.taxRate}%)</span><span>{formatEstimateMoney(totals.tax)}</span></div>}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", fontSize: 17, fontWeight: 850, color: T.text, borderTop: `1px solid ${T.border}`, paddingTop: 9 }}><span>Total</span><span style={{ color: T.primary, fontSize: 21 }}>{formatEstimateMoney(totals.total)}</span></div>
+                </div>
+              </div>
 
-            <div style={card}>
-              <label style={label}>Status</label>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 7 }}>
-                {ESTIMATE_STATUSES.map(({ id, label: statusLabel }) => {
-                  const on = form.status === id;
-                  return <button key={id} onClick={() => set("status", id, false)} aria-pressed={on} style={{ minHeight: 40, border: `1.5px solid ${on ? T.primary : T.border}`, borderRadius: 10, background: on ? hexA(T.primary, 0.08) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 750, fontSize: 11.5, fontFamily: "inherit", cursor: "pointer" }}>{statusLabel}</button>;
-                })}
+              <div style={card}>
+                <label style={label}>Status</label>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 7 }}>
+                  {ESTIMATE_STATUSES.map(({ id, label: statusLabel }) => {
+                    const on = form.status === id;
+                    return <button key={id} onClick={() => setEstimateStatus(id)} aria-pressed={on} style={{ minHeight: 40, border: `1.5px solid ${on ? T.primary : T.border}`, borderRadius: 10, background: on ? hexA(T.primary, 0.08) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 750, fontSize: 11.5, fontFamily: "inherit", cursor: "pointer" }}>{statusLabel}</button>;
+                  })}
+                </div>
               </div>
-            </div>
+            </fieldset>
 
             <div style={{ ...card, display: "flex", flexDirection: "column", gap: 8 }}>
-              <div><div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>Share with client</div><div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>Sending saves the estimate as Sent after the server confirms delivery.</div></div>
-              {canSend && <Btn onClick={sendViaEmail} disabled={sending} block style={{ gap: 7 }}><Icon name="mail" size={15} /> {sending ? "Sending…" : "Email estimate"}</Btn>}
-              {canSend && <Btn onClick={sendViaSms} disabled={smsSending} variant="outline" block style={{ gap: 7 }}><Icon name="message" size={15} /> {smsSending ? "Sending…" : "Text estimate"}</Btn>}
+              <div><div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>{canManage ? "Share with client" : "Estimate copy"}</div><div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{canManage ? "Sending saves the estimate as Sent after the server confirms delivery." : "View-only access can download a copy without changing this estimate."}</div></div>
+              {canEmailEstimate && <Btn onClick={sendViaEmail} disabled={sending} block style={{ gap: 7 }}><Icon name="mail" size={15} /> {sending ? "Sending…" : "Email estimate"}</Btn>}
+              {canTextEstimate && <Btn onClick={sendViaSms} disabled={smsSending} variant="outline" block style={{ gap: 7 }}><Icon name="message" size={15} /> {smsSending ? "Sending…" : "Text estimate"}</Btn>}
               <Btn onClick={downloadPdf} disabled={pdfBusy} variant="ghost" block style={{ gap: 7 }}><Icon name="download" size={15} /> {pdfBusy ? "Preparing…" : "Download PDF"}</Btn>
               {sentMsg && <div role="status" style={{ fontSize: 11.5, color: T.textMuted, textAlign: "center", lineHeight: 1.45, padding: "4px 2px" }}>{sentMsg}</div>}
             </div>
@@ -18052,8 +18281,8 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
         </div>
       </div>
 
-      {picker && <CatalogPickerSheet catalog={catalog} title="Add to Estimate" allowCreate={false} onClose={() => setPicker(false)} onAddCatalog={addCatalogLine} onAddBundle={addBundledParts} T={T} />}
-    </>
+      {canManage && picker && <CatalogPickerSheet catalog={catalog} title="Add to Estimate" allowCreate={!!(perms.isAdmin || perms.editCatalog)} showCosts={showProfit} showInventory={showInventory} onCreateItem={createCatalogItem} onClose={() => setPicker(false)} onAddCatalog={addCatalogLine} onAddBundle={addBundledParts} T={T} />}
+    </fieldset>
   );
 }
 
@@ -30566,7 +30795,8 @@ function CPEstimates({ client, estimates, branding, onApprove, T }) {
                 <div key={item.id || lineIndex} style={{ display:"grid", gridTemplateColumns:"minmax(0,1fr) auto", gap:12, padding:"9px 0", borderBottom:`1px solid ${T.border}` }}>
                   <div style={{ minWidth:0 }}>
                     <div style={{ fontSize:13, fontWeight:700, color:T.text, lineHeight:1.35 }}>{item.desc || item.description || "Estimate item"}</div>
-                    <div style={{ fontSize:10.5, color:T.textMuted, marginTop:2 }}>{numeric(item.qty) || 1} × {formatEstimateMoney(numeric(item.price ?? item.unitPrice))}</div>
+                    {item.bundleNote && !String(item.desc || item.description || "").includes(String(item.bundleNote)) && <div style={{ fontSize:10.5, color:T.textMuted, marginTop:2 }}>Includes: {item.bundleNote}</div>}
+                    <div style={{ fontSize:10.5, color:T.textMuted, marginTop:2 }}>{estimateLineQuantity(item)}{item.unit && !["service", "each", "bundle"].includes(item.unit) ? ` ${item.unit}` : ""} × {formatEstimateMoney(numeric(item.price ?? item.unitPrice))}</div>
                   </div>
                   <div style={{ fontSize:13, fontWeight:800, color:T.text, whiteSpace:"nowrap" }}>{formatEstimateMoney(estimateLineAmount(item))}</div>
                 </div>
@@ -33723,7 +33953,7 @@ export default function App({ authEmail = "", onSignOut }) {
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <SectionErrorBoundary key="inventory"><InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} /></SectionErrorBoundary>}
       {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} branding={branding} T={T} budget={budget} />}
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} isAdmin={perms.isAdmin} />}
-      {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
+      {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} setCatalog={setCatalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
       {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
       {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : commsSection || undefined} initialSectionNonce={commsSectionNonce} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} setBranding={setBranding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} onLinkLead={handleLinkLead} openLeadId={openLeadId} onLeadOpened={() => setOpenLeadId(null)} vp={vp} />}
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}

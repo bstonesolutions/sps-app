@@ -7,9 +7,9 @@
 // Optional env: RESEND_FROM (defaults to the verified SPS domain address)
 
 import { resolveFrom } from "./_sender.js";
-import { requireUser } from "./_auth.js";
+import { requireEstimateSender } from "./_estimate-auth.js";
 import { brandLogoSource } from "../brandAssets.js";
-import { estimateLineAmount, estimateTotals, formatEstimateMoney } from "../estimateMath.js";
+import { estimateLineAmount, estimateLineQuantity, estimateLineUnitPrice, estimateTotals, formatEstimateMoney } from "../estimateMath.js";
 
 const escapeHtml = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -28,13 +28,16 @@ function buildEstimateHtml({ clientName, branding, estimate, logoHtml }) {
   const items = Array.isArray(estimate.items) ? estimate.items : [];
   const totals = estimateTotals(estimate);
   const rows = items.filter((it) => (it.desc || "").trim()).map((it) => {
-    const qty = Number(it.qty) || 1;
-    const price = Number(it.price ?? it.unitPrice) || 0;
+    const qty = estimateLineQuantity(it);
+    const price = estimateLineUnitPrice(it);
     const amount = estimateLineAmount(it);
-    const qtyBit = qty !== 1 ? `<div style="font-size:12px;color:#6b7280">${qty} &times; ${money(price)}</div>` : "";
+    const unit = String(it.unit || "").trim();
+    const showUnit = unit && !["service", "each", "bundle"].includes(unit);
+    const qtyBit = qty !== 1 || showUnit ? `<div style="font-size:12px;color:#6b7280">${qty}${showUnit ? ` ${escapeHtml(unit)}` : ""} &times; ${money(price)}${showUnit ? `/${escapeHtml(unit)}` : ""}</div>` : "";
+    const bundleBit = it.bundleNote && !String(it.desc || "").includes(String(it.bundleNote)) ? `<div style="font-size:11px;color:#6b7280;margin-top:2px">Includes: ${escapeHtml(it.bundleNote)}</div>` : "";
     return `<tr>
       <td style="padding:9px 0;border-bottom:1px solid #eef0f2;vertical-align:top">
-        <div style="font-size:14px;color:#111827">${escapeHtml(it.desc || "—")}</div>${qtyBit}
+        <div style="font-size:14px;color:#111827">${escapeHtml(it.desc || "—")}</div>${bundleBit}${qtyBit}
       </td>
       <td style="padding:9px 0;border-bottom:1px solid #eef0f2;text-align:right;font-size:14px;color:#111827;white-space:nowrap;vertical-align:top">${money(amount)}</td>
     </tr>`;
@@ -89,8 +92,12 @@ function buildEstimateText({ clientName, branding, estimate }) {
   if (estimate.service) lines.push(`Service: ${estimate.service}`);
   lines.push("");
   (Array.isArray(estimate.items) ? estimate.items : []).filter((it) => (it.desc || "").trim()).forEach((it) => {
-    const qty = Number(it.qty) || 1, price = Number(it.price ?? it.unitPrice) || 0;
-    lines.push(`- ${it.desc}${qty !== 1 ? `  (${qty} x ${money(price)})` : ""}  ${money(estimateLineAmount(it))}`);
+    const qty = estimateLineQuantity(it), price = estimateLineUnitPrice(it);
+    const unit = String(it.unit || "").trim();
+    const showUnit = unit && !["service", "each", "bundle"].includes(unit);
+    const qtyBit = qty !== 1 || showUnit ? `  (${qty}${showUnit ? ` ${unit}` : ""} x ${money(price)}${showUnit ? `/${unit}` : ""})` : "";
+    const bundleBit = it.bundleNote && !String(it.desc || "").includes(String(it.bundleNote)) ? ` — Includes: ${it.bundleNote}` : "";
+    lines.push(`- ${it.desc}${bundleBit}${qtyBit}  ${money(estimateLineAmount(it))}`);
   });
   lines.push("");
   lines.push(`Subtotal: ${money(totals.subtotal)}`);
@@ -118,7 +125,7 @@ export default async function handler(req, res) {
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const _u = await requireUser(req, res);
+  const _u = await requireEstimateSender(req, res);
   if (!_u) return;
 
   const { to, clientName, branding = {}, estimate = {}, emailSubject } = req.body || {};

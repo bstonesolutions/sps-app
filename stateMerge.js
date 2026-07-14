@@ -1,3 +1,5 @@
+import { withEstimateTotals } from "./estimateMath.js";
+
 // Three-way merge for SPS app_state values.
 //
 // The database stores each app section as one JSON value. Compare-and-swap prevents a stale
@@ -8,6 +10,130 @@ const MISSING = Symbol("sps-state-missing");
 
 const isObject = (value) => !!value && typeof value === "object" && !Array.isArray(value);
 const scalarId = (value) => (["string", "number"].includes(typeof value) ? String(value) : "");
+
+// These estimate fields mirror values derived from items and tax settings. They must be rebuilt
+// after a three-way merge; merging each snapshot independently can preserve stale totals or create
+// false conflicts even when the underlying line-item edits are compatible.
+const ESTIMATE_DERIVED_FIELDS = new Set([
+  "subtotal",
+  "taxAmount",
+  "tax",
+  "total",
+  "estimatedCost",
+  "estimatedProfit",
+  "estimatedMargin",
+  "costComplete",
+  "missingCostLines",
+]);
+
+const ESTIMATE_LINE_FINANCIAL_FIELDS = [
+  "price",
+  "unitPrice",
+  "amount",
+  "unitCost",
+  "cost",
+  "costAmount",
+  "knownUnitCost",
+  "refId",
+];
+
+// Estimate delivery/approval state describes one exact customer-visible revision. If one device
+// changes that revision while another device sends, approves, or declines the old revision, the
+// combined record must return to Draft. Internal costing/catalog metadata is deliberately absent
+// from these snapshots so a cost correction does not invalidate a real customer decision.
+const ESTIMATE_CUSTOMER_FIELDS = [
+  "client",
+  "clientId",
+  "clientName",
+  "number",
+  "title",
+  "service",
+  "date",
+  "issueDate",
+  "validDays",
+  "notes",
+  "taxEnabled",
+  "taxRate",
+];
+
+const ESTIMATE_LINE_CUSTOMER_FIELDS = [
+  "desc",
+  "description",
+  "qty",
+  "price",
+  "unitPrice",
+  "amount",
+  "unit",
+  "bundleNote",
+  "kind",
+  "order",
+];
+
+// Older estimates can be aggregate-only (no line items). In that shape these values are the
+// customer-visible quote itself, not disposable mirrors, so a concurrent send/approval must be
+// fenced against changes to them just like an itemized price edit.
+const ESTIMATE_LEGACY_AGGREGATE_FIELDS = [
+  "subtotal",
+  "total",
+  "amount",
+  "taxAmount",
+  "tax",
+];
+
+const ESTIMATE_STATUS_FIELDS = ["status", "sentAt", "approvedAt", "declinedAt"];
+const ESTIMATE_CUSTOMER_STATUSES = new Set(["sent", "approved", "declined"]);
+
+function fieldSnapshot(value, fields) {
+  if (!isObject(value)) return value;
+  return Object.fromEntries(fields.map((field) => [field, value[field]]));
+}
+
+function estimateCustomerSnapshot(estimate) {
+  if (!isObject(estimate)) return estimate;
+  const items = Array.isArray(estimate.items) ? estimate.items : [];
+  return {
+    ...fieldSnapshot(estimate, ESTIMATE_CUSTOMER_FIELDS),
+    items: items.map((item) => fieldSnapshot(item, ESTIMATE_LINE_CUSTOMER_FIELDS)),
+    ...(items.length === 0
+      ? { aggregate: fieldSnapshot(estimate, ESTIMATE_LEGACY_AGGREGATE_FIELDS) }
+      : {}),
+  };
+}
+
+function estimateHasStatusTransition(base, candidate) {
+  if (!isObject(base) || !isObject(candidate)) return false;
+  const before = String(base.status || "").toLowerCase();
+  const after = String(candidate.status || "").toLowerCase();
+  const customerStatusChanged = before !== after
+    && (ESTIMATE_CUSTOMER_STATUSES.has(before) || ESTIMATE_CUSTOMER_STATUSES.has(after));
+  const decisionTimestampChanged = ESTIMATE_STATUS_FIELDS.slice(1)
+    .some((field) => !equal(base[field], candidate[field]));
+  return customerStatusChanged || decisionTimestampChanged;
+}
+
+function estimateNeedsDraftAfterMerge(base, local, remote, path, ctx) {
+  if (ctx.key !== "sps_estimates" || path.length !== 1) return false;
+  const baseSnapshot = estimateCustomerSnapshot(base);
+  const localRevisionChanged = !equal(baseSnapshot, estimateCustomerSnapshot(local));
+  const remoteRevisionChanged = !equal(baseSnapshot, estimateCustomerSnapshot(remote));
+  return (localRevisionChanged && estimateHasStatusTransition(base, remote))
+    || (remoteRevisionChanged && estimateHasStatusTransition(base, local));
+}
+
+function shouldDeriveEstimateTotals(base, local, remote, path, ctx) {
+  if (ctx.key !== "sps_estimates" || path.length !== 1) return false;
+  const versions = [base, local, remote].filter(isObject);
+  const itemizedVersions = versions.filter((value) => Array.isArray(value.items) && value.items.length > 0);
+  if (!itemizedVersions.length) return false;
+
+  const hasDerivedSnapshot = versions.some((value) => (
+    [...ESTIMATE_DERIVED_FIELDS].some((field) => Object.prototype.hasOwnProperty.call(value, field))
+  ));
+  const hasFinancialLine = itemizedVersions.some((value) => value.items.some((item) => (
+    isObject(item) && ESTIMATE_LINE_FINANCIAL_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(item, field))
+  )));
+  return hasDerivedSnapshot || hasFinancialLine;
+}
 
 export function normalizeStoredValue(value) {
   if (value === undefined || value === null) return value === null ? "null" : undefined;
@@ -245,8 +371,10 @@ function mergeObject(base, local, remote, path, ctx) {
   const deriveInventoryOz = ctx.key === "sps_catalog"
     && [base, local, remote].some((value) => isObject(value.stockByLoc))
     && [base, local, remote].some((value) => Object.prototype.hasOwnProperty.call(value, "inventoryOz"));
+  const deriveEstimateTotals = shouldDeriveEstimateTotals(base, local, remote, path, ctx);
   keys.forEach((key) => {
     if (deriveInventoryOz && key === "inventoryOz") return;
+    if (deriveEstimateTotals && ESTIMATE_DERIVED_FIELDS.has(key)) return;
     const value = mergeNode(
       Object.prototype.hasOwnProperty.call(base, key) ? base[key] : MISSING,
       Object.prototype.hasOwnProperty.call(local, key) ? local[key] : MISSING,
@@ -271,7 +399,14 @@ function mergeObject(base, local, remote, path, ctx) {
       if (value !== MISSING) out.inventoryOz = value;
     }
   }
-  return out;
+  let result = deriveEstimateTotals ? withEstimateTotals(out, out.taxRate ?? 0) : out;
+  if (estimateNeedsDraftAfterMerge(base, local, remote, path, ctx)) {
+    result = { ...result, status: "draft" };
+    delete result.sentAt;
+    delete result.approvedAt;
+    delete result.declinedAt;
+  }
+  return result;
 }
 
 function mergeNode(base, local, remote, path, ctx) {

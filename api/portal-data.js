@@ -172,7 +172,7 @@ function publicInvoice(invoice) {
 }
 
 function publicEstimateItem(line) {
-  return pick(line, ["id", "desc", "description", "qty", "price", "unitPrice", "kind", "amount"]);
+  return pick(line, ["id", "desc", "description", "qty", "price", "unitPrice", "kind", "unit", "bundleNote", "amount"]);
 }
 
 function estimateMoneyNumber(value) {

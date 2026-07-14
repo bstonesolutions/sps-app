@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { withEstimateTotals } from "../estimateMath.js";
 import { mergeStoredState } from "../stateMerge.js";
 
 const json = (value) => JSON.stringify(value);
@@ -150,6 +151,195 @@ test("reports concurrent edits to the same inventory cell without a mirror confl
   assert.match(result.conflicts[0].path, /stockByLoc\.truck$/);
   assert.equal(item.stockByLoc.truck, 7);
   assert.equal(item.inventoryOz, "27");
+});
+
+test("merges independent estimate line pricing and cost edits by stable line id", () => {
+  const baseEstimate = withEstimateTotals({
+    id: "estimate-1",
+    taxEnabled: true,
+    taxRate: "6",
+    items: [
+      { id: "line-service", desc: "Service", qty: "1", price: "100", unitCost: "40", costKnown: true },
+      { id: "line-part", desc: "Part", qty: "1", price: "20", unitCost: "8", costKnown: true },
+    ],
+  });
+  const base = [baseEstimate];
+  const local = structuredClone(base);
+  local[0].items[0].unitCost = "45";
+  local[0] = withEstimateTotals(local[0]);
+  const remote = structuredClone(base);
+  remote[0].items[1].price = "25";
+  remote[0] = withEstimateTotals(remote[0]);
+
+  const result = runMerge("sps_estimates", base, local, remote);
+  const estimate = result.data[0];
+
+  assert.deepEqual(result.conflicts, []);
+  assert.equal(byId(estimate.items, "line-service").unitCost, "45");
+  assert.equal(byId(estimate.items, "line-part").price, "25");
+  assert.equal(estimate.subtotal, 125);
+  assert.equal(estimate.taxAmount, 7.5);
+  assert.equal(estimate.tax, 7.5);
+  assert.equal(estimate.total, "$132.50");
+  assert.equal(estimate.estimatedCost, 53);
+  assert.equal(estimate.estimatedProfit, 72);
+  assert.equal(estimate.estimatedMargin, 57.6);
+  assert.equal(estimate.costComplete, true);
+  assert.equal(estimate.missingCostLines, 0);
+});
+
+test("reports a concurrent edit to the same estimate line cost", () => {
+  const base = [withEstimateTotals({
+    id: "estimate-1",
+    items: [{ id: "line-1", desc: "Service", qty: "1", price: "100", unitCost: "40", costKnown: true }],
+  })];
+  const local = [withEstimateTotals({
+    ...base[0],
+    items: [{ ...base[0].items[0], unitCost: "45" }],
+  })];
+  const remote = [withEstimateTotals({
+    ...base[0],
+    items: [{ ...base[0].items[0], unitCost: "50" }],
+  })];
+
+  const result = runMerge("sps_estimates", base, local, remote);
+  const estimate = result.data[0];
+
+  assert.equal(result.conflicts.length, 1);
+  assert.equal(result.conflicts[0].kind, "same-field-edit");
+  assert.match(result.conflicts[0].path, /unitCost$/);
+  assert.equal(estimate.items[0].unitCost, "50");
+  assert.equal(estimate.subtotal, 100);
+  assert.equal(estimate.estimatedCost, 50);
+  assert.equal(estimate.estimatedProfit, 50);
+  assert.equal(estimate.estimatedMargin, 50);
+});
+
+test("returns a concurrently revised estimate to draft instead of preserving an older send or decision", () => {
+  const base = [withEstimateTotals({
+    id: "estimate-1",
+    status: "draft",
+    items: [{ id: "line-1", desc: "Service", qty: "1", price: "100", unitCost: "40", costKnown: true }],
+  })];
+  const local = [withEstimateTotals({
+    ...base[0],
+    items: [{ ...base[0].items[0], price: "125" }],
+  })];
+  const transitions = [
+    { status: "sent", sentAt: "2026-07-14T14:00:00.000Z" },
+    { status: "approved", sentAt: "2026-07-14T14:00:00.000Z", approvedAt: "2026-07-14T14:05:00.000Z" },
+    { status: "declined", sentAt: "2026-07-14T14:00:00.000Z", declinedAt: "2026-07-14T14:05:00.000Z" },
+  ];
+
+  transitions.forEach((transition) => {
+    const result = runMerge("sps_estimates", base, local, [{ ...base[0], ...transition }]);
+    const estimate = result.data[0];
+
+    assert.deepEqual(result.conflicts, []);
+    assert.equal(estimate.items[0].price, "125");
+    assert.equal(estimate.subtotal, 125);
+    assert.equal(estimate.status, "draft");
+    assert.equal(Object.hasOwn(estimate, "sentAt"), false);
+    assert.equal(Object.hasOwn(estimate, "approvedAt"), false);
+    assert.equal(Object.hasOwn(estimate, "declinedAt"), false);
+  });
+});
+
+test("returns to draft when the status transition is local and the quote revision is remote", () => {
+  const base = [withEstimateTotals({
+    id: "estimate-1",
+    title: "Original scope",
+    status: "draft",
+    items: [{ id: "line-1", desc: "Service", qty: "1", price: "100", unitCost: "40", costKnown: true }],
+  })];
+  const local = [{
+    ...base[0],
+    status: "sent",
+    sentAt: "2026-07-14T14:00:00.000Z",
+  }];
+  const remote = [{ ...base[0], title: "Revised scope" }];
+
+  const result = runMerge("sps_estimates", base, local, remote);
+  const estimate = result.data[0];
+
+  assert.deepEqual(result.conflicts, []);
+  assert.equal(estimate.title, "Revised scope");
+  assert.equal(estimate.status, "draft");
+  assert.equal(Object.hasOwn(estimate, "sentAt"), false);
+});
+
+test("preserves approval when the concurrent estimate edit changes internal cost only", () => {
+  const base = [withEstimateTotals({
+    id: "estimate-1",
+    status: "draft",
+    items: [{ id: "line-1", desc: "Service", qty: "1", price: "100", unitCost: "40", costKnown: true }],
+  })];
+  const local = [withEstimateTotals({
+    ...base[0],
+    items: [{ ...base[0].items[0], unitCost: "50" }],
+  })];
+  const remote = [{
+    ...base[0],
+    status: "approved",
+    sentAt: "2026-07-14T14:00:00.000Z",
+    approvedAt: "2026-07-14T14:05:00.000Z",
+  }];
+
+  const result = runMerge("sps_estimates", base, local, remote);
+  const estimate = result.data[0];
+
+  assert.deepEqual(result.conflicts, []);
+  assert.equal(estimate.items[0].unitCost, "50");
+  assert.equal(estimate.estimatedCost, 50);
+  assert.equal(estimate.status, "approved");
+  assert.equal(estimate.sentAt, "2026-07-14T14:00:00.000Z");
+  assert.equal(estimate.approvedAt, "2026-07-14T14:05:00.000Z");
+});
+
+test("returns an aggregate-only legacy estimate to draft when its quoted total changes during send", () => {
+  const base = [{
+    id: "legacy-estimate",
+    status: "draft",
+    subtotal: 100,
+    tax: 0,
+    total: "$100.00",
+  }];
+  const local = [{ ...base[0], subtotal: 150, total: "$150.00" }];
+  const remote = [{ ...base[0], status: "sent", sentAt: "2026-07-14T18:00:00.000Z" }];
+
+  const result = runMerge("sps_estimates", base, local, remote);
+  const estimate = result.data[0];
+
+  assert.deepEqual(result.conflicts, []);
+  assert.equal(estimate.subtotal, 150);
+  assert.equal(estimate.total, "$150.00");
+  assert.equal(estimate.status, "draft");
+  assert.equal(Object.hasOwn(estimate, "sentAt"), false);
+});
+
+test("preserves aggregate-only legacy estimate values", () => {
+  const base = [{
+    id: "legacy-estimate",
+    title: "Legacy",
+    items: [],
+    subtotal: 450,
+    total: "$450.00",
+    estimatedCost: 250,
+    estimatedProfit: 200,
+  }];
+  const local = [{ ...base[0], title: "Legacy estimate" }];
+  const remote = [{ ...base[0], notes: "Keep historical totals" }];
+
+  const result = runMerge("sps_estimates", base, local, remote);
+  const estimate = result.data[0];
+
+  assert.deepEqual(result.conflicts, []);
+  assert.equal(estimate.title, "Legacy estimate");
+  assert.equal(estimate.notes, "Keep historical totals");
+  assert.equal(estimate.subtotal, 450);
+  assert.equal(estimate.total, "$450.00");
+  assert.equal(estimate.estimatedCost, 250);
+  assert.equal(estimate.estimatedProfit, 200);
 });
 
 test("preserves an app invoice id, merges QB fields, and keeps timestamp extrema", () => {
