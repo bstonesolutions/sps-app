@@ -70,6 +70,50 @@ async function loadBrandLogoData(branding) {
   return "";
 }
 const pdfLogoFormat = (dataUrl) => /^data:image\/jpe?g/i.test(dataUrl) ? "JPEG" : /^data:image\/webp/i.test(dataUrl) ? "WEBP" : "PNG";
+// The installed SPS icon is intentionally an opaque app-icon square. On a PDF's
+// red header, placing that square inside a second white tile makes the logo look
+// clipped. Detect the SPS-style red icon and lift its exact white geometry into
+// a transparent PNG so the real mark can sit cleanly on the header. A custom
+// uploaded logo that does not match that color profile falls back to its normal
+// white logo tile.
+const extractWhitePdfBrandMark = (dataUrl) => new Promise((resolve) => {
+  if (!dataUrl || typeof document === "undefined" || typeof Image === "undefined") { resolve(""); return; }
+  const image = new Image();
+  image.onload = () => {
+    try {
+      const width = image.naturalWidth || image.width;
+      const height = image.naturalHeight || image.height;
+      if (!width || !height) { resolve(""); return; }
+      const canvas = document.createElement("canvas");
+      canvas.width = width; canvas.height = height;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      if (!ctx) { resolve(""); return; }
+      ctx.drawImage(image, 0, 0, width, height);
+      const pixels = ctx.getImageData(0, 0, width, height);
+      const data = pixels.data;
+      let redPixels = 0;
+      let lightPixels = 0;
+      const totalPixels = width * height;
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
+        if (a > 20 && r > 115 && r > g * 1.7 && r > b * 1.35) redPixels++;
+        if (a > 20 && (r + g + b) / 3 > 205) lightPixels++;
+      }
+      // Only transform the red SPS app icon; never damage an arbitrary client logo.
+      if (redPixels / totalPixels < 0.22 || lightPixels / totalPixels < 0.015) { resolve(""); return; }
+      for (let i = 0; i < data.length; i += 4) {
+        const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
+        const sourceAlpha = data[i + 3] / 255;
+        const alpha = Math.max(0, Math.min(255, Math.round(((brightness - 105) / 135) * 255 * sourceAlpha)));
+        data[i] = 255; data[i + 1] = 255; data[i + 2] = 255; data[i + 3] = alpha;
+      }
+      ctx.putImageData(pixels, 0, 0);
+      resolve(canvas.toDataURL("image/png"));
+    } catch (_) { resolve(""); }
+  };
+  image.onerror = () => resolve("");
+  image.src = dataUrl;
+});
 // Save a built jsPDF doc the native-safe way: on touch devices (iOS/iPadOS WKWebView, Android) open the
 // share sheet (AirPrint / Save to Files) from the doc's blob; on desktop download it. NEVER call
 // doc.save() on native — it navigates the WKWebView away, which reads as "the whole screen closed" (this
@@ -673,124 +717,300 @@ const openExternalBrowser = (url) => {
 
 // Build the estimate PDF and return the jsPDF doc (not saved) — so both "Download PDF" and the
 // email path (which grabs its base64 to attach) share one layout.
-function buildEstimatePDFDoc(estimate, branding, invoicing) {
-  return Promise.all([loadJsPDF(), loadBrandLogoData(branding)]).then(([JsPDF, logoData]) => {
-    const doc = new JsPDF({ unit: "pt", format: "letter" });
-    const primary = branding?.accentColor || "#B81D24";
-    const W = doc.internal.pageSize.getWidth();
-    const totals = estimateTotals(estimate, invoicing?.taxRate || DEFAULT_INVOICING.taxRate);
-    let y = 40;
+async function buildEstimatePDFDoc(estimate, branding, invoicing, client = null) {
+  const [JsPDF, logoData] = await Promise.all([loadJsPDF(), loadBrandLogoData(branding)]);
+  const transparentMark = await extractWhitePdfBrandMark(logoData);
+  const doc = new JsPDF({ unit: "pt", format: "letter" });
+  const primary = branding?.accentColor || branding?.accent || "#B81D24";
+  const W = doc.internal.pageSize.getWidth();
+  const H = doc.internal.pageSize.getHeight();
+  const M = 42;
+  const contentBottom = H - 72;
+  const companyName = branding?.companyName || "Stone Property Solutions";
+  const estimateNumber = String(estimate.number || "").trim();
+  const serviceTitle = String(estimate.title || "Service Estimate").trim();
+  const totals = estimateTotals(estimate, invoicing?.taxRate || DEFAULT_INVOICING.taxRate);
+  const validDays = Math.max(1, parseInt(estimate.validDays, 10) || 30);
+  const clientName = estimate.clientName || client?.name || "";
+  const clientAddress = estimate.clientAddress || client?.address || "";
+  const clientEmail = estimate.clientEmail || client?.email || "";
+  const clientPhone = estimate.clientPhone || client?.phone || "";
+  const normalizeAddress = (value) => String(value || "").trim().replace(/\b(PO Box\s+\d+)\s+(?=[A-Za-z])/i, "$1, ");
+  const parseDate = (value) => {
+    const raw = String(value || "").trim();
+    const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const date = iso ? new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]), 12) : new Date(raw);
+    return Number.isNaN(date.getTime()) ? null : date;
+  };
+  const friendlyDate = (value) => {
+    const date = value instanceof Date ? value : parseDate(value);
+    return date ? date.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }) : String(value || "");
+  };
+  const issuedDate = parseDate(estimate.date);
+  const validThrough = issuedDate ? new Date(issuedDate.getFullYear(), issuedDate.getMonth(), issuedDate.getDate() + validDays, 12) : null;
+  const money = (value) => formatEstimateMoney(value);
+  let y = 0;
 
-    // Header bar
-    doc.setFillColor(primary);
-    doc.rect(0, 0, W, 70, "F");
-    let headerX = 40;
-    if (logoData) {
-      try {
-        doc.setFillColor("#ffffff");
-        doc.roundedRect(40, 14, 42, 42, 9, 9, "F");
-        doc.addImage(logoData, pdfLogoFormat(logoData), 42, 16, 38, 38);
-        headerX = 94;
-      } catch (_) {}
-    }
-    doc.setTextColor("#ffffff");
-    doc.setFontSize(22);
-    doc.setFont("helvetica", "bold");
-    doc.text(branding?.companyName || "Stone Property Solutions", headerX, 38);
-    doc.setFontSize(10);
-    doc.setFont("helvetica", "normal");
-    const contact = [branding?.companyPhone, branding?.companyEmail].filter(Boolean).join("  ·  ");
-    if (contact) doc.text(contact, headerX, 56);
-    y = 100;
-
-    // Estimate title + info
-    doc.setTextColor("#1D1D1F");
-    doc.setFontSize(18);
-    doc.setFont("helvetica", "bold");
-    doc.text(estimate.title || "Service Estimate", 40, y);
-    y += 24;
-    doc.setFontSize(10);
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor("#6B7280");
-    doc.text(`${estimate.number ? `Estimate: ${estimate.number}   ·   ` : ""}Date: ${estimate.date || ""}   ·   Valid: ${estimate.validDays || 30} days`, 40, y);
-    y += 10;
-    doc.text(`Prepared for: ${estimate.clientName || ""}`, 40, y);
-    y += 30;
-
-    // Line items header
-    doc.setFillColor("#F5F5F7");
-    doc.rect(40, y, W - 80, 24, "F");
-    doc.setTextColor("#1D1D1F");
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(10);
-    doc.text("Description", 52, y + 16);
-    doc.text("Qty", W - 160, y + 16, { align: "right" });
-    doc.text("Unit Price", W - 100, y + 16, { align: "right" });
-    doc.text("Amount", W - 40, y + 16, { align: "right" });
-    y += 28;
-
-    // Line items
-    doc.setFont("helvetica", "normal");
-    (estimate.items || []).filter(it => it.desc).forEach(item => {
-      const qty = parseFloat(item.qty) || 1;
-      const price = parseFloat(item.price || 0);
-      const amt = estimateLineAmount(item);
-      doc.setTextColor("#1D1D1F");
-      doc.text(String(item.desc), 52, y);
-      doc.text(String(qty), W - 160, y, { align: "right" });
-      doc.text(`$${price.toFixed(2)}`, W - 100, y, { align: "right" });
-      doc.text(formatEstimateMoney(amt), W - 40, y, { align: "right" });
-      y += 20;
-      doc.setDrawColor("#E5E7EB");
-      doc.line(40, y - 4, W - 40, y - 4);
+  try {
+    doc.setProperties({
+      title: `${estimateNumber ? `${estimateNumber} — ` : ""}Estimate for ${clientName || "client"}`,
+      subject: serviceTitle,
+      author: companyName,
+      creator: "SPS Way",
+      keywords: "estimate, service estimate, Stone Property Solutions",
     });
+  } catch (_) {}
 
-    // Totals
-    y += 10;
-    doc.setFontSize(10);
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor("#6B7280");
-    doc.text("Subtotal", W - 150, y);
-    doc.text(formatEstimateMoney(totals.subtotal), W - 40, y, { align: "right" });
-    y += 17;
-    if (totals.taxEnabled) {
-      doc.text(`Sales tax (${totals.taxRate}%)`, W - 150, y);
-      doc.text(formatEstimateMoney(totals.tax), W - 40, y, { align: "right" });
-      y += 17;
-    }
-    doc.setDrawColor("#E5E7EB");
-    doc.line(W - 150, y - 6, W - 40, y - 6);
-    doc.setFontSize(13);
+  const drawLogo = (x, top, size) => {
+    if (!logoData) return false;
+    try {
+      if (transparentMark) {
+        doc.addImage(transparentMark, "PNG", x, top, size, size);
+      } else {
+        doc.setFillColor("#ffffff");
+        doc.roundedRect(x, top, size, size, 8, 8, "F");
+        const inset = Math.max(4, Math.round(size * 0.1));
+        doc.addImage(logoData, pdfLogoFormat(logoData), x + inset, top + inset, size - inset * 2, size - inset * 2);
+      }
+      return true;
+    } catch (_) { return false; }
+  };
+
+  const drawFirstHeader = () => {
+    doc.setFillColor(primary);
+    doc.rect(0, 0, W, 88, "F");
+    const logoDrawn = drawLogo(M, 20, 44);
+    const brandX = logoDrawn ? M + 56 : M;
+    doc.setTextColor("#ffffff");
     doc.setFont("helvetica", "bold");
-    doc.setTextColor(primary);
-    doc.text(`Total: ${formatEstimateMoney(totals.total)}`, W - 40, y, { align: "right" });
-    y += 30;
+    doc.setFontSize(17);
+    doc.text(companyName, brandX, 38, { maxWidth: W - brandX - 156 });
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8.8);
+    const contact = [branding?.companyPhone, branding?.companyEmail, branding?.companyWebsite].filter(Boolean).join("   ·   ");
+    if (contact) doc.text(contact, brandX, 55, { maxWidth: W - brandX - 144 });
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(15);
+    doc.text("ESTIMATE", W - M, 35, { align: "right" });
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9.5);
+    doc.text(estimateNumber || "SERVICE QUOTE", W - M, 53, { align: "right" });
+    y = 116;
+  };
 
-    // Notes
-    if (estimate.notes) {
-      doc.setFontSize(10);
-      doc.setFont("helvetica", "normal");
-      doc.setTextColor("#6B7280");
-      const lines = doc.splitTextToSize(estimate.notes, W - 80);
-      doc.text(lines, 40, y);
-      y += lines.length * 14 + 10;
-    }
+  const drawContinuationHeader = () => {
+    doc.setFillColor(primary);
+    doc.rect(0, 0, W, 54, "F");
+    const logoDrawn = drawLogo(M, 13, 28);
+    const brandX = logoDrawn ? M + 38 : M;
+    doc.setTextColor("#ffffff");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(12);
+    doc.text(companyName, brandX, 31, { maxWidth: W - brandX - 180 });
+    doc.setFontSize(10);
+    doc.text(`${estimateNumber || "ESTIMATE"}  ·  CONTINUED`, W - M, 31, { align: "right" });
+    y = 78;
+  };
 
-    // Footer
-    y = doc.internal.pageSize.getHeight() - 40;
-    doc.setFontSize(9);
-    doc.setTextColor("#9CA3AF");
-    doc.text(`${branding?.companyName || "Stone Property Solutions"}  ·  ${branding?.companyAddress || "Honey Brook, PA"}`, 40, y);
+  const qtyX = W - 214;
+  const priceX = W - 122;
+  const amountX = W - M;
+  const descriptionWidth = qtyX - M - 24;
+  const drawTableHeader = () => {
+    doc.setFillColor("#F3F4F6");
+    doc.roundedRect(M, y, W - M * 2, 28, 5, 5, "F");
+    doc.setTextColor("#6B7280");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8.5);
+    doc.text("DESCRIPTION", M + 12, y + 18);
+    doc.text("QTY", qtyX, y + 18, { align: "right" });
+    doc.text("UNIT PRICE", priceX, y + 18, { align: "right" });
+    doc.text("AMOUNT", amountX - 2, y + 18, { align: "right" });
+    y += 38;
+  };
+  const newContentPage = (repeatTable = false) => {
+    doc.addPage();
+    drawContinuationHeader();
+    if (repeatTable) drawTableHeader();
+  };
+  const ensureSpace = (need, repeatTable = false) => {
+    if (y + need > contentBottom) newContentPage(repeatTable);
+  };
 
-    return doc;
+  drawFirstHeader();
+
+  // Project title and compact recipient / estimate-details block.
+  doc.setTextColor("#9CA3AF");
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(8.5);
+  doc.text("PROJECT / SERVICE", M, y);
+  y += 21;
+  doc.setTextColor("#111827");
+  doc.setFontSize(18);
+  doc.text(doc.splitTextToSize(serviceTitle, W - M * 2), M, y);
+  const titleLines = doc.splitTextToSize(serviceTitle, W - M * 2);
+  y += Math.max(24, titleLines.length * 21) + 8;
+  doc.setDrawColor("#E5E7EB");
+  doc.setLineWidth(0.8);
+  doc.line(M, y, W - M, y);
+  y += 22;
+
+  const infoTop = y;
+  const detailX = W - 216;
+  doc.setTextColor("#9CA3AF");
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(8.5);
+  doc.text("PREPARED FOR", M, infoTop);
+  doc.text("ESTIMATE DETAILS", detailX, infoTop);
+  let clientY = infoTop + 18;
+  doc.setTextColor("#111827");
+  doc.setFontSize(11.5);
+  doc.text(String(clientName || "Client"), M, clientY);
+  clientY += 15;
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9.5);
+  doc.setTextColor("#6B7280");
+  const recipientDetails = [normalizeAddress(clientAddress), clientEmail, clientPhone].filter(Boolean);
+  recipientDetails.forEach((detail) => {
+    const lines = doc.splitTextToSize(String(detail), detailX - M - 22);
+    doc.text(lines, M, clientY);
+    clientY += lines.length * 12;
   });
+  const detailRows = [
+    ["Issued", friendlyDate(issuedDate || estimate.date)],
+    ["Valid through", friendlyDate(validThrough) || `${validDays} days`],
+  ];
+  let detailY = infoTop + 18;
+  detailRows.forEach(([label, value]) => {
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9.5);
+    doc.setTextColor("#6B7280");
+    doc.text(label, detailX, detailY);
+    doc.setTextColor("#111827");
+    doc.setFont("helvetica", "bold");
+    doc.text(String(value || "—"), W - M, detailY, { align: "right" });
+    detailY += 17;
+  });
+  y = Math.max(clientY, detailY) + 20;
+  drawTableHeader();
+
+  // Wrapped, dynamically sized line items with safe continuation pages.
+  const lineItems = (estimate.items || []).filter((item) => String(item.desc || "").trim());
+  lineItems.forEach((item) => {
+    const qty = parseFloat(item.qty) || 1;
+    const price = parseFloat(item.price || 0);
+    const amount = estimateLineAmount(item);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(10);
+    const descriptionLines = doc.splitTextToSize(String(item.desc), descriptionWidth);
+    const rowHeight = Math.max(34, descriptionLines.length * 13 + 17);
+    ensureSpace(rowHeight, true);
+    doc.setTextColor("#111827");
+    doc.text(descriptionLines, M + 12, y);
+    doc.setTextColor("#374151");
+    doc.text(String(qty), qtyX, y, { align: "right" });
+    doc.text(money(price), priceX, y, { align: "right" });
+    doc.setFont("helvetica", "bold");
+    doc.text(money(amount), amountX - 2, y, { align: "right" });
+    y += rowHeight;
+    doc.setDrawColor("#E5E7EB");
+    doc.setLineWidth(0.7);
+    doc.line(M, y - 8, W - M, y - 8);
+  });
+
+  // A single, visually connected totals panel.
+  const totalsHeight = totals.taxEnabled ? 91 : 72;
+  y += 10;
+  ensureSpace(totalsHeight + 10);
+  const totalsX = W - 246;
+  const totalsW = 204;
+  doc.setFillColor("#F8F8FA");
+  doc.roundedRect(totalsX, y, totalsW, totalsHeight, 9, 9, "F");
+  let totalY = y + 22;
+  const totalRow = (label, value, emphasis = false) => {
+    doc.setFont("helvetica", emphasis ? "bold" : "normal");
+    doc.setFontSize(emphasis ? 13 : 9.5);
+    doc.setTextColor(emphasis ? primary : "#6B7280");
+    doc.text(label, totalsX + 14, totalY);
+    doc.setTextColor(emphasis ? primary : "#374151");
+    doc.text(value, totalsX + totalsW - 14, totalY, { align: "right" });
+    totalY += emphasis ? 21 : 17;
+  };
+  totalRow("Subtotal", money(totals.subtotal));
+  if (totals.taxEnabled) totalRow(`Sales tax (${totals.taxRate}%)`, money(totals.tax));
+  doc.setDrawColor("#D9DCE1");
+  doc.line(totalsX + 14, totalY - 6, totalsX + totalsW - 14, totalY - 6);
+  totalY += 7;
+  totalRow("Total", money(totals.total), true);
+  y += totalsHeight + 22;
+
+  // Notes become a bounded card instead of running into the footer.
+  if (String(estimate.notes || "").trim()) {
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9.5);
+    const noteLines = doc.splitTextToSize(String(estimate.notes).trim(), W - M * 2 - 28);
+    const notesHeight = 44 + noteLines.length * 12;
+    ensureSpace(notesHeight + 12);
+    doc.setTextColor("#9CA3AF");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8.5);
+    doc.text("SCOPE & NOTES", M, y);
+    y += 12;
+    doc.setFillColor("#F8F8FA");
+    doc.roundedRect(M, y, W - M * 2, notesHeight - 18, 8, 8, "F");
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9.5);
+    doc.setTextColor("#4B5563");
+    doc.text(noteLines, M + 14, y + 20);
+    y += notesHeight;
+  }
+
+  // Clear client next step on the saved/printed document.
+  const approvalCopy = branding?.companyPhone
+    ? `Reply YES to approve this estimate. Questions? Call ${branding.companyPhone}.`
+    : "Reply YES to approve this estimate, or contact us with any questions.";
+  const approvalLines = doc.splitTextToSize(approvalCopy, W - M * 2 - 32);
+  const approvalHeight = 62 + Math.max(0, approvalLines.length - 1) * 11;
+  ensureSpace(approvalHeight + 8);
+  doc.setFillColor("#FFF5F5");
+  doc.roundedRect(M, y, W - M * 2, approvalHeight, 10, 10, "F");
+  doc.setTextColor(primary);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(11.5);
+  doc.text("Ready to move forward?", M + 16, y + 22);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9.5);
+  doc.setTextColor("#4B5563");
+  doc.text(approvalLines, M + 16, y + 39);
+  doc.setFontSize(8.5);
+  doc.setTextColor("#6B7280");
+  doc.text(`Pricing is valid ${validThrough ? `through ${friendlyDate(validThrough)}` : `for ${validDays} days`}.`, M + 16, y + approvalHeight - 10);
+
+  // Consistent footer and page numbering on every page.
+  const pages = doc.getNumberOfPages();
+  const footerContact = [companyName, branding?.companyPhone, branding?.companyEmail].filter(Boolean).join("  ·  ");
+  const footerLocation = [normalizeAddress(branding?.companyAddress), branding?.companyWebsite].filter(Boolean).join("  ·  ");
+  for (let page = 1; page <= pages; page++) {
+    doc.setPage(page);
+    doc.setDrawColor("#E5E7EB");
+    doc.setLineWidth(0.7);
+    doc.line(M, H - 53, W - M, H - 53);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.setTextColor("#6B7280");
+    if (footerContact) doc.text(footerContact, M, H - 36, { maxWidth: W - M * 2 - 120 });
+    if (footerLocation) doc.text(footerLocation, M, H - 23, { maxWidth: W - M * 2 - 120 });
+    doc.text(`${estimateNumber || "Estimate"}  ·  Page ${page} of ${pages}`, W - M, H - 29, { align: "right" });
+  }
+
+  return doc;
 }
 function estimatePdfName(estimate) {
   return `estimate-${(estimate.clientName || "client").replace(/\s+/g, "-").toLowerCase()}.pdf`;
 }
 // Generate + save/share the estimate PDF (native-safe share sheet / desktop download).
-function generateEstimatePDF(estimate, branding, invoicing) {
-  return buildEstimatePDFDoc(estimate, branding, invoicing).then(doc => savePdfDoc(doc, estimatePdfName(estimate)));
+function generateEstimatePDF(estimate, branding, invoicing, client = null) {
+  return buildEstimatePDFDoc(estimate, branding, invoicing, client).then(doc => savePdfDoc(doc, estimatePdfName(estimate)));
 }
 
 function generateStatementPDF(client, invoices, branding) {
@@ -4405,7 +4625,7 @@ function HomeCommsWidget({ leads = [], clients = [], onNav, T, perms = {} }) {
 }
 
 function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onOpenAlert, onOpenStop, onNav, catalog, onConfirmUpgrade, userName, me, scheduleCfg, reminderLog, completedSids = {}, budget = {}, leads = [], vp = {} }) {
-  const { T, perms, branding } = useApp();
+  const { T, perms } = useApp();
   const [editing, setEditing] = useState(false);
   const [statPicker, setStatPicker] = useState(false);
 
@@ -4722,8 +4942,17 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
   // number continues to use the same bank-aware source and the route state is not repeated.
   const heroCard = (
     <div style={{ position: "relative", overflow: "hidden", background: `linear-gradient(135deg, ${hexA(T.primary, 0.11)} 0%, ${T.surface} 62%)`, border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 20, padding: vp.isPhone ? "17px 17px 16px" : "21px 22px 20px", marginBottom: 16, boxShadow: "0 1px 3px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.06)" }}>
-      <ProtectedImage src={brandLogoSource(branding)} alt="" aria-hidden="true"
-        style={{ position: "absolute", right: -28, top: "50%", transform: "translateY(-50%)", width: vp.isPhone ? 150 : 185, height: vp.isPhone ? 150 : 185, objectFit: "contain", opacity: 0.065, pointerEvents: "none" }} />
+      {/* Extract the exact white SPS mark from the app icon, recolor it SPS red, and drop the
+          icon's square/background. This keeps the real logo shape without a generated substitute. */}
+      <svg viewBox="0 0 512 512" aria-hidden="true"
+        style={{ position: "absolute", right: -20, top: "50%", transform: "translateY(-50%)", width: vp.isPhone ? 142 : 176, height: vp.isPhone ? 142 : 176, opacity: 0.18, pointerEvents: "none" }}>
+        <defs>
+          <filter id="sps-home-mark" colorInterpolationFilters="sRGB">
+            <feColorMatrix type="matrix" values="0 0 0 0 .7216  0 0 0 0 .1137  0 0 0 0 .1412  2 2 2 0 -4.5" />
+          </filter>
+        </defs>
+        <image href="/icon-512.png" width="512" height="512" filter="url(#sps-home-mark)" />
+      </svg>
       <div style={{ position: "relative", zIndex: 1 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -11027,12 +11256,15 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   const wx = useAreaWeather((branding && branding.companyAddress) || "");  // service-area forecast for weather flags
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
   const compact = cfg.density === "compact";
+  const denseDesktop = !!(vp.isDesktop && !vp.isTablet && (!vp.width || vp.width >= 1100));
+  const denseSchedule = compact || denseDesktop;
   const [omwModal, setOmwModal] = useState(null);
   const [arrivedModal, setArrivedModal] = useState(null);
   const [headHereModal, setHeadHereModal] = useState(null);
   const [completeModal, setCompleteModal] = useState(null);
   const [stopChange, setStopChange] = useState(null); // { stop, client, dayDate } — reschedule/cancel/late
   const [historyEdit, setHistoryEdit] = useState(null); // view/edit a completed stop's saved report ({ entry, clientId })
+  const [stopOverview, setStopOverview] = useState(null); // safe fallback when a completed stop's report is missing/unlinked
   const [editStopModal, setEditStopModal] = useState(null); // { stop, dayDate }
   const [sentStops, setSentStops] = useState({});
   const [showAdd, setShowAdd] = useState(false);
@@ -11501,11 +11733,42 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   const goDirections = (addr) => buildMapUrl(addr || "", preferredMapApp);
   const catChip = (s) => { const c = clients.find(x => String(x.id) === String(s.clientId ?? s.id)); return (c && c.division) || s.type; };
 
+  // Resolve legacy stops defensively: an empty/stale clientId used to hide the valid legacy id.
+  // Only use a name fallback when it identifies exactly one client.
+  const clientForStop = (stop) => {
+    const ids = [stop?.clientId, stop?.id].filter(id => id != null && String(id).trim() !== "");
+    for (const id of ids) {
+      const match = (clients || []).find(client => String(client.id) === String(id));
+      if (match) return match;
+    }
+    const name = String(stop?.client || "").trim().toLowerCase();
+    if (!name) return null;
+    const matches = (clients || []).filter(client => String(client?.name || "").trim().toLowerCase() === name);
+    return matches.length === 1 ? matches[0] : null;
+  };
+  const reportForStop = (stop, client) => {
+    const history = Array.isArray(client?.history) ? client.history : [];
+    const marker = completedSids && stop ? completedSids[stop.sid] : null;
+    const receiptId = marker && typeof marker === "object" ? marker.receiptId : null;
+    if (receiptId) {
+      const receiptMatches = history.filter(entry => entry && String(entry.completionReceiptId || "") === String(receiptId));
+      if (receiptMatches.length === 1) return receiptMatches[0];
+    }
+    const sidMatches = history.filter(entry => entry && entry.sid != null && String(entry.sid) === String(stop?.sid));
+    return sidMatches.length === 1 ? sidMatches[0] : null;
+  };
+  const openCompletedStop = (stop, dayDate, resolvedClient) => {
+    const client = resolvedClient || clientForStop(stop);
+    const entry = reportForStop(stop, client);
+    if (entry && client) setHistoryEdit({ entry, clientId: client.id });
+    else setStopOverview({ stop, client, dayDate });
+  };
+
   // one stop card, reused by the bulk-select list and the per-tech route
   const renderStopCard = (s, dayDate, displayNum, isToday, isNext = null) => {
     // Resolve the live client type-tolerantly (ids can be strings) and clientId-first,
     // so the row shows the CURRENT client name even if the saved snapshot was generic.
-    const c = clients.find(x => String(x.id) === String(s.clientId ?? s.id));
+    const c = clientForStop(s);
     const sent = sentStops[s.sid];
     const arrived = arrivals[s.sid];
     // "Headed" = we've kicked off this stop (tapped Head Here OR the big "Head to next" bar —
@@ -11516,13 +11779,22 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
     const outOfOrder = isNext === false;
     const isSel = !!selected[s.sid];
     const isComplete = completedSids && completedSids[s.sid];
+    const reportEntry = isComplete ? reportForStop(s, c) : null;
     const emp = (team || []).find(e => e.id === s.assigneeId);
     const accentLeft = isComplete ? T.accent : (isToday ? T.primary : T.textMuted);
+    const utilityHeight = denseDesktop ? 34 : 40;
+    const actionHeight = denseDesktop ? 38 : 44;
+    const canOpenCard = !!(selectMode || perms.completeStops || isComplete);
+    const openStopCard = () => {
+      if (selectMode) return toggle(s.sid);
+      if (isComplete) return openCompletedStop(s, dayDate, c);
+      if (perms.completeStops) setCompleteModal({ stop: s, client: c, dayDate });
+    };
     // Cancelled stop — kept on the schedule as a struck-through record, with a quiet remove.
     // Always render this view (even in select mode) so a cancelled record can't be bulk-selected.
     if (s.cancelled) {
       return (
-        <div key={s.sid} style={{ background: T.surfaceAlt, border: `1px dashed ${T.border}`, borderRadius: 18, padding: compact ? "10px 14px" : "12px 16px", display: "flex", alignItems: "center", gap: 12 }}>
+        <div key={s.sid} style={{ background: T.surfaceAlt, border: `1px dashed ${T.border}`, borderRadius: denseSchedule ? 14 : 18, padding: denseSchedule ? "8px 12px" : "12px 16px", display: "flex", alignItems: "center", gap: denseSchedule ? 9 : 12 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 14, fontWeight: 800, color: T.textMuted, textDecoration: "line-through", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c?.name || s.client}</div>
             <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2 }}>{s.time ? `${s.time} · ` : ""}Cancelled{s.cancelReason ? ` · ${s.cancelReason}` : ""}</div>
@@ -11537,31 +11809,27 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
       );
     }
     return (
-      <div key={s.sid} style={{ background: isComplete ? hexA(T.accent, 0.06) : T.surface, border: `1px solid ${isSel ? T.primary : isComplete ? hexA(T.accent, 0.3) : T.border}`, borderRadius: 20, overflow: "hidden", boxShadow: isComplete ? "none" : "0 2px 12px rgba(0,0,0,0.06)", display: "flex" }}>
+      <div key={s.sid} style={{ background: T.surface, border: `1px solid ${isSel ? T.primary : isComplete ? hexA(T.accent, 0.34) : T.border}`, borderRadius: denseSchedule ? 15 : 20, overflow: "hidden", boxShadow: isComplete ? "0 1px 4px rgba(0,0,0,0.035)" : "0 2px 12px rgba(0,0,0,0.06)", display: "flex" }}>
         {/* Number bar */}
         {!selectMode && displayNum != null && (
-          <div style={{ width: 44, flexShrink: 0, background: isComplete ? hexA(T.accent, 0.12) : hexA(accentLeft, 0.1), color: isComplete ? T.accent : accentLeft, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 900 }}>{displayNum}</div>
+          <div style={{ width: denseSchedule ? 36 : 44, flexShrink: 0, background: isComplete ? hexA(T.accent, 0.1) : hexA(accentLeft, 0.1), color: isComplete ? T.accent : accentLeft, display: "flex", alignItems: "center", justifyContent: "center", fontSize: denseSchedule ? 14 : 16, fontWeight: 900 }}>{displayNum}</div>
         )}
         <div style={{ flex: 1, minWidth: 0 }}>
           {/* Main info row */}
           <div
-            onClick={() => {
-              if (selectMode) return toggle(s.sid);
-              // A finished stop opens its SAVED report (photos/readings/services/notes),
-              // not a blank complete form. Falls back to the complete form if no record.
-              // Completed → always open the SAVED report (editable). Never fall through to a
-              // blank complete form, which would let a re-completion overwrite the saved record.
-              if (isComplete) { const entry = (c?.history || []).find(h => String(h.sid) === String(s.sid)); if (entry) setHistoryEdit({ entry, clientId: c.id }); return; }
-              if (perms.completeStops) setCompleteModal({ stop: s, client: c, dayDate });
-            }}
-            style={{ padding: compact ? "9px 14px" : "11px 16px", cursor: (selectMode || perms.completeStops || isComplete) ? "pointer" : "default", display: "flex", gap: 12, alignItems: "center" }}
+            onClick={openStopCard}
+            role={canOpenCard ? "button" : undefined}
+            tabIndex={canOpenCard ? 0 : undefined}
+            aria-label={canOpenCard ? `${isComplete ? "Open completed stop overview" : "Open stop"} for ${c?.name || s.client || "client"}` : undefined}
+            onKeyDown={e => { if (canOpenCard && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openStopCard(); } }}
+            style={{ padding: denseSchedule ? "8px 12px" : "11px 16px", cursor: canOpenCard ? "pointer" : "default", display: "flex", gap: denseSchedule ? 9 : 12, alignItems: "center" }}
           >
             {selectMode && <Checkbox checked={isSel} onChange={() => toggle(s.sid)} />}
 
             {/* Time */}
-            <div style={{ textAlign: "center", minWidth: 44, flexShrink: 0 }}>
+            <div style={{ textAlign: "center", minWidth: denseSchedule ? 40 : 44, flexShrink: 0 }}>
               {s.time ? (<>
-                <div style={{ fontSize: 15, fontWeight: 900, color: T.text, letterSpacing: "-0.03em", lineHeight: 1 }}>{s.time.split(" ")[0]}</div>
+                <div style={{ fontSize: denseSchedule ? 14 : 15, fontWeight: 900, color: T.text, letterSpacing: "-0.03em", lineHeight: 1 }}>{s.time.split(" ")[0]}</div>
                 <div style={{ fontSize: 9, color: T.textMuted, fontWeight: 700, letterSpacing: "0.06em", marginTop: 2 }}>{s.time.split(" ")[1]}</div>
               </>) : (
                 <div style={{ fontSize: 9.5, color: T.textMuted, fontWeight: 700, lineHeight: 1.25 }}>Any<br />time</div>
@@ -11570,7 +11838,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
 
             {/* Client + details */}
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 800, fontSize: 16.5, color: isComplete ? T.textMuted : T.text, letterSpacing: "-0.02em", display: "flex", alignItems: "center", gap: 5 }}>
+              <div style={{ fontWeight: 800, fontSize: denseSchedule ? 15 : 16.5, color: T.text, letterSpacing: "-0.02em", display: "flex", alignItems: "center", gap: 5 }}>
                 {isComplete && <Icon name="check" size={14} style={{ color: T.accent, flexShrink: 0 }} />}
                 {c?.name || s.client}
               </div>
@@ -11585,7 +11853,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
             </div>
 
             {/* Right meta */}
-            <div style={{ textAlign: "right", flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+            <div style={{ textAlign: "right", flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: denseSchedule ? 2 : 4 }}>
               {s._arr != null && (
                 <div style={{ fontSize: 11, fontWeight: 800, color: isComplete ? T.accent : T.primary, display: "flex", alignItems: "center", gap: 3 }}>
                   <Icon name="map" size={11} />
@@ -11608,29 +11876,29 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
               {isComplete ? (
                 /* Completed — ONE consolidated row (no duplicate label, no big button).
                    Tap "Re-open" to undo; tapping the card body opens the saved report. */
-                <div style={{ padding: "6px 10px 6px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: T.accent, fontWeight: 800, minWidth: 0 }}>
+                <div style={{ padding: denseDesktop ? "2px 7px 2px 11px" : "6px 10px 6px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: denseDesktop ? 11.5 : 12.5, color: T.accent, fontWeight: 800, minWidth: 0 }}>
                     <Icon name="check" size={14} />
                     Completed
-                    <span style={{ fontWeight: 600, color: T.textMuted, fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>· Report saved</span>
+                    <span style={{ fontWeight: 650, color: reportEntry ? T.textMuted : T.warning, fontSize: denseDesktop ? 10.5 : 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>· {reportEntry ? "Report saved" : "Overview available"}</span>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0, flexWrap: "wrap" }}>
                     {perms.completeStops && (
-                      <button onClick={e => { e.stopPropagation(); const entry = (c?.history || []).find(h => String(h.sid) === String(s.sid)); if (entry) setHistoryEdit({ entry, clientId: c.id }); }}
-                        title="Edit this visit's saved report — keeps everything you entered"
-                        style={{ minHeight: 40, background: "none", border: "none", color: T.primary, fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", padding: "8px 5px", display: "flex", alignItems: "center", gap: 4 }}>
-                        <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg> Edit
+                      <button onClick={e => { e.stopPropagation(); openCompletedStop(s, dayDate, c); }}
+                        title={reportEntry ? "Edit this visit's saved report — keeps everything you entered" : "Open this completed stop's available overview"}
+                        style={{ minHeight: utilityHeight, background: "none", border: "none", color: T.primary, fontSize: denseDesktop ? 11 : 12, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", padding: "6px 5px", display: "flex", alignItems: "center", gap: 4 }}>
+                        <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg> {reportEntry ? "Edit" : "Overview"}
                       </button>
                     )}
                     {perms.completeStops && (
                       <button onClick={e => { e.stopPropagation(); if (confirm("Re-open this stop? Its saved visit will be removed, and the exact stock and prior balance changed by this completion will be restored. To just change a detail, use Edit instead.")) void onUncomplete(c?.id ?? s.clientId ?? s.id, s.sid); }}
-                        style={{ minHeight: 40, background: "none", border: "none", color: T.textMuted, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", padding: "8px 5px", display: "flex", alignItems: "center", gap: 4 }}>
+                        style={{ minHeight: utilityHeight, background: "none", border: "none", color: T.textMuted, fontSize: denseDesktop ? 11 : 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", padding: "6px 5px", display: "flex", alignItems: "center", gap: 4 }}>
                         <Icon name="refresh" size={12} /> Re-open
                       </button>
                     )}
                     {perms.scheduleAddRemove && (
                       <button onClick={e => { e.stopPropagation(); if (confirm(`Delete this stop for ${c?.name || "this client"}? This can't be undone.`)) deleteStop(dayDate, s.sid); }}
-                        title="Delete stop" style={{ width: 40, height: 40, background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", justifyContent: "center", opacity: 0.55 }}>
+                        title="Delete stop" style={{ width: utilityHeight, height: utilityHeight, background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", justifyContent: "center", opacity: 0.55 }}>
                         <Icon name="trash" size={14} />
                       </button>
                     )}
@@ -11639,7 +11907,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
               ) : (
                 <>
                   {/* Status line — quiet delete tucked top-right */}
-                  <div style={{ padding: "6px 10px 0 14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, flexWrap: "wrap" }}>
+                  <div style={{ padding: denseDesktop ? "3px 8px 0 11px" : "6px 10px 0 14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, flexWrap: "wrap" }}>
                     {arrived ? (
                       <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#16a34a", fontWeight: 700 }}>
                         <Icon name="check" size={12} /> On site
@@ -11658,19 +11926,19 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                     <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0, flexWrap: "wrap" }}>
                       {(perms.completeStops || perms.scheduleAddRemove) && !headed && !arrived && (
                         <button onClick={e => { e.stopPropagation(); setEditStopModal({ stop: s, dayDate }); }}
-                          title="Edit time, service, tech, or date — saves without completing the stop" style={{ minHeight: 40, background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: "8px 5px", fontSize: 11, fontWeight: 700, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4 }}>
+                          title="Edit time, service, tech, or date — saves without completing the stop" style={{ minHeight: utilityHeight, background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: "6px 5px", fontSize: 11, fontWeight: 700, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4 }}>
                           <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg> Edit
                         </button>
                       )}
                       {(perms.completeStops || perms.scheduleAddRemove) && (
                         <button onClick={e => { e.stopPropagation(); setStopChange({ stop: s, client: c, dayDate }); }}
-                          title="Reschedule, cancel, or running late" style={{ minHeight: 40, background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: "8px 5px", fontSize: 11, fontWeight: 700, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4 }}>
+                          title="Reschedule, cancel, or running late" style={{ minHeight: utilityHeight, background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: "6px 5px", fontSize: 11, fontWeight: 700, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4 }}>
                           <Icon name="calendar" size={12} /> Reschedule
                         </button>
                       )}
                       {perms.scheduleAddRemove && (
                         <button onClick={e => { e.stopPropagation(); if (confirm(`Delete this stop for ${c?.name || "this client"}? This can't be undone.`)) deleteStop(dayDate, s.sid); }}
-                          title="Delete stop" style={{ width: 40, height: 40, background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", justifyContent: "center", opacity: 0.55 }}>
+                          title="Delete stop" style={{ width: utilityHeight, height: utilityHeight, background: "none", border: "none", color: T.textMuted, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", justifyContent: "center", opacity: 0.55 }}>
                           <Icon name="trash" size={14} />
                         </button>
                       )}
@@ -11679,30 +11947,30 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
 
                   {/* Actions — compact single-row toolbar. Head Here keeps its FULL behavior
                       (fires the On My Way text + directions), so it is NOT renamed "Directions". */}
-                  <div style={{ padding: "6px 10px 10px", display: "flex", gap: 7 }}>
+                  <div style={{ padding: denseDesktop ? "4px 8px 8px" : "6px 10px 10px", display: "flex", gap: denseDesktop ? 6 : 7 }}>
                     {/* Head Here — not headed → solid red (confirm first if out of order);
                         headed (tapped here OR via the bottom "Head to next" bar) → pressed "Heading". */}
                     {!headed ? (
                       <button onClick={e => { e.stopPropagation(); if (outOfOrder && !confirm(`Head to ${c?.name || "this stop"} now? It isn't the next stop on your route.`)) return; onEnRoute && onEnRoute(s.sid); setHeadHereModal({ stop: { ...s, trackToken: ensureTrackToken(s, "enroute") }, client: c }); }}
-                        style={{ flex: 1, minWidth: 0, minHeight: 44, background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
+                        style={{ flex: 1, minWidth: 0, minHeight: actionHeight, background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: denseDesktop ? "7px 6px" : "9px 6px", fontSize: denseDesktop ? 11.5 : 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
                         <Icon name="map" size={14} /> Head Here
                       </button>
                     ) : (
                       <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: { ...s, trackToken: ensureTrackToken(s, "enroute") }, client: c }); }}
                         title="Heading here — tap for directions again"
-                        style={{ flex: 1, minWidth: 0, minHeight: 44, background: hexA(T.primary, 0.1), color: T.primary, border: `1px solid ${hexA(T.primary, 0.3)}`, borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
+                        style={{ flex: 1, minWidth: 0, minHeight: actionHeight, background: hexA(T.primary, 0.1), color: T.primary, border: `1px solid ${hexA(T.primary, 0.3)}`, borderRadius: 10, padding: denseDesktop ? "7px 6px" : "9px 6px", fontSize: denseDesktop ? 11.5 : 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
                         <Icon name="check" size={13} /> Heading
                       </button>
                     )}
                     {/* I'm Here — logs arrival (also starts the job clock); flips to pressed "Arrived" */}
                     <button onClick={e => { e.stopPropagation(); if (!arrived) setArrivedModal({ stop: { ...s, trackToken: ensureTrackToken(s, "arrived") }, client: c, key: s.sid }); }}
-                      style={{ flex: 1, minWidth: 0, minHeight: 44, background: arrived ? hexA("#16a34a", 0.12) : T.surface, color: arrived ? "#16a34a" : T.text, border: `1px solid ${arrived ? hexA("#16a34a", 0.4) : T.border}`, borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 700, cursor: arrived ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap" }}>
+                      style={{ flex: 1, minWidth: 0, minHeight: actionHeight, background: arrived ? hexA("#16a34a", 0.12) : T.surface, color: arrived ? "#16a34a" : T.text, border: `1px solid ${arrived ? hexA("#16a34a", 0.4) : T.border}`, borderRadius: 10, padding: denseDesktop ? "7px 6px" : "9px 6px", fontSize: denseDesktop ? 11.5 : 12.5, fontWeight: 700, cursor: arrived ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap" }}>
                       {arrived ? <><Icon name="check" size={13} /> Arrived</> : "I'm Here"}
                     </button>
                     {/* Complete — solid green action button; opens the report sheet */}
                     {perms.completeStops && (
                       <button onClick={e => { e.stopPropagation(); setCompleteModal({ stop: s, client: c, dayDate }); }}
-                        style={{ flex: 1, minWidth: 0, minHeight: 44, background: T.accent, color: "#fff", border: "none", borderRadius: 10, padding: "9px 6px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap" }}>
+                        style={{ flex: 1, minWidth: 0, minHeight: actionHeight, background: T.accent, color: "#fff", border: "none", borderRadius: 10, padding: denseDesktop ? "7px 6px" : "9px 6px", fontSize: denseDesktop ? 11.5 : 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap" }}>
                         <Icon name="check" size={14} /> Complete
                       </button>
                     )}
@@ -11735,7 +12003,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
       </div>
 
       {/* Tab switcher */}
-      <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 11, padding: 3, gap: 3, marginBottom: 18 }}>
+      <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 11, padding: 3, gap: 3, marginBottom: denseDesktop ? 12 : 18 }}>
         {[["schedule", "Schedule"], ...(perms.scheduleReorder ? [["routes", "Route Assignments"]] : [])].map(([id, label]) => (
           <button key={id} onClick={() => setSchedTab(id)} style={{ flex: 1, minHeight: 44, padding: "8px", border: "none", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer", background: schedTab === id ? T.surface : "transparent", color: schedTab === id ? T.primary : T.textMuted, fontFamily: "inherit", boxShadow: schedTab === id ? "0 1px 4px rgba(0,0,0,0.1)" : "none", transition: "all 0.15s" }}>
             {label}
@@ -11782,22 +12050,21 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
 
       {/* Day strip */}
       {!selectMode && schedule.length > 0 && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 18 }}>
-          <div ref={stripRef} style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", flex: 1 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: denseDesktop ? 6 : 8, marginBottom: denseDesktop ? 12 : 18 }}>
+          <div ref={stripRef} style={{ display: "flex", gap: denseDesktop ? 5 : 6, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", flex: 1 }}>
           {dayCells.map(cell => {
             const on = cell.ds === selectedDate;
             const isToday = cell.ds === todayMDY();
             return (
               <button key={cell.ds} ref={isToday ? todayCellRef : undefined} data-today={isToday ? "1" : undefined} data-sel={on ? "1" : undefined} onClick={() => { setSelectedDate(cell.ds); setViewTech(null); }}
-                style={{ flexShrink: 0, width: 54, paddingTop: 10, paddingBottom: 10, borderRadius: 16, border: isToday && !on ? `2px solid ${hexA(T.primary, 0.4)}` : "none", cursor: "pointer", fontFamily: "inherit", textAlign: "center", transition: "background 0.15s, transform 0.1s",
+                style={{ flexShrink: 0, width: denseDesktop ? 48 : 54, paddingTop: denseDesktop ? 7 : 10, paddingBottom: denseDesktop ? 7 : 10, borderRadius: denseDesktop ? 13 : 16, border: isToday && !on ? `2px solid ${hexA(T.primary, 0.4)}` : "none", cursor: "pointer", fontFamily: "inherit", textAlign: "center", transition: "background 0.15s, box-shadow 0.15s",
                   background: on ? T.primary : T.surfaceAlt,
                   color: on ? "#fff" : T.textMuted,
-                  boxShadow: on ? `0 4px 14px ${hexA(T.primary, 0.35)}` : "none",
-                  transform: on ? "scale(1.06)" : "scale(1)",
+                  boxShadow: on ? `0 3px 10px ${hexA(T.primary, 0.28)}` : "none",
                 }}>
                 <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", opacity: on ? 0.85 : 0.7 }}>{cell.weekday}</div>
-                <div style={{ fontSize: 20, fontWeight: 900, marginTop: 3, letterSpacing: "-0.03em" }}>{cell.num}</div>
-                <div style={{ height: 5, marginTop: 4, display: "flex", justifyContent: "center" }}>
+                <div style={{ fontSize: denseDesktop ? 18 : 20, fontWeight: 900, marginTop: denseDesktop ? 2 : 3, letterSpacing: "-0.03em" }}>{cell.num}</div>
+                <div style={{ height: 5, marginTop: denseDesktop ? 2 : 4, display: "flex", justifyContent: "center" }}>
                   {cell.hasStops
                     ? <span style={{ width: 5, height: 5, borderRadius: "50%", background: on ? "rgba(255,255,255,0.8)" : T.primary }} />
                     : <span style={{ width: 5, height: 5 }} />
@@ -11809,7 +12076,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           </div>
           {selectedDate !== todayMDY() && (
             <button onClick={() => { setSelectedDate(todayMDY()); setViewTech(null); }}
-              style={{ flexShrink: 0, alignSelf: "stretch", padding: "0 16px", borderRadius: 16, border: `1.5px solid ${T.primary}`, background: hexA(T.primary, 0.06), color: T.primary, fontFamily: "inherit", fontWeight: 800, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}>
+              style={{ flexShrink: 0, alignSelf: "stretch", padding: denseDesktop ? "0 12px" : "0 16px", borderRadius: denseDesktop ? 13 : 16, border: `1.5px solid ${T.primary}`, background: hexA(T.primary, 0.06), color: T.primary, fontFamily: "inherit", fontWeight: 800, fontSize: denseDesktop ? 12 : 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}>
               <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
               Today
             </button>
@@ -11838,7 +12105,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           const groups = groupsForDate(selectedDate);
           return (
             <div>
-              <div style={{ fontSize: 13, fontWeight: 700, color: T.textMuted, marginBottom: 12 }}>{stripDate(selectedDate)}{selectedDate === todayMDY() ? " · Today" : ""}</div>
+              <div style={{ fontSize: denseDesktop ? 12 : 13, fontWeight: 700, color: T.textMuted, marginBottom: denseDesktop ? 8 : 12 }}>{stripDate(selectedDate)}{selectedDate === todayMDY() ? " · Today" : ""}</div>
               {groups.length === 0 ? (
                 <div style={{ textAlign: "center", padding: "44px 20px", color: T.textMuted }}>
                   <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="calendar" size={26} /></div>
@@ -11847,27 +12114,28 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                   {perms.scheduleAddRemove && <Btn onClick={() => setShowAdd(true)}>+ Add Stop</Btn>}
                 </div>
               ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: denseDesktop ? 8 : 12 }}>
                   {groups.map(g => {
                     const m = routeMetrics(g.stops);
                     const pct = m.total ? Math.round((m.done / m.total) * 100) : 0;
                     const sel = vp.isDesktop && g.key === viewTech;
                     return (
                       <button key={g.key} onClick={() => setViewTech(g.key)}
-                        style={{ display: "flex", alignItems: "center", gap: 16, background: T.surface, border: vp.isDesktop ? `2px solid ${sel ? T.primary : "transparent"}` : "none", borderRadius: 20, boxShadow: T.shadow, padding: "16px 18px", cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%" }}>
-                        <RouteRing done={m.done} total={m.total} size={68} label="stops" />
+                        aria-pressed={vp.isDesktop ? sel : undefined}
+                        style={{ display: "flex", alignItems: "center", gap: denseDesktop ? 11 : 16, background: sel ? hexA(T.primary, 0.035) : T.surface, border: vp.isDesktop ? `1px solid ${sel ? hexA(T.primary, 0.72) : T.border}` : "none", borderRadius: denseDesktop ? 15 : 20, boxShadow: sel ? `0 5px 16px ${hexA(T.primary, 0.1)}` : T.shadow, padding: denseDesktop ? "11px 13px" : "16px 18px", cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%" }}>
+                        <RouteRing done={m.done} total={m.total} size={denseDesktop ? 54 : 68} label="stops" />
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                            <div style={{ fontSize: 21, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.name}</div>
-                            <span style={{ color: T.textMuted, fontSize: 20, flexShrink: 0 }}>›</span>
+                            <div style={{ fontSize: denseDesktop ? 17 : 21, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.name}</div>
+                            <span style={{ color: sel ? T.primary : T.textMuted, fontSize: denseDesktop ? 17 : 20, flexShrink: 0 }}>›</span>
                           </div>
-                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: T.textMuted, margin: "6px 0 5px" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: denseDesktop ? 11 : 12, color: T.textMuted, margin: denseDesktop ? "4px 0" : "6px 0 5px" }}>
                             <span>{fmtMin(m.startMin)}</span><span>{fmtMin(m.endMin)}</span>
                           </div>
-                          <div style={{ height: 6, background: T.surfaceAlt, borderRadius: 100, overflow: "hidden" }}>
+                          <div style={{ height: denseDesktop ? 5 : 6, background: T.surfaceAlt, borderRadius: 100, overflow: "hidden" }}>
                             <div style={{ width: `${pct}%`, height: "100%", background: m.done >= m.total ? T.accent : T.primary, borderRadius: 100 }} />
                           </div>
-                          <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 6 }}>{m.done}/{m.total} done · ~{m.milesEst} mi · {fmtDur(Math.max(0, m.endMin - m.startMin))} est</div>
+                          <div style={{ fontSize: denseDesktop ? 10.5 : 11.5, color: T.textMuted, marginTop: denseDesktop ? 4 : 6 }}>{m.done}/{m.total} done · ~{m.milesEst} mi · {fmtDur(Math.max(0, m.endMin - m.startMin))} est</div>
                         </div>
                       </button>
                     );
@@ -11894,37 +12162,42 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           const nextStop = orderedStops.find(s => !(completedSids && completedSids[s.sid]));
           // The next stop's client, so the big "Head to next" button can launch the full
           // flow (On My Way text + directions in the tech's preferred app), not just a link.
-          const nextStopClient = nextStop ? clients.find(x => String(x.id) === String(nextStop.clientId ?? nextStop.id)) : null;
+          const nextStopClient = nextStop ? clientForStop(nextStop) : null;
           const headToNext = () => { if (!nextStop) return; onEnRoute && onEnRoute(nextStop.sid); setHeadHereModal({ stop: nextStop, client: nextStopClient }); };
           return (
             <div style={{ paddingBottom: vp.isDesktop ? 0 : (nextStop ? 80 : 0) }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 0 12px" }}>
-                {vp.isDesktop
-                  ? <div style={{ fontSize: 18, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{techName}</div>
-                  : <button onClick={() => setViewTech(null)} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
-                      <Icon name="back" size={14} /> All routes
-                    </button>}
-                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                  <span style={{ fontSize: 12, color: T.textMuted, fontWeight: 600 }}>{stripDate(selectedDate)}{isToday ? " · Today" : ""}</span>
-                  <WeatherFlag wx={wx} date={selectedDate} T={T} />
-                  {/* Both admin and staff can optimize their own route (display-only). */}
-                  {stops.length > 1 && (
-                    <button onClick={() => !optimizing && optimizeRoute(selectedDate, viewTech, stops)} disabled={optimizing}
-                      style={{ background: hexA(T.primary, 0.1), border: `1px solid ${hexA(T.primary, 0.2)}`, color: T.primary, borderRadius: 10, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: optimizing ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5, opacity: optimizing ? 0.7 : 1 }}>
-                      <Icon name="refresh" size={13} /> {optimizing ? "Optimizing…" : "Optimize Route"}
-                    </button>
-                  )}
-                </div>
-              </div>
+              {!vp.isDesktop && (
+                <button onClick={() => setViewTech(null)} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", padding: "0 0 10px", display: "flex", alignItems: "center", gap: 4 }}>
+                  <Icon name="back" size={14} /> All routes
+                </button>
+              )}
 
-              <div style={{ background: T.surface, borderRadius: 18, boxShadow: T.shadow, padding: "16px 18px", marginBottom: 16, display: "flex", alignItems: "center", gap: 16 }}>
-                <RouteRing done={m.done} total={m.total} size={64} label="stops" />
+              {/* One compact route header: name, date, weather, metrics and optimize action live
+                  together instead of repeating the technician in a second desktop heading. */}
+              <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: denseDesktop ? 15 : 18, boxShadow: "0 2px 10px rgba(0,0,0,0.05)", padding: denseDesktop ? "11px 13px" : "16px 18px", marginBottom: denseDesktop ? 10 : 16, display: "flex", alignItems: "center", gap: denseDesktop ? 12 : 16 }}>
+                <RouteRing done={m.done} total={m.total} size={denseDesktop ? 54 : 64} label="stops" />
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 19, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{techName}</div>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: T.textMuted, margin: "7px 0 5px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, flexWrap: "wrap" }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: denseDesktop ? 17 : 19, fontWeight: 800, color: T.text, letterSpacing: "-0.03em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{techName}</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginTop: 2 }}>
+                        <span style={{ fontSize: denseDesktop ? 10.5 : 12, color: T.textMuted, fontWeight: 600 }}>{stripDate(selectedDate)}{isToday ? " · Today" : ""}</span>
+                        <WeatherFlag wx={wx} date={selectedDate} T={T} />
+                      </div>
+                    </div>
+                    {/* Both admin and staff can optimize their own route (display-only). */}
+                    {stops.length > 1 && (
+                      <button onClick={() => !optimizing && optimizeRoute(selectedDate, viewTech, stops)} disabled={optimizing}
+                        title="Optimize route order"
+                        style={{ background: hexA(T.primary, 0.08), border: `1px solid ${hexA(T.primary, 0.2)}`, color: T.primary, borderRadius: 9, padding: denseDesktop ? "5px 8px" : "6px 10px", fontSize: denseDesktop ? 10.5 : 11.5, fontWeight: 750, cursor: optimizing ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4, opacity: optimizing ? 0.7 : 1, whiteSpace: "nowrap" }}>
+                        <Icon name="refresh" size={12} /> {optimizing ? "Optimizing…" : "Optimize"}
+                      </button>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: denseDesktop ? 10.5 : 12, color: T.textMuted, margin: denseDesktop ? "5px 0 4px" : "7px 0 5px" }}>
                     <span>{fmtMin(m.startMin)}</span><span>~{m.milesEst} mi est</span><span>{fmtMin(m.endMin)}</span>
                   </div>
-                  <div style={{ height: 6, background: T.surfaceAlt, borderRadius: 100, overflow: "hidden" }}>
+                  <div style={{ height: denseDesktop ? 5 : 6, background: T.surfaceAlt, borderRadius: 100, overflow: "hidden" }}>
                     <div style={{ width: `${pct}%`, height: "100%", background: m.done >= m.total ? T.accent : T.primary, borderRadius: 100 }} />
                   </div>
                 </div>
@@ -11947,9 +12220,9 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                 </div>
               )}
 
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: denseDesktop ? 6 : 8 }}>
                 {orderedStops.map((s, i) => (
-                  <div key={s.sid} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div key={s.sid} style={{ display: "flex", flexDirection: "column", gap: denseDesktop ? 6 : 8 }}>
                     {renderStopCard(s, selectedDate, i + 1, isToday, !!nextStop && String(s.sid) === String(nextStop.sid))}
                     {optActive && i < orderedStops.length - 1 && routeOpt.legs[s.sid] && (
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 5, fontSize: 11, fontWeight: 700, color: T.textMuted }}>
@@ -11989,8 +12262,8 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
         // Mobile: dashboard OR detail (drill-down). Desktop: dashboard left + detail right.
         if (!vp.isDesktop) return viewTech === null ? dashboard : detailFor();
         return (
-          <div style={{ display: "flex", gap: vp.isTablet ? 16 : 26, alignItems: "flex-start" }}>
-            <div style={{ width: vp.isTablet ? 280 : 372, flexShrink: 0 }}>{dashboard}</div>
+          <div style={{ display: "flex", gap: vp.isTablet ? 16 : 18, alignItems: "flex-start" }}>
+            <div style={{ width: vp.isTablet ? 280 : 320, flexShrink: 0 }}>{dashboard}</div>
             <div style={{ flex: 1, minWidth: 0 }}>
               {viewTech !== null ? detailFor() : (
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: T.textMuted, gap: 12, padding: "60px 40px", textAlign: "center", background: T.surface, borderRadius: 20, boxShadow: T.shadow }}>
@@ -12098,6 +12371,43 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
         />
       )}
 
+      {stopOverview && (() => {
+        const s = stopOverview.stop || {};
+        const client = stopOverview.client;
+        const assigned = (team || []).find(member => String(member.id) === String(s.assigneeId));
+        const serviceNames = (s.services || []).map(service => typeof service === "string" ? service : service?.name).filter(Boolean);
+        const rawDuration = String(s.duration || "").trim();
+        const durationText = rawDuration && /^\d+(?:\.\d+)?$/.test(rawDuration) ? `${rawDuration} min` : rawDuration;
+        const overviewRow = (label, value) => value ? (
+          <div style={{ display: "grid", gridTemplateColumns: vp.isPhone ? "1fr" : "120px 1fr", gap: vp.isPhone ? 3 : 12, padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
+            <div style={{ fontSize: 10.5, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</div>
+            <div style={{ fontSize: 13.5, fontWeight: 650, color: T.text, lineHeight: 1.45, overflowWrap: "anywhere" }}>{value}</div>
+          </div>
+        ) : null;
+        return (
+          <Modal title="Completed stop overview" maxWidth={520} onClose={() => setStopOverview(null)}>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 10, background: hexA("#B45309", 0.08), border: `1px solid ${hexA("#B45309", 0.22)}`, borderRadius: 12, padding: "11px 12px", marginBottom: 12 }}>
+              <Icon name="warning" size={16} style={{ color: "#B45309", flexShrink: 0, marginTop: 1 }} />
+              <div style={{ fontSize: 12.5, color: T.text, lineHeight: 1.45 }}>This stop is complete, but its original visit report is not linked to this schedule card. The available schedule details are shown below.</div>
+            </div>
+            <div style={{ borderTop: `1px solid ${T.border}` }}>
+              {overviewRow("Client", client?.name || s.client || "Client")}
+              {overviewRow("Date", stopOverview.dayDate ? stripDate(stopOverview.dayDate) : "")}
+              {overviewRow("Time", s.time || "Any time")}
+              {overviewRow("Address", s.address || client?.address)}
+              {overviewRow("Visit", [s.type, durationText].filter(Boolean).join(" · "))}
+              {overviewRow("Assigned to", assigned?.name || s.assigneeName || "Unassigned")}
+              {overviewRow("Planned work", serviceNames.join(" · "))}
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap", marginTop: 16 }}>
+              {client && onClientSelect && <Btn sm variant="ghost" onClick={() => { setStopOverview(null); onClientSelect(client, "history"); }}>View client history</Btn>}
+              {(perms.scheduleAddRemove || perms.completeStops) && <Btn sm variant="outline" onClick={() => { setStopOverview(null); setEditStopModal({ stop: s, dayDate: stopOverview.dayDate }); }}>Edit schedule</Btn>}
+              <Btn sm onClick={() => setStopOverview(null)}>Close</Btn>
+            </div>
+          </Modal>
+        );
+      })()}
+
       {completeModal && (
         <CompleteStopModal
           stop={completeModal.stop}
@@ -12129,7 +12439,22 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           catalog={catalog}
           team={team}
           onSave={(upd) => {
-            setClients(cs => (cs || []).map(cl => cl.id === historyEdit.clientId ? { ...cl, history: (cl.history || []).map(h => h.sid === upd.sid ? upd : h) } : cl));
+            setClients(cs => (cs || []).map(cl => {
+              if (String(cl.id) !== String(historyEdit.clientId)) return cl;
+              const history = Array.isArray(cl.history) ? cl.history : [];
+              const selectedReceipt = String(historyEdit.entry?.completionReceiptId || "");
+              const selectedSid = historyEdit.entry?.sid;
+              const receiptMatches = selectedReceipt ? history.filter(h => String(h?.completionReceiptId || "") === selectedReceipt) : [];
+              const sidMatches = selectedReceipt ? [] : history.filter(h => h?.sid != null && String(h.sid) === String(selectedSid));
+              return {
+                ...cl,
+                history: history.map(h => {
+                  const receiptMatch = selectedReceipt && receiptMatches.length === 1 && String(h?.completionReceiptId || "") === selectedReceipt;
+                  const uniqueSidMatch = !selectedReceipt && sidMatches.length === 1 && String(h?.sid) === String(selectedSid);
+                  return receiptMatch || uniqueSidMatch ? { ...upd, completionReceiptId: upd?.completionReceiptId || h?.completionReceiptId } : h;
+                }),
+              };
+            }));
             setHistoryEdit(null);
           }}
           onClose={() => setHistoryEdit(null)}
@@ -17215,9 +17540,10 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
     setPdfBusy(true); setSentMsg("");
     try {
       const normalized = withEstimateTotals(form, defaultTaxRate);
+      const client = (clients || []).find((entry) => String(entry.id) === String(normalized.clientId));
       setForm(normalized);
       if (onPersist) onPersist(normalized); // save edits, but stay on the estimate (no close)
-      const r = await generateEstimatePDF(normalized, branding, invoicing);
+      const r = await generateEstimatePDF(normalized, branding, invoicing, client);
       if (r === "downloaded") setSentMsg("Estimate PDF saved to your downloads.");
     } catch (e) {
       setSentMsg("Couldn't export the PDF: " + ((e && e.message) || "unknown error"));
@@ -17334,7 +17660,7 @@ function EstimateForm({ estimate, clients, catalog, branding, email, invoicing, 
       // Attach the same PDF the "Download PDF" button makes, so the client can save it (best-effort).
       let pdf = null;
       try {
-        const doc = await buildEstimatePDFDoc(current, branding, invoicing);
+        const doc = await buildEstimatePDFDoc(current, branding, invoicing, client);
         const b64 = (doc.output("datauristring").split("base64,")[1] || "");
         if (b64) pdf = { filename: estimatePdfName(current), content: b64 };
       } catch (_) { /* PDF optional — still send the branded email */ }
@@ -32715,29 +33041,28 @@ export default function App({ authEmail = "", onSignOut }) {
         {pushPrimerModal}
 
         {/* Header — a non-scrolling flex child, frozen at the top */}
-        <header style={{ background: hexA(T.surface, 0.9), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, position: "relative", zIndex: 100, flexShrink: 0, borderBottom: `1px solid ${T.border}` }}>
+        <header style={{ background: hexA(T.surface, 0.94), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, position: "relative", zIndex: 100, flexShrink: 0, borderBottom: `1px solid ${T.border}`, boxShadow: "0 1px 0 rgba(0,0,0,0.02)" }}>
           {/* Safe area spacer — grows to exactly the status bar height on any iPhone, zero on Android */}
           <div style={{ height: "env(safe-area-inset-top)", background: "transparent" }} />
-          <div style={{ minHeight: 52, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, paddingLeft: 16, paddingRight: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0, flex: 1 }}>
-            <div style={{ width: 30, height: 30, borderRadius: 9, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+          <div style={{ minHeight: 62, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "7px 12px 7px 16px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: 1 }}>
+            <div style={{ width: 36, height: 36, borderRadius: 11, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, boxShadow: `0 2px 8px ${hexA(T.primary, 0.18)}` }}>
               <ProtectedImage src={brandLogoSource(branding)} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
             </div>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: "-0.02em", lineHeight: 1.15, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.companyName}</div>
-                {email?.testMode?.on && (
-                  (canSeeComms(perms) && (perms.isAdmin || perms.commsSettings || perms.editNotifications))
-                    ? <button type="button" onClick={() => handleNav("comms", { commsSection: "settings" })}
-                        aria-label="Test mode is on. Open Comms settings." title="Test mode is on — tap to manage it in Comms → Settings"
-                        style={{ minWidth: 48, minHeight: 40, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 9.5, fontWeight: 800, letterSpacing: "0.06em", color: "#B45309", background: hexA("#F59E0B", 0.16), padding: "0 8px", border: "none", borderRadius: 100, textTransform: "uppercase", whiteSpace: "nowrap", cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Test</button>
-                    : <span title="Test mode is on" style={{ fontSize: 8.5, fontWeight: 800, letterSpacing: "0.06em", color: "#B45309", background: hexA("#F59E0B", 0.16), padding: "2px 6px", borderRadius: 100, textTransform: "uppercase", whiteSpace: "nowrap" }}>Test</span>
-                )}
-              </div>
-              <div style={{ fontSize: 10.5, color: T.textMuted, letterSpacing: "0.01em", lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.division}</div>
+            <div style={{ minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "center", gap: 2 }}>
+              <div style={{ fontSize: 15, fontWeight: 800, letterSpacing: "-0.025em", lineHeight: 1.12, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.companyName}</div>
+              <div style={{ fontSize: 11, fontWeight: 500, color: T.textMuted, letterSpacing: "0.01em", lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.division}</div>
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            {/* Keep launch status visually separate from the company name so neither looks cramped. */}
+            {email?.testMode?.on && (
+              (canSeeComms(perms) && (perms.isAdmin || perms.commsSettings || perms.editNotifications))
+                ? <button type="button" onClick={() => handleNav("comms", { commsSection: "settings" })}
+                    aria-label="Test mode is on. Open Comms settings." title="Test mode is on — tap to manage it in Comms → Settings"
+                    style={{ minWidth: 48, height: 32, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 850, letterSpacing: "0.07em", color: "#A64B08", background: hexA("#F59E0B", 0.13), padding: "0 9px", border: `1px solid ${hexA("#F59E0B", 0.18)}`, borderRadius: 10, textTransform: "uppercase", whiteSpace: "nowrap", cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Test</button>
+                : <span title="Test mode is on" style={{ minWidth: 48, height: 32, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 850, letterSpacing: "0.07em", color: "#A64B08", background: hexA("#F59E0B", 0.13), padding: "0 9px", border: `1px solid ${hexA("#F59E0B", 0.18)}`, borderRadius: 10, textTransform: "uppercase", whiteSpace: "nowrap", flexShrink: 0 }}>Test</span>
+            )}
             {/* Sync button — far-right header action */}
             <button onClick={manualSync} title="Sync"
               aria-label="Sync data" style={{ background: hexA(T.primary, 0.1), border: "none", color: syncState === "saved" ? "#16a34a" : T.primary, cursor: "pointer", width: 44, height: 44, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", transition: "color 0.3s" }}>
