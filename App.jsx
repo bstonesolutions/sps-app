@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { store, supabase } from "./supabaseClient";
 import { PROD_URL } from "./config";
 import { sendWidgetPayload, clearWidgetPayload } from "./widgetBridge";
-import { normalizeCompletionInvoice } from "./stopCompletion";
+import { normalizeCompletionInvoice, STOP_REVERSAL_LEDGER_KEY } from "./stopCompletion";
 import { CLIENT_MEDIA_BUCKET, backupManifestStatus, buildMediaArchive, buildStorageObjectPath, findUniqueStableMatch, makeStorageRef, parseDataUrl, parseStorageLocator, selectLegacyMediaForMigration, validateBackupMediaSize } from "./mediaBackup";
 import { createPortalDataFence, portalVisitMatchesReference, portalVisitReference, rejectPortalPreviewAction, requestPortalAction, retainPortalRatingVisit } from "./portalActionClient";
 import { selectActiveEnRouteStop } from "./geofenceSafety";
@@ -7233,9 +7233,11 @@ function ClientEquipment({ client, invoices, onChange }) {
 }
 
 function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
-  const { T } = useApp();
+  const { T, perms } = useApp();
   const vp = useViewport();
   const wide = vp.isDesktop || vp.isTablet; // desktop/iPad → two-column layout
+  const canEditFinancials = !!perms.seeProfit;
+  const canSeeServicePrices = !!(perms.seeProfit || perms.seeBalances);
   const num = (v) => parseFloat(v) || 0;
   const b = entry.breakdown || {};
   const legacy = { pH: entry.ph, Ammonia: entry.ammonia, Nitrite: entry.nitrite, Temperature: entry.temp };
@@ -7260,15 +7262,17 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
   const [revenue, setRevenue] = useState(String(b.revenue ?? (entry.invoice || "").replace(/[^\d.]/g, "")));
   const [labor, setLabor] = useState(String(b.labor ?? 0));
   const [treatment, setTreatment] = useState(String(b.treatment ?? 0));
+  const [partsCost, setPartsCost] = useState(String(b.parts ?? 0));
   const [product, setProduct] = useState(String(b.product ?? 0));
   const [gas, setGas] = useState(String(b.gas ?? 0));
   const [insurance, setInsurance] = useState(String(b.insurance ?? 0));
   const [equipment, setEquipment] = useState(String(b.equipment ?? 0));
   const [overhead, setOverhead] = useState(String(b.overhead ?? 0));
 
-  const total = num(labor) + num(treatment) + num(product) + num(gas) + num(insurance) + num(equipment) + num(overhead);
-  const profit = num(revenue) - total;
-  const margin = num(revenue) > 0 ? (profit / num(revenue)) * 100 : 0;
+  const total = num(labor) + num(treatment) + num(partsCost) + num(product) + num(gas) + num(insurance) + num(equipment) + num(overhead);
+  const effectiveRevenue = num(revenue) + num(b.partsBilledRetail) + num(b.productBilledRetail);
+  const profit = effectiveRevenue - total;
+  const margin = effectiveRevenue > 0 ? (profit / effectiveRevenue) * 100 : 0;
   const money = (n) => `$${n.toFixed(2)}`;
 
   const addPhotos = async (e) => {
@@ -7282,15 +7286,21 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
   };
 
   const save = () => {
-    onSave({
+    const updated = {
       ...entry,
       type: type || entry.type, tech,
       services: svcList.filter(s => s.name), products: prodList,
       notes, officeNotes, readings, readingStatus, photos,
-      invoice: revenue ? `$${revenue}` : "$0",
       ph: readings["pH"] || "—", ammonia: readings["Ammonia"] || "—", nitrite: readings["Nitrite"] || "—", temp: readings["Temperature"] || "—",
-      breakdown: { ...b, revenue: num(revenue), labor: num(labor), treatment: num(treatment), product: num(product), gas: num(gas), insurance: num(insurance), equipment: num(equipment), overhead: num(overhead), total, profit, margin },
-    });
+    };
+    // Staff who can edit visit notes but cannot see profit must not be able to
+    // reveal or silently recalculate the saved financial snapshot.
+    if (canEditFinancials) {
+      updated.invoice = revenue ? `$${revenue}` : "$0";
+      updated.quoted_price = num(revenue);
+      updated.breakdown = { ...b, revenue: num(revenue), effectiveRevenue, labor: num(labor), treatment: num(treatment), parts: num(partsCost), product: num(product), gas: num(gas), insurance: num(insurance), equipment: num(equipment), overhead: num(overhead), total, profit, margin };
+    }
+    onSave(updated);
     onClose();
   };
 
@@ -7334,10 +7344,10 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
             {svcList.map((s, i) => (
               <div key={i} style={{ display: "flex", gap: 7, alignItems: "center" }}>
                 <input value={s.name} onChange={e => setSvcList(l => l.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} placeholder="Service name" style={{ ...ta, flex: 1, resize: "none" }} />
-                <div style={{ position: "relative", width: 90 }}>
+                {canSeeServicePrices && <div style={{ position: "relative", width: 90 }}>
                   <span style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
                   <input value={s.price} onChange={e => setSvcList(l => l.map((x, j) => j === i ? { ...x, price: e.target.value.replace(/[^\d.]/g, "") } : x))} placeholder="0" style={{ width: "100%", padding: "10px 8px 10px 20px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
-                </div>
+                </div>}
                 <button onClick={() => setSvcList(l => l.filter((_, j) => j !== i))} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", fontSize: 18, lineHeight: 1, padding: "0 2px" }}>×</button>
               </div>
             ))}
@@ -7444,7 +7454,7 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
         </div>
   );
 
-  const financialsBlock = (
+  const financialsBlock = canEditFinancials ? (
         <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: 14 }}>
           <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 12 }}>Financials</div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
@@ -7457,6 +7467,7 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
           <div style={{ borderTop: `1px solid ${T.border}`, margin: "6px 0 10px" }} />
           {costLine("Labor", labor, setLabor)}
           {costLine("Treatments", treatment, setTreatment)}
+          {costLine("Parts", partsCost, setPartsCost)}
           {costLine("Products", product, setProduct)}
           {costLine("Gas", gas, setGas)}
           {costLine("Insurance", insurance, setInsurance)}
@@ -7468,7 +7479,7 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
             <span style={{ fontSize: 16, fontWeight: 800, color: profit >= 0 ? T.accent : "#C0392B" }}>{money(Math.abs(profit))} <span style={{ fontSize: 12, color: T.textMuted }}>({margin.toFixed(0)}%)</span></span>
           </div>
         </div>
-  );
+  ) : null;
 
   const saveBtn = <Btn onClick={save} style={{ width: "100%", padding: "12px", borderRadius: 12 }}>Save Changes</Btn>;
 
@@ -7507,6 +7518,175 @@ function stopProfitability(h) {
   const target = parseFloat(h && h.target_hourly_rate);
   const hasTarget = target > 0;
   return { revenue: qp, hours: ah, rate, target: hasTarget ? target : null, status: !hasTarget ? "neutral" : (rate >= target ? "good" : "low") };
+}
+
+// Read-only source of truth for a completed visit. This intentionally renders the
+// saved history snapshot rather than the schedule card, whose planned fields may
+// have changed after the technician finished the work.
+function FinishedReportModal({ entry, client, catalog, onEdit, onClose }) {
+  const { T, perms } = useApp();
+  const vp = useViewport();
+  if (!entry) return null;
+
+  const money = (value) => `$${(Number.parseFloat(value) || 0).toFixed(2)}`;
+  const list = (value) => Array.isArray(value) ? value : (value == null || value === "" ? [] : [value]);
+  const showMoney = !!(perms.seeProfit || perms.seeBalances);
+  const locationName = (locationId) => {
+    if (locationId == null || String(locationId).trim() === "") return "";
+    const location = (catalog?.locations || []).find(item => String(item?.id) === String(locationId));
+    return location?.name || `Location ${locationId}`;
+  };
+  const readingPairs = entry.readings && Object.keys(entry.readings).length
+    ? Object.entries(entry.readings).filter(([, value]) => value !== "" && value != null && value !== "—")
+    : [["pH", entry.ph], ["Ammonia", entry.ammonia], ["Nitrite", entry.nitrite], ["Temperature", entry.temp]].filter(([, value]) => value && value !== "—");
+  const services = list(entry.services).map(service => typeof service === "string" ? { name: service } : service).filter(service => service?.name);
+  const checklist = list(entry.checklist).filter(Boolean);
+  const treatments = list(entry.treatmentsUsed).filter(Boolean);
+  const parts = list(entry.partsUsed).filter(Boolean);
+  const purchasedProducts = list(entry.productsPurchased).filter(Boolean);
+  const photos = list(entry.photos).filter(photo => photo && (typeof photo === "string" || photo.src));
+  const productNames = [...new Set([...list(entry.productsUsed), ...list(entry.products)]
+    .map(product => typeof product === "string" ? product : product?.name).filter(Boolean))];
+  const purchasedNames = new Set(purchasedProducts.map(product => String(product?.name || "").toLowerCase()));
+  const otherProductNames = productNames.filter(name => !purchasedNames.has(String(name).toLowerCase()));
+  const breakdown = entry.breakdown && typeof entry.breakdown === "object" ? entry.breakdown : null;
+  const arrivalDate = entry.arrivedAt ? new Date(entry.arrivedAt) : null;
+  const arrivalText = arrivalDate && !Number.isNaN(arrivalDate.getTime())
+    ? arrivalDate.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+    : "";
+  const stockLocation = locationName(entry.usageLoc);
+  const reportId = String(entry.completionReceiptId || "").trim();
+
+  const sectionTitle = { fontSize: 10.5, fontWeight: 850, textTransform: "uppercase", letterSpacing: "0.07em", color: T.textMuted, marginBottom: 9 };
+  const section = (title, content) => (
+    <section style={{ borderTop: `1px solid ${T.border}`, paddingTop: 15 }}>
+      <div style={sectionTitle}>{title}</div>
+      {content}
+    </section>
+  );
+  const itemRow = (name, detail, meta, rowKey) => (
+    <div key={rowKey} style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, padding: "5px 0" }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text, lineHeight: 1.35 }}>{name}</div>
+        {meta && <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 2 }}>{meta}</div>}
+      </div>
+      {detail && <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text, flexShrink: 0, textAlign: "right" }}>{detail}</div>}
+    </div>
+  );
+  const metaItems = [
+    ["Date", entry.date],
+    ["Service", entry.type],
+    ["Technician", entry.tech || "Unassigned"],
+    ["Arrived", arrivalText],
+    ["Time on site", entry.actual_hours ? `${entry.actual_hours} hr` : ""],
+    ["Stock location", stockLocation],
+  ].filter(([, value]) => value);
+
+  return (
+    <Modal title="Finished service report" maxWidth={vp.isPhone ? 680 : 820} onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 15 }}>
+        <div style={{ background: `linear-gradient(135deg, ${hexA(T.accent, 0.11)}, ${hexA(T.primary, 0.035)})`, border: `1px solid ${hexA(T.accent, 0.24)}`, borderRadius: 16, padding: vp.isPhone ? "14px" : "16px 18px", display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ width: 42, height: 42, borderRadius: 13, background: hexA(T.accent, 0.14), color: T.accent, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name="check" size={20} /></div>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontSize: 16, fontWeight: 850, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{client?.name || "Client"}</div>
+            <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2 }}>Completed visit · saved report</div>
+          </div>
+          {showMoney && entry.invoice && <div style={{ fontSize: 15, fontWeight: 850, color: T.text, flexShrink: 0 }}>{entry.invoice}</div>}
+        </div>
+
+        {metaItems.length > 0 && (
+          <div style={{ display: "grid", gridTemplateColumns: vp.isPhone ? "repeat(2, minmax(0, 1fr))" : "repeat(3, minmax(0, 1fr))", gap: 8 }}>
+            {metaItems.map(([label, value]) => (
+              <div key={label} style={{ background: T.surfaceAlt, borderRadius: 11, padding: "9px 11px", minWidth: 0 }}>
+                <div style={{ fontSize: 9.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted }}>{label}</div>
+                <div style={{ fontSize: 12.5, fontWeight: 750, color: T.text, marginTop: 3, lineHeight: 1.35, overflowWrap: "anywhere" }}>{value}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {services.length > 0 && section("Services performed", (
+          <div>{services.map((service, index) => itemRow(service.name, showMoney && service.price !== "" && service.price != null ? money(service.price) : "", "", service.id || `${service.name}-${index}`))}</div>
+        ))}
+
+        {checklist.length > 0 && section("Work checklist", (
+          <div style={{ display: "grid", gap: 6 }}>
+            {checklist.map((task, index) => (
+              <div key={(typeof task === "object" && task?.id) || index} style={{ display: "flex", alignItems: "flex-start", gap: 8, background: (typeof task === "string" || task.done) ? hexA(T.accent, 0.07) : T.surfaceAlt, borderRadius: 10, padding: "8px 10px" }}>
+                <div style={{ color: (typeof task === "string" || task.done) ? T.accent : T.textMuted, marginTop: 1 }}><Icon name={(typeof task === "string" || task.done) ? "check" : "close"} size={13} /></div>
+                <div style={{ fontSize: 12.5, color: (typeof task === "string" || task.done) ? T.text : T.textMuted, lineHeight: 1.4, textDecoration: (typeof task === "string" || task.done) ? "none" : "line-through" }}>{typeof task === "string" ? task : (task.text || task.name || `Task ${index + 1}`)}</div>
+              </div>
+            ))}
+          </div>
+        ))}
+
+        {readingPairs.length > 0 && section("Water tests", (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(92px, 1fr))", gap: 8 }}>
+            {readingPairs.map(([name, value]) => {
+              const status = READING_STATUS[entry.readingStatus?.[name] || ""];
+              return (
+                <div key={name} style={{ background: T.surfaceAlt, border: `1px solid ${status ? hexA(status.color, 0.42) : T.border}`, borderRadius: 11, padding: "9px 8px", textAlign: "center" }}>
+                  <div style={{ fontSize: 9.5, color: T.textMuted, fontWeight: 800, textTransform: "uppercase", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</div>
+                  <div style={{ fontSize: 16, fontWeight: 850, color: status?.color || T.text, marginTop: 2 }}>{value}</div>
+                  {status && <div style={{ fontSize: 8.5, color: status.color, fontWeight: 850, textTransform: "uppercase", marginTop: 2 }}>{status.label}</div>}
+                </div>
+              );
+            })}
+          </div>
+        ))}
+
+        {(treatments.length > 0 || parts.length > 0 || purchasedProducts.length > 0 || otherProductNames.length > 0) && section("Materials and products", (
+          <div>
+            {stockLocation && <div style={{ fontSize: 11.5, color: T.textMuted, marginBottom: 6, display: "flex", alignItems: "center", gap: 5 }}><Icon name="map" size={12} /> Used from {stockLocation}</div>}
+            {treatments.map((item, index) => itemRow(item.name || `Treatment ${index + 1}`, `${item.oz ?? item.qty ?? 0} ${item.unit || "oz"}`, locationName(item.locId), item.id || `treatment-${index}`))}
+            {parts.map((item, index) => itemRow(item.name || `Part ${index + 1}`, `${item.qty ?? 0} ${item.unit || "pieces"}`, `${locationName(item.locId)}${item.bill === false ? `${locationName(item.locId) ? " · " : ""}not billed` : ""}`, item.id || `part-${index}`))}
+            {purchasedProducts.map((item, index) => itemRow(item.name || `Product ${index + 1}`, `×${item.qty ?? 0}`, item.bill === false ? "Not billed" : "Billed", item.id || `product-${index}`))}
+            {otherProductNames.map((name, index) => itemRow(name, "", "Recorded product", `recorded-product-${index}`))}
+          </div>
+        ))}
+
+        {(entry.notes || entry.officeNotes) && section("Visit notes", (
+          <div style={{ display: "grid", gap: 9 }}>
+            {entry.notes && <div style={{ background: T.surfaceAlt, borderRadius: 11, padding: "11px 12px", fontSize: 13, color: T.text, lineHeight: 1.5, whiteSpace: "pre-wrap" }}><strong style={{ display: "block", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 4 }}>Client report</strong>{entry.notes}</div>}
+            {entry.officeNotes && <div style={{ background: hexA(T.warning, 0.08), border: `1px solid ${hexA(T.warning, 0.2)}`, borderRadius: 11, padding: "11px 12px", fontSize: 13, color: T.text, lineHeight: 1.5, whiteSpace: "pre-wrap" }}><strong style={{ display: "block", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", color: T.warning, marginBottom: 4 }}>Office note</strong>{entry.officeNotes}</div>}
+          </div>
+        ))}
+
+        {photos.length > 0 && section(`Photos · ${photos.length}`, <PhotoStrip photos={photos} size={vp.isPhone ? 64 : 76} />)}
+
+        {showMoney && (entry.invoice || breakdown || entry.quoted_price != null) && section("Visit amount", (
+          <div>
+            {itemRow("Client charge", entry.invoice || money(breakdown?.revenue), "")}
+            {perms.seeProfit && breakdown && (
+              <details style={{ marginTop: 7, background: T.surfaceAlt, borderRadius: 11, padding: "10px 12px" }}>
+                <summary style={{ cursor: "pointer", fontSize: 12.5, fontWeight: 800, color: T.text }}>Profitability details</summary>
+                <div style={{ marginTop: 9 }}>
+                  {[
+                    ["Revenue", breakdown.effectiveRevenue ?? breakdown.revenue, false],
+                    ["Labor", breakdown.labor, true], ["Treatments", breakdown.treatment, true],
+                    ["Parts", breakdown.parts, true], ["Products", breakdown.product, true],
+                    ["Gas", breakdown.gas, true], ["Insurance", breakdown.insurance, true],
+                    ["Equipment", breakdown.equipment, true], ["Overhead", breakdown.overhead, true],
+                  ].map(([label, value, negative]) => value != null ? (
+                    <div key={label} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "3px 0", fontSize: 12 }}><span style={{ color: T.textMuted }}>{label}</span><span style={{ color: T.text }}>{negative ? "−" : ""}{money(value)}</span></div>
+                  ) : null)}
+                  {breakdown.profit != null && <div style={{ display: "flex", justifyContent: "space-between", gap: 12, borderTop: `1px solid ${T.border}`, marginTop: 6, paddingTop: 8, fontSize: 13, fontWeight: 850 }}><span>{breakdown.profit >= 0 ? "Profit" : "Loss"}</span><span style={{ color: breakdown.profit >= 0 ? T.accent : "#C0392B" }}>{money(Math.abs(breakdown.profit))}{breakdown.margin != null ? ` · ${(Number(breakdown.margin) || 0).toFixed(0)}%` : ""}</span></div>}
+                  {entry.target_hourly_rate != null && <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 8 }}>Quoted {money(entry.quoted_price)} · target {money(entry.target_hourly_rate)}/hr</div>}
+                </div>
+              </details>
+            )}
+          </div>
+        ))}
+
+        {reportId && <div style={{ fontSize: 9.5, color: T.textMuted, overflowWrap: "anywhere" }}>Report ID: {reportId}</div>}
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap", borderTop: `1px solid ${T.border}`, paddingTop: 14 }}>
+          {onEdit && <Btn sm variant="outline" onClick={onEdit}><Icon name="edit" size={13} /> Edit report</Btn>}
+          <Btn sm onClick={onClose}>Close</Btn>
+        </div>
+      </div>
+    </Modal>
+  );
 }
 
 function ClientHistory({ client, catalog, team, onChange }) {
@@ -11263,7 +11443,8 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   const [headHereModal, setHeadHereModal] = useState(null);
   const [completeModal, setCompleteModal] = useState(null);
   const [stopChange, setStopChange] = useState(null); // { stop, client, dayDate } — reschedule/cancel/late
-  const [historyEdit, setHistoryEdit] = useState(null); // view/edit a completed stop's saved report ({ entry, clientId })
+  const [finishedReport, setFinishedReport] = useState(null); // read-only completed report ({ entry, client, stop, dayDate })
+  const [historyEdit, setHistoryEdit] = useState(null); // edit a completed stop's saved report ({ entry, clientId })
   const [stopOverview, setStopOverview] = useState(null); // safe fallback when a completed stop's report is missing/unlinked
   const [editStopModal, setEditStopModal] = useState(null); // { stop, dayDate }
   const [sentStops, setSentStops] = useState({});
@@ -11732,6 +11913,25 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   const preferredEtaBuffer = (me && me.etaBuffer != null && me.etaBuffer !== "") ? Number(me.etaBuffer) : 5;
   const goDirections = (addr) => buildMapUrl(addr || "", preferredMapApp);
   const catChip = (s) => { const c = clients.find(x => String(x.id) === String(s.clientId ?? s.id)); return (c && c.division) || s.type; };
+  // One index per client-history change keeps completed-card rendering cheap even
+  // when a route and the client archive are both large.
+  const completedReportIndex = useMemo(() => {
+    const byReceipt = new Map();
+    const bySid = new Map();
+    (clients || []).forEach(client => {
+      (Array.isArray(client?.history) ? client.history : []).forEach(entry => {
+        if (!entry) return;
+        const match = { entry, client };
+        const receiptId = String(entry.completionReceiptId || "");
+        if (receiptId) byReceipt.set(receiptId, [...(byReceipt.get(receiptId) || []), match]);
+        if (entry.sid != null) {
+          const sid = String(entry.sid);
+          bySid.set(sid, [...(bySid.get(sid) || []), match]);
+        }
+      });
+    });
+    return { byReceipt, bySid };
+  }, [clients]);
 
   // Resolve legacy stops defensively: an empty/stale clientId used to hide the valid legacy id.
   // Only use a name fallback when it identifies exactly one client.
@@ -11746,22 +11946,39 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
     const matches = (clients || []).filter(client => String(client?.name || "").trim().toLowerCase() === name);
     return matches.length === 1 ? matches[0] : null;
   };
-  const reportForStop = (stop, client) => {
-    const history = Array.isArray(client?.history) ? client.history : [];
+  const reportForStop = (stop) => {
+    if (!stop) return null;
     const marker = completedSids && stop ? completedSids[stop.sid] : null;
-    const receiptId = marker && typeof marker === "object" ? marker.receiptId : null;
-    if (receiptId) {
-      const receiptMatches = history.filter(entry => entry && String(entry.completionReceiptId || "") === String(receiptId));
-      if (receiptMatches.length === 1) return receiptMatches[0];
+    const modernMarker = !!(marker && typeof marker === "object" && !Array.isArray(marker));
+    const receiptId = modernMarker ? String(marker.receiptId || "") : "";
+    const ledgerReceipt = receiptId ? completedSids?.[STOP_REVERSAL_LEDGER_KEY]?.[receiptId] : null;
+    if (modernMarker) {
+      if (!receiptId) return null;
+      const receiptMatches = completedReportIndex.byReceipt.get(receiptId) || [];
+      if (receiptMatches.length === 1) return { ...receiptMatches[0], reversalClientId: ledgerReceipt?.clientId ?? receiptMatches[0].client?.id };
+      // A receipt is authoritative about its owner. This only breaks a duplicate tie;
+      // it never uses a client name/date guess that could open somebody else's report.
+      if (receiptMatches.length > 1 && ledgerReceipt?.clientId != null) {
+        const ownerMatches = receiptMatches.filter(({ client }) => String(client?.id) === String(ledgerReceipt.clientId));
+        if (ownerMatches.length === 1) return { ...ownerMatches[0], reversalClientId: ledgerReceipt.clientId };
+      }
+      // Modern completion identity is receipt-based. Never substitute a report
+      // merely because an older entry happens to reuse the same stop id.
+      return null;
     }
-    const sidMatches = history.filter(entry => entry && entry.sid != null && String(entry.sid) === String(stop?.sid));
-    return sidMatches.length === 1 ? sidMatches[0] : null;
+    if (marker !== true) return null;
+    const sidMatches = completedReportIndex.bySid.get(String(stop.sid)) || [];
+    return sidMatches.length === 1 ? { ...sidMatches[0], reversalClientId: sidMatches[0].client?.id } : null;
   };
-  const openCompletedStop = (stop, dayDate, resolvedClient) => {
-    const client = resolvedClient || clientForStop(stop);
-    const entry = reportForStop(stop, client);
-    if (entry && client) setHistoryEdit({ entry, clientId: client.id });
-    else setStopOverview({ stop, client, dayDate });
+  const openCompletedStop = (stop, dayDate) => {
+    const report = reportForStop(stop);
+    if (report) setFinishedReport({ ...report, stop, dayDate });
+    else setStopOverview({ stop, client: clientForStop(stop), dayDate });
+  };
+  const editCompletedStop = (stop, dayDate) => {
+    const report = reportForStop(stop);
+    if (report) setHistoryEdit({ entry: report.entry, clientId: report.client.id });
+    else setStopOverview({ stop, client: clientForStop(stop), dayDate });
   };
 
   // one stop card, reused by the bulk-select list and the per-tech route
@@ -11779,7 +11996,12 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
     const outOfOrder = isNext === false;
     const isSel = !!selected[s.sid];
     const isComplete = completedSids && completedSids[s.sid];
-    const reportEntry = isComplete ? reportForStop(s, c) : null;
+    const reportMatch = isComplete ? reportForStop(s) : null;
+    const reportEntry = reportMatch?.entry || null;
+    const markerReceiptId = isComplete && typeof isComplete === "object" ? String(isComplete.receiptId || "") : "";
+    const reversalClientId = markerReceiptId
+      ? completedSids?.[STOP_REVERSAL_LEDGER_KEY]?.[markerReceiptId]?.clientId
+      : reportMatch?.reversalClientId;
     const emp = (team || []).find(e => e.id === s.assigneeId);
     const accentLeft = isComplete ? T.accent : (isToday ? T.primary : T.textMuted);
     const utilityHeight = denseDesktop ? 34 : 40;
@@ -11787,7 +12009,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
     const canOpenCard = !!(selectMode || perms.completeStops || isComplete);
     const openStopCard = () => {
       if (selectMode) return toggle(s.sid);
-      if (isComplete) return openCompletedStop(s, dayDate, c);
+      if (isComplete) return openCompletedStop(s, dayDate);
       if (perms.completeStops) setCompleteModal({ stop: s, client: c, dayDate });
     };
     // Cancelled stop — kept on the schedule as a struck-through record, with a quiet remove.
@@ -11820,7 +12042,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
             onClick={openStopCard}
             role={canOpenCard ? "button" : undefined}
             tabIndex={canOpenCard ? 0 : undefined}
-            aria-label={canOpenCard ? `${isComplete ? "Open completed stop overview" : "Open stop"} for ${c?.name || s.client || "client"}` : undefined}
+            aria-label={canOpenCard ? `${isComplete ? "Open finished service report" : "Open stop"} for ${reportMatch?.client?.name || c?.name || s.client || "client"}` : undefined}
             onKeyDown={e => { if (canOpenCard && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openStopCard(); } }}
             style={{ padding: denseSchedule ? "8px 12px" : "11px 16px", cursor: canOpenCard ? "pointer" : "default", display: "flex", gap: denseSchedule ? 9 : 12, alignItems: "center" }}
           >
@@ -11880,18 +12102,16 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                   <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: denseDesktop ? 11.5 : 12.5, color: T.accent, fontWeight: 800, minWidth: 0 }}>
                     <Icon name="check" size={14} />
                     Completed
-                    <span style={{ fontWeight: 650, color: reportEntry ? T.textMuted : T.warning, fontSize: denseDesktop ? 10.5 : 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>· {reportEntry ? "Report saved" : "Overview available"}</span>
+                    <span style={{ fontWeight: 650, color: reportEntry ? T.textMuted : T.warning, fontSize: denseDesktop ? 10.5 : 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>· {reportEntry ? "Report saved" : "Report unavailable"}</span>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0, flexWrap: "wrap" }}>
+                    <button onClick={e => { e.stopPropagation(); openCompletedStop(s, dayDate); }}
+                      title={reportEntry ? "View the full saved service report" : "Show why this finished report is unavailable"}
+                      style={{ minHeight: utilityHeight, background: "none", border: "none", color: T.primary, fontSize: denseDesktop ? 11 : 12, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", padding: "6px 5px", display: "flex", alignItems: "center", gap: 4 }}>
+                      <Icon name="clipboard" size={12} /> {reportEntry ? "Report" : "Details"}
+                    </button>
                     {perms.completeStops && (
-                      <button onClick={e => { e.stopPropagation(); openCompletedStop(s, dayDate, c); }}
-                        title={reportEntry ? "Edit this visit's saved report — keeps everything you entered" : "Open this completed stop's available overview"}
-                        style={{ minHeight: utilityHeight, background: "none", border: "none", color: T.primary, fontSize: denseDesktop ? 11 : 12, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", padding: "6px 5px", display: "flex", alignItems: "center", gap: 4 }}>
-                        <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg> {reportEntry ? "Edit" : "Overview"}
-                      </button>
-                    )}
-                    {perms.completeStops && (
-                      <button onClick={e => { e.stopPropagation(); if (confirm("Re-open this stop? Its saved visit will be removed, and the exact stock and prior balance changed by this completion will be restored. To just change a detail, use Edit instead.")) void onUncomplete(c?.id ?? s.clientId ?? s.id, s.sid); }}
+                      <button onClick={e => { e.stopPropagation(); if (confirm("Re-open this stop? Its saved visit will be removed, and the exact stock and prior balance changed by this completion will be restored. To just change a detail, open the report and use Edit report instead.")) void onUncomplete(reversalClientId ?? c?.id ?? s.clientId ?? s.id, s.sid); }}
                         style={{ minHeight: utilityHeight, background: "none", border: "none", color: T.textMuted, fontSize: denseDesktop ? 11 : 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", padding: "6px 5px", display: "flex", alignItems: "center", gap: 4 }}>
                         <Icon name="refresh" size={12} /> Re-open
                       </button>
@@ -12371,6 +12591,20 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
         />
       )}
 
+      {finishedReport && (
+        <FinishedReportModal
+          entry={finishedReport.entry}
+          client={finishedReport.client}
+          catalog={catalog}
+          onEdit={perms.editHistory ? () => {
+            const current = finishedReport;
+            setFinishedReport(null);
+            editCompletedStop(current.stop, current.dayDate);
+          } : null}
+          onClose={() => setFinishedReport(null)}
+        />
+      )}
+
       {stopOverview && (() => {
         const s = stopOverview.stop || {};
         const client = stopOverview.client;
@@ -12385,10 +12619,10 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           </div>
         ) : null;
         return (
-          <Modal title="Completed stop overview" maxWidth={520} onClose={() => setStopOverview(null)}>
+          <Modal title="Finished report unavailable" maxWidth={520} onClose={() => setStopOverview(null)}>
             <div style={{ display: "flex", alignItems: "flex-start", gap: 10, background: hexA("#B45309", 0.08), border: `1px solid ${hexA("#B45309", 0.22)}`, borderRadius: 12, padding: "11px 12px", marginBottom: 12 }}>
               <Icon name="warning" size={16} style={{ color: "#B45309", flexShrink: 0, marginTop: 1 }} />
-              <div style={{ fontSize: 12.5, color: T.text, lineHeight: 1.45 }}>This stop is complete, but its original visit report is not linked to this schedule card. The available schedule details are shown below.</div>
+              <div style={{ fontSize: 12.5, color: T.text, lineHeight: 1.45 }}>This stop is marked complete, but no unique saved visit report could be matched safely. The planned schedule details are shown below; nothing was substituted for the missing finished report.</div>
             </div>
             <div style={{ borderTop: `1px solid ${T.border}` }}>
               {overviewRow("Client", client?.name || s.client || "Client")}
@@ -24185,10 +24419,6 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
                 );
               })}
             </div>
-            <button type="button" onClick={() => setCommsDensity(compactComms ? "comfortable" : "compact")} title={`Comms spacing: ${compactComms ? "Compact" : "Roomy"}. Switch to ${compactComms ? "Roomy" : "Compact"}.`} aria-label={`Comms spacing: ${compactComms ? "compact" : "roomy"}. Tap to change.`}
-              style={{ width: 46, minWidth: 46, height: 46, padding: 0, border: `1px solid ${compactComms ? hexA(T.primary, 0.35) : T.border}`, borderRadius: compactComms ? 12 : 14, background: compactComms ? hexA(T.primary, 0.08) : T.surface, color: compactComms ? T.primary : T.textMuted, display: "grid", placeItems: "center", fontFamily: "inherit", cursor: "pointer", flexShrink: 0 }}>
-              <Icon name="sliders" size={16} />
-            </button>
             </div>
           </div>
         )}
