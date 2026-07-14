@@ -3527,7 +3527,7 @@ function CardHeader({ title, action }) {
   );
 }
 
-function Btn({ children, onClick, href, variant = "primary", sm, lg, block, disabled, style }) {
+function Btn({ children, onClick, href, variant = "primary", sm, lg, block, disabled, style, ariaLabel, title }) {
   const { T } = useApp();
   const styles = {
     primary: { background: T.primary, color: "#fff", border: "none", boxShadow: `0 1px 2px ${hexA(T.primary, 0.3)}, 0 4px 12px ${hexA(T.primary, 0.2)}` },
@@ -3558,21 +3558,24 @@ function Btn({ children, onClick, href, variant = "primary", sm, lg, block, disa
     ...style,
   };
   const className = `sps-btn${sm ? " sps-btn-sm" : ""}`;
-  if (href) return <a className={className} href={href} onClick={onClick} style={css}>{children}</a>;
-  return <button className={className} onClick={onClick} disabled={disabled} style={css}>{children}</button>;
+  if (href) return <a className={className} href={href} onClick={onClick} style={css} aria-label={ariaLabel} title={title}>{children}</a>;
+  return <button className={className} onClick={onClick} disabled={disabled} style={css} aria-label={ariaLabel} title={title}>{children}</button>;
 }
 
-function StatCard({ label, value, sub, accent, onClick, icon, trend }) {
+function StatCard({ label, value, sub, accent, onClick, icon, trend, compact = false }) {
   const { T } = useApp();
   const clickable = !!onClick;
   const ac = accent && accent !== T.surface ? accent : T.primary;
+  const valueLength = String(value ?? "").length;
+  const valueSize = compact ? (valueLength >= 15 ? 14 : valueLength >= 12 ? 16 : valueLength >= 9 ? 18 : valueLength >= 7 ? 20 : 23) : 28;
   return (
-    <div onClick={onClick}
+    <div onClick={onClick} role={clickable ? "button" : undefined} tabIndex={clickable ? 0 : undefined}
+      onKeyDown={e => { if (clickable && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onClick(); } }}
       style={{
         background: T.surface,
         border: `1px solid ${clickable ? hexA(accent || T.primary, 0.25) : T.border}`,
-        borderRadius: 20,
-        padding: "16px 18px",
+        borderRadius: compact ? 16 : 18,
+        padding: compact ? "12px 13px" : "15px 16px",
         boxShadow: "0 1px 3px rgba(0,0,0,0.04), 0 4px 16px rgba(0,0,0,0.05)",
         cursor: clickable ? "pointer" : "default",
         transition: "box-shadow 0.15s, transform 0.1s",
@@ -3585,9 +3588,9 @@ function StatCard({ label, value, sub, accent, onClick, icon, trend }) {
       onTouchEnd={e => { if (clickable) e.currentTarget.style.transform = "scale(1)"; }}
     >
       {/* Top row: metric icon (left) + trend chip or chevron (right) */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 11, minHeight: 30 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: compact ? 8 : 10, minHeight: compact ? 27 : 30 }}>
         {icon
-          ? <div style={{ width: 30, height: 30, borderRadius: 9, background: hexA(ac, 0.12), color: ac, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name={icon} size={16} /></div>
+          ? <div style={{ width: compact ? 27 : 30, height: compact ? 27 : 30, borderRadius: 9, background: hexA(ac, 0.12), color: ac, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name={icon} size={compact ? 14 : 16} /></div>
           : <span />}
         {trend
           ? <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 10.5, fontWeight: 800, padding: "3px 8px", borderRadius: 100, background: hexA(trend.good ? "#16a34a" : "#E5484D", 0.12), color: trend.good ? "#16a34a" : "#E5484D" }}>{trend.dir === "up" ? "▲" : "▼"} {trend.text}</span>
@@ -3595,9 +3598,9 @@ function StatCard({ label, value, sub, accent, onClick, icon, trend }) {
             ? <svg viewBox="0 0 24 24" width={13} height={13} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.5 }}><path d="m9 18 6-6-6-6"/></svg>
             : <span />}
       </div>
-      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.04em", color: T.textMuted, textTransform: "uppercase", marginBottom: 7 }}>{label}</div>
-      <div style={{ fontSize: 28, fontWeight: 800, color: accent && accent !== T.surface ? accent : T.text, lineHeight: 1, letterSpacing: "-0.03em" }}>{value}</div>
-      {sub && <div style={{ fontSize: 12, color: T.textMuted, marginTop: 6 }}>{sub}</div>}
+      <div style={{ fontSize: compact ? 9.5 : 10.5, fontWeight: 780, letterSpacing: "0.045em", color: T.textMuted, textTransform: "uppercase", marginBottom: compact ? 5 : 7, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{label}</div>
+      <div style={{ fontSize: valueSize, fontWeight: 820, color: accent && accent !== T.surface ? accent : T.text, lineHeight: 1, letterSpacing: "-0.035em", whiteSpace: "nowrap" }}>{value}</div>
+      {sub && <div style={{ fontSize: compact ? 10.5 : 12, color: T.textMuted, marginTop: compact ? 5 : 6, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{sub}</div>}
     </div>
   );
 }
@@ -4096,7 +4099,7 @@ const ClockGlyph = ({ size = 20, color = "currentColor" }) => (
 // ─────────────────────────────────────────────
 // CLOCK IN / CLOCK OUT  (staff home — pushes completed shifts to Gusto)
 // ─────────────────────────────────────────────
-function ClockInOut({ me, T }) {
+function ClockInOut({ me, T, compact = false }) {
   const staffId = me?.id != null ? String(me.id) : "";
   // Stable identity for the running shift: the signed-in EMAIL never changes, whereas me.id is a
   // team-array id that shifts when the roster is re-seeded/edited — which used to orphan a live
@@ -4203,7 +4206,7 @@ function ClockInOut({ me, T }) {
     }
   };
 
-  const cardBase = { borderRadius: 18, padding: "16px 18px", marginBottom: 16 };
+  const cardBase = { borderRadius: compact ? 16 : 18, padding: compact ? "12px 14px" : "16px 18px", marginBottom: 16 };
   const GREEN = "#16a34a", RED = "#C0392B";
 
   // ── Location consent (shown once before the first browser permission prompt) ──
@@ -4236,15 +4239,15 @@ function ClockInOut({ me, T }) {
     const good = result.ok;
     const tone = good ? GREEN : T.warning;
     return (
-      <div style={{ ...cardBase, background: hexA(tone, 0.08), border: `1px solid ${hexA(tone, 0.3)}`, display: "flex", alignItems: "center", gap: 13 }}>
-        <div style={{ width: 42, height: 42, borderRadius: 12, background: tone, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-          <Icon name={good ? "check" : "warning"} size={20} />
+      <div style={{ ...cardBase, background: hexA(tone, 0.08), border: `1px solid ${hexA(tone, 0.3)}`, display: "flex", alignItems: "center", gap: compact ? 10 : 13 }}>
+        <div style={{ width: compact ? 36 : 42, height: compact ? 36 : 42, borderRadius: 12, background: tone, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <Icon name={good ? "check" : "warning"} size={compact ? 17 : 20} />
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>Shift complete · {result.hours}h</div>
-          <div style={{ fontSize: 12.5, fontWeight: 600, color: tone, marginTop: 2 }}>{good ? "Submitted to Gusto ✓" : result.error}</div>
+          <div style={{ fontSize: compact ? 13.5 : 15, fontWeight: 800, color: T.text }}>Shift complete · {result.hours}h</div>
+          <div style={{ fontSize: compact ? 11.5 : 12.5, fontWeight: 600, color: tone, marginTop: 2 }}>{good ? "Submitted to Gusto ✓" : result.error}</div>
         </div>
-        <button onClick={() => setResult(null)} style={{ background: T.surface, border: `1px solid ${T.border}`, color: T.text, borderRadius: 10, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Done</button>
+        <button onClick={() => setResult(null)} style={{ minHeight: 40, background: T.surface, border: `1px solid ${T.border}`, color: T.text, borderRadius: 10, padding: compact ? "8px 12px" : "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Done</button>
       </div>
     );
   }
@@ -4254,22 +4257,28 @@ function ClockInOut({ me, T }) {
     const elapsed = now - new Date(shift.startTime).getTime();
     return (
       <div style={{ ...cardBase, background: hexA(GREEN, 0.07), border: `1px solid ${hexA(GREEN, 0.3)}` }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
-          <div style={{ width: 46, height: 46, borderRadius: 13, background: GREEN, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-            <ClockGlyph size={23} color="#fff" />
+        <div style={{ display: "flex", alignItems: "center", gap: compact ? 10 : 13 }}>
+          <div style={{ width: compact ? 38 : 46, height: compact ? 38 : 46, borderRadius: 13, background: GREEN, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <ClockGlyph size={compact ? 19 : 23} color="#fff" />
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.08em", color: GREEN }}>On Shift</div>
-            <div style={{ fontSize: 24, fontWeight: 900, color: T.text, letterSpacing: "-0.02em", marginTop: 1 }}>{fmtElapsed(elapsed)}</div>
-            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>Clocked in at {fmtClock(new Date(shift.startTime))}</div>
+            <div style={{ fontSize: compact ? 19 : 24, fontWeight: 900, color: T.text, letterSpacing: "-0.02em", marginTop: 1 }}>{fmtElapsed(elapsed)}</div>
+            <div style={{ fontSize: compact ? 11 : 12, color: T.textMuted, marginTop: 2 }}>Since {fmtClock(new Date(shift.startTime))}</div>
           </div>
+          {compact && (
+            <button onClick={clockOut} disabled={submitting}
+              style={{ minHeight: 42, background: RED, color: "#fff", border: "none", borderRadius: 12, padding: "10px 14px", fontSize: 13, fontWeight: 800, cursor: submitting ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, opacity: submitting ? 0.7 : 1, flexShrink: 0 }}>
+              {submitting ? "Saving…" : "Clock out"}
+            </button>
+          )}
         </div>
-        <button onClick={clockOut} disabled={submitting}
+        {!compact && <button onClick={clockOut} disabled={submitting}
           style={{ marginTop: 14, width: "100%", background: RED, color: "#fff", border: "none", borderRadius: 13, padding: "14px", fontSize: 15, fontWeight: 800, cursor: submitting ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, opacity: submitting ? 0.7 : 1 }}>
           {submitting
             ? <><div style={{ width: 15, height: 15, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.7s linear infinite" }} /> Submitting to Gusto…</>
             : <><ClockGlyph size={17} color="#fff" /> Clock Out</>}
-        </button>
+        </button>}
       </div>
     );
   }
@@ -4278,24 +4287,30 @@ function ClockInOut({ me, T }) {
   const nowD = new Date(now);
   return (
     <div style={{ ...cardBase, background: T.surface, border: `1px solid ${T.border}` }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
-        <div style={{ width: 46, height: 46, borderRadius: 13, background: hexA(GREEN, 0.12), color: GREEN, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-          <ClockGlyph size={23} color={GREEN} />
+      <div style={{ display: "flex", alignItems: "center", gap: compact ? 10 : 13 }}>
+        <div style={{ width: compact ? 38 : 46, height: compact ? 38 : 46, borderRadius: 13, background: hexA(GREEN, 0.12), color: GREEN, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <ClockGlyph size={compact ? 19 : 23} color={GREEN} />
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>Ready to start your day?</div>
-          <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 2 }}>{nowD.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })} · {fmtClock(nowD)}</div>
+          <div style={{ fontSize: compact ? 13.5 : 14, fontWeight: 800, color: T.text }}>{compact ? "Start your shift" : "Ready to start your day?"}</div>
+          <div style={{ fontSize: compact ? 11.5 : 12.5, color: T.textMuted, marginTop: 2 }}>{nowD.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })} · {fmtClock(nowD)}</div>
         </div>
+        {compact && (
+          <button onClick={requestClockIn}
+            style={{ minHeight: 42, background: GREEN, color: "#fff", border: "none", borderRadius: 12, padding: "10px 15px", fontSize: 13, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>
+            Clock in
+          </button>
+        )}
       </div>
       {!gustoUuid && (
         <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 7, fontSize: 12, fontWeight: 600, color: T.warning, background: hexA(T.warning, 0.08), border: `1px solid ${hexA(T.warning, 0.25)}`, borderRadius: 10, padding: "9px 12px" }}>
           <Icon name="warning" size={14} /> Gusto ID not configured — contact your admin
         </div>
       )}
-      <button onClick={requestClockIn}
+      {!compact && <button onClick={requestClockIn}
         style={{ marginTop: 14, width: "100%", background: GREEN, color: "#fff", border: "none", borderRadius: 13, padding: "14px", fontSize: 15, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
         <ClockGlyph size={17} color="#fff" /> Clock In
-      </button>
+      </button>}
     </div>
   );
 }
@@ -4321,7 +4336,8 @@ function HomeCommsWidget({ leads = [], clients = [], onNav, T, perms = {} }) {
   const threadMap = {};
   (msgs || []).forEach(m => { const cid = String(m.client_id); if (!threadMap[cid]) threadMap[cid] = { cid, lastMsg: String(m.body || "").replace(/\[\[[^\]]+\]\]/g, "").trim() || "Message", at: m.created_at, unread: 0 }; if (m.sender === "client" && !m.read_at) threadMap[cid].unread++; });
   const threads = Object.values(threadMap).sort((a, b) => String(b.at).localeCompare(String(a.at)));
-  const openLeads = canLeads ? (leads || []).filter(l => l && !["won", "lost"].includes(l.status)) : [];
+  const timeValue = (value) => { const numeric = Number(value); if (Number.isFinite(numeric) && numeric > 0) return numeric; const parsed = Date.parse(value); return Number.isFinite(parsed) ? parsed : 0; };
+  const openLeads = canLeads ? (leads || []).filter(l => l && !["won", "lost"].includes(l.status)).sort((a, b) => timeValue(b.createdAt) - timeValue(a.createdAt)) : [];
   const unreadChats = threads.reduce((s, t) => s + (t.unread > 0 ? 1 : 0), 0);
   const newLeads = openLeads.filter(l => l.status === "new").length;
   const unreadInbox = (emails || []).filter(e => e && !e.read).length;
@@ -4339,7 +4355,7 @@ function HomeCommsWidget({ leads = [], clients = [], onNav, T, perms = {} }) {
       onClick: () => onNav("comms", { commsSection: "email" }),
     });
   });
-  recent.sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
+  recent.sort((a, b) => timeValue(b.at) - timeValue(a.at));
   const top = recent.slice(0, 3);
   const AV = ["#B81D24", "#0E9488", "#2563eb", "#b45309", "#7c3aed", "#c2410c", "#0891b2", "#be185d"];
   const col = (s) => { let h = 0; const x = String(s || "?"); for (let i = 0; i < x.length; i++) h = (h * 31 + x.charCodeAt(i)) >>> 0; return AV[h % AV.length]; };
@@ -4398,7 +4414,10 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
   const today = (schedule || []).find(d => d.date === todayKey) || { stops: [], date: todayKey };
   // Live completion progress for today (drives the hero "X / N done" + Today's Route state).
   const isStopDone = (s) => !!(completedSids && s && completedSids[s.sid]);
-  const doneToday = (today.stops || []).filter(isStopDone).length;
+  const todayStops = today.stops || [];
+  const doneToday = todayStops.filter(isStopDone).length;
+  const nextStop = todayStops.find(s => !isStopDone(s)) || null;
+  const routeProgress = todayStops.length ? Math.round((doneToday / todayStops.length) * 100) : 0;
   const [upgradeModal, setUpgradeModal] = useState(null); // alert object being confirmed
   const ma = monthActuals(clients, new Date(), invoices);
   const derived = deriveAlerts(clients, invoices, catalog).filter(a => perms.seeBalances || !/outstanding/i.test(a.title || ""));
@@ -4467,7 +4486,8 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
   // Due appointment reminders (in-app surfacing)
   const remCfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
   const remQueue = buildReminderQueue(schedule, clients, remCfg, reminderLog || {}, new Date());
-  const dueReminders = remQueue.due || [];
+  const canSeeHomeReminders = !!(perms.isAdmin || perms.commsReminders);
+  const dueReminders = canSeeHomeReminders ? (remQueue.due || []) : [];
 
   const items = (home && home.items) || DEFAULT_HOME.items;
   const setItems = (next) => setHome({ ...home, items: next });
@@ -4480,36 +4500,42 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
     [next[i], next[j]] = [next[j], next[i]];
     setItems(next);
   };
-  const available = Object.keys(HOME_WIDGETS).filter(id => !items.some(it => it.id === id));
+  const canUseWidget = (id) => {
+    if (id === "profit") return !!(perms.isAdmin || perms.seeProfit);
+    if (id === "comms") return canSeeComms(perms);
+    return true;
+  };
+  const available = Object.keys(HOME_WIDGETS).filter(id => canUseWidget(id) && !items.some(it => it.id === id));
 
   const widget = (id, compact) => {
     if (id === "comms") return <HomeCommsWidget key="comms" leads={leads} clients={clients} onNav={onNav} T={T} perms={perms} />;
     if (id === "stats") {
       return (
         <div key="stats" style={{ marginBottom: 16 }}>
-          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }}>
-            <button onClick={() => setStatPicker(true)} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4, padding: 2 }}>
-              <Icon name="edit" size={12} /> Customize
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 9, padding: "0 2px" }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: T.textMuted, letterSpacing: "0.045em", textTransform: "uppercase" }}>Key metrics</div>
+            <button onClick={() => setStatPicker(true)} style={{ minHeight: 36, background: "none", border: "none", color: T.primary, fontSize: 12, fontWeight: 750, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5, padding: "4px 6px" }}>
+              <Icon name="edit" size={13} /> Edit metrics
             </button>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: compact ? "repeat(2, 1fr)" : (vp.isDesktop ? "repeat(4, 1fr)" : vp.isTablet ? "repeat(3, 1fr)" : "1fr 1fr"), gap: 12 }}>
-            {shownTiles.map(mid => { const t = STAT_CATALOG[mid]; return <StatCard key={mid} label={t.label} value={t.value} sub={t.sub} accent={t.accent} icon={t.icon} trend={t.trend} onClick={t.onClick} />; })}
+          <div style={{ display: "grid", gridTemplateColumns: (vp.isPhone || vp.isTablet || compact) ? "repeat(2, minmax(0, 1fr))" : "repeat(4, minmax(0, 1fr))", gap: vp.isPhone ? 10 : 12 }}>
+            {shownTiles.map(mid => { const t = STAT_CATALOG[mid]; return <StatCard key={mid} label={t.label} value={t.value} sub={t.sub} accent={t.accent} icon={t.icon} trend={t.trend} onClick={t.onClick} compact={vp.isPhone || vp.isTablet || compact} />; })}
           </div>
         </div>
       );
     }
     if (id === "profit") {
-      if (!perms.seeProfit) return null;
+      if (!(perms.isAdmin || perms.seeProfit)) return null;
       // Bank truth when connected — same numbers as the stat tiles / Budget / Reports; ops fallback.
       const pRev = bankMo ? bankMo.income : ma.revenue, pCost = bankMo ? bankMo.expense : ma.cost, pProf = bankMo ? bankMo.profit : ma.profit;
       return (
       <Card key="profit" style={{ marginBottom: 16 }}>
-        <CardHeader title="This Month" action={<Btn variant="text" sm onClick={() => onNav("budget")}>Budget →</Btn>} />
-        <div style={{ padding: "18px 18px 6px", display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+        <CardHeader title="This month" action={(perms.seeCostsBudget || perms.isAdmin) ? <Btn variant="text" sm onClick={() => onNav("budget")}>Budget →</Btn> : null} />
+        <div style={{ padding: "16px 16px 6px", display: "grid", gridTemplateColumns: compact ? "1fr" : "repeat(3, minmax(0, 1fr))", gap: 8 }}>
           {[["Revenue", pRev, T.text],["Costs", pCost, T.textMuted],["Profit", pProf, pProf >= 0 ? T.accent : "#C0392B"]].map(([k, v, col]) => (
-            <div key={k} style={{ background: T.surfaceAlt, borderRadius: 10, padding: "12px 10px", textAlign: "center" }}>
-              <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>{k}</div>
-              <div style={{ fontSize: 18, fontWeight: 800, color: col, marginTop: 3 }}>{money(v)}</div>
+            <div key={k} style={{ background: T.surfaceAlt, borderRadius: 12, padding: compact ? "11px 12px" : vp.isPhone ? "11px 6px" : "12px 10px", textAlign: compact ? "left" : "center", minWidth: 0, display: compact ? "flex" : "block", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+              <div style={{ fontSize: 9.5, color: T.textMuted, fontWeight: 750, textTransform: "uppercase", letterSpacing: "0.045em", whiteSpace: "nowrap" }}>{k}</div>
+              <div style={{ fontSize: compact ? 17 : vp.isPhone ? 15 : 18, fontWeight: 820, color: col, marginTop: compact ? 0 : 4, whiteSpace: "nowrap" }}>{money(v)}</div>
             </div>
           ))}
         </div>
@@ -4518,34 +4544,21 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
       );
     }
     if (id === "todayRoute") {
-      const stops = today.stops || [];
-      // The NEXT bar follows the FIRST stop that isn't completed yet, so it advances through the
-      // day instead of being stuck on stop #1. Completed stops stay listed (greyed + checked) so
-      // the card reads as a running overview of the day.
-      const next = stops.find(s => !isStopDone(s)) || null;
+      const stops = todayStops;
+      if (stops.length === 0) return null;
+      const visibleStops = stops.slice(0, vp.isPhone ? 4 : 6);
+      const hiddenStops = Math.max(0, stops.length - visibleStops.length);
       return (
       <Card key="todayRoute" style={{ marginBottom: 16 }}>
-        <CardHeader title="Today's Route" action={<Btn variant="text" sm onClick={() => onNav("schedule")}>View All</Btn>} />
-        {stops.length === 0 && <div style={{ padding: 18, fontSize: 13, color: T.textMuted }}>No stops scheduled today.</div>}
-        {/* Lead with a prominent "head to the next incomplete stop" CTA → opens that stop in the schedule */}
-        {next && (
-          <div onClick={() => onOpenStop ? onOpenStop(next, today.date) : onNav("schedule")} role="button"
-            style={{ margin: "12px 16px", background: T.primary, color: "#fff", borderRadius: 12, padding: "11px 14px", cursor: "pointer", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.15)" }}>
-            <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.08em", opacity: 0.82 }}>NEXT{next.time ? ` · ${next.time}` : ""}</div>
-            <div style={{ fontSize: 13.5, fontWeight: 800, marginTop: 2, display: "flex", alignItems: "center", gap: 5 }}><Icon name="map" size={14} /> Head to {next.client} ›</div>
-          </div>
-        )}
-        {next == null && stops.length > 0 && (
-          <div style={{ margin: "12px 16px", background: hexA(T.accent, 0.12), color: T.accent, borderRadius: 12, padding: "11px 14px", fontSize: 13, fontWeight: 800, display: "flex", alignItems: "center", gap: 6 }}>
-            <Icon name="check" size={15} /> All stops complete — nice work.
-          </div>
-        )}
-        {stops.map((s, i) => {
+        <CardHeader title="Today's route" action={<Btn variant="text" sm onClick={() => onNav("schedule")}>Open schedule →</Btn>} />
+        {visibleStops.map((s, i) => {
           const done = isStopDone(s);
-          const isNext = next && (s.sid != null ? s.sid === next.sid : s === next);
+          const isNext = nextStop && (s.sid != null ? s.sid === nextStop.sid : s === nextStop);
+          const open = () => onOpenStop ? onOpenStop(s, today.date) : onNav("schedule");
           return (
-          <div key={s.sid || i} onClick={() => onOpenStop && onOpenStop(s, today.date)} style={{ padding: "13px 18px", borderTop: `1px solid ${T.border}`, display: "flex", gap: 14, alignItems: "center", cursor: onOpenStop ? "pointer" : "default", background: isNext ? hexA(T.primary, 0.05) : "transparent", opacity: done ? 0.62 : 1 }}>
-            <div style={{ background: done ? hexA(T.accent, 0.12) : T.surfaceAlt, borderRadius: 10, padding: "7px 10px", textAlign: "center", minWidth: 58, flexShrink: 0 }}>
+          <div key={s.sid || i} onClick={open} role="button" tabIndex={0} onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}
+            style={{ padding: vp.isPhone ? "11px 14px" : "13px 18px", borderTop: i === 0 ? "none" : `1px solid ${T.border}`, display: "flex", gap: vp.isPhone ? 10 : 14, alignItems: "center", cursor: "pointer", background: isNext ? hexA(T.primary, 0.055) : "transparent", opacity: done ? 0.58 : 1 }}>
+            <div style={{ background: done ? hexA(T.accent, 0.12) : T.surfaceAlt, borderRadius: 10, padding: "7px 8px", textAlign: "center", minWidth: vp.isPhone ? 52 : 58, flexShrink: 0 }}>
               {s.time ? (<>
                 <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{s.time.split(" ")[1]}</div>
                 <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>{s.time.split(" ")[0]}</div>
@@ -4559,20 +4572,34 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
               </div>
               <div style={{ fontSize: 12, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.address}</div>
             </div>
-            <div style={{ textAlign: "right", flexShrink: 0 }}>
+            {!vp.isPhone && <div style={{ textAlign: "right", flexShrink: 0, maxWidth: 128 }}>
               <div style={{ fontSize: 12, color: T.text, fontWeight: 600 }}>{s.type}</div>
               <div style={{ fontSize: 11, color: done ? T.accent : T.textMuted, fontWeight: done ? 700 : 400 }}>{done ? "Done" : s.duration}</div>
-            </div>
+            </div>}
+            {vp.isPhone && <Icon name="chevronR" size={15} />}
           </div>
           );
         })}
+        {hiddenStops > 0 && (
+          <button onClick={() => onNav("schedule")} style={{ width: "100%", minHeight: 44, background: T.surfaceAlt, color: T.primary, border: "none", borderTop: `1px solid ${T.border}`, fontFamily: "inherit", fontSize: 12.5, fontWeight: 750, cursor: "pointer" }}>
+            +{hiddenStops} more stop{hiddenStops === 1 ? "" : "s"} · Open schedule
+          </button>
+        )}
       </Card>
       );
     }
     if (id === "alerts") return (
       <Card key="alerts" style={{ marginBottom: 16 }}>
-        <CardHeader title="Alerts" />
-        {flags.length === 0 && derived.length === 0 && <div style={{ padding: 18, fontSize: 13, color: T.textMuted }}>All clear — no alerts right now.</div>}
+        <CardHeader title="Needs attention" action={(flags.length + derived.length) > 0 ? <Badge sm label={flags.length + derived.length} bg={hexA(T.primary, 0.1)} color={T.primary} /> : null} />
+        {flags.length === 0 && derived.length === 0 && (
+          <div style={{ padding: "20px 18px", display: "flex", alignItems: "center", gap: 11 }}>
+            <div style={{ width: 34, height: 34, borderRadius: 11, background: hexA(T.accent, 0.1), color: T.accent, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name="check" size={17} /></div>
+            <div>
+              <div style={{ fontSize: 13.5, fontWeight: 750, color: T.text }}>{dueReminders.length > 0 ? "No other alerts" : "All clear"}</div>
+              <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>{dueReminders.length > 0 ? "Ready reminders are shown separately above." : "Nothing needs your attention right now."}</div>
+            </div>
+          </div>
+        )}
         {/* office flags from the field (resolvable) */}
         {flags.map((a) => {
           const isUpgrade = a.type === "upgrade_request";
@@ -4654,76 +4681,104 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
     return null;
   };
 
-  // Hero — the day's headline + profit/revenue, with the logo ghosted in. Extracted so desktop can
-  // pair it beside the Key Stats (top row) while mobile keeps it full-width above the widgets.
-  const heroCard = (
-    <div onClick={() => onNav("schedule")} role="button"
-      style={{ position: "relative", overflow: "hidden", background: "#AE0019", color: "#fff", borderRadius: 20, padding: "18px 20px", marginBottom: 16, cursor: "pointer", boxShadow: "0 10px 30px rgba(0,0,0,0.16), inset 0 1px 0 rgba(255,255,255,0.15)" }}>
-      <ProtectedImage src={brandLogoSource(branding)} alt="" aria-hidden="true"
-        style={{ position: "absolute", right: -30, top: "50%", transform: "translateY(-50%)", width: 188, height: 188, objectFit: "contain", opacity: 0.45, pointerEvents: "none" }} />
-      <div style={{ position: "relative", zIndex: 1 }}>
-        <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.1em", opacity: 0.82 }}>TODAY</div>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginTop: 5 }}>
-          {today.stops.length === 0 ? (
-            <span style={{ fontSize: 28, fontWeight: 800, lineHeight: 1.12, letterSpacing: "-0.02em" }}>No stops today</span>
-          ) : (
-            <>
-              <span style={{ fontSize: 42, fontWeight: 800, lineHeight: 1, letterSpacing: "-0.03em" }}>{doneToday}<span style={{ fontSize: 23, fontWeight: 800, opacity: 0.72 }}> / {today.stops.length}</span></span>
-              <span style={{ fontSize: 14, fontWeight: 700, opacity: 0.92 }}>{doneToday >= today.stops.length ? "all done ✓" : "stops done"}</span>
-            </>
-          )}
+  const canOpenTab = (id) => !perms.tabAccess || perms.tabAccess[id] !== "hidden";
+  const quickActions = [
+    canOpenTab("schedule") && { id: "schedule", label: "Schedule", icon: "calendar", go: () => onNav("schedule") },
+    canOpenTab("clients") && { id: "clients", label: "Clients", icon: "clients", go: () => onNav("clients") },
+    canOpenTab("estimates") && perms.canInvoice && { id: "estimates", label: "Estimate", icon: "clipboard", go: () => onNav("estimates") },
+    canSeeComms(perms) && { id: "comms", label: "Comms", icon: "message", go: () => onNav("comms") },
+  ].filter(Boolean);
+  const quickActionsCard = quickActions.length > 0 ? (
+    <div style={{ display: "grid", gridTemplateColumns: `repeat(${quickActions.length}, minmax(0, 1fr))`, gap: vp.isPhone ? 8 : 10, marginBottom: 16 }}>
+      {quickActions.map(a => (
+        <button key={a.id} onClick={a.go}
+          style={{ minWidth: 0, minHeight: vp.isPhone ? 62 : 68, background: T.surface, border: `1px solid ${T.border}`, borderRadius: vp.isPhone ? 14 : 16, padding: vp.isPhone ? "9px 5px" : "11px 8px", color: T.text, boxShadow: "0 1px 3px rgba(0,0,0,0.035)", cursor: "pointer", fontFamily: "inherit", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6 }}>
+          <span style={{ width: vp.isPhone ? 27 : 30, height: vp.isPhone ? 27 : 30, borderRadius: 9, background: hexA(T.primary, 0.1), color: T.primary, display: "grid", placeItems: "center" }}><Icon name={a.icon} size={vp.isPhone ? 14 : 16} /></span>
+          <span style={{ maxWidth: "100%", fontSize: vp.isPhone ? 10.5 : 11.5, fontWeight: 750, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{a.label}</span>
+        </button>
+      ))}
+    </div>
+  ) : null;
+
+  // Due reminders are operationally important, so they stay visible outside the optional widget list.
+  // The entire surface is permission-gated to match the Reminders section in Comms.
+  const reminderCard = dueReminders.length > 0 ? (
+    <Card style={{ marginBottom: 16 }}>
+      <div onClick={() => onNav("reminders")} role="button" tabIndex={0} onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onNav("reminders"); } }}
+        style={{ padding: vp.isPhone ? "13px 14px" : "14px 16px", display: "flex", alignItems: "center", gap: 11, cursor: "pointer", background: hexA(T.primary, 0.045), borderRadius: "inherit" }}>
+        <div style={{ width: 36, height: 36, borderRadius: 11, background: hexA(T.primary, 0.11), color: T.primary, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name="message" size={16} /></div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13.5, fontWeight: 760, color: T.text }}>{dueReminders.length} reminder{dueReminders.length === 1 ? "" : "s"} ready to send</div>
+          <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {dueReminders.slice(0, 3).map(r => (r.client?.name || r.stop?.client || "Client").split(" ")[0]).join(", ")}{dueReminders.length > 3 ? ` +${dueReminders.length - 3} more` : ""}
+          </div>
         </div>
-        {today.stops.length > 0 && (
-          <div style={{ height: 5, borderRadius: 100, background: "rgba(255,255,255,0.22)", marginTop: 10, overflow: "hidden" }}>
-            <div style={{ height: "100%", borderRadius: 100, background: "rgba(255,255,255,0.92)", width: `${Math.round((doneToday / today.stops.length) * 100)}%`, transition: "width 0.35s ease" }} />
+        <Icon name="chevronR" size={15} />
+      </div>
+    </Card>
+  ) : null;
+
+  // One focused summary of today's work. Money stays in Key metrics / This month so every financial
+  // number continues to use the same bank-aware source and the route state is not repeated.
+  const heroCard = (
+    <div style={{ position: "relative", overflow: "hidden", background: `linear-gradient(135deg, ${hexA(T.primary, 0.11)} 0%, ${T.surface} 62%)`, border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 20, padding: vp.isPhone ? "17px 17px 16px" : "21px 22px 20px", marginBottom: 16, boxShadow: "0 1px 3px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.06)" }}>
+      <ProtectedImage src={brandLogoSource(branding)} alt="" aria-hidden="true"
+        style={{ position: "absolute", right: -28, top: "50%", transform: "translateY(-50%)", width: vp.isPhone ? 150 : 185, height: vp.isPhone ? 150 : 185, objectFit: "contain", opacity: 0.065, pointerEvents: "none" }} />
+      <div style={{ position: "relative", zIndex: 1 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ width: 30, height: 30, borderRadius: 10, background: todayStops.length > 0 && doneToday === todayStops.length ? hexA(T.accent, 0.12) : hexA(T.primary, 0.11), color: todayStops.length > 0 && doneToday === todayStops.length ? T.accent : T.primary, display: "grid", placeItems: "center", flexShrink: 0 }}>
+              <Icon name={todayStops.length > 0 && doneToday === todayStops.length ? "check" : "calendar"} size={15} />
+            </div>
+            <div style={{ fontSize: 10.5, fontWeight: 820, letterSpacing: "0.085em", color: T.textMuted }}>TODAY'S WORK</div>
+          </div>
+          {todayStops.length > 0 && <div style={{ fontSize: 11.5, fontWeight: 750, color: T.textMuted }}>{doneToday} of {todayStops.length} complete</div>}
+        </div>
+        <div style={{ marginTop: 13, maxWidth: 620 }}>
+          <div style={{ fontSize: vp.isPhone ? 22 : 27, fontWeight: 840, color: T.text, lineHeight: 1.14, letterSpacing: "-0.035em" }}>
+            {todayStops.length === 0 ? "Your route is clear" : nextStop ? `Next up: ${nextStop.client}` : "Today's route is complete"}
+          </div>
+          <div style={{ fontSize: 12.5, color: T.textMuted, lineHeight: 1.45, marginTop: 6, maxWidth: 520 }}>
+            {nextStop
+              ? [nextStop.time, nextStop.type, nextStop.address].filter(Boolean).join(" · ")
+              : todayStops.length === 0
+                ? "No stops are scheduled for today."
+                : "Every scheduled stop has been completed. Nice work."}
+          </div>
+        </div>
+        {todayStops.length > 0 && (
+          <div style={{ height: 5, borderRadius: 100, background: hexA(T.textMuted, 0.16), marginTop: 14, overflow: "hidden", maxWidth: 620 }}>
+            <div style={{ height: "100%", borderRadius: 100, background: doneToday === todayStops.length ? T.accent : T.primary, width: `${routeProgress}%`, transition: "width 0.35s ease" }} />
           </div>
         )}
-        {perms.seeProfit && (
-          <div style={{ display: "flex", alignItems: "flex-end", gap: 26, marginTop: 16 }}>
-            <div>
-              <div style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.08em", opacity: 0.82 }}>PROFIT (MO)</div>
-              <div style={{ fontSize: 26, fontWeight: 800, lineHeight: 1.05, letterSpacing: "-0.02em", marginTop: 3 }}>{money(ma.profit)}</div>
-            </div>
-            <div>
-              <div style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.08em", opacity: 0.82 }}>REVENUE (MO)</div>
-              <div style={{ fontSize: 16, fontWeight: 800, opacity: 0.95, marginTop: 4 }}>{money(ma.revenue)}</div>
-            </div>
-          </div>
-        )}
-        <div style={{ marginTop: 16, display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.2)", borderRadius: 100, padding: "8px 15px", fontSize: 12.5, fontWeight: 800 }}>
-          View route <span style={{ fontSize: 15, lineHeight: 1 }}>›</span>
+        <div style={{ marginTop: 15, display: "flex", flexWrap: "wrap", gap: 8 }}>
+          <button onClick={() => nextStop && onOpenStop ? onOpenStop(nextStop, today.date) : onNav("schedule")}
+            style={{ minHeight: 42, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 7, background: T.primary, color: "#fff", border: "none", borderRadius: 12, padding: "10px 15px", fontSize: 12.5, fontWeight: 800, fontFamily: "inherit", cursor: "pointer", boxShadow: `0 4px 12px ${hexA(T.primary, 0.2)}` }}>
+            <Icon name={nextStop ? "map" : "calendar"} size={15} /> {nextStop ? "Open next stop" : todayStops.length ? "Review route" : "Open schedule"}
+          </button>
+          {nextStop && <button onClick={() => onNav("schedule")} style={{ minHeight: 42, background: T.surface, color: T.text, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 15px", fontSize: 12.5, fontWeight: 750, fontFamily: "inherit", cursor: "pointer" }}>Full route</button>}
         </div>
       </div>
     </div>
   );
+  const selectedWidgetIds = items.map(it => it.id).filter(canUseWidget);
+  const hasWidget = (id) => selectedWidgetIds.includes(id);
+  const isWideHome = !!(vp.isDesktop && !vp.isTablet && vp.width >= 1180);
+  const wideMainIds = ["todayRoute", "comms"].filter(id => selectedWidgetIds.includes(id));
+  const selectedSideIds = ["alerts", "profit"].filter(id => selectedWidgetIds.includes(id));
+  const wideOtherIds = selectedWidgetIds.filter(id => !["stats", "todayRoute", "comms", "alerts", "profit"].includes(id));
+  const clockWidget = me && me.clockInOut !== false ? <ClockInOut me={me} T={T} compact /> : null;
   return (
-    <div style={{ paddingBottom: 40, maxWidth: vp.isDesktop ? 1520 : "none", marginLeft: "auto", marginRight: "auto", width: "100%" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22 }}>
-        <div>
-          <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 4, letterSpacing: "-0.01em" }}>{new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" })}</div>
-          <h2 style={{ margin: 0, fontSize: 28, fontWeight: 700, color: T.text, letterSpacing: "-0.03em" }}>{(() => { const h = new Date().getHours(); return h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening"; })()}, {(userName || "Brandon").split(" ")[0]}.</h2>
+    <div style={{ paddingBottom: 40, maxWidth: vp.isDesktop ? 1440 : "none", marginLeft: "auto", marginRight: "auto", width: "100%" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14, marginBottom: vp.isPhone ? 17 : 22 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: vp.isPhone ? 11.5 : 13, color: T.textMuted, marginBottom: 3, letterSpacing: "-0.01em" }}>{new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" })}</div>
+          <h2 style={{ margin: 0, fontSize: vp.isPhone ? 24 : 30, lineHeight: 1.08, fontWeight: 780, color: T.text, letterSpacing: "-0.04em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{(() => { const h = new Date().getHours(); return h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening"; })()}, {(userName || "Brandon").split(" ")[0]}.</h2>
         </div>
-        <Btn variant="ghost" sm onClick={() => setEditing(e => !e)}>{editing ? "Done" : "Edit"}</Btn>
+        <Btn variant="ghost" sm onClick={() => setEditing(e => !e)} ariaLabel={editing ? "Done customizing Home" : "Customize Home"} title={editing ? "Done" : "Customize Home"} style={{ minHeight: 40, minWidth: vp.isPhone ? 40 : undefined, padding: vp.isPhone ? "8px 11px" : undefined, flexShrink: 0 }}>
+          {editing ? "Done" : <><Icon name="sliders" size={14} /> {!vp.isPhone && <span style={{ marginLeft: 5 }}>Customize</span>}</>}
+        </Btn>
       </div>
-
-      {/* Clock In / Clock Out — pushes completed shifts to Gusto (per-member toggle in Team editor) */}
-      {me && me.clockInOut !== false && <ClockInOut me={me} T={T} />}
-
-      {/* Reminders due — in-app surfacing */}
-      {!editing && dueReminders.length > 0 && (
-        <div onClick={() => onNav("reminders")} style={{ background: hexA(T.primary, 0.08), border: `1px solid ${hexA(T.primary, 0.25)}`, borderRadius: 16, padding: "14px 16px", marginBottom: 16, cursor: "pointer", display: "flex", alignItems: "center", gap: 13 }}>
-          <div style={{ width: 40, height: 40, borderRadius: 11, background: T.primary, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-            <Icon name="message" size={19} />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>{dueReminders.length} reminder{dueReminders.length !== 1 ? "s" : ""} ready to send</div>
-            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {dueReminders.slice(0, 3).map(r => (r.client?.name || r.stop.client || "Client").split(" ")[0]).join(", ")}{dueReminders.length > 3 ? ` +${dueReminders.length - 3} more` : ""}
-            </div>
-          </div>
-          <Icon name="chevronD" size={16} style={{ transform: "rotate(-90deg)", color: T.primary, flexShrink: 0 }} />
-        </div>
-      )}
 
       {editing ? (
         <Card>
@@ -4731,10 +4786,10 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
           <div style={{ padding: 12 }}>
             {items.map((it, i) => (
               <div key={it.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 8px", borderBottom: i < items.length - 1 ? `1px solid ${T.border}` : "none" }}>
-                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                {!isWideHome && <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                   <button onClick={() => move(i, -1)} disabled={i === 0} style={{ background: "none", border: "none", cursor: i === 0 ? "default" : "pointer", color: i === 0 ? T.border : T.textMuted, fontSize: 12, lineHeight: 1, padding: 0 }}>▲</button>
                   <button onClick={() => move(i, 1)} disabled={i === items.length - 1} style={{ background: "none", border: "none", cursor: i === items.length - 1 ? "default" : "pointer", color: i === items.length - 1 ? T.border : T.textMuted, fontSize: 12, lineHeight: 1, padding: 0 }}>▼</button>
-                </div>
+                </div>}
                 <span style={{ flex: 1, fontSize: 14, fontWeight: 700, color: T.text }}>{HOME_WIDGETS[it.id]}</span>
                 <button onClick={() => removeWidget(it.id)} style={{ background: "none", border: `1px solid ${T.border}`, borderRadius: 9, padding: "8px 14px", fontSize: 12, fontWeight: 700, color: "#C0392B", cursor: "pointer", fontFamily: "inherit" }}>Remove</button>
               </div>
@@ -4754,29 +4809,33 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
                 </div>
               </div>
             )}
-            <div style={{ fontSize: 11, color: T.textMuted, padding: "12px 8px 4px" }}>Add or remove widgets and use the arrows to reorder your home screen.</div>
+            <div style={{ fontSize: 11, color: T.textMuted, padding: "12px 8px 4px" }}>{isWideHome ? "Choose which widgets appear. Larger screens group them into dashboard columns." : "Add or remove widgets and use the arrows to reorder your widgets."}</div>
           </div>
         </Card>
-      ) : vp.isDesktop ? (
-        /* Desktop: hero paired with Key Stats up top, then the widgets flow into comfortable-width
-           columns that MULTIPLY to fill the space (2 on a laptop, 3–4 on a wide monitor) — the width
-           is used by more columns, not by stretching any one card. */
+      ) : isWideHome ? (
         <>
-          <div style={{ display: "grid", gridTemplateColumns: vp.width >= 1080 ? "minmax(360px, 1fr) minmax(0, 1fr)" : "1fr", gap: 16, alignItems: "start" }}>
-            {heroCard}
-            {items.some(it => it.id === "stats") ? widget("stats", true) : <div />}
-          </div>
-          <div style={{ columnWidth: 360, columnGap: 16 }}>
-            {items.filter(it => it.id !== "stats").map(it => {
-              const w = widget(it.id);
-              return w ? <div key={it.id} style={{ breakInside: "avoid" }}>{w}</div> : null;
-            })}
+          {quickActionsCard}
+          {hasWidget("stats") && widget("stats")}
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.55fr) minmax(300px, 0.78fr)", gap: 18, alignItems: "start" }}>
+            <div style={{ minWidth: 0 }}>
+              {heroCard}
+              {wideMainIds.map(id => widget(id))}
+              {wideOtherIds.map(id => widget(id))}
+            </div>
+            <div style={{ minWidth: 0 }}>
+              {clockWidget}
+              {reminderCard}
+              {selectedSideIds.map(id => widget(id, true))}
+            </div>
           </div>
         </>
       ) : (
         <>
+          {clockWidget}
           {heroCard}
-          {items.map(it => widget(it.id))}
+          {quickActionsCard}
+          {reminderCard}
+          {selectedWidgetIds.map(id => widget(id))}
         </>
       )}
       {/* Upgrade workflow modal */}
