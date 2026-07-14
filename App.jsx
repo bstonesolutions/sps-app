@@ -20717,14 +20717,14 @@ function CommsPageHeader({ title, description, icon = "inbox", meta, action, T, 
   );
 }
 
-function CommsSearchField({ value, onChange, onClear, placeholder, T, ariaLabel }) {
+function CommsSearchField({ value, onChange, onClear, placeholder, T, ariaLabel, quiet = false }) {
   const dense = useCompactComms();
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: dense ? 8 : 10, height: dense ? 42 : 46, boxSizing: "border-box", background: T.surface, border: `1px solid ${T.border}`, borderRadius: dense ? 12 : 14, padding: dense ? "0 10px" : "0 13px", boxShadow: "0 1px 2px rgba(0,0,0,0.035)", minWidth: 0 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: dense ? 8 : 10, height: dense ? 42 : 46, boxSizing: "border-box", background: quiet ? T.surfaceAlt : T.surface, border: `1px solid ${quiet ? "transparent" : T.border}`, borderRadius: dense ? 12 : 14, padding: dense ? "0 10px" : "0 13px", boxShadow: quiet ? "none" : "0 1px 2px rgba(0,0,0,0.035)", minWidth: 0 }}>
       <span style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="search" size={17} /></span>
       <input value={value} onChange={e => onChange(e.target.value)} aria-label={ariaLabel || placeholder} placeholder={placeholder}
         style={{ flex: 1, minWidth: 0, minHeight: 0, height: "100%", padding: 0, border: "none", background: "transparent", outline: "none", fontFamily: "inherit", fontSize: 16, color: T.text }} />
-      {value && <button type="button" onClick={onClear || (() => onChange(""))} aria-label="Clear search" style={{ width: 30, height: 30, borderRadius: 9, border: "none", background: T.surfaceAlt, color: T.textMuted, cursor: "pointer", display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name="close" size={14} /></button>}
+      {value && <button type="button" onClick={onClear || (() => onChange(""))} aria-label="Clear search" style={{ width: 30, height: 30, borderRadius: 9, border: "none", background: quiet ? hexA(T.textMuted, 0.11) : T.surfaceAlt, color: T.textMuted, cursor: "pointer", display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name="close" size={14} /></button>}
     </div>
   );
 }
@@ -23320,16 +23320,16 @@ function InboxSwipeRow({ rowId, ariaLabel, revealed, disabled, selected, read, i
     <div style={{ position: "relative", overflow: "hidden", background: T.surfaceAlt, touchAction: "pan-y" }}>
       <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "stretch", justifyContent: "space-between" }}>
         <button type="button" tabIndex={revealed && revealSide === "right" && !disabled ? 0 : -1} aria-hidden={revealSide !== "right"} onClick={action(onToggleRead)} aria-label={read ? "Mark unread" : "Mark read"}
-          style={{ width: RIGHT_REVEAL, border: "none", background: "#2879d9", color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, fontFamily: "inherit", fontSize: 10.5, fontWeight: 800, cursor: "pointer" }}>
+          style={{ width: RIGHT_REVEAL, border: "none", background: "#0066CC", color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, fontFamily: "inherit", fontSize: 10.5, fontWeight: 700, cursor: "pointer" }}>
           <Icon name={read ? "mail" : "check"} size={18} />{read ? "Unread" : "Read"}
         </button>
         <div style={{ display: "flex", marginLeft: "auto" }}>
           <button type="button" tabIndex={revealed && revealSide === "left" && !disabled ? 0 : -1} aria-hidden={revealSide !== "left"} onClick={action(onMore)} aria-label="More message actions"
-            style={{ width: 68, border: "none", background: "#737780", color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, fontFamily: "inherit", fontSize: 10.5, fontWeight: 800, cursor: "pointer" }}>
+            style={{ width: 68, border: "none", background: "#636366", color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, fontFamily: "inherit", fontSize: 10.5, fontWeight: 700, cursor: "pointer" }}>
             <span aria-hidden="true" style={{ fontSize: 20, lineHeight: 0.6, letterSpacing: 1 }}>•••</span>More
           </button>
           <button type="button" tabIndex={revealed && revealSide === "left" && !disabled ? 0 : -1} aria-hidden={revealSide !== "left"} onClick={action(onDelete)} aria-label={isText ? "Remove text from inbox" : "Move email to Trash"}
-            style={{ width: 80, border: "none", background: "#d9282f", color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, fontFamily: "inherit", fontSize: 10.5, fontWeight: 800, cursor: "pointer" }}>
+            style={{ width: 80, border: "none", background: "#D9282F", color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, fontFamily: "inherit", fontSize: 10.5, fontWeight: 700, cursor: "pointer" }}>
             <Icon name="trash" size={18} />{isText ? "Remove" : "Trash"}
           </button>
         </div>
@@ -23373,8 +23373,8 @@ function InboxActionSheet({ title, onClose, children, T }) {
       <div ref={sheetRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label={title} style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 311, width: "100%", maxWidth: 640, margin: "0 auto", boxSizing: "border-box", background: T.surface, borderRadius: "22px 22px 0 0", boxShadow: "0 -10px 44px rgba(0,0,0,0.22)", paddingBottom: "max(14px, env(safe-area-inset-bottom))", animation: "inboxSheetUp 0.24s cubic-bezier(.22,1,.36,1)", outline: "none", ...sheetStyle }}>
         <SheetHandle handleProps={handleProps} T={T} />
         <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "2px 16px 12px 20px", borderBottom: `1px solid ${T.border}` }}>
-          <div style={{ flex: 1, minWidth: 0, fontSize: 18, fontWeight: 850, color: T.text, letterSpacing: "-0.02em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</div>
-          <button type="button" onClick={onClose} aria-label="Close" style={{ width: 36, height: 36, borderRadius: "50%", border: "none", background: T.surfaceAlt, color: T.textMuted, display: "grid", placeItems: "center", cursor: "pointer" }}><Icon name="close" size={16} /></button>
+          <div style={{ flex: 1, minWidth: 0, fontSize: 18, fontWeight: 780, color: T.text, letterSpacing: "-0.02em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</div>
+          <button type="button" onClick={onClose} aria-label="Close" style={{ width: 44, height: 44, borderRadius: "50%", border: "none", background: T.surfaceAlt, color: T.textMuted, display: "grid", placeItems: "center", cursor: "pointer" }}><Icon name="close" size={16} /></button>
         </div>
         <div style={{ padding: "14px 16px 4px", maxHeight: "64dvh", overflowY: "auto", WebkitOverflowScrolling: "touch" }}>{children}</div>
       </div>
@@ -23890,6 +23890,22 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const fmtWhen = (iso) => {
     try { const d = new Date(iso); return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " · " + d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }); } catch (_) { return ""; }
   };
+  // Apple Mail-style list dates: keep today's time, use a weekday for recent mail, and only
+  // spend horizontal space on a full date once it is actually useful.
+  const fmtMailboxWhen = (iso) => {
+    try {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return "";
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const then = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+      const daysAgo = Math.round((today.getTime() - then.getTime()) / 86400000);
+      if (daysAgo === 0) return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+      if (daysAgo > 0 && daysAgo < 7) return d.toLocaleDateString("en-US", { weekday: "short" });
+      if (d.getFullYear() === now.getFullYear()) return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+      return d.toLocaleDateString("en-US", { month: "numeric", day: "numeric", year: "2-digit" });
+    } catch (_) { return ""; }
+  };
   const channelTab = (id, label, count, icon) => {
     const on = channelFilter === id;
     const tone = id === "sms" ? "#7c3aed" : id === "email" ? "#2563eb" : T.primary;
@@ -23909,14 +23925,15 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       {channelTab("email", "Email", emailCount, "mail")}
     </div>
   );
-  const mobileQuickBtn = (key, label, count, icon, active, onClick) => (
-    <button key={key} type="button" aria-pressed={active} onClick={onClick}
-      style={{ minHeight: dense ? 36 : 38, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 5, flexShrink: 0, whiteSpace: "nowrap", padding: dense ? "6px 10px" : "7px 12px", borderRadius: 100, border: `1px solid ${active ? T.primary : T.border}`, background: active ? hexA(T.primary, 0.09) : T.surface, color: active ? T.primary : T.textMuted, fontFamily: "inherit", fontSize: dense ? 11.5 : 12, fontWeight: active ? 820 : 700, cursor: "pointer" }}>
-      <Icon name={icon} size={13} />{label}{count != null && <span style={{ minWidth: 17, padding: "0 4px", borderRadius: 100, background: active ? hexA(T.primary, 0.13) : T.surfaceAlt, fontSize: 9.5, fontWeight: 850, lineHeight: 1.6 }}>{badgeLabel(count)}</span>}
-    </button>
-  );
+  const mobileQuickBtn = (key, label, count, icon, active, onClick) => {
+    const tone = key === "sms" ? "#7c3aed" : key === "email" ? "#1d4ed8" : T.primary;
+    return <button key={key} type="button" aria-pressed={active} onClick={onClick}
+      style={{ minHeight: 44, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 5, flexShrink: 0, whiteSpace: "nowrap", padding: dense ? "6px 10px" : "7px 12px", borderRadius: 100, border: `1px solid ${active ? hexA(tone, 0.22) : "transparent"}`, background: active ? hexA(tone, 0.09) : T.surfaceAlt, color: active ? tone : T.textMuted, fontFamily: "inherit", fontSize: dense ? 11.5 : 12, fontWeight: active ? 780 : 650, cursor: "pointer" }}>
+      <Icon name={icon} size={13} />{label}{count != null && <span style={{ minWidth: 12, fontSize: 10, fontWeight: 750, lineHeight: 1.6, fontVariantNumeric: "tabular-nums", opacity: active ? 0.95 : 0.85 }}>{badgeLabel(count)}</span>}
+    </button>;
+  };
   const mobileQuickFilters = (
-    <div aria-label="Quick inbox filters" style={{ display: "flex", gap: 7, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
+    <div aria-label="Quick inbox filters" style={{ display: "flex", gap: 7, overflowX: "auto", padding: "2px 2px 3px", margin: "0 -2px", WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
       {mobileQuickBtn("all", "All", inboxRows.length, "inbox", channelFilter === "all" && filter === "all", () => { setChannelFilter("all"); setFilter("all"); setFiltersOpen(false); })}
       {mobileQuickBtn("unread", "Unread", unread, "mail", channelFilter === "all" && filter === "unread", () => { setChannelFilter("all"); setFilter("unread"); setFiltersOpen(false); })}
       {mobileQuickBtn("sms", "Texts", textCount, "message", channelFilter === "sms", () => { setChannelFilter("sms"); setFilter("all"); setFiltersOpen(false); })}
@@ -23924,15 +23941,22 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       {mobileQuickBtn("filters", "Filter", null, "funnel", filtersOpen || ["lead", "bill", "client", "other"].includes(filter), () => setFiltersOpen(v => !v))}
     </div>
   );
-  const chip = (id, label) => (
-    <button key={id} onClick={() => setFilter(id)} aria-pressed={filter === id} style={{ minHeight: 40, padding: "7px 14px", borderRadius: 100, border: `1.5px solid ${filter === id ? T.primary : T.border}`, background: filter === id ? hexA(T.primary, 0.08) : T.surface, color: filter === id ? T.primary : T.textMuted, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, whiteSpace: "nowrap" }}>{label}</button>
-  );
+  const chip = (id, label) => {
+    const on = filter === id;
+    return <button key={id} onClick={() => setFilter(id)} aria-pressed={on} style={{ minHeight: phone ? 44 : 40, padding: phone ? "6px 12px" : "7px 14px", borderRadius: 100, border: `${phone ? 1 : 1.5}px solid ${on ? hexA(T.primary, 0.24) : (phone ? "transparent" : T.border)}`, background: on ? hexA(T.primary, 0.1) : (phone ? T.surfaceAlt : T.surface), color: on ? T.primary : T.textMuted, fontSize: phone ? 12 : 12.5, fontWeight: on ? 760 : 650, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, whiteSpace: "nowrap" }}>{label}</button>;
+  };
   // Compact icon button for secondary actions (Import / Refresh / Select) — used on phones so the
   // header doesn't stack three text buttons and wrap. Matches the app's Icon style.
   const iconBtn = (icon, label, onClick, active) => (
     <button type="button" title={label} aria-label={label} onClick={onClick}
       style={{ width: dense ? 40 : 44, height: dense ? 40 : 44, borderRadius: dense ? 10 : 12, border: `1px solid ${active ? T.primary : T.border}`, background: active ? hexA(T.primary, 0.1) : T.surface, color: active ? T.primary : T.textMuted, display: "grid", placeItems: "center", cursor: onClick ? "pointer" : "default", flexShrink: 0, fontFamily: "inherit", opacity: onClick ? 1 : 0.55 }}>
       <Icon name={icon} size={16} />
+    </button>
+  );
+  const toolbarIconBtn = (icon, label, onClick, tone = T.primary) => (
+    <button type="button" title={label} aria-label={label} onClick={onClick} disabled={!onClick}
+      style={{ width: 44, height: 44, borderRadius: 12, border: "none", background: "transparent", color: tone, display: "grid", placeItems: "center", cursor: onClick ? "pointer" : "default", flexShrink: 0, fontFamily: "inherit", opacity: onClick ? 1 : 0.42 }}>
+      <Icon name={icon} size={19} />
     </button>
   );
   const badge = (kind) => {
@@ -24013,6 +24037,8 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     const channelTone = sms ? "#7c3aed" : "#2563eb";
     const kind = KIND[r.kind] || KIND.other;
     const selected = !!sel[r.id];
+    const preview = String((r.ai && r.ai.summary) || r.body_text || "").trim().slice(0, 150);
+    const dividerLeft = dense ? 55 : 63;
     return (
       <InboxSwipeRow key={r.id} rowId={r.id} ariaLabel={`${r.read ? "" : "Unread "}${sms ? "text" : "email"} from ${senderLabel(r)}: ${r.subject || (sms ? "Message" : "No subject")}`} revealed={openSwipeId === r.id} disabled={selMode} selected={selected} read={!!r.read} isText={sms} T={T}
         onReveal={(id) => setOpenSwipeId(id)} onClose={(id) => setOpenSwipeId(cur => cur === id ? null : cur)}
@@ -24020,8 +24046,9 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
         onToggleRead={() => { markRead([r.id], !r.read); }}
         onMore={() => setManageRow(r)}
         onDelete={() => { deleteEmails([r.id], { ask: false }); }}>
-        <div style={{ position: "relative", display: "flex", alignItems: "flex-start", gap: dense ? 9 : 11, minHeight: dense ? 72 : 84, boxSizing: "border-box", padding: dense ? "9px 11px 9px 14px" : "11px 12px 11px 16px", borderTop: i === 0 ? "none" : `1px solid ${hexA(T.border, 0.62)}`, background: selected ? hexA(T.primary, 0.07) : (r.read ? T.surface : hexA(T.primary, 0.018)) }}>
-          {!r.read && !selMode && <span aria-label="Unread" style={{ position: "absolute", left: 5, top: dense ? 17 : 20, width: 6, height: 6, borderRadius: "50%", background: T.primary }} />}
+        <div style={{ position: "relative", display: "flex", alignItems: "flex-start", gap: dense ? 9 : 11, minHeight: dense ? 72 : 84, boxSizing: "border-box", padding: dense ? "9px 11px 9px 14px" : "11px 12px 11px 16px", background: selected ? hexA(T.primary, 0.07) : T.surface }}>
+          {i > 0 && <span aria-hidden="true" style={{ position: "absolute", left: dividerLeft, right: 0, top: 0, height: 1, background: hexA(T.border, 0.7) }} />}
+          {!r.read && !selMode && <span aria-label="Unread" style={{ position: "absolute", left: 7, top: dense ? 15 : 18, width: 6, height: 6, borderRadius: "50%", background: T.primary }} />}
           {selMode ? (
             <span aria-hidden="true" style={{ width: dense ? 32 : 36, height: dense ? 32 : 36, borderRadius: "50%", border: `2px solid ${selected ? T.primary : T.border}`, background: selected ? T.primary : T.surface, color: "#fff", display: "grid", placeItems: "center", flexShrink: 0, marginTop: 1 }}>
               {selected && <Icon name="check" size={17} />}
@@ -24029,18 +24056,17 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
           ) : <Avatar name={r.from_name} email={r.from_email} channel={r.channel} size={dense ? 32 : 36} />}
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-              <span style={{ flex: 1, minWidth: 0, fontSize: dense ? 13.5 : 14.5, fontWeight: r.read ? 690 : 850, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{senderLabel(r)}</span>
+              <span style={{ flex: 1, minWidth: 0, fontSize: dense ? 13.5 : 14.5, fontWeight: r.read ? 560 : 760, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{senderLabel(r)}</span>
               {r.replied && <span title="Replied" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="reply" size={12} /></span>}
-              <span style={{ fontSize: dense ? 10.5 : 11, color: r.read ? T.textMuted : T.primary, fontWeight: r.read ? 600 : 800, flexShrink: 0 }}>{fmtWhen(r.created_at)}</span>
+              <span style={{ fontSize: dense ? 10.5 : 11, color: r.read ? T.textMuted : T.primary, fontWeight: r.read ? 520 : 700, flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{fmtMailboxWhen(r.created_at)}</span>
             </div>
-            <div style={{ marginTop: 2, fontSize: dense ? 12.5 : 13.5, lineHeight: 1.25, fontWeight: r.read ? 560 : 760, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.subject || (sms ? "Text message" : "(no subject)")}</div>
+            <div style={{ marginTop: 2, fontSize: dense ? 12.5 : 13.5, lineHeight: 1.25, fontWeight: r.read ? 450 : 650, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.subject || (sms ? "Text message" : "(no subject)")}</div>
             <div style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0, marginTop: dense ? 3 : 5, fontSize: dense ? 10.5 : 11.5, lineHeight: 1.25, color: T.textMuted }}>
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 3, color: channelTone, fontWeight: 820, flexShrink: 0 }}><Icon name={sms ? "message" : "mail"} size={11} />{sms ? "Text" : "Email"}</span>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 3, color: channelTone, background: hexA(channelTone, 0.09), padding: "1px 5px", borderRadius: 100, fontWeight: 760, flexShrink: 0 }}><Icon name={sms ? "message" : "mail"} size={11} />{sms ? "Text" : "Email"}</span>
               <span aria-hidden="true" style={{ color: T.border }}>·</span>
-              <span style={{ color: kind.color || T.textMuted, fontWeight: 750, flexShrink: 0 }}>{kind.label}</span>
-              {inLeads(r.id) && <><span aria-hidden="true" style={{ color: T.border }}>·</span><span style={{ color: "#16a34a", fontWeight: 750, flexShrink: 0 }}>In Leads</span></>}
-              <span aria-hidden="true" style={{ color: T.border }}>·</span>
-              <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{(r.ai && r.ai.summary) || (r.body_text || "").slice(0, 150)}</span>
+              <span style={{ color: T.textMuted, fontWeight: 650, flexShrink: 0 }}>{kind.label}</span>
+              {inLeads(r.id) && <><span aria-hidden="true" style={{ color: T.border }}>·</span><span style={{ color: "#16a34a", fontWeight: 700, flexShrink: 0 }}>In Leads</span></>}
+              {preview && <><span aria-hidden="true" style={{ color: T.border }}>·</span><span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{preview}</span></>}
             </div>
           </div>
         </div>
@@ -24137,14 +24163,14 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     return `${r.recipient || ""} ${nameForSent(r)} ${r.body || ""} ${r.origin || ""}`.toLowerCase().includes(qq);
   });
   const folderBar = (
-    <div style={{ display: "flex", gap: 4, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: dense ? 11 : 13, padding: dense ? 3 : 4, alignSelf: "flex-start", flex: wide ? "0 0 auto" : "1 1 auto", minWidth: 0, width: "auto" }}>
+    <div style={{ display: "flex", gap: 4, background: T.surfaceAlt, border: `1px solid ${phone ? "transparent" : T.border}`, borderRadius: phone ? 10 : (dense ? 11 : 13), padding: phone ? 3 : (dense ? 3 : 4), alignSelf: "flex-start", flex: wide ? "0 0 auto" : "1 1 auto", minWidth: 0, width: "auto" }}>
       {[["inbox", "Inbox", unread], ["sent", dense && !wide ? "Sent" : "Sent email", 0]].map(([id, lbl, badge]) => {
         const on = folder === id;
         return (
           <button key={id} type="button" onClick={() => setFolder(id)}
-            style={{ minHeight: dense ? 40 : 42, minWidth: 0, flex: wide ? "0 0 auto" : 1, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: dense ? 5 : 7, padding: dense ? "6px 8px" : "8px 14px", borderRadius: 9, border: "none", background: on ? T.surface : "transparent", color: on ? T.text : T.textMuted, fontSize: dense ? 12.5 : 13.5, fontWeight: on ? 800 : 650, cursor: "pointer", fontFamily: "inherit", boxShadow: on ? "0 1px 2px rgba(0,0,0,0.06)" : "none", whiteSpace: "nowrap" }}>
+            style={{ minHeight: phone ? 44 : (dense ? 40 : 42), minWidth: 0, flex: wide ? "0 0 auto" : 1, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: dense ? 5 : 7, padding: phone ? "5px 8px" : (dense ? "6px 8px" : "8px 14px"), borderRadius: 8, border: "none", background: on ? T.surface : "transparent", color: on ? T.text : T.textMuted, fontSize: phone ? 12.5 : (dense ? 12.5 : 13.5), fontWeight: on ? 760 : 600, cursor: "pointer", fontFamily: "inherit", boxShadow: on ? "0 1px 2px rgba(0,0,0,0.07)" : "none", whiteSpace: "nowrap" }}>
             <Icon name={id === "inbox" ? "mail" : "send"} size={15} />{lbl}
-            {badge > 0 && <span style={{ fontSize: 10.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.12), borderRadius: 100, padding: "1px 7px" }}>{badgeLabel(badge)}</span>}
+            {badge > 0 && <span style={{ fontSize: 10.5, fontWeight: 750, color: T.primary, background: phone ? "transparent" : hexA(T.primary, 0.12), borderRadius: 100, padding: phone ? 0 : "1px 7px", fontVariantNumeric: "tabular-nums" }}>{badgeLabel(badge)}</span>}
           </button>
         );
       })}
@@ -24204,19 +24230,19 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     <div style={{ display: "flex", flexDirection: "column", gap: dense ? 8 : 12, paddingBottom: phone && selMode ? 76 : 0 }}>
       {phone ? (selMode && folder === "inbox" ? (
         <div style={{ minHeight: 42, display: "grid", gridTemplateColumns: "1fr auto 1fr", alignItems: "center", gap: 10 }}>
-          <button type="button" onClick={exitSelect} style={{ justifySelf: "start", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13.5, fontWeight: 800, padding: "8px 2px", cursor: "pointer" }}>Cancel</button>
+          <button type="button" onClick={exitSelect} style={{ minHeight: 44, justifySelf: "start", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13.5, fontWeight: 800, padding: "8px 2px", cursor: "pointer" }}>Cancel</button>
           <div style={{ fontSize: 15, fontWeight: 850, color: T.text, whiteSpace: "nowrap" }}>{selIds.length ? `${selIds.length} Selected` : "Select messages"}</div>
-          <button type="button" onClick={toggleSelectAll} style={{ justifySelf: "end", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13.5, fontWeight: 800, padding: "8px 2px", cursor: "pointer" }}>{allVisibleSelected ? "Clear" : "Select All"}</button>
+          <button type="button" onClick={toggleSelectAll} style={{ minHeight: 44, justifySelf: "end", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13.5, fontWeight: 800, padding: "8px 2px", cursor: "pointer" }}>{allVisibleSelected ? "Clear" : "Select All"}</button>
         </div>
       ) : (
         <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: dense ? 22 : 25, lineHeight: 1.06, fontWeight: 880, color: T.text, letterSpacing: "-0.04em" }}>{folder === "inbox" ? "Inbox" : "Sent"}</div>
-            <div style={{ marginTop: 3, fontSize: dense ? 11 : 12, color: T.textMuted, lineHeight: 1.35 }}>{folder === "inbox" ? `${unread ? `${unread} unread` : "All caught up"} · ${textCount} text${textCount === 1 ? "" : "s"} · ${emailCount} email${emailCount === 1 ? "" : "s"}` : "Email sent from SPS Way"}</div>
+            <div style={{ marginTop: 3, fontSize: dense ? 11 : 12, color: T.textMuted, lineHeight: 1.35 }}>{folder === "inbox" ? (unread ? `${unread} unread` : "All caught up") : "Email sent from SPS Way"}</div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 7, flexShrink: 0 }}>
-            {folder === "inbox" && (list.length > 0 || selMode) && <button type="button" onClick={() => setSelMode(true)} style={{ minHeight: 40, padding: "7px 8px", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13.5, fontWeight: 820, cursor: "pointer" }}>Edit</button>}
-            {showMobileCompose && iconBtn("edit", "Compose a new email", () => { setComposeMsg(""); setComposeOpen(true); }, true)}
+            {folder === "inbox" && (list.length > 0 || selMode) && <button type="button" onClick={() => setSelMode(true)} style={{ minHeight: 44, padding: "7px 8px", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13.5, fontWeight: 740, cursor: "pointer" }}>Edit</button>}
+            {showMobileCompose && toolbarIconBtn("edit", "Compose a new email", () => { setComposeMsg(""); setComposeOpen(true); })}
           </div>
         </div>
       )) : (
@@ -24245,7 +24271,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
             {(list.length > 0 || selMode) && <Btn variant={selMode ? "primary" : "ghost"} sm onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }}>{selMode ? "Done" : "Select"}</Btn>}
           </>
         ) : phone ? (
-          <>{iconBtn("refresh", refreshing ? "Refreshing" : "Refresh inbox", refreshing ? null : load, false)}</>
+          <>{toolbarIconBtn("refresh", refreshing ? "Refreshing" : "Refresh inbox", refreshing ? null : load, T.textMuted)}</>
         ) : (
           <>
             {iconBtn("refresh", refreshing ? "Refreshing" : "Refresh inbox", refreshing ? null : load, false)}
@@ -24257,7 +24283,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
         <>
       {!(phone && selMode) && <>
       <div style={{ display: "grid", gridTemplateColumns: wide ? "minmax(260px, 1fr) minmax(330px, 0.8fr)" : "1fr", gap: dense ? 7 : 10, alignItems: "center" }}>
-        <CommsSearchField value={q} onChange={setQ} placeholder="Search messages, people, tags" T={T} />
+        <CommsSearchField value={q} onChange={setQ} placeholder="Search messages, people, tags" T={T} quiet={phone} />
         {!phone && channelSwitcher}
       </div>
       {phone && mobileQuickFilters}
@@ -24274,7 +24300,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
         </div>
       )}
       {phone && (filtersOpen || ["lead", "bill", "client", "other"].includes(filter)) && (
-        <div style={{ display: "flex", gap: 7, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
+        <div style={{ display: "flex", gap: 7, overflowX: "auto", padding: "2px 2px 3px", margin: "0 -2px", WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
           {chip("all", "All categories")}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
         </div>
       )}
@@ -24347,7 +24373,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
           </div>
         </div>
       ) : (
-        <div style={{ border: `1px solid ${T.border}`, borderRadius: dense ? 14 : 17, overflow: "hidden", background: T.surface, boxShadow: "0 2px 10px rgba(0,0,0,0.035)", marginBottom: 12 }}>{mobileRows}</div>
+        <div style={{ border: `1px solid ${hexA(T.border, phone ? 0.88 : 1)}`, borderRadius: phone ? 12 : (dense ? 14 : 17), overflow: "hidden", background: T.surface, boxShadow: phone ? "none" : "0 2px 10px rgba(0,0,0,0.035)", marginBottom: 12 }}>{mobileRows}</div>
       ))}
         </>
       ) : sentView}
