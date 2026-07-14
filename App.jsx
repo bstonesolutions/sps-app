@@ -20953,10 +20953,10 @@ function CommsPageHeader({ title, description, icon = "inbox", meta, action, T, 
   );
 }
 
-function CommsSearchField({ value, onChange, onClear, placeholder, T, ariaLabel, quiet = false }) {
+function CommsSearchField({ value, onChange, onClear, placeholder, T, ariaLabel, quiet = false, touch = false }) {
   const dense = useCompactComms();
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: dense ? 8 : 10, height: dense ? 42 : 46, boxSizing: "border-box", background: quiet ? T.surfaceAlt : T.surface, border: `1px solid ${quiet ? "transparent" : T.border}`, borderRadius: dense ? 12 : 14, padding: dense ? "0 10px" : "0 13px", boxShadow: quiet ? "none" : "0 1px 2px rgba(0,0,0,0.035)", minWidth: 0 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: dense ? 8 : 10, height: touch ? 44 : (dense ? 42 : 46), boxSizing: "border-box", background: quiet ? T.surfaceAlt : T.surface, border: `1px solid ${quiet ? "transparent" : T.border}`, borderRadius: dense ? 12 : 14, padding: dense ? "0 10px" : "0 13px", boxShadow: quiet ? "none" : "0 1px 2px rgba(0,0,0,0.035)", minWidth: 0 }}>
       <span style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="search" size={17} /></span>
       <input value={value} onChange={e => onChange(e.target.value)} aria-label={ariaLabel || placeholder} placeholder={placeholder}
         style={{ flex: 1, minWidth: 0, minHeight: 0, height: "100%", padding: 0, border: "none", background: "transparent", outline: "none", fontFamily: "inherit", fontSize: 16, color: T.text }} />
@@ -20983,37 +20983,6 @@ function CommsIconAction({ icon, label, onClick, T, active = false }) {
       style={{ width: 44, height: 44, border: "none", borderRadius: 22, background: active ? hexA(T.primary, 0.1) : "transparent", color: T.primary, display: "grid", placeItems: "center", cursor: "pointer", fontFamily: "inherit", flexShrink: 0, WebkitTapHighlightColor: "transparent" }}>
       <Icon name={icon} size={19} />
     </button>
-  );
-}
-
-// Phone-only Mail toolbar. It intentionally sits above the app's persistent bottom navigation,
-// keeping search and compose within thumb reach without changing any inbox state or actions.
-function CommsMailBottomBar({ value, onChange, placeholder, onCompose, T }) {
-  useEffect(() => {
-    if (typeof document === "undefined") return undefined;
-    const root = document.documentElement;
-    const previous = root.style.getPropertyValue("--sps-mail-dock-lift");
-    root.style.setProperty("--sps-mail-dock-lift", "58px");
-    return () => {
-      if (previous) root.style.setProperty("--sps-mail-dock-lift", previous);
-      else root.style.removeProperty("--sps-mail-dock-lift");
-    };
-  }, []);
-  if (typeof document === "undefined") return null;
-  return createPortal(
-    <div role="search" aria-label="Mail search and compose" style={{ position: "fixed", left: "max(12px, env(safe-area-inset-left))", right: "max(12px, env(safe-area-inset-right))", bottom: "calc(76px + env(safe-area-inset-bottom))", zIndex: 97, maxWidth: 560, margin: "0 auto", display: "flex", alignItems: "center", gap: 8, pointerEvents: "none" }}>
-      <div style={{ height: 52, flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 9, padding: "0 10px 0 16px", boxSizing: "border-box", borderRadius: 27, background: hexA(T.surface, 0.96), border: `1px solid ${T.border}`, boxShadow: "0 8px 26px rgba(0,0,0,0.13)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)", pointerEvents: "auto" }}>
-        <span aria-hidden="true" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="search" size={19} /></span>
-        <input type="text" inputMode="search" enterKeyHint="search" value={value} onChange={e => onChange(e.target.value)} aria-label={placeholder} placeholder={placeholder}
-          style={{ flex: 1, minWidth: 0, height: "100%", padding: 0, border: "none", background: "transparent", outline: "none", color: T.text, fontFamily: "inherit", fontSize: 16 }} />
-        {value && <button type="button" onClick={() => onChange("")} aria-label="Clear search" style={{ width: 44, height: 44, marginRight: -6, border: "none", borderRadius: 22, background: "transparent", color: T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", flexShrink: 0 }}><Icon name="close" size={14} /></button>}
-      </div>
-      {onCompose && <button type="button" onClick={onCompose} title="Compose a new email" aria-label="Compose a new email"
-        style={{ width: 52, height: 52, borderRadius: 26, border: `1px solid ${T.border}`, background: hexA(T.surface, 0.97), color: T.primary, boxShadow: "0 8px 26px rgba(0,0,0,0.13)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)", display: "grid", placeItems: "center", cursor: "pointer", pointerEvents: "auto", flexShrink: 0 }}>
-        <Icon name="edit" size={21} />
-      </button>}
-    </div>,
-    document.body
   );
 }
 
@@ -23713,6 +23682,8 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const [channelFilter, setChannelFilter] = useState("all"); // all | sms | email
   const [filter, setFilter] = useState("all"); // all | unread | lead | bill | client | other
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [phoneMailMenuOpen, setPhoneMailMenuOpen] = useState(false);
+  const phoneMailMenuRef = useRef(null);
   const [openRow, setOpenRow] = useState(null);
   const [copied, setCopied] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -23834,6 +23805,19 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     window.dispatchEvent(new CustomEvent("sps-inbox-unread", { detail: { count: (rows || []).filter(r => !r.read).length } }));
   }, [rows, err, refreshing]);
   useEffect(() => { setReplying(false); setReplyText(""); setReplyHtml(""); setReplyMsg(""); }, [openRow && openRow.id]);
+  useEffect(() => {
+    if (!phoneMailMenuOpen) return undefined;
+    const closeOutside = (event) => {
+      if (!phoneMailMenuRef.current || !phoneMailMenuRef.current.contains(event.target)) setPhoneMailMenuOpen(false);
+    };
+    const closeOnEscape = (event) => { if (event.key === "Escape") setPhoneMailMenuOpen(false); };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [phoneMailMenuOpen]);
   const KIND = { lead: { label: "Lead", color: "#16a34a" }, bill: { label: "Bill", color: "#b45309" }, client: { label: "Client", color: "#2563eb" }, other: { label: "Other", color: null } };
   // Membership is checked against the ACTUAL leads list, not the imported stamp — if a lead
   // ever vanishes (multi-device array overwrite), "Add to Leads" reappears for a one-tap re-add.
@@ -24236,24 +24220,6 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       {channelTab("email", "Email", emailCount, "mail")}
     </div>
   );
-  const mobileQuickBtn = (key, label, count, icon, active, onClick) => {
-    const tone = key === "sms" ? "#7c3aed" : key === "email" ? "#1d4ed8" : T.primary;
-    return <button key={key} type="button" aria-pressed={active} onClick={onClick}
-      style={{ minHeight: 44, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 5, flexShrink: 0, whiteSpace: "nowrap", padding: dense ? "6px 10px" : "7px 12px", borderRadius: 100, border: `1px solid ${active ? hexA(tone, 0.22) : "transparent"}`, background: active ? hexA(tone, 0.09) : T.surfaceAlt, color: active ? tone : T.textMuted, fontFamily: "inherit", fontSize: dense ? 11.5 : 12, fontWeight: active ? 780 : 650, cursor: "pointer" }}>
-      <Icon name={icon} size={13} />{label}{count > 0 && <span style={{ minWidth: 12, fontSize: 10, fontWeight: 750, lineHeight: 1.6, fontVariantNumeric: "tabular-nums", opacity: active ? 0.95 : 0.85 }}>{badgeLabel(count)}</span>}
-    </button>;
-  };
-  const mobileQuickFilters = (
-    <div aria-label="Quick inbox filters" style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
-      <div style={{ minWidth: 0, flex: 1, display: "flex", gap: 7, overflowX: "auto", padding: "2px 0 3px", WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
-        {mobileQuickBtn("all", "All", inboxRows.length, "inbox", channelFilter === "all" && filter === "all", () => { setChannelFilter("all"); setFilter("all"); setFiltersOpen(false); })}
-        {mobileQuickBtn("unread", "Unread", unread, "mail", channelFilter === "all" && filter === "unread", () => { setChannelFilter("all"); setFilter("unread"); setFiltersOpen(false); })}
-        {mobileQuickBtn("sms", "Texts", textCount, "message", channelFilter === "sms", () => { setChannelFilter("sms"); setFilter("all"); setFiltersOpen(false); })}
-        {mobileQuickBtn("email", "Email", emailCount, "mail", channelFilter === "email", () => { setChannelFilter("email"); setFilter("all"); setFiltersOpen(false); })}
-      </div>
-      {mobileQuickBtn("filters", "Filter", null, "funnel", filtersOpen || ["lead", "bill", "client", "other"].includes(filter), () => setFiltersOpen(v => !v))}
-    </div>
-  );
   const chip = (id, label) => {
     const on = filter === id;
     return <button key={id} onClick={() => setFilter(id)} aria-pressed={on} style={{ minHeight: phone ? 44 : 40, padding: phone ? "6px 12px" : "7px 14px", borderRadius: 100, border: `${phone ? 1 : 1.5}px solid ${on ? hexA(T.primary, 0.24) : (phone ? "transparent" : T.border)}`, background: on ? hexA(T.primary, 0.1) : (phone ? T.surfaceAlt : T.surface), color: on ? T.primary : T.textMuted, fontSize: phone ? 12 : 12.5, fontWeight: on ? 760 : 650, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, whiteSpace: "nowrap" }}>{label}</button>;
@@ -24475,6 +24441,52 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     const qq = sentQ.trim().toLowerCase(); if (!qq) return true;
     return `${r.recipient || ""} ${nameForSent(r)} ${r.body || ""} ${r.origin || ""}`.toLowerCase().includes(qq);
   });
+  const phoneMailViewLabel = (() => {
+    if (folder === "sent") return "Sent";
+    const parts = [];
+    if (channelFilter === "sms") parts.push("Texts");
+    else if (channelFilter === "email") parts.push("Email");
+    if (filter === "unread") parts.push("Unread");
+    else if (["lead", "bill", "client", "other"].includes(filter)) parts.push(KIND[filter].label);
+    return parts.length ? `Inbox · ${parts.join(" · ")}` : "Inbox";
+  })();
+  const phoneMenuOption = ({ key, label, icon, count, active, onClick }) => (
+    <button key={key} type="button" role="menuitemcheckbox" aria-checked={active} onClick={onClick}
+      style={{ width: "100%", minHeight: 42, padding: "8px 10px", border: "none", borderRadius: 10, background: active ? hexA(T.primary, 0.085) : "transparent", color: active ? T.primary : T.text, display: "flex", alignItems: "center", gap: 9, fontFamily: "inherit", fontSize: 12.5, fontWeight: active ? 790 : 650, cursor: "pointer", textAlign: "left" }}>
+      <span style={{ width: 25, height: 25, borderRadius: 8, background: active ? hexA(T.primary, 0.12) : T.surfaceAlt, color: active ? T.primary : T.textMuted, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name={icon} size={13} /></span>
+      <span style={{ flex: 1, minWidth: 0 }}>{label}</span>
+      {count != null && <span style={{ color: active ? T.primary : T.textMuted, fontSize: 10.5, fontWeight: 780, fontVariantNumeric: "tabular-nums" }}>{badgeLabel(count)}</span>}
+      {active && <span style={{ color: T.primary, display: "inline-flex", flexShrink: 0 }}><Icon name="check" size={14} /></span>}
+    </button>
+  );
+  const phoneMailDropdown = (
+    <div ref={phoneMailMenuRef} style={{ position: "relative", flex: 1, minWidth: 0 }}>
+      <button type="button" aria-label="Choose mailbox and inbox filters" aria-haspopup="menu" aria-expanded={phoneMailMenuOpen} onClick={() => setPhoneMailMenuOpen(open => !open)}
+        style={{ width: "100%", height: 44, padding: "0 10px 0 11px", border: `1px solid ${phoneMailMenuOpen ? T.primary : T.border}`, borderRadius: 12, background: phoneMailMenuOpen ? hexA(T.primary, 0.055) : T.surface, color: T.text, display: "flex", alignItems: "center", gap: 8, fontFamily: "inherit", cursor: "pointer", boxShadow: "0 1px 2px rgba(0,0,0,0.035)" }}>
+        <span style={{ color: folder === "sent" ? T.textMuted : T.primary, display: "inline-flex", flexShrink: 0 }}><Icon name={folder === "sent" ? "send" : "inbox"} size={16} /></span>
+        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "left", fontSize: 13.5, fontWeight: 790 }}>{phoneMailViewLabel}</span>
+        {folder === "inbox" && unread > 0 && <span style={{ minWidth: 20, padding: "2px 6px", borderRadius: 100, background: hexA(T.primary, 0.1), color: T.primary, fontSize: 10, fontWeight: 820, lineHeight: 1.4 }}>{badgeLabel(unread)}</span>}
+        <span style={{ color: T.textMuted, display: "inline-flex", transform: phoneMailMenuOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }}><Icon name="chevronD" size={14} /></span>
+      </button>
+      {phoneMailMenuOpen && (
+        <div role="menu" aria-label="Mailbox and inbox views" style={{ position: "absolute", top: "calc(100% + 6px)", left: 0, width: "min(310px, calc(100vw - 48px))", maxHeight: "min(52dvh, 440px)", overflowY: "auto", zIndex: 90, padding: 7, border: `1px solid ${T.border}`, borderRadius: 15, background: hexA(T.surface, 0.985), boxShadow: "0 14px 38px rgba(0,0,0,0.18)", backdropFilter: "blur(18px)", WebkitBackdropFilter: "blur(18px)" }}>
+          <div style={{ padding: "4px 8px 3px", color: T.textMuted, fontSize: 9.5, fontWeight: 820, letterSpacing: "0.08em", textTransform: "uppercase" }}>Mailbox</div>
+          {phoneMenuOption({ key: "mailbox-inbox", label: "Inbox", icon: "inbox", count: inboxRows.length, active: folder === "inbox", onClick: () => { setFolder("inbox"); setPhoneMailMenuOpen(false); } })}
+          {phoneMenuOption({ key: "mailbox-sent", label: "Sent", icon: "send", count: sentRows ? sentRows.length : null, active: folder === "sent", onClick: () => { exitSelect(); setFolder("sent"); setPhoneMailMenuOpen(false); } })}
+          <div style={{ height: 1, background: T.border, margin: "5px 4px" }} />
+          <div style={{ padding: "4px 8px 3px", color: T.textMuted, fontSize: 9.5, fontWeight: 820, letterSpacing: "0.08em", textTransform: "uppercase" }}>Inbox type</div>
+          {phoneMenuOption({ key: "channel-all", label: "All channels", icon: "inbox", count: inboxRows.length, active: folder === "inbox" && channelFilter === "all", onClick: () => { setFolder("inbox"); setChannelFilter("all"); setPhoneMailMenuOpen(false); } })}
+          {phoneMenuOption({ key: "channel-sms", label: "Texts", icon: "message", count: textCount, active: folder === "inbox" && channelFilter === "sms", onClick: () => { setFolder("inbox"); setChannelFilter("sms"); setPhoneMailMenuOpen(false); } })}
+          {phoneMenuOption({ key: "channel-email", label: "Email", icon: "mail", count: emailCount, active: folder === "inbox" && channelFilter === "email", onClick: () => { setFolder("inbox"); setChannelFilter("email"); setPhoneMailMenuOpen(false); } })}
+          <div style={{ height: 1, background: T.border, margin: "5px 4px" }} />
+          <div style={{ padding: "4px 8px 3px", color: T.textMuted, fontSize: 9.5, fontWeight: 820, letterSpacing: "0.08em", textTransform: "uppercase" }}>View</div>
+          {phoneMenuOption({ key: "filter-all", label: "All categories", icon: "funnel", count: channelRows.length, active: folder === "inbox" && filter === "all", onClick: () => { setFolder("inbox"); setFilter("all"); setFiltersOpen(false); setPhoneMailMenuOpen(false); } })}
+          {phoneMenuOption({ key: "filter-unread", label: "Unread", icon: "mail", count: channelUnread, active: folder === "inbox" && filter === "unread", onClick: () => { setFolder("inbox"); setFilter("unread"); setFiltersOpen(false); setPhoneMailMenuOpen(false); } })}
+          {["lead", "bill", "client", "other"].map(kind => phoneMenuOption({ key: `filter-${kind}`, label: KIND[kind].label, icon: kind === "lead" ? "funnel" : kind === "bill" ? "clipboard" : kind === "client" ? "clients" : "tag", count: channelRows.filter(row => row.kind === kind).length, active: folder === "inbox" && filter === kind, onClick: () => { setFolder("inbox"); setFilter(kind); setFiltersOpen(false); setPhoneMailMenuOpen(false); } }))}
+        </div>
+      )}
+    </div>
+  );
   const folderBar = (
     <div style={{ display: "flex", gap: phone ? 18 : 4, background: phone ? "transparent" : T.surfaceAlt, border: phone ? "none" : `1px solid ${T.border}`, borderRadius: phone ? 0 : (dense ? 11 : 13), padding: phone ? 0 : (dense ? 3 : 4), alignSelf: "flex-start", flex: wide ? "0 0 auto" : "1 1 auto", minWidth: 0, width: "auto" }}>
       {[["inbox", "Inbox", unread], ["sent", dense && !wide ? "Sent" : "Sent email", 0]].map(([id, lbl, badge]) => {
@@ -24540,7 +24552,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     textAlign: "left", cursor: "pointer",
   });
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: dense ? 8 : 12, paddingBottom: phone ? (selMode ? 76 : 72) : 0 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: dense ? 8 : 12, paddingBottom: phone ? (selMode ? 76 : 12) : 0 }}>
       {phone ? (selMode && folder === "inbox" ? (
         <div style={{ minHeight: 42, display: "grid", gridTemplateColumns: "1fr auto 1fr", alignItems: "center", gap: 10 }}>
           <button type="button" onClick={exitSelect} style={{ minHeight: 44, justifySelf: "start", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13.5, fontWeight: 800, padding: "8px 2px", cursor: "pointer" }}>Cancel</button>
@@ -24548,16 +24560,17 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
           <button type="button" onClick={toggleSelectAll} style={{ minHeight: 44, justifySelf: "end", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13.5, fontWeight: 800, padding: "8px 2px", cursor: "pointer" }}>{allVisibleSelected ? "Clear" : "Select All"}</button>
         </div>
       ) : (
-        <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <h1 style={{ margin: 0, fontSize: dense ? 27 : 29, lineHeight: 1.04, fontWeight: 880, color: T.text, letterSpacing: "-0.045em" }}>{folder === "inbox" ? "Inbox" : "Sent"}</h1>
-            <div style={{ marginTop: 3, fontSize: dense ? 11 : 12, color: T.textMuted, lineHeight: 1.35 }}>{folder === "inbox" ? (unread ? `${unread} unread` : "All caught up") : "Email sent from SPS Way"}</div>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 7, flexShrink: 0 }}>
-            {folder === "inbox" && (list.length > 0 || selMode) && <button type="button" onClick={() => setSelMode(true)} style={{ minHeight: 44, padding: "7px 8px", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13.5, fontWeight: 740, cursor: "pointer" }}>Select</button>}
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+            {phoneMailDropdown}
+            {folder === "inbox" && (list.length > 0 || selMode) && <button type="button" onClick={() => setSelMode(true)} style={{ minHeight: 44, padding: "7px 8px", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13, fontWeight: 760, cursor: "pointer", flexShrink: 0 }}>Select</button>}
             {toolbarIconBtn("refresh", folder === "inbox" ? (refreshing ? "Refreshing" : "Refresh inbox") : "Refresh sent email", folder === "inbox" ? (refreshing ? null : load) : loadSent, T.textMuted)}
           </div>
-        </div>
+          <div role="search" aria-label="Mail search and compose" style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+            <div style={{ flex: 1, minWidth: 0 }}><CommsSearchField value={folder === "inbox" ? q : sentQ} onChange={folder === "inbox" ? setQ : setSentQ} placeholder={folder === "inbox" ? "Search inbox" : "Search sent"} T={T} quiet touch /></div>
+            {showMobileCompose && <CommsIconAction icon="edit" label="Compose a new email" onClick={() => { setComposeMsg(""); setComposeOpen(true); }} T={T} active />}
+          </div>
+        </>
       )) : (
         <CommsPageHeader
           title={folder === "inbox" ? "Unified inbox" : "Sent email"}
@@ -24573,8 +24586,8 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
           T={T}
         />
       )}
-      {/* Folder switch (Inbox / Sent) + context actions — one clean toolbar row */}
-      {!(phone && selMode) && <div style={{ display: "flex", alignItems: "center", gap: dense ? 6 : 10, flexWrap: wide ? "wrap" : "nowrap", minWidth: 0 }}>
+      {/* Tablet/desktop folder switch. Phones use the compact mailbox dropdown above. */}
+      {!phone && <div style={{ display: "flex", alignItems: "center", gap: dense ? 6 : 10, flexWrap: wide ? "wrap" : "nowrap", minWidth: 0 }}>
         {folderBar}
         {wide && <div style={{ flex: 1 }} />}
         {folder === "inbox" && (wide ? (
@@ -24583,8 +24596,6 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
             <Btn variant="ghost" sm onClick={refreshing ? undefined : load}>{refreshing ? "Refreshing…" : "Refresh"}</Btn>
             {(list.length > 0 || selMode) && <Btn variant={selMode ? "primary" : "ghost"} sm onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }}>{selMode ? "Done" : "Select"}</Btn>}
           </>
-        ) : phone ? (
-          null
         ) : (
           <>
             {iconBtn("refresh", refreshing ? "Refreshing" : "Refresh inbox", refreshing ? null : load, false)}
@@ -24599,7 +24610,6 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
         {!phone && <CommsSearchField value={q} onChange={setQ} placeholder="Search messages, people, tags" T={T} />}
         {!phone && channelSwitcher}
       </div>
-      {phone && mobileQuickFilters}
       {!phone && !wide && (
         <button type="button" onClick={() => setFiltersOpen(v => !v)} aria-expanded={filtersOpen}
           style={{ minHeight: dense ? 40 : 44, width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: dense ? "7px 10px" : "9px 12px", background: T.surface, border: `1px solid ${filter !== "all" ? T.primary : T.border}`, borderRadius: 12, color: filter !== "all" ? T.primary : T.textMuted, fontFamily: "inherit", fontSize: 12.5, fontWeight: 750, cursor: "pointer" }}>
@@ -24610,11 +24620,6 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       {(!phone && (wide || filtersOpen || filter !== "all")) && (
         <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none" }}>
           {chip("all", "All categories")}{chip("unread", `Unread${channelUnread ? ` · ${channelUnread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
-        </div>
-      )}
-      {phone && (filtersOpen || ["lead", "bill", "client", "other"].includes(filter)) && (
-        <div style={{ display: "flex", gap: 7, overflowX: "auto", padding: "2px 2px 3px", margin: "0 -2px", WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
-          {chip("all", "All categories")}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
         </div>
       )}
       </>}
@@ -24690,13 +24695,6 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       ))}
         </>
       ) : sentView}
-      {phone && !selMode && <CommsMailBottomBar
-        value={folder === "inbox" ? q : sentQ}
-        onChange={folder === "inbox" ? setQ : setSentQ}
-        placeholder={folder === "inbox" ? "Search inbox" : "Search sent"}
-        onCompose={showMobileCompose ? () => { setComposeMsg(""); setComposeOpen(true); } : null}
-        T={T}
-      />}
       {phone && selMode && folder === "inbox" && createPortal(
         <div style={{ position: "fixed", left: "max(12px, env(safe-area-inset-left))", right: "max(12px, env(safe-area-inset-right))", bottom: "calc(76px + env(safe-area-inset-bottom))", zIndex: 98, maxWidth: 560, height: 58, margin: "0 auto", padding: "0 8px", boxSizing: "border-box", display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", alignItems: "stretch", background: hexA(T.surface, 0.97), border: `1px solid ${T.border}`, borderRadius: 18, boxShadow: "0 8px 28px rgba(0,0,0,0.18)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}>
           {[
