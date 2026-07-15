@@ -17730,7 +17730,7 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
   const approvedValue = est.filter((estimate) => estimate.status === "approved").reduce((sum, estimate) => sum + estimateTotals(estimate, invoicing?.taxRate).total, 0);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: vp.isPhone ? 14 : 18 }}>
+    <div data-estimates-list style={{ display: "flex", flexDirection: "column", gap: vp.isPhone ? 14 : 18, paddingTop: vp.isPhone ? 22 : 0 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, paddingTop: 2 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 11, minWidth: 0 }}>
           <div style={{ width: 40, height: 40, borderRadius: 12, background: hexA(T.primary, 0.09), color: T.primary, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name="clipboard" size={19} /></div>
@@ -18147,9 +18147,9 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   return (
     <fieldset disabled={shareBusy} aria-busy={shareBusy} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
-        {/* Mobile <main> owns a 22px top / 16px side gutter. Pull this sticky toolbar through
-            those gutters so scrolled estimate cards can never show above or beside it. */}
-        <div data-estimate-sticky-header style={{ position: "sticky", top: 0, zIndex: 40, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, margin: vp.isPhone ? "-22px -16px 0" : 0, padding: vp.isPhone ? "8px 16px 10px" : "8px 0 10px", background: T.bg, borderBottom: vp.isPhone ? `1px solid ${T.border}` : "none" }}>
+        {/* Estimates detail removes the phone scroll container's top padding, so this toolbar's
+            real sticky edge is flush beneath the global company header on every browser. */}
+        <div data-estimate-sticky-header style={{ position: "sticky", top: 0, zIndex: 40, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, margin: vp.isPhone ? "0 -16px" : 0, padding: vp.isPhone ? "8px 16px 10px" : "8px 0 10px", background: T.bg, borderBottom: vp.isPhone ? `1px solid ${T.border}` : "none", boxShadow: vp.isPhone ? `0 5px 12px ${hexA(T.text, 0.04)}` : "none" }}>
           <button onClick={onBack} style={{ minHeight: 40, background: "none", border: "none", color: T.primary, fontWeight: 750, fontSize: 13, cursor: "pointer", padding: "0 5px 0 0", display: "flex", alignItems: "center", gap: 5, fontFamily: "inherit" }}><Icon name="back" size={15} /> Estimates</button>
           <div style={{ minWidth: 0, textAlign: "center" }}>
             <div style={{ fontSize: 14, fontWeight: 850, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isNew ? "New estimate" : form.number || "Estimate"}</div>
@@ -34025,6 +34025,7 @@ export default function App({ authEmail = "", onSignOut }) {
     `}</style>
   );
   const isCommsRoute = ["comms", "reminders", "messages", "leads"].includes(page);
+  const isEstimatesRoute = page === "estimates";
   const pageBody = (
     <>
       {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onOpenAlert={handleOpenAlert} onOpenStop={handleOpenStop} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} completedSids={completedSids} budget={budget} leads={leads} vp={vp} />}
@@ -34226,7 +34227,7 @@ export default function App({ authEmail = "", onSignOut }) {
             <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 10, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, display:"flex", alignItems:"center", gap:5 }}>Retry</button>
           </div>
         )}
-        <main style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", alignSelf: "center", padding: isCommsRoute ? (vp.isPhone ? "0 16px" : "0 32px") : (vp.isPhone ? "22px 16px" : "28px 32px"), maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(env(safe-area-inset-bottom) + 96px)" }}>
+        <main style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", alignSelf: "center", padding: isCommsRoute ? (vp.isPhone ? "0 16px" : "0 32px") : (vp.isPhone ? `${isEstimatesRoute ? 0 : 22}px 16px` : "28px 32px"), maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(env(safe-area-inset-bottom) + 96px)" }}>
           {pageBody}
         </main>
 
