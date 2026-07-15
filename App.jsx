@@ -5185,6 +5185,42 @@ function useKeyboardInset() {
   return inset;
 }
 
+// A portal removes a sheet from the page scroller's ancestry, but iOS can keep an existing
+// momentum scroll alive underneath it. Freeze every app/modal scroll surface while a blocking
+// sheet is mounted, then restore the exact inline styles and scroll positions on close.
+function useBackgroundScrollLock() {
+  useEffect(() => {
+    const targets = [document.documentElement, document.body, ...document.querySelectorAll("main, [data-sps-modal-scroll]")]
+      .filter((target, index, all) => target && all.indexOf(target) === index);
+    const snapshots = targets.map(target => ({
+      target,
+      overflow: target.style.overflow,
+      overflowY: target.style.overflowY,
+      overscrollBehavior: target.style.overscrollBehavior,
+      touchAction: target.style.touchAction,
+      scrollTop: target.scrollTop,
+      scrollLeft: target.scrollLeft,
+    }));
+    targets.forEach(target => {
+      target.style.overflow = "hidden";
+      target.style.overflowY = "hidden";
+      target.style.overscrollBehavior = "none";
+      // The sheet is portaled under <body>; touch-action:none on body/html would also disable the
+      // sheet's own pan-y list. Apply it only to the background app/modal scrollers.
+      if (target !== document.documentElement && target !== document.body) target.style.touchAction = "none";
+    });
+    return () => snapshots.forEach(snapshot => {
+      const { target } = snapshot;
+      target.style.overflow = snapshot.overflow;
+      target.style.overflowY = snapshot.overflowY;
+      target.style.overscrollBehavior = snapshot.overscrollBehavior;
+      target.style.touchAction = snapshot.touchAction;
+      target.scrollTop = snapshot.scrollTop;
+      target.scrollLeft = snapshot.scrollLeft;
+    });
+  }, []);
+}
+
 function Modal({ title, children, onClose, maxWidth = 600 }) {
   const { T } = useApp();
   const { isPhone } = useViewport();
@@ -5218,7 +5254,7 @@ function Modal({ title, children, onClose, maxWidth = 600 }) {
         </div>
         {/* Scrollable body — content taller than the card scrolls here; header stays put.
             On field focus we scroll it into the visible area above the keyboard (Bug 2). */}
-        <div onFocus={onBodyFocus} style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", padding: isPhone ? "14px 16px 18px" : "16px 22px 22px" }}>
+        <div data-sps-modal-scroll onFocus={onBodyFocus} style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", padding: isPhone ? "14px 16px 18px" : "16px 22px 22px" }}>
           {children}
         </div>
       </div>
@@ -16183,6 +16219,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
 function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCreateItem, T, title = "Add to Invoice", allowCreate = true, showCosts = true, showInventory = false }) {
   const pickerVp = useViewport();
   const kb = useKeyboardInset();
+  useBackgroundScrollLock();
   const [tab, setTab] = useState("services");
   const [search, setSearch] = useState("");
   const [bundle, setBundle] = useState({});   // partId -> qty (for bundling)
@@ -16228,9 +16265,9 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
   const cell = { width: "100%", padding: "10px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
   const { handleProps, sheetStyle } = useSheetSwipe(onClose);
 
-  return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 300, display: "flex", alignItems: "flex-end", justifyContent: "center", paddingLeft: "env(safe-area-inset-left)", paddingRight: "env(safe-area-inset-right)", paddingBottom: kb > 0 ? kb : 0, transition: "padding-bottom 0.18s ease" }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: T.bg, borderRadius: "20px 20px 0 0", width: "100%", maxWidth: 600, maxHeight: `calc(100dvh - max(8px, env(safe-area-inset-top)) - ${kb}px)`, display: "flex", flexDirection: "column", paddingBottom: "env(safe-area-inset-bottom)", ...sheetStyle }}>
+  return createPortal(
+    <div role="dialog" aria-modal="true" aria-label={title} onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 300, display: "flex", alignItems: "flex-end", justifyContent: "center", paddingLeft: "env(safe-area-inset-left)", paddingRight: "env(safe-area-inset-right)", paddingBottom: kb > 0 ? kb : 0, transition: "padding-bottom 0.18s ease", overscrollBehavior: "none" }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: T.bg, borderRadius: "20px 20px 0 0", width: "100%", maxWidth: 600, minHeight: 0, maxHeight: `calc(100dvh - max(8px, env(safe-area-inset-top)) - ${kb}px)`, display: "flex", flexDirection: "column", overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)", ...sheetStyle }}>
         <SheetHandle handleProps={handleProps} T={T} />
         {/* Header */}
         <div style={{ padding: "16px 18px 10px", borderBottom: `1px solid ${T.border}` }}>
@@ -16246,7 +16283,7 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
         </div>
 
         {/* Body */}
-        <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+        <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", touchAction: "pan-y", padding: 16 }}>
           {creating ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>New {creating.type}</div>
@@ -16337,7 +16374,8 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -23852,63 +23890,89 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   }, [openSwipeId]);
   const unread = inboxRows.filter(r => !r.read).length;
   const channelUnread = channelRows.filter(r => !r.read).length;
-  const markRead = (ids, read = true) => {
-    // Flip instantly, then require the SPS Inbox write to confirm. Gmail mirroring is reported
-    // separately: it must never turn an unconfirmed app write into a fake success.
-    const before = new Map((rows || []).filter(r => ids.includes(r.id)).map(r => [r.id, !!r.read]));
-    setRows(rs => (rs || []).map(r => ids.includes(r.id) ? { ...r, read } : r));
-    setOpenRow(o => (o && ids.includes(o.id) ? { ...o, read } : o));
+  const markRead = (rawIds, read = true) => {
+    const requested = new Set((rawIds || []).map(String));
+    // Do not show the new state until the remote systems confirm it. This also removes no-op rows
+    // from bulk actions, which matters if compensation is needed after a partial server failure.
+    const targets = (rows || []).filter(row => requested.has(String(row.id)) && !!row.read !== read);
+    const ids = targets.map(row => row.id);
+    if (!ids.length) return Promise.resolve({ ok: true, gmailOk: true });
+    const smsKeys = new Set(targets.filter(isSmsRow).map(row => String(row.id)));
+    const emailIds = ids.filter(id => !smsKeys.has(String(id)));
     setGmailNote("");
+
     return (async () => {
-      const rollback = () => {
-        setRows(rs => (rs || []).map(r => ids.includes(r.id) && r.read === read && before.has(r.id) ? { ...r, read: before.get(r.id) } : r));
-        setOpenRow(o => (o && ids.includes(o.id) && o.read === read && before.has(o.id) ? { ...o, read: before.get(o.id) } : o));
-      };
       try {
         const h = await authHeaders({ "Content-Type": "application/json" });
-        const mirrorGmail = async () => {
-          const updated = [], skipped = [];
-          let ok = true;
-          for (let i = 0; i < ids.length; i += 50) {
+        const gmailAction = async (action, targetIds) => {
+          const updated = new Set();
+          const skipped = [];
+          const changes = new Map();
+          let requestFailed = false;
+          for (let i = 0; i < targetIds.length; i += 50) {
             try {
-              const response = await fetch(`${PROD_URL}/api/gmail-action`, { method: "POST", headers: h, body: JSON.stringify({ action: read ? "markRead" : "markUnread", ids: ids.slice(i, i + 50) }) });
+              const response = await fetch(`${PROD_URL}/api/gmail-action`, { method: "POST", headers: h, body: JSON.stringify({ action, ids: targetIds.slice(i, i + 50) }) });
               const receipt = await response.json().catch(() => ({}));
-              if (Array.isArray(receipt.updated)) updated.push(...receipt.updated);
+              (Array.isArray(receipt.updated) ? receipt.updated : []).forEach(id => updated.add(String(id)));
               if (Array.isArray(receipt.skipped)) skipped.push(...receipt.skipped);
-              if (!response.ok || receipt.ok !== true) ok = false;
-            } catch (_) { ok = false; }
+              (Array.isArray(receipt.changes) ? receipt.changes : []).forEach(change => {
+                if (change && change.id != null) changes.set(String(change.id), change);
+              });
+              if (!response.ok || receipt.ok !== true) requestFailed = true;
+            } catch (_) { requestFailed = true; }
           }
-          return { ok, updated, skipped };
+          return { updated, skipped, changes, requestFailed };
         };
-        const [appResult, gmailResult] = await Promise.allSettled([
-          fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: h, body: JSON.stringify({ action: "markRead", ids, read }) }),
-          mirrorGmail(),
-        ]);
-        let appOk = appResult.status === "fulfilled" && appResult.value.ok;
-        if (appOk) {
-          const receipt = await appResult.value.json().catch(() => ({}));
-          appOk = receipt.ok === true;
+
+        // Email rows are Gmail-first. Texts have no Gmail copy and stay entirely app-local.
+        const gmail = emailIds.length
+          ? await gmailAction(read ? "markRead" : "markUnread", emailIds)
+          : { updated: new Set(), skipped: [], changes: new Map(), requestFailed: false };
+        const confirmedIds = ids.filter(id => smsKeys.has(String(id)) || gmail.updated.has(String(id)));
+        const failedEmailIds = emailIds.filter(id => !gmail.updated.has(String(id)));
+
+        let appOk = true;
+        if (confirmedIds.length) {
+          try {
+            const response = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: h, body: JSON.stringify({ action: "markRead", ids: confirmedIds, read }) });
+            const receipt = await response.json().catch(() => ({}));
+            appOk = response.ok && receipt.ok === true;
+          } catch (_) { appOk = false; }
         }
+
         if (!appOk) {
-          rollback();
-          setGmailNote(`Couldn't mark ${ids.length === 1 ? "that message" : "those messages"} ${read ? "read" : "unread"} — the change was not saved. Try again.`);
-          return { ok: false, gmailOk: false };
+          // Gmail succeeded but SPS did not. Put Gmail back where it started so the two mailboxes do
+          // not silently drift; if that compensation also fails, tell the owner exactly what happened.
+          const updatedEmailIds = emailIds.filter(id => gmail.updated.has(String(id)));
+          const changedEmailIds = updatedEmailIds.filter(id => gmail.changes.get(String(id))?.changed === true);
+          const stateKnown = updatedEmailIds.every(id => gmail.changes.has(String(id)));
+          const compensation = changedEmailIds.length
+            ? await gmailAction(read ? "markUnread" : "markRead", changedEmailIds)
+            : { updated: new Set(), requestFailed: false };
+          const restored = stateKnown && changedEmailIds.every(id => compensation.updated.has(String(id)));
+          setGmailNote(restored
+            ? `Couldn't mark ${ids.length === 1 ? "that message" : "those messages"} ${read ? "read" : "unread"} — nothing was saved. Try again.`
+            : `Gmail confirmed ${updatedEmailIds.length === 1 ? "that email" : `${updatedEmailIds.length} emails`}, but SPS couldn't save the same state. Refresh before trying again.`);
+          return { ok: false, gmailOk: restored };
         }
-        let gmailOk = gmailResult.status === "fulfilled" && gmailResult.value.ok;
-        if (gmailOk) {
-          const d = gmailResult.value;
-          const updated = new Set((Array.isArray(d.updated) ? d.updated : []).map(String));
-          const smsSkipped = new Set((Array.isArray(d.skipped) ? d.skipped : []).filter(s => s && s.reason === "sms").map(s => String(s.id)));
-          gmailOk = ids.every(id => {
-            const row = before.has(id) ? (rows || []).find(r => r.id === id) : null;
-            return row && row.channel === "sms" ? smsSkipped.has(String(id)) : updated.has(String(id));
+
+        const confirmedKeys = new Set(confirmedIds.map(String));
+        setRows(current => (current || []).map(row => confirmedKeys.has(String(row.id)) ? { ...row, read } : row));
+        setOpenRow(current => current && confirmedKeys.has(String(current.id)) ? { ...current, read } : current);
+
+        if (failedEmailIds.length) {
+          const hardFailure = gmail.requestFailed || failedEmailIds.some(id => {
+            const skipped = gmail.skipped.find(item => String(item && item.id) === String(id));
+            return skipped && ["lookup-error", "search-error", "op-error", "imap-timeout"].includes(skipped.reason);
           });
+          setGmailNote(hardFailure
+            ? `Couldn't reach Gmail to mark ${failedEmailIds.length === 1 ? "that email" : `${failedEmailIds.length} emails`} ${read ? "read" : "unread"} — SPS was left unchanged.`
+            : `Gmail couldn't safely match ${failedEmailIds.length === 1 ? "that email" : `${failedEmailIds.length} emails`}, so SPS was left unchanged.`);
+          return { ok: confirmedIds.length > 0, gmailOk: false };
         }
-        if (!gmailOk) setGmailNote(`Saved in SPS Inbox, but Gmail couldn't mirror the ${read ? "read" : "unread"} state yet. Your message is still safe.`);
-        return { ok: true, gmailOk };
+        return { ok: true, gmailOk: true };
       } catch (_) {
-        rollback();
-        setGmailNote(`Couldn't mark ${ids.length === 1 ? "that message" : "those messages"} ${read ? "read" : "unread"} — the change was not saved. Try again.`);
+        setGmailNote(`Couldn't mark ${ids.length === 1 ? "that message" : "those messages"} ${read ? "read" : "unread"} — nothing was saved. Try again.`);
         return { ok: false, gmailOk: false };
       }
     })();
