@@ -18147,7 +18147,9 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   return (
     <fieldset disabled={shareBusy} aria-busy={shareBusy} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
-        <div style={{ position: "sticky", top: 0, zIndex: 12, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "8px 0 10px", background: T.bg }}>
+        {/* Mobile <main> owns a 22px top / 16px side gutter. Pull this sticky toolbar through
+            those gutters so scrolled estimate cards can never show above or beside it. */}
+        <div data-estimate-sticky-header style={{ position: "sticky", top: 0, zIndex: 40, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, margin: vp.isPhone ? "-22px -16px 0" : 0, padding: vp.isPhone ? "8px 16px 10px" : "8px 0 10px", background: T.bg, borderBottom: vp.isPhone ? `1px solid ${T.border}` : "none" }}>
           <button onClick={onBack} style={{ minHeight: 40, background: "none", border: "none", color: T.primary, fontWeight: 750, fontSize: 13, cursor: "pointer", padding: "0 5px 0 0", display: "flex", alignItems: "center", gap: 5, fontFamily: "inherit" }}><Icon name="back" size={15} /> Estimates</button>
           <div style={{ minWidth: 0, textAlign: "center" }}>
             <div style={{ fontSize: 14, fontWeight: 850, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isNew ? "New estimate" : form.number || "Estimate"}</div>
