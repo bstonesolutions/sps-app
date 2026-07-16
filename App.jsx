@@ -11,6 +11,7 @@ import { assessInboundLead, findMisfiledImportedLead } from "./leadQualification
 import { brandLogoSource } from "./brandAssets";
 import { estimateHasValidDays, estimateHasValidTaxRate, estimateLineAmount, estimateLineCost, estimateLineHasKnownCost, estimateLineQuantity, estimateLineUnitPrice, estimateNumberIsValid, estimateNumberValue, estimateProfitTotals, estimateTotals, formatEstimateMoney, withEstimateRevision, withEstimateTotals } from "./estimateMath";
 import { catalogItemFinancials, estimateLineFromCatalog, estimateLineFromPartsBundle } from "./estimateCatalog";
+import { automaticReportChannels, reportEmailUiResult } from "./reportDelivery";
 
 // True only on a genuine fresh launch of the app shell (hard close / first open).
 // sessionStorage is wiped when the PWA is killed/swiped away, but survives reloads
@@ -2184,7 +2185,7 @@ const DEFAULT_SCHEDULE_CFG = {
   // Each turns on independently; a global cooldown stops a client getting the same auto-message twice
   // in the window. Templates live in DEFAULT_EMAIL (smsReport / smsPaymentNudge / smsWinBack); per-client
   // opt-outs live on client.notifyPrefs. Until the scheduler is wired, these are configuration only.
-  postVisitOn: false,            // auto-text the client a recap right after a stop is completed (uses smsReport)
+  postVisitOn: false,            // email the full report + auto-text its portal link after completion
   paymentNudgeOn: false,         // nudge clients about past-due invoices
   paymentNudgeAfterDays: 3,      // first nudge once an invoice is this many days past due
   paymentNudgeRepeatDays: 7,     // re-nudge every N days while still unpaid
@@ -3175,6 +3176,111 @@ async function toDataUrl(src) {
     if (!blob) return "";
     return await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.onerror = () => r(""); fr.readAsDataURL(blob); });
   } catch (_) { return ""; }
+}
+
+// Build a bounded attachment set before contacting the email endpoint. Photos are
+// prepared in parallel and capped below Vercel's request-body ceiling; a slow Storage
+// object can no longer keep the report email from ever reaching the server.
+async function prepareReportEmailPhotos(photos, { maxPhotos = 8, charBudget = 2_800_000, timeoutMs = 10_000 } = {}) {
+  const work = Promise.all((Array.isArray(photos) ? photos : []).slice(0, maxPhotos).map(async (ph) => {
+    try {
+      const raw = typeof ph === "string" ? ph : (ph && ph.src) || "";
+      const src = await toDataUrl(raw);
+      if (!src.startsWith("data:image")) return null;
+      const small = await shrinkForEmail(src);
+      if (!small.startsWith("data:image")) return null;
+      return {
+        src: small,
+        label: (ph && typeof ph === "object" && ph.label) || "",
+        at: (ph && ph.takenAt) ? new Date(ph.takenAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "",
+      };
+    } catch (_) { return null; }
+  }));
+  const timeout = new Promise(resolve => setTimeout(() => resolve([]), timeoutMs));
+  const prepared = await Promise.race([work, timeout]);
+  const payload = [];
+  let remaining = charBudget;
+  for (const ph of prepared || []) {
+    if (!ph || ph.src.length > remaining) continue;
+    remaining -= ph.src.length;
+    payload.push(ph);
+  }
+  return payload;
+}
+
+// One report-email path is shared by live completion and saved-report resend. It
+// returns only after the Vercel endpoint has accepted, held, or rejected the email,
+// so the UI can never claim success before the server answers.
+async function sendServiceReportEmail({ client, email, branding, accent, ctx, readings, treatmentsUsed, partsUsed, photos, origin = "service report" }) {
+  const to = String(client?.email || "").trim();
+  if (!to) return { ok: false, sent: false, held: false, text: "No email on file for this client." };
+
+  const subject = (email?.subject || DEFAULT_EMAIL.subject).replace("{date}", ctx?.date || "");
+  const photoPayload = await prepareReportEmailPhotos(photos);
+  const reportRows = [];
+  Object.entries(readings || {}).filter(([, value]) => value !== "" && value != null && value !== "—")
+    .forEach(([key, value]) => reportRows.push([key, String(value)]));
+  if ((treatmentsUsed || []).length) reportRows.push(["Treatments", treatmentsUsed.map(item => `${item.name} (${item.oz}${item.unit || "oz"})`).join(", ")]);
+  if ((partsUsed || []).length) reportRows.push(["Parts used", partsUsed.map(item => `${item.name} ×${item.qty}`).join(", ")]);
+
+  const live = clientIsLive(client?.id);
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), 20_000) : null;
+  try {
+    const response = await fetch(`${PROD_URL}/api/send-notification`, {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      signal: controller?.signal,
+      body: JSON.stringify({
+        ...senderEmailFields(client?.id),
+        to,
+        subject,
+        heading: subject,
+        message: renderReport(email || DEFAULT_EMAIL, ctx, { includeUsage: false }),
+        rows: reportRows,
+        photos: photoPayload,
+        branding: {
+          companyName: branding?.companyName || "",
+          companyEmail: branding?.companyEmail || "",
+          companyPhone: branding?.companyPhone || "",
+          companyAddress: branding?.companyAddress || "",
+          logoType: branding?.logoType || "",
+          logoImage: branding?.logoImage || "",
+          accent,
+        },
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    const held = !!data.held;
+    const sent = response.ok && !!data.sent;
+    const logRecipient = held ? "" : (TEST_MODE.on && !live ? TEST_MODE.email : to);
+    logComm({
+      clientId: client?.id,
+      type: "Service report",
+      channel: "email",
+      body: subject,
+      ok: sent,
+      origin: `${origin}${held ? " · held by Test Mode" : TEST_MODE.on && !live ? " · TEST redirect → you" : TEST_MODE.on && live ? " · pilot (live)" : ""}`,
+      recipient: logRecipient,
+    });
+    return reportEmailUiResult({
+      responseOk: response.ok,
+      sent: !!data.sent,
+      held,
+      reason: data.reason,
+      error: data.error,
+      recipient: to,
+      photoCount: photoPayload.length,
+      testModeOn: TEST_MODE.on,
+      liveClient: live,
+    });
+  } catch (error) {
+    const message = error?.name === "AbortError" ? "Email server timed out. The report was saved, but the email was not confirmed." : "Couldn't reach the email server.";
+    logComm({ clientId: client?.id, type: "Service report", channel: "email", body: subject, ok: false, origin, recipient: to });
+    return { ok: false, sent: false, held: false, text: message };
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -7569,8 +7675,9 @@ function stopProfitability(h) {
 // saved history snapshot rather than the schedule card, whose planned fields may
 // have changed after the technician finished the work.
 function FinishedReportModal({ entry, client, catalog, onEdit, onClose }) {
-  const { T, perms } = useApp();
+  const { T, perms, email, branding } = useApp();
   const vp = useViewport();
+  const [emailSend, setEmailSend] = useState({ busy: false, result: null });
   if (!entry) return null;
 
   const money = (value) => `$${(Number.parseFloat(value) || 0).toFixed(2)}`;
@@ -7601,6 +7708,41 @@ function FinishedReportModal({ entry, client, catalog, onEdit, onClose }) {
     : "";
   const stockLocation = locationName(entry.usageLoc);
   const reportId = String(entry.completionReceiptId || "").trim();
+  const firstName = String(client?.name || "there").trim().split(/\s+/)[0] || "there";
+  const savedReportCtx = {
+    firstName,
+    company: branding?.companyName || "Stone Property Solutions",
+    serviceType: entry.type || "Service visit",
+    date: entry.date || "",
+    tech: entry.tech || "",
+    notes: entry.notes || "Service completed.",
+    readings: entry.readings || {},
+    treatmentsUsed: treatments,
+    ph: entry.readings?.pH || entry.ph || "",
+    ammonia: entry.readings?.Ammonia || entry.ammonia || "",
+    nitrite: entry.readings?.Nitrite || entry.nitrite || "",
+    temp: entry.readings?.Temperature || entry.temp || "",
+    photoCount: photos.length,
+    photosBeforeCount: photos.filter(photo => typeof photo === "object" && photo.label === "Before").length,
+    photosAfterCount: photos.filter(photo => typeof photo === "object" && photo.label === "After").length,
+  };
+  const emailSavedReport = async () => {
+    if (emailSend.busy) return;
+    setEmailSend({ busy: true, result: null });
+    const result = await sendServiceReportEmail({
+      client,
+      email: email || DEFAULT_EMAIL,
+      branding,
+      accent: T.primary,
+      ctx: savedReportCtx,
+      readings: entry.readings || {},
+      treatmentsUsed: treatments,
+      partsUsed: parts,
+      photos,
+      origin: `visit:${entry.sid || ""} · saved report resend`,
+    });
+    setEmailSend({ busy: false, result });
+  };
 
   const sectionTitle = { fontSize: 10.5, fontWeight: 850, textTransform: "uppercase", letterSpacing: "0.07em", color: T.textMuted, marginBottom: 9 };
   const section = (title, content) => (
@@ -7725,7 +7867,13 @@ function FinishedReportModal({ entry, client, catalog, onEdit, onClose }) {
 
         {reportId && <div style={{ fontSize: 9.5, color: T.textMuted, overflowWrap: "anywhere" }}>Report ID: {reportId}</div>}
 
+        {emailSend.result && (
+          <div style={{ fontSize: 12.5, fontWeight: 750, color: emailSend.result.ok ? "#16a34a" : T.accent, background: emailSend.result.ok ? hexA("#16a34a", 0.08) : hexA(T.accent, 0.07), borderRadius: 10, padding: "9px 11px", lineHeight: 1.4 }}>
+            {emailSend.result.text}
+          </div>
+        )}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap", borderTop: `1px solid ${T.border}`, paddingTop: 14 }}>
+          {(perms.completeStops || perms.editHistory) && <Btn sm variant="outline" onClick={emailSavedReport} disabled={emailSend.busy}><Icon name="mail" size={13} /> {emailSend.busy ? "Sending…" : "Email report"}</Btn>}
           {onEdit && <Btn sm variant="outline" onClick={onEdit}><Icon name="edit" size={13} /> Edit report</Btn>}
           <Btn sm onClick={onClose}>Close</Btn>
         </div>
@@ -8785,15 +8933,27 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
       if (newlyApplied && officeFlag && officeFlagMsg.trim() && onOfficeAlert) {
         onOfficeAlert({ client: client?.name || "Client", clientId: client?.id, sid: stop?.sid, message: officeFlagMsg.trim(), date: todayStr });
       }
-      setDone(true);
       if (newlyApplied) {
         // Post-visit messages are downstream effects of a confirmed completion. If the atomic save
         // fails, the modal stays open and no client report claims the visit was completed.
         const acfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
         const reportOptOut = client && client.notifyPrefs && client.notifyPrefs.reportSummary === false;
-        if (acfg.schedulerOn && acfg.postVisitOn && phone && commPref(client, "text") && !reportOptOut) sendText();
-        if (acfg.schedulerOn && acfg.postVisitOn && (client?.email || "").trim() && commPref(client, "email") && !reportOptOut) sendEmail();
+        const channels = automaticReportChannels({
+          scheduleCfg: acfg,
+          hasPhone: !!phone,
+          hasEmail: !!String(client?.email || "").trim(),
+          textAllowed: commPref(client, "text"),
+          emailAllowed: commPref(client, "email"),
+          reportOptOut,
+        });
+        const sends = [];
+        if (channels.text) sends.push(sendText());
+        if (channels.email) sends.push(sendEmail());
+        // Keep this modal alive until both channels settle. The completed stop is already
+        // saved, but the success screen must also show the real email/text outcomes.
+        if (sends.length) await Promise.allSettled(sends);
       }
+      setDone(true);
     } catch (error) {
       setSaveError((error && error.message) || "Couldn't save the completed stop. Nothing was changed.");
     } finally {
@@ -8822,44 +8982,23 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
   // phone's Mail or Messages app, so they always send as the company (not the tech).
   const sendEmail = async () => {
     const to = (client?.email || "").trim();
-    if (!to) { rsDone("email", { ok: false, text: "No email on file for this client." }); return; }
+    if (!to) { const result = { ok: false, sent: false, held: false, text: "No email on file for this client." }; rsDone("email", result); return result; }
     rsStart("email");
-    const subject = (email.subject || DEFAULT_EMAIL.subject).replace("{date}", todayStr);
-    // Shrink + size-cap the stop photos so they ride along in the email under the request limit.
-    let photoPayload = [];
-    try {
-      let budget = 3_800_000; // ~base64 char budget to keep the POST under Vercel's ~4.5MB limit
-      for (const ph of (photos || []).slice(0, 12)) {
-        const raw = typeof ph === "string" ? ph : (ph && ph.src) || "";
-        const src = await toDataUrl(raw);   // fetch Storage URLs back to base64 so they embed in the email
-        if (!src.startsWith("data:image")) continue;
-        const small = await shrinkForEmail(src);
-        if (small.length > budget) break;
-        budget -= small.length;
-        photoPayload.push({ src: small, label: (ph && typeof ph === "object" && ph.label) || "", at: (ph && ph.takenAt) ? new Date(ph.takenAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "" });
-      }
-    } catch (_) { photoPayload = []; }
-    // Surface water tests + treatments/parts as a prominent label/value table in the email
-    // (more legible than inline text), so the narrative stays clean and the data stands out.
-    const reportRows = [];
-    Object.entries(readings || {}).filter(([, v]) => v !== "" && v != null && v !== "—").forEach(([k, v]) => reportRows.push([k, String(v)]));
-    if (treatmentsUsed.length) reportRows.push(["Treatments", treatmentsUsed.map(t => `${t.name} (${t.oz}${t.unit || "oz"})`).join(", ")]);
-    if (partsUsedArr.length) reportRows.push(["Parts used", partsUsedArr.map(pt => `${pt.name} ×${pt.qty}`).join(", ")]);
-    try {
-      const r = await fetch(`${PROD_URL}/api/send-notification`, {
-        method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ ...senderEmailFields(client?.id), to, subject, heading: subject, message: renderReport(email, ctx, { includeUsage: false }), rows: reportRows, photos: photoPayload, branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", accent: T.primary } }),
-      });
-      const d = await r.json().catch(() => ({}));
-      if (r.ok) postReportToPortal();   // mirror the report into the in-app portal thread (always posts)
-      const live = clientIsLive(client?.id);
-      // The report email now hits the Log too (it never did — a held/failed email was invisible).
-      logComm({ clientId: client?.id, type: "Service report", channel: "email", body: subject, ok: r.ok && (d.sent || d.held), origin: `visit:${stop?.sid || ""} · report email${d.held ? " · held by Test Mode" : TEST_MODE.on && !live ? " · TEST redirect → you" : TEST_MODE.on && live ? " · pilot (live)" : ""}`, recipient: d.held ? "" : to });
-      const okMsg = d.held ? `Test Mode — report NOT sent.${d.reason ? ` (${d.reason})` : ""}`
-        : TEST_MODE.on && !live ? "Test Mode — report sent to you, tagged [TEST]."
-        : `Report emailed to ${to}${photoPayload.length ? ` with ${photoPayload.length} photo${photoPayload.length > 1 ? "s" : ""}` : ""}.`;
-      rsDone("email", (r.ok && (d.sent || d.held)) ? { ok: true, text: okMsg } : { ok: false, text: d.error || "Email failed to send." });
-    } catch (_) { rsDone("email", { ok: false, text: "Couldn't reach the server." }); }
+    const result = await sendServiceReportEmail({
+      client,
+      email,
+      branding,
+      accent: T.primary,
+      ctx,
+      readings,
+      treatmentsUsed,
+      partsUsed: partsUsedArr,
+      photos,
+      origin: `visit:${stop?.sid || ""} · report email`,
+    });
+    if (result.sent) postReportToPortal();
+    rsDone("email", result);
+    return result;
   };
   const sendText = async () => {
     if (!phone) { rsDone("text", { ok: false, text: "No phone number on file for this client." }); return; }
@@ -8881,6 +9020,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
       : r.redirected ? "Test Mode — text sent only to your test phone."
       : `Report text accepted for ${client?.name || "the client"}${TEST_MODE.on && clientIsLive(client?.id ?? stop?.clientId) ? " (pilot — live)" : ""}.`;
     rsDone("text", r.ok ? { ok: !!r.acceptedForClient, text: txtMsg } : { ok: false, text: r.error || (r.missingEnv ? "Texting isn't set up yet." : "Text failed to send.") });
+    return r;
   };
 
   // ── AI assist — optional; degrades to a clear "add your key" message until ANTHROPIC_API_KEY is set ──
@@ -22771,7 +22911,7 @@ function CommunicationsHub({ scheduleCfg, setScheduleCfg, email, setEmail, brand
 
   const seqs = [
     { key: "postVisit", onKey: "postVisitOn", tplKey: "smsReport", icon: "check",
-      title: "Post-visit summary", desc: "Text the client a friendly recap right after you complete a visit.",
+      title: "Completed-visit report", desc: "Email the full service report and text the portal link after a visit is completed.",
       vars: { first: "Sarah", company: CO, service: "Pond Service" }, timing: null },
     { key: "paymentNudge", onKey: "paymentNudgeOn", tplKey: "smsPaymentNudge", icon: "mail",
       title: "Payment nudge", desc: "Gently remind clients about past-due invoices, on a schedule.",
