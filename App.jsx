@@ -12,6 +12,7 @@ import { brandLogoSource } from "./brandAssets";
 import { estimateHasValidDays, estimateHasValidTaxRate, estimateLineAmount, estimateLineCost, estimateLineHasKnownCost, estimateLineQuantity, estimateLineUnitPrice, estimateNumberIsValid, estimateNumberValue, estimateProfitTotals, estimateTotals, formatEstimateMoney, withEstimateRevision, withEstimateTotals } from "./estimateMath";
 import { catalogItemFinancials, estimateLineFromCatalog, estimateLineFromPartsBundle } from "./estimateCatalog";
 import { automaticReportChannels, reportEmailUiResult } from "./reportDelivery";
+import { buildCompletedReportIndex, canRebuildCompletedReport, resolveCompletedReport } from "./completedReport";
 
 // True only on a genuine fresh launch of the app shell (hard close / first open).
 // sessionStorage is wiped when the PWA is killed/swiped away, but survives reloads
@@ -3239,11 +3240,20 @@ async function sendServiceReportEmail({ client, email, branding, accent, ctx, re
         message: renderReport(email || DEFAULT_EMAIL, ctx, { includeUsage: false }),
         rows: reportRows,
         photos: photoPayload,
+        report: {
+          kind: "service",
+          date: ctx?.date || "",
+          serviceType: ctx?.serviceType || "Service visit",
+          reportId: ctx?.reportId || "",
+          footerNote: email?.footer || "",
+        },
         branding: {
           companyName: branding?.companyName || "",
           companyEmail: branding?.companyEmail || "",
           companyPhone: branding?.companyPhone || "",
+          companyWebsite: branding?.companyWebsite || "",
           companyAddress: branding?.companyAddress || "",
+          portalTagline: branding?.portalTagline || "",
           logoType: branding?.logoType || "",
           logoImage: branding?.logoImage || "",
           accent,
@@ -3882,6 +3892,7 @@ function Btn({ children, onClick, href, variant = "primary", sm, lg, block, disa
     display: block ? "flex" : (href ? "inline-flex" : "inline-flex"),
     alignItems: "center",
     justifyContent: "center",
+    gap: 6,
     textAlign: "center",
     textDecoration: "none",
     boxSizing: "border-box",
@@ -7387,6 +7398,7 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
   const { T, perms } = useApp();
   const vp = useViewport();
   const wide = vp.isDesktop || vp.isTablet; // desktop/iPad → two-column layout
+  const isRecovery = !!entry.__recoveryDraft;
   const canEditFinancials = !!perms.seeProfit;
   const canSeeServicePrices = !!(perms.seeProfit || perms.seeBalances);
   const num = (v) => parseFloat(v) || 0;
@@ -7403,6 +7415,7 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
   const [photos, setPhotos] = useState(entry.photos || []);
   const [viewer, setViewer] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [saveError, setSaveError] = useState("");
   // Service type, tech, services performed, products used — to mirror the full stop view
   const [type, setType] = useState(entry.type || "");
   const [tech, setTech] = useState(entry.tech || "");
@@ -7437,6 +7450,15 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
   };
 
   const save = () => {
+    if (isRecovery) {
+      const hasReading = Object.values(readings || {}).some(value => value !== "" && value != null && value !== "—");
+      const hasActualVisitDetail = notes.trim() || hasReading || photos.length > 0;
+      if (!hasActualVisitDetail) {
+        setSaveError("Add actual visit notes, at least one reading, or a photo before saving this rebuilt report.");
+        return;
+      }
+    }
+    setSaveError("");
     const updated = {
       ...entry,
       type: type || entry.type, tech,
@@ -7444,6 +7466,11 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
       notes, officeNotes, readings, readingStatus, photos,
       ph: readings["pH"] || "—", ammonia: readings["Ammonia"] || "—", nitrite: readings["Nitrite"] || "—", temp: readings["Temperature"] || "—",
     };
+    delete updated.__recoveryDraft;
+    if (isRecovery) {
+      updated.recoveredFromSchedule = true;
+      updated.recoveredAt = new Date().toISOString();
+    }
     // Staff who can edit visit notes but cannot see profit must not be able to
     // reveal or silently recalculate the saved financial snapshot.
     if (canEditFinancials) {
@@ -7632,10 +7659,21 @@ function HistoryEditModal({ entry, catalog, team, onSave, onClose }) {
         </div>
   ) : null;
 
-  const saveBtn = <Btn onClick={save} style={{ width: "100%", padding: "12px", borderRadius: 12 }}>Save Changes</Btn>;
+  const saveBtn = (
+    <div>
+      {saveError && <div role="alert" style={{ marginBottom: 8, borderRadius: 10, padding: "9px 11px", background: hexA("#B45309", 0.08), color: "#92400E", fontSize: 12, fontWeight: 700, lineHeight: 1.4 }}>{saveError}</div>}
+      <Btn onClick={save} style={{ width: "100%", padding: "12px", borderRadius: 12 }}>{isRecovery ? "Save rebuilt report" : "Save Changes"}</Btn>
+    </div>
+  );
 
   return (
-    <Modal title={`Edit Service — ${entry.date}`} onClose={onClose} maxWidth={wide ? 940 : 600}>
+    <Modal title={`${isRecovery ? "Rebuild report" : "Edit Service"} — ${entry.date}`} onClose={onClose} maxWidth={wide ? 940 : 600}>
+      {isRecovery && (
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 9, background: hexA("#B45309", 0.08), border: `1px solid ${hexA("#B45309", 0.22)}`, borderRadius: 12, padding: "10px 11px", marginBottom: 15 }}>
+          <Icon name="warning" size={15} style={{ color: "#B45309", flexShrink: 0, marginTop: 1 }} />
+          <div style={{ fontSize: 12.25, color: T.text, lineHeight: 1.45 }}>This older completion saved the schedule status without its report. Planned details are prefilled below; review them and add the actual notes, readings, and photos before saving.</div>
+        </div>
+      )}
       {wide ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, alignItems: "start" }}>
@@ -7678,6 +7716,7 @@ function FinishedReportModal({ entry, client, catalog, onEdit, onClose }) {
   const { T, perms, email, branding } = useApp();
   const vp = useViewport();
   const [emailSend, setEmailSend] = useState({ busy: false, result: null });
+  const [profitOpen, setProfitOpen] = useState(false);
   if (!entry) return null;
 
   const money = (value) => `$${(Number.parseFloat(value) || 0).toFixed(2)}`;
@@ -7725,6 +7764,7 @@ function FinishedReportModal({ entry, client, catalog, onEdit, onClose }) {
     photoCount: photos.length,
     photosBeforeCount: photos.filter(photo => typeof photo === "object" && photo.label === "Before").length,
     photosAfterCount: photos.filter(photo => typeof photo === "object" && photo.label === "After").length,
+    reportId,
   };
   const emailSavedReport = async () => {
     if (emailSend.busy) return;
@@ -7744,9 +7784,9 @@ function FinishedReportModal({ entry, client, catalog, onEdit, onClose }) {
     setEmailSend({ busy: false, result });
   };
 
-  const sectionTitle = { fontSize: 10.5, fontWeight: 850, textTransform: "uppercase", letterSpacing: "0.07em", color: T.textMuted, marginBottom: 9 };
+  const sectionTitle = { fontSize: 10, fontWeight: 850, textTransform: "uppercase", letterSpacing: "0.075em", color: T.textMuted, marginBottom: 8 };
   const section = (title, content) => (
-    <section style={{ borderTop: `1px solid ${T.border}`, paddingTop: 15 }}>
+    <section style={{ borderTop: `1px solid ${T.border}`, paddingTop: vp.isPhone ? 12 : 15 }}>
       <div style={sectionTitle}>{title}</div>
       {content}
     </section>
@@ -7761,22 +7801,22 @@ function FinishedReportModal({ entry, client, catalog, onEdit, onClose }) {
     </div>
   );
   const metaItems = [
-    ["Date", entry.date],
-    ["Service", entry.type],
     ["Technician", entry.tech || "Unassigned"],
     ["Arrived", arrivalText],
     ["Time on site", entry.actual_hours ? `${entry.actual_hours} hr` : ""],
     ["Stock location", stockLocation],
   ].filter(([, value]) => value);
+  const canEmailReport = !!(perms.completeStops || perms.editHistory);
+  const showActionFooter = !vp.isPhone || canEmailReport || !!onEdit;
 
   return (
-    <Modal title="Finished service report" maxWidth={vp.isPhone ? 680 : 820} onClose={onClose}>
-      <div style={{ display: "flex", flexDirection: "column", gap: 15 }}>
-        <div style={{ background: `linear-gradient(135deg, ${hexA(T.accent, 0.11)}, ${hexA(T.primary, 0.035)})`, border: `1px solid ${hexA(T.accent, 0.24)}`, borderRadius: 16, padding: vp.isPhone ? "14px" : "16px 18px", display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ width: 42, height: 42, borderRadius: 13, background: hexA(T.accent, 0.14), color: T.accent, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name="check" size={20} /></div>
+    <Modal title="Service report" maxWidth={vp.isPhone ? 680 : 820} onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: vp.isPhone ? 12 : 15 }}>
+        <div style={{ background: `linear-gradient(135deg, ${hexA(T.accent, 0.1)}, ${hexA(T.primary, 0.03)})`, border: `1px solid ${hexA(T.accent, 0.22)}`, borderRadius: 15, padding: vp.isPhone ? "11px 12px" : "15px 17px", display: "flex", alignItems: "center", gap: 11 }}>
+          <div style={{ width: vp.isPhone ? 38 : 42, height: vp.isPhone ? 38 : 42, borderRadius: 12, background: hexA(T.accent, 0.14), color: T.accent, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name="check" size={19} /></div>
           <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ fontSize: 16, fontWeight: 850, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{client?.name || "Client"}</div>
-            <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2 }}>Completed visit · saved report</div>
+            <div style={{ fontSize: vp.isPhone ? 15 : 16, fontWeight: 850, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{client?.name || "Client"}</div>
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{[entry.date, entry.type, "Completed"].filter(Boolean).join(" · ")}</div>
           </div>
           {showMoney && entry.invoice && <div style={{ fontSize: 15, fontWeight: 850, color: T.text, flexShrink: 0 }}>{entry.invoice}</div>}
         </div>
@@ -7839,15 +7879,23 @@ function FinishedReportModal({ entry, client, catalog, onEdit, onClose }) {
           </div>
         ))}
 
-        {photos.length > 0 && section(`Photos · ${photos.length}`, <PhotoStrip photos={photos} size={vp.isPhone ? 64 : 76} />)}
+        {photos.length > 0 && section(`Visit gallery · ${photos.length}`, (
+          <div>
+            <PhotoStrip photos={photos} size={vp.isPhone ? 72 : 78} horizontal={vp.isPhone} />
+            <div style={{ marginTop: 7, fontSize: 10.5, color: T.textMuted }}>Tap any photo to view it full size.</div>
+          </div>
+        ))}
 
         {showMoney && (entry.invoice || breakdown || entry.quoted_price != null) && section("Visit amount", (
           <div>
             {itemRow("Client charge", entry.invoice || money(breakdown?.revenue), "")}
             {perms.seeProfit && breakdown && (
-              <details style={{ marginTop: 7, background: T.surfaceAlt, borderRadius: 11, padding: "10px 12px" }}>
-                <summary style={{ cursor: "pointer", fontSize: 12.5, fontWeight: 800, color: T.text }}>Profitability details</summary>
-                <div style={{ marginTop: 9 }}>
+              <div style={{ marginTop: 7, background: T.surfaceAlt, borderRadius: 11, overflow: "hidden" }}>
+                <button type="button" onClick={() => setProfitOpen(open => !open)} aria-expanded={profitOpen} style={{ width: "100%", minHeight: 44, border: "none", background: "transparent", color: T.text, cursor: "pointer", padding: "9px 11px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontFamily: "inherit", fontSize: 12.5, fontWeight: 800, textAlign: "left" }}>
+                  <span>Profitability details</span>
+                  <span aria-hidden="true" style={{ color: T.textMuted, fontSize: 18, lineHeight: 1, transform: profitOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}>›</span>
+                </button>
+                {profitOpen && <div style={{ padding: "0 12px 11px" }}>
                   {[
                     ["Revenue", breakdown.effectiveRevenue ?? breakdown.revenue, false],
                     ["Labor", breakdown.labor, true], ["Treatments", breakdown.treatment, true],
@@ -7859,24 +7907,26 @@ function FinishedReportModal({ entry, client, catalog, onEdit, onClose }) {
                   ) : null)}
                   {breakdown.profit != null && <div style={{ display: "flex", justifyContent: "space-between", gap: 12, borderTop: `1px solid ${T.border}`, marginTop: 6, paddingTop: 8, fontSize: 13, fontWeight: 850 }}><span>{breakdown.profit >= 0 ? "Profit" : "Loss"}</span><span style={{ color: breakdown.profit >= 0 ? T.accent : "#C0392B" }}>{money(Math.abs(breakdown.profit))}{breakdown.margin != null ? ` · ${(Number(breakdown.margin) || 0).toFixed(0)}%` : ""}</span></div>}
                   {entry.target_hourly_rate != null && <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 8 }}>Quoted {money(entry.quoted_price)} · target {money(entry.target_hourly_rate)}/hr</div>}
-                </div>
-              </details>
+                </div>}
+              </div>
             )}
           </div>
         ))}
 
-        {reportId && <div style={{ fontSize: 9.5, color: T.textMuted, overflowWrap: "anywhere" }}>Report ID: {reportId}</div>}
+        {reportId && <div style={{ fontSize: 9.5, color: T.textMuted, overflowWrap: "anywhere", textAlign: "center" }}>Report ID · {reportId}</div>}
 
         {emailSend.result && (
-          <div style={{ fontSize: 12.5, fontWeight: 750, color: emailSend.result.ok ? "#16a34a" : T.accent, background: emailSend.result.ok ? hexA("#16a34a", 0.08) : hexA(T.accent, 0.07), borderRadius: 10, padding: "9px 11px", lineHeight: 1.4 }}>
+          <div aria-live="polite" style={{ fontSize: 12.5, fontWeight: 750, color: emailSend.result.ok ? "#16a34a" : T.accent, background: emailSend.result.ok ? hexA("#16a34a", 0.08) : hexA(T.accent, 0.07), borderRadius: 10, padding: "9px 11px", lineHeight: 1.4 }}>
             {emailSend.result.text}
           </div>
         )}
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap", borderTop: `1px solid ${T.border}`, paddingTop: 14 }}>
-          {(perms.completeStops || perms.editHistory) && <Btn sm variant="outline" onClick={emailSavedReport} disabled={emailSend.busy}><Icon name="mail" size={13} /> {emailSend.busy ? "Sending…" : "Email report"}</Btn>}
-          {onEdit && <Btn sm variant="outline" onClick={onEdit}><Icon name="edit" size={13} /> Edit report</Btn>}
-          <Btn sm onClick={onClose}>Close</Btn>
-        </div>
+        {showActionFooter && (
+          <div style={{ position: "sticky", bottom: vp.isPhone ? -18 : -22, zIndex: 2, display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "nowrap", borderTop: `1px solid ${T.border}`, background: T.surface, margin: vp.isPhone ? "0 -16px -18px" : "0 -22px -22px", padding: vp.isPhone ? "12px 16px calc(12px + env(safe-area-inset-bottom))" : "14px 22px 16px", boxShadow: "0 -8px 18px rgba(15,23,42,0.05)" }}>
+            {canEmailReport && <Btn variant="primary" onClick={emailSavedReport} disabled={emailSend.busy} style={{ minHeight: 44, flex: 1 }}><Icon name="mail" size={15} /> {emailSend.busy ? "Sending…" : "Email report"}</Btn>}
+            {onEdit && <Btn variant="ghost" onClick={onEdit} style={{ minHeight: 44, flex: vp.isPhone ? "0 0 112px" : "0 0 auto" }}><Icon name="edit" size={15} /> Edit</Btn>}
+            {!vp.isPhone && <Btn variant="text" onClick={onClose} style={{ minHeight: 44 }}>Close</Btn>}
+          </div>
+        )}
       </div>
     </Modal>
   );
@@ -8575,7 +8625,7 @@ function PhotoViewer({ photos, index, onClose }) {
   );
 }
 
-function PhotoStrip({ photos, size = 56 }) {
+function PhotoStrip({ photos, size = 56, horizontal = false }) {
   const { T } = useApp();
   const [viewer, setViewer] = useState(null);
   // Tolerate malformed entries (null / missing src) so one bad photo can't white-screen the whole stop.
@@ -8583,13 +8633,13 @@ function PhotoStrip({ photos, size = 56 }) {
   if (!valid.length) return null;
   return (
     <>
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 7, flexWrap: horizontal ? "nowrap" : "wrap", overflowX: horizontal ? "auto" : "visible", paddingBottom: horizontal ? 3 : 0, WebkitOverflowScrolling: "touch", scrollbarWidth: horizontal ? "none" : undefined, scrollSnapType: horizontal ? "x proximity" : undefined, overscrollBehaviorX: horizontal ? "contain" : undefined }}>
         {valid.map((p, i) => {
           const src = typeof p === "string" ? p : p.src;
           const label = typeof p === "string" ? "" : p.label;
           const lc = label === "Before" ? "#F59E0B" : label === "After" ? "#16a34a" : null;
           return (
-            <div key={i} onClick={() => setViewer(i)} style={{ position: "relative", cursor: "pointer", flexShrink: 0 }}>
+            <div key={i} onClick={() => setViewer(i)} style={{ position: "relative", cursor: "pointer", flexShrink: 0, scrollSnapAlign: horizontal ? "start" : undefined }}>
               <ProtectedImage src={src} alt="" style={{ width: size, height: size, borderRadius: 10, objectFit: "cover", display: "block" }} />
               {label && <div style={{ position: "absolute", bottom: 4, left: 4, fontSize: 8, fontWeight: 800, color: "#fff", background: lc, borderRadius: 4, padding: "1px 5px" }}>{label}</div>}
               <div style={{ position: "absolute", top: 4, right: 4, width: 18, height: 18, borderRadius: "50%", background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -8856,9 +8906,10 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     .filter(p => num(productsQty[p.id]) > 0)
     .map(p => ({ id: p.id, name: p.name, qty: num(productsQty[p.id]), cost: num(p.cost), price: num(p.price), costTotal: num(productsQty[p.id]) * num(p.cost), retail: num(productsQty[p.id]) * num(p.price), bill: productBill[p.id] !== false }));
 
+  const assignedMember = (team || []).find(e => String(e.id) === String(assigneeId));
   const ctx = {
     firstName, company: branding.companyName, serviceType: stop.type,
-    date: todayStr, tech: "B. Stone", notes: notesClient,
+    date: todayStr, tech: assignedMember?.name || "Unassigned", notes: notesClient,
     readings, treatmentsUsed,   // full water-test panel + treatments (name + oz) for the report
     ph: readings["pH"] || "", ammonia: readings["Ammonia"] || "", nitrite: readings["Nitrite"] || "", temp: readings["Temperature"] || "",
     photoCount: photos.length,
@@ -8866,8 +8917,6 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     photosAfterCount:  photos.filter(p => p.label === "After").length,
   };
   const reportText = renderReport(email, ctx);
-
-  const assignedMember = (team || []).find(e => e.id === assigneeId);
 
   // Feature 3B — profitability. quoted_price = the total revenue; target = the highest
   // per-service Target $/hr among this stop's services (snapshotted so later service edits
@@ -8928,6 +8977,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
       }
       const result = await onComplete(client?.id ?? stop.clientId ?? stop.id, completionEntry, stop.sid, completionAttempt.current.key);
       if (result && result.ok === false) throw new Error(result.error || "The completed stop was not saved.");
+      if (result?.receiptId) ctx.reportId = result.receiptId;
       if (typeof onClearDraft === "function") onClearDraft(stop.sid); // clear only after the shared save confirms
       const newlyApplied = !result || result.applied !== false;
       if (newlyApplied && officeFlag && officeFlagMsg.trim() && onOfficeAlert) {
@@ -12101,21 +12151,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   // One index per client-history change keeps completed-card rendering cheap even
   // when a route and the client archive are both large.
   const completedReportIndex = useMemo(() => {
-    const byReceipt = new Map();
-    const bySid = new Map();
-    (clients || []).forEach(client => {
-      (Array.isArray(client?.history) ? client.history : []).forEach(entry => {
-        if (!entry) return;
-        const match = { entry, client };
-        const receiptId = String(entry.completionReceiptId || "");
-        if (receiptId) byReceipt.set(receiptId, [...(byReceipt.get(receiptId) || []), match]);
-        if (entry.sid != null) {
-          const sid = String(entry.sid);
-          bySid.set(sid, [...(bySid.get(sid) || []), match]);
-        }
-      });
-    });
-    return { byReceipt, bySid };
+    return buildCompletedReportIndex(clients || []);
   }, [clients]);
 
   // Resolve legacy stops defensively: an empty/stale clientId used to hide the valid legacy id.
@@ -12133,27 +12169,14 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   };
   const reportForStop = (stop) => {
     if (!stop) return null;
-    const marker = completedSids && stop ? completedSids[stop.sid] : null;
-    const modernMarker = !!(marker && typeof marker === "object" && !Array.isArray(marker));
-    const receiptId = modernMarker ? String(marker.receiptId || "") : "";
-    const ledgerReceipt = receiptId ? completedSids?.[STOP_REVERSAL_LEDGER_KEY]?.[receiptId] : null;
-    if (modernMarker) {
-      if (!receiptId) return null;
-      const receiptMatches = completedReportIndex.byReceipt.get(receiptId) || [];
-      if (receiptMatches.length === 1) return { ...receiptMatches[0], reversalClientId: ledgerReceipt?.clientId ?? receiptMatches[0].client?.id };
-      // A receipt is authoritative about its owner. This only breaks a duplicate tie;
-      // it never uses a client name/date guess that could open somebody else's report.
-      if (receiptMatches.length > 1 && ledgerReceipt?.clientId != null) {
-        const ownerMatches = receiptMatches.filter(({ client }) => String(client?.id) === String(ledgerReceipt.clientId));
-        if (ownerMatches.length === 1) return { ...ownerMatches[0], reversalClientId: ledgerReceipt.clientId };
-      }
-      // Modern completion identity is receipt-based. Never substitute a report
-      // merely because an older entry happens to reuse the same stop id.
-      return null;
-    }
-    if (marker !== true) return null;
-    const sidMatches = completedReportIndex.bySid.get(String(stop.sid)) || [];
-    return sidMatches.length === 1 ? { ...sidMatches[0], reversalClientId: sidMatches[0].client?.id } : null;
+    const scheduledClient = clientForStop(stop);
+    return resolveCompletedReport({
+      stop,
+      completed: completedSids,
+      index: completedReportIndex,
+      scheduledClientId: scheduledClient?.id ?? null,
+      ledgerKey: STOP_REVERSAL_LEDGER_KEY,
+    }).match;
   };
   const openCompletedStop = (stop, dayDate) => {
     const report = reportForStop(stop);
@@ -12287,13 +12310,13 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                   <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: denseDesktop ? 11.5 : 12.5, color: T.accent, fontWeight: 800, minWidth: 0 }}>
                     <Icon name="check" size={14} />
                     Completed
-                    <span style={{ fontWeight: 650, color: reportEntry ? T.textMuted : T.warning, fontSize: denseDesktop ? 10.5 : 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>· {reportEntry ? "Report saved" : "Report unavailable"}</span>
+                    <span style={{ fontWeight: 650, color: reportEntry ? T.textMuted : T.warning, fontSize: denseDesktop ? 10.5 : 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>· {reportEntry ? "Report saved" : "Report needs attention"}</span>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0, flexWrap: "wrap" }}>
                     <button onClick={e => { e.stopPropagation(); openCompletedStop(s, dayDate); }}
-                      title={reportEntry ? "View the full saved service report" : "Show why this finished report is unavailable"}
+                      title={reportEntry ? "View the full saved service report" : "Review or rebuild this missing report"}
                       style={{ minHeight: utilityHeight, background: "none", border: "none", color: T.primary, fontSize: denseDesktop ? 11 : 12, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", padding: "6px 5px", display: "flex", alignItems: "center", gap: 4 }}>
-                      <Icon name="clipboard" size={12} /> {reportEntry ? "Report" : "Details"}
+                      <Icon name="clipboard" size={12} /> {reportEntry ? "Report" : (perms.editHistory ? "Fix report" : "Details")}
                     </button>
                     {perms.completeStops && (
                       <button onClick={e => { e.stopPropagation(); if (confirm("Re-open this stop? Its saved visit will be removed, and the exact stock and prior balance changed by this completion will be restored. To just change a detail, open the report and use Edit report instead.")) void onUncomplete(reversalClientId ?? c?.id ?? s.clientId ?? s.id, s.sid); }}
@@ -12795,8 +12818,52 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
         const client = stopOverview.client;
         const assigned = (team || []).find(member => String(member.id) === String(s.assigneeId));
         const serviceNames = (s.services || []).map(service => typeof service === "string" ? service : service?.name).filter(Boolean);
+        const completionMarker = completedSids?.[s.sid];
+        const reportResolution = resolveCompletedReport({
+          stop: s,
+          completed: completedSids,
+          index: completedReportIndex,
+          scheduledClientId: client?.id ?? null,
+          ledgerKey: STOP_REVERSAL_LEDGER_KEY,
+        });
+        const reportIsMissing = canRebuildCompletedReport(reportResolution.reason);
+        const recoveryReceiptId = completionMarker && typeof completionMarker === "object" && !Array.isArray(completionMarker)
+          ? String(completionMarker.receiptId || "")
+          : "";
+        const recoveryReceipt = recoveryReceiptId ? completedSids?.[STOP_REVERSAL_LEDGER_KEY]?.[recoveryReceiptId] : null;
+        const canRebuildReport = !!(reportIsMissing && client && perms.editHistory && (
+          completionMarker === true
+          || (recoveryReceiptId && recoveryReceipt && String(recoveryReceipt.clientId) === String(client.id))
+        ));
         const rawDuration = String(s.duration || "").trim();
         const durationText = rawDuration && /^\d+(?:\.\d+)?$/.test(rawDuration) ? `${rawDuration} min` : rawDuration;
+        const rebuildReport = () => {
+          if (!canRebuildReport) return;
+          const configuredReadings = Object.fromEntries((catalog?.tests || []).map(test => [typeof test === "string" ? test : test?.name, ""]).filter(([name]) => name));
+          const draft = {
+            __recoveryDraft: true,
+            sid: s.sid,
+            ...(recoveryReceiptId ? { completionReceiptId: recoveryReceiptId } : {}),
+            date: stopOverview.dayDate || "",
+            type: s.type || "Service visit",
+            tech: assigned?.name || s.assigneeName || "Unassigned",
+            assigneeId: s.assigneeId || "",
+            services: (s.services || []).map(service => typeof service === "string" ? { name: service, price: "" } : { ...service }),
+            checklist: [],
+            notes: "",
+            officeNotes: "",
+            readings: configuredReadings,
+            readingStatus: {},
+            photos: [],
+            treatmentsUsed: [],
+            productsUsed: [],
+            productsPurchased: [],
+            partsUsed: [],
+            invoice: "$0",
+          };
+          setStopOverview(null);
+          setHistoryEdit({ entry: draft, clientId: client.id, create: true });
+        };
         const overviewRow = (label, value) => value ? (
           <div style={{ display: "grid", gridTemplateColumns: vp.isPhone ? "1fr" : "120px 1fr", gap: vp.isPhone ? 3 : 12, padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
             <div style={{ fontSize: 10.5, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</div>
@@ -12804,10 +12871,10 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           </div>
         ) : null;
         return (
-          <Modal title="Finished report unavailable" maxWidth={520} onClose={() => setStopOverview(null)}>
+          <Modal title="Report needs attention" maxWidth={520} onClose={() => setStopOverview(null)}>
             <div style={{ display: "flex", alignItems: "flex-start", gap: 10, background: hexA("#B45309", 0.08), border: `1px solid ${hexA("#B45309", 0.22)}`, borderRadius: 12, padding: "11px 12px", marginBottom: 12 }}>
               <Icon name="warning" size={16} style={{ color: "#B45309", flexShrink: 0, marginTop: 1 }} />
-              <div style={{ fontSize: 12.5, color: T.text, lineHeight: 1.45 }}>This stop is marked complete, but no unique saved visit report could be matched safely. The planned schedule details are shown below; nothing was substituted for the missing finished report.</div>
+              <div style={{ fontSize: 12.5, color: T.text, lineHeight: 1.45 }}>{reportIsMissing ? "This older stop was marked complete, but its saved visit report is missing." : "This stop is marked complete, but the app cannot safely identify one unique saved report."} The schedule details below are not being presented as completed work.</div>
             </div>
             <div style={{ borderTop: `1px solid ${T.border}` }}>
               {overviewRow("Client", client?.name || s.client || "Client")}
@@ -12818,9 +12885,11 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
               {overviewRow("Assigned to", assigned?.name || s.assigneeName || "Unassigned")}
               {overviewRow("Planned work", serviceNames.join(" · "))}
             </div>
+            {canRebuildReport && <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.45, marginTop: 11 }}>You can rebuild the report from these planned details, then review and add the actual notes, readings, and photos before it is saved.</div>}
+            {!reportIsMissing && <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.45, marginTop: 11 }}>This record needs a data review before it can be opened or rebuilt; no existing report will be overwritten.</div>}
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap", marginTop: 16 }}>
               {client && onClientSelect && <Btn sm variant="ghost" onClick={() => { setStopOverview(null); onClientSelect(client, "history"); }}>View client history</Btn>}
-              {(perms.scheduleAddRemove || perms.completeStops) && <Btn sm variant="outline" onClick={() => { setStopOverview(null); setEditStopModal({ stop: s, dayDate: stopOverview.dayDate }); }}>Edit schedule</Btn>}
+              {canRebuildReport && <Btn onClick={rebuildReport}><Icon name="edit" size={14} /> Rebuild report</Btn>}
               <Btn sm onClick={() => setStopOverview(null)}>Close</Btn>
             </div>
           </Modal>
@@ -12861,6 +12930,13 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
             setClients(cs => (cs || []).map(cl => {
               if (String(cl.id) !== String(historyEdit.clientId)) return cl;
               const history = Array.isArray(cl.history) ? cl.history : [];
+              if (historyEdit.create) {
+                const sameSid = history.filter(h => h?.sid != null && String(h.sid) === String(upd?.sid));
+                // Idempotent recovery: if another device repaired this stop while the editor was
+                // open, preserve that saved report instead of overwriting it with a stale draft.
+                if (sameSid.length === 0) return { ...cl, history: [{ ...upd }, ...history] };
+                return cl;
+              }
               const selectedReceipt = String(historyEdit.entry?.completionReceiptId || "");
               const selectedSid = historyEdit.entry?.sid;
               const receiptMatches = selectedReceipt ? history.filter(h => String(h?.completionReceiptId || "") === selectedReceipt) : [];

@@ -10,6 +10,7 @@
 // cross-origin via the absolute PROD_URL; the web build calls it same-origin.
 
 import { brandLogoSource } from "../brandAssets.js";
+import { buildServicePhotoGallery, buildServiceReportFooter, buildServiceReportTextFooter } from "./_report-email-layout.js";
 
 const escapeHtml = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -25,7 +26,7 @@ function setCors(res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
-function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = "", actionUrl = "", actionLabel = "", footerHtml = "", logoSrc = "" }) {
+function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = "", actionUrl = "", actionLabel = "", closingHtml = "", footerHtml = "", logoSrc = "" }) {
   const accent = /^#?[0-9a-fA-F]{3,8}$/.test(branding.accent || "") ? branding.accent : "#B81D24";
   const company = escapeHtml(branding.companyName || "Stone Property Solutions");
   // Wrap phone/email as explicitly white, non-underlined links so Apple Mail doesn't
@@ -58,6 +59,7 @@ function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = ""
       ${rowsHtml ? `<table style="width:100%;border-collapse:collapse;margin-top:14px;border-top:1px solid #eef0f2;padding-top:6px">${rowsHtml}</table>` : ""}
       ${actionUrl ? `<div style="margin-top:18px"><a href="${escapeHtml(actionUrl)}" style="display:inline-block;background:${accent};color:#fff;text-decoration:none;font-weight:800;padding:12px 22px;border-radius:10px;font-size:14px">${escapeHtml(actionLabel || "Open in the app")}</a></div>` : ""}
       ${photosHtml || ""}
+      ${closingHtml || ""}
     </div>
     ${footerHtml || ""}
   </div>`;
@@ -77,7 +79,7 @@ export default async function handler(req, res) {
   const _u = await requireUser(req, res);
   if (!_u) return;
 
-  const { to, subject, heading, message, rows = [], branding = {}, photos = [], actionUrl = "", actionLabel = "" } = req.body || {};
+  const { to, subject, heading, message, rows = [], branding = {}, photos = [], report = null, actionUrl = "", actionLabel = "" } = req.body || {};
   if (!to || !/.+@.+\..+/.test(to)) return res.status(400).json({ error: "A valid recipient email is required" });
   if (!subject) return res.status(400).json({ error: "A subject is required" });
 
@@ -100,7 +102,7 @@ export default async function handler(req, res) {
     // Embed any provided photos (base64 data URLs) as inline cid attachments referenced
     // from the HTML, so the report email shows the pictures (and they're downloadable too).
     const attachments = [];
-    const photoBlocks = [];
+    const reportPhotos = [];
     (Array.isArray(photos) ? photos : []).slice(0, 12).forEach((ph, i) => {
       const src = typeof ph === "string" ? ph : (ph && ph.src) || "";
       const m = /^data:(image\/[a-zA-Z+]+);base64,(.+)$/.exec(src || "");
@@ -110,10 +112,9 @@ export default async function handler(req, res) {
       const label = (ph && typeof ph === "object" && ph.label) ? String(ph.label) : "";
       const at = (ph && typeof ph === "object" && ph.at) ? String(ph.at) : "";
       attachments.push({ filename: `${label ? label.toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-" : ""}photo-${i + 1}.${ext}`, content: m[2], content_type: m[1], content_id: cid });
-      // Caption UNDER the photo, prominent — label (+ time when known).
-      photoBlocks.push(`<div style="margin-bottom:18px"><img src="cid:${cid}" alt="${escapeHtml(label || "Service photo")}" style="width:100%;max-width:520px;border-radius:10px;display:block;border:1px solid #eef0f2" />${(label || at) ? `<div style="font-size:13px;font-weight:800;color:#111827;margin-top:7px">${escapeHtml(label || "Photo")}${at ? ` <span style="font-weight:500;color:#6b7280">&middot; ${escapeHtml(at)}</span>` : ""}</div>` : ""}</div>`);
+      reportPhotos.push({ cid, label, at });
     });
-    const photosHtml = photoBlocks.length ? `<div style="margin-top:16px;border-top:1px solid #eef0f2;padding-top:14px"><div style="font-size:14px;font-weight:800;margin-bottom:10px">Photos</div>${photoBlocks.join("")}</div>` : "";
+    const photosHtml = buildServicePhotoGallery(reportPhotos, { accent: branding.accent });
 
     // Optional CAN-SPAM unsubscribe footer (broadcasts/marketing). Only present when the caller
     // passes `unsubscribe: { email, address }` — owner alerts + transactional sends never do, so their
@@ -145,10 +146,12 @@ export default async function handler(req, res) {
       logoSrc = "cid:splogo@sps";
     } else if (/^https?:\/\//i.test(li)) logoSrc = li;
 
-    const html = buildHtml({ branding, heading: heading || subject, message, rows, photosHtml, actionUrl, actionLabel, footerHtml, logoSrc });
+    const closingHtml = buildServiceReportFooter({ branding, report, logoSrc });
+    const html = buildHtml({ branding, heading: heading || subject, message, rows, photosHtml, actionUrl, actionLabel, closingHtml, footerHtml, logoSrc });
     const textLines = [heading || subject, "", message || ""];
     (rows || []).filter(Boolean).forEach(([k, v]) => textLines.push(`${k}: ${v}`));
-    if (photoBlocks.length) textLines.push("", `(${photoBlocks.length} photo${photoBlocks.length > 1 ? "s" : ""} attached)`);
+    if (reportPhotos.length) textLines.push("", `(${reportPhotos.length} photo${reportPhotos.length > 1 ? "s" : ""} attached)`);
+    textLines.push(...buildServiceReportTextFooter({ branding, report }));
     if (unsub && (unsub.email || unsub.address)) textLines.push("", `To stop these updates, reply to this email${unsub.email ? ` or contact ${unsub.email}` : ""}.`);
     const text = textLines.join("\n");
 
