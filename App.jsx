@@ -615,6 +615,7 @@ function sendPushEvent(event, fields) {
 // and warm-app routing come for free.
 let _pushToken = "";
 let _pushListenersOn = false;
+let _pushEnableInFlight = null;
 async function pushPlugin() {
   try {
     const { Capacitor } = await import("@capacitor/core");
@@ -631,23 +632,71 @@ async function pushIsNative() {
 }
 async function wirePushListeners(P) {
   if (_pushListenersOn) return;
-  _pushListenersOn = true;
-  P.addListener("registration", async (t) => {
-    _pushToken = (t && t.value) || "";
-    if (!_pushToken) return;
-    try {
-      await fetch(`${PROD_URL}/api/push/register`, {
-        method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ token: _pushToken }),
-      });
-    } catch (_) { /* re-registered on next app open */ }
-  });
-  P.addListener("registrationError", () => { /* surfaced as a status line in the settings card */ });
-  P.addListener("pushNotificationActionPerformed", (a) => {
+  await P.addListener("pushNotificationActionPerformed", (a) => {
     const link = a && a.notification && a.notification.data && a.notification.data.link;
     if (!link) return;
     try { localStorage.setItem("sps_deeplink", String(link)); } catch (_) {}
     try { window.dispatchEvent(new CustomEvent("sps-deeplink", { detail: String(link) })); } catch (_) {}
+  });
+  _pushListenersOn = true;
+}
+
+// PushNotifications.register() only STARTS APNs registration. Success/failure arrives later through
+// an event, so do not tell the user they are registered until a real token has also been accepted by
+// our server. The former fire-and-forget path could permanently show success with no token stored.
+async function registerAndBindDevicePush(P) {
+  let registrationHandle = null;
+  let errorHandle = null;
+  let timeoutId = null;
+  let settled = false;
+  let binding = false;
+
+  return new Promise((resolve) => {
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+      const removals = [registrationHandle, errorHandle]
+        .filter(Boolean)
+        .map((handle) => handle.remove().catch(() => {}));
+      Promise.allSettled(removals).finally(() => resolve(result));
+    };
+
+    (async () => {
+      try {
+        registrationHandle = await P.addListener("registration", (tokenInfo) => {
+          if (settled || binding) return;
+          binding = true;
+          (async () => {
+            const token = String((tokenInfo && tokenInfo.value) || "").trim();
+            if (!token) return finish({ ok: false, error: "Apple returned an empty notification token. Please try again." });
+            _pushToken = token;
+            try {
+              const response = await fetch(`${PROD_URL}/api/push/register`, {
+                method: "POST",
+                headers: await authHeaders({ "Content-Type": "application/json" }),
+                body: JSON.stringify({ token }),
+              });
+              const data = await response.json().catch(() => ({}));
+              if (!response.ok || data.ok === false) {
+                return finish({ ok: false, error: data.error || `The server couldn't register this device (${response.status}).` });
+              }
+              finish({ ok: true });
+            } catch (error) {
+              finish({ ok: false, error: (error && error.message) || "Couldn't save this device with the notification server." });
+            }
+          })();
+        });
+        errorHandle = await P.addListener("registrationError", (event) => {
+          const message = event && (event.error || event.message);
+          finish({ ok: false, error: message || "Apple couldn't register this device for notifications." });
+        });
+        timeoutId = setTimeout(() => finish({ ok: false, error: "Notification registration timed out. Check your connection and try again." }), 20000);
+        await P.register();
+      } catch (error) {
+        finish({ ok: false, error: (error && error.message) || "Couldn't register with Apple." });
+      }
+    })();
   });
 }
 // Returns: "granted" | "prompt" | "denied" (real iOS states) · "error" (NATIVE, but the plugin/bridge
@@ -663,7 +712,7 @@ async function pushPermissionState() {
 // Prompts if needed (iOS system dialog), registers with APNs, and the registration listener
 // binds the token to this account. Called by the primer, the settings card, and — silently,
 // when permission is already granted — on every app open (tokens rotate).
-async function enableDevicePush() {
+async function enableDevicePushOnce() {
   const P = await pushPlugin();
   if (!P) return { ok: false, error: (await pushIsNative()) ? "Couldn't load the notifications plugin — reopen the app and try again." : "Notifications are delivered through the iOS app." };
   try { localStorage.removeItem("sps_push_disabled"); } catch (_) {}
@@ -675,8 +724,16 @@ async function enableDevicePush() {
   try { if (perm.receive !== "granted") perm = await P.requestPermissions(); }
   catch (e) { try { console.warn("[push] requestPermissions threw", e); } catch (_) {} return { ok: false, error: (e && e.message) || "Couldn't ask for notification permission." }; }
   if (perm.receive !== "granted") return { ok: false, denied: true, error: "Notifications are turned off for SPS Way in iOS Settings." };
-  try { await P.register(); } catch (e) { return { ok: false, error: (e && e.message) || "Couldn't register with Apple." }; }
-  return { ok: true };
+  return registerAndBindDevicePush(P);
+}
+async function enableDevicePush() {
+  // A launch-time refresh and an explicit button tap can overlap. Share one native registration so
+  // their temporary listeners cannot race each other or bind the same rotating token twice.
+  if (_pushEnableInFlight) return _pushEnableInFlight;
+  _pushEnableInFlight = enableDevicePushOnce();
+  try { return await _pushEnableInFlight; }
+  catch (error) { return { ok: false, error: (error && error.message) || "Couldn't enable notifications on this device." }; }
+  finally { _pushEnableInFlight = null; }
 }
 // Sign-out unbind: remove this device's row server-side WITHOUT the opt-out flag or APNs
 // unregister — a different account signing in should re-register cleanly. The caller awaits this
@@ -3895,13 +3952,31 @@ function Btn({ children, onClick, href, variant = "primary", sm, lg, block, disa
     gap: 6,
     textAlign: "center",
     textDecoration: "none",
+    lineHeight: 1.2,
+    whiteSpace: "normal",
+    userSelect: "none",
     boxSizing: "border-box",
     transition: "opacity 0.15s, transform 0.08s",
     ...style,
   };
-  const className = `sps-btn${sm ? " sps-btn-sm" : ""}`;
+  const className = `sps-btn${sm ? " sps-btn-sm" : ""}${lg ? " sps-btn-lg" : ""}`;
   if (href) return <a className={className} href={href} onClick={onClick} style={css} aria-label={ariaLabel} title={title}>{children}</a>;
-  return <button className={className} onClick={onClick} disabled={disabled} style={css} aria-label={ariaLabel} title={title}>{children}</button>;
+  return <button type="button" className={className} onClick={onClick} disabled={disabled} style={css} aria-label={ariaLabel} title={title}>{children}</button>;
+}
+
+function IconButton({ icon, label, onClick, variant = "neutral", disabled = false, size = 44, iconSize = 17, style }) {
+  const { T } = useApp();
+  const tones = {
+    neutral: { background: T.surfaceAlt, color: T.textMuted, border: `1px solid ${T.border}` },
+    primary: { background: hexA(T.primary, 0.09), color: T.primary, border: `1px solid ${hexA(T.primary, 0.18)}` },
+    danger: { background: hexA("#E5484D", 0.08), color: "#C0392B", border: `1px solid ${hexA("#E5484D", 0.2)}` },
+  };
+  return (
+    <button type="button" onClick={onClick} disabled={disabled} aria-label={label} title={label}
+      style={{ ...tones[variant], width: size, height: size, minWidth: size, minHeight: size, padding: 0, borderRadius: Math.round(size * 0.28), display: "inline-grid", placeItems: "center", flexShrink: 0, cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.45 : 1, fontFamily: "inherit", ...style }}>
+      <Icon name={icon} size={iconSize} />
+    </button>
+  );
 }
 
 function StatCard({ label, value, sub, accent, onClick, icon, trend, compact = false }) {
@@ -5302,13 +5377,24 @@ function useKeyboardInset() {
   return inset;
 }
 
+// Keep the focused field above the iOS keyboard. The app uses fixed shells with an internal
+// scroller, so Safari cannot always perform its normal document-level focus adjustment for us.
+function keepFocusedControlVisible(event) {
+  const target = event && event.target;
+  if (!target || !target.scrollIntoView || !/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+  setTimeout(() => {
+    try { target.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" }); } catch (_) {}
+  }, 120);
+}
+
 // A portal removes a sheet from the page scroller's ancestry, but iOS can keep an existing
 // momentum scroll alive underneath it. Freeze every app/modal scroll surface while a blocking
 // sheet is mounted, then restore the exact inline styles and scroll positions on close.
-function useBackgroundScrollLock() {
+function useBackgroundScrollLock(activeScrollRef = null) {
   useEffect(() => {
+    const activeTarget = activeScrollRef && activeScrollRef.current;
     const targets = [document.documentElement, document.body, ...document.querySelectorAll("main, [data-sps-modal-scroll]")]
-      .filter((target, index, all) => target && all.indexOf(target) === index);
+      .filter((target, index, all) => target && target !== activeTarget && all.indexOf(target) === index);
     const snapshots = targets.map(target => ({
       target,
       overflow: target.style.overflow,
@@ -5335,13 +5421,21 @@ function useBackgroundScrollLock() {
       target.scrollTop = snapshot.scrollTop;
       target.scrollLeft = snapshot.scrollLeft;
     });
-  }, []);
+  }, [activeScrollRef]);
 }
 
-function Modal({ title, children, onClose, maxWidth = 600 }) {
+function Modal({ title, children, onClose, maxWidth = 600, dismissOnBackdrop = false }) {
   const { T } = useApp();
   const { isPhone } = useViewport();
   const kb = useKeyboardInset();
+  const bodyRef = useRef(null);
+  useBackgroundScrollLock(bodyRef);
+  useEffect(() => {
+    if (!onClose) return undefined;
+    const onKey = (event) => { if (event.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
   // When a field is focused, bring it into the visible (above-keyboard) area.
   const onBodyFocus = (e) => {
     const t = e.target;
@@ -5359,7 +5453,7 @@ function Modal({ title, children, onClose, maxWidth = 600 }) {
     // minHeight:0 — reliable in WKWebView, no % to mis-resolve), with a dvh max-height
     // as a backup. The CLOSE BUTTON lives in the card's own fixed header, so it's
     // always inside the white card and never clipped by the app header or notch.
-    <div onClick={onClose} style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 200, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", paddingTop: `max(${isPhone ? 8 : 14}px, env(safe-area-inset-top))`, paddingLeft: `max(${isPhone ? 8 : 14}px, env(safe-area-inset-left))`, paddingRight: `max(${isPhone ? 8 : 14}px, env(safe-area-inset-right))`, paddingBottom: kb > 0 ? kb + 8 : `max(${isPhone ? 8 : 14}px, env(safe-area-inset-bottom))`, transition: "padding-bottom 0.18s ease", overscrollBehavior: "contain" }}>
+    <div role="dialog" aria-modal="true" aria-label={title || "Dialog"} onClick={dismissOnBackdrop ? onClose : undefined} style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 200, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", paddingTop: `max(${isPhone ? 8 : 14}px, env(safe-area-inset-top))`, paddingLeft: `max(${isPhone ? 8 : 14}px, env(safe-area-inset-left))`, paddingRight: `max(${isPhone ? 8 : 14}px, env(safe-area-inset-right))`, paddingBottom: kb > 0 ? kb + 8 : `max(${isPhone ? 8 : 14}px, env(safe-area-inset-bottom))`, transition: "padding-bottom 0.18s ease", overscrollBehavior: "contain" }}>
       <div onClick={e => e.stopPropagation()} style={{ background: T.surface, borderRadius: isPhone ? 20 : 24, width: "100%", maxWidth: maxWidth, flex: "0 1 auto", minHeight: 0, maxHeight: `calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - ${isPhone ? 16 : 28}px - ${kb}px)`, display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: T.shadowLg, border: `1px solid ${T.border}`, animation: "spsModalIn 0.22s cubic-bezier(0.16, 1, 0.3, 1)" }}>
         {/* Fixed header INSIDE the card: title + close X. flexShrink:0 keeps it pinned
             to the card's top-right while the body scrolls. */}
@@ -5371,7 +5465,7 @@ function Modal({ title, children, onClose, maxWidth = 600 }) {
         </div>
         {/* Scrollable body — content taller than the card scrolls here; header stays put.
             On field focus we scroll it into the visible area above the keyboard (Bug 2). */}
-        <div data-sps-modal-scroll onFocus={onBodyFocus} style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", padding: isPhone ? "14px 16px 18px" : "16px 22px 22px" }}>
+        <div ref={bodyRef} data-sps-modal-scroll onFocus={onBodyFocus} style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", scrollPaddingBottom: 28, padding: isPhone ? "14px 16px 24px" : "16px 22px 26px" }}>
           {children}
         </div>
       </div>
@@ -5592,7 +5686,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
   const doMarkActive   = () => { onBatchUpdate(selectedIds, { status: "Active" }); setModal(null); exitSelect(); };
 
   return (
-    <div style={{ width: "100%" }}>
+    <div style={{ width: "100%", boxSizing: "border-box", paddingBottom: selectMode && selCount > 0 ? 96 : 0 }}>
     <div style={{ maxWidth: 1040, margin: "0 auto", width: "100%", boxSizing: "border-box" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10 }}>
         <div style={{ minWidth: 0 }}>
@@ -5602,12 +5696,12 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
           </div>
         </div>
         {selectMode ? (
-          <button onClick={exitSelect} style={{ minHeight: 36, padding: "7px 10px", background: hexA(T.primary, 0.08), border: "none", borderRadius: 10, color: T.primary, fontWeight: 750, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>Done</button>
+          <button onClick={exitSelect} style={{ minHeight: vp.isPhone ? 44 : 36, padding: "7px 10px", background: hexA(T.primary, 0.08), border: "none", borderRadius: 10, color: T.primary, fontWeight: 750, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>Done</button>
         ) : (perms.editClients || (perms.canImport && (onImport || onImportHistory || onFindDuplicates))) ? (
           <div style={{ display: "flex", gap: 5, alignItems: "center", flexShrink: 0 }}>
-            {perms.editClients && <button onClick={() => setSelectMode(true)} style={{ height: 36, padding: "0 9px", border: "none", borderRadius: 10, background: "transparent", color: T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Select</button>}
-            {perms.editClients && <button onClick={onAdd} style={{ height: 36, padding: "0 11px", border: "none", borderRadius: 10, background: T.primary, color: "#fff", fontWeight: 750, fontSize: 12, cursor: "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 4 }}><span style={{ fontSize: 16, lineHeight: 1, marginTop: -1 }}>+</span>Add</button>}
-            {perms.canImport && (onImport || onImportHistory || onFindDuplicates) && <button onClick={() => setModal("import")} aria-label="Import and client tools" title="Import and client tools" style={{ width: 36, height: 36, padding: 0, border: `1px solid ${T.border}`, borderRadius: 10, background: T.surface, color: T.textMuted, cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center" }}><Icon name="download" size={14} /></button>}
+            {perms.editClients && <button onClick={() => setSelectMode(true)} style={{ height: vp.isPhone ? 44 : 36, padding: "0 9px", border: "none", borderRadius: 10, background: "transparent", color: T.textMuted, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Select</button>}
+            {perms.editClients && <button onClick={onAdd} style={{ height: vp.isPhone ? 44 : 36, padding: "0 11px", border: "none", borderRadius: 10, background: T.primary, color: "#fff", fontWeight: 750, fontSize: 12, cursor: "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 4 }}><span style={{ fontSize: 16, lineHeight: 1, marginTop: -1 }}>+</span>Add</button>}
+            {perms.canImport && (onImport || onImportHistory || onFindDuplicates) && <button onClick={() => setModal("import")} aria-label="Import and client tools" title="Import and client tools" style={{ width: vp.isPhone ? 44 : 36, height: vp.isPhone ? 44 : 36, padding: 0, border: `1px solid ${T.border}`, borderRadius: 10, background: T.surface, color: T.textMuted, cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center" }}><Icon name="download" size={14} /></button>}
           </div>
         ) : null}
       </div>
@@ -5642,13 +5736,13 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
         <div style={{ display: "flex", gap: 5, overflowX: "auto", WebkitOverflowScrolling: "touch", flex: 1, minWidth: 0, scrollbarWidth: "none" }}>
           {[["alpha","A–Z"],["alpha_desc","Z–A"],["spent_desc","Most Spent"],["spent_asc","Least Spent"]].map(([val, lbl]) => (
             <button key={val} onClick={() => setSortBy(val)}
-              style={{ flexShrink: 0, height: 30, padding: "0 10px", borderRadius: 100, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 650, background: sortBy === val ? T.primary : T.surfaceAlt, color: sortBy === val ? "#fff" : T.textMuted, transition: "all 0.15s" }}>
+              style={{ flexShrink: 0, height: vp.isPhone ? 38 : 30, padding: "0 10px", borderRadius: 100, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 650, background: sortBy === val ? T.primary : T.surfaceAlt, color: sortBy === val ? "#fff" : T.textMuted, transition: "all 0.15s" }}>
               {lbl}
             </button>
           ))}
           {inactiveCount > 0 && (
             <button onClick={() => setShowInactive(s => !s)}
-              style={{ flexShrink: 0, height: 30, padding: "0 10px", borderRadius: 100, border: `1px solid ${showInactive ? T.primary : "transparent"}`, cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 650, background: showInactive ? hexA(T.primary, 0.08) : T.surfaceAlt, color: showInactive ? T.primary : T.textMuted }}>
+              style={{ flexShrink: 0, height: vp.isPhone ? 38 : 30, padding: "0 10px", borderRadius: 100, border: `1px solid ${showInactive ? T.primary : "transparent"}`, cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 650, background: showInactive ? hexA(T.primary, 0.08) : T.surfaceAlt, color: showInactive ? T.primary : T.textMuted }}>
               {showInactive ? "Hide inactive" : `Inactive ${inactiveCount}`}
             </button>
           )}
@@ -5665,7 +5759,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
               {[["all","All Tiers"], ...availableTiers.map(t => [t, t]), ["__none__","No Tier"]].map(([val, lbl]) => (
                 <button key={val} onClick={() => setFilterTier(val)}
-                  style={{ padding: "6px 13px", borderRadius: 10, border: `1.5px solid ${filterTier === val ? T.primary : T.border}`, background: filterTier === val ? hexA(T.primary, 0.08) : T.surface, color: filterTier === val ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                  style={{ minHeight: vp.isPhone ? 40 : undefined, padding: "6px 13px", borderRadius: 10, border: `1.5px solid ${filterTier === val ? T.primary : T.border}`, background: filterTier === val ? hexA(T.primary, 0.08) : T.surface, color: filterTier === val ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
                   {lbl}
                 </button>
               ))}
@@ -5679,7 +5773,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {[["all","All"], ...availableDivs.map(d => [d, d])].map(([val, lbl]) => (
                   <button key={val} onClick={() => setFilterDiv(val)}
-                    style={{ padding: "6px 13px", borderRadius: 10, border: `1.5px solid ${filterDiv === val ? T.primary : T.border}`, background: filterDiv === val ? hexA(T.primary, 0.08) : T.surface, color: filterDiv === val ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                    style={{ minHeight: vp.isPhone ? 40 : undefined, padding: "6px 13px", borderRadius: 10, border: `1.5px solid ${filterDiv === val ? T.primary : T.border}`, background: filterDiv === val ? hexA(T.primary, 0.08) : T.surface, color: filterDiv === val ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
                     {lbl}
                   </button>
                 ))}
@@ -5692,7 +5786,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>Status</div>
               <button onClick={() => setShowInactive(s => !s)}
-                style={{ padding: "6px 13px", borderRadius: 10, border: `1.5px solid ${showInactive ? T.primary : T.border}`, background: showInactive ? hexA(T.primary, 0.08) : T.surface, color: showInactive ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                style={{ minHeight: vp.isPhone ? 40 : undefined, padding: "6px 13px", borderRadius: 10, border: `1.5px solid ${showInactive ? T.primary : T.border}`, background: showInactive ? hexA(T.primary, 0.08) : T.surface, color: showInactive ? T.primary : T.textMuted, fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
                 {showInactive ? `Showing ${inactiveCount} inactive` : `Show ${inactiveCount} inactive`}
               </button>
             </div>
@@ -5738,7 +5832,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
           <ClientsTable items={filtered} clientSpend={clientSpend} tiers={tiers} onSelect={onSelect} T={T} />
         )
       ) : (
-      <div style={{ display: "grid", gridTemplateColumns: compactList ? "minmax(0, 1fr)" : "repeat(auto-fit, minmax(min(100%, 300px), 1fr))", alignItems: "start", gap: compactList ? 7 : 9, width: "100%", paddingBottom: selectMode && selCount > 0 ? 90 : 0 }}>
+      <div style={{ display: "grid", gridTemplateColumns: compactList ? "minmax(0, 1fr)" : "repeat(auto-fit, minmax(min(100%, 300px), 1fr))", alignItems: "start", gap: compactList ? 7 : 9, width: "100%" }}>
         {filtered.length === 0 && (
           <div style={{ gridColumn: "1 / -1", textAlign: "center", padding: "40px 20px", color: T.textMuted }}>
             <div style={{ width: 52, height: 52, borderRadius: 16, background: hexA(T.primary, 0.08), color: T.primary, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="clients" size={26} /></div>
@@ -5796,7 +5890,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
 
       {/* Bulk action bar */}
       {selectMode && selCount > 0 && (
-        <div style={{ position: "fixed", bottom: "calc(74px + env(safe-area-inset-bottom))", left: 0, right: 0, zIndex: 95, padding: "10px 16px", maxWidth: 740, margin: "0 auto" }}>
+        <div style={{ position: "fixed", bottom: "var(--sps-floating-action-bottom, calc(env(safe-area-inset-bottom) + 76px))", left: 0, right: 0, zIndex: 95, padding: "10px 16px", maxWidth: 740, margin: "0 auto" }}>
           <div style={{ background: T.primary, borderRadius: 14, padding: "10px 12px", display: "flex", gap: 8, boxShadow: "0 6px 24px rgba(0,0,0,0.25)", overflowX: "auto" }}>
             {[
               { label: "Schedule",   icon: "calendar",  fn: doSchedule },
@@ -6589,7 +6683,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
           <Btn sm variant="ghost" onClick={() => update({ status: "Active" })}>Reactivate</Btn>
         </div>
       )}
-      {onBack && <button onClick={() => { onBack(); window.scrollTo({ top: 0, behavior: "instant" }); }} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", padding: "0 0 16px", display: "flex", alignItems: "center", gap: 4 }}>← Back to Clients</button>}
+      {onBack && <button onClick={(event) => { const scroller = event.currentTarget.closest("main"); onBack(); requestAnimationFrame(() => { if (scroller) scroller.scrollTop = 0; }); }} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", minHeight: 44, padding: "0 0 12px", display: "flex", alignItems: "center", gap: 4 }}>← Back to Clients</button>}
 
       <Card style={{ marginBottom: 14, overflow: "hidden" }}>
         {/* Color accent bar at top */}
@@ -12593,7 +12687,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           const nextStopClient = nextStop ? clientForStop(nextStop) : null;
           const headToNext = () => { if (!nextStop) return; onEnRoute && onEnRoute(nextStop.sid); setHeadHereModal({ stop: nextStop, client: nextStopClient }); };
           return (
-            <div style={{ paddingBottom: vp.isDesktop ? 0 : (nextStop ? 80 : 0) }}>
+            <div style={{ paddingBottom: vp.isDesktop ? 0 : (nextStop ? 96 : 0) }}>
               {!vp.isDesktop && (
                 <button onClick={() => setViewTech(null)} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", padding: "0 0 10px", display: "flex", alignItems: "center", gap: 4 }}>
                   <Icon name="back" size={14} /> All routes
@@ -12678,9 +12772,9 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                   </div>
                 );
                 return vp.isDesktop ? (
-                  <div onClick={headToNext} role="button" style={{ display: "block", cursor: "pointer", marginTop: 14 }}>{bar}</div>
+                  <div onClick={headToNext} onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); headToNext(); } }} role="button" tabIndex={0} style={{ display: "block", cursor: "pointer", marginTop: 14 }}>{bar}</div>
                 ) : (
-                  <div onClick={headToNext} role="button" style={{ position: "fixed", bottom: "calc(74px + env(safe-area-inset-bottom))", left: 0, right: 0, zIndex: 95, maxWidth: 740, margin: "0 auto", padding: "0 16px", boxSizing: "border-box", cursor: "pointer" }}>{bar}</div>
+                  <div onClick={headToNext} onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); headToNext(); } }} role="button" tabIndex={0} style={{ position: "fixed", bottom: "var(--sps-floating-action-bottom, calc(env(safe-area-inset-bottom) + 76px))", left: 0, right: 0, zIndex: 95, maxWidth: 740, margin: "0 auto", padding: "0 16px", boxSizing: "border-box", cursor: "pointer" }}>{bar}</div>
                 );
               })()}
             </div>
@@ -12707,7 +12801,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
 
       {/* Bulk action bar */}
       {selectMode && selCount > 0 && (
-        <div style={{ position: "fixed", bottom: "calc(74px + env(safe-area-inset-bottom))", left: 0, right: 0, zIndex: 95, padding: "10px 16px", maxWidth: 740, margin: "0 auto" }}>
+        <div style={{ position: "fixed", bottom: "var(--sps-floating-action-bottom, calc(env(safe-area-inset-bottom) + 76px))", left: 0, right: 0, zIndex: 95, padding: "10px 16px", maxWidth: 740, margin: "0 auto" }}>
           <div style={{ background: T.headerBg, borderRadius: 14, padding: "10px 12px", display: "flex", gap: 8, boxShadow: "0 6px 24px rgba(0,0,0,0.25)" }}>
             {(team || []).length > 0 && (
               <button onClick={() => setReassignOpen(true)}
@@ -16489,7 +16583,7 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
         <div style={{ padding: "16px 18px 10px", borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
             <div style={{ fontSize: 17, fontWeight: 800, color: T.text }}>{title}</div>
-            <button onClick={onClose} aria-label="Close catalog" style={{ background: T.surfaceAlt, border: "none", borderRadius: 11, width: 40, height: 40, fontSize: 18, color: T.textMuted, cursor: "pointer", fontFamily: "inherit" }}>×</button>
+            <IconButton icon="close" label="Close catalog" onClick={onClose} />
           </div>
           <div style={{ display: "flex", gap: 4, background: T.surfaceAlt, borderRadius: 10, padding: 3, overflowX: "auto", scrollbarWidth: "none" }}>
             {tabs.map(([id, lab]) => (
@@ -16518,8 +16612,8 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
                 </div>}
               </div>
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={saveNewItem} disabled={!newItemReady} style={{ flex: 1, padding: "12px", borderRadius: 10, border: "none", background: T.primary, color: "#fff", fontWeight: 700, fontSize: 14, cursor: newItemReady ? "pointer" : "default", fontFamily: "inherit", opacity: newItemReady ? 1 : 0.5 }}>Save & Add</button>
-                <button onClick={() => setCreating(null)} style={{ padding: "12px 18px", borderRadius: 10, border: "none", background: T.surfaceAlt, color: T.textMuted, fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+                <Btn onClick={saveNewItem} disabled={!newItemReady} block style={{ flex: 1 }}>Save & Add</Btn>
+                <Btn variant="ghost" onClick={() => setCreating(null)}>Cancel</Btn>
               </div>
               {!newItemPriceValid && <div style={{ fontSize: 11.5, color: T.warning, fontWeight: 700, textAlign: "center" }}>Enter a valid retail price. Use 0 only when the item is intentionally free.</div>}
               {!newItemCostValid && <div style={{ fontSize: 11.5, color: T.warning, fontWeight: 700, textAlign: "center" }}>Enter a valid cost or leave it blank if it is not known yet.</div>}
@@ -16536,9 +16630,14 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
                   const requestedQty = selected && estimateNumberIsValid(bundle[it.id]) ? estimateNumberValue(bundle[it.id]) : 1;
                   const shortOnStock = showInventory && financials.inventoryTracked && financials.onHand < requestedQty;
                   return (
-                    <div key={it.id}
+                    <div key={it.id} role="button" tabIndex={0} aria-pressed={isBundling ? selected : undefined}
                       onClick={() => isBundling ? toggleBundle(it.id) : onAddCatalog(kindOf(), it)}
-                      style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", background: selected ? hexA(T.primary, 0.08) : T.surface, border: `1px solid ${selected ? T.primary : T.border}`, borderRadius: 12, cursor: "pointer" }}>
+                      onKeyDown={(event) => {
+                        if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+                        event.preventDefault();
+                        if (isBundling) toggleBundle(it.id); else onAddCatalog(kindOf(), it);
+                      }}
+                      style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", background: selected ? hexA(T.primary, 0.08) : T.surface, border: `1px solid ${selected ? T.primary : T.border}`, borderRadius: 12, cursor: "pointer", outlineOffset: 2 }}>
                       {isBundling && (
                         <div style={{ width: 22, height: 22, borderRadius: 6, flexShrink: 0, border: `1.5px solid ${selected ? T.primary : T.border}`, background: selected ? T.primary : "transparent", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 13, fontWeight: 800 }}>{selected ? "✓" : ""}</div>
                       )}
@@ -16571,10 +16670,10 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
                 {filtered.length === 0 && <div style={{ textAlign: "center", padding: "24px", color: T.textMuted, fontSize: 13 }}>No {tab} found</div>}
               </div>
               {/* Create new */}
-              {allowCreate && <button onClick={() => { setCreating({ type: tab === "services" ? "service" : tab === "products" ? "product" : tab === "treatments" ? "treatment" : "part" }); setNewItem({ name: search, price: "", cost: "" }); }}
-                style={{ marginTop: 12, width: "100%", padding: "11px", borderRadius: 10, border: `1.5px dashed ${T.border}`, background: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+              {allowCreate && <Btn variant="outline" block onClick={() => { setCreating({ type: tab === "services" ? "service" : tab === "products" ? "product" : tab === "treatments" ? "treatment" : "part" }); setNewItem({ name: search, price: "", cost: "" }); }}
+                style={{ marginTop: 12, borderStyle: "dashed" }}>
                 + Create new {tab === "services" ? "service" : tab === "products" ? "product" : tab === "treatments" ? "treatment" : "part"}
-              </button>}
+              </Btn>}
             </>
           )}
         </div>
@@ -16584,9 +16683,9 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
           <div style={{ padding: "12px 16px", borderTop: `1px solid ${T.border}`, background: T.surface }}>
             {bundleMissingRetail && <div style={{ marginBottom: 8, fontSize: 11.5, color: T.warning, fontWeight: 700, textAlign: "center", lineHeight: 1.4 }}>Set a retail price on every selected part before creating the bundle. Use 0 only for an intentionally free part.</div>}
             {bundleInvalidQuantity && <div style={{ marginBottom: 8, fontSize: 11.5, color: T.warning, fontWeight: 700, textAlign: "center", lineHeight: 1.4 }}>Every selected part needs a valid quantity greater than zero.</div>}
-            <button onClick={confirmBundle} disabled={bundleMissingRetail || bundleInvalidQuantity} style={{ width: "100%", padding: "13px", borderRadius: 12, border: "none", background: T.primary, color: "#fff", fontWeight: 800, fontSize: 14, cursor: bundleMissingRetail || bundleInvalidQuantity ? "default" : "pointer", fontFamily: "inherit", opacity: bundleMissingRetail || bundleInvalidQuantity ? 0.5 : 1 }}>
+            <Btn onClick={confirmBundle} disabled={bundleMissingRetail || bundleInvalidQuantity} block lg>
               Add {bundleCount} part{bundleCount !== 1 ? "s" : ""} as one line
-            </button>
+            </Btn>
           </div>
         )}
       </div>
@@ -17888,6 +17987,14 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
   const [selected, setSelected] = useState(null);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("active");
+  const screenRef = useRef(null);
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const scroller = screenRef.current && screenRef.current.closest("main");
+      if (scroller) scroller.scrollTop = 0;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [view, selected && selected.id]);
 
   // Persist without leaving the editor — used by "Download PDF" so exporting saves your edits but
   // doesn't kick you back to the list (that close was the reported bug).
@@ -17909,7 +18016,7 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
 
   if (view === "new" || (view === "detail" && selected)) {
     return (
-      <EstimateForm
+      <div ref={screenRef} data-estimates-editor-root style={{ minWidth: 0 }}><EstimateForm
         estimate={view === "detail" ? selected : null}
         clients={clients}
         catalog={catalog}
@@ -17924,7 +18031,7 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
         canManage={canManage}
         nextNumber={nextEstimateNumber(estimates)}
         onBack={() => { setView("list"); setSelected(null); }}
-      />
+      /></div>
     );
   }
 
@@ -17946,7 +18053,7 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
   const approvedValue = est.filter((estimate) => estimate.status === "approved").reduce((sum, estimate) => sum + estimateTotals(estimate, invoicing?.taxRate).total, 0);
 
   return (
-    <div data-estimates-list style={{ display: "flex", flexDirection: "column", gap: vp.isPhone ? 14 : 18, paddingTop: vp.isPhone ? 22 : 0 }}>
+    <div ref={screenRef} data-estimates-list style={{ display: "flex", flexDirection: "column", gap: vp.isPhone ? 14 : 18, paddingTop: vp.isPhone ? 22 : 0 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, paddingTop: 2 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 11, minWidth: 0 }}>
           <div style={{ width: 40, height: 40, borderRadius: 12, background: hexA(T.primary, 0.09), color: T.primary, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name="clipboard" size={19} /></div>
@@ -18036,6 +18143,9 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
 function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email, invoicing, T, onSave, onPersist, onDelete, onBack, nextNumber, canManage: canManageProp }) {
   const { perms = {} } = useApp();
   const vp = useViewport();
+  // Keep portrait iPads in the single-column editor. At the old 700px split point the line-item
+  // grid was narrower than its own Qty/Retail/Cost/Total minimums and visibly overflowed the card.
+  const wideEstimateLayout = vp.width >= 900;
   const showProfit = !!(perms.isAdmin || perms.seeProfit);
   const showInventory = !!(perms.isAdmin || perms.seeInventory);
   const canManage = canManageProp ?? canManageEstimates(perms);
@@ -18095,7 +18205,9 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   const [sentMsg, setSentMsg] = useState("");
   const [formError, setFormError] = useState("");
   const [pdfBusy, setPdfBusy] = useState(false);
+  const [dirty, setDirty] = useState(false);
   const shareBusyRef = useRef(false);
+  const pendingLineRef = useRef("");
   const [picker, setPicker] = useState(false);
   const shareBusy = sending || smsSending || pdfBusy;
   const totals = estimateTotals(form, defaultTaxRate);
@@ -18141,7 +18253,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
       const normalized = withEstimateTotals(form, defaultTaxRate);
       const client = (clients || []).find((entry) => String(entry.id) === String(normalized.clientId));
       setForm(normalized);
-      if (canManage && onPersist) onPersist(normalized); // view-only exports must never write
+      if (canManage && onPersist) { onPersist(normalized); setDirty(false); } // view-only exports must never write
       const r = await generateEstimatePDF(normalized, branding, invoicing, client);
       if (r === "downloaded") setSentMsg("Estimate PDF saved to your downloads.");
     } catch (e) {
@@ -18155,6 +18267,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   const set = (key, value, contentChanged = true) => {
     if (!canManage || shareBusyRef.current) return;
     setFormError("");
+    setDirty(true);
     setForm((current) => revise(current, { [key]: value }, contentChanged));
   };
 
@@ -18171,11 +18284,23 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   const addItem = () => set("items", [...form.items, emptyEstimateLine()]);
   const removeItem = (idx) => set("items", form.items.filter((_, i) => i !== idx));
   const populatedItems = () => form.items.filter((entry) => String(entry.desc || "").trim() || String(entry.price || "").trim() || entry.refId);
+  const revealAddedLine = (line) => {
+    pendingLineRef.current = line.id;
+    setPicker(false);
+    // The picker restores the page's prior momentum-scroll position during unmount. Wait for that
+    // cleanup, then reveal the newly added row so the action never appears to have done nothing.
+    setTimeout(() => {
+      if (pendingLineRef.current !== line.id) return;
+      const row = document.querySelector(`[data-estimate-line-id="${line.id}"]`);
+      if (row && row.scrollIntoView) row.scrollIntoView({ block: "center", behavior: "smooth" });
+      pendingLineRef.current = "";
+    }, 180);
+  };
 
   const addCatalogLine = (kind, item) => {
     const line = estimateLineFromCatalog(kind, item, newLineId());
     set("items", [...populatedItems(), line]);
-    setPicker(false);
+    revealAddedLine(line);
   };
   const addBundledParts = (selected) => {
     const line = estimateLineFromPartsBundle(selected, newLineId());
@@ -18187,7 +18312,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
       return;
     }
     set("items", [...populatedItems(), line]);
-    setPicker(false);
+    revealAddedLine(line);
   };
 
   const createCatalogItem = (type, data) => {
@@ -18208,6 +18333,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   const selectClient = (id) => {
     if (!canManage || shareBusyRef.current) return;
     const c = (clients||[]).find(c => String(c.id) === String(id));
+    setDirty(true);
     setForm((current) => revise(current, { clientId: id, clientName: c?.name || "" }));
   };
 
@@ -18219,7 +18345,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   const markSent = (current) => {
     const sent = withEstimateTotals({ ...current, status: "sent", sentAt: new Date().toISOString() }, defaultTaxRate);
     setForm(sent);
-    if (onPersist) onPersist(sent);
+    if (onPersist) { onPersist(sent); setDirty(false); }
   };
 
   // Build the estimate text for SMS
@@ -18354,6 +18480,10 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
     setFormError("");
     onSave(withEstimateTotals(form, defaultTaxRate));
   };
+  const handleBack = () => {
+    if (dirty && canManage && !confirm("Discard the unsaved changes to this estimate?")) return;
+    onBack();
+  };
   const confirmDelete = () => {
     if (!canDelete || shareBusyRef.current) return;
     if (!confirm(`Delete ${form.number || "this estimate"}? This cannot be undone.`)) return;
@@ -18361,18 +18491,18 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   };
 
   return (
-    <fieldset disabled={shareBusy} aria-busy={shareBusy} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+    <fieldset disabled={shareBusy} aria-busy={shareBusy} data-estimate-form onFocusCapture={keepFocusedControlVisible} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, paddingBottom: vp.isPhone ? 16 : 0 }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
         {/* Estimates detail removes the phone scroll container's top padding, so this toolbar's
             real sticky edge is flush beneath the global company header on every browser. */}
         <div data-estimate-sticky-header style={{ position: "sticky", top: 0, zIndex: 40, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, margin: vp.isPhone ? "0 -16px" : 0, padding: vp.isPhone ? "8px 16px 10px" : "8px 0 10px", background: T.bg, borderBottom: vp.isPhone ? `1px solid ${T.border}` : "none", boxShadow: vp.isPhone ? `0 5px 12px ${hexA(T.text, 0.04)}` : "none" }}>
-          <button onClick={onBack} style={{ minHeight: 40, background: "none", border: "none", color: T.primary, fontWeight: 750, fontSize: 13, cursor: "pointer", padding: "0 5px 0 0", display: "flex", alignItems: "center", gap: 5, fontFamily: "inherit" }}><Icon name="back" size={15} /> Estimates</button>
+          <button type="button" onClick={handleBack} style={{ minHeight: 44, background: "none", border: "none", color: T.primary, fontWeight: 750, fontSize: 13, cursor: "pointer", padding: "0 5px 0 0", display: "flex", alignItems: "center", gap: 5, fontFamily: "inherit" }}><Icon name="back" size={15} /> Estimates</button>
           <div style={{ minWidth: 0, textAlign: "center" }}>
             <div style={{ fontSize: 14, fontWeight: 850, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isNew ? "New estimate" : form.number || "Estimate"}</div>
             <div style={{ fontSize: 10.5, fontWeight: 750, color: statusTone, marginTop: 1 }}>{estimateStatusLabel(form.status)}</div>
           </div>
           {canManage
-            ? <Btn sm onClick={saveCurrent} style={{ minHeight: 40, minWidth: 66 }}>Save</Btn>
+            ? <Btn sm onClick={saveCurrent} style={{ minWidth: 66 }}>Save</Btn>
             : <span style={{ minWidth: 66, textAlign: "right", color: T.textMuted, fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.045em" }}>View only</span>}
         </div>
 
@@ -18385,7 +18515,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
           </div>
         )}
 
-        <div style={{ display: "grid", gridTemplateColumns: vp.isDesktop ? "minmax(0, 1.6fr) minmax(290px, 0.75fr)" : "1fr", gap: 13, alignItems: "start" }}>
+        <div style={{ display: "grid", gridTemplateColumns: wideEstimateLayout ? "minmax(0, 1.6fr) minmax(290px, 0.75fr)" : "1fr", gap: 13, alignItems: "start" }}>
           <fieldset disabled={!canManage} style={{ display: "flex", flexDirection: "column", gap: 13, minWidth: 0, border: 0, padding: 0, margin: 0 }}>
             <div style={{ ...card, display: "flex", flexDirection: "column", gap: 12 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
@@ -18412,7 +18542,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
             <div style={{ ...card, padding: 0, overflow: "hidden" }}>
               <div style={{ padding: "13px 14px", borderBottom: `1px solid ${T.border}`, display: "flex", flexDirection: vp.width <= 360 ? "column" : "row", justifyContent: "space-between", alignItems: vp.width <= 360 ? "stretch" : "center", gap: 10 }}>
                 <div><div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>Scope & pricing</div><div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>Pull from services and inventory, or add one-time work.</div></div>
-                <button onClick={() => setPicker(true)} style={{ minHeight: 38, padding: "7px 10px", borderRadius: 10, border: "none", background: T.primary, color: "#fff", fontSize: 11.5, fontWeight: 800, fontFamily: "inherit", cursor: "pointer", flexShrink: 0 }}><Icon name="plus" size={12} /> {vp.width <= 360 ? "Add from catalog" : "Catalog / inventory"}</button>
+                {canManage && <Btn sm onClick={() => setPicker(true)} style={{ flexShrink: 0 }}><Icon name="plus" size={12} /> {vp.width <= 360 ? "Add from catalog" : "Catalog / inventory"}</Btn>}
               </div>
               <div style={{ display: "flex", flexDirection: "column" }}>
                 {form.items.map((item, idx) => {
@@ -18422,7 +18552,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
                   const lineProfit = lineRevenue - lineCost;
                   const lineMargin = lineRevenue > 0 ? (lineProfit / lineRevenue) * 100 : 0;
                   const kindLabel = ({ service: "Service", product: "Product", treatment: "Treatment", part: "Part", bundle: "Parts bundle", custom: "Custom" })[item.kind] || "Custom";
-                  const compactFields = vp.width <= 420;
+                  const compactFields = vp.width <= 520 || (wideEstimateLayout && vp.width < 980);
                   const lineQty = String(item.qty ?? "").trim() === "" ? 1 : (Number.parseFloat(item.qty) || 0);
                   const inventoryStatus = (() => {
                     if (!showInventory) return null;
@@ -18452,14 +18582,14 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
                     return { warning, text: `${stock.onHand} ${stock.unit} on hand${warning ? ` · estimate needs ${lineQty}` : ""}` };
                   })();
                   return (
-                    <div key={item.id} style={{ padding: vp.isPhone ? "12px 14px" : "13px 16px", borderBottom: idx < form.items.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", flexDirection: "column", gap: 8 }}>
+                    <div key={item.id} data-estimate-line-id={item.id} style={{ padding: vp.isPhone ? "12px 14px" : "13px 16px", borderBottom: idx < form.items.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", flexDirection: "column", gap: 8 }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 6, minHeight: 18 }}>
                         <span style={{ display: "inline-flex", alignItems: "center", borderRadius: 100, padding: "3px 7px", background: item.refId || item.kind === "bundle" ? hexA(T.primary, 0.08) : T.surfaceAlt, color: item.refId || item.kind === "bundle" ? T.primary : T.textMuted, fontSize: 9.5, fontWeight: 850, textTransform: "uppercase", letterSpacing: "0.04em" }}>{kindLabel}</span>
                         {(item.refId || item.kind === "bundle") && <span style={{ color: T.textMuted, fontSize: 10.5 }}>Catalog pricing saved to this estimate</span>}
                       </div>
                       <div style={{ display: "flex", alignItems: "flex-end", gap: 7 }}>
                         <div style={{ flex: 1, minWidth: 0 }}><label style={label}>Description</label><input style={field} value={item.desc} onChange={e => setItem(idx, "desc", e.target.value)} placeholder="Service or item description" /></div>
-                        <button onClick={() => removeItem(idx)} disabled={form.items.length === 1} aria-label="Remove line item" style={{ width: 42, height: 44, flexShrink: 0, borderRadius: 11, border: `1px solid ${T.border}`, background: T.surfaceAlt, color: T.textMuted, cursor: form.items.length === 1 ? "default" : "pointer", opacity: form.items.length === 1 ? 0.35 : 1, display: "grid", placeItems: "center" }}><Icon name="close" size={15} /></button>
+                        {canManage && <IconButton icon="close" label="Remove line item" onClick={() => removeItem(idx)} disabled={form.items.length === 1} />}
                       </div>
                       <div style={{ display: "grid", gridTemplateColumns: showProfit ? (compactFields ? "minmax(58px, 0.55fr) repeat(2, minmax(86px, 1fr))" : "minmax(70px, 0.6fr) repeat(2, minmax(105px, 1fr)) minmax(90px, 0.75fr)") : (compactFields ? "minmax(68px, 0.65fr) minmax(110px, 1.35fr)" : "minmax(72px, 0.7fr) minmax(110px, 1.2fr) minmax(90px, 0.8fr)"), gap: 7, alignItems: "end" }}>
                         <div><label style={label}>{item.kind === "bundle" ? "Bundle" : `Qty${item.unit && item.unit !== "service" && item.unit !== "each" ? ` (${item.unit})` : ""}`}</label><input inputMode="decimal" disabled={item.kind === "bundle"} title={item.kind === "bundle" ? "Part quantities are saved inside this bundle" : undefined} style={{ ...field, textAlign: "center", background: item.kind === "bundle" ? T.surfaceAlt : T.surface, color: item.kind === "bundle" ? T.textMuted : T.text }} value={item.kind === "bundle" ? (String(item.qty ?? "").trim() || "1") : item.qty} onChange={e => setItem(idx, "qty", e.target.value.replace(/[^\d.]/g, ""))} /></div>
@@ -18476,9 +18606,9 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
                   );
                 })}
               </div>
-              <div style={{ padding: "11px 14px", borderTop: `1px solid ${T.border}`, background: T.surfaceAlt }}>
-                <button onClick={addItem} style={{ width: "100%", minHeight: 40, borderRadius: 10, border: `1.5px dashed ${T.border}`, background: T.surface, color: T.primary, fontSize: 12.5, fontWeight: 800, fontFamily: "inherit", cursor: "pointer" }}>+ Add one-time custom line</button>
-              </div>
+              {canManage && <div style={{ padding: "11px 14px", borderTop: `1px solid ${T.border}`, background: T.surfaceAlt }}>
+                <Btn variant="outline" onClick={addItem} block>+ Add one-time custom line</Btn>
+              </div>}
             </div>
 
             <div style={card}>
@@ -18487,7 +18617,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
             </div>
           </fieldset>
 
-          <div style={{ display: "flex", flexDirection: "column", gap: 13, position: vp.isDesktop ? "sticky" : "static", top: vp.isDesktop ? 72 : undefined }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 13, position: wideEstimateLayout ? "sticky" : "static", top: wideEstimateLayout ? 72 : undefined }}>
             {showProfit && <div style={card}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
                 <div><div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>Projected job profit</div><div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 2 }}>Internal only · before sales tax</div></div>
@@ -18522,13 +18652,13 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 7 }}>
                   {ESTIMATE_STATUSES.map(({ id, label: statusLabel }) => {
                     const on = form.status === id;
-                    return <button key={id} onClick={() => setEstimateStatus(id)} aria-pressed={on} style={{ minHeight: 40, border: `1.5px solid ${on ? T.primary : T.border}`, borderRadius: 10, background: on ? hexA(T.primary, 0.08) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 750, fontSize: 11.5, fontFamily: "inherit", cursor: "pointer" }}>{statusLabel}</button>;
+                    return <button key={id} onClick={() => setEstimateStatus(id)} aria-pressed={on} style={{ minHeight: 44, border: `1.5px solid ${on ? T.primary : T.border}`, borderRadius: 10, background: on ? hexA(T.primary, 0.08) : T.surface, color: on ? T.primary : T.textMuted, fontWeight: 750, fontSize: 11.5, fontFamily: "inherit", cursor: "pointer" }}>{statusLabel}</button>;
                   })}
                 </div>
               </div>
             </fieldset>
 
-            <div style={{ ...card, display: "flex", flexDirection: "column", gap: 8 }}>
+            <div data-estimate-actions style={{ ...card, display: "flex", flexDirection: "column", gap: 8 }}>
               <div><div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>{canManage ? "Share with client" : "Estimate copy"}</div><div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{canManage ? "Sending saves the estimate as Sent after the server confirms delivery." : "View-only access can download a copy without changing this estimate."}</div></div>
               {canEmailEstimate && <Btn onClick={sendViaEmail} disabled={sending} block style={{ gap: 7 }}><Icon name="mail" size={15} /> {sending ? "Sending…" : "Email estimate"}</Btn>}
               {canTextEstimate && <Btn onClick={sendViaSms} disabled={smsSending} variant="outline" block style={{ gap: 7 }}><Icon name="message" size={15} /> {smsSending ? "Sending…" : "Text estimate"}</Btn>}
@@ -18536,7 +18666,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
               {sentMsg && <div role="status" style={{ fontSize: 11.5, color: T.textMuted, textAlign: "center", lineHeight: 1.45, padding: "4px 2px" }}>{sentMsg}</div>}
             </div>
 
-            {!isNew && canDelete && <button onClick={confirmDelete} style={{ minHeight: 42, background: "transparent", border: `1px solid ${hexA("#E5484D", 0.28)}`, borderRadius: 11, color: "#C0392B", fontSize: 12.5, fontWeight: 750, fontFamily: "inherit", cursor: "pointer" }}>Delete estimate</button>}
+            {!isNew && canDelete && <Btn variant="danger" onClick={confirmDelete} block><Icon name="trash" size={14} /> Delete estimate</Btn>}
           </div>
         </div>
       </div>
@@ -22848,7 +22978,7 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
 function StaffChat({ client, currentUser, T, onBack, embedded = false }) {
   const initials = (client?.name || "?").trim().split(/\s+/).map(w => w[0]).slice(0, 2).join("").toUpperCase() || "?";
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: embedded ? "100%" : "clamp(430px, calc(100dvh - 238px), 760px)", minHeight: 0 }}>
+    <div style={{ display: "flex", flexDirection: "column", height: embedded ? "100%" : "min(760px, calc(100dvh - 238px))", maxHeight: embedded ? "100%" : "calc(100dvh - 238px)", minHeight: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 11, marginBottom: 10, paddingBottom: 12, borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
         {!embedded && (
           <button onClick={onBack} aria-label="Back to conversations" style={{ width: 40, height: 40, borderRadius: 12, background: T.surfaceAlt, border: "none", color: T.primary, cursor: "pointer", padding: 0, display: "grid", placeItems: "center", flexShrink: 0 }}>
@@ -24978,7 +25108,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
         </>
       ) : sentView}
       {phone && selMode && folder === "inbox" && createPortal(
-        <div style={{ position: "fixed", left: "max(12px, env(safe-area-inset-left))", right: "max(12px, env(safe-area-inset-right))", bottom: "calc(76px + env(safe-area-inset-bottom))", zIndex: 98, maxWidth: 560, height: 58, margin: "0 auto", padding: "0 8px", boxSizing: "border-box", display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", alignItems: "stretch", background: hexA(T.surface, 0.97), border: `1px solid ${T.border}`, borderRadius: 18, boxShadow: "0 8px 28px rgba(0,0,0,0.18)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}>
+        <div style={{ position: "fixed", left: "max(12px, env(safe-area-inset-left))", right: "max(12px, env(safe-area-inset-right))", bottom: "var(--sps-floating-action-bottom, calc(env(safe-area-inset-bottom) + 76px))", zIndex: 98, maxWidth: 560, height: 58, margin: "0 auto", padding: "0 8px", boxSizing: "border-box", display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", alignItems: "stretch", background: hexA(T.surface, 0.97), border: `1px solid ${T.border}`, borderRadius: 18, boxShadow: "0 8px 28px rgba(0,0,0,0.18)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}>
           {[
             ["check", "Read", () => { markRead(selIds, true); exitSelect(); }],
             ["mail", "Unread", () => { markRead(selIds, false); exitSelect(); }],
@@ -31314,7 +31444,7 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
       <div style={{ display: "grid", gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))`, gap: 6 }}>
         {options.map(([val, lbl]) => (
           <button key={val} onClick={() => onChange(val)}
-            style={{ minHeight: 40, padding: compact ? "7px 5px" : "6px 14px", borderRadius: 100, border: `1.5px solid ${value === val ? T.primary : T.border}`, background: value === val ? hexA(T.primary, 0.1) : T.surface, color: value === val ? T.primary : T.textMuted, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
+            style={{ minHeight: compact ? 44 : 40, padding: compact ? "7px 5px" : "6px 14px", borderRadius: 100, border: `1.5px solid ${value === val ? T.primary : T.border}`, background: value === val ? hexA(T.primary, 0.1) : T.surface, color: value === val ? T.primary : T.textMuted, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
             {lbl}
           </button>
         ))}
@@ -31342,7 +31472,7 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
           <div style={{ fontSize: 12, color: T.textMuted, marginTop: 4 }}>{client.name}{effectiveTier(client) ? ` · ${effectiveTier(client)} Plan` : ""}</div>
           {!isStaffPreview && (<>
             <button onClick={() => { setPwOpen(o => !o); setPwMsg(null); }}
-              style={{ marginTop: 12, background: hexA(T.primary, 0.1), color: T.primary, border: "none", borderRadius: 10, padding: "9px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 6 }}>
+              style={{ minHeight: 44, marginTop: 12, background: hexA(T.primary, 0.1), color: T.primary, border: "none", borderRadius: 10, padding: "9px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 6 }}>
               <Icon name="lock" size={14} /> Change Password
             </button>
             {pwOpen && (
@@ -31531,7 +31661,14 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
     const initial = prefs.defaultPage || branding.portalDefaultPage || "cp_home";
     return initial === "cp_request" ? "cp_messages" : initial;
   });
+  const portalMainRef = useRef(null);
   useEffect(() => { try { sessionStorage.setItem(cpPageKey, page); } catch (_) {} }, [page, cpPageKey]);
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      if (portalMainRef.current) portalMainRef.current.scrollTop = 0;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [page, settingsOpen]);
 
   // Poll for unread staff replies — shows dot on Messages tab
   const [portalUnread, setPortalUnread] = useState(0);
@@ -31555,6 +31692,8 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
     return () => clearInterval(iv);
   }, [client.id, isStaffPreview]);
   const vp = useViewport();
+  const portalKeyboardInset = useKeyboardInset();
+  const portalKeyboardOpen = portalKeyboardInset > 120;
   const wide = vp.isTablet || vp.isDesktop;
   // Render the upgraded sidebar shell on any desktop-width viewport — INCLUDING staff "Preview
   // Portal as X", so the owner sees the real desktop client experience. Preview's wrapper is
@@ -31585,7 +31724,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
   );
 
   return (
-    <div style={{ fontFamily: fontStack, background: T.bg, display: "flex", flexDirection: isDesktopShell ? "row" : "column", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ...(isStaffPreview ? { position: "relative", minHeight: "100%" } : { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden" }) }}>
+    <div style={{ fontFamily: fontStack, background: T.bg, display: "flex", flexDirection: isDesktopShell ? "row" : "column", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ["--sps-page-bottom-clearance"]: "calc(env(safe-area-inset-bottom) + 124px)", ["--sps-floating-action-bottom"]: "calc(env(safe-area-inset-bottom) + 76px)", ...(isStaffPreview ? { position: "relative", minHeight: "100%" } : { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden" }) }}>
       <style>{`
         * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
         ${isStaffPreview ? "" : `/* Lock the document so only <main> scrolls — position:fixed on <body>
@@ -31601,6 +31740,8 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
         input[type="checkbox"], input[type="radio"] { -webkit-appearance: auto; appearance: auto; }
         input:focus, select:focus, textarea:focus { border-color: ${T.primary} !important; outline: none; box-shadow: 0 0 0 3px ${hexA(T.primary, 0.15)}; }
         button { transition: transform 0.08s ease, opacity 0.15s ease; }
+        button:disabled { cursor: not-allowed !important; }
+        button:focus-visible, a:focus-visible, [role="button"]:focus-visible { outline: 3px solid ${hexA(T.primary, 0.22)}; outline-offset: 2px; }
         button:active { transform: scale(0.97); }
         /* Keep the native calendar / clock picker affordance on date & time fields */
         input[type="date"], input[type="time"] { -webkit-appearance: auto; appearance: auto; position: relative; }
@@ -31656,18 +31797,19 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
       {/* Main content — desktop docks beside the sidebar; on mobile <main> is the only scroller */}
       {isDesktopShell ? (
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", ...(isStaffPreview ? {} : { overflow: "hidden" }) }}>
-          <main style={{ flex: 1, ...(isStaffPreview ? {} : { minHeight: 0, overflowY: "auto" }), padding: vp.isTablet ? "24px 22px" : "32px 40px", fontSize: `${textScale}em` }}>
+          <main ref={portalMainRef} style={{ flex: 1, ...(isStaffPreview ? {} : { minHeight: 0, overflowY: "auto" }), padding: vp.isTablet ? "24px 22px" : "32px 40px", fontSize: `${textScale}em` }}>
             <div style={{ maxWidth: vp.isTablet ? 1040 : ((page === "cp_invoices" || page === "cp_home" || page === "cp_property") ? 1320 : 940), margin: "0 auto", width: "100%" }}>{screens}</div>
           </main>
         </div>
       ) : (
-        <main style={{ flex: 1, ...(isStaffPreview ? {} : { minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }), padding: "20px 16px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(env(safe-area-inset-bottom) + 96px)", fontSize: `${textScale}em` }}>
+        <main ref={portalMainRef} data-sps-app-scroll onFocusCapture={keepFocusedControlVisible} style={{ flex: 1, ...(isStaffPreview ? {} : { minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }), padding: "20px 16px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: portalKeyboardOpen ? `calc(${portalKeyboardInset}px + 40px)` : "var(--sps-page-bottom-clearance)", scrollPaddingBottom: portalKeyboardOpen ? portalKeyboardInset + 40 : "var(--sps-page-bottom-clearance)", fontSize: `${textScale}em` }}>
           {screens}
+          <div aria-hidden="true" data-sps-page-end style={{ height: 1 }} />
         </main>
       )}
 
       {/* Floating capsule bottom nav (mobile only) — matches the staff floating pill. */}
-      {!isDesktopShell && (
+      {!isDesktopShell && !portalKeyboardOpen && (
       <nav style={{ position: "fixed", left: "max(14px, env(safe-area-inset-left))", right: "max(14px, env(safe-area-inset-right))", bottom: "calc(env(safe-area-inset-bottom) + 4px)", zIndex: 90, height: 64, borderRadius: 32, background: hexA(T.surface, 0.94), backdropFilter: "saturate(180%) blur(22px)", WebkitBackdropFilter: "saturate(180%) blur(22px)", border: `1px solid ${T.border}`, boxShadow: "0 12px 32px rgba(0,0,0,0.20), 0 3px 10px rgba(0,0,0,0.08)", display: "flex", alignItems: "stretch", padding: "0 8px", WebkitTapHighlightColor: "transparent" }}>
         {CLIENT_NAV.map(n => {
           const active = (page === n.id || (n.id === "cp_property" && (page === "cp_pond" || page === "cp_service"))) && !settingsOpen;
@@ -31888,6 +32030,7 @@ async function readStopMutationBaseline(fallbacks) {
 }
 
 export default function App({ authEmail = "", onSignOut }) {
+  const appMainRef = useRef(null);
   const [selectedClient, setSelectedClient] = useState(null);
   const [clientOpenTab, setClientOpenTab] = useState(null); // which ClientDetail tab to open (e.g. from a Home alert)
   const [scheduleFocus, setScheduleFocus] = useState(null); // { sid, date } — open a specific stop from Home
@@ -32027,6 +32170,8 @@ export default function App({ authEmail = "", onSignOut }) {
   // rotate / background / remount never loses the tech's work. Keyed by sid; cleared on finish.
   const [stopDrafts, setStopDrafts] = useStoredState("sps_stop_drafts", {});
   const vp = useViewport();
+  const keyboardInset = useKeyboardInset();
+  const keyboardOpen = keyboardInset > 120;
   // Desktop fill is driven by ENVIRONMENT, not platform alone. A real desktop browser
   // — or the Mac app, which reports getPlatform()==='ios' but a 'Macintosh' user-agent
   // with NO touch — should fill + reflow like the web desktop view. A genuine iPad is a
@@ -32872,6 +33017,11 @@ export default function App({ authEmail = "", onSignOut }) {
     await Promise.race([cleanup, new Promise(resolve => setTimeout(resolve, 1800))]);
     if (onSignOut) await onSignOut();
   };
+  const resetAppMainScroll = () => {
+    requestAnimationFrame(() => {
+      if (appMainRef.current) appMainRef.current.scrollTop = 0;
+    });
+  };
   // first real sign-in (no emails assigned yet) claims the owner account automatically
   useEffect(() => {
     // Don't touch the team while the initial read failed — `team` is the seeded DEFAULT_TEAM right
@@ -32887,7 +33037,7 @@ export default function App({ authEmail = "", onSignOut }) {
     });
   }, [ltm, emailKey, currentUser, anyEmail]);
 
-  const handleClientSelect = (c, tab) => { setSelectedClient(c); setClientOpenTab(tab || null); setAdding(false); setPage("clients"); window.scrollTo({ top: 0, behavior: "instant" }); };
+  const handleClientSelect = (c, tab) => { setSelectedClient(c); setClientOpenTab(tab || null); setAdding(false); setPage("clients"); resetAppMainScroll(); };
   // Tap a Home alert → open that client's record at their service history (where the flagged visit's report + photos live).
   const handleOpenAlert = (a) => { const c = (clients || []).find(x => String(x.id) === String(a && a.clientId)); if (c) handleClientSelect(c, "history"); };
   // Tap a Home "Today's Route" stop → jump to Schedule and open that stop to edit.
@@ -33089,25 +33239,52 @@ export default function App({ authEmail = "", onSignOut }) {
   // "Not now" snoozes 14 days — for plain techs and portal clients the primer is the ONLY
   // enable surface (the Comms settings card is permission-gated), so it must come back.
   const [pushPrimer, setPushPrimer] = useState(false);
+  const [pushPrimerBusy, setPushPrimerBusy] = useState(false);
+  const [pushPrimerError, setPushPrimerError] = useState("");
   useEffect(() => {
     if (!hydrated || (!currentUser && !clientUser)) return;
-    let seen = false;
-    try {
-      if (localStorage.getItem("sps_push_disabled")) seen = true; // explicit opt-out — never re-ask
-      const v = localStorage.getItem("sps_push_primer");
-      if (v === "done" || v === "1") seen = true;
-      else if (Number(v) > 0 && Date.now() - Number(v) < 14 * 24 * 3600 * 1000) seen = true;
-    } catch (_) {}
-    if (seen) return;
+    let cancelled = false;
     (async () => {
-      try { const st = await pushPermissionState(); if (st === "prompt" || st === "error") setPushPrimer(true); } catch (_) {}
+      try {
+        // iOS is the source of truth. Older builds wrote "done" before permission/registration
+        // succeeded, so that marker must never hide a still-pending native permission request.
+        const state = await pushPermissionState();
+        if (cancelled || (state !== "prompt" && state !== "prompt-with-rationale" && state !== "error")) return;
+        let snoozed = false;
+        try {
+          if (localStorage.getItem("sps_push_disabled")) snoozed = true; // explicit opt-out
+          const marker = localStorage.getItem("sps_push_primer");
+          const snoozeAt = Number(marker);
+          if (snoozeAt > 0 && Date.now() - snoozeAt < 14 * 24 * 3600 * 1000) snoozed = true;
+          // Clear stale success from pre-fix builds so this device gets a real recovery path.
+          if (marker === "done" || marker === "1") localStorage.removeItem("sps_push_primer");
+        } catch (_) {}
+        if (!snoozed) setPushPrimer(true);
+      } catch (_) {}
     })();
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated, !!currentUser, !!clientUser]);
-  const dismissPushPrimer = (enable) => {
-    try { localStorage.setItem("sps_push_primer", enable ? "done" : String(Date.now())); } catch (_) {}
-    setPushPrimer(false);
-    if (enable) enableDevicePush();
+  const dismissPushPrimer = async (enable) => {
+    if (pushPrimerBusy) return;
+    if (!enable) {
+      try { localStorage.setItem("sps_push_primer", String(Date.now())); } catch (_) {}
+      setPushPrimerError("");
+      setPushPrimer(false);
+      return;
+    }
+    setPushPrimerBusy(true);
+    setPushPrimerError("");
+    const result = await enableDevicePush();
+    setPushPrimerBusy(false);
+    if (result.ok) {
+      try { localStorage.setItem("sps_push_primer", "done"); } catch (_) {}
+      setPushPrimer(false);
+      return;
+    }
+    // Keep the recovery UI visible and never persist success until the token is saved server-side.
+    try { localStorage.removeItem("sps_push_primer"); } catch (_) {}
+    setPushPrimerError(result.error || "Couldn't enable notifications. Please try again.");
   };
 
   const _openParamRef = useRef(false);
@@ -33434,7 +33611,7 @@ export default function App({ authEmail = "", onSignOut }) {
     setSettingsSection(opts.settingsSection || null);
     setCommsSection(opts.commsSection || null);
     if (opts.commsSection) setCommsSectionNonce(n => n + 1);
-    window.scrollTo({ top: 0, behavior: "instant" });
+    resetAppMainScroll();
   };
 
   // Bottom-bar / sidebar / menu navigation. Switching to a DIFFERENT section keeps that
@@ -33452,14 +33629,14 @@ export default function App({ authEmail = "", onSignOut }) {
       // Schedule keeps its day/tech in a module cache; clear it and remount so a re-tap
       // returns to today's overview (matches how re-tapping Clients returns to the list).
       if (id === "schedule") { SCHED_VIEW = { date: null, tech: null }; setSchedNonce(n => n + 1); }
-      window.scrollTo({ top: 0, behavior: "instant" });
+      resetAppMainScroll();
       return;
     }
     // Switching sections → just change page; leave sub-state (open client, Schedule day/tech) intact.
     setPage(id);
     setSettingsTab(null); // clear any Customize deep-link so a normal Customize tap opens its default tab
     setCommsSection(null); // normal Comms navigation should not retain a one-time deep link
-    window.scrollTo({ top: 0, behavior: "instant" });
+    resetAppMainScroll();
   };
 
   // Consume in-app deep links (spsway://alerts / schedule / invoices). Owner-email "Open
@@ -34101,9 +34278,14 @@ export default function App({ authEmail = "", onSignOut }) {
             <div style={{ fontSize: 14, color: pT.textMuted, lineHeight: 1.55 }}>
               Get a ping when {pBranding.companyName || "your service team"} sends you a message, an invoice, or a visit report.
             </div>
+            {pushPrimerError && (
+              <div role="alert" style={{ fontSize: 12.5, lineHeight: 1.45, color: "#B42318", background: "rgba(180,35,24,0.08)", borderRadius: 10, padding: "9px 11px" }}>
+                {pushPrimerError}
+              </div>
+            )}
             <div style={{ display: "flex", gap: 10 }}>
-              <button onClick={() => dismissPushPrimer(false)} style={{ flex: 1, padding: "12px 14px", borderRadius: 12, border: `1.5px solid ${pT.border}`, background: pT.surface, color: pT.text, fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Not now</button>
-              <button onClick={() => dismissPushPrimer(true)} style={{ flex: 1, padding: "12px 14px", borderRadius: 12, border: "none", background: pT.primary, color: "#ffffff", fontWeight: 800, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Turn on</button>
+              <button disabled={pushPrimerBusy} onClick={() => dismissPushPrimer(false)} style={{ flex: 1, padding: "12px 14px", borderRadius: 12, border: `1.5px solid ${pT.border}`, background: pT.surface, color: pT.text, fontWeight: 700, fontSize: 14, cursor: pushPrimerBusy ? "default" : "pointer", opacity: pushPrimerBusy ? 0.6 : 1, fontFamily: "inherit" }}>Not now</button>
+              <button disabled={pushPrimerBusy} onClick={() => dismissPushPrimer(true)} style={{ flex: 1, padding: "12px 14px", borderRadius: 12, border: "none", background: pT.primary, color: "#ffffff", fontWeight: 800, fontSize: 14, cursor: pushPrimerBusy ? "default" : "pointer", opacity: pushPrimerBusy ? 0.72 : 1, fontFamily: "inherit" }}>{pushPrimerBusy ? "Connecting…" : "Turn on"}</button>
             </div>
           </div>
         </div>
@@ -34227,8 +34409,11 @@ export default function App({ authEmail = "", onSignOut }) {
           button { -webkit-tap-highlight-color: transparent; }
           @media (max-width: 699px), (max-height: 559px) and (pointer: coarse) {
             .sps-btn { min-height: 44px; }
-            .sps-btn-sm { min-height: 40px; }
+            .sps-btn-sm { min-height: 44px; }
+            .sps-btn-lg { min-height: 48px; }
           }
+          button:disabled { cursor: not-allowed !important; }
+          button:focus-visible, a:focus-visible, [role="button"]:focus-visible { outline: 3px solid var(--ring); outline-offset: 2px; }
           button, a { transition: transform .1s cubic-bezier(.34,1.56,.64,1), opacity .15s ease, background .15s ease; }
           button:active:not(:disabled) { transform: scale(0.95); opacity: 0.85; }
           @media (hover: hover) { button:hover:not(:disabled) { filter: brightness(1.05); } }
@@ -34295,14 +34480,19 @@ export default function App({ authEmail = "", onSignOut }) {
   // in the mobile return, so at vp.isDesktop (>=700px: iPad, the Mac app, and iPhone in landscape)
   // the effect could set pushPrimer=true but nothing showed it → the OS prompt was never reachable.
   const pushPrimerModal = pushPrimer ? (
-    <Modal title="Turn on notifications?" onClose={() => dismissPushPrimer(false)} maxWidth={430}>
+    <Modal title="Turn on notifications?" onClose={() => { if (!pushPrimerBusy) dismissPushPrimer(false); }} maxWidth={430}>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div style={{ fontSize: 14, color: T.text, lineHeight: 1.55 }}>
           Get a ping the moment it matters — new leads, payments, completed stops, and messages, right on your lock screen. You can fine-tune which events notify you anytime in Comms → Settings.
         </div>
+        {pushPrimerError && (
+          <div role="alert" style={{ fontSize: 12.5, lineHeight: 1.45, color: "#B42318", background: hexA("#B42318", 0.08), borderRadius: 10, padding: "9px 11px" }}>
+            {pushPrimerError}
+          </div>
+        )}
         <div style={{ display: "flex", gap: 10 }}>
-          <Btn variant="ghost" block onClick={() => dismissPushPrimer(false)}>Not now</Btn>
-          <Btn variant="primary" block onClick={() => dismissPushPrimer(true)}>Turn on</Btn>
+          <Btn variant="ghost" block onClick={pushPrimerBusy ? undefined : () => dismissPushPrimer(false)}>Not now</Btn>
+          <Btn variant="primary" block onClick={pushPrimerBusy ? undefined : () => dismissPushPrimer(true)}>{pushPrimerBusy ? "Connecting…" : "Turn on"}</Btn>
         </div>
       </div>
     </Modal>
@@ -34327,7 +34517,7 @@ export default function App({ authEmail = "", onSignOut }) {
                 <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 10, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Retry</button>
               </div>
             )}
-            <main style={{ flex: 1, minHeight: 0, ...(dtMasterDetail
+            <main ref={appMainRef} style={{ flex: 1, minHeight: 0, ...(dtMasterDetail
               ? { display: "flex", overflow: "hidden" }
               : { overflowY: "auto", padding: vp.isTablet ? "22px 22px" : (isDesktopWeb ? "30px 48px" : "28px 36px"), maxWidth: isDesktopWeb ? "none" : 1180, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: 40 }) }}>
               {pageBody}
@@ -34352,6 +34542,8 @@ export default function App({ authEmail = "", onSignOut }) {
         WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em",
         // CSS vars used by the global polish layer below
         ["--ring"]: hexA(T.primary, 0.22), ["--ringBorder"]: T.primary,
+        ["--sps-page-bottom-clearance"]: "calc(env(safe-area-inset-bottom) + 124px)",
+        ["--sps-floating-action-bottom"]: "calc(env(safe-area-inset-bottom) + 76px)",
       }}>
         <style>{`
           *, *::before, *::after { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
@@ -34383,8 +34575,11 @@ export default function App({ authEmail = "", onSignOut }) {
           button { -webkit-tap-highlight-color: transparent; }
           @media (max-width: 699px), (max-height: 559px) and (pointer: coarse) {
             .sps-btn { min-height: 44px; }
-            .sps-btn-sm { min-height: 40px; }
+            .sps-btn-sm { min-height: 44px; }
+            .sps-btn-lg { min-height: 48px; }
           }
+          button:disabled { cursor: not-allowed !important; }
+          button:focus-visible, a:focus-visible, [role="button"]:focus-visible { outline: 3px solid var(--ring); outline-offset: 2px; }
           button, a { transition: transform .1s cubic-bezier(.34,1.56,.64,1), opacity .15s ease, background .15s ease; }
           button:active:not(:disabled) { transform: scale(0.95); opacity: 0.85; }
           @media (hover: hover) { button:hover:not(:disabled) { filter: brightness(1.05); } }
@@ -34443,15 +34638,16 @@ export default function App({ authEmail = "", onSignOut }) {
             <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 10, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, display:"flex", alignItems:"center", gap:5 }}>Retry</button>
           </div>
         )}
-        <main style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", alignSelf: "center", padding: isCommsRoute ? (vp.isPhone ? "0 16px" : "0 32px") : (vp.isPhone ? `${isEstimatesRoute ? 0 : 22}px 16px` : "28px 32px"), maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: "calc(env(safe-area-inset-bottom) + 96px)" }}>
+        <main ref={appMainRef} data-sps-app-scroll onFocusCapture={keepFocusedControlVisible} style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", alignSelf: "center", padding: isCommsRoute ? (vp.isPhone ? "0 16px" : "0 32px") : (vp.isPhone ? `${isEstimatesRoute ? 0 : 22}px 16px` : "28px 32px"), maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: keyboardOpen ? `calc(${keyboardInset}px + 40px)` : "var(--sps-page-bottom-clearance)", scrollPaddingBottom: keyboardOpen ? keyboardInset + 40 : "var(--sps-page-bottom-clearance)" }}>
           {pageBody}
+          <div aria-hidden="true" data-sps-page-end style={{ height: 1 }} />
         </main>
 
         {/* Floating capsule bottom nav (MOBILE ONLY) — customizable dock + Menu.
             A rounded pill that floats above the safe area with a gap on every side; desktop/iPad
             uses the sidebar instead. The first 4 dock slots (set in Menu or Customize → Logo &
             Identity) show here; Menu is always last. */}
-        {(() => {
+        {!keyboardOpen && (() => {
           const docked = dockIds.slice(0, 4);
           const primary = docked.map(id => {
             const n = ALL_NAV.find(x => x.id === id);
