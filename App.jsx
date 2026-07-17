@@ -28120,7 +28120,7 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
   // Debt tools: per-debt payoff calculator + the AI payoff strategy
   const [calcFor, setCalcFor] = useState(null); // debt id with the calculator open
   const [calcPay, setCalcPay] = useState("");
-  // Money-plan nudge (the app computes the transfer; the OWNER moves the money in their bank)
+  // Money-plan nudge (a monthly reserve target; the app never moves money)
   const [nudgeBusy, setNudgeBusy] = useState(false);
   const [nudgeMsg, setNudgeMsg] = useState(null); // { ok, text }
   const nudgeCfg = (scheduleCfg && scheduleCfg.transferNudge) || {};
@@ -28398,7 +28398,7 @@ function BudgetHub({ budget, setBudget, clients, costs, invoices, onNav, T, vp =
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", rowGap: 8 }}>
                       <div>
                         <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text }}>Money-plan nudge</div>
-                        <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2 }}>Texts/emails you the exact transfer to make — you move the money in your bank.</div>
+                        <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2 }}>Texts/emails you an updated monthly reserve target and the next useful step.</div>
                       </div>
                       <Toggle on={!!nudgeCfg.on} onChange={v => setNudge({ on: v })} />
                     </div>
