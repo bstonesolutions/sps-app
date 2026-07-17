@@ -8,13 +8,28 @@ test("staff and client shells keep page actions reachable above the mobile nav a
   const app = await loadApp();
 
   assert.equal((app.match(/data-sps-app-scroll/g) || []).length, 2, "both app shells should own their mobile scroll surface");
-  assert.equal((app.match(/data-sps-page-end/g) || []).length, 2, "both shells should include a physical end-of-page target");
+  assert.match(app, /function MobilePageEndClearance\(\{ keyboardOpen = false, keyboardInset = 0 \}\)/);
+  assert.equal((app.match(/<MobilePageEndClearance /g) || []).length, 2, "both shells should render the physical end-of-page clearance block");
+  assert.match(app, /data-sps-page-end-clearance/);
+  assert.match(app, /height, minHeight: height, flex: `0 0 \$\{height\}`/);
   assert.ok((app.match(/--sps-page-bottom-clearance/g) || []).length >= 4, "shared nav clearance should be defined and consumed by both shells");
+  assert.ok((app.match(/--sps-mobile-nav-reserve/g) || []).length >= 4, "both shells should reserve the floating dock outside the scroll viewport");
   assert.ok((app.match(/--sps-floating-action-bottom/g) || []).length >= 6, "all mobile action bars should use the same nav offset");
-  assert.match(app, /paddingBottom: keyboardOpen \? `calc\(\$\{keyboardInset\}px \+ 40px\)` : "var\(--sps-page-bottom-clearance\)"/);
-  assert.match(app, /paddingBottom: portalKeyboardOpen \? `calc\(\$\{portalKeyboardInset\}px \+ 40px\)` : "var\(--sps-page-bottom-clearance\)"/);
+  assert.equal((app.match(/paddingBottom: 0, scrollPaddingBottom:/g) || []).length, 2, "mobile shells must not depend on Safari scroll-container padding for reachability");
+  assert.match(app, /marginBottom: keyboardOpen \? 0 : "var\(--sps-mobile-nav-reserve\)"/);
+  assert.match(app, /marginBottom: portalKeyboardOpen \? 0 : "var\(--sps-mobile-nav-reserve\)"/);
+  assert.match(app, /<MobilePageEndClearance keyboardOpen=\{keyboardOpen\} keyboardInset=\{keyboardInset\} \/>/);
+  assert.match(app, /<MobilePageEndClearance keyboardOpen=\{portalKeyboardOpen\} keyboardInset=\{portalKeyboardInset\} \/>/);
   assert.match(app, /!keyboardOpen && \(\(\) => \{/);
   assert.match(app, /!isDesktopShell && !portalKeyboardOpen && \(/);
+
+  // Geometry contract: <main> physically ends above the 64px dock and its 4px bottom gap, with
+  // extra separation. The real end block then provides ordinary content breathing room.
+  const reserves = [...app.matchAll(/\["--sps-mobile-nav-reserve"\]: "calc\(env\(safe-area-inset-bottom\) \+ (\d+)px\)"/g)]
+    .map((match) => Number(match[1]));
+  assert.equal(reserves.length, 2, "staff and client shells should declare the same measured dock reserve");
+  assert.ok(reserves.every((value) => value >= 64 + 4 + 8), "scroll viewport must end above the dock instead of beneath it");
+  assert.equal((app.match(/\["--sps-page-bottom-clearance"\]: "24px"/g) || []).length, 2, "the physical page-end block should keep a consistent 24px content gap");
 });
 
 test("navigation resets the real app scrollers instead of the locked window", async () => {

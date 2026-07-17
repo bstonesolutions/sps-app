@@ -5387,6 +5387,24 @@ function keepFocusedControlVisible(event) {
   }, 120);
 }
 
+// Mobile Safari/WKWebView can omit scroll-container padding from the reachable scroll range when
+// the container is also a flex child.  A real block at the end of the scroll content is therefore
+// more reliable than padding alone: at maximum scroll, the last action stays fully above the
+// floating navigation dock instead of stopping behind it.
+function MobilePageEndClearance({ keyboardOpen = false, keyboardInset = 0 }) {
+  const height = keyboardOpen
+    ? `calc(${Math.max(0, Number(keyboardInset) || 0)}px + 40px)`
+    : "var(--sps-page-bottom-clearance)";
+  return (
+    <div
+      aria-hidden="true"
+      data-sps-page-end
+      data-sps-page-end-clearance
+      style={{ display: "block", width: "100%", height, minHeight: height, flex: `0 0 ${height}`, pointerEvents: "none" }}
+    />
+  );
+}
+
 // A portal removes a sheet from the page scroller's ancestry, but iOS can keep an existing
 // momentum scroll alive underneath it. Freeze every app/modal scroll surface while a blocking
 // sheet is mounted, then restore the exact inline styles and scroll positions on close.
@@ -31724,7 +31742,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
   );
 
   return (
-    <div style={{ fontFamily: fontStack, background: T.bg, display: "flex", flexDirection: isDesktopShell ? "row" : "column", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ["--sps-page-bottom-clearance"]: "calc(env(safe-area-inset-bottom) + 124px)", ["--sps-floating-action-bottom"]: "calc(env(safe-area-inset-bottom) + 76px)", ...(isStaffPreview ? { position: "relative", minHeight: "100%" } : { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden" }) }}>
+    <div style={{ fontFamily: fontStack, background: T.bg, display: "flex", flexDirection: isDesktopShell ? "row" : "column", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ["--sps-mobile-nav-reserve"]: "calc(env(safe-area-inset-bottom) + 76px)", ["--sps-page-bottom-clearance"]: "24px", ["--sps-floating-action-bottom"]: "calc(env(safe-area-inset-bottom) + 76px)", ...(isStaffPreview ? { position: "relative", minHeight: "100%" } : { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden" }) }}>
       <style>{`
         * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
         ${isStaffPreview ? "" : `/* Lock the document so only <main> scrolls — position:fixed on <body>
@@ -31802,9 +31820,9 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
           </main>
         </div>
       ) : (
-        <main ref={portalMainRef} data-sps-app-scroll onFocusCapture={keepFocusedControlVisible} style={{ flex: 1, ...(isStaffPreview ? {} : { minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }), padding: "20px 16px", maxWidth: 600, margin: "0 auto", width: "100%", boxSizing: "border-box", paddingBottom: portalKeyboardOpen ? `calc(${portalKeyboardInset}px + 40px)` : "var(--sps-page-bottom-clearance)", scrollPaddingBottom: portalKeyboardOpen ? portalKeyboardInset + 40 : "var(--sps-page-bottom-clearance)", fontSize: `${textScale}em` }}>
+        <main ref={portalMainRef} data-sps-app-scroll onFocusCapture={keepFocusedControlVisible} style={{ flex: 1, ...(isStaffPreview ? {} : { minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }), padding: "20px 16px", maxWidth: 600, margin: "0 auto", marginBottom: portalKeyboardOpen ? 0 : "var(--sps-mobile-nav-reserve)", width: "100%", boxSizing: "border-box", paddingBottom: 0, scrollPaddingBottom: portalKeyboardOpen ? portalKeyboardInset + 40 : "var(--sps-page-bottom-clearance)", fontSize: `${textScale}em` }}>
           {screens}
-          <div aria-hidden="true" data-sps-page-end style={{ height: 1 }} />
+          <MobilePageEndClearance keyboardOpen={portalKeyboardOpen} keyboardInset={portalKeyboardInset} />
         </main>
       )}
 
@@ -34542,7 +34560,8 @@ export default function App({ authEmail = "", onSignOut }) {
         WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em",
         // CSS vars used by the global polish layer below
         ["--ring"]: hexA(T.primary, 0.22), ["--ringBorder"]: T.primary,
-        ["--sps-page-bottom-clearance"]: "calc(env(safe-area-inset-bottom) + 124px)",
+        ["--sps-mobile-nav-reserve"]: "calc(env(safe-area-inset-bottom) + 76px)",
+        ["--sps-page-bottom-clearance"]: "24px",
         ["--sps-floating-action-bottom"]: "calc(env(safe-area-inset-bottom) + 76px)",
       }}>
         <style>{`
@@ -34638,9 +34657,9 @@ export default function App({ authEmail = "", onSignOut }) {
             <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 10, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, display:"flex", alignItems:"center", gap:5 }}>Retry</button>
           </div>
         )}
-        <main ref={appMainRef} data-sps-app-scroll onFocusCapture={keepFocusedControlVisible} style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", alignSelf: "center", padding: isCommsRoute ? (vp.isPhone ? "0 16px" : "0 32px") : (vp.isPhone ? `${isEstimatesRoute ? 0 : 22}px 16px` : "28px 32px"), maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: keyboardOpen ? `calc(${keyboardInset}px + 40px)` : "var(--sps-page-bottom-clearance)", scrollPaddingBottom: keyboardOpen ? keyboardInset + 40 : "var(--sps-page-bottom-clearance)" }}>
+        <main ref={appMainRef} data-sps-app-scroll onFocusCapture={keepFocusedControlVisible} style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", alignSelf: "center", padding: isCommsRoute ? (vp.isPhone ? "0 16px" : "0 32px") : (vp.isPhone ? `${isEstimatesRoute ? 0 : 22}px 16px` : "28px 32px"), maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", marginBottom: keyboardOpen ? 0 : "var(--sps-mobile-nav-reserve)", width: "100%", boxSizing: "border-box", paddingBottom: 0, scrollPaddingBottom: keyboardOpen ? keyboardInset + 40 : "var(--sps-page-bottom-clearance)" }}>
           {pageBody}
-          <div aria-hidden="true" data-sps-page-end style={{ height: 1 }} />
+          <MobilePageEndClearance keyboardOpen={keyboardOpen} keyboardInset={keyboardInset} />
         </main>
 
         {/* Floating capsule bottom nav (MOBILE ONLY) — customizable dock + Menu.
