@@ -19,7 +19,7 @@ delete process.env.APNS_TEAM_ID;
 delete process.env.APNS_PRIVATE_KEY;
 
 const { default: sendSmsHandler } = await import("../api/send-sms.js");
-const { default: smsIntakeHandler } = await import("../api/sms-intake.js");
+const { default: smsIntakeHandler, inboundTextStaffKeys, pushLegNeedsRetry } = await import("../api/sms-intake.js");
 const { memberHasCapability, requireOwner } = await import("../api/_staff-auth.js");
 
 const originalFetch = globalThis.fetch;
@@ -89,8 +89,14 @@ function installOutboundFetch({
   textSafetyClientsFailure = false,
   inboxRows = null,
   inboxFailure = false,
+  receiptFailure = false,
+  quoStatus = 200,
+  quoThrows = false,
+  quoDelayMs = 0,
 } = {}) {
-  const calls = { quo: 0, quoBodies: [], quoNumberChecks: 0, textSafetyChecks: 0, textSafetyClientChecks: 0, inboxLookups: 0 };
+  let receiptValue;
+  let receiptVersion = 0;
+  const calls = { quo: 0, quoBodies: [], quoNumberChecks: 0, textSafetyChecks: 0, textSafetyClientChecks: 0, inboxLookups: 0, receiptReads: 0, receiptWrites: 0 };
   globalThis.fetch = async (url, options = {}) => {
     const target = String(url);
     if (target.endsWith("/auth/v1/user")) {
@@ -113,6 +119,27 @@ function installOutboundFetch({
         ? response({ error: "unavailable" }, { ok: false, status: 503 })
         : response([{ value: JSON.stringify(textSafetyClients) }]);
     }
+    if (target.includes("/rest/v1/app_state?") && target.includes("key=eq.sps_sms_delivery_receipts")) {
+      calls.receiptReads += 1;
+      if (receiptFailure) return response({ error: "receipt store unavailable" }, { ok: false, status: 503 });
+      return response(receiptVersion ? [{
+        key: "sps_sms_delivery_receipts",
+        value: JSON.stringify(receiptValue),
+        version: receiptVersion,
+        updated_at: "2026-07-20T14:00:00.000Z",
+      }] : []);
+    }
+    if (target.endsWith("/rest/v1/rpc/sps_app_state_cas")) {
+      calls.receiptWrites += 1;
+      if (receiptFailure) return response({ error: "receipt store unavailable" }, { ok: false, status: 503 });
+      const body = JSON.parse(options.body);
+      if (Number(body.p_expected_version) !== receiptVersion) {
+        return response([{ applied: false, outcome: "conflict", current_version: receiptVersion, changed_at: null }]);
+      }
+      receiptValue = JSON.parse(body.p_value);
+      receiptVersion += 1;
+      return response([{ applied: true, outcome: receiptVersion === 1 ? "inserted" : "updated", current_version: receiptVersion, changed_at: "2026-07-20T14:00:00.000Z" }]);
+    }
     if (target.includes("/rest/v1/sps_inbox?") && target.includes("select=id,channel,from_phone,ai")) {
       calls.inboxLookups += 1;
       return inboxFailure
@@ -122,7 +149,11 @@ function installOutboundFetch({
     if (target === "https://api.quo.com/v1/messages") {
       calls.quo += 1;
       calls.quoBodies.push(JSON.parse(options.body));
-      return response({ data: { id: `quo-message-${calls.quo}` } });
+      if (quoDelayMs) await new Promise(resolve => setTimeout(resolve, quoDelayMs));
+      if (quoThrows) throw new Error("provider connection lost");
+      return quoStatus >= 200 && quoStatus < 300
+        ? response({ data: { id: `quo-message-${calls.quo}` } }, { status: quoStatus })
+        : response({ code: "provider_error" }, { ok: false, status: quoStatus });
     }
     if (target === "https://api.quo.com/v1/phone-numbers") {
       calls.quoNumberChecks += 1;
@@ -186,8 +217,9 @@ async function invokeWebhook(payload, options = {}) {
   return { res, raw };
 }
 
-function installInboxFetch({ duplicate = false, storageFailure = false, clientReadFailure = false } = {}) {
-  const calls = { inserts: 0, rows: [] };
+function installInboxFetch({ duplicate = false, duplicateAi = null, storageFailure = false, clientReadFailure = false, patchFailure = false } = {}) {
+  let storedRow = duplicate ? { ai: duplicateAi || { quoLine: "automation" }, kind: "other" } : null;
+  const calls = { inserts: 0, patches: 0, patchBodies: [], reads: 0, rows: [] };
   globalThis.fetch = async (url, options = {}) => {
     const target = String(url);
     if (target.includes("/rest/v1/app_state?") && target.includes("key=eq.sps_clients")) {
@@ -197,10 +229,24 @@ function installInboxFetch({ duplicate = false, storageFailure = false, clientRe
     }
     if (target.includes("/rest/v1/sps_inbox?on_conflict=id")) {
       calls.inserts += 1;
-      calls.rows.push(...JSON.parse(options.body));
+      const insertedRows = JSON.parse(options.body);
+      calls.rows.push(...insertedRows);
+      if (!duplicate && !storageFailure) storedRow = insertedRows[0];
       return storageFailure
         ? response({ message: "database unavailable" }, { ok: false, status: 503 })
-        : response(duplicate ? [] : JSON.parse(options.body));
+        : response(duplicate ? [] : insertedRows);
+    }
+    if (target.includes("/rest/v1/sps_inbox?") && target.includes("select=ai,kind") && !options.method) {
+      calls.reads += 1;
+      return response(storedRow ? [{ ai: storedRow.ai, kind: storedRow.kind }] : []);
+    }
+    if (target.includes("/rest/v1/sps_inbox?") && options.method === "PATCH") {
+      calls.patches += 1;
+      if (patchFailure) return response({ message: "database unavailable" }, { ok: false, status: 503 });
+      const patch = JSON.parse(options.body);
+      calls.patchBodies.push(patch);
+      storedRow = { ...(storedRow || {}), ...patch };
+      return response([{ ai: storedRow.ai, kind: storedRow.kind || "other" }]);
     }
     throw new Error(`Unexpected fetch: ${target}`);
   };
@@ -231,6 +277,35 @@ test("the two text-line visibility capabilities are independent, private by defa
   assert.equal(memberHasCapability({ ...inboxStaff({ main: true }), tabAccess: { schedule: "edit", comms: "hidden" } }, "commsMainLine"), false);
   assert.equal(memberHasCapability(ownerStaff(), "commsTextInbox"), true);
   assert.equal(memberHasCapability(ownerStaff(), "commsMainLine"), true);
+});
+
+test("inbound text push audiences honor the exact receiving line and active roster state", () => {
+  const team = [
+    { ...ownerStaff(), id: "owner-1" },
+    { ...inboxStaff(), id: "automation-only" },
+    { ...inboxStaff({ main: true, automation: false }), id: "main-only" },
+    { ...inboxStaff({ main: true }), id: "both-lines" },
+    { ...inboxStaff({ main: true }), id: "disabled", disabled: true },
+    { ...inboxStaff({ main: true }), id: "not-active", active: false },
+    { ...inboxStaff(), id: "inactive", status: "inactive" },
+    { ...inboxStaff(), id: "hidden", tabAccess: { schedule: "edit", comms: "hidden" } },
+    { ...inboxStaff(), id: "" },
+  ];
+
+  assert.deepEqual(inboundTextStaffKeys(team, "automation"), ["automation-only", "both-lines"]);
+  assert.deepEqual(inboundTextStaffKeys(team, "main"), ["main-only", "both-lines"]);
+  assert.deepEqual(inboundTextStaffKeys(team, "unknown"), []);
+});
+
+test("notification retries distinguish transient APNs failures from permanently pruned tokens", () => {
+  assert.equal(pushLegNeedsRetry({ ok: false, sent: 0, failed: 2, pruned: 2 }), false);
+  assert.equal(pushLegNeedsRetry({ ok: true, sent: 1, failed: 1, pruned: 0 }), true);
+  assert.equal(pushLegNeedsRetry({ ok: false, error: "connect timeout" }), true);
+  assert.equal(pushLegNeedsRetry({ ok: false, skipped: "apns not configured" }), false);
+  assert.equal(pushLegNeedsRetry({ ok: false, results: [
+    { ok: false, sent: 0, failed: 1, pruned: 1 },
+    { ok: true, sent: 1, failed: 0, pruned: 0 },
+  ] }), false);
 });
 
 test("the isolated staff bridge enforces owner-only automation previews", async () => {
@@ -304,6 +379,163 @@ test("authorized staff send normalized US numbers through the Quo business line"
     content: "Appointment reminder",
     from: "+15550001111",
     to: ["+15552345678"],
+  });
+});
+
+test("arrival confirmations claim one durable receipt before Quo and safely replay", async () => {
+  const calls = installOutboundFetch({ quoDelayMs: 15 });
+  const body = {
+    to: "+15552345678",
+    message: "Hi Jordan, your technician has arrived.",
+    clientId: "client-1",
+    messageType: "On site",
+    idempotencyKey: "arrival:stop-1:sms",
+  };
+  const first = makeRes();
+  const overlap = makeRes();
+  await Promise.all([
+    sendSmsHandler(outboundRequest(body), first),
+    sendSmsHandler(outboundRequest(body), overlap),
+  ]);
+
+  assert.equal(calls.quo, 1, "overlapping arrival sheets must make one provider request");
+  const responses = [first.body, overlap.body];
+  assert.equal(responses.some((result) => result.accepted === true), true);
+  // Depending on scheduling, the second invocation either sees the active claim (uncertain/in
+  // progress) or arrives just after finalization and receives the durable accepted replay. Both
+  // are safe outcomes; neither may invite or perform another provider send.
+  const follower = responses.find((result) => result.uncertain === true)
+    || responses.find((result) => result.replayed === true);
+  assert.ok(follower, "the overlapping request must be blocked or replay the saved receipt");
+  assert.equal(follower.retrySafe, false);
+
+  const replay = makeRes();
+  await sendSmsHandler(outboundRequest(body), replay);
+  assert.equal(replay.statusCode, 202);
+  assert.equal(replay.body.accepted, true);
+  assert.equal(replay.body.replayed, true);
+  assert.equal(replay.body.id, "quo-message-1");
+  assert.equal(calls.quo, 1, "an accepted replay must not call Quo again");
+
+  const changed = makeRes();
+  await sendSmsHandler(outboundRequest({ ...body, message: "Changed arrival copy" }), changed);
+  assert.equal(changed.statusCode, 409);
+  assert.match(changed.body.error, /different text details/i);
+  assert.equal(calls.quo, 1);
+});
+
+test("ambiguous arrival delivery is terminal and never blindly retried", async () => {
+  const calls = installOutboundFetch({ quoThrows: true });
+  const body = {
+    to: "+15552345678",
+    message: "Hi Jordan, your technician has arrived.",
+    clientId: "client-1",
+    messageType: "On site",
+    idempotencyKey: "arrival:stop-2:sms",
+  };
+  const first = makeRes();
+  await sendSmsHandler(outboundRequest(body), first);
+  assert.equal(first.statusCode, 502);
+  assert.equal(first.body.uncertain, true);
+  assert.equal(first.body.retrySafe, false);
+  assert.equal(calls.quo, 1);
+
+  const replay = makeRes();
+  await sendSmsHandler(outboundRequest(body), replay);
+  assert.equal(replay.statusCode, 202);
+  assert.equal(replay.body.uncertain, true);
+  assert.equal(replay.body.replayed, true);
+  assert.equal(calls.quo, 1);
+});
+
+test("arrival receipt storage failure stops before Quo", async () => {
+  const calls = installOutboundFetch({ receiptFailure: true });
+  const res = makeRes();
+  await sendSmsHandler(outboundRequest({
+    to: "+15552345678",
+    message: "Hi Jordan, your technician has arrived.",
+    clientId: "client-1",
+    messageType: "On site",
+    idempotencyKey: "arrival:stop-3:sms",
+  }), res);
+  assert.equal(res.statusCode, 503);
+  assert.match(res.body.error, /safety is temporarily unavailable/i);
+  assert.equal(calls.quo, 0);
+});
+
+test("the server upgrades link-bearing field texts from already-installed app builds", async (t) => {
+  await t.test("browser-only live tracking", async () => {
+    const calls = installOutboundFetch();
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({
+      to: "+15552345678",
+      message: "Hi Jordan, I'm on my way. Track my live location here: https://spsway.app/?track=private-token — See you soon!",
+    }), res);
+    assert.equal(res.statusCode, 202);
+    const sent = calls.quoBodies[0].content;
+    assert.match(sent, /Hi Jordan, I'm on my way\. See you soon!/);
+    assert.match(sent, /Open in app: https:\/\/spsway\.app\/\?open=track/);
+    assert.match(sent, /Browser: https:\/\/spsway\.app\/\?track=private-token/);
+    assert.equal((sent.match(/private-token/g) || []).length, 1);
+  });
+
+  await t.test("browser-only completed report", async () => {
+    const calls = installOutboundFetch();
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({
+      to: "+15552345678",
+      message: "Your service report is ready; your invoice will follow. View your full report and photos here: https://spsway.app",
+    }), res);
+    const sent = calls.quoBodies[0].content;
+    assert.match(sent, /Open in app: https:\/\/spsway\.app\/\?open=reports/);
+    assert.match(sent, /Browser: https:\/\/spsway\.app\/#open=reports/);
+    assert.doesNotMatch(sent, /here:\s*$/m);
+  });
+
+  await t.test("old invoice custom scheme", async () => {
+    const calls = installOutboundFetch();
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({
+      to: "+15552345678",
+      message: "Invoice #123 is ready.\nPay in the app: spsway://invoices",
+    }), res);
+    const sent = calls.quoBodies[0].content;
+    assert.doesNotMatch(sent, /spsway:\/\/invoices/);
+    assert.match(sent, /Open in app: https:\/\/spsway\.app\/\?open=invoices/);
+    assert.match(sent, /Browser: https:\/\/spsway\.app\/#open=invoices/);
+  });
+});
+
+test("client link normalization fails cleanly and keeps Test Mode URLs intact", async (t) => {
+  await t.test("an abnormally long SPS URL is rejected before Quo", async () => {
+    const calls = installOutboundFetch();
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({
+      to: "+15552345678",
+      message: `Track here: https://spsway.app/?track=${"x".repeat(900)}`,
+    }), res);
+    assert.equal(res.statusCode, 400);
+    assert.match(res.body.error, /link.*too long/i);
+    assert.equal(calls.quo, 0);
+  });
+
+  await t.test("a long canonical message is refit before the Test Mode prefix", async () => {
+    const calls = installOutboundFetch({
+      textSafety: { testMode: { on: true, mode: "redirect", phone: "+15550009999", liveClientIds: [] } },
+    });
+    const res = makeRes();
+    const footer = "View your full report and photos\nOpen in app: https://spsway.app/?open=reports\nBrowser: https://spsway.app/#open=reports";
+    const body = "x".repeat(1600 - footer.length - 2);
+    await sendSmsHandler(outboundRequest({
+      to: "+15552345678",
+      message: `${body}\n\n${footer}`,
+      messageType: "Service report",
+    }), res);
+    assert.equal(res.statusCode, 202);
+    const sent = calls.quoBodies[0].content;
+    assert.ok(sent.length <= 1600);
+    assert.match(sent, /Open in app: https:\/\/spsway\.app\/\?open=reports/);
+    assert.match(sent, /Browser: https:\/\/spsway\.app\/#open=reports$/);
   });
 });
 
@@ -898,6 +1130,11 @@ test("scheduled client texts fail closed when the saved Test Mode settings canno
   assert.match(source, /!email\.testMode\s*\|\|\s*typeof email\.testMode !== ["']object["']/);
   assert.match(source, /savedTestModeOn !== true && savedTestModeOn !== false/);
   assert.match(source, /Text safety settings are temporarily unavailable\. No automated messages were sent\./);
+  assert.match(source, /import\s*\{[^}]*ensureClientLinkChoices[^}]*\}\s*from\s*["']\.\.\/clientMessageLinks\.js["']/);
+  assert.match(source, /due\s*=\s*due\.flatMap\([\s\S]*ensureClientLinkChoices\(message\.message,\s*\{\s*messageType:\s*message\.type\s*\}\)/);
+  assert.match(source, /normalizationErrors\.push\(\{\s*type:\s*message\.type/);
+  assert.match(source, /invalidLinks:\s*normalizationErrors\.length/);
+  assert.match(source, /const errors = \[\.\.\.normalizationErrors\]/);
 });
 
 test("both On My Way screens honor the saved per-alert opt-out before any channel send", async () => {
@@ -933,16 +1170,38 @@ test("inbound webhook requires both the URL key and a signed request", async (t)
 
 test("inbound health distinguishes server readiness from a recently observed signed reply", async () => {
   globalThis.fetch = async (url) => {
-    assert.match(String(url), /sps_inbox\?select=id,channel,from_phone,created_at/);
+    assert.match(String(url), /sps_inbox\?select=id,channel,from_phone,created_at,ai/);
     return response([{ id: "sms_recent", channel: "sms", from_phone: "+15552345678", created_at: new Date().toISOString() }]);
   };
   const res = makeRes();
   await smsIntakeHandler({ method: "GET", query: {}, headers: {} }, res);
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.configured.ready, true);
+  assert.equal(res.body.configured.mainConfigured, true);
   assert.equal(res.body.configured.mainLine, true);
+  assert.equal(res.body.configured.duplicateLines, false);
   assert.equal(res.body.configured.observed, true);
+  assert.deepEqual(res.body.configured.observedLines, { automation: true, main: false });
+  assert.equal(res.body.configured.push, false);
   assert.ok(res.body.configured.lastInboundAt);
+});
+
+test("inbound health proves the automation and main Quo webhooks independently", async () => {
+  const now = new Date().toISOString();
+  globalThis.fetch = async (url) => {
+    assert.match(String(url), /created_at=gte\./);
+    return response([
+      { id: "sms_main", channel: "sms", from_phone: "+15552345678", created_at: now, ai: { quoLine: "main" } },
+      { id: "sms_automation", channel: "sms", from_phone: "+15552345679", created_at: now, ai: { quoLine: "automation" } },
+    ]);
+  };
+  const res = makeRes();
+  await smsIntakeHandler({ method: "GET", query: {}, headers: {} }, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.configured.observedLines, { automation: true, main: true });
+  assert.equal(res.body.configured.lastInboundByLine.main, now);
+  assert.equal(res.body.configured.lastInboundByLine.automation, now);
 });
 
 test("inbound webhook accepts a valid signature among comma-separated candidates", async () => {
@@ -957,6 +1216,23 @@ test("inbound webhook accepts a valid signature among comma-separated candidates
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.stored, true);
   assert.equal(calls.inserts, 1);
+});
+
+test("every durably stored inbound text attempts an owner push even when it is not a client or lead", async () => {
+  const calls = installInboxFetch();
+  const { res } = await invokeWebhook(webhookPayload("unknown-owner-push", {
+    from: "+15558889999",
+    body: "Just letting you know the gate is open.",
+  }));
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.stored, true);
+  assert.equal(res.body.kind, "other");
+  assert.equal(calls.inserts, 1);
+  // This test worker intentionally has no APNs key. Seeing the helper's explicit result proves the
+  // owner path was attempted; an unavailable push transport must not turn the stored webhook into 5xx.
+  assert.equal(res.body.push?.owner?.ok, false);
+  assert.match(res.body.push?.owner?.skipped || "", /apns not configured/i);
 });
 
 test("inbound texts preserve whether Quo received them on the automation or main line", async () => {
@@ -1062,9 +1338,81 @@ test("inbound webhook acknowledges an already-stored event without inserting it 
   assert.equal(calls.inserts, 1);
 });
 
+test("a stored inbound text records notification completion before acknowledging Quo", async () => {
+  const calls = installInboxFetch();
+  const { res } = await invokeWebhook(webhookPayload("delivery-ledger"));
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(calls.rows[0].ai?._pushDelivery?.owner, "sending");
+  assert.equal(calls.rows[0].ai?._pushDelivery?.staff, "sending");
+  assert.equal(calls.patches, 1);
+  assert.equal(calls.patchBodies[0].ai?._pushDelivery?.owner, "done");
+  assert.equal(calls.patchBodies[0].ai?._pushDelivery?.staff, "done");
+});
+
+test("an unfinished duplicate resumes only its pending notification leg", async () => {
+  const calls = installInboxFetch({
+    duplicate: true,
+    duplicateAi: {
+      quoLine: "automation",
+      _pushDelivery: {
+        v: 1,
+        owner: "retry",
+        staff: "done",
+        attempts: 1,
+        lastAttemptAt: "2026-01-01T00:00:00.000Z",
+        retryAfter: "2026-01-01T00:00:30.000Z",
+      },
+    },
+  });
+  const { res } = await invokeWebhook(webhookPayload("retry-owner"));
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.duplicate, true);
+  assert.equal(res.body.notificationRetry, true);
+  assert.match(res.body.push?.staff?.skipped || "", /already completed/i);
+  assert.equal(calls.reads, 1);
+  assert.equal(calls.patches, 2, "one atomic lease claim and one completion write");
+  assert.equal(calls.patchBodies.at(-1).ai?._pushDelivery?.owner, "done");
+  assert.equal(calls.patchBodies.at(-1).ai?._pushDelivery?.staff, "done");
+});
+
+test("an overlapping duplicate waits for the active notification lease instead of double-sending", async () => {
+  const calls = installInboxFetch({
+    duplicate: true,
+    duplicateAi: {
+      quoLine: "automation",
+      _pushDelivery: {
+        v: 1,
+        owner: "sending",
+        staff: "sending",
+        attempts: 1,
+        lastAttemptAt: new Date().toISOString(),
+        retryAfter: new Date(Date.now() + 60_000).toISOString(),
+      },
+    },
+  });
+  const { res } = await invokeWebhook(webhookPayload("active-delivery-lease"));
+
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.body.notificationRetryPending, true);
+  assert.equal(calls.reads, 1);
+  assert.equal(calls.patches, 0);
+});
+
+test("notification ledger write failures stay 5xx so Quo can retry safely", async () => {
+  const calls = installInboxFetch({ patchFailure: true });
+  const { res } = await invokeWebhook(webhookPayload("delivery-patch-failure"));
+
+  assert.equal(res.statusCode, 502);
+  assert.equal(res.body.stored, true);
+  assert.equal(calls.patches, 1);
+});
+
 test("overlapping inbound deliveries atomically claim one row and run one winner", async () => {
   let claimed = false;
   let inserts = 0;
+  let storedRow = null;
   globalThis.fetch = async (url, options = {}) => {
     const target = String(url);
     if (target.includes("/rest/v1/app_state?") && target.includes("key=eq.sps_clients")) return response([]);
@@ -1073,7 +1421,15 @@ test("overlapping inbound deliveries atomically claim one row and run one winner
       const rows = JSON.parse(options.body);
       if (claimed) return response([]);
       claimed = true;
+      storedRow = rows[0];
       return response(rows);
+    }
+    if (target.includes("/rest/v1/sps_inbox?") && target.includes("select=ai,kind") && !options.method) {
+      return response(storedRow ? [{ ai: storedRow.ai, kind: storedRow.kind }] : []);
+    }
+    if (target.includes("/rest/v1/sps_inbox?") && options.method === "PATCH") {
+      storedRow = { ...(storedRow || {}), ...JSON.parse(options.body) };
+      return response([{ ai: storedRow.ai, kind: storedRow.kind || "other" }]);
     }
     throw new Error(`Unexpected fetch: ${target}`);
   };
@@ -1082,8 +1438,9 @@ test("overlapping inbound deliveries atomically claim one row and run one winner
   const [first, second] = await Promise.all([invokeWebhook(payload), invokeWebhook(payload)]);
   const bodies = [first.res.body, second.res.body];
   assert.equal(inserts, 2);
-  assert.equal(bodies.filter((b) => b.stored === true).length, 1);
+  assert.equal(bodies.filter((b) => b.duplicate !== true).length, 1);
   assert.equal(bodies.filter((b) => b.duplicate === true).length, 1);
+  assert.equal(bodies.filter((b) => b.push).length, 1);
 });
 
 test("inbound storage failures stay 5xx so Quo can retry", async () => {

@@ -10,6 +10,15 @@ const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const TOKEN_RE = /^[A-Za-z0-9_-]{8,128}$/;
 const ACTIVE_STATUSES = new Set(["enroute", "arrived"]);
 
+export function isFreshLiveLocation(location, now = Date.now()) {
+  const updatedAt = Date.parse((location && location.updated_at) || "");
+  const ageMs = Number(now) - updatedAt;
+  return !!(
+    location && location.is_active && location.lat != null && location.lng != null &&
+    Number.isFinite(updatedAt) && Number.isFinite(ageMs) && ageMs >= 0 && ageMs < 90 * 1000
+  );
+}
+
 function serviceHeaders() {
   return { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` };
 }
@@ -77,11 +86,10 @@ export default async function handler(req, res) {
     if (!locationResponse.ok) return res.status(200).json({ record: publicRecord, location: null });
     const locations = await locationResponse.json().catch(() => []);
     const location = locations && locations[0];
-    const updatedAt = Date.parse((location && location.updated_at) || "");
-    const fresh = !!(
-      location && location.is_active && location.lat != null && location.lng != null &&
-      Number.isFinite(updatedAt) && Date.now() - updatedAt < 6 * 60 * 1000
-    );
+    // Foreground tracking writes at most every 30 seconds. A 90-second lease tolerates two missed
+    // updates but fails closed quickly if iOS suspends the app, the network disappears, or auth is
+    // revoked before the client can mark its row inactive.
+    const fresh = isFreshLiveLocation(location);
     return res.status(200).json({
       record: publicRecord,
       location: fresh ? {

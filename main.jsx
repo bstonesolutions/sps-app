@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { supabase, store } from "./supabaseClient";
 import { PROD_URL } from "./config";
 import { Capacitor } from "@capacitor/core";
-import App, { LiveTrack } from "./App.jsx";
+import App, { LiveTrack, SIGNOUT_CLEANUP_MARKER, cleanupNativeSessionAfterUnexpectedSignOut } from "./App.jsx";
 import { brandLogoSource } from "./brandAssets";
 
 // Remove the static boot splash (in index.html) once a real React screen is up. Hold it at least
@@ -298,16 +298,31 @@ function Root() {
   const [pwdDone, setPwdDone] = useState(false);
 
   useEffect(() => {
+    let authEventVersion = 0;
     supabase.auth.getSession().then(({ data }) => {
+      if (authEventVersion !== 0) return;
       const s = data.session;
       if (s && s.user) { try { store.setUser(s.user.id); } catch (_) {} }  // namespace the read cache BEFORE <App> mounts
       setSession(s);
     });
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
+    const { data: sub } = supabase.auth.onAuthStateChange(async (_e, s) => {
+      const eventVersion = ++authEventVersion;
       // Clear the on-disk cache ONLY on a real sign-out (not TOKEN_REFRESHED/USER_UPDATED), so a shared
       // device never serves the prior account's cached data; otherwise keep the cache uid-namespaced.
-      if (_e === "SIGNED_OUT") { try { store.clearCache(); } catch (_) {} }
-      else if (s && s.user) { try { store.setUser(s.user.id); } catch (_) {} }
+      if (_e === "SIGNED_OUT") {
+        let alreadyCleaned = false;
+        try {
+          alreadyCleaned = sessionStorage.getItem(SIGNOUT_CLEANUP_MARKER) === "1";
+          sessionStorage.removeItem(SIGNOUT_CLEANUP_MARKER);
+        } catch (_) {}
+        if (!alreadyCleaned) {
+          try { await cleanupNativeSessionAfterUnexpectedSignOut(); } catch (_) {}
+        }
+        try { await store.clearCache(); } catch (_) {}
+        if (eventVersion !== authEventVersion) return;
+      } else if (s && s.user) {
+        try { store.setUser(s.user.id); } catch (_) {}
+      }
       setSession(s);
       if (s && window.location.hash.includes("access_token")) {
         window.history.replaceState(null, "", window.location.pathname);

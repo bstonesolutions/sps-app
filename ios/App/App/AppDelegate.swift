@@ -7,7 +7,14 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        // Override point for customization after application launch.
+        // When iOS relaunches a terminated app for a monitored-region event, a retained
+        // CLLocationManager delegate must exist during didFinishLaunching. Waiting for the
+        // Capacitor WebView to load can miss the relaunch callback entirely. The coordinator
+        // owns the same bridge instance that MainViewController later registers with Capacitor,
+        // so this creates no second manager or competing arrival notification path.
+        if launchOptions?.keys.contains(.location) == true {
+            SPSArrivalCoordinator.shared.startForLocationRelaunch()
+        }
         return true
     }
 

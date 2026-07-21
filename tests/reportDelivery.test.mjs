@@ -77,7 +77,7 @@ test("Test Mode redirects state exactly where the accepted report went", () => {
   assert.match(result.text, /\[TEST\]/);
 });
 
-test("completion waits for report sends and saved reports expose a resend action", async () => {
+test("completion waits for one automatic delivery and the success screen cannot send duplicate texts", async () => {
   const app = await readFile(new URL("../App.jsx", import.meta.url), "utf8");
   const completionStart = app.indexOf("function CompleteStopModal");
   const completionEnd = app.indexOf("function StopChangeModal", completionStart);
@@ -88,6 +88,16 @@ test("completion waits for report sends and saved reports expose a resend action
 
   assert.match(completion, /await Promise\.allSettled\(sends\)/);
   assert.match(completion, /const result = await sendServiceReportEmail/);
+  assert.match(completion, /setReportPlan\(plan\)/);
+  assert.match(completion, /appendClientLinks\(short, \{ target: "reports"/);
+  assert.match(completion, /app: !!\(client\?\.id != null && commPref\(client, "app"\)/);
+  assert.match(completion, /if \(plan\.app\) sends\.push\(sendPortalReport\(\)\)/);
+  assert.match(completion, /This screen did not send another report/);
+  assert.doesNotMatch(completion, />Text Report</);
+  assert.doesNotMatch(completion, /Text this recap/);
+  assert.doesNotMatch(completion, /textAiRecap|genRecap/);
+  assert.match(completion, /Internal only — nothing here is sent to the client/);
+  assert.match(completion, /const runWaterCheck = async/);
   assert.match(finished, /saved report resend/);
   assert.match(finished, /Email report/);
 });

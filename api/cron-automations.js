@@ -22,6 +22,7 @@ import { requireOwner } from "./_staff-auth.js";
 import { mutateAppState, NO_APP_STATE_CHANGE, readAppStateVersioned } from "./_app-state.js";
 import { pushOwner } from "./_push.js";
 import { pruneExpiredTrackingRecords } from "./_tracking-cleanup.js";
+import { appendClientLinks, ensureClientLinkChoices } from "../clientMessageLinks.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
 const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -185,9 +186,22 @@ function collectPaymentNudges(now, invoices, clientsById, cfg, email, autoLog) {
     const eligible = rec.count === 0 ? daysOverdue >= after : (now - new Date(rec.lastSentAt || 0).getTime()) >= repeat * dayMs;
     if (!eligible) continue;
     const c = clientsById[String(inv.clientId)]; if (!c || !isActive(c) || optedOut(c, "paymentNudges") || !textOn(c) || !c.phone) continue;
-    const link = inv.paymentLink ? `Pay here: ${inv.paymentLink}` : "View & pay it in your portal: spsway.app";
+    const rawPaymentUrl = String(inv.paymentLink || "").trim();
+    // A corrupt or extreme stored provider link must not crash the entire automation run. Fall
+    // back to the authenticated SPS Way invoice page; valid QuickBooks links remain untouched.
+    let paymentUrl = "";
+    try {
+      const parsedPaymentUrl = new URL(rawPaymentUrl);
+      if (parsedPaymentUrl.protocol === "https:" && rawPaymentUrl.length <= 800) paymentUrl = rawPaymentUrl;
+    } catch (_) { /* malformed provider link: use the SPS Way invoice fallback */ }
+    const link = paymentUrl ? "the secure payment link below" : "your SPS Way portal";
+    const message = appendClientLinks(fill(tpl, { first: firstName(c.name), company: cfg._company, number: inv.number || "", amount: money(invBalance(inv)), dueDate: inv.dueDate || "", link }), {
+      target: "invoices",
+      heading: "View and pay in SPS Way",
+      protectedLines: paymentUrl ? [`Pay online: ${paymentUrl}`] : [],
+    });
     out.push({ type: "PaymentNudge", dedup: { ledger: "auto", key: `nudge_${inv.id}`, bump: rec }, clientId: c.id, to: c.phone, who: c.name,
-      message: fill(tpl, { first: firstName(c.name), company: cfg._company, number: inv.number || "", amount: money(invBalance(inv)), dueDate: inv.dueDate || "", link }) });
+      message });
   }
   return out;
 }
@@ -282,6 +296,23 @@ export default async function handler(req, res) {
     ...collectWinBack(now, clients, cfg, email, autoLog),
   ];
 
+  // Custom automation templates can contain an older browser-only SPS Way URL. Repair every due
+  // client message before previews, cooldowns, or sends so scheduled texts follow the same app +
+  // browser contract as field texts. A malformed/oversized message is skipped and reported without
+  // blocking unrelated valid reminders in the same batch.
+  const normalizationErrors = [];
+  due = due.flatMap((message) => {
+    try {
+      return [{
+        ...message,
+        message: ensureClientLinkChoices(message.message, { messageType: message.type }),
+      }];
+    } catch (_) {
+      normalizationErrors.push({ type: message.type, who: message.who, error: "SPS Way link is too long; message skipped" });
+      return [];
+    }
+  });
+
   // 2) cooldown: drop a message if this client already got the same type within the window
   const cooled = [];
   due = due.filter(m => {
@@ -300,14 +331,14 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true, dryRun: true, ran: new Date(now).toISOString(), master: true,
       testMode: { on: !!testMode.on, mode: testMode.mode || "redirect" },
-      counts: { due: due.length, wouldSend: toSend.length, cooledDown: cooled.length, capped: capped.length },
+      counts: { due: due.length, wouldSend: toSend.length, cooledDown: cooled.length, capped: capped.length, invalidLinks: normalizationErrors.length },
       wouldSend: toSend.map(m => ({ type: m.type, to: testMode.on && isLive(m.clientId) ? `${m.to} (LIVE — pilot)` : testMode.on && testMode.mode === "redirect" ? `${testMode.phone} (TEST)` : m.to, client: m.who, message: m.message })),
-      cooledDown: cooled, capped: capped.map(m => ({ type: m.type, client: m.who })),
+      cooledDown: cooled, capped: capped.map(m => ({ type: m.type, client: m.who })), errors: normalizationErrors,
     });
   }
 
   // 5) REAL RUN — send, then record dedup + cooldown + log
-  let sent = 0; const errors = [];
+  let sent = 0; const errors = [...normalizationErrors];
   const reminderOps = [], autoOps = [];
   let sentReal = 0; // sends that actually reached a real client number (live pilots, or Test Mode off)
   for (const m of toSend) {
@@ -388,7 +419,7 @@ export default async function handler(req, res) {
     ok: true, ran: new Date(now).toISOString(), master: true,
     maintenance: { tracking: trackingMaintenance },
     testMode: { on: !!testMode.on, mode: testMode.mode || "redirect" },
-    counts: { due: due.length, sent, errors: errors.length, cooledDown: cooled.length, capped: capped.length },
+    counts: { due: due.length, sent, errors: errors.length, invalidLinks: normalizationErrors.length, cooledDown: cooled.length, capped: capped.length },
     errors, capped: capped.map(m => ({ type: m.type, client: m.who })),
   });
 }

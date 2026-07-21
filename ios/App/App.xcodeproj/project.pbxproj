@@ -19,7 +19,6 @@
 		504EC30D1FED79650016851F /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 504EC30B1FED79650016851F /* Main.storyboard */; };
 		504EC30F1FED79650016851F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 504EC30E1FED79650016851F /* Assets.xcassets */; };
 		504EC3121FED79650016851F /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 504EC3101FED79650016851F /* LaunchScreen.storyboard */; };
-		50B271D11FEDC1A000F3C39B /* public in Resources */ = {isa = PBXBuildFile; fileRef = 50B271D01FEDC1A000F3C39B /* public */; };
 		5FE407B2883E7D409212AF1D /* ClientScheduleWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = F864E51DCD41695F5DC624D8 /* ClientScheduleWidget.swift */; };
 		8E5293A384535BD13E843161 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AC545A4D440AE0B4BFEAD6AF /* Foundation.framework */; };
 		A1B2C3D4E5F6000000000001 /* MainViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6000000000002 /* MainViewController.swift */; };
@@ -184,13 +183,14 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		504EC3031FED79650016851F /* App */ = {
+		504EC3031FED79650016851F /* SPS Way */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 504EC3161FED79650016851F /* Build configuration list for PBXNativeTarget "App" */;
+			buildConfigurationList = 504EC3161FED79650016851F /* Build configuration list for PBXNativeTarget "SPS Way" */;
 			buildPhases = (
 				504EC3001FED79650016851F /* Sources */,
 				504EC3011FED79650016851F /* Frameworks */,
 				504EC3021FED79650016851F /* Resources */,
+				A7B8C9D0E1F2030405060708 /* Build and Embed Current Web Bundle */,
 				98A5D856C554E294095990DD /* Embed Foundation Extensions */,
 			);
 			buildRules = (
@@ -198,7 +198,7 @@
 			dependencies = (
 				8F00860AEB7CACF14B1F30E3 /* PBXTargetDependency */,
 			);
-			name = App;
+			name = "SPS Way";
 			packageProductDependencies = (
 				4D22ABE82AF431CB00220026 /* CapApp-SPM */,
 			);
@@ -238,6 +238,9 @@
 						LastSwiftMigration = 1100;
 						ProvisioningStyle = Automatic;
 						SystemCapabilities = {
+							com.apple.BackgroundModes = {
+								enabled = 1;
+							};
 							com.apple.Push = {
 								enabled = 1;
 							};
@@ -261,7 +264,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				504EC3031FED79650016851F /* App */,
+				504EC3031FED79650016851F /* SPS Way */,
 				BEA2B0D0429B6C7ED5D55790 /* SPSWidgets */,
 			);
 		};
@@ -273,7 +276,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				504EC3121FED79650016851F /* LaunchScreen.storyboard in Resources */,
-				50B271D11FEDC1A000F3C39B /* public in Resources */,
 				504EC30F1FED79650016851F /* Assets.xcassets in Resources */,
 				50379B232058CBB4000EE86E /* capacitor.config.json in Resources */,
 				504EC30D1FED79650016851F /* Main.storyboard in Resources */,
@@ -289,6 +291,31 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		A7B8C9D0E1F2030405060708 /* Build and Embed Current Web Bundle */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/App/public",
+			);
+			name = "Build and Embed Current Web Bundle";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/public",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\nexport PATH=\"/opt/homebrew/bin:/usr/local/bin:${PATH}\"\nROOT=\"${SRCROOT}/../..\"\nSOURCE_PUBLIC=\"${SRCROOT}/App/public\"\nBUNDLE_ROOT=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\nBUNDLE_PUBLIC=\"${BUNDLE_ROOT}/public\"\ncd \"${ROOT}\"\nif ! command -v npm >/dev/null 2>&1 || ! command -v npx >/dev/null 2>&1; then\n  echo \"error: Node/npm is required to build the current SPS Way web bundle.\"\n  exit 1\nfi\nnpm run build\nnpx --no-install cap copy ios\n/usr/bin/cmp -s \"${ROOT}/dist/index.html\" \"${SOURCE_PUBLIC}/index.html\" || {\n  echo \"error: Capacitor iOS web bundle is stale.\"\n  exit 1\n}\n/bin/rm -rf \"${BUNDLE_PUBLIC}\"\n/bin/mkdir -p \"${BUNDLE_PUBLIC}\"\n/usr/bin/ditto \"${SOURCE_PUBLIC}\" \"${BUNDLE_PUBLIC}\"\n/bin/cp \"${SRCROOT}/App/capacitor.config.json\" \"${BUNDLE_ROOT}/capacitor.config.json\"\n/usr/bin/cmp -s \"${SOURCE_PUBLIC}/index.html\" \"${BUNDLE_PUBLIC}/index.html\" || {\n  echo \"error: Built iOS app contains a stale web index.\"\n  exit 1\n}\nENTRY=$(/usr/bin/sed -n 's|.*src=\"/\\([^\"]*\\.js\\)\".*|\\1|p' \"${SOURCE_PUBLIC}/index.html\" | /usr/bin/head -n 1)\nif [ -z \"${ENTRY}\" ] || [ ! -f \"${BUNDLE_PUBLIC}/${ENTRY}\" ]; then\n  echo \"error: Built iOS app is missing its current web entry bundle.\"\n  exit 1\nfi\n/usr/bin/cmp -s \"${SOURCE_PUBLIC}/${ENTRY}\" \"${BUNDLE_PUBLIC}/${ENTRY}\" || {\n  echo \"error: Built iOS app contains a stale web entry bundle.\"\n  exit 1\n}\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		504EC3001FED79650016851F /* Sources */ = {
@@ -478,7 +505,8 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = App/App.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 30;
+				CURRENT_PROJECT_VERSION = 31;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				INFOPLIST_FILE = App/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "SPS Way";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.business";
@@ -503,7 +531,8 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = App/App.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 30;
+				CURRENT_PROJECT_VERSION = 31;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				INFOPLIST_FILE = App/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "SPS Way";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.business";
@@ -528,7 +557,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = SPSWidgets/SPSWidgets.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 30;
+				CURRENT_PROJECT_VERSION = 31;
 				DEVELOPMENT_TEAM = JASPHFVN38;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SPSWidgets/Info.plist;
@@ -560,7 +589,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = SPSWidgets/SPSWidgets.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 30;
+				CURRENT_PROJECT_VERSION = 31;
 				DEVELOPMENT_TEAM = JASPHFVN38;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SPSWidgets/Info.plist;
@@ -596,7 +625,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		504EC3161FED79650016851F /* Build configuration list for PBXNativeTarget "App" */ = {
+		504EC3161FED79650016851F /* Build configuration list for PBXNativeTarget "SPS Way" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				504EC3171FED79650016851F /* Debug */,

@@ -24,9 +24,9 @@ const config: CapacitorConfig = {
       backgroundColor: "#B81D24",
     },
     PushNotifications: {
-      // Show pushes even while the app is OPEN (banner + sound); without this, foreground
-      // notifications are swallowed silently on iOS.
-      presentationOptions: ["banner", "sound"],
+      // Show pushes even while the app is open and keep them in Notification Center. Badge/list
+      // matter in the field: a banner that disappears should not become a missed client text.
+      presentationOptions: ["badge", "sound", "banner", "list"],
     },
   }
 };

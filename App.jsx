@@ -6,13 +6,17 @@ import { sendWidgetPayload, clearWidgetPayload } from "./widgetBridge";
 import { normalizeCompletionInvoice, STOP_REVERSAL_LEDGER_KEY } from "./stopCompletion";
 import { CLIENT_MEDIA_BUCKET, backupManifestStatus, buildMediaArchive, buildStorageObjectPath, findUniqueStableMatch, makeStorageRef, parseDataUrl, parseStorageLocator, selectLegacyMediaForMigration, validateBackupMediaSize } from "./mediaBackup";
 import { createPortalDataFence, portalVisitMatchesReference, portalVisitReference, rejectPortalPreviewAction, requestPortalAction, retainPortalRatingVisit } from "./portalActionClient";
-import { selectActiveEnRouteStop } from "./geofenceSafety";
+import { foregroundFenceTransition, selectActiveEnRouteStop, selectArrivalWatchStop } from "./geofenceSafety";
 import { assessInboundLead, findMisfiledImportedLead } from "./leadQualification";
 import { brandLogoSource } from "./brandAssets";
 import { estimateHasValidDays, estimateHasValidTaxRate, estimateLineAmount, estimateLineCost, estimateLineHasKnownCost, estimateLineQuantity, estimateLineUnitPrice, estimateNumberIsValid, estimateNumberValue, estimateProfitTotals, estimateTotals, formatEstimateMoney, withEstimateRevision, withEstimateTotals } from "./estimateMath";
 import { catalogItemFinancials, estimateLineFromCatalog, estimateLineFromPartsBundle } from "./estimateCatalog";
 import { automaticReportChannels, reportEmailUiResult } from "./reportDelivery";
 import { buildCompletedReportIndex, canRebuildCompletedReport, resolveCompletedReport } from "./completedReport";
+import { appendClientLinks, clientLinkFooter, withoutClientLinks } from "./clientMessageLinks";
+import { driveTimeErrorMessage, getCurrentPositionWithDeadline, requestGoogleDrivingRoute, summarizeGoogleRoute, withDeadline } from "./driveTime";
+import { resolveStaffDeepLink } from "./staffDeepLinks";
+import { arrivalDeliveryKey, runArrivalDeliveryOnce } from "./arrivalDelivery";
 
 // True only on a genuine fresh launch of the app shell (hard close / first open).
 // sessionStorage is wiped when the PWA is killed/swiped away, but survives reloads
@@ -526,7 +530,9 @@ async function sendSms(to, message, meta) {
   // EXCEPT pilot-live clients, who get the real text while everyone else stays protected.
   let dest = to, body = message;
   const testProtected = TEST_MODE.on && !explicitTest && !clientIsLive(meta && meta.clientId);
-  if (testProtected) {
+  // Durable workflows must reach the server even in Test Mode so its at-most-once receipt records
+  // the hold/redirect. Ordinary legacy calls retain the immediate client-side Test Mode UX.
+  if (testProtected && !meta?.idempotencyKey) {
     if (TEST_MODE.mode === "hold") {
       // Held texts still hit the Log (honest accounting, matching email broadcasts) — with no
       // recipient, since nothing was delivered anywhere.
@@ -560,15 +566,33 @@ async function sendSms(to, message, meta) {
         ...(meta?.lineRole === "main" ? { line: "main" } : {}),
         ...(meta?.inboxId ? { inboxId: String(meta.inboxId) } : {}),
         ...(meta?.purpose === "broadcast" ? { purpose: "broadcast" } : {}),
+        ...(meta?.type ? { messageType: String(meta.type) } : {}),
+        ...(meta?.idempotencyKey ? { idempotencyKey: String(meta.idempotencyKey) } : {}),
       }),
     });
     const d = await r.json().catch(() => ({}));
-    result = r.ok && d.held
-      ? { ok: true, accepted: false, sent: false, held: true, redirected: false, line: d.line || null }
+    result = r.ok && d.uncertain
+      ? { ok: false, accepted: false, sent: false, held: false, redirected: false, uncertain: true, retrySafe: false, replayed: !!d.replayed, deliveryState: d.deliveryState || "uncertain", line: d.line || null, error: d.error || "Text delivery could not be confirmed." }
+      : r.ok && d.held
+      ? { ok: true, accepted: false, sent: false, held: true, redirected: false, uncertain: false, retrySafe: false, replayed: !!d.replayed, deliveryState: d.deliveryState || "held", line: d.line || null }
       : r.ok && (d.accepted || d.sent)
-        ? { ok: true, accepted: true, sent: true, held: false, redirected: !!d.redirected, line: d.line || null }
-        : { ok: false, accepted: false, sent: false, held: !!d.held, redirected: false, line: d.line || null, error: d.error || `Error ${r.status}`, missingEnv: !!d.missingEnv };
-  } catch (e) { result = { ok: false, error: e.message || "network error" }; }
+        ? { ok: true, accepted: true, sent: true, held: false, redirected: !!d.redirected, uncertain: false, retrySafe: false, replayed: !!d.replayed, deliveryState: d.deliveryState || "accepted", receiptStored: d.receiptStored !== false, id: d.id || null, line: d.line || null }
+        : { ok: false, accepted: false, sent: false, held: !!d.held, redirected: false, uncertain: !!d.uncertain, retrySafe: d.retrySafe === true, replayed: !!d.replayed, deliveryState: d.deliveryState || "failed", line: d.line || null, error: d.error || `Error ${r.status}`, missingEnv: !!d.missingEnv };
+  } catch (e) {
+    result = {
+      ok: false,
+      accepted: false,
+      sent: false,
+      held: false,
+      redirected: false,
+      // Once an idempotent request leaves the device, a transport failure cannot prove whether
+      // Vercel/Quo accepted it. The UI must check Comms instead of automatically retrying.
+      uncertain: !!meta?.idempotencyKey,
+      retrySafe: !meta?.idempotencyKey,
+      deliveryState: meta?.idempotencyKey ? "uncertain" : "failed",
+      error: e.message || "network error",
+    };
+  }
   const redirected = (testProtected && TEST_MODE.mode !== "hold") || !!result.redirected;
   const held = !!result.held;
   const testOnly = explicitTest || redirected;
@@ -688,6 +712,24 @@ function sendPushEvent(event, fields) {
 let _pushToken = "";
 let _pushListenersOn = false;
 let _pushEnableInFlight = null;
+const PUSH_INSTALL_ID_KEY = "sps_push_install_id_v1";
+// Version this recovery marker whenever the native registration flow materially changes. Older
+// builds could snooze a primer even though no APNs token ever reached the server; carrying that
+// stale timestamp forward would hide the repaired setup for another two weeks.
+const PUSH_PRIMER_KEY = "sps_push_primer_recovery_v2";
+function pushInstallId() {
+  try {
+    const saved = String(localStorage.getItem(PUSH_INSTALL_ID_KEY) || "").trim();
+    if (/^[A-Za-z0-9._~-]{16,128}$/.test(saved)) return saved;
+    const bytes = new Uint8Array(24);
+    globalThis.crypto.getRandomValues(bytes);
+    const created = Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
+    localStorage.setItem(PUSH_INSTALL_ID_KEY, created);
+    return created;
+  } catch (_) {
+    return "";
+  }
+}
 async function pushPlugin() {
   try {
     const { Capacitor } = await import("@capacitor/core");
@@ -704,8 +746,29 @@ async function pushIsNative() {
 }
 async function wirePushListeners(P) {
   if (_pushListenersOn) return;
+  const isSpsRemotePush = (notification) => {
+    const marker = notification?.data?.spsRemote;
+    return marker === true || marker === 1 || String(marker || "").toLowerCase() === "true";
+  };
+  const recordRemotePush = (notification) => {
+    if (!isSpsRemotePush(notification)) return false;
+    try {
+      localStorage.setItem("sps_push_last_received", JSON.stringify({
+        at: new Date().toISOString(),
+        id: String(notification?.id || ""),
+        title: String(notification?.title || ""),
+      }));
+      window.dispatchEvent(new CustomEvent("sps-push-received"));
+    } catch (_) {}
+    return true;
+  };
+  await P.addListener("pushNotificationReceived", (notification) => {
+    recordRemotePush(notification);
+  });
   await P.addListener("pushNotificationActionPerformed", (a) => {
-    const link = a && a.notification && a.notification.data && a.notification.data.link;
+    const notification = a && a.notification;
+    recordRemotePush(notification);
+    const link = notification && notification.data && notification.data.link;
     if (!link) return;
     try { localStorage.setItem("sps_deeplink", String(link)); } catch (_) {}
     try { window.dispatchEvent(new CustomEvent("sps-deeplink", { detail: String(link) })); } catch (_) {}
@@ -742,12 +805,14 @@ async function registerAndBindDevicePush(P) {
           (async () => {
             const token = String((tokenInfo && tokenInfo.value) || "").trim();
             if (!token) return finish({ ok: false, error: "Apple returned an empty notification token. Please try again." });
+            const installId = pushInstallId();
+            if (!installId) return finish({ ok: false, error: "This iPhone couldn't create a stable notification identity. Reopen SPS Way and try again." });
             _pushToken = token;
             try {
               const response = await fetch(`${PROD_URL}/api/push/register`, {
                 method: "POST",
                 headers: await authHeaders({ "Content-Type": "application/json" }),
-                body: JSON.stringify({ token }),
+                body: JSON.stringify({ action: "register", token, installId }),
               });
               const data = await response.json().catch(() => ({}));
               if (!response.ok || data.ok === false) {
@@ -807,35 +872,88 @@ async function enableDevicePush() {
   catch (error) { return { ok: false, error: (error && error.message) || "Couldn't enable notifications on this device." }; }
   finally { _pushEnableInFlight = null; }
 }
-// Sign-out unbind: remove this device's row server-side WITHOUT the opt-out flag or APNs
-// unregister — a different account signing in should re-register cleanly. The caller awaits this
-// while the current auth token is still valid, so the cleanup is not raced by supabase.signOut().
+// Sign-out unbind: remove every stale token for this exact app install server-side WITHOUT the
+// opt-out flag or APNs unregister — a different account signing in should re-register cleanly.
+// The caller awaits this while the current auth token is still valid, so cleanup is not raced by
+// supabase.signOut(); unlike the old memory-token path, it also works after a cold app launch.
 async function unbindDevicePushToken() {
-  if (!_pushToken) return; // not registered this session — next sign-in rebinds the row anyway
+  const installId = pushInstallId();
+  if (!installId) return { ok: false, error: "This iPhone's notification identity is unavailable." };
   try {
-    await fetch(`${PROD_URL}/api/push/register`, {
+    const response = await fetch(`${PROD_URL}/api/push/register`, {
       method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ token: _pushToken, remove: true }),
+      body: JSON.stringify({ action: "unregister", installId }),
     });
-  } catch (_) {}
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.ok === false) return { ok: false, error: data.error || "Couldn't unlink this iPhone from notifications." };
+    _pushToken = "";
+    return { ...data, ok: true };
+  } catch (error) {
+    return { ok: false, error: error?.message || "Couldn't unlink this iPhone from notifications." };
+  }
+}
+
+async function unregisterNativeDevicePush() {
+  const task = (async () => {
+    if (!(await pushIsNative())) return { ok: true, unsupported: true };
+    const P = await pushPlugin();
+    if (!P) return { ok: false, error: "Couldn't load the iPhone notification bridge." };
+    try {
+      await P.unregister();
+      _pushToken = "";
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error?.message || "Apple couldn't unregister notifications." };
+    }
+  })();
+  return Promise.race([
+    task,
+    new Promise(resolve => setTimeout(() => resolve({
+      ok: false,
+      timedOut: true,
+      error: "Apple notification cleanup timed out.",
+    }), 3000)),
+  ]);
 }
 
 async function disableDevicePush() {
-  const P = await pushPlugin();
-  if (!P) return { ok: false };
   // Remember the explicit opt-out — iOS permission stays "granted" after unregister(), so
   // without this flag the silent re-register on next app open would resurrect pushes.
   try { localStorage.setItem("sps_push_disabled", "1"); } catch (_) {}
-  try { await P.unregister(); } catch (_) {}
-  if (_pushToken) {
-    try {
-      await fetch(`${PROD_URL}/api/push/register`, {
-        method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ token: _pushToken, remove: true }),
-      });
-    } catch (_) {}
+  // Always remove the verified server binding even if the native bridge is temporarily missing.
+  // That server-side barrier is what prevents another alert from targeting this exact install.
+  const serverTask = Promise.race([
+    unbindDevicePushToken(),
+    new Promise(resolve => setTimeout(() => resolve({
+      ok: false,
+      timedOut: true,
+      error: "Notification server unlink timed out.",
+    }), 8000)),
+  ]);
+  const [server, native] = await Promise.all([serverTask, unregisterNativeDevicePush()]);
+  if (!server?.ok || !native?.ok) {
+    return { ok: false, error: server?.error || native?.error || "Notifications couldn't be fully disabled." };
   }
-  return { ok: true };
+  return { ok: true, removed: !!server.removed };
+}
+
+// Authenticated server-side diagnostics. These never expose an APNs token: they only answer whether
+// the signed-in account has an enabled device binding, and can send a benign test to that account.
+async function devicePushBinding(action = "status") {
+  try {
+    const installId = pushInstallId();
+    if (!installId) return { ok: false, error: "This iPhone's notification identity is unavailable." };
+    const response = await fetch(`${PROD_URL}/api/push/register`, {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ action, installId }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.ok === false) return { ok: false, error: data.error || `Notification check failed (${response.status}).` };
+    return { ...data, ok: true };
+  } catch (error) {
+    return { ok: false, error: error?.message || "Couldn't reach the notification server." };
+  }
 }
 
 // Open a URL in the device's DEFAULT/EXTERNAL browser (not the in-app browser) —
@@ -1835,9 +1953,12 @@ const haversineMiles = (a, b) => {
   const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(h));
 };
-// Geofence radius for auto-arrival: ~64m. A hair above 60m to stay forgiving of geocode jitter;
-// firing a touch early just texts the client "arrived" ~15s out, and the Undo affordance covers it.
-const GEOFENCE_MI = 0.04;
+// Arrival-prompt radius: ~110m. This accommodates approximate GPS, long driveways, and address-pin
+// jitter. Crossing it only asks the tech to confirm; it never marks arrival or texts a client.
+const GEOFENCE_MI = 0.07;
+// A dismissed foreground false positive must move materially outside the property before it can
+// prompt again. This hysteresis boundary is deliberately wider than the precise entry fence.
+const GEOFENCE_EXIT_MI = 0.1;
 
 // ── Google Maps (live tracking, ETA, route optimization) ──
 // Requires VITE_GOOGLE_MAPS_API_KEY (set in Vercel). Enabled APIs needed:
@@ -1847,21 +1968,291 @@ const GEOFENCE_MI = 0.04;
 const GOOGLE_MAPS_KEY = (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_GOOGLE_MAPS_API_KEY) || "";
 const hasGoogleMaps = () => !!GOOGLE_MAPS_KEY;
 let _gmapsPromise = null;
+let _gmapsAttempt = 0;
 const loadGoogleMaps = () => {
   if (typeof window === "undefined") return Promise.reject(new Error("No window"));
   if (window.google && window.google.maps) return Promise.resolve(window.google.maps);
   if (!GOOGLE_MAPS_KEY) return Promise.reject(new Error("Google Maps API key not configured"));
   if (_gmapsPromise) return _gmapsPromise;
   _gmapsPromise = new Promise((resolve, reject) => {
-    const cbName = "__sps_gmaps_cb";
-    window[cbName] = () => { try { resolve(window.google.maps); } finally { try { delete window[cbName]; } catch (_) {} } };
+    const cbName = `__sps_gmaps_cb_${++_gmapsAttempt}`;
     const s = document.createElement("script");
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      try { delete window[cbName]; } catch (_) {}
+    };
+    const fail = (message) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      try { s.remove(); } catch (_) {}
+      _gmapsPromise = null;
+      reject(new Error(message));
+    };
+    const timer = setTimeout(() => fail("Google Maps took too long to load"), 12000);
+    window[cbName] = () => {
+      if (settled) return;
+      if (!window.google || !window.google.maps) { fail("Google Maps did not initialize"); return; }
+      settled = true;
+      cleanup();
+      resolve(window.google.maps);
+    };
     s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(GOOGLE_MAPS_KEY)}&libraries=geometry&callback=${cbName}`;
     s.async = true; s.defer = true;
-    s.onerror = () => { _gmapsPromise = null; reject(new Error("Failed to load Google Maps")); };
+    s.onerror = () => fail("Failed to load Google Maps");
     document.head.appendChild(s);
   });
   return _gmapsPromise;
+};
+
+const requestServerDriveTime = async (origin, destination, parentSignal = null) => {
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort();
+  if (parentSignal) {
+    if (parentSignal.aborted) controller.abort();
+    else parentSignal.addEventListener("abort", forwardAbort, { once: true });
+  }
+  try {
+    return await withDeadline((async () => {
+      const response = await fetch(`${PROD_URL}/api/drive-time`, {
+        method: "POST",
+        headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ origin, destination }),
+        signal: controller.signal,
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        const error = new Error(payload.error || "Drive time could not be calculated.");
+        error.code = payload.code || (response.status === 401 || response.status === 403 ? "route_auth_failed" : "route_provider_failed");
+        throw error;
+      }
+      const minutes = Number(payload.minutes);
+      if (!Number.isFinite(minutes) || minutes <= 0) {
+        const error = new Error("The route provider returned no drive time.");
+        error.code = "route_empty";
+        throw error;
+      }
+      const rawDistance = payload.distanceMiles;
+      const distanceMiles = rawDistance == null ? null : Number(rawDistance);
+      return {
+        minutes: Math.max(1, Math.round(minutes)),
+        distanceMiles: Number.isFinite(distanceMiles) && distanceMiles >= 0 ? distanceMiles : null,
+        trafficAware: !!payload.trafficAware,
+      };
+    })(), 10000, "route_timeout");
+  } finally {
+    controller.abort();
+    if (parentSignal) parentSignal.removeEventListener("abort", forwardAbort);
+  }
+};
+
+let _nativeDriveTimePlugin = null;
+let _nativeArrivalPlugin = null;
+const getRuntimePlatform = async () => {
+  try {
+    const { Capacitor } = await import("@capacitor/core");
+    return Capacitor && Capacitor.isNativePlatform && Capacitor.isNativePlatform() ? Capacitor.getPlatform() : "web";
+  } catch (_) { return "web"; }
+};
+
+// Native iOS arrival monitor. Unlike navigator.geolocation, Core Location region monitoring can
+// wake the installed app after Maps or the lock screen backgrounds the WebView. The bridge only
+// detects proximity and asks the tech to confirm — it never records arrival or contacts a client.
+const getNativeArrivalPlugin = async () => {
+  const { Capacitor, registerPlugin } = await import("@capacitor/core");
+  if (!Capacitor?.isNativePlatform?.() || Capacitor.getPlatform() !== "ios") return null;
+  if (!_nativeArrivalPlugin) _nativeArrivalPlugin = registerPlugin("SPSArrivalBridge");
+  return _nativeArrivalPlugin;
+};
+const nativeArrivalStatus = async () => {
+  try {
+    const plugin = await getNativeArrivalPlugin();
+    return plugin ? await plugin.status() : { supported: false };
+  } catch (error) {
+    return { supported: true, error: error?.message || "Arrival monitoring couldn't load." };
+  }
+};
+const configureNativeArrival = async (stop, { checkCurrentState = true } = {}) => {
+  const plugin = await getNativeArrivalPlugin();
+  if (!plugin || !stop?.sid || !String(stop.address || "").trim()) return { supported: !!plugin, monitoring: false };
+  // A restored iOS region must never survive into a later workday. Allow late-running stops a
+  // small overnight grace window, then require the active schedule to configure a fresh target.
+  // Use the STOP'S service date rather than "tomorrow from whenever the app happened to open";
+  // otherwise reopening a late stop after midnight could extend customer-specific region data for
+  // an extra day. __arrivalDate is internal-only and is never persisted on the stop.
+  const serviceDate = parseMDY(stop.__arrivalDate || "") || new Date();
+  const validUntil = new Date(serviceDate);
+  validUntil.setDate(validUntil.getDate() + 1);
+  validUntil.setHours(3, 0, 0, 0);
+  return plugin.configure({
+    stopId: String(stop.sid),
+    clientName: String(stop.client || "this stop").slice(0, 100),
+    address: String(stop.address || "").slice(0, 400),
+    validUntil: validUntil.toISOString(),
+    // Core Location region events are intentionally broader than the active-app GPS fallback.
+    // iOS may defer small regions in the background; 300m favors a dependable prompt that the tech
+    // must still confirm, while the foreground fence above remains precise at ~110m.
+    radiusMeters: 300,
+    checkCurrentState,
+  });
+};
+const clearNativeArrival = async ({ preservePending = false } = {}) => {
+  try {
+    const plugin = await getNativeArrivalPlugin();
+    if (!plugin) return { ok: true, supported: false, configured: false, pending: false };
+    const status = await plugin.clear({ preservePending });
+    if (!preservePending && (status?.configured || status?.monitoring || status?.pending || status?.pendingArrival)) {
+      return { ok: false, ...status, error: "iOS still has arrival data for the previous account." };
+    }
+    return { ok: true, ...(status || {}) };
+  } catch (error) {
+    return { ok: false, error: error?.message || "Arrival monitoring could not be cleared." };
+  }
+};
+export const SIGNOUT_CLEANUP_MARKER = "sps_signout_cleanup_done_v1";
+const LIVE_LOCATION_ACTIVE_STAFF_KEY = "sps_live_location_active_staff_v1";
+let _liveLocationWriteEpoch = 0;
+let _liveLocationWriteTail = Promise.resolve();
+
+const invalidateAndDrainLiveLocationWrites = () => {
+  _liveLocationWriteEpoch += 1;
+  return Promise.resolve(_liveLocationWriteTail).catch(() => null);
+};
+
+const queueLiveLocationWrite = (epoch, task) => {
+  _liveLocationWriteTail = Promise.resolve(_liveLocationWriteTail)
+    .catch(() => null)
+    .then(() => (epoch === _liveLocationWriteEpoch ? task() : null));
+  return _liveLocationWriteTail;
+};
+
+// Stop this install from continuing to broadcast before auth is removed. Keep the shift record so
+// hours are not lost, but mark it as opted out; a later clock-in/Head Here action can deliberately
+// enable sharing again. Returning the last active staff id lets the unexpected-sign-out fallback
+// attempt the same authenticated database shutdown if Supabase still accepts the cached session.
+const pauseLocalLiveLocation = () => {
+  if (typeof window === "undefined") return null;
+  invalidateAndDrainLiveLocationWrites();
+  let activeStaffId = null;
+  try { activeStaffId = localStorage.getItem(LIVE_LOCATION_ACTIVE_STAFF_KEY) || null; } catch (_) {}
+  try { localStorage.setItem("sps_live_location_paused", "1"); } catch (_) {}
+  try {
+    const raw = localStorage.getItem("sps_active_shift");
+    if (raw) {
+      const shift = JSON.parse(raw);
+      if (shift && typeof shift === "object") {
+        if (!activeStaffId && shift.staffId != null) activeStaffId = String(shift.staffId);
+        localStorage.setItem("sps_active_shift", JSON.stringify({ ...shift, track: false }));
+      }
+    }
+  } catch (_) {}
+  try { window.dispatchEvent(new Event("sps-shift-changed")); } catch (_) {}
+  return activeStaffId;
+};
+
+const resumeLocalLiveLocation = () => {
+  if (typeof window === "undefined") return;
+  try { localStorage.removeItem("sps_live_location_paused"); } catch (_) {}
+  try {
+    const raw = localStorage.getItem("sps_active_shift");
+    if (raw) {
+      const shift = JSON.parse(raw);
+      if (shift && typeof shift === "object" && shift.startTime) {
+        localStorage.setItem("sps_active_shift", JSON.stringify({ ...shift, track: true }));
+      }
+    }
+  } catch (_) {}
+  try { window.dispatchEvent(new Event("sps-shift-changed")); } catch (_) {}
+};
+
+const deactivateServerLiveLocation = async (staffId) => {
+  if (staffId == null || String(staffId).trim() === "") return { ok: true, skipped: true };
+  try {
+    const response = await fetch(`${PROD_URL}/api/staff-location`, {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ action: "deactivate", staffId: String(staffId) }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.ok !== true || data.inactive !== true) {
+      throw new Error(data.error || "The server could not confirm that live location stopped.");
+    }
+    try {
+      if (localStorage.getItem(LIVE_LOCATION_ACTIVE_STAFF_KEY) === String(staffId)) {
+        localStorage.removeItem(LIVE_LOCATION_ACTIVE_STAFF_KEY);
+      }
+    } catch (_) {}
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error?.message || "Live location could not be stopped." };
+  }
+};
+
+// A revoked/expired session can emit SIGNED_OUT without using the in-app button. The server token
+// can no longer be authenticated at that point, but native customer state must still be removed
+// immediately from a shared crew iPhone. Normal sign-out performs the stronger server unlink first
+// and sets SIGNOUT_CLEANUP_MARKER so Root does not repeat this local fallback.
+export async function cleanupNativeSessionAfterUnexpectedSignOut() {
+  pauseLocalLiveLocation();
+  const tasks = [
+    clearNativeArrival(),
+    unregisterNativeDevicePush(),
+    Promise.resolve(clearWidgetPayload()).then(() => ({ ok: true })),
+  ];
+  const results = await Promise.allSettled(tasks);
+  return { ok: results.every(result => result.status === "fulfilled" && result.value?.ok !== false), results };
+}
+const openNativeAppSettings = async () => {
+  try { const plugin = await getNativeArrivalPlugin(); if (plugin) await plugin.openSettings(); } catch (_) {}
+};
+const requestNativeDriveTime = async (origin, destination, signal = null) => {
+  const { Capacitor, registerPlugin } = await import("@capacitor/core");
+  if (!Capacitor || !Capacitor.isNativePlatform || !Capacitor.isNativePlatform() || Capacitor.getPlatform() !== "ios") return null;
+  if (!_nativeDriveTimePlugin) _nativeDriveTimePlugin = registerPlugin("SPSDriveTimeBridge");
+  const requestId = globalThis.crypto && typeof globalThis.crypto.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
+    : `drive_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  let onAbort = null;
+  const nativeRequest = _nativeDriveTimePlugin.calculate({
+    requestId,
+    latitude: origin.lat,
+    longitude: origin.lng,
+    destination,
+  });
+  const abortRequest = signal ? new Promise((_, reject) => {
+    onAbort = () => {
+      void _nativeDriveTimePlugin.cancel({ requestId }).catch(() => {});
+      const error = new Error("Drive-time calculation was cancelled.");
+      error.code = "drive_time_cancelled";
+      reject(error);
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  }) : null;
+  try {
+    const payload = await withDeadline(
+      abortRequest ? Promise.race([nativeRequest, abortRequest]) : nativeRequest,
+      12000,
+      "route_timeout",
+    );
+    const minutes = Number(payload && payload.minutes);
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+      const error = new Error("Apple Maps returned no drive time.");
+      error.code = "route_empty";
+      throw error;
+    }
+    const rawDistance = payload && payload.distanceMiles;
+    const distanceMiles = rawDistance == null ? null : Number(rawDistance);
+    return {
+      minutes: Math.max(1, Math.round(minutes)),
+      distanceMiles: Number.isFinite(distanceMiles) && distanceMiles >= 0 ? distanceMiles : null,
+      trafficAware: !!(payload && payload.trafficAware),
+    };
+  } finally {
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+    void _nativeDriveTimePlugin.cancel({ requestId }).catch(() => {});
+  }
 };
 
 // ── Per-stop live tracking link ──────────────────────────────────────────────
@@ -2098,7 +2489,7 @@ function buildInvoiceReminderQueue(invoices, clients, cfg, reminderLog, now = ne
       phone: (client.phone || "").replace(/\D/g, ""),
       date: iv.dueDate, daysOverdue,
       amount: `$${(Number(t.balance != null ? t.balance : t.total) || 0).toFixed(2)}`,
-      number: iv.number || "", link: iv.paymentLink || "",
+      number: iv.number || "", link: iv.paymentLink || "your SPS Way portal",
     };
     const already = reminderLog && reminderLog[entry.sid];
     if (already) sent.push({ ...entry, sentAt: already.sentAt });
@@ -2996,6 +3387,7 @@ const NOTIFY_EVENTS = [
   // the settings UI renders only the Push toggle for these.
   { key: "new_lead",         label: "New lead",            hint: "A quote request arrives — website form or work email", pushOnly: true },
   { key: "bill_received",    label: "Bill received",       hint: "A bill or invoice lands in your work email", pushOnly: true },
+  { key: "inbound_text",     label: "Inbound business text", hint: "A new client or prospect text arrives on a business line", pushOnly: true },
   { key: "stop_completed",   label: "Stop completed",      hint: "A tech finishes a service stop", pushOnly: true },
   { key: "office_alert",     label: "Tech note for the office", hint: "A tech flags something from the field", pushOnly: true },
   { key: "reports",          label: "Reports & automation summaries", hint: "Digest emails, the money plan, auto-text run summaries", pushOnly: true },
@@ -3011,6 +3403,7 @@ const DEFAULT_NOTIFY = {
     payment_received: { inApp: true, email: false, push: true },
     new_lead:         { push: true },
     bill_received:    { push: true },
+    inbound_text:     { push: true },
     stop_completed:   { push: true },
     office_alert:     { push: true },
     reports:          { push: true },
@@ -4434,6 +4827,10 @@ function UpgradeWorkflowModal({ alert: a, clients, T, onConfirm, onClose }) {
 
 // localStorage key holding the running shift so it survives a refresh / app close.
 const ACTIVE_SHIFT_KEY = "sps_active_shift";
+// Clock-out must be an actual privacy boundary. Consent remains remembered so a future clock-in can
+// resume without another iOS prompt, while this pause prevents the schedule-window fallback from
+// silently turning sharing back on after the tech explicitly ended their shift.
+const LIVE_LOCATION_PAUSED_KEY = "sps_live_location_paused";
 
 // ─────────────────────────────────────────────
 // STAFF LIVE LOCATION (broadcast while clocked in, so clients can track arrival)
@@ -4458,13 +4855,15 @@ function useStaffLocationTracking(opts) {
   // (mounted once) always reads current values without re-subscribing.
   const optsRef = useRef(opts || {});
   optsRef.current = opts || {};
-  const firedRef = useRef({});   // geofence: auto-arrival fires at most once per stop sid
+  const firedRef = useRef({});   // geofence: arrival prompt fires at most once per stop sid
+  const waitForExitRef = useRef({}); // dismissed false positives stay latched until a wider exit
   const coordRef = useRef({});   // geofence: resolved {lat,lng} per stop sid (from the geocode cache)
   useEffect(() => {
     if (typeof window === "undefined") return;
     let watchId = null;
     let lastSent = 0;
     let activeId = null;
+    let lastHere = null;
     // The signed-in user's Supabase auth uid. staff_locations RLS requires each row's auth_uid to
     // equal the writer's auth.uid(), so a tech can only write their OWN location (anti-spoof).
     let authUid = null;
@@ -4473,54 +4872,103 @@ function useStaffLocationTracking(opts) {
     const readShift = () => { try { return JSON.parse(localStorage.getItem(ACTIVE_SHIFT_KEY) || "null"); } catch { return null; } };
 
     const stop = async (id) => {
+      const drained = invalidateAndDrainLiveLocationWrites();
       if (watchId != null && navigator.geolocation) { try { navigator.geolocation.clearWatch(watchId); } catch (_) {} }
       watchId = null;
-      if (id) { try { const { data: ud } = await supabase.auth.getUser(); await supabase.from("staff_locations").update({ is_active: false, updated_at: new Date().toISOString(), auth_uid: (ud && ud.user && ud.user.id) || authUid || null }).eq("staff_id", String(id)); } catch (_) {} }
+      await drained;
+      if (id) await deactivateServerLiveLocation(id);
     };
 
     const start = (id) => {
       if (watchId != null || !navigator.geolocation || !id) return;
       lastSent = 0;
+      try { localStorage.setItem(LIVE_LOCATION_ACTIVE_STAFF_KEY, String(id)); } catch (_) {}
       watchId = navigator.geolocation.watchPosition(
         (pos) => {
           const t = Date.now();
           if (t - lastSent < 30000) return;   // never hammer GPS — at most once / 30s
           lastSent = t;
           const { latitude, longitude } = pos.coords;
-          const writeLoc = (uid) => supabase.from("staff_locations").upsert(
-            { staff_id: String(id), lat: latitude, lng: longitude, updated_at: new Date().toISOString(), is_active: true, auth_uid: uid || null },
-            { onConflict: "staff_id" }
-          ).then(() => {}, () => {});
-          if (authUid) writeLoc(authUid);
-          else supabase.auth.getUser().then(({ data }) => { authUid = (data && data.user && data.user.id) || null; writeLoc(authUid); }, () => writeLoc(null));
-          // Geofence auto-arrival — fire once when the tech comes within GEOFENCE_MI of a not-yet-
+          const writeEpoch = _liveLocationWriteEpoch;
+          const writeLoc = async (uid) => {
+            try {
+              const { error } = await supabase.from("staff_locations").upsert(
+                { staff_id: String(id), lat: latitude, lng: longitude, updated_at: new Date().toISOString(), is_active: true, auth_uid: uid || null },
+                { onConflict: "staff_id" }
+              );
+              if (error) throw error;
+              const ready = optsRef.current || {};
+              if (typeof ready.onLocationReady === "function") ready.onLocationReady();
+            } catch (error) {
+              const current = optsRef.current || {};
+              if (typeof current.onLocationError === "function") {
+                current.onLocationError(0, error?.message || "Your live location couldn't reach SPS Way.");
+              }
+            }
+          };
+          if (authUid) queueLiveLocationWrite(writeEpoch, () => writeLoc(authUid));
+          else supabase.auth.getUser().then(({ data }) => {
+            authUid = (data && data.user && data.user.id) || null;
+            queueLiveLocationWrite(writeEpoch, () => writeLoc(authUid));
+          }, () => queueLiveLocationWrite(writeEpoch, () => writeLoc(null)));
+          // Geofence arrival prompt — fire once when the tech comes within GEOFENCE_MI of a not-yet-
           // arrived stop. Coordinates resolve async into coordRef (NEVER awaited inside this GPS
           // callback), so a geocode/network failure can never disrupt the location broadcast.
           const go = optsRef.current || {};
           // Location sharing uses every stop in `stops` to define the day's broadcast window, but
-          // automatic arrival is deliberately narrower: only the explicit active "Head Here" stop
-          // supplied in `geofenceStops` may cross the fence and notify its client.
+          // arrival prompting is deliberately narrower: only the one selected candidate supplied in
+          // `geofenceStops` may cross the fence. The callback opens confirmation; it never contacts
+          // the client by itself.
           const gStops = Array.isArray(go.geofenceStops) ? go.geofenceStops : [];
           if (typeof go.onGeofenceArrive === "function" && gStops.length) {
             const here = { lat: latitude, lng: longitude };
+            lastHere = here;
             let cache = null;
+            const evaluateFence = (s, sample, coordinate) => {
+              const sid = s && s.sid;
+              if (!sid || !sample || !coordinate) return;
+              const transition = foregroundFenceTransition(
+                haversineMiles(sample, coordinate),
+                { fired: !!firedRef.current[sid], waitForExit: !!waitForExitRef.current[sid] },
+                GEOFENCE_MI,
+                GEOFENCE_EXIT_MI,
+              );
+              if (transition.fired) firedRef.current[sid] = true;
+              else delete firedRef.current[sid];
+              if (transition.waitForExit) waitForExitRef.current[sid] = true;
+              else delete waitForExitRef.current[sid];
+              if (transition.prompt) { try { go.onGeofenceArrive(sid); } catch (_) {} }
+            };
             gStops.forEach((s) => {
-              if (!s || !s.sid || firedRef.current[s.sid]) return;
+              if (!s || !s.sid) return;
               if (typeof go.isArrived === "function" && go.isArrived(s.sid)) return;
               const address = s.address || "";
               if (!address) return;
               const ckey = s.sid + "::" + geoKey(address);   // address in the key → an address edit forces a fresh geocode (never a stale coord)
               const known = coordRef.current[ckey];
               if (known) {
-                if (haversineMiles(here, known) <= GEOFENCE_MI) { firedRef.current[s.sid] = true; try { go.onGeofenceArrive(s.sid); } catch (_) {} }
+                evaluateFence(s, here, known);
               } else {
                 if (!cache) cache = loadGeoCache();
-                geocodeAddress(address, cache).then((coord) => { if (coord) { coordRef.current[ckey] = coord; try { saveGeoCache(cache); } catch (_) {} } }, () => {});
+                geocodeAddress(address, cache).then((coord) => {
+                  if (!coord) return;
+                  coordRef.current[ckey] = coord;
+                  try { saveGeoCache(cache); } catch (_) {}
+                  // Re-evaluate the GPS sample that triggered this geocode. Previously the first
+                  // sample only cached the address and then waited up to 30+ seconds for another
+                  // position callback, which made arrival prompting appear broken while parked.
+                  if (lastHere) evaluateFence(s, lastHere, coord);
+                }, () => {});
               }
             });
           }
         },
-        () => { /* denied / unavailable — clock-in still works, just no broadcast */ },
+        (error) => {
+          const go = optsRef.current || {};
+          if (typeof go.onLocationError === "function") {
+            try { go.onLocationError(error?.code || 0, error?.message || "Location is unavailable."); } catch (_) {}
+          }
+        },
         { enableHighAccuracy: true, maximumAge: 30000, timeout: 27000 }
       );
     };
@@ -4536,6 +4984,11 @@ function useStaffLocationTracking(opts) {
       let consented = false;
       try { consented = localStorage.getItem("sps_loc_consent") === "1"; } catch (_) {}
       if (!consented) return null;
+      try { if (localStorage.getItem(LIVE_LOCATION_PAUSED_KEY) === "1") return null; } catch (_) {}
+      // Only an explicit, still-valid "Head Here" action may start trip sharing outside the route
+      // window. The implicit next-stop arrival candidate is for a local proximity reminder only;
+      // it must never widen who can see the tech's foreground location or how long it is shared.
+      if (o.explicitTripActive === true) return String(o.staffId);
       const times = (o.stops || []).map(s => s && s.time).filter(t => t && /\d{1,2}:\d{2}/.test(t)).map(to24).filter(n => Number.isFinite(n));
       if (!times.length) return null;
       const first = Math.min(...times), last = Math.max(...times);
@@ -4565,14 +5018,23 @@ function useStaffLocationTracking(opts) {
     };
 
     sync();
-    // Undo of an auto-arrival re-arms the geofence for that stop (firedRef is private to this hook,
-    // so App signals it via this event — same idiom as sps-shift-changed above).
-    const onGeoUndo = (e) => { const sid = e && e.detail; if (sid) { try { delete firedRef.current[sid]; } catch (_) {} } };
+    // A dismissed false positive stays latched until a GPS sample crosses the wider exit boundary.
+    // This re-arms a later real visit without reopening the sheet while the tech is still parked.
+    const onGeoDismissed = (e) => {
+      const sid = e && e.detail;
+      if (!sid) return;
+      firedRef.current[sid] = true;
+      waitForExitRef.current[sid] = true;
+    };
+    // Retain the old explicit undo signal for compatibility with an already-open web session.
+    const onGeoUndo = (e) => { const sid = e && e.detail; if (sid) { try { delete firedRef.current[sid]; delete waitForExitRef.current[sid]; } catch (_) {} } };
     window.addEventListener("sps-shift-changed", sync);
+    window.addEventListener("sps-geofence-dismissed", onGeoDismissed);
     window.addEventListener("sps-geofence-undo", onGeoUndo);
     const iv = setInterval(sync, 20000); // safety re-sync (covers cross-tab changes)
     return () => {
       window.removeEventListener("sps-shift-changed", sync);
+      window.removeEventListener("sps-geofence-dismissed", onGeoDismissed);
       window.removeEventListener("sps-geofence-undo", onGeoUndo);
       clearInterval(iv);
       // Flip the live-location row inactive on unmount/sign-out so a stale row can't keep showing
@@ -4654,7 +5116,10 @@ function ClockInOut({ me, T, compact = false }) {
     setAskLoc(false);
     setResult(null);
     const s = { startTime: new Date().toISOString(), employeeUuid: gustoUuid, staffId, userKey: meKey, track: !!track };
-    try { localStorage.setItem(ACTIVE_SHIFT_KEY, JSON.stringify(s)); } catch (_) {}
+    try {
+      localStorage.setItem(ACTIVE_SHIFT_KEY, JSON.stringify(s));
+      localStorage.removeItem(LIVE_LOCATION_PAUSED_KEY);
+    } catch (_) {}
     setShift(s);
     try { window.dispatchEvent(new Event("sps-shift-changed")); } catch (_) {}
   };
@@ -4667,7 +5132,10 @@ function ClockInOut({ me, T, compact = false }) {
     // Clear the running shift immediately so it can never be double-counted.
     // The shift-changed event tells the App-level tracker to stop broadcasting
     // and flip staff_locations.is_active=false.
-    try { localStorage.removeItem(ACTIVE_SHIFT_KEY); } catch (_) {}
+    try {
+      localStorage.removeItem(ACTIVE_SHIFT_KEY);
+      localStorage.setItem(LIVE_LOCATION_PAUSED_KEY, "1");
+    } catch (_) {}
     setShift(null);
     try { window.dispatchEvent(new Event("sps-shift-changed")); } catch (_) {}
 
@@ -4806,6 +5274,116 @@ function ClockInOut({ me, T, compact = false }) {
         <ClockGlyph size={17} color="#fff" /> Clock In
       </button>}
     </div>
+  );
+}
+
+function FieldReadinessBanner({ status, locationError, testModeHoldsStaff, onOpen }) {
+  const { T } = useApp();
+  if (!status?.native) return null;
+  const arrivalEnabled = status.arrivalEnabled === true;
+  const loc = String(status.location || "").toLowerCase();
+  const always = loc === "always" || loc === "authorizedalways" || loc === "authorized_always";
+  const precise = String(status.locationAccuracy || "unknown").toLowerCase() === "full";
+  const backgroundRefresh = String(status.backgroundRefresh || "unknown").toLowerCase();
+  const backgroundReady = backgroundRefresh === "available";
+  const pushAllowed = status.push === "granted";
+  const pushReady = pushAllowed && status.bound === true;
+  const transportReady = pushReady && arrivalEnabled && always && precise && backgroundReady && !status.error && !locationError;
+  const ready = transportReady && !testModeHoldsStaff;
+  const detail = !pushAllowed
+    ? "Notifications need setup"
+    : status.bound !== true
+      ? "iOS permission is on, but this iPhone is not linked to the notification server"
+    : !arrivalEnabled
+      ? "Turn on field alerts so SPS Way can watch the next assigned stop"
+    : !always
+      ? "Allow Always Location for lock-screen arrival prompts"
+      : !precise
+        ? "Turn on Precise Location so SPS Way can detect the property boundary"
+      : !backgroundReady
+        ? "Turn on Background App Refresh so arrival prompts can wake SPS Way"
+      : locationError || status.error
+        ? (locationError || status.error)
+      : testModeHoldsStaff
+        ? "Device transport is ready, but Test Mode is holding staff push alerts; arrival prompts still work"
+      : (status.monitoring ? "Watching your next stop" : "Ready for your next route");
+  const headline = ready
+    ? "Field alerts ready"
+    : transportReady && testModeHoldsStaff
+      ? "Staff alerts held by Test Mode"
+      : "Finish field-alert setup";
+  return (
+    <button type="button" onClick={onOpen} style={{ width: "100%", border: `1px solid ${ready ? hexA("#16a34a", 0.26) : hexA(T.warning || T.primary, 0.32)}`, background: ready ? hexA("#16a34a", 0.075) : hexA(T.warning || T.primary, 0.08), color: T.text, borderRadius: 14, padding: "10px 12px", display: "flex", alignItems: "center", gap: 10, textAlign: "left", fontFamily: "inherit", cursor: "pointer", marginBottom: 12 }}>
+      <span style={{ width: 34, height: 34, borderRadius: 11, background: ready ? hexA("#16a34a", 0.14) : hexA(T.warning || T.primary, 0.14), color: ready ? "#15803d" : (T.warning || T.primary), display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name={ready ? "check" : "warning"} size={17} /></span>
+      <span style={{ minWidth: 0, flex: 1 }}>
+        <span style={{ display: "block", fontSize: 13, fontWeight: 800 }}>{headline}</span>
+        <span style={{ display: "block", fontSize: 11.5, color: T.textMuted, lineHeight: 1.35, marginTop: 1 }}>{detail}</span>
+      </span>
+      <Icon name="chevronR" size={15} style={{ color: T.textMuted, flexShrink: 0 }} />
+    </button>
+  );
+}
+
+function FieldSetupModal({ status, locationError, testModeHoldsStaff, busy, message, onEnable, onDisableArrival, onTest, onOpenSettings, onClose }) {
+  const { T } = useApp();
+  const arrivalEnabled = status?.arrivalEnabled === true;
+  const loc = String(status?.location || "unknown").toLowerCase();
+  const always = loc === "always" || loc === "authorizedalways" || loc === "authorized_always";
+  const precise = String(status?.locationAccuracy || "unknown").toLowerCase() === "full";
+  const backgroundRefresh = String(status?.backgroundRefresh || "unknown").toLowerCase();
+  const backgroundReady = backgroundRefresh === "available";
+  const pushAllowed = status?.push === "granted";
+  const bound = status?.bound === true;
+  const deviceCount = Math.max(1, Number(status?.deviceCount) || 0);
+  const lastReceived = status?.lastReceivedAt ? new Date(status.lastReceivedAt) : null;
+  const lastReceivedLabel = lastReceived && !Number.isNaN(lastReceived.getTime())
+    ? `Last received ${lastReceived.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`
+    : "No alert has been confirmed on this install yet";
+  const rows = [
+    { label: "iOS notifications", ready: pushAllowed, detail: pushAllowed ? "Allowed on this iPhone" : status?.push === "denied" ? "Turned off in iOS Settings" : "Permission has not been completed" },
+    { label: "Notification server", ready: bound, detail: bound ? `${deviceCount} device${deviceCount === 1 ? "" : "s"} linked · ${lastReceivedLabel}` : "This iPhone has not registered with the server" },
+    { label: "Background App Refresh", ready: backgroundReady, detail: backgroundReady ? "Available for background arrival events" : backgroundRefresh === "denied" ? "Turn it on in iOS Settings so SPS Way can wake in the background" : "Unavailable or restricted on this iPhone" },
+    { label: "Precise Location", ready: precise, detail: precise ? "On for dependable property-boundary detection" : "Turn on Precise Location in iOS Settings" },
+    { label: "Arrival prompts", ready: arrivalEnabled && always && precise && backgroundReady, detail: !arrivalEnabled ? "Tap Enable / retry to turn on field arrival monitoring" : !always ? "Always Location is required when Maps or the lock screen is open" : !precise ? "Precise Location is required for a dependable arrival boundary" : !backgroundReady ? "Waiting for Background App Refresh" : (status?.monitoring ? "Monitoring the next assigned stop" : "Ready when a stop is assigned") },
+  ];
+  return (
+    <Modal title="Field alerts & arrival" onClose={onClose} maxWidth={480}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ fontSize: 13.5, lineHeight: 1.55, color: T.textMuted }}>
+          SPS Way only watches the next assigned stop while field alerts are enabled. Entering the area asks you to confirm arrival; it never marks the stop or texts the client by itself.
+        </div>
+        {testModeHoldsStaff && (
+          <div style={{ borderRadius: 12, padding: "10px 12px", fontSize: 12.5, lineHeight: 1.45, color: "#9A6700", background: hexA("#d97706", 0.1), border: `1px solid ${hexA("#d97706", 0.24)}` }}>
+            This iPhone can register and receive a test alert, but business staff push alerts are held while Test Mode is on. Arrival prompts are local and continue to work.
+          </div>
+        )}
+        <div style={{ border: `1px solid ${T.border}`, borderRadius: 14, overflow: "hidden" }}>
+          {rows.map((row, index) => (
+            <div key={row.label} style={{ display: "flex", gap: 10, padding: "11px 12px", alignItems: "flex-start", borderTop: index ? `1px solid ${T.border}` : "none", background: T.surface }}>
+              <span style={{ width: 24, height: 24, borderRadius: 8, flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", color: row.ready ? "#15803d" : T.warning, background: row.ready ? hexA("#16a34a", 0.1) : hexA(T.warning || T.primary, 0.1) }}><Icon name={row.ready ? "check" : "warning"} size={13} /></span>
+              <span style={{ minWidth: 0 }}>
+                <span style={{ display: "block", color: T.text, fontSize: 13, fontWeight: 800 }}>{row.label}</span>
+                <span style={{ display: "block", color: T.textMuted, fontSize: 11.5, lineHeight: 1.35, marginTop: 1 }}>{row.detail}</span>
+              </span>
+            </div>
+          ))}
+        </div>
+        {(locationError || status?.error || message) && (
+          <div role="status" style={{ borderRadius: 12, padding: "10px 12px", fontSize: 12.5, lineHeight: 1.45, color: (locationError || status?.error) ? "#B42318" : T.text, background: (locationError || status?.error) ? hexA("#B42318", 0.08) : T.surfaceAlt }}>
+            {locationError || status?.error || message}
+          </div>
+        )}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 9 }}>
+          <Btn block onClick={busy ? undefined : onEnable}>{busy ? "Checking…" : (pushAllowed && bound && arrivalEnabled && always && precise && backgroundReady ? "Check again" : "Enable / retry")}</Btn>
+          <Btn variant="ghost" block onClick={busy || !bound ? undefined : onTest}>Send test alert</Btn>
+        </div>
+        {arrivalEnabled && <Btn variant="ghost" block onClick={busy ? undefined : onDisableArrival}>Turn off arrival prompts</Btn>}
+        {(!pushAllowed || !always || !precise || !backgroundReady) && <Btn variant="ghost" block onClick={onOpenSettings}>Open iOS Settings</Btn>}
+        <div style={{ fontSize: 11.5, lineHeight: 1.45, color: T.textMuted }}>
+          Live map updates continue while SPS Way is active during the route. Background arrival prompting is separate and uses Apple's power-efficient region monitoring.
+        </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -8636,7 +9214,7 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
       .replace(/\{company\}/g, branding.companyName)
       .replace(/\{eta\}/g, String(eta))
       .replace(/\{arrival\}/g, arrivalStr)
-      .replace(/\{track\}/g, includeTrack && trackUrl ? `Track my live location here: ${trackUrl} — ` : "");
+      .replace(/\{track\}/g, includeTrack && trackUrl ? `${clientLinkFooter("track", { origin: PROD_URL, browserUrl: trackUrl, heading: "Live tracking" })}\n` : "");
   })();
 
   const [sending, setSending] = useState(false);
@@ -8648,27 +9226,33 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
   const canApp = onMyWayEnabled && !!(client && client.id != null && commPref(client, "app"));
   const copyLink = async () => {
     if (!trackUrl) return;
-    try { await navigator.clipboard.writeText(trackUrl); } catch (_) {}
+    try { await navigator.clipboard.writeText(clientLinkFooter("track", { origin: PROD_URL, browserUrl: trackUrl, heading: "Live tracking" })); } catch (_) {}
     setCopied(true); setTimeout(() => setCopied(false), 1800);
   };
   const handleSend = async () => {
     if (partialDone) { onClose(); return; }
     if (!canText && !canApp) return;
     setSending(true); setSendErr("");
+    const outgoing = includeTrack
+      ? appendClientLinks(message, { target: "track", origin: PROD_URL, browserUrl: trackUrl, heading: "Live tracking" })
+      : message;
+    const portalBody = includeTrack
+      ? withoutClientLinks(outgoing, { target: "track", origin: PROD_URL, browserUrl: trackUrl, heading: "Live tracking" })
+      : outgoing;
     // Mirror the same message into the in-app portal for app-preference clients.
     let appDelivered = false;
     let appHeld = false;
     let appError = "";
     if (canApp) {
       try {
-        const posted = await postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: message });
+        const posted = await postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: portalBody });
         appDelivered = !posted?.held && !posted?.error;
         appHeld = !!posted?.held;
         appError = posted?.error?.message || (typeof posted?.error === "string" ? posted.error : "");
       } catch (e) { appDelivered = false; appError = e?.message || "Couldn't reach the client portal."; }
     }
     if (canText) {
-      const r = await sendSms(client.phone, message, { clientId: client.id, type: "On my way", origin: `visit:${stop?.sid || ""} · on my way` }); // business Quo line ONLY — never the device Messages app
+      const r = await sendSms(client.phone, outgoing, { clientId: client.id, type: "On my way", origin: `visit:${stop?.sid || ""} · on my way` }); // business Quo line ONLY — never the device Messages app
       setSending(false);
       if (!r.ok) {
         if (appDelivered) {
@@ -8809,10 +9393,12 @@ function OnMyWayModal({ stop, client, email, onClose, onSent }) {
 // tech has arrived, using the customizable arrival message. Portaled like the shared
 // Modal so it always sits above the floating bottom nav.
 // ─────────────────────────────────────────────
-function ArrivedModal({ stop, client, email, onClose, onArrived }) {
+function ArrivedModal({ stop, client, email, onClose, onDismiss = onClose, onValidate, onPrepareTracking, onArrived, detected = false }) {
   const { T, branding } = useApp();
   const firstName = client?.name?.split(" ")[0] || "there";
   const phone = client?.phone?.replace(/\D/g, "") || "";
+  const trackUrl = (stop && stop.trackToken) ? stopTrackLink(stop.trackToken) : ((email && email.trackLink) || "");
+  const trackingOn = (email && email.liveTrackingEnabled !== false) && !!trackUrl;
   const message = (() => {
     const tpl = (email && email.smsArrived) || DEFAULT_EMAIL.smsArrived;
     let m = tpl
@@ -8820,78 +9406,134 @@ function ArrivedModal({ stop, client, email, onClose, onArrived }) {
       .replace(/\{sender\}/g, (email && email.senderName) || (email && email.fromName) || branding.companyName)
       .replace(/\{company\}/g, branding.companyName)
       .replace(/\{service\}/g, stop?.type || "service");
-    // Live "on site" link (browser; opens the app once universal links are configured). If the
-    // template has a {track} slot use it, otherwise append the labeled line so it always shows.
-    const trackUrl = (stop && stop.trackToken) ? stopTrackLink(stop.trackToken) : ((email && email.trackLink) || "");
-    const linkLine = ((email && email.liveTrackingEnabled !== false) && trackUrl) ? `See the live update here: ${trackUrl}` : "";
+    // Live "on site" links always include the installed app plus the tokenized browser fallback.
+    // If the template has a {track} slot use it, otherwise append the labeled block.
+    const linkLine = trackingOn
+      ? clientLinkFooter("track", { origin: PROD_URL, browserUrl: trackUrl, heading: "Live update" })
+      : "";
     if (/\{track\}/.test(tpl)) m = m.replace(/\{track\}/g, linkLine);
     else if (linkLine) m += `\n\n${linkLine}`;
     return m;
   })();
   const [sending, setSending] = useState(false);
   const [sendErr, setSendErr] = useState("");
-  const arrivedRef = useRef(false);
+  const busyRef = useRef(false);
   const appNoticeRef = useRef({ attempted: false, accepted: false, held: false, error: "" });
   const [noticeDone, setNoticeDone] = useState(false);
   const canText = !!phone && commPref(client, "text");
   const send = async () => {
     if (noticeDone) { onClose(); return; }
-    if (!arrivedRef.current) {         // record arrival + in-app notice once, even if a retry is needed
-      arrivedRef.current = true;
-      onArrived();                     // start the job clock (record arrival time)
-      if (client?.id && commPref(client, "app")) {  // in-app portal notification (best-effort), if they want in-app
-        try {
-          const posted = await postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: message });
-          appNoticeRef.current = { attempted: true, accepted: !posted?.held && !posted?.error, held: !!posted?.held, error: posted?.error?.message || (typeof posted?.error === "string" ? posted.error : "") };
-        } catch (e) {
-          appNoticeRef.current = { attempted: true, accepted: false, held: false, error: e?.message || "Couldn't reach the client portal." };
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setSending(true);
+    setSendErr("");
+    const outgoing = trackingOn
+      ? appendClientLinks(message, { target: "track", origin: PROD_URL, browserUrl: trackUrl, heading: "Live update" })
+      : message;
+    const portalBody = trackingOn
+      ? withoutClientLinks(outgoing, { target: "track", origin: PROD_URL, browserUrl: trackUrl, heading: "Live update" })
+      : outgoing;
+    try {
+      if (onValidate) {
+        const stillValid = await onValidate();
+        if (!stillValid) {
+          setNoticeDone(true);
+          setSendErr("This stop changed on another device, so SPS Way did not mark arrival or contact the client. Close this sheet and refresh Schedule.");
+          return;
         }
       }
-    }
-    if (canText) {  // text the client from the business Quo line ONLY — never the device
-      setSending(true); setSendErr("");
-      const r = await sendSms(client.phone, message, { clientId: client.id, type: "On site", origin: `visit:${stop?.sid || ""} · arrived` });
-      setSending(false);
-      if (!r.ok) {
-        if (appNoticeRef.current.accepted) { setNoticeDone(true); setSendErr("Arrival was recorded and the in-app notice was posted, but the text wasn't accepted."); return; }
-        setSendErr(r.error || (r.missingEnv ? "Texting isn't set up yet — arrival was still recorded." : "Text wasn't accepted — arrival was still recorded.")); return;
+      if (trackingOn && onPrepareTracking) {
+        try { await onPrepareTracking(); }
+        catch (error) {
+          setSendErr(error?.message || "The live visit link couldn't be prepared, so no client notice was sent. Please retry.");
+          return;
+        }
       }
-      if (!r.acceptedForClient) {
+      const result = await runArrivalDeliveryOnce(stop?.sid, async () => {
+        onArrived(); // first-wins timestamp in App; this shared workflow runs once for both sheets
+        let portal = { attempted: false, accepted: false, held: false, error: "" };
+        if (client?.id && commPref(client, "app")) {
+          try {
+            const posted = await postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: portalBody });
+            portal = { attempted: true, accepted: !posted?.held && !posted?.error, held: !!posted?.held, error: posted?.error?.message || (typeof posted?.error === "string" ? posted.error : "") };
+          } catch (e) {
+            portal = { attempted: true, accepted: false, held: false, error: e?.message || "Couldn't reach the client portal." };
+          }
+        }
+        const sms = canText
+          ? await sendSms(client.phone, outgoing, {
+            clientId: client.id,
+            type: "On site",
+            origin: `visit:${stop?.sid || ""} · arrived`,
+            idempotencyKey: arrivalDeliveryKey(stop?.sid),
+          })
+          : null;
+        return { portal, sms };
+      });
+      appNoticeRef.current = result?.portal || appNoticeRef.current;
+      const r = result?.sms;
+      if (r?.uncertain) {
+        setNoticeDone(true);
+        setSendErr(appNoticeRef.current.accepted
+          ? "Arrival was recorded and the in-app notice was posted. We couldn't confirm whether Quo accepted the text. Check Comms before sending another text."
+          : "Arrival was recorded. We couldn't confirm whether Quo accepted the text. Check Comms before sending another message.");
+        return;
+      }
+      if (r && !r.ok) {
+        setNoticeDone(true);
+        if (appNoticeRef.current.accepted) {
+          setSendErr("Arrival was recorded and the in-app notice was posted, but the text was not sent. Check Comms before sending anything else.");
+        } else {
+          setSendErr(r.error || (r.missingEnv
+            ? "Arrival was recorded, but texting is not configured. Check Comms before sending anything else."
+            : "Arrival was recorded, but the client notice was not sent. Check Comms before sending anything else."));
+        }
+        return;
+      }
+      if (r && !r.acceptedForClient) {
         setNoticeDone(true);
         setSendErr(appNoticeRef.current.accepted
           ? (r.held ? "Arrival recorded; the in-app notice was posted and Test Mode held the text." : "Arrival recorded; the in-app notice was posted and the test text went only to you.")
           : (r.held ? "Arrival recorded, but Test Mode held the client notice." : "Arrival recorded; the test text went only to you, not the client."));
         return;
       }
-    } else if (appNoticeRef.current.attempted && !appNoticeRef.current.accepted) {
+      if (!r && appNoticeRef.current.attempted && !appNoticeRef.current.accepted) {
+        setNoticeDone(true);
+        setSendErr(appNoticeRef.current.held
+          ? "Arrival was recorded, but Test Mode held the in-app notice."
+          : `Arrival was recorded, but the in-app notice couldn't be posted${appNoticeRef.current.error ? `: ${appNoticeRef.current.error}` : "."}`);
+        return;
+      }
+      onClose();
+    } catch (error) {
       setNoticeDone(true);
-      setSendErr(appNoticeRef.current.held
-        ? "Arrival was recorded, but Test Mode held the in-app notice."
-        : `Arrival was recorded, but the in-app notice couldn't be posted${appNoticeRef.current.error ? `: ${appNoticeRef.current.error}` : "."}`);
-      return;
+      setSendErr("Arrival was recorded, but delivery could not be confirmed. Check Comms before sending another message.");
+    } finally {
+      busyRef.current = false;
+      setSending(false);
     }
-    onClose();
   };
-  const { handleProps, sheetStyle } = useSheetSwipe(onClose);
+  const requestDismiss = () => { if (!busyRef.current) onDismiss(); };
+  const { handleProps, sheetStyle } = useSheetSwipe(requestDismiss);
   return createPortal(
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 250, display: "flex", alignItems: "flex-end", justifyContent: "center", paddingLeft: "env(safe-area-inset-left)", paddingRight: "env(safe-area-inset-right)" }} onClick={onClose}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 250, display: "flex", alignItems: "flex-end", justifyContent: "center", paddingLeft: "env(safe-area-inset-left)", paddingRight: "env(safe-area-inset-right)" }} onClick={requestDismiss}>
       <div onClick={e => e.stopPropagation()} style={{ background: T.surface, borderRadius: "22px 22px 0 0", width: "100%", maxWidth: 600, maxHeight: "calc(100dvh - max(8px, env(safe-area-inset-top)))", overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", padding: "4px 16px calc(20px + env(safe-area-inset-bottom))", boxShadow: "0 -8px 40px rgba(0,0,0,0.2)", ...sheetStyle }}>
-        <SheetHandle handleProps={handleProps} T={T} />
+        <SheetHandle handleProps={sending ? {} : handleProps} T={T} />
         <div style={{ height: 12 }} />
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
           <div>
-            <div style={{ fontWeight: 800, fontSize: 17, color: T.text, letterSpacing: "-0.02em" }}>I'm Here</div>
+            <div style={{ fontWeight: 800, fontSize: 17, color: T.text, letterSpacing: "-0.02em" }}>{detected ? "It looks like you've arrived" : "I'm Here"}</div>
             <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{client?.name}{client?.phone ? ` · ${client.phone}` : ""}</div>
           </div>
-          <button onClick={onClose} aria-label="Close" style={{ background: T.surfaceAlt, border: "none", borderRadius: "50%", width: 40, height: 40, cursor: "pointer", color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="close" size={18} /></button>
+          <button onClick={requestDismiss} disabled={sending} aria-label="Close" style={{ background: T.surfaceAlt, border: "none", borderRadius: "50%", width: 40, height: 40, cursor: sending ? "default" : "pointer", opacity: sending ? 0.55 : 1, color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="close" size={18} /></button>
         </div>
         <div style={{ background: hexA("#16a34a", 0.08), border: `1px solid ${hexA("#16a34a", 0.2)}`, borderRadius: 14, padding: "12px 14px", marginBottom: 14, fontSize: 13, color: T.text, display: "flex", alignItems: "center", gap: 8 }}>
-          <Icon name="check" size={16} /> Starts the job clock and sends {firstName}'s enabled client notice.
+          <Icon name="check" size={16} /> Nothing is sent until you confirm. Confirming starts the job clock and sends {firstName}'s enabled client notice.
         </div>
         <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 6 }}>Message to client</div>
         <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: "12px 14px", fontSize: 13.5, color: T.text, lineHeight: 1.5, marginBottom: 16 }}>{message}</div>
         <Btn onClick={send} disabled={sending} style={{ width: "100%", padding: "13px", borderRadius: 12, gap: 7, justifyContent: "center" }}>
-          {sending ? "Sending…" : noticeDone ? "Done" : <><Icon name="check" size={15} /> {canText ? "Mark Arrived & Text Client" : "Mark Arrived"}</>}
+          {sending ? "Sending…" : noticeDone ? "Done" : <><Icon name="check" size={15} /> {canText ? "Yes — Mark Arrived & Text Client" : "Yes — Mark Arrived"}</>}
         </Btn>
         {sendErr && <div style={{ fontSize: 12, fontWeight: 700, color: T.accent, textAlign: "center", marginTop: 10 }}>{sendErr}</div>}
         {phone && !commPref(client, "text") && <div style={{ fontSize: 11, color: T.warning, textAlign: "center", marginTop: 8 }}>{firstName} prefers no texts — arrival is recorded without one.</div>}
@@ -9306,9 +9948,17 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
           emailAllowed: commPref(client, "email"),
           reportOptOut,
         });
+        // In-app delivery is its own channel. It must not depend on an email or text succeeding,
+        // otherwise an app-only client would never receive the completed report.
+        const plan = {
+          ...channels,
+          app: !!(client?.id != null && commPref(client, "app") && !reportOptOut),
+        };
+        setReportPlan(plan);
         const sends = [];
-        if (channels.text) sends.push(sendText());
-        if (channels.email) sends.push(sendEmail());
+        if (plan.text) sends.push(sendText());
+        if (plan.email) sends.push(sendEmail());
+        if (plan.app) sends.push(sendPortalReport());
         // Keep this modal alive until both channels settle. The completed stop is already
         // saved, but the success screen must also show the real email/text outcomes.
         if (sends.length) await Promise.allSettled(sends);
@@ -9326,17 +9976,37 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
   // shared {busy,msg} would re-enable buttons mid-flight and let one result silently overwrite
   // the other. busy/msgs are keyed by "email" | "text".
   const [reportSend, setReportSend] = useState({ busy: {}, msgs: {} });
+  // null means this was an idempotent replay of an already-completed stop, so no duplicate
+  // delivery was attempted. An object records the exact automatic plan shown on the receipt.
+  const [reportPlan, setReportPlan] = useState(null);
   const rsStart = (ch) => setReportSend(s => ({ busy: { ...s.busy, [ch]: true }, msgs: { ...s.msgs, [ch]: null } }));
   const rsDone = (ch, msg) => setReportSend(s => ({ busy: { ...s.busy, [ch]: false }, msgs: { ...s.msgs, [ch]: msg } }));
-  // Drop the same report into the client's in-app portal thread so they always have it
-  // in the app too — not just email/text. Posted once per completed report (deduped),
-  // best-effort: a failure never blocks the send.
+  // Drop the same report into the client's in-app portal thread as an independent channel.
+  // It is posted once per newly-applied completion and never depends on email/text success.
   const reportPostedRef = useRef(false);
-  const postReportToPortal = () => {
-    if (reportPostedRef.current || !client?.id || !commPref(client, "app")) return; // honor client's in-app channel choice
+  const sendPortalReport = async () => {
+    if (!client?.id || !commPref(client, "app")) {
+      const result = { ok: false, text: "In-app reports are unavailable for this client." };
+      rsDone("app", result);
+      return result;
+    }
+    if (reportPostedRef.current) return { ok: true, text: "The report is already in the client app." };
     reportPostedRef.current = true;
-    postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: reportText + svcCardMarker(stop?.type || "Service visit", todayStr, branding.companyName) })
-      .then(() => {}, () => {});
+    rsStart("app");
+    try {
+      const posted = await postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: reportText + svcCardMarker(stop?.type || "Service visit", todayStr, branding.companyName) });
+      const result = posted?.held
+        ? { ok: false, text: "Test Mode held the in-app report." }
+        : posted?.error
+          ? { ok: false, text: posted.error.message || "The in-app report could not be posted." }
+          : { ok: true, text: "Report posted in the client app." };
+      rsDone("app", result);
+      return result;
+    } catch (error) {
+      const result = { ok: false, text: error?.message || "The in-app report could not be posted." };
+      rsDone("app", result);
+      return result;
+    }
   };
   // Reports go out through the business identity — Resend email + Quo text — never the
   // phone's Mail or Messages app, so they always send as the company (not the tech).
@@ -9356,7 +10026,6 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
       photos,
       origin: `visit:${stop?.sid || ""} · report email`,
     });
-    if (result.sent) postReportToPortal();
     rsDone("email", result);
     return result;
   };
@@ -9368,14 +10037,12 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
       .replace(/\{first\}/g, firstName)
       .replace(/\{service\}/g, stop.type || "service")
       .replace(/\{company\}/g, branding.companyName)
-      .replace(/\{sender\}/g, (email && email.senderName) || branding.companyName);
-    // Portal link so the client can open the full report + photos (browser link; opens the app
-    // once universal links are configured). Use {link} if the template has it, else append.
-    const portalUrl = PROD_URL;
-    if (/\{link\}/.test(tpl)) short = short.replace(/\{link\}/g, portalUrl);
-    else short += `\n\nView your full report and photos here: ${portalUrl}`;
+      .replace(/\{sender\}/g, (email && email.senderName) || branding.companyName)
+      .replace(/\{link\}/g, clientLinkFooter("reports", { origin: PROD_URL, heading: "View your full report and photos" }));
+    // This happens at send time, after all editable template substitutions, so neither a custom
+    // template nor an AI edit can accidentally remove the native-app or browser destination.
+    short = appendClientLinks(short, { target: "reports", origin: PROD_URL, heading: "View your full report and photos" });
     const r = await sendSms(phone, short, { clientId: client?.id ?? stop?.clientId, type: "Service report", origin: `visit:${stop?.sid || ""} · report text` }); // business Quo line ONLY
-    if (r.ok) postReportToPortal();   // mirror the full report into the in-app portal thread
     const txtMsg = r.held ? "Test Mode (hold) — text NOT sent."
       : r.redirected ? "Test Mode — text sent only to your test phone."
       : `Report text accepted for ${client?.name || "the client"}${TEST_MODE.on && clientIsLive(client?.id ?? stop?.clientId) ? " (pilot — live)" : ""}.`;
@@ -9383,49 +10050,57 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     return r;
   };
 
-  // ── AI assist — optional; degrades to a clear "add your key" message until ANTHROPIC_API_KEY is set ──
-  const [aiBusy, setAiBusy] = useState({ recap: false, diag: false });
-  const [aiRecap, setAiRecap] = useState(null);
-  const [aiDiag, setAiDiag] = useState(null);
-  const [aiErr, setAiErr] = useState("");
-  const aiNotReady = "AI isn't connected yet — add your ANTHROPIC_API_KEY in Vercel to turn this on.";
-  const genRecap = async () => {
-    setAiBusy(b => ({ ...b, recap: true })); setAiErr("");
-    try {
-      const r = await fetch(`${PROD_URL}/api/ai-summarize`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ serviceType: stop.type, readings, treatments: treatmentsUsed, parts: partsUsedArr, notes: notesClient, photoCount: photos.length, clientFirst: firstName, company: branding.companyName }) });
-      const d = await r.json().catch(() => ({}));
-      if (d && d.summary) setAiRecap(d.summary);
-      else setAiErr(d && d.missingEnv ? aiNotReady : ((d && d.error) || "Couldn't generate the recap."));
-    } catch (_) { setAiErr("Couldn't reach the AI service."); }
-    setAiBusy(b => ({ ...b, recap: false }));
-  };
-  const genDiag = async () => {
+  // Internal-only AI water check. This remains available while the post-completion AI recap and
+  // extra text-send controls are removed; running it cannot message the client.
+  const [waterAiBusy, setWaterAiBusy] = useState(false);
+  const [waterAiDiag, setWaterAiDiag] = useState(null);
+  const [waterAiError, setWaterAiError] = useState("");
+  const runWaterCheck = async () => {
     const hasReadings = readings && Object.values(readings).some(v => v !== "" && v != null && v !== "—");
-    if (!hasReadings) { setAiDiag(null); setAiErr("Enter your water test readings first — the water check reads those to flag issues."); return; }
-    setAiBusy(b => ({ ...b, diag: true })); setAiErr("");
+    if (!hasReadings) {
+      setWaterAiDiag(null);
+      setWaterAiError("Enter the water test readings first.");
+      return;
+    }
+    setWaterAiBusy(true);
+    setWaterAiError("");
     try {
-      const hist = Array.isArray(client?.history) ? client.history.slice(0, 5).map(h => ({ date: h.date, readings: h.readings })) : [];
-      const cat = ((catalog && catalog.treatments) || []).map(t => ({ name: t.name, retail: t.retailPerOz ?? t.retail, unit: t.unit }));
-      const photoUrls = (await Promise.all(photos.map(async p => {
-        const src = typeof p === "string" ? p : p?.src;
+      const history = Array.isArray(client?.history)
+        ? client.history.slice(0, 5).map(h => ({ date: h.date, readings: h.readings }))
+        : [];
+      const treatmentCatalog = ((catalog && catalog.treatments) || []).map(t => ({
+        name: t.name,
+        retail: t.retailPerOz ?? t.retail,
+        unit: t.unit,
+      }));
+      const photoUrls = (await Promise.all(photos.map(async photo => {
+        const src = typeof photo === "string" ? photo : photo?.src;
         if (!src || src.startsWith("data:")) return "";
-        try { return await resolveProtectedMediaUrl(src); } catch { return ""; }
-      }))).filter(Boolean); // signed Storage URLs only; skip inline payloads and inaccessible objects
-      const r = await fetch(`${PROD_URL}/api/ai-water-diagnosis`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ serviceType: stop.type, readings, history: hist, photoUrls, catalog: cat, division: client?.division, clientFirst: firstName }) });
-      const d = await r.json().catch(() => ({}));
-      if (d && d.ok) setAiDiag(d);
-      else setAiErr(d && d.missingEnv ? aiNotReady : ((d && d.error) || "Couldn't analyze the water."));
-    } catch (_) { setAiErr("Couldn't reach the AI service."); }
-    setAiBusy(b => ({ ...b, diag: false }));
-  };
-  const textAiRecap = async () => {
-    if (!phone) { rsDone("text", { ok: false, text: "No phone number on file for this client." }); return; }
-    rsStart("text");
-    const r = await sendSms(phone, `${aiRecap}\n\nView your full report and photos here: ${PROD_URL}`, { clientId: client?.id ?? stop?.clientId, type: "Service report", origin: `visit:${stop?.sid || ""} · report text` });
-    if (r.ok) { try { postReportToPortal(); } catch (_) {} }
-    rsDone("text", r.ok ? { ok: !!r.acceptedForClient, text: r.held ? "Test Mode (hold) — not sent." : r.redirected ? "Test Mode — recap sent only to your test phone." : `Recap text accepted for ${client?.name || "the client"}${TEST_MODE.on && clientIsLive(client?.id ?? stop?.clientId) ? " (pilot — live)" : ""}.` } : { ok: false, text: r.error || "Text failed to send." });
+        try { return await resolveProtectedMediaUrl(src); } catch (_) { return ""; }
+      }))).filter(Boolean);
+      const response = await fetch(`${PROD_URL}/api/ai-water-diagnosis`, {
+        method: "POST",
+        headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          serviceType: stop.type,
+          readings,
+          history,
+          photoUrls,
+          catalog: treatmentCatalog,
+          division: client?.division,
+          clientFirst: firstName,
+        }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (result?.ok) setWaterAiDiag(result);
+      else setWaterAiError(result?.missingEnv
+        ? "AI isn't connected yet — add ANTHROPIC_API_KEY in Vercel to turn on water checks."
+        : (result?.error || "The water check could not be completed."));
+    } catch (_) {
+      setWaterAiError("The AI water-check service could not be reached.");
+    } finally {
+      setWaterAiBusy(false);
+    }
   };
 
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
@@ -9490,59 +10165,39 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
               </div>
             );
           })()}
-          <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 10, lineHeight: 1.5 }}>Send the client their report:</div>
-          <div style={{ marginBottom: 12 }}><CommPrefBadges client={client} compact /></div>
-          <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
-            <Btn onClick={sendEmail} disabled={!!reportSend.busy.email} style={{ flex: 1, padding: "13px", borderRadius: 12, display:"flex", alignItems:"center", justifyContent:"center", gap:6, opacity: commPref(client, "email") ? 1 : 0.5 }}><Icon name="mail" size={14} /> {reportSend.busy.email ? "Sending…" : "Email Report"}</Btn>
-            <Btn onClick={sendText} variant="ghost" disabled={!!reportSend.busy.text} style={{ flex: 1, padding: "13px", borderRadius: 12, display:"flex", alignItems:"center", justifyContent:"center", gap:6, opacity: commPref(client, "text") ? 1 : 0.5 }}><Icon name="message" size={14} /> {reportSend.busy.text ? "Sending…" : "Text Report"}</Btn>
-          </div>
-          {(!commPref(client, "email") || !commPref(client, "text")) && <div style={{ fontSize: 11.5, color: T.textMuted, marginBottom: 8, lineHeight: 1.4 }}>Dimmed = the client opted out of that channel. Sending still works if you need to reach them.</div>}
-          {["email", "text"].map(ch => reportSend.msgs[ch] && (
-            <div key={ch} style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 6, color: reportSend.msgs[ch].ok ? "#16a34a" : T.accent }}>{reportSend.msgs[ch].text}</div>
-          ))}
-          {/* ✨ AI assist — a personalized recap + a water check, generated from this visit's data */}
-          <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 4, paddingTop: 12, marginBottom: 12 }}>
-            <div style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 8 }}>✨ AI assist</div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <Btn variant="ghost" onClick={genRecap} disabled={aiBusy.recap} style={{ flex: 1, minWidth: 130, padding: "10px", borderRadius: 12 }}>{aiBusy.recap ? "Writing…" : "Write client recap"}</Btn>
-              <Btn variant="ghost" onClick={genDiag} disabled={aiBusy.diag} style={{ flex: 1, minWidth: 130, padding: "10px", borderRadius: 12 }}>{aiBusy.diag ? "Analyzing…" : "Water check"}</Btn>
-            </div>
-            {aiErr && <div style={{ fontSize: 12, color: T.accent, marginTop: 8, lineHeight: 1.45 }}>{aiErr}</div>}
-            {aiRecap != null && (
-              <div style={{ marginTop: 10 }}>
-                <label style={labelStyle}>Client recap — edit if you like</label>
-                <textarea rows={3} value={aiRecap} onChange={e => setAiRecap(e.target.value)} style={{ width: "100%", padding: "10px 12px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 13.5, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical", lineHeight: 1.5 }} />
-                <Btn onClick={textAiRecap} disabled={!!reportSend.busy.text} style={{ marginTop: 8, padding: "10px 14px", borderRadius: 12, display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="message" size={13} /> Text this recap</Btn>
+          <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 4, paddingTop: 14, marginBottom: 14, textAlign: "left" }}>
+            <div style={{ fontSize: 11, fontWeight: 850, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 9 }}>Client report delivery</div>
+            {reportPlan === null ? (
+              <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: "11px 12px", fontSize: 12.5, color: T.textMuted, lineHeight: 1.45 }}>
+                This completion was already saved on another attempt. This screen did not send another report.
+              </div>
+            ) : (
+              <div style={{ display: "grid", gap: 8 }}>
+                {[
+                  { key: "text", label: "Text message", icon: "message" },
+                  { key: "email", label: "Email", icon: "mail" },
+                  { key: "app", label: "Client app", icon: "phone" },
+                ].map(channel => {
+                  const planned = !!reportPlan[channel.key];
+                  const result = reportSend.msgs[channel.key];
+                  const protectedResult = !!(result && !result.ok && /Test Mode/i.test(result.text || ""));
+                  const color = result?.ok ? "#16a34a" : protectedResult ? "#d97706" : planned ? T.accent : T.textMuted;
+                  const detail = planned
+                    ? (result?.text || "The server did not confirm this delivery attempt.")
+                    : "Not sent automatically — delivery is off, unavailable, or disabled by the client's preferences.";
+                  return (
+                    <div key={channel.key} style={{ display: "flex", alignItems: "flex-start", gap: 10, background: T.surfaceAlt, borderRadius: 12, padding: "10px 12px" }}>
+                      <span style={{ width: 28, height: 28, borderRadius: 9, background: hexA(color, 0.1), color, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name={channel.icon} size={14} /></span>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{channel.label}</div>
+                        <div style={{ fontSize: 11.5, color, lineHeight: 1.4, marginTop: 2 }}>{detail}</div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
-            {aiDiag && (() => {
-              const dIssues = (aiDiag.issues || []).filter(is => is && is.title);
-              const dRecs = (aiDiag.recommendations || []).filter(rc => rc && rc.name);
-              // All-clear → a tidy green "all good" pill instead of a sparse card.
-              if (aiDiag.healthy && dIssues.length === 0 && dRecs.length === 0) {
-                return (
-                  <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 9, background: hexA("#16a34a", 0.1), border: `1px solid ${hexA("#16a34a", 0.3)}`, borderRadius: 12, padding: "11px 13px" }}>
-                    <span style={{ color: "#16a34a", flexShrink: 0, display: "flex" }}><Icon name="check" size={16} /></span>
-                    <div style={{ fontSize: 12.5, fontWeight: 700, color: T.text, lineHeight: 1.4 }}>{aiDiag.summary || "Water looks healthy — nothing to flag."}</div>
-                  </div>
-                );
-              }
-              return (
-                <div style={{ marginTop: 10, background: T.surfaceAlt, borderRadius: 12, padding: 12 }}>
-                  <div style={{ fontSize: 12.5, fontWeight: 700, color: T.text, lineHeight: 1.45 }}>{aiDiag.healthy ? "✓ " : "⚠️ "}{aiDiag.summary}</div>
-                  {dIssues.map((is, i) => (
-                    <div key={i} style={{ fontSize: 11.5, color: T.textMuted, marginTop: 7, lineHeight: 1.45 }}><b style={{ color: is.severity === "high" ? T.accent : T.text }}>{is.title}</b>{is.detail ? ` — ${is.detail}` : ""}</div>
-                  ))}
-                  {dRecs.length > 0 && (<>
-                    <div style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginTop: 11, marginBottom: 4 }}>Recommend to client</div>
-                    {dRecs.map((rc, i) => (
-                      <div key={i} style={{ fontSize: 11.5, color: T.text, marginTop: 4, lineHeight: 1.45 }}>• <b>{rc.name}</b>{rc.reason ? ` — ${rc.reason}` : ""}</div>
-                    ))}
-                  </>)}
-                  <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 10, fontStyle: "italic" }}>AI suggestion — use your judgment.</div>
-                </div>
-              );
-            })()}
+            <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 9, lineHeight: 1.45 }}>Completion sends the configured report once. Any separate follow-up belongs in Comms, where the conversation stays visible.</div>
           </div>
           <button onClick={onClose} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 8, fontFamily: "inherit" }}>Done</button>
         </div>
@@ -9863,6 +10518,49 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
                 </div>
               );
             })}
+          </div>
+          <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 10, paddingTop: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 800, color: T.text }}>AI water check</div>
+                <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 2 }}>Internal only — nothing here is sent to the client.</div>
+              </div>
+              <Btn type="button" variant="ghost" sm onClick={runWaterCheck} disabled={waterAiBusy}>
+                {waterAiBusy ? "Analyzing…" : waterAiDiag ? "Run again" : "Check readings"}
+              </Btn>
+            </div>
+            {waterAiError && <div style={{ fontSize: 11.5, color: T.accent, marginTop: 8, lineHeight: 1.45 }}>{waterAiError}</div>}
+            {waterAiDiag && (() => {
+              const issues = (waterAiDiag.issues || []).filter(issue => issue && issue.title);
+              const recommendations = (waterAiDiag.recommendations || []).filter(item => item && item.name);
+              if (waterAiDiag.healthy && !issues.length && !recommendations.length) {
+                return (
+                  <div style={{ marginTop: 9, display: "flex", alignItems: "center", gap: 8, background: hexA("#16a34a", 0.1), border: `1px solid ${hexA("#16a34a", 0.3)}`, borderRadius: 11, padding: "10px 12px" }}>
+                    <span style={{ color: "#16a34a", display: "flex", flexShrink: 0 }}><Icon name="check" size={15} /></span>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: T.text, lineHeight: 1.4 }}>{waterAiDiag.summary || "Water looks healthy — nothing to flag."}</div>
+                  </div>
+                );
+              }
+              return (
+                <div style={{ marginTop: 9, background: T.surfaceAlt, borderRadius: 11, padding: 11 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: T.text, lineHeight: 1.45 }}>{waterAiDiag.healthy ? "✓ " : "⚠️ "}{waterAiDiag.summary}</div>
+                  {issues.map((issue, index) => (
+                    <div key={index} style={{ fontSize: 11.5, color: T.textMuted, marginTop: 7, lineHeight: 1.45 }}>
+                      <b style={{ color: issue.severity === "high" ? T.accent : T.text }}>{issue.title}</b>{issue.detail ? ` — ${issue.detail}` : ""}
+                    </div>
+                  ))}
+                  {recommendations.length > 0 && (
+                    <div style={{ marginTop: 10 }}>
+                      <div style={{ fontSize: 10.5, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>Possible treatments</div>
+                      {recommendations.map((item, index) => (
+                        <div key={index} style={{ fontSize: 11.5, color: T.text, marginTop: 5, lineHeight: 1.45 }}>• <b>{item.name}</b>{item.reason ? ` — ${item.reason}` : ""}</div>
+                      ))}
+                    </div>
+                  )}
+                  <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 9, fontStyle: "italic" }}>AI suggestion — use your professional judgment.</div>
+                </div>
+              );
+            })()}
           </div>
         </div>
       )}
@@ -10702,7 +11400,7 @@ function RouteRing({ done, total, size = 58, label = "stops" }) {
   );
 }
 
-function HeadHereModal({ stop, client, email, defaultMapApp = "", defaultEtaBuffer = 5, onClose, onSent }) {
+function HeadHereModal({ stop, client, email, defaultMapApp = "", defaultEtaBuffer = 5, onClose, onPrepareTracking, onStarted, onSent }) {
   const { T, branding } = useApp();
   const [pref, setPref] = useState(() => { if (defaultMapApp) return defaultMapApp; try { return localStorage.getItem("sps_map_app") || null; } catch { return null; } });
   const [expanded, setExpanded] = useState(false);
@@ -10711,6 +11409,16 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", defaultEtaBuff
   const onMyWayEnabled = client?.notifyPrefs?.onMyWay !== false;
   const canText = onMyWayEnabled && !!phone && commPref(client, "text");
   const canApp = onMyWayEnabled && !!(client && client.id != null && commPref(client, "app"));
+  const trackUrl = (stop && stop.trackToken) ? stopTrackLink(stop.trackToken) : ((email && email.trackLink) || "");
+  const liveTrackingConfigured = (email && email.liveTrackingEnabled !== false) && !!trackUrl;
+  const [locationShareAllowed, setLocationShareAllowed] = useState(() => {
+    try {
+      return localStorage.getItem("sps_loc_consent") === "1"
+        && localStorage.getItem(LIVE_LOCATION_PAUSED_KEY) !== "1";
+    } catch (_) { return false; }
+  });
+  const [locationEnableBusy, setLocationEnableBusy] = useState(false);
+  const trackingOn = liveTrackingConfigured && locationShareAllowed;
   // Build 15, 7D — fall back to the client's address when the stop's was empty at creation
   // (e.g. the client's address was added later), so "Head Here" always has a destination.
   const addr = stop.address || (client && client.address) || "";
@@ -10720,61 +11428,158 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", defaultEtaBuff
   const etaTouchedRef = useRef(false);        // tech adjusted the ETA — auto-compute must not stomp it
   const [calc, setCalc] = useState(false);    // computing drive time from the tech's GPS
   const [driveMin, setDriveMin] = useState(null); // computed one-way drive minutes (caption only)
+  const [driveMiles, setDriveMiles] = useState(null);
+  const [trafficAware, setTrafficAware] = useState(false);
+  const [calcError, setCalcError] = useState("");
+  const [autoEtaAttempt, setAutoEtaAttempt] = useState(0);
   const buildMsg = (eta) => {
     const tpl = (email && email.smsOnMyWay) || DEFAULT_EMAIL.smsOnMyWay;
-    // Per-stop live-tracking link (browser link; opens the app once universal links are set up).
-    const trackUrl = (stop && stop.trackToken) ? stopTrackLink(stop.trackToken) : ((email && email.trackLink) || "");
-    const trackingOn = (email && email.liveTrackingEnabled !== false) && !!trackUrl;
+    // Per-stop live tracking always offers the installed app plus the tokenized browser fallback.
     const arrival = new Date(Date.now() + eta * 60000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     return (tpl || "")
       .replace(/{first}/g, firstName).replace(/{sender}/g, (email && email.senderName) || branding.companyName)
       .replace(/{company}/g, branding.companyName).replace(/{eta}/g, String(eta))
       .replace(/{arrival}/g, arrival)
-      .replace(/{track}/g, trackingOn ? `Track my live location here: ${trackUrl} — ` : "");
+      .replace(/{track}/g, trackingOn ? `${clientLinkFooter("track", { origin: PROD_URL, browserUrl: trackUrl, heading: "Live tracking" })}\n` : "");
   };
   const arrivalStr = new Date(Date.now() + etaMin * 60000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   // The editable text follows the ETA stepper until the tech types their own edits.
   const [draft, setDraft] = useState(() => buildMsg(15));
   const [edited, setEdited] = useState(false);
-  useEffect(() => { if (!edited) setDraft(buildMsg(etaMin)); }, [etaMin]);
-  // Auto-ETA: seed the estimate with the real drive time from the tech's live GPS to the stop,
-  // then ADD the tech's buffer on top (they may stop for gas/parts). Falls back to the 15-min
-  // default when there's no Maps key, no GPS, or Directions fails — identical to prior behavior.
+  useEffect(() => { if (!edited) setDraft(buildMsg(etaMin)); }, [etaMin, trackingOn]);
+  // Auto-ETA: current GPS goes to native MapKit in the installed iOS app, then an authenticated
+  // server route when configured. That avoids asking capacitor://localhost to authorize an HTTPS-
+  // restricted Maps JS key. A bounded Maps JS fallback keeps browsers working too. Every phase
+  // has a deadline, visible failure, and Retry.
   useEffect(() => {
     let alive = true;
-    if (!hasGoogleMaps() || typeof navigator === "undefined" || !navigator.geolocation || !addr) return;
+    const controller = new AbortController();
+    const clearRoute = () => { setDriveMin(null); setDriveMiles(null); setTrafficAware(false); };
+    if (!canText && !canApp) { setCalc(false); setCalcError(""); clearRoute(); return () => controller.abort(); }
+    if (!addr) { setCalc(false); clearRoute(); setCalcError("This stop needs a valid address before drive time can be calculated."); return () => controller.abort(); }
+    if (typeof navigator === "undefined" || !navigator.geolocation) { setCalc(false); clearRoute(); setCalcError("Location isn't available on this device."); return () => controller.abort(); }
     setCalc(true);
+    setCalcError("");
+    clearRoute();
     (async () => {
       try {
-        const maps = await loadGoogleMaps();
-        const pos = await new Promise((res, rej) => navigator.geolocation.getCurrentPosition(res, rej, { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }));
-        const svc = new maps.DirectionsService();
-        const result = await svc.route({ origin: { lat: pos.coords.latitude, lng: pos.coords.longitude }, destination: addr, travelMode: maps.TravelMode.DRIVING });
-        const leg = result && result.routes && result.routes[0] && result.routes[0].legs && result.routes[0].legs[0];
-        const secs = leg && leg.duration && leg.duration.value;
-        if (alive && secs != null) {
-          const cm = Math.max(5, Math.round(secs / 60));
+        const route = await withDeadline((async () => {
+          const pos = await getCurrentPositionWithDeadline(navigator.geolocation, {}, 11000, controller.signal);
+          const origin = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+          const platform = await getRuntimePlatform();
+          let nativeError = null;
+          if (platform === "ios") {
+            try {
+              const nativeRoute = await requestNativeDriveTime(origin, addr, controller.signal);
+              if (nativeRoute) return nativeRoute;
+            } catch (error) {
+              nativeError = error;
+            }
+          }
+          if (controller.signal.aborted) throw nativeError || Object.assign(new Error("Drive-time calculation was cancelled."), { code: "drive_time_cancelled" });
+
+          const mapsRoute = async () => {
+            const maps = await withDeadline(loadGoogleMaps(), 12000, "maps_timeout");
+            if (controller.signal.aborted) throw Object.assign(new Error("Drive-time calculation was cancelled."), { code: "drive_time_cancelled" });
+            const drivingOptions = maps.TrafficModel
+              ? { departureTime: new Date(), trafficModel: maps.TrafficModel.BEST_GUESS }
+              : undefined;
+            const result = await requestGoogleDrivingRoute(maps, {
+              origin,
+              destination: addr,
+              travelMode: maps.TravelMode.DRIVING,
+              ...(drivingOptions ? { drivingOptions } : {}),
+            }, 11000, controller.signal);
+            return summarizeGoogleRoute(result);
+          };
+          const serverRoute = () => requestServerDriveTime(origin, addr, controller.signal);
+
+          // Use one primary route provider per platform so a single opening never duplicates a
+          // billable request or transmits the same GPS/address twice. iOS uses MapKit above and may
+          // fall back once to the authenticated server; HTTPS uses its restricted Maps JS key.
+          const errors = nativeError ? [nativeError] : [];
+          try {
+            if (platform === "web" && hasGoogleMaps()) return await mapsRoute();
+            return await serverRoute();
+          } catch (routeError) {
+            errors.push(routeError);
+          }
+          throw errors.find(error => error && error.code === "route_not_found")
+            || (nativeError && nativeError.code === "route_not_found" ? nativeError : null)
+            || errors.find(error => error && !["route_not_configured", "drive_time_cancelled"].includes(error.code))
+            || nativeError
+            || errors[0]
+            || Object.assign(new Error("Drive time is unavailable."), { code: "route_provider_failed" });
+        })(), 35000, "route_timeout");
+        if (alive && !controller.signal.aborted) {
+          const cm = Math.max(1, Math.round(route.minutes));
           setDriveMin(cm);
+          setDriveMiles(route.distanceMiles == null ? null : route.distanceMiles);
+          setTrafficAware(!!route.trafficAware);
           if (!etaTouchedRef.current) setEtaMin(cm + Math.max(0, Number(defaultEtaBuffer) || 0));
         }
-      } catch (_) { /* leave etaMin at the default */ }
-      finally { if (alive) setCalc(false); }
+      } catch (error) {
+        if (alive && !controller.signal.aborted) setCalcError(driveTimeErrorMessage(error));
+      }
+      finally {
+        controller.abort();
+        if (alive) setCalc(false);
+      }
     })();
-    return () => { alive = false; };
-  }, []);
+    return () => { alive = false; controller.abort(); };
+  }, [addr, defaultEtaBuffer, autoEtaAttempt, canText, canApp]);
   const [omw, setOmw] = useState({ busy: false, msg: null });
+  const enableTripLocation = () => {
+    if (locationEnableBusy) return;
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      setOmw({ busy: false, msg: { ok: false, text: "Live location isn't available on this device." } });
+      return;
+    }
+    setLocationEnableBusy(true);
+    navigator.geolocation.getCurrentPosition(
+      () => {
+        try {
+          localStorage.setItem("sps_loc_consent", "1");
+          resumeLocalLiveLocation();
+        } catch (_) {}
+        setLocationShareAllowed(true);
+        setLocationEnableBusy(false);
+      },
+      (error) => {
+        setLocationEnableBusy(false);
+        setOmw({ busy: false, msg: { ok: false, text: error?.message || "Allow Location to share a live trip map." } });
+      },
+      { enableHighAccuracy: true, maximumAge: 15000, timeout: 12000 },
+    );
+  };
   // Send via the business Quo line ONLY — never open the device Messages app.
   const sendOmwText = async () => {
     if (!canText && !canApp) return;
     setOmw({ busy: true, msg: null });
-    const outgoing = draft;
+    // Never send a live URL until its server record is confirmed. A successful SMS with a missing
+    // tracking record is worse than a visible retry because the client receives a dead link.
+    if (trackingOn && onPrepareTracking) {
+      try { await onPrepareTracking(); }
+      catch (error) {
+        setOmw({ busy: false, msg: { ok: false, text: error?.message || "Live tracking couldn't be started. Please retry." } });
+        return;
+      }
+    }
+    // The draft is editable, so restore both destinations at the actual send point if a tech
+    // accidentally removes either one while changing the wording.
+    const outgoing = trackingOn
+      ? appendClientLinks(draft, { target: "track", origin: PROD_URL, browserUrl: trackUrl, heading: "Live tracking" })
+      : draft;
+    const portalBody = trackingOn
+      ? withoutClientLinks(outgoing, { target: "track", origin: PROD_URL, browserUrl: trackUrl, heading: "Live tracking" })
+      : outgoing;
     // Mirror the same On-My-Way message into the in-app portal for app-preference clients.
     let appDelivered = false;
     let appHeld = false;
     let appError = "";
     if (canApp) {
       try {
-        const posted = await postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: outgoing });
+        const posted = await postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: portalBody });
         appDelivered = !posted?.held && !posted?.error;
         appHeld = !!posted?.held;
         appError = posted?.error?.message || (typeof posted?.error === "string" ? posted.error : "");
@@ -10806,7 +11611,19 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", defaultEtaBuff
     setOmw({ busy: false, msg: { ok: clientNotified, text: okText } });
     if (clientNotified) onSent && onSent();
   };
-  const openMap = (app) => { try { localStorage.setItem("sps_map_app", app); } catch {} setPref(app); };
+  const openMap = async (app, event) => {
+    if (event?.preventDefault) event.preventDefault();
+    try { localStorage.setItem("sps_map_app", app); } catch {}
+    setPref(app);
+    // Opening Maps is the first unambiguous trip action. Try to establish tracking before leaving
+    // SPS Way, but never strand a field tech if the database is temporarily offline.
+    if (trackingOn && onPrepareTracking) {
+      try { await onPrepareTracking(); }
+      catch (_) { /* directions remain available; no client link has been sent */ }
+    }
+    if (onStarted) onStarted();
+    if (typeof window !== "undefined") window.location.href = buildMapUrl(addr, app);
+  };
   const mapApps = [{ key: "apple", label: "Apple Maps", icon: "A" }, { key: "google", label: "Google Maps", icon: "G" }, { key: "waze", label: "Waze", icon: "W" }];
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 10, display: "block" };
   return (
@@ -10815,16 +11632,32 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", defaultEtaBuff
         {addr && <div style={{ fontSize: 13, color: T.textMuted, marginTop: -8, lineHeight: 1.4, display:"flex", alignItems:"center", gap:5 }}><Icon name="location" size={13} />{addr}</div>}
         <div>
           <span style={lbl}>On My Way Text</span>
+          {liveTrackingConfigured && !locationShareAllowed && (
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 11px", margin: "0 0 10px", borderRadius: 11, background: hexA(T.warning || T.primary, 0.09), border: `1px solid ${hexA(T.warning || T.primary, 0.2)}` }}>
+              <div style={{ minWidth: 0, flex: 1, fontSize: 11.5, lineHeight: 1.4, color: T.textMuted }}><strong style={{ color: T.text }}>Live map is off.</strong> Enable it for this trip, or the client receives the ETA without a tracking link.</div>
+              <button type="button" onClick={enableTripLocation} disabled={locationEnableBusy} style={{ border: 0, borderRadius: 9, padding: "8px 10px", background: T.primary, color: "#fff", font: "inherit", fontSize: 11.5, fontWeight: 800, cursor: locationEnableBusy ? "wait" : "pointer", flexShrink: 0 }}>{locationEnableBusy ? "Enabling…" : "Enable"}</button>
+            </div>
+          )}
           {(canText || canApp) ? <>
             {/* ETA / buffer — bump the arrival estimate; the text below follows along until you edit it. */}
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
               <button onClick={() => { etaTouchedRef.current = true; setEtaMin(e => Math.max(5, e - 5)); }} style={{ width: 40, height: 40, borderRadius: 12, border: `1.5px solid ${T.border}`, background: T.surface, fontSize: 22, fontWeight: 300, color: T.text, cursor: "pointer", flexShrink: 0 }}>−</button>
               <div style={{ flex: 1, textAlign: "center" }}>
                 <div style={{ fontSize: 22, fontWeight: 800, color: T.text, lineHeight: 1 }}>{etaMin}<span style={{ fontSize: 13, fontWeight: 600, color: T.textMuted }}> min</span></div>
-                <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 3 }}>{calc ? "Calculating drive time…" : `Arriving around ${arrivalStr}${driveMin != null ? ` · ~${driveMin} min drive` : ""}`}</div>
+                <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 3 }}>
+                  {calc
+                    ? "Calculating live drive time…"
+                    : driveMin != null
+                      ? `Arriving around ${arrivalStr} · ${driveMin} min drive${driveMiles != null ? ` · ${driveMiles.toFixed(1)} mi` : ""}${trafficAware ? " · traffic" : ""}`
+                      : `Arriving around ${arrivalStr}`}
+                </div>
               </div>
               <button onClick={() => { etaTouchedRef.current = true; setEtaMin(e => e + 5); }} style={{ width: 40, height: 40, borderRadius: 12, border: `1.5px solid ${T.border}`, background: T.surface, fontSize: 22, fontWeight: 300, color: T.text, cursor: "pointer", flexShrink: 0 }}>+</button>
             </div>
+            {!calc && calcError && <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "center", gap: 7, margin: "-3px 0 10px", padding: "8px 10px", borderRadius: 9, background: hexA(T.warning || T.primary, 0.09), color: T.warning || T.primary, fontSize: 11.5, lineHeight: 1.35, fontWeight: 650 }}>
+              <span style={{ flex: 1 }}>{calcError}</span>
+              <button type="button" onClick={() => setAutoEtaAttempt(v => v + 1)} style={{ border: 0, background: "transparent", color: "inherit", padding: 0, font: "inherit", fontWeight: 850, cursor: "pointer", whiteSpace: "nowrap" }}>Retry</button>
+            </div>}
             <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
               {[10, 15, 20, 30, 45, 60].map(m => (
                 <button key={m} onClick={() => { etaTouchedRef.current = true; setEtaMin(m); }} style={{ flex: 1, padding: "6px 2px", borderRadius: 9, border: `1.5px solid ${etaMin === m ? T.primary : T.border}`, background: etaMin === m ? hexA(T.primary, 0.1) : T.surface, color: etaMin === m ? T.primary : T.textMuted, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>{m}</button>
@@ -10843,7 +11676,7 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", defaultEtaBuff
           <span style={lbl}>Open in Maps</span>
           {pref && !expanded ? (
             <>
-              <Btn href={buildMapUrl(addr, pref)} variant="primary" block onClick={() => openMap(pref)} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+              <Btn href={buildMapUrl(addr, pref)} variant="primary" block onClick={(event) => openMap(pref, event)} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
                 <Icon name="location" size={15} /> Open in {(mapApps.find(a => a.key === pref) || {}).label || "Maps"}
               </Btn>
               <button onClick={() => setExpanded(true)} style={{ background: "none", border: "none", color: T.primary, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", marginTop: 8, padding: 4 }}>Use a different app</button>
@@ -10852,7 +11685,7 @@ function HeadHereModal({ stop, client, email, defaultMapApp = "", defaultEtaBuff
             <>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {mapApps.map(a => (
-                  <Btn key={a.key} href={buildMapUrl(addr, a.key)} variant={pref === a.key ? "primary" : "ghost"} block onClick={() => openMap(a.key)}>
+                  <Btn key={a.key} href={buildMapUrl(addr, a.key)} variant={pref === a.key ? "primary" : "ghost"} block onClick={(event) => openMap(a.key, event)}>
                     {a.label}{pref === a.key ? " ✓" : ""}
                   </Btn>
                 ))}
@@ -11983,7 +12816,7 @@ function StopChangeModal({ stop, client, dayDate, email, onReschedule, onCancelS
 // reload / resync / close (the module re-initializes then). Cleared on a Schedule re-tap.
 let SCHED_VIEW = { date: null, tech: null };
 
-function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, me, onClientSelect, seedClientIds, clearSeed, focusStop, clearFocus, stopDrafts = {}, setStopDrafts, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {}, arrivals = {}, onArrived, enRoute = {}, onEnRoute }) {
+function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, me, onClientSelect, seedClientIds, clearSeed, focusStop, clearFocus, stopDrafts = {}, setStopDrafts, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {}, arrivals = {}, onArrived, onValidateArrival, enRoute = {}, onEnRoute }) {
   const { T, perms, branding } = useApp();
   const wx = useAreaWeather((branding && branding.companyAddress) || "");  // service-area forecast for weather flags
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
@@ -12152,13 +12985,13 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   //     stop's essentials + status. The public /?track= page reads ONLY that key — so it never has
   //     to read the whole schedule (which RLS rightly hides from the anonymous client), and a client
   //     can never see anything but their own stop. `status` advances scheduled → enroute → arrived.
-  const writeTrackRecord = (stop, status) => {
-    if (!stop || !stop.trackToken) return;
+  const writeTrackRecord = async (stop, status) => {
+    if (!stop || !stop.trackToken) return { ok: false, error: new Error("This stop has no tracking link.") };
     try {
       const configuredMinutes = parseInt(email && email.trackingLinkMinutes, 10);
       const trackingMinutes = Number.isFinite(configuredMinutes) ? Math.min(1440, Math.max(5, configuredMinutes)) : 60;
       const now = new Date();
-      store.set("sps_track_" + stop.trackToken, JSON.stringify({
+      const result = await store.set("sps_track_" + stop.trackToken, JSON.stringify({
         sid: stop.sid,
         assigneeId: stop.assigneeId || "",
         client: (stop.client || "").split(" ")[0] || "there", // first name only — no full name / PII
@@ -12167,16 +13000,27 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
         at: now.toISOString(),
         expiresAt: new Date(now.getTime() + trackingMinutes * 60000).toISOString(),
       }));
-    } catch (_) {}
+      if (!result?.ok) throw result?.error || new Error("The live tracking session did not save.");
+      return result;
+    } catch (error) {
+      return { ok: false, error };
+    }
   };
-  const ensureTrackToken = (stop, status) => {
+  const ensureTrackToken = (stop) => {
     let token = stop.trackToken;
     if (!token) {
       token = genTrackToken();
       setSchedule(days => (days || []).map(d => ({ ...d, stops: (d.stops || []).map(s => s.sid === stop.sid ? { ...s, trackToken: token } : s) })));
     }
-    writeTrackRecord({ ...stop, trackToken: token }, status);
     return token;
+  };
+  const prepareTracking = async (stop, status = "enroute") => {
+    const token = stop?.trackToken || ensureTrackToken(stop);
+    if (!token) throw new Error("SPS Way couldn't create a secure tracking link.");
+    const prepared = { ...stop, trackToken: token };
+    const result = await writeTrackRecord(prepared, status);
+    if (!result?.ok) throw result?.error || new Error("The live tracking session did not save.");
+    return prepared;
   };
 
   const addStops = (date, newStops) => {
@@ -12696,19 +13540,19 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
                     {/* Head Here — not headed → solid red (confirm first if out of order);
                         headed (tapped here OR via the bottom "Head to next" bar) → pressed "Heading". */}
                     {!headed ? (
-                      <button onClick={e => { e.stopPropagation(); if (outOfOrder && !confirm(`Head to ${c?.name || "this stop"} now? It isn't the next stop on your route.`)) return; onEnRoute && onEnRoute(s.sid); setHeadHereModal({ stop: { ...s, trackToken: ensureTrackToken(s, "enroute") }, client: c }); }}
+                      <button onClick={e => { e.stopPropagation(); if (outOfOrder && !confirm(`Head to ${c?.name || "this stop"} now? It isn't the next stop on your route.`)) return; setHeadHereModal({ stop: { ...s, trackToken: ensureTrackToken(s) }, client: c }); }}
                         style={{ flex: 1, minWidth: 0, minHeight: actionHeight, background: T.primary, color: "#fff", border: "none", borderRadius: 10, padding: denseDesktop ? "7px 6px" : "9px 6px", fontSize: denseDesktop ? 11.5 : 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
                         <Icon name="map" size={14} /> Head Here
                       </button>
                     ) : (
-                      <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: { ...s, trackToken: ensureTrackToken(s, "enroute") }, client: c }); }}
+                      <button onClick={e => { e.stopPropagation(); setHeadHereModal({ stop: { ...s, trackToken: ensureTrackToken(s) }, client: c }); }}
                         title="Heading here — tap for directions again"
                         style={{ flex: 1, minWidth: 0, minHeight: actionHeight, background: hexA(T.primary, 0.1), color: T.primary, border: `1px solid ${hexA(T.primary, 0.3)}`, borderRadius: 10, padding: denseDesktop ? "7px 6px" : "9px 6px", fontSize: denseDesktop ? 11.5 : 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, whiteSpace: "nowrap" }}>
                         <Icon name="check" size={13} /> Heading
                       </button>
                     )}
                     {/* I'm Here — logs arrival (also starts the job clock); flips to pressed "Arrived" */}
-                    <button onClick={e => { e.stopPropagation(); if (!arrived) setArrivedModal({ stop: { ...s, trackToken: ensureTrackToken(s, "arrived") }, client: c, key: s.sid }); }}
+                    <button onClick={e => { e.stopPropagation(); if (!arrived) setArrivedModal({ stop: { ...s, trackToken: ensureTrackToken(s) }, client: c, key: s.sid }); }}
                       style={{ flex: 1, minWidth: 0, minHeight: actionHeight, background: arrived ? hexA("#16a34a", 0.12) : T.surface, color: arrived ? "#16a34a" : T.text, border: `1px solid ${arrived ? hexA("#16a34a", 0.4) : T.border}`, borderRadius: 10, padding: denseDesktop ? "7px 6px" : "9px 6px", fontSize: denseDesktop ? 11.5 : 12.5, fontWeight: 700, cursor: arrived ? "default" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, whiteSpace: "nowrap" }}>
                       {arrived ? <><Icon name="check" size={13} /> Arrived</> : "I'm Here"}
                     </button>
@@ -12908,7 +13752,7 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           // The next stop's client, so the big "Head to next" button can launch the full
           // flow (On My Way text + directions in the tech's preferred app), not just a link.
           const nextStopClient = nextStop ? clientForStop(nextStop) : null;
-          const headToNext = () => { if (!nextStop) return; onEnRoute && onEnRoute(nextStop.sid); setHeadHereModal({ stop: nextStop, client: nextStopClient }); };
+          const headToNext = () => { if (!nextStop) return; setHeadHereModal({ stop: { ...nextStop, trackToken: ensureTrackToken(nextStop) }, client: nextStopClient }); };
           return (
             <div style={{ paddingBottom: vp.isDesktop ? 0 : (nextStop ? 96 : 0) }}>
               {!vp.isDesktop && (
@@ -13088,9 +13932,9 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
         <OnMyWayModal stop={omwModal.stop} client={omwModal.client} email={email} onClose={() => setOmwModal(null)} onSent={() => handleOmwSent(omwModal.key)} />
       )}
       {arrivedModal && (
-        <ArrivedModal stop={arrivedModal.stop} client={arrivedModal.client} email={email} onClose={() => setArrivedModal(null)} onArrived={() => { onArrived && onArrived(arrivedModal.key); }} />
+        <ArrivedModal stop={arrivedModal.stop} client={arrivedModal.client} email={email} onClose={() => setArrivedModal(null)} onValidate={() => onValidateArrival ? onValidateArrival(arrivedModal.key) : true} onPrepareTracking={() => prepareTracking(arrivedModal.stop, "enroute")} onArrived={() => { onArrived && onArrived(arrivedModal.key, arrivedModal.stop); }} />
       )}
-      {headHereModal && <HeadHereModal stop={headHereModal.stop} client={headHereModal.client} email={email} defaultMapApp={preferredMapApp} defaultEtaBuffer={preferredEtaBuffer} onClose={() => setHeadHereModal(null)} onSent={() => handleOmwSent(headHereModal.stop.sid)} />}
+      {headHereModal && <HeadHereModal stop={headHereModal.stop} client={headHereModal.client} email={email} defaultMapApp={preferredMapApp} defaultEtaBuffer={preferredEtaBuffer} onClose={() => setHeadHereModal(null)} onPrepareTracking={() => prepareTracking(headHereModal.stop, "enroute")} onStarted={() => { onEnRoute && onEnRoute(headHereModal.stop.sid); }} onSent={() => { onEnRoute && onEnRoute(headHereModal.stop.sid); handleOmwSent(headHereModal.stop.sid); }} />}
       {stopChange && (
         <StopChangeModal
           stop={stopChange.stop}
@@ -14401,7 +15245,7 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
     .replace(/\{dueDate\}/g, "Jun 30").replace(/\{date\}/g, "06/30/2025")
     .replace(/\{plan\}/g, "Premium")
     .replace(/\{eta\}/g, "15").replace(/\{arrival\}/g, "3:45 PM")
-    .replace(/\{link\}/g, "Pay online: stonepropertysolutions.com/pay\nPay in the app: spsway://invoices").replace(/\{track\}/g, "");
+    .replace(/\{link\}/g, `Pay online: stonepropertysolutions.com/pay\n${clientLinkFooter("invoices", { origin: PROD_URL, heading: "SPS Way invoice" })}`).replace(/\{track\}/g, "");
   const previewBox = { marginTop: 8, background: T.surfaceAlt, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: T.text, lineHeight: 1.5, borderTopLeftRadius: 4 };
 
   const sample = {
@@ -14415,7 +15259,7 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
   const smsPreview = (email.smsOnMyWay || "")
     .replace(/\{first\}/g, "Robert").replace(/\{sender\}/g, email.senderName || email.fromName || branding.companyName)
     .replace(/\{company\}/g, branding.companyName).replace(/\{eta\}/g, "15").replace(/\{arrival\}/g, "3:45 PM")
-    .replace(/\{track\}/g, email.trackLink ? `Track my live location here: ${email.trackLink} — ` : "");
+    .replace(/\{track\}/g, email.trackLink ? `${clientLinkFooter("track", { origin: PROD_URL, browserUrl: email.trackLink, heading: "Live tracking" })}\n` : "");
 
   const labelStyle = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 };
   const field = { width: "100%", padding: "10px 13px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
@@ -14601,8 +15445,8 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
             <label style={labelStyle}>"Service Complete" Text</label>
             <textarea style={{ ...field, resize: "vertical" }} rows={3} value={email.smsReport || ""} onChange={e => set("smsReport", e.target.value)} placeholder={DEFAULT_EMAIL.smsReport} />
             <AIAssist kind="reminder" channel="text" context={{ company: branding?.companyName || "" }} value={email.smsReport || ""} onChange={v => set("smsReport", v)} />
-            <div style={hint}>Sent when you tap "Text Report" after finishing a visit. Tags: {"{first}"}, {"{service}"}, {"{company}"}.</div>
-            <div style={previewBox}>{sampleFill(email.smsReport || DEFAULT_EMAIL.smsReport)}</div>
+            <div style={hint}>Sent once automatically after a completed stop is saved and report delivery is enabled. Tags: {"{first}"}, {"{service}"}, {"{company}"}, {"{link}"}. The app and browser links are always kept.</div>
+            <div style={previewBox}>{appendClientLinks(sampleFill(email.smsReport || DEFAULT_EMAIL.smsReport), { target: "reports", origin: PROD_URL, heading: "View your full report and photos" })}</div>
           </div>
           <div>
             <label style={labelStyle}>Invoice Sent Text <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
@@ -14611,13 +15455,6 @@ function EmailSettings({ email, setEmail, branding, setBranding }) {
               onChange={e => set("smsInvoice", e.target.value)}
               placeholder={`Hi {first}, you have a new invoice from {company}. Log in to your portal to view and pay it.`} />
             <div style={previewBox}>{sampleFill(email.smsInvoice || DEFAULT_EMAIL.smsInvoice)}</div>
-          </div>
-          <div>
-            <label style={labelStyle}>Job Complete Text <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
-            <textarea style={{ ...field, resize: "vertical" }} rows={2}
-              value={email.smsComplete || ""}
-              onChange={e => set("smsComplete", e.target.value)}
-              placeholder={`Hi {first}, your {company} service is complete. Check your portal for notes and photos.`} />
           </div>
         </div>
       </Card>
@@ -16161,13 +16998,20 @@ function InvoiceSendStep({ invoice, client, onClose }) {
   const phone = String(client?.phone || "").replace(/[^\d+]/g, "");
   const clientEmail = (invoice.clientEmail || client?.email || "").trim();
 
-  const fill = (tpl) => String(tpl || "")
+  const fillWithLink = (tpl, linkText) => String(tpl || "")
     .replace(/\{first\}/g, first)
     .replace(/\{company\}/g, branding.companyName || "")
     .replace(/\{number\}/g, invoice.number || "")
     .replace(/\{amount\}/g, amount).replace(/\{total\}/g, amount)
     .replace(/\{dueDate\}/g, invoice.dueDate || "soon")
-    .replace(/\{link\}/g, payLink ? `Pay online: ${payLink}\nPay in the app: spsway://invoices` : "View & pay it in your portal.");
+    .replace(/\{link\}/g, linkText);
+  // Preserve the existing app/email template behavior; only SMS receives the paired footer.
+  const fill = (tpl) => fillWithLink(tpl, payLink ? `Pay online: ${payLink}\nPay in the app: spsway://invoices` : "View & pay it in your portal.");
+  const smsProtectedLines = payLink ? [`Pay online: ${payLink}`] : [];
+  const fillSms = (tpl) => appendClientLinks(
+    fillWithLink(tpl, payLink ? "Payment options are below." : "Open it in SPS Way below."),
+    { target: "invoices", origin: PROD_URL, heading: "View and pay in SPS Way", protectedLines: smsProtectedLines },
+  );
 
   const [doSms, setDoSms]   = useState(!!phone && commPref(client, "text"));
   const [doChat, setDoChat] = useState(commPref(client, "app"));
@@ -16177,7 +17021,7 @@ function InvoiceSendStep({ invoice, client, onClose }) {
   const smsOptedOut   = !!phone && !commPref(client, "text");
   const chatOptedOut  = !!client?.id && !commPref(client, "app");
   const emailOptedOut = !!clientEmail && !commPref(client, "email");
-  const [smsMsg, setSmsMsg]   = useState(fill(e.smsInvoice || DEFAULT_EMAIL.smsInvoice));
+  const [smsMsg, setSmsMsg]   = useState(fillSms(e.smsInvoice || DEFAULT_EMAIL.smsInvoice));
   const [chatMsg, setChatMsg] = useState(fill(e.chatInvoice || DEFAULT_EMAIL.chatInvoice));
   const [sending, setSending] = useState(false);
   const [err, setErr] = useState("");
@@ -16190,7 +17034,8 @@ function InvoiceSendStep({ invoice, client, onClose }) {
     const protectedChannels = [];
     if (doSms && phone) {
       try {
-        const r = await sendSms(phone, smsMsg, { clientId: client.id, type: "Invoice" }); // gated: honors Test Mode (hold/redirect)
+        const outgoingSms = appendClientLinks(smsMsg, { target: "invoices", origin: PROD_URL, heading: "View and pay in SPS Way", protectedLines: smsProtectedLines });
+        const r = await sendSms(phone, outgoingSms, { clientId: client.id, type: "Invoice" }); // gated: honors Test Mode (hold/redirect)
         if (!r.ok) fails.push(`Text: ${r.error || "failed"}`);
         else if (!r.acceptedForClient) protectedChannels.push(r.held ? "Test Mode held the invoice text" : "the test text went only to you");
       } catch (_) { fails.push("Text: couldn't reach server"); }
@@ -18603,7 +19448,9 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
       "",
       `To approve, reply YES. Questions? Call ${branding.companyPhone || "us"}.`,
     ].filter(Boolean);
-    return lines.join("\n");
+    return appendClientLinks(lines.join("\n"), {
+      target: "estimates", origin: PROD_URL, heading: "Review your estimate in SPS Way",
+    });
   };
 
   const sendViaSms = async () => {
@@ -19236,7 +20083,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
     setPhase("messaging");
   };
 
-  const fill = (tpl, c, inv) => {
+  const fillWithLink = (tpl, c, inv, linkText) => {
     const totals = invoiceTotals(inv);
     return String(tpl || "")
       .replace(/\{first\}/g, (c.name || "").trim().split(" ")[0] || "there")
@@ -19244,8 +20091,18 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
       .replace(/\{number\}/g, inv.number || "")
       .replace(/\{amount\}/g, money(totals.total)).replace(/\{total\}/g, money(totals.total))
       .replace(/\{dueDate\}/g, inv.dueDate || "soon")
-      .replace(/\{link\}/g, inv.paymentLink ? `Pay online: ${inv.paymentLink}\nPay in the app: spsway://invoices` : "View & pay it in your portal.");
+      .replace(/\{link\}/g, linkText);
   };
+  const fill = (tpl, c, inv) => fillWithLink(tpl, c, inv, inv.paymentLink ? `Pay online: ${inv.paymentLink}\nPay in the app: spsway://invoices` : "View & pay it in your portal.");
+  const fillSms = (tpl, c, inv) => appendClientLinks(
+    fillWithLink(tpl, c, inv, inv.paymentLink ? "Payment options are below." : "Open it in SPS Way below."),
+    {
+      target: "invoices",
+      origin: PROD_URL,
+      heading: "View and pay in SPS Way",
+      protectedLines: inv.paymentLink ? [`Pay online: ${inv.paymentLink}`] : [],
+    },
+  );
 
   const created = progress.filter(p => p.ok);
   const sendBatch = async () => {
@@ -19257,7 +20114,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
       const inv = p.invoice;
       const phone = String(c.phone || "").replace(/[^\d+]/g, "");
       const cEmail = (c.email || "").trim();
-      if (doSms && phone && commPref(c, "text")) { try { const r = await sendSms(phone, fill(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv), { clientId: c.id, type: "Invoice" }); if (!r.ok) fails++; else if (!r.acceptedForClient) protectedChannels++; } catch (_) { fails++; } }
+      if (doSms && phone && commPref(c, "text")) { try { const r = await sendSms(phone, fillSms(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv), { clientId: c.id, type: "Invoice" }); if (!r.ok) fails++; else if (!r.acceptedForClient) protectedChannels++; } catch (_) { fails++; } }
       if (doChat && c.id && commPref(c, "app")) { try { const posted = await postToPortalSafe({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) + invCardMarker(inv, "$" + ((invoiceTotals(inv).total) || 0).toFixed(2), branding.companyName) }); if (posted?.error) fails++; else if (posted?.held) protectedChannels++; } catch (_) { fails++; } }
       if (doEmail && cEmail && commPref(c, "email")) { try { const tt = invoiceTotals(inv); const rE = await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ ...senderEmailFields(c.id), emailSubject: fill(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, c, inv), emailIntro: fill(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, c, inv), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); logComm({ clientId: c.id, type: "Invoice", channel: "email", body: `Invoice ${inv.number || ""} emailed (batch)`, ok: rE.ok, origin: ACTOR ? `${ACTOR} — batch invoice` : "batch invoice", recipient: cEmail }); if (!rE.ok) fails++; } catch (_) { fails++; } }
     }
@@ -21119,8 +21976,15 @@ function PushSettingsCard() {
   };
   const disable = async () => {
     setPs(s => ({ ...s, busy: true, msg: "" }));
-    await disableDevicePush();
-    setPs(s => ({ ...s, busy: false, msg: "Push is off for this device." }));
+    const result = await disableDevicePush();
+    setPs(s => ({
+      ...s,
+      busy: false,
+      msg: result.ok
+        ? "Push is off for this device."
+        : (result.error || "Notifications couldn't be fully disabled. Please try again."),
+    }));
+    await refresh();
   };
   const native = ps.perm !== "unsupported" && ps.perm !== "checking";
   return (
@@ -21349,12 +22213,20 @@ function SyncStatus({ T, branding, team, currentUserId, email = {} }) {
         if (!outbound.upstreamReachable) return { status: "down", detail: "Quo rejected the connection — check QUO_API_KEY" };
         if (outbound.numberOnAccount === false) return { status: "down", detail: "QUO_PHONE_NUMBER isn't on the connected Quo account" };
         if (!inbound.ready) {
-          const missing = [!inbound.schema && "inbox SQL", !inbound.key && "webhook key", !inbound.sig && "signing secret", !inbound.line && "business line"].filter(Boolean).join(" + ");
+          const missing = [!inbound.schema && "inbox SQL", !inbound.key && "webhook key", !inbound.sig && "signing secret", !inbound.line && "automation line", inbound.mainConfigured && !inbound.mainLine && (inbound.duplicateLines ? "separate main line" : "main line")].filter(Boolean).join(" + ");
           return { status: "warn", detail: `Outgoing works · replies need ${missing || "webhook setup"}` };
         }
-        return inbound.observed
-          ? { status: "ok", detail: "Outgoing verified · an incoming reply has been received" }
-          : { status: "warn", detail: "Outgoing verified · incoming server ready — send one test reply to confirm the Quo webhook" };
+        if (!inbound.push) return { status: "warn", detail: "Incoming texts can be stored, but APNs push is not configured" };
+        const observedAutomation = inbound.observedLines?.automation === true;
+        const observedMain = inbound.observedLines?.main === true;
+        if (inbound.mainConfigured) {
+          if (observedAutomation && observedMain) return { status: "ok", detail: "Outgoing verified · signed replies received on both business lines · APNs ready" };
+          const unproven = [!observedAutomation && "automation line", !observedMain && "main work line"].filter(Boolean).join(" + ");
+          return { status: "warn", detail: `Server and APNs ready · send one signed test reply to the ${unproven}` };
+        }
+        return observedAutomation
+          ? { status: "ok", detail: "Outgoing verified · signed reply received · APNs ready" }
+          : { status: "warn", detail: "Server and APNs ready · send one test reply to confirm the Quo webhook" };
       },
       fix: { label: "Open Quo settings ↗", run: () => openExternalBrowser("https://app.quo.com"), note: "For incoming replies: run SMS-INBOX-MIGRATION.sql, then set QUO_WEBHOOK_KEY + QUO_WEBHOOK_SECRET and create the signed message.received webhook." } },
     { key: "qb", label: "QuickBooks", icon: "invoice", sub: "Invoices + payments sync",
@@ -23579,9 +24451,19 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
     const company = branding?.companyName || "Stone Property Solutions";
     // Payment entries use the payment template; seasonal carry their own; service use the shared one.
     const raw = entry.kind === "payment" ? payTpl : (entry.message != null && entry.message !== "") ? entry.message : tpl;
-    return raw
+    const paymentUrl = entry.kind === "payment" && /^https?:\/\//i.test(String(entry.link || "")) ? String(entry.link) : "";
+    const filled = raw
       .replace(/{first}/g, first).replace(/{company}/g, company).replace(/{date}/g, entry.date || "")
-      .replace(/{number}/g, entry.number || "").replace(/{amount}/g, entry.amount || "").replace(/{link}/g, entry.link || "");
+      .replace(/{number}/g, entry.number || "").replace(/{amount}/g, entry.amount || "")
+      .replace(/{link}/g, paymentUrl ? "the secure payment link below" : (entry.link || "your SPS Way portal"));
+    return entry.kind === "payment"
+      ? appendClientLinks(filled, {
+          target: "invoices",
+          origin: PROD_URL,
+          heading: "View and pay in SPS Way",
+          protectedLines: paymentUrl ? [`Pay online: ${paymentUrl}`] : [],
+        })
+      : filled;
   };
 
   const [reminderErr, setReminderErr] = useState("");
@@ -23612,8 +24494,17 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
   const sendReview = async () => {
     if (!review) return;
     setSendBusy(true);
+    const paymentUrl = review.kind === "payment" && /^https?:\/\//i.test(String(review.link || "")) ? String(review.link) : "";
+    const outgoing = review.kind === "payment"
+      ? appendClientLinks(reviewMsg, {
+          target: "invoices",
+          origin: PROD_URL,
+          heading: "View and pay in SPS Way",
+          protectedLines: paymentUrl ? [`Pay online: ${paymentUrl}`] : [],
+        })
+      : reviewMsg;
     if (review.phone) {
-      const r = await sendSms(review.phone, reviewMsg, { clientId: review.client?.id, type: review.kind === "payment" ? "Payment reminder" : "Reminder" }); // business Quo line ONLY
+      const r = await sendSms(review.phone, outgoing, { clientId: review.client?.id, type: review.kind === "payment" ? "Payment reminder" : "Reminder" }); // business Quo line ONLY
       if (!r.ok) { setReminderErr(r.error || (r.missingEnv ? "Texting isn't set up on the server yet." : "Couldn't send the text.")); setSendBusy(false); return; }
       if (!r.acceptedForClient) {
         setReminderErr(r.held ? "Held by Test Mode — the client was not reminded." : "Test sent to you — the client was not reminded.");
@@ -23622,7 +24513,7 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
       }
     } else if (!manualCopied) {
       try {
-        await navigator.clipboard?.writeText(reviewMsg);
+        await navigator.clipboard?.writeText(outgoing);
         setManualCopied(true);
         setReminderErr("Copied to your clipboard. It is not marked sent yet — send it manually, then confirm below.");
       } catch (_) { setReminderErr("Couldn't copy the message. Select the text and copy it manually."); }
@@ -31941,6 +32832,9 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
     if (t === "invoices" || t.indexOf("invoice") === 0) setPage("cp_invoices");
     else if (t === "messages" || t === "comms") setPage("cp_messages"); // push taps on new-message notifications
     else if (t === "track" || t === "home") setPage("cp_home"); // live tracking lives on Home
+    else if (t === "reports" || t === "property" || t === "history") setPage("cp_property");
+    else if (t === "estimates") setPage("cp_estimates");
+    else if (t === "schedule") setPage("cp_home"); // upcoming visits live on Home
     if (onDeepLinkHandled) onDeepLinkHandled();
   }, [deepLink]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -32348,6 +33242,7 @@ export default function App({ authEmail = "", onSignOut }) {
   const [portalDeepLink, setPortalDeepLink] = useState(null); // route the client portal from a deep link (e.g. invoice "Pay in the app")
   const [payBanner, setPayBanner] = useState(null); // Build 15, Item 6 — in-app "payment received" banner (owner, while in the app)
   const [adding, setAdding] = useState(false);
+  const [signOutError, setSignOutError] = useState("");
   const [clientsView, setClientsView] = useState("split"); // desktop only: "split" (master-detail) | "table"
   const [scheduleSeed, setScheduleSeed] = useState(null);
   // Staff "Preview Portal as X" lives at the App top level (rendered OUTSIDE the shell's
@@ -32733,87 +33628,472 @@ export default function App({ authEmail = "", onSignOut }) {
   }, [page]);
   // (The boot splash from index.html is removed once the app is ready — see the
   // boot-splash removal effect below, keyed on `hydrated`.)
+  // Reactive mirror of DB_READ_OK. Arrival recovery must not consume a durable native region
+  // event while the app is still showing a cache-first schedule that may be missing that stop.
+  const [dbOk, setDbOk] = useState(DB_READ_OK);
+  useEffect(() => {
+    setDbOk(DB_READ_OK);
+    const on = (e) => {
+      const detail = (((e || {}).detail) || {});
+      if (detail.type === "read-ok") setDbOk(true);
+      else if (detail.type === "identity" || (detail.type === "error" && /reach the database/i.test(detail.msg || ""))) setDbOk(false);
+    };
+    document.addEventListener("sps-db-status", on);
+    return () => document.removeEventListener("sps-db-status", on);
+  }, []);
+
+  // Arrival monitoring is safety-sensitive: never replace or clear an iOS region from the
+  // cache-first React schedule. Keep a separate snapshot that becomes usable only after Supabase
+  // has confirmed the schedule row. Keyed reconciles are emitted only when no local write is
+  // pending, so later cross-device assignments can safely advance this snapshot too.
+  const [arrivalConfirmedSchedule, setArrivalConfirmedSchedule] = useState(null);
+  const arrivalScheduleReady = Array.isArray(arrivalConfirmedSchedule);
+  const [arrivalClockBucket, setArrivalClockBucket] = useState(() => Math.floor(Date.now() / 60000));
+  useEffect(() => {
+    const timer = setInterval(() => setArrivalClockBucket(Math.floor(Date.now() / 60000)), 60000);
+    return () => clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    setArrivalConfirmedSchedule(null);
+    if (!hydrated || !currentUser || !dbOk) return;
+    let alive = true;
+    const adopt = (raw) => {
+      const decoded = decodeStopStateValue(raw);
+      if (alive && Array.isArray(decoded)) setArrivalConfirmedSchedule(decoded);
+    };
+    const onReconciled = async (event) => {
+      const key = event?.detail?.key;
+      if (key !== "sps_schedule") return;
+      const current = await store.get("sps_schedule").catch(() => null);
+      if (current?.value != null) adopt(current.value);
+      else if (event?.detail?.remoteMissing) adopt([]);
+    };
+    document.addEventListener("sps-reconciled", onReconciled);
+    store.refresh("sps_schedule").then((result) => {
+      if (!alive || !result?.ok) return;
+      adopt(result.exists ? result.value : []);
+    }, () => {});
+    return () => {
+      alive = false;
+      document.removeEventListener("sps-reconciled", onReconciled);
+    };
+  }, [hydrated, currentUser?.id, dbOk]);
+
   // Today's stops for the signed-in tech — powers auto-share-on-route below.
   const myTodayStops = useMemo(() => {
     if (!currentUser) return [];
     const key = fmtMDY(new Date());
     const day = (schedule || []).find(d => d.date === key);
-    return day ? (day.stops || []).filter(s => String(s.assigneeId) === String(currentUser.id)) : [];
-  }, [schedule, currentUser && currentUser.id]);
-  // `sps_enroute` intentionally retains each stop's start timestamp for time tracking. Select only
-  // the newest explicit "Head Here" stop for geofencing; once it arrives/completes, do not fall back
-  // to an older retained timestamp and accidentally notify a previous or future client.
+    const assigned = day
+      ? (day.stops || []).filter(s => String(s.assigneeId) === String(currentUser.id) && !s?.cancelled && !s?.canceled)
+      : [];
+    // Match the route order shown on Schedule. In manual mode the stored order is authoritative;
+    // in time mode the next arrival candidate follows the same chronological order the tech sees.
+    return scheduleCfg?.sort === "time"
+      ? [...assigned].sort((a, b) => to24(a?.time) - to24(b?.time))
+      : assigned;
+  }, [schedule, currentUser && currentUser.id, scheduleCfg?.sort]);
+  // A region configured before midnight is intentionally valid until 3 a.m. Include yesterday's
+  // assigned stops only during that grace window so a late-running job can still recover its
+  // durable native prompt after the calendar day rolls over.
+  const myArrivalRecoveryStops = useMemo(() => {
+    if (!currentUser || !arrivalScheduleReady) return [];
+    const now = new Date();
+    const keys = [fmtMDY(now)];
+    if (now.getHours() < 3) {
+      const yesterday = new Date(now);
+      yesterday.setDate(yesterday.getDate() - 1);
+      keys.unshift(fmtMDY(yesterday));
+    }
+    const seen = new Set();
+    const daysByDate = new Map((arrivalConfirmedSchedule || []).map(day => [day?.date, day]));
+    return keys
+      .map(key => daysByDate.get(key))
+      .filter(Boolean)
+      .filter(day => keys.includes(day?.date))
+      .flatMap(day => {
+        const stops = scheduleCfg?.sort === "time"
+          ? [...(day?.stops || [])].sort((a, b) => to24(a?.time) - to24(b?.time))
+          : (day?.stops || []);
+        return stops.map(stop => ({ ...stop, __arrivalDate: day.date }));
+      })
+      .filter(stop => String(stop?.assigneeId) === String(currentUser.id) && !stop?.cancelled && !stop?.canceled)
+      .filter(stop => {
+        const sid = String(stop?.sid || "");
+        if (!sid || seen.has(sid)) return false;
+        seen.add(sid);
+        return true;
+      });
+  }, [arrivalConfirmedSchedule, arrivalScheduleReady, arrivalClockBucket, scheduleCfg?.sort, currentUser && currentUser.id]);
+  const myArrivalTodayStops = useMemo(() => {
+    const today = fmtMDY(new Date());
+    const assigned = (myArrivalRecoveryStops || []).filter(stop => stop?.__arrivalDate === today);
+    return scheduleCfg?.sort === "time"
+      ? [...assigned].sort((a, b) => to24(a?.time) - to24(b?.time))
+      : assigned;
+  }, [myArrivalRecoveryStops, arrivalClockBucket, scheduleCfg?.sort]);
+  const [arrivalPromptsEnabled, setArrivalPromptsEnabled] = useState(() => {
+    try { return localStorage.getItem("sps_arrival_prompts_enabled") === "1"; } catch (_) { return false; }
+  });
+  // Arrival watch target: an explicit "Head Here" stop wins, otherwise watch the next unfinished
+  // scheduled stop. Detection is only a prompt — it must never mark the stop or contact a client
+  // until the tech confirms through the same ArrivedModal used by the manual "I'm Here" action.
+  const arrivalWatchStop = useMemo(
+    () => selectArrivalWatchStop(myArrivalRecoveryStops, enRoute, arrivals, completedSids),
+    [myArrivalRecoveryStops, enRoute, arrivals, completedSids],
+  );
   const activeEnRouteStop = useMemo(
     () => selectActiveEnRouteStop(myTodayStops, enRoute, arrivals, completedSids),
     [myTodayStops, enRoute, arrivals, completedSids],
   );
-  // ── Geofence auto-arrival (Batch B) ──────────────────────────────────────────
-  // When the tech's broadcast GPS enters the geofence of a stop, fire the SAME arrival the "I'm
-  // Here" button does — stamp arrival, flip the public track record to "arrived", and send the
-  // on-site text (through the existing Test-Mode/pilot-gated sendSms) — with a one-shot guard in
-  // the location hook and a 60-second Undo here.
-  const [autoArrivedToast, setAutoArrivedToast] = useState(null); // { sid, name } | null
-  const geoUndoTimer = useRef(null);
-  const geoTrackWrite = (stop, status) => {
-    if (!stop || !stop.trackToken) return;
+  const [detectedArrival, setDetectedArrival] = useState(null); // { stop, client, source }
+  const nativeArrivalResetRef = useRef(Promise.resolve());
+  const geoTrackWrite = async (stop, status) => {
+    if (!stop || !stop.trackToken) return { ok: false, error: new Error("This stop has no tracking link.") };
     try {
       const configuredMinutes = parseInt(email && email.trackingLinkMinutes, 10);
       const trackingMinutes = Number.isFinite(configuredMinutes) ? Math.min(1440, Math.max(5, configuredMinutes)) : 60;
       const now = new Date();
-      store.set("sps_track_" + stop.trackToken, JSON.stringify({
+      const result = await store.set("sps_track_" + stop.trackToken, JSON.stringify({
         sid: stop.sid, assigneeId: stop.assigneeId || "",
         client: (stop.client || "").split(" ")[0] || "there",
         address: stop.address || "", status: status || "scheduled", at: now.toISOString(),
         expiresAt: new Date(now.getTime() + trackingMinutes * 60000).toISOString(),
       }));
-    } catch (_) {}
-  };
-  const onGeofenceArrive = (sid) => {
-    if (!sid || sid !== activeEnRouteStop?.sid || arrivals[sid]) return; // only the current explicit Head Here stop
-    const day = (schedule || []).find(d => (d.stops || []).some(s => s.sid === sid));
-    const stop = day && (day.stops || []).find(s => s.sid === sid);
-    if (!stop) return;
-    setArrivals(a => ({ ...a, [sid]: a[sid] || new Date().toISOString() })); // stamp arrival (first-wins)
-    geoTrackWrite(stop, "arrived");                           // flip the public live-track page to "arrived"
-    const client = (clients || []).find(c => String(c.id) === String(stop.clientId ?? stop.id));
-    if (client) {
-      const firstName = (client.name || "").split(" ")[0] || "there";
-      const tpl = (email && email.smsArrived) || DEFAULT_EMAIL.smsArrived;
-      let msg = tpl.replace(/\{first\}/g, firstName)
-        .replace(/\{sender\}/g, (email && email.senderName) || (email && email.fromName) || branding.companyName)
-        .replace(/\{company\}/g, branding.companyName)
-        .replace(/\{service\}/g, stop.type || "service");
-      const trackUrl = stop.trackToken ? stopTrackLink(stop.trackToken) : ((email && email.trackLink) || "");
-      const linkLine = ((email && email.liveTrackingEnabled !== false) && trackUrl) ? `See the live update here: ${trackUrl}` : "";
-      if (/\{track\}/.test(tpl)) msg = msg.replace(/\{track\}/g, linkLine);
-      else if (linkLine) msg += `\n\n${linkLine}`;
-      if (client.id != null && commPref(client, "app")) postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: msg }).then(() => {}, () => {});
-      const phone = (client.phone || "").replace(/\D/g, "");
-      if (phone && commPref(client, "text")) sendSms(client.phone, msg, { clientId: client.id, type: "On site", origin: `visit:${sid} · arrived (auto)` }).then(() => {}, () => {});
+      if (!result?.ok) throw result?.error || new Error("The live tracking session did not save.");
+      return result;
+    } catch (error) {
+      return { ok: false, error };
     }
-    setAutoArrivedToast({ sid, name: (client && client.name) || (stop.client || "the stop") });
-    if (geoUndoTimer.current) clearTimeout(geoUndoTimer.current);
-    geoUndoTimer.current = setTimeout(() => setAutoArrivedToast(null), 60000);
   };
-  const onUndoArrive = (sid) => {
-    setArrivals(a => { const n = { ...a }; delete n[sid]; return n; });
-    const day = (schedule || []).find(d => (d.stops || []).some(s => s.sid === sid));
-    const stop = day && (day.stops || []).find(s => s.sid === sid);
-    if (stop) geoTrackWrite(stop, "enroute");
-    try { window.dispatchEvent(new CustomEvent("sps-geofence-undo", { detail: sid })); } catch (_) {} // re-arm the geofence for this stop
-    if (geoUndoTimer.current) { clearTimeout(geoUndoTimer.current); geoUndoTimer.current = null; }
-    setAutoArrivedToast(null);
+  const prepareArrivalTracking = async (stop, status = "enroute") => {
+    if (!stop?.sid) throw new Error("This scheduled stop is no longer available.");
+    let prepared = stop;
+    if (!prepared.trackToken) {
+      const token = genTrackToken();
+      if (!token) throw new Error("SPS Way couldn't create a secure visit link.");
+      prepared = { ...prepared, trackToken: token };
+      setSchedule(days => (days || []).map(day => ({ ...day, stops: (day.stops || []).map(item => item.sid === stop.sid ? { ...item, trackToken: token } : item) })));
+    }
+    const result = await geoTrackWrite(prepared, status);
+    if (!result?.ok) throw result?.error || new Error("The live visit link did not save.");
+    return prepared;
   };
+  const promptDetectedArrival = (sid, source = "foreground", { allowAssignedToday = false, validUntil = "" } = {}) => {
+    if (!arrivalPromptsEnabled || !sid || arrivals[sid] || completedSids[sid]) return false;
+    // A durable native event belongs to the stop that iOS was monitoring when the phone crossed the
+    // boundary. A schedule refresh may already have selected another candidate, but the persisted
+    // event remains valid as long as that stop is still assigned to this tech today. Foreground GPS
+    // remains stricter and may only prompt the current route candidate.
+    const assignedToday = (myArrivalTodayStops || []).find(stop => String(stop?.sid || "") === String(sid));
+    const assignedCurrentCandidate = (myArrivalRecoveryStops || []).find(stop => String(stop?.sid || "") === String(sid));
+    const expiry = Date.parse(String(validUntil || ""));
+    const validOvernightRecovery = allowAssignedToday && Number.isFinite(expiry) && expiry > Date.now();
+    const assignedForRecovery = validOvernightRecovery
+      ? (myArrivalRecoveryStops || []).find(stop => String(stop?.sid || "") === String(sid))
+      : assignedToday;
+    const stop = allowAssignedToday
+      ? assignedForRecovery
+      : (String(arrivalWatchStop?.sid || "") === String(sid) ? assignedCurrentCandidate : null);
+    if (!stop) return false;
+    const client = (clients || []).find(c => String(c.id) === String(stop.clientId ?? stop.id));
+    let prepared = stop;
+    if (!prepared.trackToken) {
+      const token = genTrackToken();
+      if (token) {
+        prepared = { ...prepared, trackToken: token };
+        setSchedule(days => (days || []).map(d => ({ ...d, stops: (d.stops || []).map(s => s.sid === sid ? { ...s, trackToken: token } : s) })));
+      }
+    }
+    setDetectedArrival(current => current?.stop?.sid === prepared.sid ? current : { stop: prepared, client: client || null, source });
+    return true;
+  };
+  const [locationWatchError, setLocationWatchError] = useState("");
   // Broadcast staff location while clocked in OR during the tech's scheduled route
   // window today (auto-share — no clock-in needed once location's been allowed once).
   useStaffLocationTracking({
     staffId: currentUser ? currentUser.id : null,
     meKey: currentUser ? (currentUser.email || "").trim().toLowerCase() : "",
     stops: myTodayStops,
-    geofenceStops: activeEnRouteStop ? [activeEnRouteStop] : [],
-    onGeofenceArrive,
+    // The foreground fallback watches the same one safe candidate as native Core Location.
+    geofenceStops: arrivalPromptsEnabled && arrivalWatchStop ? [arrivalWatchStop] : [],
+    explicitTripActive: !!(activeEnRouteStop && String(activeEnRouteStop.address || "").trim()),
+    onGeofenceArrive: (sid) => promptDetectedArrival(sid, "foreground"),
+    onLocationError: (_code, message) => setLocationWatchError(message || "Location is unavailable."),
+    onLocationReady: () => setLocationWatchError(""),
     isArrived: (sid) => !!arrivals[sid],
   });
+
+  // Field reliability status is intentionally available to every signed-in staff role. Recovery
+  // used to live only in owner-only Comms settings, while dismissing the primer hid it for 14 days.
+  const [fieldReadiness, setFieldReadiness] = useState({ native: false, push: "checking", bound: null, deviceCount: 0, arrivalEnabled: false, location: "unknown", locationAccuracy: "unknown", backgroundRefresh: "unknown", monitoring: false, error: "" });
+  const [fieldSetupOpen, setFieldSetupOpen] = useState(false);
+  const [fieldSetupBusy, setFieldSetupBusy] = useState(false);
+  const [fieldSetupMsg, setFieldSetupMsg] = useState("");
+  const refreshFieldReadiness = async () => {
+    const [push, arrival, binding] = await Promise.all([pushPermissionState(), nativeArrivalStatus(), devicePushBinding("status")]);
+    let lastReceivedAt = "";
+    let arrivalEnabled = arrivalPromptsEnabled;
+    try { lastReceivedAt = JSON.parse(localStorage.getItem("sps_push_last_received") || "null")?.at || ""; } catch (_) {}
+    try { arrivalEnabled = localStorage.getItem("sps_arrival_prompts_enabled") === "1"; } catch (_) {}
+    setFieldReadiness({
+      native: !!arrival?.supported,
+      push,
+      bound: binding?.ok ? !!binding.bound : false,
+      deviceCount: binding?.ok ? Math.max(0, Number(binding.deviceCount) || 0) : 0,
+      arrivalEnabled,
+      location: arrival?.authorization || arrival?.locationAuthorization || "unknown",
+      locationAccuracy: arrival?.locationAccuracy || "unknown",
+      backgroundRefresh: arrival?.backgroundRefreshStatus || "unknown",
+      monitoring: !!arrival?.monitoring,
+      monitoredStopId: arrival?.stop?.stopId || arrival?.stopId || arrival?.monitoredStopId || "",
+      notification: arrival?.notificationAuthorization || "unknown",
+      error: arrival?.lastError || arrival?.error || "",
+      bindingError: binding?.ok ? "" : (binding?.error || "Notification server status is unavailable."),
+      lastReceivedAt,
+    });
+  };
+  useEffect(() => {
+    if (!hydrated || !currentUser) return;
+    let nativeHandle = null;
+    const onVisible = () => { if (!document.hidden) refreshFieldReadiness(); };
+    document.addEventListener("visibilitychange", onVisible);
+    refreshFieldReadiness();
+    import("@capacitor/app")
+      .then(({ App }) => App?.addListener("appStateChange", (state) => { if (state?.isActive) refreshFieldReadiness(); }))
+      .then(handle => { nativeHandle = handle || null; })
+      .catch(() => {});
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      try { nativeHandle?.remove(); } catch (_) {}
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, currentUser?.id]);
+  useEffect(() => {
+    if (!hydrated || !currentUser) return;
+    const onReceived = () => {
+      setFieldSetupMsg("Notification received on this iPhone — push delivery is working.");
+      refreshFieldReadiness();
+    };
+    window.addEventListener("sps-push-received", onReceived);
+    return () => window.removeEventListener("sps-push-received", onReceived);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, currentUser?.id]);
+  // A fresh field install gets one unavoidable setup explanation instead of relying on a small
+  // banner the tech may never notice. iOS permissions are still requested only after the tech taps
+  // Enable / retry; closing this sheet is respected and the permanent Home/Schedule status remains.
+  useEffect(() => {
+    if (!hydrated || !currentUser || !fieldReadiness.native || !["dashboard", "schedule"].includes(page)) return;
+    const loc = String(fieldReadiness.location || "").toLowerCase();
+    const always = loc === "always" || loc === "authorizedalways" || loc === "authorized_always";
+    const ready = fieldReadiness.push === "granted"
+      && fieldReadiness.bound === true
+      && fieldReadiness.arrivalEnabled === true
+      && always
+      && String(fieldReadiness.locationAccuracy || "").toLowerCase() === "full"
+      && String(fieldReadiness.backgroundRefresh || "").toLowerCase() === "available";
+    if (ready) return;
+    try {
+      if (localStorage.getItem("sps_field_setup_shown_v1") === "1") return;
+      localStorage.setItem("sps_field_setup_shown_v1", "1");
+    } catch (_) {}
+    setFieldSetupMsg("");
+    setFieldSetupOpen(true);
+  }, [hydrated, currentUser?.id, page, fieldReadiness.native, fieldReadiness.push, fieldReadiness.bound, fieldReadiness.arrivalEnabled, fieldReadiness.location, fieldReadiness.locationAccuracy, fieldReadiness.backgroundRefresh]);
+
+  const [arrivalRetryNonce, setArrivalRetryNonce] = useState(0);
+  const nativeArrivalRetryRef = useRef({ key: "", attempts: 0 });
+  useEffect(() => {
+    if (!hydrated || !currentUser) return;
+    let nativeHandle = null, resumeTimer = null;
+    // Let the foreground schedule refresh land first; then retry the monitor against that newly
+    // confirmed route instead of racing it with the previous background snapshot.
+    const retry = () => {
+      if (resumeTimer) clearTimeout(resumeTimer);
+      resumeTimer = setTimeout(() => setArrivalRetryNonce(value => value + 1), 1200);
+    };
+    const onVisibleRetry = () => { if (!document.hidden) retry(); };
+    window.addEventListener("online", retry);
+    document.addEventListener("visibilitychange", onVisibleRetry);
+    import("@capacitor/app")
+      .then(({ App }) => App?.addListener("appStateChange", state => { if (state?.isActive) retry(); }))
+      .then(handle => { nativeHandle = handle || null; })
+      .catch(() => {});
+    return () => {
+      window.removeEventListener("online", retry);
+      document.removeEventListener("visibilitychange", onVisibleRetry);
+      if (resumeTimer) clearTimeout(resumeTimer);
+      try { nativeHandle?.remove(); } catch (_) {}
+    };
+  }, [hydrated, currentUser?.id]);
+
+  // Keep one power-efficient native region monitor on the explicit destination or next stop. It is
+  // opt-in and clears itself when there is nothing left to visit.
+  useEffect(() => {
+    if (!hydrated || !currentUser) return;
+    if (!arrivalPromptsEnabled) {
+      // An explicit opt-out owns both foreground and native monitoring, including any old pending
+      // local alert. Do not retain customer-identifying arrival state after the user turns it off.
+      clearNativeArrival().then(refreshFieldReadiness, () => {});
+      return;
+    }
+    // Cache-first state is display-only. Until the schedule row is confirmed, preserve the native
+    // monitor exactly as iOS left it rather than replacing/clearing it from a stale device cache.
+    if (!arrivalScheduleReady) return;
+    if (!arrivalWatchStop) {
+      // Preserve a background event until the tech confirms or dismisses it after a cold launch; a
+      // temporarily empty schedule must never erase a real arrival detection merely by rendering.
+      clearNativeArrival({ preservePending: true }).then(refreshFieldReadiness, () => {});
+      return;
+    }
+    let cancelled = false, retryTimer = null;
+    const retryKey = `${arrivalWatchStop.sid}::${arrivalWatchStop.address || ""}::${arrivalWatchStop.__arrivalDate || ""}`;
+    if (nativeArrivalRetryRef.current.key !== retryKey) nativeArrivalRetryRef.current = { key: retryKey, attempts: 0 };
+    Promise.resolve(nativeArrivalResetRef.current).catch(() => null)
+      .then(() => nativeArrivalStatus())
+      .then((status) => {
+        // A detected region entry is persisted by iOS. Do not let a schedule refresh replace its
+        // monitor and erase that pending prompt before the listener below can present it.
+        if (status?.pending || status?.pendingArrival) return status;
+        return configureNativeArrival(arrivalWatchStop);
+      })
+      .then(() => {
+        if (cancelled) return;
+        nativeArrivalRetryRef.current.attempts = 0;
+        refreshFieldReadiness();
+      })
+      .catch(error => {
+        if (cancelled) return;
+        setFieldReadiness(s => ({ ...s, monitoring: false, error: error?.message || "Couldn't monitor this stop." }));
+        const attempts = Math.min(6, (nativeArrivalRetryRef.current.attempts || 0) + 1);
+        nativeArrivalRetryRef.current.attempts = attempts;
+        retryTimer = setTimeout(() => setArrivalRetryNonce(value => value + 1), Math.min(60000, 3000 * (2 ** (attempts - 1))));
+      });
+    return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, currentUser?.id, arrivalPromptsEnabled, arrivalScheduleReady, arrivalWatchStop?.sid, arrivalWatchStop?.address, arrivalWatchStop?.__arrivalDate, arrivalRetryNonce]);
+
+  // Native region entry may arrive while SPS Way is foregrounded, backgrounded, or relaunched by
+  // iOS. Present the durable event without consuming it: it remains recoverable across another
+  // interruption until the tech explicitly confirms or dismisses. Only a completed, unassigned, or
+  // missing-today stop is stale; consume that record and move the monitor to the current candidate.
+  useEffect(() => {
+    if (!hydrated || !currentUser || !arrivalPromptsEnabled || !arrivalScheduleReady) return;
+    let handle = null, cancelled = false;
+    getNativeArrivalPlugin().then(async plugin => {
+      if (!plugin || cancelled) return;
+      const clearStalePending = async () => {
+        const reset = (async () => {
+          await plugin.consumePending().catch(() => null);
+          if (arrivalWatchStop) await configureNativeArrival(arrivalWatchStop);
+          else await clearNativeArrival();
+        })();
+        nativeArrivalResetRef.current = reset;
+        await reset.catch(() => null);
+        if (!cancelled) refreshFieldReadiness();
+      };
+      const present = async (event) => {
+        if (cancelled || !event?.stopId) return;
+        const accepted = promptDetectedArrival(String(event.stopId), "native", {
+          allowAssignedToday: true,
+          validUntil: event.validUntil || "",
+        });
+        // Cache-first hydration can briefly omit a real stop. Keep the native event durable until a
+        // confirmed database read can prove it stale; offline/slow startup must not consume it.
+        if (!accepted && arrivalScheduleReady) await clearStalePending();
+      };
+      handle = await plugin.addListener("arrivalDetected", present);
+      const status = await plugin.status().catch(() => null);
+      if (!cancelled && status?.pendingArrival?.stopId) await present(status.pendingArrival);
+    }).catch(() => {});
+    return () => { cancelled = true; try { handle?.remove(); } catch (_) {} };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, currentUser?.id, arrivalPromptsEnabled, arrivalScheduleReady, arrivalWatchStop?.sid, myArrivalTodayStops, myArrivalRecoveryStops, clients, arrivals, completedSids]);
+
+  // If the shared, database-confirmed schedule invalidates an already-open native prompt, remove
+  // the sheet before it can act. Do not key this to `arrivals`: this device records arrival before
+  // its client delivery finishes and must keep the sheet mounted to show a real delivery failure.
+  useEffect(() => {
+    if (!detectedArrival || !arrivalScheduleReady) return;
+    const sid = String(detectedArrival.stop?.sid || "");
+    const assigned = (myArrivalRecoveryStops || []).some(stop => String(stop?.sid || "") === sid);
+    if (assigned && !completedSids?.[sid]) return;
+    setDetectedArrival(null);
+    const reset = (async () => {
+      try { const plugin = await getNativeArrivalPlugin(); if (plugin) await plugin.consumePending(); } catch (_) {}
+      if (arrivalWatchStop && String(arrivalWatchStop.sid || "") !== sid) await configureNativeArrival(arrivalWatchStop);
+      else if (!arrivalWatchStop) await clearNativeArrival();
+    })();
+    nativeArrivalResetRef.current = reset;
+    void reset.then(refreshFieldReadiness, () => {});
+  }, [detectedArrival?.stop?.sid, arrivalScheduleReady, myArrivalRecoveryStops, completedSids, arrivalWatchStop?.sid]);
+
+  const enableFieldAlerts = async () => {
+    if (fieldSetupBusy) return;
+    setFieldSetupBusy(true); setFieldSetupMsg("");
+    try {
+      // Arrival detection and APNs are separate from broadcasting a tech's live coordinates.
+      // Location sharing remains an explicit Clock In / Head Here choice.
+      try {
+        localStorage.setItem("sps_arrival_prompts_enabled", "1");
+        localStorage.removeItem("sps_push_disabled");
+        localStorage.removeItem(PUSH_PRIMER_KEY);
+      } catch (_) {}
+      setArrivalPromptsEnabled(true);
+      const pushResult = await enableDevicePush();
+      let arrivalResult = null;
+      const plugin = await getNativeArrivalPlugin();
+      if (plugin) arrivalResult = await plugin.requestAlways();
+      if (arrivalWatchStop) await configureNativeArrival(arrivalWatchStop);
+      await refreshFieldReadiness();
+      const loc = arrivalResult?.authorization || arrivalResult?.locationAuthorization;
+      const precise = String(arrivalResult?.locationAccuracy || "unknown").toLowerCase() === "full";
+      const backgroundRefresh = String(arrivalResult?.backgroundRefreshStatus || "unknown").toLowerCase();
+      if (pushResult.ok && loc === "always" && precise && backgroundRefresh === "available") {
+        setFieldSetupMsg("Notifications and background arrival prompts are ready on this iPhone.");
+      } else {
+        const pieces = [];
+        if (!pushResult.ok) pieces.push(pushResult.error || "Notifications still need attention.");
+        if (plugin && loc !== "always") pieces.push("Choose Always for Location so arrival prompts work while Maps or the lock screen is open.");
+        if (plugin && !precise) pieces.push("Turn on Precise Location in iOS Settings so the property boundary can be detected reliably.");
+        if (plugin && backgroundRefresh !== "available") pieces.push("Turn on Background App Refresh in iOS Settings so SPS Way can wake for arrival prompts.");
+        setFieldSetupMsg(pieces.join(" ") || "Setup started. Follow the iOS permission prompts, then check again.");
+      }
+    } catch (error) {
+      setFieldSetupMsg(error?.message || "Field alerts couldn't be enabled yet.");
+    } finally { setFieldSetupBusy(false); }
+  };
+  const disableArrivalPrompts = async () => {
+    if (fieldSetupBusy) return;
+    setFieldSetupBusy(true); setFieldSetupMsg("");
+    try {
+      try { localStorage.removeItem("sps_arrival_prompts_enabled"); } catch (_) {}
+      setArrivalPromptsEnabled(false);
+      setDetectedArrival(null);
+      const cleared = await clearNativeArrival();
+      if (!cleared?.ok) throw new Error(cleared?.error || "Arrival monitoring could not be cleared.");
+      setFieldSetupMsg("Arrival prompts are off. Notifications for messages and work updates remain on.");
+      await refreshFieldReadiness();
+    } catch (error) {
+      // If iOS could not verify the clear, restore the visible opt-in state so the screen cannot
+      // claim monitoring is off while a customer-named region may still exist on this phone.
+      try { localStorage.setItem("sps_arrival_prompts_enabled", "1"); } catch (_) {}
+      setArrivalPromptsEnabled(true);
+      setFieldSetupMsg(error?.message || "Arrival prompts could not be turned off safely.");
+    } finally { setFieldSetupBusy(false); }
+  };
+  const testFieldNotification = async () => {
+    if (fieldSetupBusy) return;
+    setFieldSetupBusy(true); setFieldSetupMsg("");
+    try {
+      const result = await devicePushBinding("test");
+      if (!result.ok) throw new Error(result.error || "The test notification wasn't accepted.");
+      setFieldSetupMsg("Test alert sent. Lock this iPhone or leave SPS Way open and confirm it arrives.");
+      await refreshFieldReadiness();
+    } catch (error) {
+      setFieldSetupMsg(error?.message || "The test notification couldn't be sent.");
+    } finally { setFieldSetupBusy(false); }
+  };
 
   // Resolve the brand logo to base64 for native widgets. The shared resolver always supplies the
   // current app icon when no uploaded image is available, so widgets never need a letter fallback.
@@ -33321,14 +34601,63 @@ export default function App({ authEmail = "", onSignOut }) {
     };
   }, [perms.isAdmin, perms.commsTextInbox, perms.commsMainLine]);
 
-  // Sign-out unbinds this device's push token and clears native widget data FIRST, while the auth
-  // token is still valid. Cleanup is time-bounded so a native bridge/network problem cannot trap
-  // the user on the signed-in screen.
+  // Sign-out unbinds this exact app install and clears native customer state FIRST, while the auth
+  // token is still valid. Give the server enough time to confirm the unlink instead of racing auth
+  // sign-out after 1.8 seconds. A local APNs unregister is useful cleanup, but it cannot prove the
+  // authoritative server row was removed, so a failed unlink keeps the account signed in and gives
+  // the user a retry instead of leaking the prior employee's alerts on a shared crew iPhone.
   const handleSignOut = async () => {
+    setSignOutError("");
     setPage("dashboard"); setSelectedClient(null); setAdding(false);
-    const cleanup = Promise.allSettled([unbindDevicePushToken(), clearWidgetPayload()]);
-    await Promise.race([cleanup, new Promise(resolve => setTimeout(resolve, 1800))]);
-    if (onSignOut) await onSignOut();
+    const activeLocationStaffId = pauseLocalLiveLocation() || currentUser?.id || null;
+    const locationCleanup = Promise.race([
+      (async () => {
+        await invalidateAndDrainLiveLocationWrites();
+        return deactivateServerLiveLocation(activeLocationStaffId);
+      })(),
+      new Promise(resolve => setTimeout(() => resolve({ ok: false, timedOut: true, error: "Live-location cleanup timed out." }), 4000)),
+    ]);
+    const widgetCleanup = Promise.race([
+      Promise.resolve(clearWidgetPayload()).then(() => ({ ok: true })).catch(error => ({ ok: false, error: error?.message || "Widget cleanup failed." })),
+      new Promise(resolve => setTimeout(() => resolve({ ok: false, timedOut: true, error: "Widget cleanup timed out." }), 2500)),
+    ]);
+    const arrivalCleanup = Promise.race([
+      clearNativeArrival(),
+      new Promise(resolve => setTimeout(() => resolve({ ok: false, timedOut: true, error: "Arrival cleanup timed out." }), 4000)),
+    ]);
+    const unbound = await Promise.race([
+      unbindDevicePushToken(),
+      new Promise(resolve => setTimeout(() => resolve({
+        ok: false,
+        timedOut: true,
+        error: "Notification unlink timed out during sign-out.",
+      }), 6000)),
+    ]);
+    const [widgetCleared, arrivalCleared, locationCleared] = await Promise.all([widgetCleanup, arrivalCleanup, locationCleanup]);
+    if (!unbound?.ok || !arrivalCleared?.ok || !widgetCleared?.ok || !locationCleared?.ok) {
+      await unregisterNativeDevicePush();
+      try { console.warn("[push] sign-out privacy cleanup was not confirmed", { unbound, arrivalCleared, widgetCleared, locationCleared }); } catch (_) {}
+      setSignOutError(
+        !arrivalCleared?.ok
+          ? "SPS Way couldn't confirm that the previous client's arrival monitor was cleared. Tap Retry before handing this iPhone to another employee."
+          : !locationCleared?.ok
+            ? "SPS Way couldn't confirm that live location stopped. Check your connection and tap Retry before handing this iPhone to another employee."
+          : !unbound?.ok
+            ? "SPS Way couldn't confirm that this iPhone was unlinked from the current account. Check your connection and tap Retry so alerts for this account cannot remain on a shared phone."
+            : "SPS Way couldn't confirm that private widget data was cleared. Tap Retry before handing this iPhone to another employee."
+      );
+      return;
+    }
+    try { sessionStorage.setItem(SIGNOUT_CLEANUP_MARKER, "1"); } catch (_) {}
+    if (onSignOut) {
+      try {
+        const authResult = await onSignOut();
+        if (authResult?.error) throw authResult.error;
+      } catch (error) {
+        try { sessionStorage.removeItem(SIGNOUT_CLEANUP_MARKER); } catch (_) {}
+        setSignOutError(error?.message || "Native data was cleared, but the account could not sign out. Check your connection and retry.");
+      }
+    }
   };
   const resetAppMainScroll = () => {
     requestAnimationFrame(() => {
@@ -33431,21 +34760,6 @@ export default function App({ authEmail = "", onSignOut }) {
     run();
   }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Reactive mirror of DB_READ_OK. On warm cache-first boots `hydrated` flips while the network
-  // SELECT is still in flight, so effects that sample the module flag once never see it turn true —
-  // this state re-fires them when the confirmed read lands (the sps-db-status "ok" event).
-  const [dbOk, setDbOk] = useState(DB_READ_OK);
-  useEffect(() => {
-    setDbOk(DB_READ_OK);
-    const on = (e) => {
-      const detail = (((e || {}).detail) || {});
-      if (detail.type === "read-ok") setDbOk(true);
-      else if (detail.type === "identity" || (detail.type === "error" && /reach the database/i.test(detail.msg || ""))) setDbOk(false);
-    };
-    document.addEventListener("sps-db-status", on);
-    return () => document.removeEventListener("sps-db-status", on);
-  }, []);
-
   // ── Recurring maintenance invoicing: once per month (per session), create any missing DRAFT
   // invoices for the current month — clients with Auto-Invoice on + a monthly rate. Drafts only;
   // the owner reviews + sends them from Invoices. Never auto-sent. Gated on a confirmed DB read so
@@ -33529,11 +34843,6 @@ export default function App({ authEmail = "", onSignOut }) {
   // ── Email deep links: https://spsway.app/?open=leads jumps straight to that page after sign-in
   // (the "Open in SPS" buttons in owner emails). Allowlisted pages only; param stripped after use
   // so a refresh doesn't re-navigate.
-  // ONE map for every deep-link surface — this web ?open= effect AND the native spsway:// /
-  // universal-link consumer further down — so the two can never drift. Email targets
-  // alerts/profit land on the dashboard (their cards live there).
-  const DEEPLINK_MAP = { alerts: "dashboard", profit: "dashboard", schedule: "schedule", invoices: "invoices", invoice: "invoices", leads: "leads", comms: "comms", budget: "budget", clients: "clients", reports: "reports" };
-
   // ── Build 27: native push — silent re-register on open once permission is granted (APNs
   // tokens rotate; the signed-in account can change). Never prompts from here — the primer
   // below and the Comms → Settings card own the permission ask.
@@ -33566,11 +34875,11 @@ export default function App({ authEmail = "", onSignOut }) {
         let snoozed = false;
         try {
           if (localStorage.getItem("sps_push_disabled")) snoozed = true; // explicit opt-out
-          const marker = localStorage.getItem("sps_push_primer");
+          const marker = localStorage.getItem(PUSH_PRIMER_KEY);
           const snoozeAt = Number(marker);
           if (snoozeAt > 0 && Date.now() - snoozeAt < 14 * 24 * 3600 * 1000) snoozed = true;
           // Clear stale success from pre-fix builds so this device gets a real recovery path.
-          if (marker === "done" || marker === "1") localStorage.removeItem("sps_push_primer");
+          if (marker === "done" || marker === "1") localStorage.removeItem(PUSH_PRIMER_KEY);
         } catch (_) {}
         if (!snoozed) setPushPrimer(true);
       } catch (_) {}
@@ -33581,7 +34890,7 @@ export default function App({ authEmail = "", onSignOut }) {
   const dismissPushPrimer = async (enable) => {
     if (pushPrimerBusy) return;
     if (!enable) {
-      try { localStorage.setItem("sps_push_primer", String(Date.now())); } catch (_) {}
+      try { localStorage.setItem(PUSH_PRIMER_KEY, String(Date.now())); } catch (_) {}
       setPushPrimerError("");
       setPushPrimer(false);
       return;
@@ -33591,31 +34900,41 @@ export default function App({ authEmail = "", onSignOut }) {
     const result = await enableDevicePush();
     setPushPrimerBusy(false);
     if (result.ok) {
-      try { localStorage.setItem("sps_push_primer", "done"); } catch (_) {}
+      try { localStorage.setItem(PUSH_PRIMER_KEY, "done"); } catch (_) {}
       setPushPrimer(false);
       return;
     }
     // Keep the recovery UI visible and never persist success until the token is saved server-side.
-    try { localStorage.removeItem("sps_push_primer"); } catch (_) {}
+    try { localStorage.removeItem(PUSH_PRIMER_KEY); } catch (_) {}
     setPushPrimerError(result.error || "Couldn't enable notifications. Please try again.");
   };
 
   const _openParamRef = useRef(false);
   useEffect(() => {
-    if (!hydrated || !currentUser || _openParamRef.current) return;
+    if (!hydrated || (!currentUser && !clientUser) || _openParamRef.current) return;
     _openParamRef.current = true;
     try {
       const q = new URLSearchParams(window.location.search);
-      const open = String(q.get("open") || "").toLowerCase();
-      const target = DEEPLINK_MAP[open];
-      if (target) {
-        handleNav(target);
+      const hashParams = new URLSearchParams(String(window.location.hash || "").replace(/^#\/?\??/, ""));
+      const queryOpen = q.get("open");
+      const hashOpen = hashParams.get("open");
+      const open = String(queryOpen || hashOpen || "").toLowerCase();
+      const clientTargets = new Set(["home", "track", "reports", "property", "history", "invoices", "invoice", "estimates", "messages", "comms", "schedule"]);
+      const staffRoute = resolveStaffDeepLink(open);
+      const handled = clientUser && !currentUser
+        ? clientTargets.has(open)
+        : !!staffRoute;
+      if (handled) {
+        if (clientUser && !currentUser) setPortalDeepLink(open);
+        else handleNav(staffRoute.page, staffRoute.options);
         q.delete("open");
+        hashParams.delete("open");
         const rest = q.toString();
-        window.history.replaceState({}, "", window.location.pathname + (rest ? `?${rest}` : ""));
+        const hashRest = hashParams.toString();
+        window.history.replaceState({}, "", window.location.pathname + (rest ? `?${rest}` : "") + (hashRest ? `#${hashRest}` : ""));
       }
     } catch (_) {}
-  }, [hydrated, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [hydrated, currentUser, clientUser]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Website leads auto-import — once per open, owner only. Pulls new quote-form submissions
   // from the marketing site's Supabase `leads` table (api/leads-sync) into the in-app funnel
@@ -33962,8 +35281,8 @@ export default function App({ authEmail = "", onSignOut }) {
       try { localStorage.removeItem("sps_deeplink"); } catch (_) {}
       // A signed-in client sees the portal, not the staff pages — route within the portal instead.
       if (clientUser && !currentUser) { setPortalDeepLink(sec); return; }
-      const target = DEEPLINK_MAP[sec.split("/")[0]];
-      if (target) handleNav(target);
+      const staffRoute = resolveStaffDeepLink(sec);
+      if (staffRoute) handleNav(staffRoute.page, staffRoute.options);
     };
     try { const pending = localStorage.getItem("sps_deeplink"); if (pending) go(pending); } catch (_) {}
     const onDeep = (e) => go(e && e.detail);
@@ -34420,11 +35739,71 @@ export default function App({ authEmail = "", onSignOut }) {
     setInvoices(list => (list || []).filter(iv => iv.id !== id));
   };
 
+  // Re-read the three authoritative sections immediately before an arrival is recorded or any
+  // client notice is sent. This closes the stale-sheet window when another device completes,
+  // arrives, cancels, deletes, or reassigns the stop while this iPhone still has the modal open.
+  const validateArrivalStop = async (sid) => {
+    if (!sid || !currentUser) return false;
+    try {
+      const [scheduleResult, completedResult, arrivalsResult] = await Promise.all([
+        store.refresh("sps_schedule"),
+        store.refresh("sps_completed"),
+        store.refresh("sps_arrivals"),
+      ]);
+      if (!scheduleResult?.ok || !completedResult?.ok || !arrivalsResult?.ok) return false;
+      const latestSchedule = decodeStopStateValue(scheduleResult.exists ? scheduleResult.value : []);
+      const latestCompleted = decodeStopStateValue(completedResult.exists ? completedResult.value : {}) || {};
+      const latestArrivals = decodeStopStateValue(arrivalsResult.exists ? arrivalsResult.value : {}) || {};
+      if (!Array.isArray(latestSchedule) || latestCompleted?.[sid] || latestArrivals?.[sid]) return false;
+      const stop = latestSchedule.flatMap(day => day?.stops || []).find(item => String(item?.sid || "") === String(sid));
+      return !!(stop
+        && String(stop.assigneeId) === String(currentUser.id)
+        && !stop.cancelled
+        && !stop.canceled);
+    } catch (_) { return false; }
+  };
+
   // Feature 3B: record arrival (tech tapped "I'm here") — starts the job clock. Keeps the
   // first timestamp if tapped again, so the running clock isn't reset.
-  const handleArrived = (sid) => setArrivals(a => ({ ...a, [sid]: a[sid] || new Date().toISOString() }));
+  const handleArrived = (sid, stop = null) => {
+    if (!sid) return;
+    setArrivals(a => ({ ...a, [sid]: a[sid] || new Date().toISOString() }));
+    if (stop) geoTrackWrite(stop, "arrived");
+    // Keep an auto-detected sheet mounted while its portal/text deliveries settle. Its send handler
+    // closes the sheet after success or leaves the real failure visible to the tech.
+    nativeArrivalResetRef.current = clearNativeArrival();
+  };
+  const dismissDetectedArrival = () => {
+    const stop = detectedArrival?.stop || null;
+    setDetectedArrival(null);
+    // A false-positive dismissal re-arms the one-shot native region without immediately checking
+    // the current inside/outside state (which would reopen the same prompt while still parked).
+    // It will prompt again only after the tech leaves and enters the property on a later visit.
+    if (stop?.sid && !arrivals[stop.sid] && !completedSids[stop.sid]) {
+      try { window.dispatchEvent(new CustomEvent("sps-geofence-dismissed", { detail: stop.sid })); } catch (_) {}
+      const reset = (async () => {
+        // A native detection remains durable while the sheet is only being presented. Dismissal is
+        // the explicit acknowledgement: consume it, then re-arm without checking the current inside
+        // state. Foreground GPS independently waits for its wider exit boundary before re-entry.
+        try { const plugin = await getNativeArrivalPlugin(); if (plugin) await plugin.consumePending(); } catch (_) {}
+        await configureNativeArrival(stop, { checkCurrentState: false });
+      })();
+      nativeArrivalResetRef.current = reset;
+      void reset.then(refreshFieldReadiness, () => {});
+    }
+  };
   // Stamp the "On My Way"/Head Here start once per stop (first-wins, so re-opening doesn't reset it).
-  const handleEnRoute = (sid) => { if (!sid) return; setEnRoute(a => (a[sid] ? a : { ...a, [sid]: new Date().toISOString() })); };
+  const handleEnRoute = (sid) => {
+    if (!sid) return;
+    // A fresh Head Here/Maps action after clock-out is an explicit trip start. Resume only if this
+    // tech previously granted live-location consent; arrival permission alone never grants it.
+    try {
+      if (localStorage.getItem("sps_loc_consent") === "1") {
+        resumeLocalLiveLocation();
+      }
+    } catch (_) {}
+    setEnRoute(a => (a[sid] ? a : { ...a, [sid]: new Date().toISOString() }));
+  };
 
   // Completing/reopening spans three shared sections. Field staff cannot call the generic
   // owner-only batch primitive, so a narrow staff-authorized endpoint validates the scheduled stop,
@@ -34775,7 +36154,7 @@ export default function App({ authEmail = "", onSignOut }) {
           {selectedClient && <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>}
         </>
       ))}
-      {page === "schedule" && <SectionErrorBoundary key={"schedule-" + schedNonce}><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
+      {page === "schedule" && <SectionErrorBoundary key={"schedule-" + schedNonce}><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} onValidateArrival={validateArrivalStop} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <SectionErrorBoundary key="inventory"><InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} /></SectionErrorBoundary>}
       {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} branding={branding} T={T} budget={budget} />}
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} isAdmin={perms.isAdmin} />}
@@ -34792,7 +36171,7 @@ export default function App({ authEmail = "", onSignOut }) {
   // Native push permission primer — hoisted so BOTH layout branches render it. It used to live only
   // in the mobile return, so at vp.isDesktop (>=700px: iPad, the Mac app, and iPhone in landscape)
   // the effect could set pushPrimer=true but nothing showed it → the OS prompt was never reachable.
-  const pushPrimerModal = pushPrimer ? (
+  const pushPrimerModal = pushPrimer && !(currentUser && fieldReadiness.native) ? (
     <Modal title="Turn on notifications?" onClose={() => { if (!pushPrimerBusy) dismissPushPrimer(false); }} maxWidth={430}>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div style={{ fontSize: 14, color: T.text, lineHeight: 1.55 }}>
@@ -34809,6 +36188,33 @@ export default function App({ authEmail = "", onSignOut }) {
         </div>
       </div>
     </Modal>
+  ) : null;
+  const fieldSetupModal = fieldSetupOpen ? (
+    <FieldSetupModal
+      status={fieldReadiness}
+      locationError={locationWatchError || fieldReadiness.bindingError}
+      testModeHoldsStaff={!!email?.testMode?.on && !perms.isAdmin}
+      busy={fieldSetupBusy}
+      message={fieldSetupMsg}
+      onEnable={enableFieldAlerts}
+      onDisableArrival={disableArrivalPrompts}
+      onTest={testFieldNotification}
+      onOpenSettings={openNativeAppSettings}
+      onClose={() => { if (!fieldSetupBusy) setFieldSetupOpen(false); }}
+    />
+  ) : null;
+  const detectedArrivalModal = detectedArrival ? (
+    <ArrivedModal
+      detected
+      stop={detectedArrival.stop}
+      client={detectedArrival.client}
+      email={email}
+      onClose={() => setDetectedArrival(null)}
+      onDismiss={dismissDetectedArrival}
+      onValidate={() => validateArrivalStop(detectedArrival.stop.sid)}
+      onPrepareTracking={() => prepareArrivalTracking(detectedArrival.stop, "enroute")}
+      onArrived={() => handleArrived(detectedArrival.stop.sid, detectedArrival.stop)}
+    />
   ) : null;
 
   // ── Desktop (>=700px): left sidebar + content. Mobile (below) is unchanged. ──
@@ -34833,6 +36239,7 @@ export default function App({ authEmail = "", onSignOut }) {
             <main ref={appMainRef} style={{ flex: 1, minHeight: 0, ...(dtMasterDetail
               ? { display: "flex", overflow: "hidden" }
               : { overflowY: "auto", padding: vp.isTablet ? "22px 22px" : (isDesktopWeb ? "30px 48px" : "28px 36px"), maxWidth: isDesktopWeb ? "none" : 1180, marginLeft: "auto", marginRight: "auto", width: "100%", boxSizing: "border-box", paddingBottom: 40 }) }}>
+              {!isMacApp && (page === "dashboard" || page === "schedule") && <FieldReadinessBanner status={fieldReadiness} locationError={locationWatchError} testModeHoldsStaff={!!email?.testMode?.on && !perms.isAdmin} onOpen={() => { setFieldSetupMsg(""); setFieldSetupOpen(true); }} />}
               {pageBody}
             </main>
           </div>
@@ -34841,6 +36248,8 @@ export default function App({ authEmail = "", onSignOut }) {
           <StaffClientPreview client={previewClient} invoices={invoices} invoicing={invoicing} schedule={schedule} branding={branding} onClose={() => setPreviewClient(null)} />
         )}
         {pushPrimerModal}
+        {fieldSetupModal}
+        {detectedArrivalModal}
       </AppCtx.Provider>
     );
   }
@@ -34907,6 +36316,8 @@ export default function App({ authEmail = "", onSignOut }) {
 
         <PaymentBanner banner={payBanner} T={T} onOpen={() => { setPayBanner(null); handleNav("invoices", { invoiceFilter: "Paid" }); }} onClose={() => setPayBanner(null)} />
         {pushPrimerModal}
+        {fieldSetupModal}
+        {detectedArrivalModal}
 
         {/* Header — a non-scrolling flex child, frozen at the top */}
         <header style={{ background: hexA(T.surface, 0.94), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, position: "relative", zIndex: 100, flexShrink: 0, borderBottom: `1px solid ${T.border}`, boxShadow: "0 1px 0 rgba(0,0,0,0.02)" }}>
@@ -34953,6 +36364,7 @@ export default function App({ authEmail = "", onSignOut }) {
           </div>
         )}
         <main ref={appMainRef} data-sps-app-scroll onFocusCapture={keepFocusedControlVisible} style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", alignSelf: "center", padding: isCommsRoute ? (vp.isPhone ? "0 16px" : "0 32px") : (vp.isPhone ? `${isEstimatesRoute ? 0 : 22}px 16px` : "28px 32px"), maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", marginBottom: keyboardOpen ? 0 : "var(--sps-mobile-nav-reserve)", width: "100%", boxSizing: "border-box", paddingBottom: 0, scrollPaddingBottom: keyboardOpen ? keyboardInset + 40 : "var(--sps-page-bottom-clearance)" }}>
+          {(page === "dashboard" || page === "schedule") && <FieldReadinessBanner status={fieldReadiness} locationError={locationWatchError} testModeHoldsStaff={!!email?.testMode?.on && !perms.isAdmin} onOpen={() => { setFieldSetupMsg(""); setFieldSetupOpen(true); }} />}
           {pageBody}
           <MobilePageEndClearance keyboardOpen={keyboardOpen} keyboardInset={keyboardInset} />
         </main>
@@ -35028,16 +36440,18 @@ export default function App({ authEmail = "", onSignOut }) {
         />
       )}
 
-      {/* Geofence auto-arrival — transient Undo banner (Batch B). Portaled above the nav. */}
-      {autoArrivedToast && createPortal(
-        <div style={{ position: "fixed", bottom: "calc(86px + var(--sps-mail-dock-lift, 0px) + env(safe-area-inset-bottom))", left: 0, right: 0, zIndex: 260, display: "flex", justifyContent: "center", padding: "0 16px", pointerEvents: "none" }}>
-          <div style={{ pointerEvents: "auto", display: "flex", alignItems: "center", gap: 10, background: T.text, color: T.surface, borderRadius: 14, padding: "11px 12px 11px 14px", boxShadow: "0 8px 30px rgba(0,0,0,0.28)", maxWidth: 460, width: "100%", boxSizing: "border-box" }}>
-            <span style={{ fontSize: 17, flexShrink: 0 }}>📍</span>
-            <div style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, lineHeight: 1.35 }}>Auto-arrived at {autoArrivedToast.name}</div>
-            <button onClick={() => onUndoArrive(autoArrivedToast.sid)} style={{ flexShrink: 0, background: hexA(T.surface, 0.16), color: T.surface, border: `1px solid ${hexA(T.surface, 0.3)}`, borderRadius: 9, padding: "7px 13px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}>Not here — undo</button>
-            <button onClick={() => setAutoArrivedToast(null)} aria-label="Dismiss" style={{ flexShrink: 0, background: "none", border: "none", color: hexA(T.surface, 0.7), fontSize: 18, cursor: "pointer", fontFamily: "inherit", lineHeight: 1, padding: 2 }}>×</button>
+      {signOutError && (
+        <Modal title="Couldn't sign out safely" onClose={() => setSignOutError("")}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ color: T.text, fontSize: 14, lineHeight: 1.55 }}>{signOutError}</div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={() => setSignOutError("")} style={{ flex: 1, border: "none", borderRadius: 12, padding: "12px 14px", background: T.surfaceAlt, color: T.text, fontFamily: "inherit", fontWeight: 700, cursor: "pointer" }}>Stay signed in</button>
+              <button onClick={handleSignOut} style={{ flex: 1, border: "none", borderRadius: 12, padding: "12px 14px", background: T.primary, color: "#fff", fontFamily: "inherit", fontWeight: 800, cursor: "pointer" }}>Retry</button>
+            </div>
           </div>
-        </div>, document.body)}
+        </Modal>
+      )}
+
     </AppCtx.Provider>
   );
 }

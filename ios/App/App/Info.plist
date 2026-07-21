@@ -46,10 +46,18 @@
 	<string>Stone Property Solutions can save service photos to your photo library.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Stone Property Solutions uses the microphone to record audio when you capture a video on a service stop.</string>
-	<!-- Location: live staff position on the client map + ETA, and recording where service
-	     stops happen. When-In-Use only — location is read solely while the app is open. -->
+	<!-- Location: live staff position while the app is active plus one power-efficient background
+	     region for the next assigned stop. Region entry only prompts the tech to confirm arrival. -->
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>SPS Way uses your location in the background only while an assigned stop is active so it can remind you to open the app and confirm when you arrive. Arrival detection never contacts the client automatically.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Stone Property Solutions uses your location to show your live position to clients during a service visit and to record where service stops happen. Location is used only while the app is open.</string>
+	<string>SPS Way uses your location for route timing, active-stop tracking, and arrival confirmation while you work.</string>
+	<!-- The app monitors one assigned-stop region so iOS can wake it to show an arrival-check
+	     notification. It does not run continuous background GPS tracking. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+	</array>
 	<!-- Export compliance: app uses only standard HTTPS/TLS, so it qualifies for the exemption.
 	     Set so TestFlight/App Store uploads don't prompt "Missing Compliance" every time. -->
 	<key>ITSAppUsesNonExemptEncryption</key>

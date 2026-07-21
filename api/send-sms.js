@@ -13,6 +13,13 @@
 // cross-origin via the absolute PROD_URL; the web build calls it same-origin.
 
 import { memberHasCapability, requireStaff } from "./_staff-auth.js";
+import { ensureClientLinkChoices } from "../clientMessageLinks.js";
+import {
+  claimSmsDelivery,
+  finalizeSmsDelivery,
+  normalizeSmsIdempotencyKey,
+  smsRequestFingerprint,
+} from "./_sms-idempotency.js";
 
 const SUPABASE_URL = (
   process.env.SUPABASE_URL ||
@@ -32,7 +39,6 @@ function setCors(res) {
 // Quo accepts E.164 up to 15 digits. Require at least 8 total digits as a practical guard against
 // malformed partial numbers while keeping international destinations valid.
 const E164 = /^\+[1-9]\d{7,14}$/;
-
 // Normalize familiar US input while still requiring Quo's E.164 format at the API boundary.
 function toE164(s) {
   const raw = String(s == null ? "" : s).trim();
@@ -250,6 +256,17 @@ export default async function handler(req, res) {
 
   const { to, message } = req.body || {};
   const toNum = toE164(to);
+  const rawClientId = (req.body || {}).clientId;
+  const clientId = (typeof rawClientId === "string" || typeof rawClientId === "number")
+    ? String(rawClientId).trim()
+    : "";
+  const messageType = String((req.body || {}).messageType || "").trim();
+  let idempotencyKey = "";
+  try {
+    idempotencyKey = normalizeSmsIdempotencyKey((req.body || {}).idempotencyKey, messageType);
+  } catch (_) {
+    return res.status(400).json({ error: "This arrival text has an invalid delivery key. No message was sent." });
+  }
   const inboxId = String((req.body || {}).inboxId || "").trim();
   const ownerSender = _u.teamRole === "owner";
   let line;
@@ -308,6 +325,12 @@ export default async function handler(req, res) {
   const content = String(message == null ? "" : message).trim();
   if (!content) return res.status(400).json({ error: "A message is required." });
   if (content.length > 1600) return res.status(400).json({ error: "Text messages are limited to 1,600 characters." });
+  let normalizedContent;
+  try {
+    normalizedContent = ensureClientLinkChoices(content, { messageType: (req.body || {}).messageType });
+  } catch (_) {
+    return res.status(400).json({ error: "The SPS Way link in this text is too long. Shorten or replace it before sending." });
+  }
 
   // The saved server setting is authoritative. Client-side Test Mode is useful UX, but older
   // installed builds and direct API callers must not be able to send around it.
@@ -326,13 +349,10 @@ export default async function handler(req, res) {
   }
 
   let safeTo = toNum;
-  let safeContent = content;
+  let safeContent = normalizedContent;
   let redirected = false;
+  let heldByTestMode = false;
   if (textSafety.on) {
-    const rawClientId = (req.body || {}).clientId;
-    const clientId = (typeof rawClientId === "string" || typeof rawClientId === "number")
-      ? String(rawClientId).trim()
-      : "";
     const ownerTestDestination = !!textSafety.phone && toNum === textSafety.phone;
     let pilotLive = false;
     if (!ownerTestDestination && clientId && textSafety.liveClientIds.has(clientId)) {
@@ -352,20 +372,122 @@ export default async function handler(req, res) {
 
     if (!ownerTestDestination && !pilotLive) {
       if (textSafety.mode === "hold" || !E164.test(textSafety.phone)) {
-        return res.status(200).json({
-          accepted: false,
-          sent: false,
-          held: true,
-          redirected: false,
-          testMode: true,
-          line,
-        });
+        heldByTestMode = true;
+      } else {
+        safeTo = textSafety.phone;
+        const prefix = `[TEST → ${toNum}] `;
+        safeContent = `${prefix}${normalizedContent}`.slice(0, 1600);
+        redirected = true;
       }
-      safeTo = textSafety.phone;
-      const prefix = `[TEST → ${toNum}] `;
-      safeContent = `${prefix}${content}`.slice(0, 1600);
-      redirected = true;
     }
+  }
+
+  // Arrival confirmation can be opened from both a manual Schedule action and native geofence
+  // detection. Claim the stable stop key before Quo is contacted, so reloads, two devices, and an
+  // ambiguous network response cannot turn those two surfaces into duplicate client texts.
+  let deliveryClaim = null;
+  if (idempotencyKey) {
+    const requestHash = smsRequestFingerprint({ line, from: fromNum, to: safeTo, clientId, content: safeContent });
+    try {
+      deliveryClaim = await claimSmsDelivery({ idempotencyKey, requestHash });
+    } catch (error) {
+      console.error("[send-sms] delivery receipt unavailable:", error && error.message ? error.message : error);
+      return res.status(503).json({
+        error: "Arrival text safety is temporarily unavailable. No text was sent.",
+        accepted: false,
+        sent: false,
+        held: false,
+        uncertain: false,
+        retrySafe: true,
+      });
+    }
+    if (deliveryClaim.outcome === "mismatch") {
+      return res.status(409).json({
+        error: "This arrival was already confirmed with different text details. No second text was sent.",
+        accepted: false,
+        sent: false,
+        held: false,
+        uncertain: false,
+        retrySafe: false,
+      });
+    }
+    if (deliveryClaim.outcome === "accepted") {
+      return res.status(202).json({
+        accepted: true,
+        sent: true,
+        held: false,
+        redirected,
+        replayed: true,
+        retrySafe: false,
+        deliveryState: "accepted",
+        line,
+        id: deliveryClaim.receipt.providerId || null,
+      });
+    }
+    if (deliveryClaim.outcome === "held") {
+      return res.status(200).json({
+        accepted: false,
+        sent: false,
+        held: true,
+        redirected: false,
+        testMode: true,
+        replayed: true,
+        retrySafe: false,
+        deliveryState: "held",
+        line,
+      });
+    }
+    if (deliveryClaim.outcome === "sending" || deliveryClaim.outcome === "uncertain") {
+      return res.status(202).json({
+        error: "Quo delivery is already in progress or could not be confirmed. Check Comms before sending another text.",
+        accepted: false,
+        sent: false,
+        held: false,
+        uncertain: true,
+        retrySafe: false,
+        replayed: true,
+        deliveryState: deliveryClaim.outcome === "sending" ? "in_progress" : "uncertain",
+        line,
+      });
+    }
+    if (deliveryClaim.outcome !== "claimed") {
+      return res.status(409).json({
+        error: "This arrival text cannot be safely sent again. Check Comms before sending another message.",
+        accepted: false,
+        sent: false,
+        held: false,
+        uncertain: false,
+        retrySafe: false,
+        deliveryState: deliveryClaim.outcome || "blocked",
+        line,
+      });
+    }
+  }
+
+  const settleDelivery = async (state, options = {}) => {
+    if (!deliveryClaim) return true;
+    try {
+      const settled = await finalizeSmsDelivery(deliveryClaim, { state, ...options });
+      return settled.changed || settled.receipt?.state === state;
+    } catch (error) {
+      // The pre-send claim remains durable. Leaving it in `sending` deliberately blocks a blind
+      // retry if the final database write fails after Quo may already have accepted the message.
+      console.error("[send-sms] delivery receipt finalize failed:", error && error.message ? error.message : error);
+      return false;
+    }
+  };
+
+  if (heldByTestMode) {
+    const receiptStored = await settleDelivery("held");
+    return res.status(200).json({
+      accepted: false,
+      sent: false,
+      held: true,
+      redirected: false,
+      testMode: true,
+      line,
+      ...(deliveryClaim ? { retrySafe: false, deliveryState: "held", receiptStored } : {}),
+    });
   }
 
   try {
@@ -377,6 +499,8 @@ export default async function handler(req, res) {
     const data = await r.json().catch(() => ({}));
     if (!r.ok) {
       console.error("[send-sms] Quo rejected message:", r.status, data?.code || data?.title || data?.message || "unknown error");
+      const uncertain = r.status >= 500 || r.status === 408;
+      const receiptStored = await settleDelivery(uncertain ? "uncertain" : "failed", { retrySafe: !uncertain });
       const reason = r.status === 402
         ? "The texting account needs more prepaid credit."
         : r.status === 401 || r.status === 403
@@ -384,8 +508,23 @@ export default async function handler(req, res) {
           : r.status === 429
             ? "The texting service is busy. Please wait a moment and try again."
             : "The texting service could not send that message. Please try again.";
-      return res.status(502).json({ error: reason });
+      if (!deliveryClaim) return res.status(502).json({ error: reason });
+      return res.status(502).json({
+        error: uncertain
+          ? "Quo may already have accepted this text. Check Comms before sending another message."
+          : reason,
+        accepted: false,
+        sent: false,
+        held: false,
+        uncertain,
+        retrySafe: !uncertain,
+        deliveryState: uncertain ? "uncertain" : "failed",
+        receiptStored,
+        line,
+      });
     }
+    const providerId = (data && (data.data?.id || data.id)) || null;
+    const receiptStored = await settleDelivery("accepted", { providerId });
     // Quo has accepted the message for sending. Carrier delivery is a separate webhook event,
     // so keep `sent` only for compatibility with installed v1.1 clients and expose the truth too.
     return res.status(202).json({
@@ -394,10 +533,23 @@ export default async function handler(req, res) {
       held: false,
       redirected,
       line,
-      id: (data && (data.data?.id || data.id)) || null,
+      id: providerId,
+      ...(deliveryClaim ? { replayed: false, retrySafe: false, deliveryState: "accepted", receiptStored } : {}),
     });
   } catch (err) {
     console.error("[send-sms] Quo request failed:", err && err.message ? err.message : err);
-    return res.status(502).json({ error: "The texting service could not be reached. Please try again." });
+    const receiptStored = await settleDelivery("uncertain");
+    if (!deliveryClaim) return res.status(502).json({ error: "The texting service could not be reached. Please try again." });
+    return res.status(502).json({
+      error: "Quo may already have accepted this text. Check Comms before sending another message.",
+      accepted: false,
+      sent: false,
+      held: false,
+      uncertain: true,
+      retrySafe: false,
+      deliveryState: "uncertain",
+      receiptStored,
+      line,
+    });
   }
 }

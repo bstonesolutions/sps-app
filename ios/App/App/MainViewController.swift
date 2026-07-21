@@ -11,5 +11,10 @@ import Capacitor
 class MainViewController: CAPBridgeViewController {
     override func capacitorDidLoad() {
         bridge?.registerPluginInstance(SPSWidgetBridge())
+        bridge?.registerPluginInstance(SPSDriveTimeBridge())
+        // Reuse the exact instance AppDelegate prepares for a Core Location cold relaunch.
+        // Registering a new bridge here would create a second CLLocationManager/delegate and
+        // could race the durable pending-arrival and local-notification contract.
+        bridge?.registerPluginInstance(SPSArrivalCoordinator.shared.plugin)
     }
 }
