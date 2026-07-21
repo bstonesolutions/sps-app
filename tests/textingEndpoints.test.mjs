@@ -10,6 +10,7 @@ process.env.SUPABASE_URL = "https://supabase.test";
 process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-key";
 process.env.QUO_API_KEY = "test-quo-api-key";
 process.env.QUO_PHONE_NUMBER = "+15550001111";
+process.env.QUO_MAIN_PHONE_NUMBER = "+15550002222";
 process.env.QUO_WEBHOOK_KEY = "test-webhook-key";
 process.env.QUO_WEBHOOK_SECRET = Buffer.from("test-webhook-signing-secret", "utf8").toString("base64");
 delete process.env.ANTHROPIC_API_KEY;
@@ -52,6 +53,32 @@ function outboundRequest(body, token = "staff-token") {
   };
 }
 
+const automationStaff = () => ({
+  id: "staff-1",
+  email: "tech@example.test",
+  role: "field",
+  tabAccess: { schedule: "edit", comms: "edit" },
+});
+
+const inboxStaff = ({ main = false, automation = true } = {}) => ({
+  ...automationStaff(),
+  fine: { ...(automation ? { commsTextInbox: true } : {}), ...(main ? { commsMainLine: true } : {}) },
+});
+
+const broadcastOnlyStaff = () => ({
+  id: "staff-broadcast",
+  email: "tech@example.test",
+  role: "field",
+  tabAccess: { schedule: "view", comms: "view" },
+  fine: { commsBroadcast: true },
+});
+
+const ownerStaff = () => ({
+  id: "owner-1",
+  email: "tech@example.test",
+  role: "owner",
+});
+
 function installOutboundFetch({
   email = "tech@example.test",
   team = [{ id: "staff-1", email: "tech@example.test", role: "field", tabAccess: { schedule: "edit" } }],
@@ -60,8 +87,10 @@ function installOutboundFetch({
   textSafetyFailure = false,
   textSafetyClients = [{ id: "pilot-1", phone: "+15552345678" }],
   textSafetyClientsFailure = false,
+  inboxRows = null,
+  inboxFailure = false,
 } = {}) {
-  const calls = { quo: 0, quoBodies: [], quoNumberChecks: 0, textSafetyChecks: 0, textSafetyClientChecks: 0 };
+  const calls = { quo: 0, quoBodies: [], quoNumberChecks: 0, textSafetyChecks: 0, textSafetyClientChecks: 0, inboxLookups: 0 };
   globalThis.fetch = async (url, options = {}) => {
     const target = String(url);
     if (target.endsWith("/auth/v1/user")) {
@@ -84,6 +113,12 @@ function installOutboundFetch({
         ? response({ error: "unavailable" }, { ok: false, status: 503 })
         : response([{ value: JSON.stringify(textSafetyClients) }]);
     }
+    if (target.includes("/rest/v1/sps_inbox?") && target.includes("select=id,channel,from_phone,ai")) {
+      calls.inboxLookups += 1;
+      return inboxFailure
+        ? response({ error: "unavailable" }, { ok: false, status: 503 })
+        : response(inboxRows ?? []);
+    }
     if (target === "https://api.quo.com/v1/messages") {
       calls.quo += 1;
       calls.quoBodies.push(JSON.parse(options.body));
@@ -92,7 +127,8 @@ function installOutboundFetch({
     if (target === "https://api.quo.com/v1/phone-numbers") {
       calls.quoNumberChecks += 1;
       return response({ data: [
-        { e164: "+15550001111", name: "SPS" },
+        { e164: "+15550001111", name: "SPS Automation" },
+        { e164: "+15550002222", name: "SPS Main" },
         { e164: "+15559998888", name: "Unrelated workspace line" },
       ] });
     }
@@ -183,6 +219,20 @@ test("legacy Messages or Reminders edit access still grants the folded Comms tex
   assert.equal(memberHasCapability({ role: "field", tabAccess: { schedule: "view", messages: "view" } }, "sendTexts"), false);
 });
 
+test("the two text-line visibility capabilities are independent, private by default, and honor the Comms master switch", () => {
+  assert.equal(memberHasCapability(automationStaff(), "commsTextInbox"), false);
+  assert.equal(memberHasCapability(automationStaff(), "commsMainLine"), false);
+  assert.equal(memberHasCapability(inboxStaff(), "commsTextInbox"), true);
+  assert.equal(memberHasCapability(inboxStaff(), "commsMainLine"), false);
+  assert.equal(memberHasCapability(inboxStaff({ main: true }), "commsMainLine"), true);
+  assert.equal(memberHasCapability(inboxStaff({ main: true, automation: false }), "commsTextInbox"), false);
+  assert.equal(memberHasCapability(inboxStaff({ main: true, automation: false }), "commsMainLine"), true);
+  assert.equal(memberHasCapability({ ...inboxStaff({ main: true }), tabAccess: { schedule: "edit", comms: "hidden" } }, "commsTextInbox"), false);
+  assert.equal(memberHasCapability({ ...inboxStaff({ main: true }), tabAccess: { schedule: "edit", comms: "hidden" } }, "commsMainLine"), false);
+  assert.equal(memberHasCapability(ownerStaff(), "commsTextInbox"), true);
+  assert.equal(memberHasCapability(ownerStaff(), "commsMainLine"), true);
+});
+
 test("the isolated staff bridge enforces owner-only automation previews", async () => {
   installOutboundFetch();
   const fieldRes = makeRes();
@@ -246,6 +296,7 @@ test("authorized staff send normalized US numbers through the Quo business line"
     sent: true,
     held: false,
     redirected: false,
+    line: "automation",
     id: "quo-message-1",
   });
   assert.equal(calls.quo, 1);
@@ -253,6 +304,258 @@ test("authorized staff send normalized US numbers through the Quo business line"
     content: "Appointment reminder",
     from: "+15550001111",
     to: ["+15552345678"],
+  });
+});
+
+test("an explicit Broadcast grant can use only the automation line for marked broadcasts", async (t) => {
+  await t.test("the sender picker can inspect only the automation line", async () => {
+    const calls = installOutboundFetch({ team: [broadcastOnlyStaff()] });
+    const res = makeRes();
+    await sendSmsHandler({ method: "GET", query: { details: "1" }, headers: { authorization: "Bearer staff-token" } }, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.from, "+15550001111");
+    assert.equal(res.body.directFrom, undefined);
+    assert.deepEqual(res.body.numbers, [{ role: "automation", number: "+15550001111", label: "SPS Automation" }]);
+    assert.equal(calls.quoNumberChecks, 1);
+  });
+
+  await t.test("marked broadcast succeeds from automation", async () => {
+    const calls = installOutboundFetch({ team: [broadcastOnlyStaff()] });
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({
+      to: "+15552345678",
+      message: "Seasonal service update",
+      purpose: "broadcast",
+      line: "automation",
+    }), res);
+    assert.equal(res.statusCode, 202);
+    assert.equal(res.body.line, "automation");
+    assert.equal(calls.quoBodies[0].from, "+15550001111");
+  });
+
+  await t.test("the grant does not unlock ordinary direct texts", async () => {
+    const calls = installOutboundFetch({ team: [broadcastOnlyStaff()] });
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({ to: "+15552345678", message: "Direct message" }), res);
+    assert.equal(res.statusCode, 403);
+    assert.equal(calls.quo, 0);
+  });
+
+  await t.test("the grant cannot select the owner's main line", async () => {
+    const calls = installOutboundFetch({ team: [broadcastOnlyStaff()] });
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({
+      to: "+15552345678",
+      message: "Must not send",
+      purpose: "broadcast",
+      line: "main",
+    }), res);
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /only the owner/i);
+    assert.equal(calls.quo, 0);
+  });
+
+  await t.test("the grant does not unlock shared-inbox replies", async () => {
+    const calls = installOutboundFetch({
+      team: [broadcastOnlyStaff()],
+      inboxRows: [{ id: "sms-auto", channel: "sms", from_phone: "+15552345678", ai: { quoLine: "automation" } }],
+    });
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({
+      to: "+15552345678",
+      message: "Must not send",
+      purpose: "broadcast",
+      inboxId: "sms-auto",
+    }), res);
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /business text inbox/i);
+    assert.equal(calls.inboxLookups, 0);
+    assert.equal(calls.quo, 0);
+  });
+});
+
+test("staff outbound stays on the automation line and the owner's main line is owner-send only", async (t) => {
+  await t.test("ordinary staff can still send from automation", async () => {
+    const calls = installOutboundFetch({ team: [automationStaff()] });
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({
+      to: "(555) 234-5678",
+      message: "Staff update",
+      line: "automation",
+      from: "+15559998888",
+    }), res);
+
+    assert.equal(res.statusCode, 202);
+    assert.equal(res.body.line, "automation");
+    assert.deepEqual(calls.quoBodies[0], {
+      content: "Staff update",
+      from: "+15550001111",
+      to: ["+15552345678"],
+    });
+  });
+
+  await t.test("ordinary staff cannot select the owner's main line", async () => {
+    const calls = installOutboundFetch({ team: [automationStaff()] });
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({
+      to: "(555) 234-5678",
+      message: "Must stay private",
+      line: "main",
+    }), res);
+
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /owner's work line/i);
+    assert.equal(calls.quo, 0);
+  });
+
+  await t.test("main-line visibility never lets an explicitly granted staff member send from it", async () => {
+    const calls = installOutboundFetch({ team: [inboxStaff({ main: true })] });
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({
+      to: "(555) 234-5678",
+      message: "Must remain owner-only",
+      line: "main",
+      from: "+15559998888",
+    }), res);
+
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /only the owner/i);
+    assert.equal(calls.quo, 0);
+  });
+
+  await t.test("the owner can use the main line without fine-grained flags", async () => {
+    const calls = installOutboundFetch({ team: [ownerStaff()] });
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({
+      to: "(555) 234-5678",
+      message: "Owner message",
+      line: "main",
+    }), res);
+
+    assert.equal(res.statusCode, 202);
+    assert.equal(res.body.line, "main");
+    assert.equal(calls.quoBodies[0].from, "+15550002222");
+  });
+});
+
+test("unknown Quo line roles are rejected before contacting Quo", async () => {
+  const calls = installOutboundFetch();
+  const res = makeRes();
+  await sendSmsHandler(outboundRequest({ to: "+15552345678", message: "No", line: "other" }), res);
+  assert.equal(res.statusCode, 400);
+  assert.match(res.body.error, /unknown business texting line/i);
+  assert.equal(calls.quo, 0);
+});
+
+test("inbox replies use the verified line and recipient from the original inbound text", async (t) => {
+  await t.test("ordinary staff cannot reply through the shared inbox", async () => {
+    const calls = installOutboundFetch({
+      team: [automationStaff()],
+      inboxRows: [{ id: "sms-auto", channel: "sms", from_phone: "+15552345678", ai: { quoLine: "automation" } }],
+    });
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({ to: "+15552345678", message: "Must not send", inboxId: "sms-auto" }), res);
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /business text inbox/i);
+    assert.equal(calls.inboxLookups, 0);
+    assert.equal(calls.quo, 0);
+  });
+
+  await t.test("only the owner can reply to a main-line inbound text", async () => {
+    const calls = installOutboundFetch({
+      team: [inboxStaff({ main: true })],
+      inboxRows: [{ id: "sms-main", channel: "sms", from_phone: "+15552345678", ai: { quoLine: "main" } }],
+    });
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({
+      to: "+15552345678",
+      message: "Reply",
+      inboxId: "sms-main",
+      line: "automation",
+      from: "+15559998888",
+    }), res);
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /only the owner/i);
+    assert.equal(calls.inboxLookups, 1);
+    assert.equal(calls.quo, 0);
+  });
+
+  await t.test("the owner reply uses the protected main sender even when metadata needs normalization", async () => {
+    const calls = installOutboundFetch({
+      team: [ownerStaff()],
+      inboxRows: [{ id: "sms-main-normalized", channel: "sms", from_phone: "+15552345678", ai: { quoLine: " MAIN " } }],
+    });
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({ to: "+15552345678", message: "Reply", inboxId: "sms-main-normalized" }), res);
+    assert.equal(res.statusCode, 202);
+    assert.equal(res.body.line, "main");
+    assert.equal(calls.quoBodies[0].from, "+15550002222");
+  });
+
+  await t.test("text-inbox access alone cannot reply from the owner's main line", async () => {
+    const calls = installOutboundFetch({
+      team: [inboxStaff()],
+      inboxRows: [{ id: "sms-main", channel: "sms", from_phone: "+15552345678", ai: { quoLine: "main" } }],
+    });
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({ to: "+15552345678", message: "Must not send", inboxId: "sms-main" }), res);
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /only the owner/i);
+    assert.equal(calls.inboxLookups, 1);
+    assert.equal(calls.quo, 0);
+  });
+
+  await t.test("legacy inbound without metadata stays on automation", async () => {
+    const calls = installOutboundFetch({
+      team: [inboxStaff()],
+      inboxRows: [{ id: "sms-old", channel: "sms", from_phone: "+15552345678", ai: { summary: "legacy" } }],
+    });
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({ to: "+15552345678", message: "Reply", inboxId: "sms-old", line: "main" }), res);
+    assert.equal(res.statusCode, 202);
+    assert.equal(res.body.line, "automation");
+    assert.equal(calls.quoBodies[0].from, "+15550001111");
+  });
+
+  await t.test("malformed or unknown line metadata fails closed", async () => {
+    for (const [id, ai] of [
+      ["sms-unknown", { quoLine: "unexpected" }],
+      ["sms-malformed-string", "not-json"],
+      ["sms-malformed-array", []],
+    ]) {
+      const calls = installOutboundFetch({
+        team: [inboxStaff({ main: true })],
+        inboxRows: [{ id, channel: "sms", from_phone: "+15552345678", ai }],
+      });
+      const res = makeRes();
+      await sendSmsHandler(outboundRequest({ to: "+15552345678", message: "Must not send", inboxId: id }), res);
+      assert.equal(res.statusCode, 503, id);
+      assert.match(res.body.error, /original text line could not be verified/i);
+      assert.equal(calls.quo, 0, id);
+    }
+  });
+
+  await t.test("caller cannot reuse an inbox id for another recipient", async () => {
+    const calls = installOutboundFetch({
+      team: [ownerStaff()],
+      inboxRows: [{ id: "sms-main", channel: "sms", from_phone: "+15552345678", ai: { quoLine: "main" } }],
+    });
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({ to: "+15557654321", message: "Must not send", inboxId: "sms-main" }), res);
+    assert.equal(res.statusCode, 400);
+    assert.match(res.body.error, /recipient does not match/i);
+    assert.equal(calls.quo, 0);
+  });
+
+  await t.test("missing or unavailable inbox context fails closed", async () => {
+    for (const options of [{ inboxRows: [] }, { inboxFailure: true }]) {
+      const calls = installOutboundFetch({ ...options, team: [inboxStaff()] });
+      const res = makeRes();
+      await sendSmsHandler(outboundRequest({ to: "+15552345678", message: "Must not send", inboxId: "sms-missing" }), res);
+      assert.equal(res.statusCode, 503);
+      assert.match(res.body.error, /original text line could not be verified/i);
+      assert.equal(calls.quo, 0);
+    }
   });
 });
 
@@ -298,6 +601,7 @@ test("server Test Mode holds non-pilot client texts without contacting Quo", asy
     held: true,
     redirected: false,
     testMode: true,
+    line: "automation",
   });
   assert.equal(calls.textSafetyChecks, 1);
   assert.equal(calls.quo, 0);
@@ -480,7 +784,7 @@ test("a legacy string false Test Mode value is normalized as off", async () => {
   assert.deepEqual(calls.quoBodies[0].to, ["+15552345678"]);
 });
 
-test("public SMS health is compatibility-safe and authenticated details expose only the configured SPS line", async () => {
+test("public SMS health is compatibility-safe and ordinary staff details hide the owner's line", async () => {
   let anonymousFetches = 0;
   globalThis.fetch = async () => { anonymousFetches += 1; throw new Error("public health must not call upstream services"); };
   const publicRes = makeRes();
@@ -493,15 +797,44 @@ test("public SMS health is compatibility-safe and authenticated details expose o
   });
   assert.equal(anonymousFetches, 0);
 
-  const calls = installOutboundFetch();
+  const calls = installOutboundFetch({ team: [automationStaff()] });
   const detailsRes = makeRes();
   await sendSmsHandler({ method: "GET", query: { check: "", details: "1" }, headers: { authorization: "Bearer staff-token" } }, detailsRes);
   assert.equal(detailsRes.statusCode, 200);
   assert.equal(detailsRes.body.from, "+15550001111");
-  assert.deepEqual(detailsRes.body.numbers, [{ number: "+15550001111", label: "SPS" }]);
+  assert.equal(detailsRes.body.directFrom, undefined);
+  assert.deepEqual(detailsRes.body.numbers, [
+    { role: "automation", number: "+15550001111", label: "SPS Automation" },
+  ]);
+  assert.equal(detailsRes.body.configured.quoMainNumber, undefined);
   assert.equal(detailsRes.body.configured.upstreamReachable, true);
   assert.equal(detailsRes.body.configured.numberOnAccount, true);
+  assert.equal(detailsRes.body.configured.mainNumberOnAccount, undefined);
   assert.equal(calls.quoNumberChecks, 1);
+});
+
+test("main-line details are returned only to the owner or an explicitly granted staff member", async (t) => {
+  for (const [label, member] of [
+    ["owner", ownerStaff()],
+    ["delegated staff", inboxStaff({ main: true })],
+  ]) {
+    await t.test(label, async () => {
+      const calls = installOutboundFetch({ team: [member] });
+      const res = makeRes();
+      await sendSmsHandler({ method: "GET", query: { details: "1" }, headers: { authorization: "Bearer staff-token" } }, res);
+
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.body.from, "+15550001111");
+      assert.equal(res.body.directFrom, "+15550002222");
+      assert.deepEqual(res.body.numbers, [
+        { role: "automation", number: "+15550001111", label: "SPS Automation" },
+        { role: "main", number: "+15550002222", label: "SPS Main" },
+      ]);
+      assert.equal(res.body.configured.quoMainNumber, true);
+      assert.equal(res.body.configured.mainNumberOnAccount, true);
+      assert.equal(calls.quoNumberChecks, 1);
+    });
+  }
 });
 
 test("portal accounts cannot enumerate the configured Quo line", async () => {
@@ -515,11 +848,46 @@ test("portal accounts cannot enumerate the configured Quo line", async () => {
   assert.equal(calls.quoNumberChecks, 0);
 });
 
-test("every server-side Quo sender is locked to QUO_PHONE_NUMBER", async () => {
-  for (const path of ["../api/send-sms.js", "../api/cron-automations.js", "../api/lead-intake.js", "../api/transfer-nudge.js"]) {
+test("automations remain locked to the automation Quo number", async () => {
+  for (const path of ["../api/cron-automations.js", "../api/lead-intake.js", "../api/transfer-nudge.js"]) {
     const source = await readFile(new URL(path, import.meta.url), "utf8");
     assert.doesNotMatch(source, /email\.textingNumber|fromOverride/, `${path} must not honor a saved sender override`);
+    assert.doesNotMatch(source, /QUO_MAIN_PHONE_NUMBER/, `${path} must not move an automation to the main work line`);
   }
+});
+
+test("human-written Comms actions explicitly choose their protected Quo routes", async () => {
+  const source = await readFile(new URL("../App.jsx", import.meta.url), "utf8");
+  assert.match(source, /openphone:\/\/dial\?/);
+  assert.match(source, /new URLSearchParams\(\{[\s\S]*action:\s*["']call["']/);
+  const pickerStart = source.indexOf("function QuoSenderPicker");
+  const directStart = source.indexOf("function DirectQuoTextModal");
+  const directEnd = source.indexOf("function effectiveClientPlan", directStart);
+  assert.ok(pickerStart >= 0 && directStart > pickerStart);
+  const pickerSource = source.slice(pickerStart, directStart);
+  assert.match(pickerSource, /const canUseMain = !!perms\?\.isAdmin/);
+  assert.doesNotMatch(pickerSource, /commsMainLine/, "main-line visibility must never add a staff sender identity");
+  const directSource = source.slice(directStart, directEnd > directStart ? directEnd : directStart + 8000);
+  assert.match(directSource, /perms\?\.isAdmin\s*\?\s*["']main["']\s*:\s*["']automation["']/);
+  assert.match(directSource, /lineRole:\s*senderRole/);
+  assert.match(directSource, /<QuoSenderPicker\s+value=\{senderRole\}/);
+  assert.doesNotMatch(directSource, /commsMainLine/, "staff direct texts must stay on automation even with owner-inbox visibility");
+
+  const replyStart = source.indexOf("const sendOpenRowReply = async");
+  const replyEnd = source.indexOf("const [selMode", replyStart);
+  assert.ok(replyStart >= 0 && replyEnd > replyStart);
+  assert.match(source.slice(replyStart, replyEnd), /sendSms\(phone,\s*replyText\.trim\(\),\s*\{[\s\S]*?inboxId:\s*row\.id/);
+
+  const broadcastStart = source.indexOf("function BroadcastSection");
+  const broadcastEnd = source.indexOf("function OwnerDigestSettings", broadcastStart);
+  assert.ok(broadcastStart >= 0 && broadcastEnd > broadcastStart);
+  const broadcastSource = source.slice(broadcastStart, broadcastEnd);
+  assert.equal((broadcastSource.match(/lineRole:\s*senderRole/g) || []).length, 2, "live and test broadcasts must use the selected protected sender role");
+  assert.equal((broadcastSource.match(/purpose:\s*["']broadcast["']/g) || []).length, 2, "live and test broadcasts must carry the explicit server authorization purpose");
+  assert.match(broadcastSource, /perms\?\.isAdmin\s*\?\s*["']main["']\s*:\s*["']automation["']/);
+  assert.match(broadcastSource, /<QuoSenderPicker\s+value=\{senderRole\}/);
+  assert.doesNotMatch(broadcastSource, /commsMainLine/, "staff broadcasts must stay on automation even with owner-inbox visibility");
+  assert.match(broadcastSource, /replies return to the same unified Comms inbox/i);
 });
 
 test("scheduled client texts fail closed when the saved Test Mode settings cannot be read", async () => {
@@ -572,6 +940,7 @@ test("inbound health distinguishes server readiness from a recently observed sig
   await smsIntakeHandler({ method: "GET", query: {}, headers: {} }, res);
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.configured.ready, true);
+  assert.equal(res.body.configured.mainLine, true);
   assert.equal(res.body.configured.observed, true);
   assert.ok(res.body.configured.lastInboundAt);
 });
@@ -588,6 +957,19 @@ test("inbound webhook accepts a valid signature among comma-separated candidates
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.stored, true);
   assert.equal(calls.inserts, 1);
+});
+
+test("inbound texts preserve whether Quo received them on the automation or main line", async () => {
+  const calls = installInboxFetch();
+  const automation = await invokeWebhook(webhookPayload("automation-line", { to: "+15550001111" }));
+  const main = await invokeWebhook(webhookPayload("main-line", { to: ["+15550002222"] }));
+
+  assert.equal(automation.res.statusCode, 200);
+  assert.equal(automation.res.body.line, "automation");
+  assert.equal(main.res.statusCode, 200);
+  assert.equal(main.res.body.line, "main");
+  assert.equal(calls.rows[0].ai?.quoLine, "automation");
+  assert.equal(calls.rows[1].ai?.quoLine, "main");
 });
 
 test("inbound webhook stores Quo's body field and supports the legacy text fallback", async () => {

@@ -102,6 +102,36 @@ export function memberHasCapability(member, capability) {
   if (role === "owner") return true;
   const fine = member.fine && typeof member.fine === "object" ? member.fine : {};
 
+  // The shared text inbox and the owner's main work line are deliberately NOT inherited from a
+  // broad role or from ordinary `sendTexts` access. A non-owner must be opted in explicitly by the
+  // owner, and a hidden Comms tab remains the master off switch. Legacy members without tabAccess
+  // use the app's historical "Comms available" baseline, but still need the new explicit fine flag.
+  if (capability === "commsTextInbox") {
+    const comms = tabMode(member, "comms");
+    const commsVisible = comms === null || comms === "view" || comms === "edit";
+    return commsVisible && fine.commsTextInbox === true;
+  }
+
+  if (capability === "commsMainLine") {
+    // This capability is visibility only. Sending from the owner's line is enforced as owner-only
+    // inside send-sms.js, even when an employee is allowed to help monitor the conversation.
+    const comms = tabMode(member, "comms");
+    const commsVisible = comms === null || comms === "view" || comms === "edit";
+    return commsVisible && fine.commsMainLine === true;
+  }
+
+  if (capability === "commsBroadcast") {
+    const comms = tabMode(member, "comms");
+    const commsVisible = comms === null || comms === "view" || comms === "edit";
+    return commsVisible && fine.commsBroadcast === true;
+  }
+
+  if (capability === "serviceReports") {
+    // Matches the app: a technician who can complete stops or an office employee who can edit a
+    // client's history may send/resend that client's finished service report.
+    return memberHasCapability(member, "completeStops") || tabMode(member, "clients") === "edit";
+  }
+
   if (capability === "invoiceView") {
     const mode = tabMode(member, "invoices");
     if (mode !== null) return mode === "view" || mode === "edit";

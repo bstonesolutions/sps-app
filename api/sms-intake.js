@@ -25,7 +25,8 @@ const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.s
 const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const KEY          = process.env.QUO_WEBHOOK_KEY;
 const SIGN_SECRET  = process.env.QUO_WEBHOOK_SECRET; // Quo's base64 signing secret
-const QUO_NUMBER   = process.env.QUO_PHONE_NUMBER;
+const QUO_NUMBER   = process.env.QUO_PHONE_NUMBER;      // automation line
+const QUO_MAIN_NUMBER = process.env.QUO_MAIN_PHONE_NUMBER; // ported main work line
 
 const sbHeaders = () => ({ apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" });
 async function inboxStatus() {
@@ -41,8 +42,17 @@ async function inboxStatus() {
   } catch { return { schema: false, observed: false, lastInboundAt: null }; }
 }
 const SMS_AI_HOURLY_CAP = 30;
+const E164 = /^\+[1-9]\d{7,14}$/;
 const digits = (s) => String(s || "").replace(/\D/g, "");
 const last10 = (s) => digits(s).slice(-10);
+const toE164 = (value) => {
+  const raw = String(value == null ? "" : value).trim();
+  if (raw.startsWith("+")) return `+${raw.slice(1).replace(/\D/g, "")}`;
+  const d = digits(raw);
+  if (d.length === 10) return `+1${d}`;
+  if (d.length === 11 && d.startsWith("1")) return `+${d}`;
+  return d ? `+${d}` : "";
+};
 const clean = (v, n) => String(v == null ? "" : v).replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").slice(0, n).trim();
 const fmtPhone = (p) => { const d = last10(p); return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : (p || ""); };
 
@@ -142,7 +152,9 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method === "GET") {
     const { schema, observed, lastInboundAt } = await inboxStatus();
-    return res.status(200).json({ ok: true, configured: { key: !!KEY, ai: aiConfigured(), sig: !!SIGN_SECRET, line: !!QUO_NUMBER, schema, observed, lastInboundAt, ready: !!KEY && !!SIGN_SECRET && !!SERVICE_KEY && !!QUO_NUMBER && schema } });
+    const automationLine = toE164(QUO_NUMBER);
+    const mainLine = toE164(QUO_MAIN_NUMBER);
+    return res.status(200).json({ ok: true, configured: { key: !!KEY, ai: aiConfigured(), sig: !!SIGN_SECRET, line: E164.test(automationLine), mainLine: E164.test(mainLine) && mainLine !== automationLine, duplicateLines: !!mainLine && mainLine === automationLine, schema, observed, lastInboundAt, ready: !!KEY && !!SIGN_SECRET && !!SERVICE_KEY && E164.test(automationLine) && schema } });
   }
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
   if (!KEY || !SIGN_SECRET) return res.status(501).json({ error: "Inbound texting is not fully configured.", missingEnv: true });
@@ -168,11 +180,17 @@ export default async function handler(req, res) {
     // Fail SAFE: only ingest explicitly-incoming texts. Our OWN outbound sends ride this same
     // stream ("outgoing"), and a variant event that omits direction must NOT be re-ingested.
     if (String(msg.direction || "").toLowerCase() !== "incoming") return res.status(200).json({ ok: true, skipped: "not incoming" });
-    // This workspace has more than one Quo line. Only accept messages addressed to the same line
-    // configured for SPS outbound texting; the webhook should also select only that resource.
+    // This workspace has more than one Quo line. Accept only the two explicitly configured SPS
+    // lines and preserve which one received the text so replies use the same conversation line.
     const recipients = Array.isArray(msg.to) ? msg.to : (msg.to ? [msg.to] : []);
     if (!recipients.length) return res.status(200).json({ ok: true, skipped: "missing destination" });
-    if (!recipients.some((recipient) => last10(recipient) === last10(QUO_NUMBER))) return res.status(200).json({ ok: true, skipped: "other business number" });
+    const acceptedLines = [
+      { role: "automation", number: toE164(QUO_NUMBER) },
+      { role: "main", number: toE164(QUO_MAIN_NUMBER) },
+    ].filter((line, index, lines) => E164.test(line.number) && lines.findIndex((candidate) => candidate.number === line.number) === index);
+    const matchedLine = acceptedLines.find((line) => recipients.some((recipient) => toE164(recipient) === line.number));
+    if (!matchedLine) return res.status(200).json({ ok: true, skipped: "other business number" });
+    const quoLine = matchedLine.role;
     const eventId = clean(body.id || msg.id, 80);
     if (!eventId) return res.status(200).json({ ok: true, skipped: "no id" });
     const id = `sms_${eventId}`;
@@ -198,13 +216,14 @@ export default async function handler(req, res) {
     const client = matches.length === 1 ? matches[0] : null;
 
     let kind = client ? "client" : "other", ai = client
-      ? { summary: `Text from client ${client.name}`, clientId: String(client.id) }
+      ? { summary: `Text from client ${client.name}`, clientId: String(client.id), quoLine }
       : matches.length > 1
-        ? { summary: "This phone number matches more than one client. Review it before replying." }
-        : clientLookupOk ? null : {
+        ? { summary: "This phone number matches more than one client. Review it before replying.", quoLine }
+        : clientLookupOk ? { quoLine } : {
           summary: clientRead.timeout
             ? "Client matching timed out. Review this text before replying."
             : "Client matching failed. Review this text before replying.",
+          quoLine,
         };
 
     const row = {
@@ -233,7 +252,7 @@ export default async function handler(req, res) {
       return res.status(502).json(out); // 5xx → Quo retries once the columns exist
     }
     if (!claim.inserted) return res.status(200).json({ ok: true, duplicate: true });
-    out.stored = true; out.kind = kind;
+    out.stored = true; out.kind = kind; out.line = quoLine;
 
     // Optional triage runs only after the durable atomic claim. It is capped separately from email
     // and skipped whenever the webhook's response budget is getting tight.
@@ -254,11 +273,11 @@ export default async function handler(req, res) {
         const j = triageRun.completed && !triageRun.error ? extractJson(triageRun.value) : null;
         if (j && ["lead", "bill", "other"].includes(j.kind) && remaining(900) > 100) {
           let nextKind = j.kind;
-          let nextAi = j;
+          let nextAi = { ...j, quoLine };
           if (j.kind === "lead") {
             const verdict = assessInboundLead({ channel: "sms", from_phone: fromPhone, body_text: text, ai: j }, clients);
             nextKind = verdict.eligible ? "lead" : verdict.kind;
-            if (!verdict.eligible) nextAi = { ...j, autoLead: false, leadRejectedReason: verdict.reason, ...(verdict.client ? { clientId: String(verdict.client.id) } : {}) };
+            if (!verdict.eligible) nextAi = { ...j, quoLine, autoLead: false, leadRejectedReason: verdict.reason, ...(verdict.client ? { clientId: String(verdict.client.id) } : {}) };
           }
           try {
             const patch = await timedFetch(`${SUPABASE_URL}/rest/v1/sps_inbox?id=eq.${encodeURIComponent(id)}`, {

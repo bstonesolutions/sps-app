@@ -441,8 +441,9 @@ const qbCheckStatus = async () => {
   } catch { return qbIsConnected(); }
 };
 // "Sending identity" mirror of the saved email settings, so server calls can carry a custom
-// from-name/address without threading props through every call site. Texting identity is never
-// client-controlled: every Quo route uses QUO_PHONE_NUMBER from Vercel.
+// from-name/address without threading props through every call site. Quo sender identity remains
+// server-owned: automation is the staff default; only the owner or an explicitly delegated teammate
+// may request `main` for a human-written Comms message.
 let SENDER_IDENTITY = { fromName: "", fromAddress: "" };
 function setSenderIdentity(v) { SENDER_IDENTITY = { ...SENDER_IDENTITY, ...(v || {}) }; }
 
@@ -509,7 +510,9 @@ function getWidgetSync() { return WIDGET_SYNC; }
 function registerWidgetPush(fn) { _widgetPush = fn; }
 async function resyncWidgets() { return _widgetPush ? _widgetPush() : setWidgetSync({ ok: false, skipped: true, reason: "Sign in as the owner on the iOS app to use widgets." }); }
 
-// Send a text via the business Quo number (server-side, from the company line).
+// Send a text via a server-approved Quo line. Existing callers omit lineRole and therefore stay on
+// the automation line; owner/delegated Comms messages may use lineRole:"main". Inbox replies pass
+// inboxId so the server—not the browser—selects the same line that received the original text.
 // Absolute PROD_URL so it works on the native app too. Returns { ok, error, missingEnv }.
 async function sendSms(to, message, meta) {
   const phoneDigits = (value) => String(value || "").replace(/\D/g, "");
@@ -534,8 +537,13 @@ async function sendSms(to, message, meta) {
       if (meta && (meta.clientId != null || meta.origin)) logComm({ clientId: meta.clientId ?? "", type: meta.type, channel: "sms", body: message, ok: false, origin: `${(meta && meta.origin) || (ACTOR ? `${ACTOR} — app` : "app")} · Test Mode misconfigured (no redirect phone)`, recipient: "" });
       return { ok: false, accepted: false, sent: false, held: false, redirected: false, testOnly: false, acceptedForClient: false, error: "Test mode is on, but no owner phone is set to redirect texts to." };
     }
-    dest = TEST_MODE.phone;
-    body = `[TEST → ${to}] ${message}`;
+    // Inbox replies must keep the original sender in `to` so the server can prove the row and
+    // recipient match before it chooses that row's Quo line. The server then performs the same
+    // Test Mode redirect. Other legacy callers retain the immediate client-side redirect UX.
+    if (!meta?.inboxId) {
+      dest = TEST_MODE.phone;
+      body = `[TEST → ${to}] ${message}`;
+    }
   }
   let result;
   try {
@@ -545,14 +553,21 @@ async function sendSms(to, message, meta) {
       // clientId lets the server independently verify Pilot LIVE exceptions. The server still
       // owns the final destination and Test Mode decision; this client-side gate is only the
       // immediate UX/safety layer for installed and offline-prone app builds.
-      body: JSON.stringify({ to: dest, message: body, ...(meta?.clientId != null ? { clientId: String(meta.clientId) } : {}) }),
+      body: JSON.stringify({
+        to: dest,
+        message: body,
+        ...(meta?.clientId != null ? { clientId: String(meta.clientId) } : {}),
+        ...(meta?.lineRole === "main" ? { line: "main" } : {}),
+        ...(meta?.inboxId ? { inboxId: String(meta.inboxId) } : {}),
+        ...(meta?.purpose === "broadcast" ? { purpose: "broadcast" } : {}),
+      }),
     });
     const d = await r.json().catch(() => ({}));
     result = r.ok && d.held
-      ? { ok: true, accepted: false, sent: false, held: true, redirected: false }
+      ? { ok: true, accepted: false, sent: false, held: true, redirected: false, line: d.line || null }
       : r.ok && (d.accepted || d.sent)
-        ? { ok: true, accepted: true, sent: true, held: false, redirected: !!d.redirected }
-        : { ok: false, accepted: false, sent: false, held: !!d.held, redirected: false, error: d.error || `Error ${r.status}`, missingEnv: !!d.missingEnv };
+        ? { ok: true, accepted: true, sent: true, held: false, redirected: !!d.redirected, line: d.line || null }
+        : { ok: false, accepted: false, sent: false, held: !!d.held, redirected: false, line: d.line || null, error: d.error || `Error ${r.status}`, missingEnv: !!d.missingEnv };
   } catch (e) { result = { ok: false, error: e.message || "network error" }; }
   const redirected = (testProtected && TEST_MODE.mode !== "hold") || !!result.redirected;
   const held = !!result.held;
@@ -588,6 +603,63 @@ async function logComm({ clientId, type, channel = "sms", body = "", ok = true, 
     if (error && /origin|recipient|column|schema/i.test(String(error.message || ""))) await supabase.from("sps_comms_log").insert(base);
   } catch (_) { /* table not created yet, or offline — logging is best-effort */ }
 }
+
+const phoneToE164 = (value) => {
+  const raw = String(value || "").trim();
+  if (raw.startsWith("+")) return `+${raw.slice(1).replace(/\D/g, "")}`;
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  return digits ? `+${digits}` : "";
+};
+const phoneDisplay = (value) => {
+  const digits = String(value || "").replace(/\D/g, "").slice(-10);
+  return digits.length === 10 ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}` : String(value || "");
+};
+let _quoLineDetails = null;
+let _quoLineDetailsKey = "";
+let _quoLineDetailsPromise = null;
+async function loadQuoLineDetails(permissionScope = "") {
+  let viewerKey = "";
+  try {
+    const { data } = await supabase.auth.getSession();
+    viewerKey = `${String(data?.session?.user?.id || "")}:${String(permissionScope || "")}`;
+  } catch (_) {}
+  if (_quoLineDetails && _quoLineDetailsKey === viewerKey) return _quoLineDetails;
+  if (_quoLineDetailsPromise && _quoLineDetailsKey === viewerKey) return _quoLineDetailsPromise;
+  // Exact main-line details are permission-sensitive. Never reuse an owner's cached response after
+  // sign-out when a staff member signs in on the same device.
+  _quoLineDetails = null;
+  _quoLineDetailsKey = viewerKey;
+  _quoLineDetailsPromise = (async () => {
+    const response = await fetch(`${PROD_URL}/api/send-sms?check&details=1`, { headers: await authHeaders() });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Quo line details are unavailable.");
+    const details = {
+      automation: phoneToE164(data.from),
+      main: phoneToE164(data.directFrom),
+      automationReady: !!(data.configured?.quoNumber && data.configured?.numberOnAccount !== false),
+      mainReady: !!(data.configured?.quoMainNumber && !data.configured?.duplicateConfiguredLines && data.configured?.mainNumberOnAccount !== false),
+    };
+    if (_quoLineDetailsKey === viewerKey) _quoLineDetails = details;
+    return details;
+  })();
+  try { return await _quoLineDetailsPromise; }
+  finally { if (_quoLineDetailsKey === viewerKey) _quoLineDetailsPromise = null; }
+}
+const isMobileQuoSurface = () => {
+  if (typeof window === "undefined") return false;
+  if (window.Capacitor?.isNativePlatform?.()) return true;
+  return /Android|iPhone|iPad|iPod/i.test(String(window.navigator?.userAgent || ""));
+};
+const quoCallHref = (to, from) => {
+  const number = phoneToE164(to);
+  const callerId = phoneToE164(from);
+  if (!number) return "";
+  if (!isMobileQuoSurface()) return `tel:${number}`;
+  const params = new URLSearchParams({ number, ...(callerId ? { from: callerId } : {}), action: "call" });
+  return `openphone://dial?${params.toString()}`;
+};
 
 // Fire an event push to the right audience (owner / a client / a staff member) through
 // api/send-push — the SERVER resolves recipients from registered device tokens and enforces
@@ -2529,11 +2601,16 @@ function applyFinePerms(out, member) {
   out.commsBroadcast = cg("commsBroadcast", false);
   out.commsSettings  = cg("commsSettings",  false);
   out.commsLog       = cg("commsLog",       false);
+  // Each Quo inbox is private-by-default for every non-owner, including broad/full roles. The two
+  // visibility grants are independent so the owner controls exactly which line each employee sees.
+  // Sending from the ported owner number is still owner-only and enforced again by the API.
+  out.commsTextInbox = adm ? true : (commsOn && fine.commsTextInbox === true);
+  out.commsMainLine  = adm ? true : (commsOn && fine.commsMainLine === true);
   return out;
 }
 
 // The Comms hub is visible when the viewer can see at least one of its sections (owner sees all).
-const COMMS_SECTION_FLAGS = ["commsMessages", "commsInbox", "commsReminders", "commsBroadcast", "commsSettings", "commsLog"];
+const COMMS_SECTION_FLAGS = ["commsMessages", "commsInbox", "commsTextInbox", "commsMainLine", "commsReminders", "commsBroadcast", "commsSettings"];
 const canSeeComms = (perms) => !!perms && (perms.isAdmin || perms.editNotifications || COMMS_SECTION_FLAGS.some(f => perms[f]));
 const badgeLabel = (count) => Number(count) > 99 ? "99+" : Number(count) || 0;
 
@@ -4738,17 +4815,18 @@ function ClockInOut({ me, T, compact = false }) {
 function HomeCommsWidget({ leads = [], clients = [], onNav, T, perms = {} }) {
   const canChat = !!(perms.isAdmin || perms.commsMessages);
   const canLeads = !!(perms.isAdmin || perms.commsInbox);
-  const canExternalInbox = !!perms.isAdmin;
+  const canExternalInbox = !!(perms.isAdmin || perms.commsTextInbox || perms.commsMainLine);
+  const externalInboxEndpoint = perms.isAdmin ? "/api/inbox" : "/api/sms-inbox";
   const [msgs, setMsgs] = useState(null);
   const [emails, setEmails] = useState(null);
   useEffect(() => {
     let alive = true;
     if (canChat) (async () => { try { const { data, error } = await supabase.from("sps_messages").select("client_id, body, sender, created_at, read_at").order("created_at", { ascending: false }).limit(60); if (alive) setMsgs(error ? [] : (data || [])); } catch (_) { if (alive) setMsgs([]); } })();
     else setMsgs([]);
-    if (canExternalInbox) (async () => { try { const r = await fetch(`${PROD_URL}/api/inbox?limit=100`, { headers: await authHeaders() }); const d = await r.json().catch(() => ({})); if (alive) setEmails(r.ok ? (d.rows || []) : []); } catch (_) { if (alive) setEmails([]); } })();
+    if (canExternalInbox) (async () => { try { const r = await fetch(`${PROD_URL}${externalInboxEndpoint}?limit=100`, { headers: await authHeaders() }); const d = await r.json().catch(() => ({})); if (alive) setEmails(r.ok ? (d.rows || []) : []); } catch (_) { if (alive) setEmails([]); } })();
     else setEmails([]);
     return () => { alive = false; };
-  }, [canChat, canExternalInbox]);
+  }, [canChat, canExternalInbox, externalInboxEndpoint]);
   const nameOf = (cid) => { const c = (clients || []).find(x => String(x.id) === String(cid)); return c ? c.name : "Client"; };
   const threadMap = {};
   (msgs || []).forEach(m => { const cid = String(m.client_id); if (!threadMap[cid]) threadMap[cid] = { cid, lastMsg: String(m.body || "").replace(/\[\[[^\]]+\]\]/g, "").trim() || "Message", at: m.created_at, unread: 0 }; if (m.sender === "client" && !m.read_at) threadMap[cid].unread++; });
@@ -4781,7 +4859,7 @@ function HomeCommsWidget({ leads = [], clients = [], onNav, T, perms = {} }) {
   const tiles = [
     canChat && ["Unread chats", unreadChats, T.primary, () => onNav("messages")],
     canLeads && ["New leads", newLeads, "#16a34a", () => onNav("leads")],
-    canExternalInbox && ["Inbox unread", unreadInbox, "#7c3aed", () => onNav("comms", { commsSection: "email" })],
+    canExternalInbox && [perms.isAdmin ? "Inbox unread" : "Texts unread", unreadInbox, "#7c3aed", () => onNav("comms", { commsSection: "email" })],
   ].filter(Boolean);
   const openComms = () => canChat ? onNav("messages") : canLeads ? onNav("leads") : onNav("comms", { commsSection: "email" });
   const loading = (canChat && msgs === null) || (canExternalInbox && emails === null);
@@ -5489,6 +5567,112 @@ function Modal({ title, children, onClose, maxWidth = 600, dismissOnBackdrop = f
       </div>
     </div>,
     document.body
+  );
+}
+
+function useQuoMainLine(fallback = "") {
+  const { perms } = useApp();
+  const fallbackMain = phoneToE164(fallback);
+  const canViewMain = !!(perms?.isAdmin || perms?.commsMainLine);
+  const permissionScope = `${perms?.isAdmin ? "owner" : "staff"}:${perms?.commsTextInbox ? "staff-inbox" : "no-staff-inbox"}:${canViewMain ? "main-inbox" : "no-main-inbox"}:${perms?.sendTexts ? "send" : "no-send"}`;
+  // Begin empty instead of painting another signed-in user's cached numbers for one render. The
+  // authenticated, permission-scoped response fills this immediately afterward.
+  const [details, setDetails] = useState(() => ({ automation: "", main: canViewMain ? fallbackMain : "", automationReady: false, mainReady: false, loaded: false }));
+  useEffect(() => {
+    let alive = true;
+    setDetails({ automation: "", main: canViewMain ? fallbackMain : "", automationReady: false, mainReady: false, loaded: false });
+    loadQuoLineDetails(permissionScope).then((next) => {
+      if (alive) setDetails({ automation: next.automation || "", main: canViewMain ? (next.main || fallbackMain) : "", automationReady: !!next.automationReady, mainReady: canViewMain && !!next.mainReady, loaded: true });
+    }).catch(() => {
+      if (alive) setDetails((current) => ({ ...current, main: canViewMain ? (current.main || fallbackMain) : "", loaded: true }));
+    });
+    return () => { alive = false; };
+  }, [fallbackMain, canViewMain, permissionScope]);
+  return details;
+}
+
+// Default identity for ordinary one-to-one actions outside Comms: owner → ported main number;
+// every staff account → existing staff/automation number. Main-line visibility is deliberately
+// separate from sender authority, so a staff account never gets the owner's sender identity.
+function useDefaultQuoIdentity(fallback = "") {
+  const { perms } = useApp();
+  const lines = useQuoMainLine(fallback);
+  const role = perms?.isAdmin ? "main" : "automation";
+  return {
+    ...lines,
+    role,
+    number: role === "main" ? lines.main : lines.automation,
+    ready: role === "main" ? lines.mainReady : lines.automationReady,
+  };
+}
+
+function QuoSenderPicker({ value, onChange, lines, compact = false }) {
+  const { T, perms } = useApp();
+  const canUseMain = !!perms?.isAdmin;
+  const choices = [
+    { id: "automation", label: "Staff number", number: lines?.automation, ready: lines?.automationReady },
+    ...(canUseMain ? [{ id: "main", label: "My number", number: lines?.main, ready: lines?.mainReady }] : []),
+  ];
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+      <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted }}>Send from</div>
+      <div style={{ display: "grid", gridTemplateColumns: `repeat(${choices.length}, minmax(0, 1fr))`, gap: 6, padding: 4, borderRadius: 12, background: T.surfaceAlt, border: `1px solid ${T.border}` }}>
+        {choices.map((choice) => {
+          const active = value === choice.id;
+          return <button key={choice.id} type="button" aria-pressed={active} onClick={() => onChange(choice.id)} style={{ minWidth: 0, minHeight: compact ? 40 : 46, padding: compact ? "6px 8px" : "8px 10px", border: "none", borderRadius: 9, background: active ? T.surface : "transparent", color: active ? T.primary : T.textMuted, boxShadow: active ? "0 1px 4px rgba(0,0,0,0.1)" : "none", fontFamily: "inherit", cursor: "pointer", textAlign: "left" }}>
+            <span style={{ display: "block", fontSize: 12, fontWeight: 820, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{choice.label}</span>
+            <span style={{ display: "block", marginTop: 2, fontSize: 10.5, fontWeight: 650, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{choice.number ? phoneDisplay(choice.number) : (lines?.loaded ? "Not connected" : "Checking Quo…")}{choice.ready ? " · Ready" : ""}</span>
+          </button>;
+        })}
+      </div>
+    </div>
+  );
+}
+
+function DirectQuoTextModal({ name, phone, clientId, brandingPhone, origin = "Direct text", onClose }) {
+  const { T, perms } = useApp();
+  const lines = useQuoMainLine(brandingPhone);
+  const [senderRole, setSenderRole] = useState(() => perms?.isAdmin ? "main" : "automation");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+  useEffect(() => {
+    if (!perms?.isAdmin && senderRole === "main") setSenderRole("automation");
+  }, [perms?.isAdmin, senderRole]);
+  const first = String(name || "this contact").trim().split(/\s+/)[0] || "this contact";
+  const send = async () => {
+    const content = message.trim();
+    if (!content || busy) return;
+    setBusy(true); setResult(null);
+    const sent = await sendSms(phone, content, {
+      ...(clientId != null && clientId !== "" ? { clientId } : {}),
+      lineRole: senderRole,
+      type: "Direct text",
+      origin,
+    });
+    if (!sent.ok) setResult({ ok: false, text: sent.error || "The text could not be sent." });
+    else if (sent.held) setResult({ ok: false, text: "Held by Test Mode — the contact was not texted." });
+    else if (sent.redirected) setResult({ ok: false, text: "Test Mode sent this only to your saved test number." });
+    else {
+      setResult({ ok: true, text: `Text accepted for sending to ${first} from ${senderRole === "main" ? "your number" : "the staff number"}.` });
+      setMessage("");
+    }
+    setBusy(false);
+  };
+  return (
+    <Modal title={`Text ${name || phone || "contact"}`} onClose={onClose} maxWidth={520}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
+        <QuoSenderPicker value={senderRole} onChange={(next) => { setSenderRole(next); setResult(null); }} lines={lines} />
+        <div style={{ fontSize: 12, color: T.textMuted, lineHeight: 1.45 }}>To {name || "Contact"} · {phoneDisplay(phone)}. Staff messages always use the existing staff number; your ported number is owner-send only.</div>
+        <textarea autoFocus value={message} maxLength={1600} onChange={(event) => { setMessage(event.target.value); setResult(null); }} placeholder={`Write a text to ${first}…`} rows={6}
+          style={{ width: "100%", minHeight: 132, resize: "vertical", padding: "12px 14px", border: `1.5px solid ${T.border}`, borderRadius: 13, background: T.surface, color: T.text, fontFamily: "inherit", fontSize: 16, lineHeight: 1.5, boxSizing: "border-box", outline: "none" }} />
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <span style={{ fontSize: 11, color: T.textMuted }}>{message.length}/1600</span>
+          <Btn onClick={send} disabled={busy || !message.trim()} style={{ gap: 7 }}><Icon name="send" size={14} />{busy ? "Sending…" : "Send text"}</Btn>
+        </div>
+        {result && <div style={{ fontSize: 12.5, fontWeight: 700, lineHeight: 1.45, color: result.ok ? "#15803d" : T.warning, background: hexA(result.ok ? "#16a34a" : T.warning, 0.08), borderRadius: 10, padding: "9px 11px" }}>{result.text}</div>}
+      </div>
+    </Modal>
   );
 }
 
@@ -6654,6 +6838,8 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
   const [tab, setTab] = useState(initialTab || "overview");
   const [editing, setEditing] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
+  const [directTextOpen, setDirectTextOpen] = useState(false);
+  const quoDefaultLine = useDefaultQuoIdentity(branding?.companyPhone);
   // Division-aware tier — same source of truth as the Service Tiers screen + clients list,
   // so a tier set in the bulk editor links here even when c.plan is stale (post-restore /
   // non-primary division). Don't read the flat client.plan directly for display.
@@ -6751,22 +6937,22 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
             {perms.seeBalances && <span style={{ display:"flex", alignItems:"center", gap:4, fontSize:12, fontWeight:700, color: owed <= 0 ? T.accent : T.warning }}><Icon name="dollar" size={12} />${owed.toFixed(2)}{owed > 0 ? " due" : " balance"}</span>}
           </div>
 
-          {/* Quick contact. Call / Device text use YOUR phone (device dialer + Messages). "Chat in app" is
-              the in-app thread with the client — it lands in their portal and is logged here. */}
+          {/* Quick contact. Owner actions default to the ported number; staff actions default to the
+              existing staff number. "Chat in app" remains the client portal thread. */}
           <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
             {(client.phone || client.email) && (
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                 {client.phone && (
-                  <a href={`tel:${String(client.phone).replace(/[^\d+]/g, "")}`}
+                  <a href={quoCallHref(client.phone, quoDefaultLine.number || branding?.companyPhone)} title={`Call in Quo from the ${quoDefaultLine.role === "main" ? "owner work" : "staff"} number`}
                     style={{ flex: "1 1 0", minWidth: 64, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "11px", borderRadius: 12, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 13, fontWeight: 700, textDecoration: "none", fontFamily: "inherit" }}>
                     <Icon name="phone" size={14} /> Call
                   </a>
                 )}
-                {client.phone && (
-                  <a href={`sms:${String(client.phone).replace(/[^\d+]/g, "")}`} title="Opens this device's Messages app"
-                    style={{ flex: "1 1 0", minWidth: 64, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "11px", borderRadius: 12, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 13, fontWeight: 700, textDecoration: "none", fontFamily: "inherit" }}>
-                    <Icon name="message" size={14} /> Device text
-                  </a>
+                {client.phone && perms.sendTexts !== false && (
+                  <button type="button" onClick={() => setDirectTextOpen(true)} title="Text through Quo"
+                    style={{ flex: "1 1 0", minWidth: 64, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "11px", borderRadius: 12, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 13, fontWeight: 700, fontFamily: "inherit", cursor: "pointer" }}>
+                    <Icon name="message" size={14} /> Text
+                  </button>
                 )}
                 {client.email && (
                   <a href={`mailto:${client.email}`}
@@ -6825,6 +7011,16 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
             </div>
           </div>
         </Modal>
+      )}
+      {directTextOpen && (
+        <DirectQuoTextModal
+          name={client.name}
+          phone={client.phone}
+          clientId={client.id}
+          brandingPhone={branding?.companyPhone}
+          origin="Client profile direct text"
+          onClose={() => setDirectTextOpen(false)}
+        />
       )}
     </div>
   );
@@ -8783,6 +8979,8 @@ function newCompletionAttemptKey(sid) {
 function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, team, clients, dayDate, arrivedAt, enRouteAt, draft, onSaveDraft, onClearDraft, onComplete, onUpdateStop, onClose, onViewClient, onOfficeAlert, me }) {
   const { T, branding, perms } = useApp();
   const completeVp = useViewport();
+  const [directTextOpen, setDirectTextOpen] = useState(false);
+  const quoDefaultLine = useDefaultQuoIdentity(branding?.companyPhone);
   const todayStr = new Date().toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" });
   const firstName = client?.name?.split(" ")[0] || "there";
   const phone = client?.phone?.replace(/\D/g, "") || "";
@@ -9388,6 +9586,12 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
         <div style={{ fontSize: 12, color: T.textMuted }}>{stop.type} · {todayStr}</div>
         {onViewClient && client && <button onClick={() => { onViewClient(client); onClose(); }} style={{ background: "none", border: "none", color: T.primary, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>View client →</button>}
       </div>
+      {client?.phone && (
+        <div style={{ display: "flex", gap: 8, marginTop: -8, marginBottom: 16 }}>
+          <a href={quoCallHref(client.phone, quoDefaultLine.number || branding?.companyPhone)} title={`Call in Quo from the ${quoDefaultLine.role === "main" ? "owner work" : "staff"} number`} style={{ flex: 1, minHeight: 40, borderRadius: 11, border: `1px solid ${T.border}`, background: T.surface, color: T.text, textDecoration: "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 12.5, fontWeight: 750 }}><Icon name="phone" size={14} />Call</a>
+          {perms.sendTexts !== false && <button type="button" onClick={() => setDirectTextOpen(true)} title="Text through Quo" style={{ flex: 1, minHeight: 40, borderRadius: 11, border: `1px solid ${T.border}`, background: T.surface, color: T.text, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontFamily: "inherit", fontSize: 12.5, fontWeight: 750, cursor: "pointer" }}><Icon name="message" size={14} />Text</button>}
+        </div>
+      )}
 
       {/* Combined editor — change this stop's client or date right here (replaces the Edit button) */}
       {onUpdateStop && (
@@ -9931,6 +10135,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
       <Btn onClick={finish} disabled={busy || saveBusy} style={{ width: "100%", padding: "13px", fontSize: 14, borderRadius: 12 }}>
         {saveBusy ? "Saving completed stop…" : "Finish & Save Report"}
       </Btn>
+      {directTextOpen && <DirectQuoTextModal name={client?.name} phone={client?.phone} clientId={client?.id} brandingPhone={branding?.companyPhone} origin="Schedule stop direct text" onClose={() => setDirectTextOpen(false)} />}
     </Modal>
   );
 }
@@ -14094,18 +14299,19 @@ function AIAssist({ kind = "reminder", channel = "text", context = {}, value = "
 }
 
 // ── Sending identity — THE one place (Comms → Settings) for what your messages send FROM. ──
-// Email sender (Resend-verified) + the Quo texting number. Moved out of Customize → Messages &
+// Email sender (Resend-verified) + both server-approved Quo roles. Moved out of Customize → Messages &
 // Templates per the owner: every number/email setting lives in Comms → Settings, nowhere else.
 function SendingIdentitySettings({ email, setEmail }) {
-  const { T } = useApp();
+  const { T, perms } = useApp();
+  const canSeeOwnerLine = !!(perms?.isAdmin || perms?.commsMainLine);
   const set = (k, v) => setEmail(e => ({ ...e, [k]: v }));
-  const [identity, setIdentity] = useState({ verifiedDomain: "", numbers: [], smsFrom: "", resendOk: false, quoOk: false, loaded: false });
+  const [identity, setIdentity] = useState({ verifiedDomain: "", numbers: [], smsFrom: "", mainSmsFrom: "", resendOk: false, quoOk: false, mainQuoOk: false, loaded: false });
   useEffect(() => {
     let alive = true;
     (async () => {
-      const out = { verifiedDomain: "", numbers: [], smsFrom: "", resendOk: false, quoOk: false, loaded: true };
+      const out = { verifiedDomain: "", numbers: [], smsFrom: "", mainSmsFrom: "", resendOk: false, quoOk: false, mainQuoOk: false, loaded: true };
       try { const r = await fetch(`${PROD_URL}/api/send-magic-link?check`); const d = await r.json(); if (d) { if (d.verifiedDomain) out.verifiedDomain = String(d.verifiedDomain).toLowerCase(); out.resendOk = !!(d.configured && d.configured.resend); } } catch (_) {}
-      try { const r = await fetch(`${PROD_URL}/api/send-sms?check&details=1`, { headers: await authHeaders() }); const d = await r.json(); if (r.ok && d) { out.numbers = Array.isArray(d.numbers) ? d.numbers : []; out.smsFrom = d.from || ""; out.quoOk = !!(d.configured && d.configured.quoKey && d.configured.quoNumber && d.configured.upstreamReachable && d.configured.numberOnAccount !== false); } } catch (_) {}
+      try { const r = await fetch(`${PROD_URL}/api/send-sms?check&details=1`, { headers: await authHeaders() }); const d = await r.json(); if (r.ok && d) { out.numbers = Array.isArray(d.numbers) ? d.numbers : []; out.smsFrom = d.from || ""; out.mainSmsFrom = d.directFrom || ""; out.quoOk = !!(d.configured && d.configured.quoKey && d.configured.quoNumber && d.configured.upstreamReachable && d.configured.numberOnAccount !== false); out.mainQuoOk = !!(d.configured && d.configured.quoKey && d.configured.quoMainNumber && d.configured.upstreamReachable && d.configured.mainNumberOnAccount !== false); } } catch (_) {}
       if (alive) setIdentity(out);
     })();
     return () => { alive = false; };
@@ -14122,7 +14328,8 @@ function SendingIdentitySettings({ email, setEmail }) {
           <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>Sending status</div>
           {[
             { label: "Email (Resend)", ok: identity.resendOk, hint: identity.resendOk ? "Connected" : "Not configured — set RESEND_API_KEY in Vercel" },
-            { label: "Texting (Quo)", ok: identity.quoOk, hint: identity.quoOk ? (identity.smsFrom || "Connected") : "Not configured — set QUO_API_KEY + number in Vercel" },
+            { label: "Automatic service texts (Quo)", ok: identity.quoOk, hint: identity.quoOk ? (identity.smsFrom || "Connected") : "Not configured — set QUO_API_KEY + QUO_PHONE_NUMBER in Vercel" },
+            ...(canSeeOwnerLine ? [{ label: perms?.isAdmin ? "Your calls, texts & broadcasts (Quo)" : "Owner work-number inbox (view only)", ok: identity.mainQuoOk, hint: identity.mainQuoOk ? (identity.mainSmsFrom || "Connected") : "Not configured — set QUO_MAIN_PHONE_NUMBER in Vercel" }] : []),
           ].map((row) => {
             const col = !identity.loaded ? T.textMuted : row.ok ? "#16a34a" : "#d97706";
             return (
@@ -14159,14 +14366,19 @@ function SendingIdentitySettings({ email, setEmail }) {
         </div>
       </Card>
       <Card>
-        <CardHeader title="Texting Number" />
+        <CardHeader title="Quo Work Numbers" />
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 13 }}>
-          <div style={{ fontSize: 12, color: T.textMuted, marginTop: -2 }}>Every SPS client text uses the single business line configured in Vercel. Staff and installed app builds cannot switch to another number in the Quo workspace.</div>
+          <div style={{ fontSize: 12, color: T.textMuted, marginTop: -2, lineHeight: 1.5 }}>{canSeeOwnerLine ? "Both Quo numbers feed Comms without sharing a personal phone. Staff calls and messages stay on the existing staff/service number. The ported number is the owner's sending identity; Team → Advanced permissions can grant view-only access to its inbox." : "The staff/service number handles automatic client texts and the business text inbox you are allowed to use."}</div>
           <div>
-            <label style={labelStyle}>SPS Business Line</label>
+            <label style={labelStyle}>Automatic Service Number</label>
             <input type="tel" readOnly style={{ ...field, background: T.surfaceAlt, cursor: "default" }} value={identity.smsFrom || ""} placeholder={!identity.loaded ? "Checking…" : "Not configured"} />
-            <div style={hint}>{!identity.loaded ? "Checking the Quo connection…" : identity.quoOk ? "✓ Verified on the connected Quo account" : "Set QUO_API_KEY and QUO_PHONE_NUMBER in Vercel, then redeploy."}</div>
+            <div style={hint}>{!identity.loaded ? "Checking the Quo connection…" : identity.quoOk ? "✓ Verified — reminders, reports, estimates, invoices, and On My Way texts stay here" : "Set QUO_API_KEY and QUO_PHONE_NUMBER in Vercel, then redeploy."}</div>
           </div>
+          {canSeeOwnerLine && <div>
+            <label style={labelStyle}>Main Comms Number</label>
+            <input type="tel" readOnly style={{ ...field, background: T.surfaceAlt, cursor: "default" }} value={identity.mainSmsFrom || ""} placeholder={!identity.loaded ? "Checking…" : "Not configured"} />
+            <div style={hint}>{!identity.loaded ? "Checking the ported line…" : identity.mainQuoOk ? (perms?.isAdmin ? "✓ Verified — your calls, direct texts, broadcasts, and replies use this number" : "✓ Connected — view only; only the owner can call or send from this number") : "Set QUO_MAIN_PHONE_NUMBER in Vercel to the ported number, then redeploy."}</div>
+          </div>}
         </div>
       </Card>
     </>
@@ -15576,12 +15788,13 @@ function AdvancedPermsEditor({ member, onChange }) {
             {row("scheduleReorder", "Reorder & assign routes", "The Route Assignments tab")}
           </>)}
           {commsGranted && group("Comms sections", <>
-            {row("commsMessages",  "Messages",            "Two-way texting with clients")}
+            {row("commsMessages",  "Portal chat",         "In-app conversations inside the client portal")}
             {row("commsInbox",     "Leads inbox",         "New leads coming in from the funnel")}
+            {row("commsTextInbox", "Staff text inbox", "See texts on the existing automation/staff number")}
+            {row("commsMainLine", "Owner work-number inbox", "View the owner's ported-number conversations; sending from it remains owner-only")}
             {row("commsReminders", "Reminders",           "Upcoming-service + overdue-payment nudges")}
             {row("commsBroadcast", "Broadcast",           "Mass text or email a whole segment of clients")}
             {row("commsSettings",  "Automation settings", "Message templates + auto-send config")}
-            {row("commsLog",       "Activity log",        "The running feed of everything sent")}
           </>)}
         </div>
       )}
@@ -21416,7 +21629,7 @@ function CommsGroupHeader({ title, count, tone, T }) {
 // ── Leads (intake funnel) — the owner's pipeline of prospects → one-tap convert to client. ──
 // Owner-only (the nav entry is ownerOnly). Reads/writes the sps_leads app_state collection.
 function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, onLeadOpened, vp = {} }) {
-  const { T } = useApp();
+  const { T, perms, branding } = useApp();
   const dense = useCompactComms();
   const phone = !!vp.isPhone;
   const [filter, setFilter] = useState("active"); // active | all | <stage>
@@ -21426,6 +21639,8 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
   const [form, setForm] = useState({ ...BLANK_LEAD });
   const [dupModal, setDupModal] = useState(null); // { lead, dup } — convert hit an existing client
   const [lightbox, setLightbox] = useState(null);  // full-screen photo URL (in-app, no browser hop)
+  const [directTextLead, setDirectTextLead] = useState(null);
+  const quoDefaultLine = useDefaultQuoIdentity(branding?.companyPhone);
   const [leadRepair, setLeadRepair] = useState({ busy: false, error: "", undo: null, message: "" });
   // Deep-link: reopen a specific lead (e.g. returning from a cancelled convert).
   useEffect(() => {
@@ -21664,7 +21879,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
             {(sel.phone || sel.email || sel.service) && (
               <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, overflow: "hidden" }}>
                 {sel.service && <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "11px 14px", borderBottom: (sel.phone || sel.email) ? `1px solid ${T.border}` : "none" }}><span style={{ fontSize: 12.5, color: T.textMuted, fontWeight: 700 }}>Service</span><span style={{ fontSize: 13.5, color: T.text, fontWeight: 700, textAlign: "right" }}>{sel.service}</span></div>}
-                {sel.phone && <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "11px 14px", borderBottom: sel.email ? `1px solid ${T.border}` : "none", flexWrap: "wrap" }}><span style={{ fontSize: 12.5, color: T.textMuted, fontWeight: 700 }}>Phone</span><span style={{ fontSize: 13.5, color: T.text, fontWeight: 700, marginLeft: "auto" }}>{sel.phone}</span><span style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}><a href={`tel:${sel.phone}`} style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "6px 12px", textDecoration: "none" }}>Call</a><a href={`sms:${sel.phone}`} title="Opens this device's Messages app" style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "6px 12px", textDecoration: "none" }}>Device text</a></span></div>}
+                {sel.phone && <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "11px 14px", borderBottom: sel.email ? `1px solid ${T.border}` : "none", flexWrap: "wrap" }}><span style={{ fontSize: 12.5, color: T.textMuted, fontWeight: 700 }}>Phone</span><span style={{ fontSize: 13.5, color: T.text, fontWeight: 700, marginLeft: "auto" }}>{sel.phone}</span><span style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}><a href={quoCallHref(sel.phone, quoDefaultLine.number || branding?.companyPhone)} title={`Call in Quo from the ${quoDefaultLine.role === "main" ? "owner work" : "staff"} number`} style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "6px 12px", textDecoration: "none" }}>Call</a>{perms.sendTexts !== false && <button type="button" onClick={() => setDirectTextLead(sel)} title="Text through Quo" style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), border: "none", borderRadius: 100, padding: "6px 12px", fontFamily: "inherit", cursor: "pointer" }}>Text</button>}</span></div>}
                 {sel.email && <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "11px 14px", flexWrap: "wrap" }}><span style={{ fontSize: 12.5, color: T.textMuted, fontWeight: 700 }}>Email</span><span style={{ fontSize: 13, color: T.text, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: "1 1 180px", textAlign: "right" }}>{sel.email}</span><a href={`mailto:${sel.email}`} style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "6px 12px", textDecoration: "none" }}>Email</a></div>}
               </div>
             )}
@@ -21725,6 +21940,16 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
             <Btn block lg onClick={addManual} style={{ opacity: (form.name || form.phone || form.email) ? 1 : 0.5, pointerEvents: (form.name || form.phone || form.email) ? "auto" : "none" }}>Add lead</Btn>
           </div>
         </Modal>
+      )}
+
+      {directTextLead && (
+        <DirectQuoTextModal
+          name={directTextLead.name || "Lead"}
+          phone={directTextLead.phone}
+          brandingPhone={branding?.companyPhone}
+          origin="Lead profile direct text"
+          onClose={() => setDirectTextLead(null)}
+        />
       )}
 
       {dupModal && (
@@ -23572,6 +23797,9 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
 // Broadcast — text a whole segment of clients at once. AI draft, test-first-N, then send-to-all with
 // throttling so a big blast never trips carrier / Quo rate limits. Reuses sendSms (Test Mode + opt-outs).
 function BroadcastSection({ clients, invoices, email, branding, T }) {
+  const { perms } = useApp();
+  const lines = useQuoMainLine(branding?.companyPhone);
+  const [senderRole, setSenderRole] = useState(() => perms?.isAdmin ? "main" : "automation");
   const [channel, setChannel] = useState("text"); // "text" | "email"
   const [seg, setSeg] = useState("active");
   const [subject, setSubject] = useState("");
@@ -23585,6 +23813,9 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
   const [err, setErr] = useState("");
   const [confirmAll, setConfirmAll] = useState(false);
   const [confirmPilot, setConfirmPilot] = useState(false);
+  useEffect(() => {
+    if (!perms?.isAdmin && senderRole === "main") setSenderRole("automation");
+  }, [perms?.isAdmin, senderRole]);
   const testMode = !!(email && email.testMode && email.testMode.on);
   const isEmail = channel === "email";
 
@@ -23637,7 +23868,13 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
     setSending(true); setConfirmAll(false); setConfirmPilot(false); setErr(""); setResult(""); setProgress({ done: 0, total: list.length, failed: 0 });
     let done = 0, failed = 0, held = 0, redirected = 0;
     for (const c of list) {
-      const r = isEmail ? await sendEmailTo(c) : await sendSms((c.phone || "").replace(/\D/g, ""), fill(c), { clientId: c.id, type: "Broadcast", origin: `${ACTOR ? `${ACTOR} — ` : ""}text broadcast` });
+      const r = isEmail ? await sendEmailTo(c) : await sendSms((c.phone || "").replace(/\D/g, ""), fill(c), {
+        clientId: c.id,
+        lineRole: senderRole,
+        purpose: "broadcast",
+        type: "Broadcast",
+        origin: `${ACTOR ? `${ACTOR} — ` : ""}text broadcast · ${senderRole === "main" ? "owner work" : "staff"} line`,
+      });
       if (!r.ok) failed++;
       else if (r.held) held++;
       else if (r.redirected || (isEmail && testMode && !clientIsLive(c.id))) redirected++;
@@ -23661,7 +23898,13 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
     if (!sample || !ready) return;
     if (!TEST_MODE.phone) { setErr("Add your test phone in Comms → Settings first."); return; }
     setSending(true); setErr(""); setResult("");
-    const r = await sendSms(TEST_MODE.phone, `[BROADCAST TEST → ${sample.name || "sample client"}] ${fill(sample)}`, { testSend: true, type: "Broadcast test", origin: "Comms → Broadcast test" });
+    const r = await sendSms(TEST_MODE.phone, `[BROADCAST TEST → ${sample.name || "sample client"}] ${fill(sample)}`, {
+      testSend: true,
+      lineRole: senderRole,
+      purpose: "broadcast",
+      type: "Broadcast test",
+      origin: `Comms → Broadcast test · ${senderRole === "main" ? "owner work" : "staff"} line`,
+    });
     setSending(false);
     setResultStatus(r.ok ? "success" : "error");
     setResult(r.ok ? "Test accepted for your saved test phone — no clients were contacted." : "");
@@ -23680,6 +23923,8 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
     <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 14, maxWidth: 820, margin: "0 auto" }}>
       <CommsPageHeader T={T} icon="mail" title="Broadcast" description="Reach a client group with one carefully reviewed message." />
       <div style={{ display: "flex", gap: 4, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 14, padding: 4 }}>{chanBtn("text", "Text message", "message", "#7c3aed")}{chanBtn("email", "Email", "mail", "#2563eb")}</div>
+      {!isEmail && <QuoSenderPicker value={senderRole} onChange={(next) => { setSenderRole(next); setResult(""); setErr(""); }} lines={lines} compact />}
+      {!isEmail && <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 11px", borderRadius: 11, background: hexA("#16a34a", 0.07), border: `1px solid ${hexA("#16a34a", 0.18)}`, color: T.text, fontSize: 11.5, lineHeight: 1.4 }}><Icon name="inbox" size={14} color="#15803d" /><span>Customer replies return to the same unified Comms inbox and stay attached to this number.</span></div>}
       <div style={panel}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12 }}>
           <div><div style={{ fontSize: 14.5, fontWeight: 800, color: T.text }}>1. Choose recipients</div><div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{isEmail ? "Clients with an allowed email address" : "Clients with an allowed text number"} · opt-outs skipped</div></div>
@@ -23723,7 +23968,7 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
       {confirmAll && (
         <Modal title={`Send ${isEmail ? "email" : "text"} broadcast`} onClose={() => setConfirmAll(false)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <div style={{ fontSize: 14, color: T.text, lineHeight: 1.5 }}>{isEmail ? "Email" : "Text"} <b>{total} client{total !== 1 ? "s" : ""}</b>?{testMode ? (() => { const liveCount = recipients.filter(c => clientIsLive(c.id)).length; const protectedCount = Math.max(0, total - liveCount); return ` Test Mode: ${liveCount} pilot client${liveCount === 1 ? "" : "s"} receive it for real; ${protectedCount} ${TEST_MODE.mode === "hold" ? "held" : "redirected to you"}.`; })() : ""}</div>
+            <div style={{ fontSize: 14, color: T.text, lineHeight: 1.5 }}>{isEmail ? "Email" : "Text"} <b>{total} client{total !== 1 ? "s" : ""}</b>{!isEmail ? ` from ${phoneDisplay(senderRole === "main" ? lines.main : lines.automation) || (senderRole === "main" ? "the owner work number" : "the staff number")}` : ""}?{testMode ? (() => { const liveCount = recipients.filter(c => clientIsLive(c.id)).length; const protectedCount = Math.max(0, total - liveCount); return ` Test Mode: ${liveCount} pilot client${liveCount === 1 ? "" : "s"} receive it for real; ${protectedCount} ${TEST_MODE.mode === "hold" ? "held" : "redirected to you"}.`; })() : ""}</div>
             {isEmail && subject.trim() && <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{fillOne(subject, recipients[0] || { name: "Client" })}</div>}
             <div style={{ fontSize: 13, color: T.textMuted, background: T.surfaceAlt, borderRadius: 10, padding: "10px 12px", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{fill(recipients[0] || { name: "Client" })}</div>
             <Btn block lg onClick={() => send(0)}>{isEmail ? "Email" : "Text"} all {total}</Btn>
@@ -23900,7 +24145,9 @@ function InboxSwipeRow({ rowId, ariaLabel, revealed, disabled, selected, read, i
   const suppressClickUntil = useRef(0);
   const rafRef = useRef(0);
   const [revealSide, setRevealSide] = useState(null); // "left" actions or "right" read toggle
-  const LEFT_REVEAL = -148;
+  const canMore = typeof onMore === "function";
+  const canDelete = typeof onDelete === "function";
+  const LEFT_REVEAL = -(canMore ? 68 : 0) - (canDelete ? 80 : 0);
   const RIGHT_REVEAL = 86;
 
   const paint = (next, animate = false) => {
@@ -23975,7 +24222,7 @@ function InboxSwipeRow({ rowId, ariaLabel, revealed, disabled, selected, read, i
     cancelAnimationFrame(rafRef.current);
     suppressClickUntil.current = Date.now() + 280;
     const current = offsetRef.current;
-    const target = current <= -42 ? LEFT_REVEAL : current >= 34 ? RIGHT_REVEAL : 0;
+    const target = LEFT_REVEAL < 0 && current <= -42 ? LEFT_REVEAL : current >= 34 ? RIGHT_REVEAL : 0;
     setRevealSide(target < 0 ? "left" : target > 0 ? "right" : null);
     paint(target, true);
     if (target) onReveal && onReveal(rowId);
@@ -24008,14 +24255,14 @@ function InboxSwipeRow({ rowId, ariaLabel, revealed, disabled, selected, read, i
           <Icon name={read ? "mail" : "check"} size={18} />{read ? "Unread" : "Read"}
         </button>
         <div style={{ display: "flex", marginLeft: "auto" }}>
-          <button type="button" tabIndex={revealed && revealSide === "left" && !disabled ? 0 : -1} aria-hidden={revealSide !== "left"} onClick={action(onMore)} aria-label="More message actions"
+          {canMore && <button type="button" tabIndex={revealed && revealSide === "left" && !disabled ? 0 : -1} aria-hidden={revealSide !== "left"} onClick={action(onMore)} aria-label="More message actions"
             style={{ width: 68, border: "none", background: "#636366", color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, fontFamily: "inherit", fontSize: 10.5, fontWeight: 700, cursor: "pointer" }}>
             <span aria-hidden="true" style={{ fontSize: 20, lineHeight: 0.6, letterSpacing: 1 }}>•••</span>More
-          </button>
-          <button type="button" tabIndex={revealed && revealSide === "left" && !disabled ? 0 : -1} aria-hidden={revealSide !== "left"} onClick={action(onDelete)} aria-label={isText ? "Remove text from inbox" : "Move email to Trash"}
+          </button>}
+          {canDelete && <button type="button" tabIndex={revealed && revealSide === "left" && !disabled ? 0 : -1} aria-hidden={revealSide !== "left"} onClick={action(onDelete)} aria-label={isText ? "Remove text from inbox" : "Move email to Trash"}
             style={{ width: 80, border: "none", background: "#D9282F", color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, fontFamily: "inherit", fontSize: 10.5, fontWeight: 700, cursor: "pointer" }}>
             <Icon name="trash" size={18} />{isText ? "Remove" : "Trash"}
-          </button>
+          </button>}
         </div>
       </div>
       <div ref={frontRef} role="button" tabIndex={0} aria-label={`${disabled ? `${selected ? "Selected" : "Not selected"}. ` : ""}${ariaLabel || "Message"}`} aria-pressed={disabled ? !!selected : undefined} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={finishPointer} onPointerCancel={cancelPointer} onClick={activate}
@@ -24067,13 +24314,16 @@ function InboxActionSheet({ title, onClose, children, T }) {
   );
 }
 
-// Comms → Inbox: the owner's private work email + business-line text replies. AI
-// triages every email — Lead / Bill / Client / Other — leads flow into Comms → Leads
-// automatically. Owner-only: rows come from the owner-gated api/inbox (sps_inbox has no
-// client-readable policy at all — this is private mail).
-function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
-  const { T } = useApp();
+// Comms → Inbox. The owner gets private work email plus both business text lines through the
+// owner-only api/inbox route. Staff use the SMS-only route, where each line has an independent
+// visibility grant. The owner's ported line remains read-only for every non-owner.
+function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOnly = false }) {
+  const { T, branding, perms } = useApp();
   const vp = useViewport();
+  const quoLines = useQuoMainLine(branding?.companyPhone);
+  const ownerView = !!perms?.isAdmin;
+  const inboxEndpoint = smsOnly ? "/api/sms-inbox" : "/api/inbox";
+  const inboxApiUrl = `${PROD_URL}${inboxEndpoint}`;
   const dense = useCompactComms();
   const phone = vp.isPhone;
   // Two-pane (list + reading pane) ONLY when there's genuinely room — this section sits inside the
@@ -24083,7 +24333,8 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const [rows, setRows] = useState(null);
   const [err, setErr] = useState("");
   const [q, setQ] = useState("");              // inbox search
-  const [channelFilter, setChannelFilter] = useState("all"); // all | sms | email
+  const [channelFilter, setChannelFilter] = useState(smsOnly ? "sms" : "all"); // all | sms | email
+  const [inboxAccess, setInboxAccess] = useState({ automation: ownerView || !!perms?.commsTextInbox, main: ownerView || !!perms?.commsMainLine });
   const [filter, setFilter] = useState("all"); // all | unread | lead | bill | client | other
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [phoneMailMenuOpen, setPhoneMailMenuOpen] = useState(false);
@@ -24128,6 +24379,11 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const sendOpenRowReply = async () => {
     if (replyBusy || !openRow || !replyText.trim()) return;
     const row = openRow;
+    if (row.channel === "sms" && !canTextFromRow(row)) {
+      setReplyMsg(lineRoleForRow(row) === "main" ? "Only the owner can send from this number." : "Your team permissions do not allow replying from this inbox.");
+      setReplying(false);
+      return;
+    }
     setReplyBusy(true); setReplyMsg("");
     try {
       if (row.channel === "sms") {
@@ -24135,17 +24391,17 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
         const phoneKey = phone.replace(/\D/g, "").slice(-10);
         const clientMatches = phoneKey ? (clients || []).filter(c => String(c.phone || "").replace(/\D/g, "").slice(-10) === phoneKey) : [];
         const clientId = row.ai && row.ai.clientId != null ? row.ai.clientId : (clientMatches.length === 1 ? clientMatches[0].id : undefined);
-        const sent = await sendSms(phone, replyText.trim(), { clientId, type: "Text reply", origin: "Comms → Inbox text reply" });
+        const sent = await sendSms(phone, replyText.trim(), { clientId, inboxId: row.id, type: "Text reply", origin: "Comms → Inbox text reply" });
         if (!sent.ok) setReplyMsg(sent.error || "Couldn't send the text.");
         else if (sent.held) setReplyMsg("Held by Test Mode — the customer was not contacted.");
         else if (sent.redirected) setReplyMsg("Test sent to you — the customer was not contacted.");
         else {
-          setReplyMsg("Text accepted for sending from the SPS business number.");
+          setReplyMsg(`Text accepted from ${sent.line === "main" ? "your number" : "the staff number"}.`);
           setReplyText(""); setReplyHtml(""); setReplying(false); flagReplied(row.id);
           // Quo already accepted the text; persisting the inbox badge is best-effort and must never
           // turn a successful send into an error if the status update briefly fails.
           (async () => {
-            try { await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "markReplied", id: row.id }) }); } catch (_) {}
+            try { await fetch(inboxApiUrl, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "markReplied", id: row.id }) }); } catch (_) {}
           })();
         }
       } else {
@@ -24192,18 +24448,32 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const [sentErr, setSentErr] = useState("");
   const [sentQ, setSentQ] = useState("");
   const [openSent, setOpenSent] = useState(null);           // expanded sent row id
+  useEffect(() => {
+    if (!smsOnly) return;
+    setFolder("inbox");
+    setChannelFilter("sms");
+    setSelMode(false);
+    setSel({});
+    setComposeOpen(false);
+    setImportOpen(false);
+  }, [smsOnly]);
   const load = async () => {
     setErr("");
     setRefreshing(true);
     try {
-      const r = await fetch(`${PROD_URL}/api/inbox?limit=100`, { headers: await authHeaders() });
+      const r = await fetch(`${inboxApiUrl}?limit=100`, { headers: await authHeaders() });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) { setErr(d.error || `Error ${r.status}`); setRows(prev => prev === null ? [] : prev); }
-      else setRows((d.rows || []).filter(row => !deletingIdsRef.current.has(String(row.id))));
+      else {
+        setInboxAccess(current => ({ ...current, ...(d.access || {}) }));
+        setRows((d.rows || []).filter(row => !deletingIdsRef.current.has(String(row.id))));
+      }
     } catch (_) { setErr("Couldn't reach the server."); setRows(prev => prev === null ? [] : prev); }
     setRefreshing(false);
   };
-  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Permission changes must immediately discard formerly visible line contents and re-read through
+  // the server scope; never leave a revoked owner's conversation sitting in component state.
+  useEffect(() => { setRows(null); load(); }, [inboxApiUrl, smsOnly, perms?.commsTextInbox, perms?.commsMainLine]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (rows === null || err || refreshing) return;
     window.dispatchEvent(new CustomEvent("sps-inbox-unread", { detail: { count: (rows || []).filter(r => !r.read).length } }));
@@ -24228,6 +24498,17 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const leadSourceIds = useMemo(() => new Set((leads || []).filter(Boolean).map(l => l.srcId)), [leads]);
   const inLeads = (emailId) => leadSourceIds.has(`em_${emailId}`);
   const isSmsRow = (row) => row && row.channel === "sms";
+  const lineRoleForRow = (row) => row?.ai?.quoLine === "main" ? "main" : "automation";
+  const lineLabelForRow = (row) => lineRoleForRow(row) === "main"
+    ? (ownerView ? "My number" : "Owner number")
+    : "Staff number";
+  const canTextFromRow = (row) => !!row && !!perms?.sendTexts && (ownerView || (lineRoleForRow(row) === "automation" && !!perms?.commsTextInbox));
+  useEffect(() => {
+    if (openRow?.channel === "sms" && !canTextFromRow(openRow)) setReplying(false);
+  }, [openRow?.channel, openRow?.ai?.quoLine, ownerView, perms?.sendTexts, perms?.commsTextInbox]); // eslint-disable-line react-hooks/exhaustive-deps
+  const quoCallerForRow = (row) => lineRoleForRow(row) === "main"
+    ? (quoLines.main || quoLines.automation || branding?.companyPhone)
+    : (quoLines.automation || quoLines.main || branding?.companyPhone);
   const inboxRows = rows || [];
   const textCount = inboxRows.filter(isSmsRow).length;
   const emailCount = inboxRows.length - textCount;
@@ -24256,6 +24537,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   }, [openSwipeId]);
   const unread = inboxRows.filter(r => !r.read).length;
   const channelUnread = channelRows.filter(r => !r.read).length;
+  const visibleLineSummary = [inboxAccess.automation ? "staff number" : "", inboxAccess.main ? (ownerView ? "my number" : "owner number") : ""].filter(Boolean).join(" and ") || "permitted lines";
   const markRead = (rawIds, read = true) => {
     const requested = new Set((rawIds || []).map(String));
     // Do not show the new state until the remote systems confirm it. This also removes no-op rows
@@ -24300,7 +24582,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
         let appOk = true;
         if (confirmedIds.length) {
           try {
-            const response = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: h, body: JSON.stringify({ action: "markRead", ids: confirmedIds, read }) });
+            const response = await fetch(inboxApiUrl, { method: "POST", headers: h, body: JSON.stringify({ action: "markRead", ids: confirmedIds, read }) });
             const receipt = await response.json().catch(() => ({}));
             appOk = response.ok && receipt.ok === true;
           } catch (_) { appOk = false; }
@@ -24350,7 +24632,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     setRows(rs => (rs || []).map(r => r.id === row.id ? { ...r, kind } : r));
     setOpenRow(o => (o && o.id === row.id ? { ...o, kind } : o));
     try {
-      const response = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "setKind", id: row.id, kind }) });
+      const response = await fetch(inboxApiUrl, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "setKind", id: row.id, kind }) });
       const receipt = await response.json().catch(() => ({}));
       if (response.ok && receipt.ok === true) return true;
     } catch (_) {}
@@ -24384,14 +24666,14 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     // Persist the reclassification, then ack — but ONLY after the lead is in the SERVER-
     // CONFIRMED sps_leads (same two-phase as the auto-import; if the save hasn't flushed yet,
     // the ack simply happens on the next app open — nothing can be lost either way).
-    try { await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "setKind", id: row.id, kind: "lead" }) }); } catch (_) {}
+    try { await fetch(inboxApiUrl, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "setKind", id: row.id, kind: "lead" }) }); } catch (_) {}
     try {
       await new Promise(r2 => setTimeout(r2, 1500)); // give the debounced sps_leads save a beat to flush
       const { data } = await supabase.from("app_state").select("value").eq("key", "sps_leads").maybeSingle();
       const v = data && data.value;
       const arr = typeof v === "string" ? JSON.parse(v) : (Array.isArray(v) ? v : []);
       if ((Array.isArray(arr) ? arr : []).some(l => l && l.srcId === lead.srcId)) {
-        await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "markImported", id: row.id, leadId: lead.id }) });
+        await fetch(inboxApiUrl, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "markImported", id: row.id, leadId: lead.id }) });
       }
     } catch (_) { /* auto-import acks it next open */ }
   };
@@ -24415,7 +24697,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     setBusyBulk(true);
     let saved = false;
     try {
-      const response = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "setKind", ids, kind }) });
+      const response = await fetch(inboxApiUrl, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ action: "setKind", ids, kind }) });
       const receipt = await response.json().catch(() => ({}));
       saved = response.ok && receipt.ok === true;
     } catch (_) {}
@@ -24492,7 +24774,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
           for (let attempt = 0; attempt < 2 && appDeleted.size < safeToRemove.length; attempt++) {
             const pending = safeToRemove.filter(id => !appDeleted.has(String(id)));
             try {
-              const appDelete = await fetch(`${PROD_URL}/api/inbox`, { method: "POST", headers: h, body: JSON.stringify({ action: "delete", ids: pending }) });
+              const appDelete = await fetch(inboxApiUrl, { method: "POST", headers: h, body: JSON.stringify({ action: "delete", ids: pending }) });
               const receipt = await appDelete.json().catch(() => ({}));
               if (Array.isArray(receipt.deletedIds)) {
                 const pendingKeys = new Set(pending.map(String));
@@ -24675,7 +24957,8 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
   const channelBadge = (row) => {
     const sms = isSmsRow(row);
     const tone = sms ? "#7c3aed" : "#2563eb";
-    return <span title={sms ? "Text message" : "Email message"} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 9.5, fontWeight: 850, letterSpacing: "0.045em", textTransform: "uppercase", color: tone, background: hexA(tone, 0.1), padding: "2px 8px", borderRadius: 100, flexShrink: 0 }}><Icon name={sms ? "message" : "mail"} size={11} />{sms ? "Text" : "Email"}</span>;
+    const label = sms ? lineLabelForRow(row) : "Email";
+    return <span title={sms ? `${label} through Quo` : "Email message"} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 9.5, fontWeight: 850, letterSpacing: "0.045em", textTransform: "uppercase", color: tone, background: hexA(tone, 0.1), padding: "2px 8px", borderRadius: 100, flexShrink: 0 }}><Icon name={sms ? "message" : "mail"} size={11} />{label}</span>;
   };
   const senderLabel = (row) => isSmsRow(row)
     ? (row.from_name || row.from_phone || "Unknown number")
@@ -24694,9 +24977,9 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
     return <div style={{ width: size, height: size, borderRadius: "50%", background: hexA(c, 0.15), color: c, display: "flex", alignItems: "center", justifyContent: "center", fontSize: size * 0.42, fontWeight: 800, flexShrink: 0 }}>{((name || email || "?").trim()[0] || "?").toUpperCase()}</div>;
   };
   const setupPending = err && /hasn't been created|sps_inbox/i.test(err);
-  const showMobileCompose = !wide && !setupPending && rows !== null && (folder === "sent" || channelFilter !== "sms");
+  const showMobileCompose = !smsOnly && !wide && !setupPending && rows !== null && (folder === "sent" || channelFilter !== "sms");
   const hasSearchOrCategory = !!q.trim() || filter !== "all";
-  const hasInboxFilter = hasSearchOrCategory || channelFilter !== "all";
+  const hasInboxFilter = hasSearchOrCategory || (!smsOnly && channelFilter !== "all");
   const emptyInboxTitle = channelFilter === "sms"
     ? (hasSearchOrCategory ? "No matching texts" : "No texts here yet")
     : channelFilter === "email"
@@ -24704,7 +24987,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       : (hasSearchOrCategory ? "No matching messages" : "Your inbox is empty");
   const emptyInboxCopy = hasSearchOrCategory
     ? "Try a different channel, category, or search."
-    : "Incoming texts and work email will appear here with clear channel labels.";
+    : (smsOnly ? "Incoming business texts you are allowed to see will appear here." : "Incoming texts and work email will appear here with clear channel labels.");
   const openMessage = (r) => {
     setOpenSwipeId(null);
     setOpenRow(r);
@@ -24753,8 +25036,8 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
         onReveal={(id) => setOpenSwipeId(id)} onClose={(id) => setOpenSwipeId(cur => cur === id ? null : cur)}
         onActivate={() => selMode ? toggleSel(r.id) : openMessage(r)}
         onToggleRead={() => { markRead([r.id], !r.read); }}
-        onMore={() => setManageRow(r)}
-        onDelete={() => { deleteEmails([r.id], { ask: false }); }}>
+        onMore={smsOnly ? undefined : () => setManageRow(r)}
+        onDelete={smsOnly ? undefined : () => { deleteEmails([r.id], { ask: false }); }}>
         <div style={{ position: "relative", display: "flex", alignItems: "flex-start", gap: dense ? 9 : 11, minHeight: dense ? 72 : 84, boxSizing: "border-box", padding: dense ? "9px 11px 9px 14px" : "11px 12px 11px 16px", background: selected ? hexA(T.primary, 0.07) : T.surface }}>
           {i > 0 && <span aria-hidden="true" style={{ position: "absolute", left: dividerLeft, right: 0, top: 0, height: 1, background: phone ? T.border : hexA(T.border, 0.7) }} />}
           {!r.read && !selMode && <span aria-label="Unread" style={{ position: "absolute", left: 7, top: dense ? 15 : 18, width: 6, height: 6, borderRadius: "50%", background: T.primary }} />}
@@ -24771,7 +25054,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
             </div>
             <div style={{ marginTop: 2, fontSize: dense ? 12.5 : 13.5, lineHeight: 1.25, fontWeight: r.read ? 450 : 650, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.subject || (sms ? "Text message" : "(no subject)")}</div>
             <div style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0, marginTop: dense ? 3 : 5, fontSize: dense ? 10.5 : 11.5, lineHeight: 1.25, color: T.textMuted }}>
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 3, color: channelTone, background: hexA(channelTone, 0.09), padding: "1px 5px", borderRadius: 100, fontWeight: 760, flexShrink: 0 }}><Icon name={sms ? "message" : "mail"} size={11} />{sms ? "Text" : "Email"}</span>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 3, color: channelTone, background: hexA(channelTone, 0.09), padding: "1px 5px", borderRadius: 100, fontWeight: 760, flexShrink: 0 }}><Icon name={sms ? "message" : "mail"} size={11} />{sms ? lineLabelForRow(r) : "Email"}</span>
               <span aria-hidden="true" style={{ color: T.border }}>·</span>
               <span style={{ color: T.textMuted, fontWeight: 650, flexShrink: 0 }}>{kind.label}</span>
               {inLeads(r.id) && <><span aria-hidden="true" style={{ color: T.border }}>·</span><span style={{ color: "#16a34a", fontWeight: 700, flexShrink: 0 }}>In Leads</span></>}
@@ -24812,7 +25095,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
           })}
         </div>
       )}
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+      {!smsOnly && <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted }}>Sort as</span>
         {["lead", "bill", "client", "other"].map(k => {
           const kk = KIND[k]; const on = openRow.kind === k;
@@ -24824,13 +25107,16 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
         <div style={{ flex: 1 }} />
         <Btn variant="ghost" sm onClick={() => markRead([openRow.id], !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>
         <Btn variant="danger" sm onClick={() => deleteEmails([openRow.id])}>Delete</Btn>
-      </div>
+      </div>}
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-        {!inLeads(openRow.id) && <Btn variant="primary" sm onClick={() => addToLeads(openRow)} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={14} />Add to Leads</Btn>}
-        {inLeads(openRow.id) && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 700, color: "#16a34a", alignSelf: "center" }}><Icon name="check" size={14} />In your Leads funnel</span>}
+        {smsOnly && <Btn variant="ghost" sm onClick={() => markRead([openRow.id], !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>}
+        {!smsOnly && !inLeads(openRow.id) && <Btn variant="primary" sm onClick={() => addToLeads(openRow)} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={14} />Add to Leads</Btn>}
+        {!smsOnly && inLeads(openRow.id) && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 700, color: "#16a34a", alignSelf: "center" }}><Icon name="check" size={14} />In your Leads funnel</span>}
+        {openRow.channel === "sms" && openRow.from_phone && canTextFromRow(openRow) && <a href={quoCallHref(openRow.from_phone, quoCallerForRow(openRow))} title={`Call in Quo from ${lineLabelForRow(openRow).toLowerCase()}`} style={{ minHeight: 32, padding: "6px 12px", borderRadius: 9, border: `1px solid ${T.border}`, background: T.surface, color: T.text, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 750 }}><Icon name="phone" size={14} />Call</a>}
         {openRow.channel === "sms"
-          ? <Btn variant="outline" sm onClick={toggleReply} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="message" size={14} />{replying ? "Hide reply" : "Text back"}</Btn>
+          ? (canTextFromRow(openRow) && <Btn variant="outline" sm onClick={toggleReply} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="message" size={14} />{replying ? "Hide reply" : "Text back"}</Btn>)
           : <Btn variant="outline" sm onClick={toggleReply} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="reply" size={14} />{replying ? "Hide reply" : "Reply"}</Btn>}
+        {openRow.channel === "sms" && !canTextFromRow(openRow) && <span style={{ fontSize: 11.5, fontWeight: 760, color: T.textMuted }}>View only · only the owner can use this number</span>}
         <Btn variant="ghost" sm onClick={async () => {
           try { await navigator.clipboard.writeText(openRow.body_text || ""); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch (_) {}
         }}>{copied ? <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><Icon name="check" size={13} />Copied</span> : "Copy text"}</Btn>
@@ -24848,7 +25134,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
             <Btn variant="primary" sm disabled={replyBusy || !replyText.trim()} onClick={sendOpenRowReply}>{replyBusy ? "Sending…" : openRow.channel === "sms" ? "Send text" : "Send reply"}</Btn>
             {replyMsg && <span style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</span>}
           </div>
-          <div style={{ fontSize: 11.5, color: T.textMuted }}>{openRow.channel === "sms" ? "Sends through Quo from the SPS business number — never your personal phone number." : "Sends from your Sending Identity (Comms → Settings) and quietly copies your Gmail for the record."}</div>
+          <div style={{ fontSize: 11.5, color: T.textMuted }}>{openRow.channel === "sms" ? `Sends through Quo from the same ${lineLabelForRow(openRow).toLowerCase()} that received this text.` : "Sends from your Sending Identity (Comms → Settings) and quietly copies your Gmail for the record."}</div>
         </div>
       )}
       {!replying && replyMsg && <div style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</div>}
@@ -24865,7 +25151,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       setSentRows(rows);
     } catch (_) { setSentErr("Couldn't load your sent mail."); setSentRows(prev => prev === null ? [] : prev); }
   };
-  useEffect(() => { if (folder === "sent" && sentRows === null) loadSent(); }, [folder]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (!smsOnly && folder === "sent" && sentRows === null) loadSent(); }, [folder, smsOnly]); // eslint-disable-line react-hooks/exhaustive-deps
   const nameForSent = (r) => { if (r.client_id) { const c = (clients || []).find(x => String(x.id) === String(r.client_id)); if (c) return c.name; } return ""; };
   const sentList = (sentRows || []).filter(r => {
     const qq = sentQ.trim().toLowerCase(); if (!qq) return true;
@@ -24901,13 +25187,15 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       {phoneMailMenuOpen && (
         <div role="menu" aria-label="Mailbox and inbox views" style={{ position: "absolute", top: "calc(100% + 6px)", left: 0, width: "min(310px, calc(100vw - 48px))", maxHeight: "min(52dvh, 440px)", overflowY: "auto", zIndex: 90, padding: 7, border: `1px solid ${T.border}`, borderRadius: 15, background: hexA(T.surface, 0.985), boxShadow: "0 14px 38px rgba(0,0,0,0.18)", backdropFilter: "blur(18px)", WebkitBackdropFilter: "blur(18px)" }}>
           <div style={{ padding: "4px 8px 3px", color: T.textMuted, fontSize: 9.5, fontWeight: 820, letterSpacing: "0.08em", textTransform: "uppercase" }}>Mailbox</div>
-          {phoneMenuOption({ key: "mailbox-inbox", label: "Inbox", icon: "inbox", count: inboxRows.length, active: folder === "inbox", onClick: () => { setFolder("inbox"); setPhoneMailMenuOpen(false); } })}
-          {phoneMenuOption({ key: "mailbox-sent", label: "Sent", icon: "send", count: sentRows ? sentRows.length : null, active: folder === "sent", onClick: () => { exitSelect(); setFolder("sent"); setPhoneMailMenuOpen(false); } })}
-          <div style={{ height: 1, background: T.border, margin: "5px 4px" }} />
-          <div style={{ padding: "4px 8px 3px", color: T.textMuted, fontSize: 9.5, fontWeight: 820, letterSpacing: "0.08em", textTransform: "uppercase" }}>Inbox type</div>
-          {phoneMenuOption({ key: "channel-all", label: "All channels", icon: "inbox", count: inboxRows.length, active: folder === "inbox" && channelFilter === "all", onClick: () => { setFolder("inbox"); setChannelFilter("all"); setPhoneMailMenuOpen(false); } })}
-          {phoneMenuOption({ key: "channel-sms", label: "Texts", icon: "message", count: textCount, active: folder === "inbox" && channelFilter === "sms", onClick: () => { setFolder("inbox"); setChannelFilter("sms"); setPhoneMailMenuOpen(false); } })}
-          {phoneMenuOption({ key: "channel-email", label: "Email", icon: "mail", count: emailCount, active: folder === "inbox" && channelFilter === "email", onClick: () => { setFolder("inbox"); setChannelFilter("email"); setPhoneMailMenuOpen(false); } })}
+          {phoneMenuOption({ key: "mailbox-inbox", label: smsOnly ? "Business texts" : "Inbox", icon: smsOnly ? "message" : "inbox", count: inboxRows.length, active: folder === "inbox", onClick: () => { setFolder("inbox"); if (smsOnly) setChannelFilter("sms"); setPhoneMailMenuOpen(false); } })}
+          {!smsOnly && phoneMenuOption({ key: "mailbox-sent", label: "Sent", icon: "send", count: sentRows ? sentRows.length : null, active: folder === "sent", onClick: () => { exitSelect(); setFolder("sent"); setPhoneMailMenuOpen(false); } })}
+          {!smsOnly && <>
+            <div style={{ height: 1, background: T.border, margin: "5px 4px" }} />
+            <div style={{ padding: "4px 8px 3px", color: T.textMuted, fontSize: 9.5, fontWeight: 820, letterSpacing: "0.08em", textTransform: "uppercase" }}>Inbox type</div>
+            {phoneMenuOption({ key: "channel-all", label: "All channels", icon: "inbox", count: inboxRows.length, active: folder === "inbox" && channelFilter === "all", onClick: () => { setFolder("inbox"); setChannelFilter("all"); setPhoneMailMenuOpen(false); } })}
+            {phoneMenuOption({ key: "channel-sms", label: "Texts", icon: "message", count: textCount, active: folder === "inbox" && channelFilter === "sms", onClick: () => { setFolder("inbox"); setChannelFilter("sms"); setPhoneMailMenuOpen(false); } })}
+            {phoneMenuOption({ key: "channel-email", label: "Email", icon: "mail", count: emailCount, active: folder === "inbox" && channelFilter === "email", onClick: () => { setFolder("inbox"); setChannelFilter("email"); setPhoneMailMenuOpen(false); } })}
+          </>}
           <div style={{ height: 1, background: T.border, margin: "5px 4px" }} />
           <div style={{ padding: "4px 8px 3px", color: T.textMuted, fontSize: 9.5, fontWeight: 820, letterSpacing: "0.08em", textTransform: "uppercase" }}>View</div>
           {phoneMenuOption({ key: "filter-all", label: "All categories", icon: "funnel", count: channelRows.length, active: folder === "inbox" && filter === "all", onClick: () => { setFolder("inbox"); setFilter("all"); setFiltersOpen(false); setPhoneMailMenuOpen(false); } })}
@@ -24993,7 +25281,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
         <>
           <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
             {phoneMailDropdown}
-            {folder === "inbox" && (list.length > 0 || selMode) && <button type="button" onClick={() => setSelMode(true)} style={{ minHeight: 44, padding: "7px 8px", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13, fontWeight: 760, cursor: "pointer", flexShrink: 0 }}>Select</button>}
+            {!smsOnly && folder === "inbox" && (list.length > 0 || selMode) && <button type="button" onClick={() => setSelMode(true)} style={{ minHeight: 44, padding: "7px 8px", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13, fontWeight: 760, cursor: "pointer", flexShrink: 0 }}>Select</button>}
             {toolbarIconBtn("refresh", folder === "inbox" ? (refreshing ? "Refreshing" : "Refresh inbox") : "Refresh sent email", folder === "inbox" ? (refreshing ? null : load) : loadSent, T.textMuted)}
           </div>
           <div role="search" aria-label="Mail search and compose" style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
@@ -25003,42 +25291,42 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
         </>
       )) : (
         <CommsPageHeader
-          title={folder === "inbox" ? "Unified inbox" : "Sent email"}
-          description={folder === "inbox" ? `${unread} unread · business texts and work email, clearly separated` : "Email you compose and reply to from SPS Way."}
+          title={folder === "inbox" ? (smsOnly ? "Business texts" : "Unified inbox") : "Sent email"}
+          description={folder === "inbox" ? (smsOnly ? `${unread} unread · ${visibleLineSummary}` : `${unread} unread · business texts and work email, clearly separated`) : "Email you compose and reply to from SPS Way."}
           icon={folder === "inbox" ? "inbox" : "send"}
-          meta={folder === "inbox" ? <>
+          meta={folder === "inbox" && !smsOnly ? <>
             <span style={{ color: "#7c3aed", background: hexA("#7c3aed", 0.1), borderRadius: 100, padding: "3px 9px", fontSize: 10.5, fontWeight: 800 }}>{textCount} text{textCount === 1 ? "" : "s"}</span>
             <span style={{ color: "#2563eb", background: hexA("#2563eb", 0.1), borderRadius: 100, padding: "3px 9px", fontSize: 10.5, fontWeight: 800 }}>{emailCount} email{emailCount === 1 ? "" : "s"}</span>
           </> : null}
-          action={wide
+          action={!smsOnly && wide
             ? <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="edit" size={14} />New email</Btn>
-            : showMobileCompose ? iconBtn("edit", "Compose a new email", () => { setComposeMsg(""); setComposeOpen(true); }, true) : null}
+            : !smsOnly && showMobileCompose ? iconBtn("edit", "Compose a new email", () => { setComposeMsg(""); setComposeOpen(true); }, true) : null}
           T={T}
         />
       )}
       {/* Tablet/desktop folder switch. Phones use the compact mailbox dropdown above. */}
       {!phone && <div style={{ display: "flex", alignItems: "center", gap: dense ? 6 : 10, flexWrap: wide ? "wrap" : "nowrap", minWidth: 0 }}>
-        {folderBar}
+        {!smsOnly && folderBar}
         {wide && <div style={{ flex: 1 }} />}
         {folder === "inbox" && (wide ? (
           <>
-            <Btn variant="ghost" sm onClick={importState.running ? undefined : () => setImportOpen(o => !o)}>{importState.running ? "Importing…" : "Import"}</Btn>
+            {!smsOnly && <Btn variant="ghost" sm onClick={importState.running ? undefined : () => setImportOpen(o => !o)}>{importState.running ? "Importing…" : "Import"}</Btn>}
             <Btn variant="ghost" sm onClick={refreshing ? undefined : load}>{refreshing ? "Refreshing…" : "Refresh"}</Btn>
-            {(list.length > 0 || selMode) && <Btn variant={selMode ? "primary" : "ghost"} sm onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }}>{selMode ? "Done" : "Select"}</Btn>}
+            {!smsOnly && (list.length > 0 || selMode) && <Btn variant={selMode ? "primary" : "ghost"} sm onClick={() => { if (selMode) exitSelect(); else setSelMode(true); }}>{selMode ? "Done" : "Select"}</Btn>}
           </>
         ) : (
           <>
             {iconBtn("refresh", refreshing ? "Refreshing" : "Refresh inbox", refreshing ? null : load, false)}
-            {(list.length > 0 || selMode) && iconBtn("check", selMode ? "Finish selecting" : "Select messages", () => { if (selMode) exitSelect(); else setSelMode(true); }, selMode)}
+            {!smsOnly && (list.length > 0 || selMode) && iconBtn("check", selMode ? "Finish selecting" : "Select messages", () => { if (selMode) exitSelect(); else setSelMode(true); }, selMode)}
           </>
         ))}
       </div>}
       {folder === "inbox" ? (
         <>
       {!(phone && selMode) && <>
-      <div style={{ display: "grid", gridTemplateColumns: wide ? "minmax(260px, 1fr) minmax(330px, 0.8fr)" : "1fr", gap: dense ? 7 : 10, alignItems: "center" }}>
+      <div style={{ display: "grid", gridTemplateColumns: wide && !smsOnly ? "minmax(260px, 1fr) minmax(330px, 0.8fr)" : "1fr", gap: dense ? 7 : 10, alignItems: "center" }}>
         {!phone && <CommsSearchField value={q} onChange={setQ} placeholder="Search messages, people, tags" T={T} />}
-        {!phone && channelSwitcher}
+        {!phone && !smsOnly && channelSwitcher}
       </div>
       {!phone && !wide && (
         <button type="button" onClick={() => setFiltersOpen(v => !v)} aria-expanded={filtersOpen}
@@ -25053,7 +25341,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
         </div>
       )}
       </>}
-      {selMode && !phone && (
+      {!smsOnly && selMode && !phone && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "8px 12px" }}>
           <button type="button" onClick={toggleSelectAll} style={{ background: "none", border: "none", color: T.primary, fontWeight: 800, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit", padding: 0 }}>{allVisibleSelected ? "Clear" : "Select all"}</button>
           <span style={{ fontSize: 12.5, fontWeight: 700, color: T.textMuted }}>{selIds.length} selected</span>
@@ -25072,7 +25360,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
           )}
         </div>
       )}
-      {importOpen && !importState.running && (
+      {!smsOnly && importOpen && !importState.running && (
         <div style={{ border: `1px solid ${T.border}`, borderRadius: 12, background: T.surface, padding: "12px 14px", display: "flex", flexDirection: "column", gap: 9 }}>
           <div style={{ fontSize: 13, color: T.text, fontWeight: 700 }}>Pull your existing Gmail into the inbox</div>
           <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5 }}>Imports past mail from your work address, AI-sorted like new email. Marked read so it won't flood your unread count. Needs a Gmail app password set up (I'll walk you through it).</div>
@@ -25083,7 +25371,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
           </div>
         </div>
       )}
-      {importState.msg && <div style={{ fontSize: 12.5, fontWeight: 700, color: importState.running ? T.textMuted : (importState.msg.startsWith("Done") ? "#16a34a" : T.warning), padding: "2px 2px" }}>{importState.msg}</div>}
+      {!smsOnly && importState.msg && <div style={{ fontSize: 12.5, fontWeight: 700, color: importState.running ? T.textMuted : (importState.msg.startsWith("Done") ? "#16a34a" : T.warning), padding: "2px 2px" }}>{importState.msg}</div>}
       {gmailNote && (
         <div style={{ display: "flex", alignItems: "flex-start", gap: 10, fontSize: 12.5, fontWeight: 600, color: T.text, background: hexA(T.warning, 0.1), border: `1px solid ${hexA(T.warning, 0.35)}`, borderRadius: 10, padding: "10px 12px", lineHeight: 1.45 }}>
           <span style={{ color: T.warning, flexShrink: 0, display: "inline-flex", marginTop: 1 }}><Icon name="warning" size={15} /></span>
@@ -25098,7 +25386,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
       {err && !setupPending && <CommsEmptyState icon="warning" title="Inbox couldn't refresh" copy={err} action={<Btn variant="outline" sm onClick={load}>Try again</Btn>} T={T} />}
       {rows !== null && !err && list.length === 0 && (
         <CommsEmptyState icon={channelFilter === "sms" ? "message" : channelFilter === "email" ? "mail" : "inbox"} title={emptyInboxTitle} copy={emptyInboxCopy}
-          action={hasInboxFilter ? <Btn variant="outline" sm onClick={() => { setQ(""); setChannelFilter("all"); setFilter("all"); setFiltersOpen(false); }}>Clear filters</Btn> : null} T={T} />
+          action={hasInboxFilter ? <Btn variant="outline" sm onClick={() => { setQ(""); setChannelFilter(smsOnly ? "sms" : "all"); setFilter("all"); setFiltersOpen(false); }}>Clear filters</Btn> : null} T={T} />
       )}
       {list.length > 0 && (wide ? (
         <div style={{ display: "grid", gridTemplateColumns: "minmax(300px, 360px) 1fr", gap: 12, alignItems: "start" }}>
@@ -25226,7 +25514,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
               </div>
             )}
             {/* Manage: reclassify (the owner's override on the AI's call) + read state + copy */}
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            {!smsOnly && <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
               <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted }}>Sort as</span>
               {["lead", "bill", "client", "other"].map(k => {
                 const kk = KIND[k]; const on = openRow.kind === k;
@@ -25238,13 +25526,16 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
               <div style={{ flex: 1 }} />
               <Btn variant="ghost" sm onClick={() => markRead([openRow.id], !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>
               <Btn variant="danger" sm onClick={() => deleteEmails([openRow.id])}>Delete</Btn>
-            </div>
+            </div>}
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-              {!inLeads(openRow.id) && <Btn variant="primary" sm onClick={() => addToLeads(openRow)} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={14} />Add to Leads</Btn>}
-              {inLeads(openRow.id) && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 700, color: "#16a34a", alignSelf: "center" }}><Icon name="check" size={14} />In your Leads funnel</span>}
+              {smsOnly && <Btn variant="ghost" sm onClick={() => markRead([openRow.id], !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>}
+              {!smsOnly && !inLeads(openRow.id) && <Btn variant="primary" sm onClick={() => addToLeads(openRow)} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={14} />Add to Leads</Btn>}
+              {!smsOnly && inLeads(openRow.id) && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 700, color: "#16a34a", alignSelf: "center" }}><Icon name="check" size={14} />In your Leads funnel</span>}
+              {openRow.channel === "sms" && openRow.from_phone && canTextFromRow(openRow) && <a href={quoCallHref(openRow.from_phone, quoCallerForRow(openRow))} title={`Call in Quo from ${lineLabelForRow(openRow).toLowerCase()}`} style={{ minHeight: 32, padding: "6px 12px", borderRadius: 9, border: `1px solid ${T.border}`, background: T.surface, color: T.text, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 750 }}><Icon name="phone" size={14} />Call</a>}
               {openRow.channel === "sms"
-                ? <Btn variant="outline" sm onClick={toggleReply} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="message" size={14} />{replying ? "Hide reply" : "Text back"}</Btn>
+                ? (canTextFromRow(openRow) && <Btn variant="outline" sm onClick={toggleReply} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="message" size={14} />{replying ? "Hide reply" : "Text back"}</Btn>)
                 : <Btn variant="outline" sm onClick={toggleReply} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="reply" size={14} />{replying ? "Hide reply" : "Reply"}</Btn>}
+              {openRow.channel === "sms" && !canTextFromRow(openRow) && <span style={{ fontSize: 11.5, fontWeight: 760, color: T.textMuted }}>View only · only the owner can use this number</span>}
               <Btn variant="ghost" sm onClick={async () => {
                 try { await navigator.clipboard.writeText(openRow.body_text || ""); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch (_) {}
               }}>{copied ? <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><Icon name="check" size={13} />Copied</span> : "Copy text"}</Btn>
@@ -25262,7 +25553,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
                   <Btn variant="primary" sm disabled={replyBusy || !replyText.trim()} onClick={sendOpenRowReply}>{replyBusy ? "Sending…" : openRow.channel === "sms" ? "Send text" : "Send reply"}</Btn>
                   {replyMsg && <span style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</span>}
                 </div>
-                <div style={{ fontSize: 11.5, color: T.textMuted }}>{openRow.channel === "sms" ? "Sends through Quo from the SPS business number — never your personal phone number." : "Sends from your Sending Identity (Comms → Settings) and quietly copies your Gmail for the record."}</div>
+                <div style={{ fontSize: 11.5, color: T.textMuted }}>{openRow.channel === "sms" ? `Sends through Quo from the same ${lineLabelForRow(openRow).toLowerCase()} that received this text.` : "Sends from your Sending Identity (Comms → Settings) and quietly copies your Gmail for the record."}</div>
               </div>
             )}
             {!replying && replyMsg && <div style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</div>}
@@ -25270,7 +25561,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [] }) {
         </Modal>
       )}
 
-      {composeOpen && (
+      {!smsOnly && composeOpen && (
         <Modal title="New email" onClose={resetCompose} maxWidth={620}>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {(() => {
@@ -25527,13 +25818,15 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
     reminders: isAdmin || !!perms.commsReminders,
     broadcast: isAdmin || !!perms.commsBroadcast,
     settings:  isAdmin || !!perms.commsSettings || !!perms.editNotifications,
-    log:       isAdmin || !!perms.commsLog,
-    email:     isAdmin, // the owner's private work inbox — owner only, no per-staff grant
+    // The existing outbound log has no per-line ownership metadata, so keep it owner-private rather
+    // than exposing owner-line bodies through a broad authenticated read policy.
+    log:       isAdmin,
+    email:     isAdmin || !!perms.commsTextInbox || !!perms.commsMainLine, // owner: email + both lines; granted staff: scoped SMS only
   };
   const SECTIONS = [
     { id: "messages", label: "Chat", icon: "message" },
     { id: "inbox", label: "Leads", icon: "funnel" },
-    { id: "email", label: "Inbox", icon: "mail" },
+    { id: "email", label: isAdmin ? "Inbox" : "Texts", icon: isAdmin ? "mail" : "message" },
     { id: "reminders", label: "Reminders", icon: "calendar" },
     { id: "broadcast", label: "Broadcast", icon: "mail" },
     { id: "settings", label: "Settings", icon: "sliders" },
@@ -25627,7 +25920,7 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
         {(perms.isAdmin || perms.editSettings || perms.canInvoice) && <Card><CardHeader title="Staff Invite & Login Emails" /><InviteEmailSettings email={emailTpl} setEmail={setEmailTpl} branding={brandTpl} /></Card>}
       </div>}
       {section === "broadcast" && CAN.broadcast && <BroadcastSection clients={clients} invoices={invoices} email={email} branding={branding} T={T} />}
-      {section === "email" && CAN.email && <div style={{ padding: `0 ${compactComms ? 12 : 16}px` }}><EmailInboxSection leads={leads} setLeads={setLeads} clients={clients} invoices={invoices} /></div>}
+      {section === "email" && CAN.email && <div style={{ padding: `0 ${compactComms ? 12 : 16}px` }}><EmailInboxSection leads={leads} setLeads={setLeads} clients={clients} invoices={invoices} smsOnly={!isAdmin} /></div>}
       {section === "log" && CAN.log && <div style={{ padding: `0 ${compactComms ? 12 : 16}px` }}><LogsScreen clients={clients} showOwnerRows={!!perms.isAdmin} /></div>}
     </>
     </CommsDensityContext.Provider>
@@ -32833,7 +33126,7 @@ export default function App({ authEmail = "", onSignOut }) {
   // Track unread message count for nav badge
   const [navUnread, setNavUnread] = useState(0);
   const [inboxUnread, setInboxUnread] = useState(0);
-  const navUnreadTotal = navUnread + (perms.isAdmin ? inboxUnread : 0);
+  const navUnreadTotal = navUnread + (perms.isAdmin || perms.commsTextInbox || perms.commsMainLine ? inboxUnread : 0);
   // Count of reminders due now, for the nav badge + dashboard alert
   const reminderDueCount = useMemo(() => {
     try { return buildReminderQueue(schedule, clients, scheduleCfg, reminderLog, new Date()).due.length; }
@@ -32996,14 +33289,16 @@ export default function App({ authEmail = "", onSignOut }) {
     return () => { clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
   }, [perms.isAdmin, perms.commsMessages]);
   useEffect(() => {
-    if (!perms.isAdmin) { setInboxUnread(0); return undefined; }
+    const canReadExternalInbox = !!(perms.isAdmin || perms.commsTextInbox || perms.commsMainLine);
+    if (!canReadExternalInbox) { setInboxUnread(0); return undefined; }
+    const endpoint = perms.isAdmin ? "/api/inbox" : "/api/sms-inbox";
     let alive = true;
     let inFlight = false;
     const load = async () => {
       if (document.hidden || inFlight) return;
       inFlight = true;
       try {
-        const r = await fetch(`${PROD_URL}/api/inbox?summary=unread`, { headers: await authHeaders() });
+        const r = await fetch(`${PROD_URL}${endpoint}?summary=unread`, { headers: await authHeaders() });
         const d = await r.json().catch(() => ({}));
         if (alive && r.ok) setInboxUnread(Math.max(0, Number(d.unread) || 0));
       } catch (_) {
@@ -33024,7 +33319,7 @@ export default function App({ authEmail = "", onSignOut }) {
       window.removeEventListener("sps-inbox-unread", onLocalUpdate);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [perms.isAdmin]);
+  }, [perms.isAdmin, perms.commsTextInbox, perms.commsMainLine]);
 
   // Sign-out unbinds this device's push token and clears native widget data FIRST, while the auth
   // token is still valid. Cleanup is time-bounded so a native bridge/network problem cannot trap
@@ -34673,7 +34968,10 @@ export default function App({ authEmail = "", onSignOut }) {
             return n ? { id: n.id, label: n.label, icon: n.icon, onClick: () => handleTabNav(n.id) } : null;
           }).filter(Boolean);
           const dockedSet = new Set(docked);
-          const commsBadge = (perms.isAdmin || perms.commsMessages ? navUnreadTotal : 0) + (perms.isAdmin || perms.commsReminders ? reminderDueCount : 0) + (perms.isAdmin || perms.commsInbox ? leadNewCount : 0);
+          const commsBadge = (perms.isAdmin || perms.commsMessages ? navUnread : 0)
+            + (perms.isAdmin || perms.commsTextInbox || perms.commsMainLine ? inboxUnread : 0)
+            + (perms.isAdmin || perms.commsReminders ? reminderDueCount : 0)
+            + (perms.isAdmin || perms.commsInbox ? leadNewCount : 0);
           const menuBadge = dockedSet.has("comms") ? 0 : commsBadge;
           const tabs = [
             ...primary.map(t => ({ ...t, active: page === t.id, badge: t.id === "comms" ? commsBadge : 0 })),

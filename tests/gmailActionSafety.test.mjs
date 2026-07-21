@@ -49,7 +49,7 @@ test("inbox read state is Gmail-first and delete retries recognize Gmail Trash",
   const markSource = app.slice(markStart, markEnd);
   assert.match(markSource, /const smsKeys = new Set/);
   assert.match(markSource, /const emailIds = ids\.filter/);
-  assert.ok(markSource.indexOf("await gmailAction(read") < markSource.indexOf('fetch(`${PROD_URL}/api/inbox`'), "Gmail must confirm before SPS persists email read state");
+  assert.ok(markSource.indexOf("await gmailAction(read") < markSource.indexOf("fetch(inboxApiUrl"), "Gmail must confirm before SPS persists email read state");
   assert.match(markSource, /markUnread" : "markRead"/);
   assert.match(markSource, /Do not show the new state until the remote systems confirm it/);
 

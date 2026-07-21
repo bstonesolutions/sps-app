@@ -14,7 +14,9 @@ test("mobile inbox uses a compact mailbox dropdown with inline search and compos
   assert.match(source, /placeholder=\{folder === "inbox" \? "Search inbox" : "Search sent"\}/);
   assert.match(source, /label: "All channels"/);
   assert.match(source, /quiet touch/);
-  assert.match(source, /!phone && <div[\s\S]*?\{folderBar\}/);
+  assert.match(source, /!phone && <div[\s\S]*?\{!smsOnly && folderBar\}/);
+  assert.match(source, /const inboxEndpoint = smsOnly \? "\/api\/sms-inbox" : "\/api\/inbox"/);
+  assert.match(source, /!smsOnly && phoneMenuOption\(\{ key: "mailbox-sent"/);
   assert.doesNotMatch(app, /function CommsMailBottomBar/);
   assert.doesNotMatch(source, /<CommsMailBottomBar/);
 });

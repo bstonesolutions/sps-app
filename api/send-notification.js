@@ -1,7 +1,7 @@
 // api/send-notification.js
-// Sends the business owner a branded notification email (e.g. a client upgrade
-// request) through Resend. Generic: pass a subject + message, plus optional
-// label/value rows. Used by the in-app Owner Alerts routing.
+// Sends branded service reports, explicitly permitted broadcasts, and owner notifications through
+// Resend. The server classifies the payload and checks the matching staff capability; an active
+// staff login by itself is never enough to use this general email sender.
 //
 // Required env (set in Vercel): RESEND_API_KEY
 // Optional env: RESEND_FROM (defaults to the verified SPS domain address)
@@ -66,7 +66,7 @@ function buildHtml({ branding = {}, heading, message, rows = [], photosHtml = ""
 }
 
 import { resolveFrom } from "./_sender.js";
-import { requireUser } from "./_auth.js";
+import { memberHasCapability, requireStaff } from "./_staff-auth.js";
 
 export default async function handler(req, res) {
   setCors(res);
@@ -76,10 +76,18 @@ export default async function handler(req, res) {
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const _u = await requireUser(req, res);
-  if (!_u) return;
-
   const { to, subject, heading, message, rows = [], branding = {}, photos = [], report = null, actionUrl = "", actionLabel = "" } = req.body || {};
+  const staff = await requireStaff(req, res, "sending a business email");
+  if (!staff) return;
+  const owner = staff.teamRole === "owner";
+  const serviceReport = report && typeof report === "object" && report.kind === "service";
+  const broadcast = !serviceReport && req.body?.unsubscribe && typeof req.body.unsubscribe === "object";
+  const authorized = owner
+    || (serviceReport && memberHasCapability(staff.teamMember, "serviceReports"))
+    || (broadcast && memberHasCapability(staff.teamMember, "commsBroadcast"));
+  if (!authorized) {
+    return res.status(403).json({ error: "Your team permissions do not allow sending this type of email." });
+  }
   if (!to || !/.+@.+\..+/.test(to)) return res.status(400).json({ error: "A valid recipient email is required" });
   if (!subject) return res.status(400).json({ error: "A subject is required" });
 

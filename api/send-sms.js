@@ -1,16 +1,18 @@
 // api/send-sms.js
-// Sends an SMS through Quo (formerly OpenPhone) from the business number, so texts
-// go out automatically from the company line — no device Messages app, no tech's
-// personal number.
+// Sends an SMS through Quo (formerly OpenPhone) from one of two server-owned SPS lines:
+//   - automation (default): reminders, reports, invoices, On My Way, etc.
+//   - main: the owner's newly ported Comms number (or an explicitly granted delegate).
+// A caller can select only the role, never an arbitrary workspace number.
 //
-// Required env (set in Vercel): QUO_API_KEY, QUO_PHONE_NUMBER (business # in E.164)
+// Required env (set in Vercel): QUO_API_KEY, QUO_PHONE_NUMBER (automation line, E.164)
+// Optional until direct comms is enabled: QUO_MAIN_PHONE_NUMBER (ported main line, E.164)
 // API: POST https://api.quo.com/v1/messages  ·  Authorization: <key> (no "Bearer")
 //      body { content, from, to: [ ... ] }  ·  numbers in E.164 (+1234567890)
 //
 // CORS is permissive so the native app (capacitor://localhost) can call it
 // cross-origin via the absolute PROD_URL; the web build calls it same-origin.
 
-import { requireCapability } from "./_staff-auth.js";
+import { memberHasCapability, requireStaff } from "./_staff-auth.js";
 
 const SUPABASE_URL = (
   process.env.SUPABASE_URL ||
@@ -121,13 +123,52 @@ async function pilotMatchesDestination(clientId, toNum) {
   return textPreference !== false && toE164(client.phone || client.contactPhone) === toNum;
 }
 
+async function lineForInboxReply(inboxId) {
+  if (!SERVICE_KEY) throw new Error("SUPABASE_SERVICE_ROLE_KEY is not configured");
+  const id = String(inboxId || "").trim();
+  if (!id || id.length > 120) throw new Error("invalid inbox message");
+  let response;
+  try {
+    response = await fetch(
+      `${SUPABASE_URL}/rest/v1/sps_inbox?id=eq.${encodeURIComponent(id)}&select=id,channel,from_phone,ai&limit=2`,
+      { headers: serviceHeaders() },
+    );
+  } catch (error) {
+    throw new Error(`inbox reply lookup failed: ${error && error.message ? error.message : "network error"}`);
+  }
+  if (!response.ok) throw new Error(`inbox reply lookup failed (${response.status})`);
+  const rows = await response.json().catch(() => null);
+  if (!Array.isArray(rows) || rows.length !== 1 || rows[0]?.channel !== "sms") {
+    throw new Error("inbox text was not found");
+  }
+  const ai = parseStoredValue(rows[0].ai);
+  // Historical inbound texts predate multi-line support and could only have arrived on the
+  // automation line, so a missing marker on an otherwise-valid object retains that legacy
+  // behavior. Any malformed container or unknown non-empty marker fails closed: silently
+  // downgrading it to automation could cross the owner/staff line boundary.
+  if (ai != null && (typeof ai !== "object" || Array.isArray(ai))) {
+    throw new Error("inbox text has malformed line metadata");
+  }
+  const rawLine = ai && typeof ai === "object"
+    ? String(ai.quoLine == null ? "" : ai.quoLine).trim().toLowerCase()
+    : "";
+  if (rawLine && rawLine !== "automation" && rawLine !== "main") {
+    throw new Error("inbox text has unknown line metadata");
+  }
+  const line = rawLine === "main" ? "main" : "automation";
+  const recipient = toE164(rows[0].from_phone);
+  if (!E164.test(recipient)) throw new Error("inbox text has no valid sender");
+  return { line, recipient };
+}
+
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
 
   const KEY = process.env.QUO_API_KEY;
-  const FROM = process.env.QUO_PHONE_NUMBER;
-  const configuredFrom = toE164(FROM);
+  const configuredFrom = toE164(process.env.QUO_PHONE_NUMBER);
+  const configuredMainFrom = toE164(process.env.QUO_MAIN_PHONE_NUMBER);
+  const duplicateConfiguredLines = !!configuredMainFrom && configuredMainFrom === configuredFrom;
 
   if (req.method === "GET") {
     // Keep the compatibility health check intentionally small: older installed builds call it
@@ -136,12 +177,21 @@ export default async function handler(req, res) {
     if (!((req.query || {}).details === "1")) {
       return res.status(200).json({ ok: true, endpoint: "send-sms", configured });
     }
-    const _u = await requireCapability(req, res, "sendTexts", "viewing the business texting line");
+    const _u = await requireStaff(req, res, "viewing the business texting line");
     if (!_u) return;
+    if (!memberHasCapability(_u.teamMember, "sendTexts")
+      && !memberHasCapability(_u.teamMember, "commsTextInbox")
+      && !memberHasCapability(_u.teamMember, "commsMainLine")
+      && !memberHasCapability(_u.teamMember, "commsBroadcast")) {
+      return res.status(403).json({ error: "Your team permissions do not allow viewing a business texting line." });
+    }
+    const canViewMainLine = _u.teamRole === "owner" || memberHasCapability(_u.teamMember, "commsMainLine");
 
     let upstreamReachable = false;
     let numberOnAccount = null;
+    let mainNumberOnAccount = null;
     let lineLabel = "";
+    let mainLineLabel = "";
     if (KEY) {
       try {
         const nr = await fetch("https://api.quo.com/v1/phone-numbers", { headers: { "Authorization": KEY } });
@@ -149,36 +199,111 @@ export default async function handler(req, res) {
         if (nr.ok) {
           const nd = await nr.json().catch(() => ({}));
           const list = Array.isArray(nd?.data) ? nd.data : (Array.isArray(nd) ? nd : []);
-          const match = list.find((n) => toE164(n.e164 || n.phoneNumber || n.number || n.formattedNumber || "") === configuredFrom);
+          const numberOf = (n) => toE164(n.e164 || n.phoneNumber || n.number || n.formattedNumber || "");
+          const match = list.find((n) => numberOf(n) === configuredFrom);
+          // Do not resolve or report the owner's private line unless the owner granted visibility.
+          const mainMatch = canViewMainLine ? list.find((n) => numberOf(n) === configuredMainFrom) : null;
           numberOnAccount = !!match;
+          mainNumberOnAccount = canViewMainLine && configuredMainFrom ? !!mainMatch : null;
           lineLabel = match ? String(match.name || match.label || "") : "";
+          mainLineLabel = mainMatch ? String(mainMatch.name || mainMatch.label || "") : "";
         }
       } catch (_) { /* surfaced through upstreamReachable=false */ }
     }
     return res.status(200).json({
       ok: true,
       endpoint: "send-sms",
-      configured: { ...configured, upstreamReachable, numberOnAccount },
+      configured: {
+        ...configured,
+        upstreamReachable,
+        numberOnAccount,
+        ...(canViewMainLine ? {
+          quoMainNumber: !!configuredMainFrom && !duplicateConfiguredLines,
+          duplicateConfiguredLines,
+          mainNumberOnAccount,
+        } : {}),
+      },
       from: configuredFrom || null,
-      // Never expose or allow selection of unrelated lines in this Quo workspace.
-      numbers: configuredFrom ? [{ number: configuredFrom, label: lineLabel }] : [],
+      ...(canViewMainLine ? { directFrom: configuredMainFrom || null } : {}),
+      // Exact server-approved lines only. Never enumerate unrelated numbers in the workspace.
+      numbers: [
+        ...(configuredFrom ? [{ role: "automation", number: configuredFrom, label: lineLabel }] : []),
+        ...(canViewMainLine && configuredMainFrom && !duplicateConfiguredLines ? [{ role: "main", number: configuredMainFrom, label: mainLineLabel }] : []),
+      ],
     });
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  // Gate the privileged send path (the GET "?check"/health branch above stays open).
-  const _u = await requireCapability(req, res, "sendTexts", "sending client text messages");
+  // Gate the privileged send path (the GET "?check"/health branch above stays open). An explicit
+  // Broadcast grant may use only the automation line for messages marked as broadcasts. It does not
+  // unlock ordinary direct texts, shared-inbox replies, or the owner's ported number.
+  const _u = await requireStaff(req, res, "sending client text messages");
   if (!_u) return;
+  const requestedPurpose = String((req.body || {}).purpose || "").trim().toLowerCase();
+  const canSendTexts = memberHasCapability(_u.teamMember, "sendTexts");
+  const canBroadcast = requestedPurpose === "broadcast" && memberHasCapability(_u.teamMember, "commsBroadcast");
+  if (!canSendTexts && !canBroadcast) {
+    return res.status(403).json({ error: "Your team permissions do not allow sending client text messages." });
+  }
 
   if (!KEY) return res.status(501).json({ error: "Texting is not configured on the server.", missingEnv: true });
 
   const { to, message } = req.body || {};
   const toNum = toE164(to);
-  // The server owns the sender identity. A client/staff request may choose the recipient and
-  // content within its capability, but it can never switch to another line in the Quo workspace.
-  const fromNum = configuredFrom;
-  if (!fromNum) return res.status(501).json({ error: "No business texting number is configured.", missingEnv: true });
-  if (!E164.test(fromNum)) return res.status(501).json({ error: "The business texting number is invalid.", missingEnv: true });
+  const inboxId = String((req.body || {}).inboxId || "").trim();
+  const ownerSender = _u.teamRole === "owner";
+  let line;
+  if (inboxId) {
+    if (!canSendTexts) {
+      return res.status(403).json({ error: "Your team permissions do not allow replying from the business text inbox." });
+    }
+    // A schedule-only texting grant must not open either shared inbox. Visibility can be granted
+    // independently per line, but only the owner may send through the owner's ported number.
+    const canViewAutomation = memberHasCapability(_u.teamMember, "commsTextInbox");
+    const canViewMain = ownerSender || memberHasCapability(_u.teamMember, "commsMainLine");
+    if (!canViewAutomation && !canViewMain) {
+      return res.status(403).json({ error: "Your team permissions do not allow replying from the business text inbox." });
+    }
+    try {
+      const replyContext = await lineForInboxReply(inboxId);
+      line = replyContext.line;
+      // Check the private line before comparing caller-supplied recipients so an unauthorized
+      // delegate cannot use different status codes to probe the phone number on a main-line row.
+      if (line === "main" && !ownerSender) {
+        return res.status(403).json({ error: "Only the owner can send from the owner's work line." });
+      }
+      if (line === "automation" && !canViewAutomation) {
+        return res.status(403).json({ error: "Your team permissions do not allow replying from the staff text inbox." });
+      }
+      if (replyContext.recipient !== toNum) {
+        return res.status(400).json({ error: "The reply recipient does not match the original inbound text. No message was sent." });
+      }
+    } catch (error) {
+      console.error("[send-sms] inbox reply line unavailable:", error && error.message ? error.message : error);
+      return res.status(503).json({ error: "The original text line could not be verified. No reply was sent." });
+    }
+  } else {
+    const rawLine = String((req.body || {}).line || "automation").trim().toLowerCase();
+    if (!["automation", "main"].includes(rawLine)) return res.status(400).json({ error: "Unknown business texting line." });
+    line = rawLine === "main" ? "main" : "automation";
+  }
+  // `sendTexts` intentionally remains enough for the staff/automation number. Main-line visibility
+  // never implies sender authority: the ported owner number is owner-send only on the server.
+  if (line === "main" && !ownerSender) {
+    return res.status(403).json({ error: "Only the owner can send from the owner's work line." });
+  }
+  if (canBroadcast && !canSendTexts && line !== "automation") {
+    return res.status(403).json({ error: "Staff broadcasts must use the automation texting line." });
+  }
+  // The server owns both sender identities. The app can request a role, but cannot inject `from`.
+  if (line === "main" && duplicateConfiguredLines) return res.status(501).json({ error: "The main and automation Quo numbers must be different.", missingEnv: true, line });
+  const fromNum = line === "main" ? configuredMainFrom : configuredFrom;
+  if (!fromNum) return res.status(501).json({
+    error: line === "main" ? "The main Quo work number is not configured yet." : "No automation texting number is configured.",
+    missingEnv: true,
+    line,
+  });
+  if (!E164.test(fromNum)) return res.status(501).json({ error: `The ${line} texting number is invalid.`, missingEnv: true, line });
   if (!E164.test(toNum)) return res.status(400).json({ error: "Enter a valid recipient phone number, including its country code." });
   const content = String(message == null ? "" : message).trim();
   if (!content) return res.status(400).json({ error: "A message is required." });
@@ -233,6 +358,7 @@ export default async function handler(req, res) {
           held: true,
           redirected: false,
           testMode: true,
+          line,
         });
       }
       safeTo = textSafety.phone;
@@ -267,6 +393,7 @@ export default async function handler(req, res) {
       sent: true,
       held: false,
       redirected,
+      line,
       id: (data && (data.data?.id || data.id)) || null,
     });
   } catch (err) {

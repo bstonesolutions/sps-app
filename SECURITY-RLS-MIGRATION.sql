@@ -1123,7 +1123,8 @@ create policy "app_state staff delete operational owner delete admin"
 -- sps_messages and sps_comms_log
 -- Portal clients have no direct policy. Server-mediated portal/API operations use
 -- service_role and continue to bypass RLS. Staff retain the operations used by the
--- current app; comms log remains append-only to authenticated staff.
+-- current app; comms log remains append-only to authenticated staff, while only the owner may
+-- read message bodies and recipient details back.
 -- --------------------------------------------------------------------------
 
 create policy "messages staff read"
@@ -1151,11 +1152,11 @@ create policy "messages owner delete"
   to authenticated
   using (public.sps_rls_is_owner());
 
-create policy "comms_log staff read"
+create policy "comms_log owner read"
   on public.sps_comms_log
   for select
   to authenticated
-  using (public.sps_rls_is_staff());
+  using ((select public.sps_rls_is_owner()));
 
 create policy "comms_log staff insert"
   on public.sps_comms_log
