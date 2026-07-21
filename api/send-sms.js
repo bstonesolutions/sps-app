@@ -20,6 +20,13 @@ import {
   normalizeSmsIdempotencyKey,
   smsRequestFingerprint,
 } from "./_sms-idempotency.js";
+import {
+  cleanSmsValue,
+  legacySmsInboxRow,
+  parseTestRedirect,
+  quoContactMetadata,
+  smsHistorySchemaMissing,
+} from "./_sms-history.js";
 
 const SUPABASE_URL = (
   process.env.SUPABASE_URL ||
@@ -65,6 +72,91 @@ function serviceHeaders() {
     Authorization: `Bearer ${SERVICE_KEY}`,
     "Content-Type": "application/json",
   };
+}
+
+function displayPhone(value) {
+  const digits = String(value || "").replace(/\D/g, "").slice(-10);
+  return digits.length === 10
+    ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`
+    : String(value || "");
+}
+
+async function storeOutgoingHistory({
+  providerMessage,
+  line,
+  peer,
+  content,
+  clientId,
+  redirected,
+}) {
+  if (!SERVICE_KEY) return { stored: false, reason: "service key missing" };
+  const providerId = cleanSmsValue(providerMessage?.id, 100);
+  if (!providerId) return { stored: false, reason: "Quo response had no message id" };
+  const legacyRedirect = parseTestRedirect(content);
+  const historyPeer = legacyRedirect?.intendedPeer || peer;
+  const historyContent = legacyRedirect?.content || content;
+  const wasRedirected = redirected || !!legacyRedirect;
+  const embeddedContact = quoContactMetadata(providerMessage?.contact);
+  const contactId = embeddedContact.id || cleanSmsValue(providerMessage?.contactId, 100);
+  const contactName = embeddedContact.name || cleanSmsValue(providerMessage?.contactName, 180);
+  const id = `sms_out_${providerId}`;
+  const ai = {
+    quoLine: line,
+    smsDirection: "outgoing",
+    ...(clientId ? { clientId } : {}),
+    ...(wasRedirected ? { testRedirected: true, intendedPeer: historyPeer } : {}),
+  };
+  const row = {
+    id,
+    channel: "sms",
+    from_phone: historyPeer,
+    from_name: displayPhone(historyPeer),
+    from_email: displayPhone(historyPeer),
+    subject: cleanSmsValue(historyContent, 80) || "(text message)",
+    body_text: cleanSmsValue(historyContent, 4000),
+    body_html: "",
+    message_id: providerId,
+    kind: clientId ? "client" : "other",
+    ai,
+    lead_id: "",
+    read: true,
+    replied: true,
+    sms_direction: "outgoing",
+    sms_line: line,
+    sms_peer_phone: historyPeer,
+    quo_message_id: providerId,
+    // A Test Mode carrier conversation belongs to the test phone, not the intended client. Let
+    // the app group it by protected line + intended peer instead of attaching the wrong Quo id.
+    quo_conversation_id: wasRedirected ? null : (cleanSmsValue(providerMessage?.conversationId, 120) || null),
+    quo_phone_number_id: cleanSmsValue(providerMessage?.phoneNumberId, 120) || null,
+    sms_status: wasRedirected ? "test_redirected" : cleanSmsValue(providerMessage?.status, 40) || "accepted",
+    sms_media: [],
+    quo_contact_id: contactId || null,
+    sms_contact_name: contactName || null,
+    sms_provider_created_at: cleanSmsValue(providerMessage?.createdAt, 60) || null,
+  };
+  const insert = async (value) => {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?on_conflict=id`, {
+      method: "POST",
+      headers: { ...serviceHeaders(), Prefer: "resolution=ignore-duplicates,return=representation" },
+      body: JSON.stringify([value]),
+    });
+    const text = response.ok ? "" : await response.text().catch(() => "");
+    return { response, text };
+  };
+  try {
+    let result = await insert(row);
+    let legacySchema = false;
+    if (!result.response.ok && smsHistorySchemaMissing(result.text)) {
+      result = await insert(legacySmsInboxRow(row));
+      legacySchema = result.response.ok;
+    }
+    if (!result.response.ok) return { stored: false, reason: result.text.slice(0, 160) || `HTTP ${result.response.status}` };
+    const rows = await result.response.json().catch(() => []);
+    return { stored: true, duplicate: !Array.isArray(rows) || rows.length === 0, legacySchema, id };
+  } catch (error) {
+    return { stored: false, reason: cleanSmsValue(error?.message || error, 160) || "history insert failed" };
+  }
 }
 
 async function loadTextSafety() {
@@ -523,8 +615,26 @@ export default async function handler(req, res) {
         line,
       });
     }
-    const providerId = (data && (data.data?.id || data.id)) || null;
+    const providerMessage = data && typeof data === "object" && data.data && typeof data.data === "object"
+      ? data.data
+      : data;
+    const providerId = (providerMessage && providerMessage.id) || null;
     const receiptStored = await settleDelivery("accepted", { providerId });
+    // Persist the intended counterparty immediately, even when Test Mode delivered the carrier
+    // message to the owner's test device. message.delivered later enriches this exact provider id
+    // with the Quo conversation id and final status. History storage cannot turn a Quo-accepted
+    // send into an apparent failure, which would invite staff to send a duplicate.
+    const history = await storeOutgoingHistory({
+      providerMessage,
+      line,
+      peer: toNum,
+      content: normalizedContent,
+      clientId,
+      redirected,
+    });
+    if (!history.stored) {
+      console.error("[send-sms] Quo accepted text but history insert failed:", history.reason || "unknown error");
+    }
     // Quo has accepted the message for sending. Carrier delivery is a separate webhook event,
     // so keep `sent` only for compatibility with installed v1.1 clients and expose the truth too.
     return res.status(202).json({
@@ -534,6 +644,9 @@ export default async function handler(req, res) {
       redirected,
       line,
       id: providerId,
+      historyStored: !!history.stored,
+      historyId: history.stored ? history.id : null,
+      historyPendingWebhook: !history.stored,
       ...(deliveryClaim ? { replayed: false, retrySafe: false, deliveryState: "accepted", receiptStored } : {}),
     });
   } catch (err) {

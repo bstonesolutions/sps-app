@@ -89,6 +89,7 @@ function installOutboundFetch({
   textSafetyClientsFailure = false,
   inboxRows = null,
   inboxFailure = false,
+  historyFailure = false,
   receiptFailure = false,
   quoStatus = 200,
   quoThrows = false,
@@ -96,7 +97,7 @@ function installOutboundFetch({
 } = {}) {
   let receiptValue;
   let receiptVersion = 0;
-  const calls = { quo: 0, quoBodies: [], quoNumberChecks: 0, textSafetyChecks: 0, textSafetyClientChecks: 0, inboxLookups: 0, receiptReads: 0, receiptWrites: 0 };
+  const calls = { quo: 0, quoBodies: [], quoNumberChecks: 0, textSafetyChecks: 0, textSafetyClientChecks: 0, inboxLookups: 0, historyRows: [], receiptReads: 0, receiptWrites: 0 };
   globalThis.fetch = async (url, options = {}) => {
     const target = String(url);
     if (target.endsWith("/auth/v1/user")) {
@@ -145,6 +146,13 @@ function installOutboundFetch({
       return inboxFailure
         ? response({ error: "unavailable" }, { ok: false, status: 503 })
         : response(inboxRows ?? []);
+    }
+    if (target.includes("/rest/v1/sps_inbox?on_conflict=id") && options.method === "POST") {
+      const inserted = JSON.parse(options.body);
+      calls.historyRows.push(...inserted);
+      return historyFailure
+        ? response({ message: "history unavailable" }, { ok: false, status: 503 })
+        : response(inserted);
     }
     if (target === "https://api.quo.com/v1/messages") {
       calls.quo += 1;
@@ -373,6 +381,9 @@ test("authorized staff send normalized US numbers through the Quo business line"
     redirected: false,
     line: "automation",
     id: "quo-message-1",
+    historyStored: true,
+    historyId: "sms_out_quo-message-1",
+    historyPendingWebhook: false,
   });
   assert.equal(calls.quo, 1);
   assert.deepEqual(calls.quoBodies[0], {
@@ -380,6 +391,21 @@ test("authorized staff send normalized US numbers through the Quo business line"
     from: "+15550001111",
     to: ["+15552345678"],
   });
+  assert.equal(calls.historyRows.length, 1);
+  assert.equal(calls.historyRows[0].sms_direction, "outgoing");
+  assert.equal(calls.historyRows[0].sms_line, "automation");
+  assert.equal(calls.historyRows[0].sms_peer_phone, "+15552345678");
+});
+
+test("a Quo-accepted text stays successful when conversation-history storage is temporarily unavailable", async () => {
+  const calls = installOutboundFetch({ historyFailure: true });
+  const res = makeRes();
+  await sendSmsHandler(outboundRequest({ to: "+15552345678", message: "Accepted once" }), res);
+  assert.equal(res.statusCode, 202);
+  assert.equal(res.body.accepted, true);
+  assert.equal(res.body.historyStored, false);
+  assert.equal(res.body.historyPendingWebhook, true);
+  assert.equal(calls.quo, 1, "history failure must not invite a second provider send");
 });
 
 test("arrival confirmations claim one durable receipt before Quo and safely replay", async () => {
@@ -858,6 +884,26 @@ test("server Test Mode still allows an explicit text to the saved owner test pho
   assert.deepEqual(calls.quoBodies[0].to, ["+15550009999"]);
 });
 
+test("legacy installed clients that pre-redirect are stored under the intended customer", async () => {
+  const calls = installOutboundFetch({
+    textSafety: {
+      testMode: { on: true, mode: "hold", phone: "+15550009999", liveClientIds: [] },
+    },
+  });
+  const res = makeRes();
+  await sendSmsHandler(outboundRequest({
+    to: "+15550009999",
+    message: "[TEST → (555) 010-0103] Hi David, your technician is on the way.",
+  }), res);
+  assert.equal(res.statusCode, 202);
+  assert.equal(res.body.redirected, false, "the older client already performed the redirect");
+  assert.equal(calls.historyRows.length, 1);
+  assert.equal(calls.historyRows[0].sms_peer_phone, "+15550100103");
+  assert.equal(calls.historyRows[0].body_text, "Hi David, your technician is on the way.");
+  assert.equal(calls.historyRows[0].sms_status, "test_redirected");
+  assert.equal(calls.historyRows[0].quo_conversation_id, null);
+});
+
 test("server Test Mode redirects a non-pilot to the owner phone and caps the labeled message", async () => {
   const calls = installOutboundFetch({
     textSafety: {
@@ -881,6 +927,8 @@ test("server Test Mode redirects a non-pilot to the owner phone and caps the lab
   assert.deepEqual(calls.quoBodies[0].to, ["+15550009999"]);
   assert.match(calls.quoBodies[0].content, /^\[TEST → \+15552345678\] /);
   assert.equal(calls.quoBodies[0].content.length, 1600);
+  assert.equal(calls.historyRows[0].sms_peer_phone, "+15552345678");
+  assert.equal(calls.historyRows[0].sms_status, "test_redirected");
 });
 
 test("server Test Mode sends a listed pilot client for real only when clientId is supplied", async () => {
@@ -1108,7 +1156,7 @@ test("human-written Comms actions explicitly choose their protected Quo routes",
   const replyStart = source.indexOf("const sendOpenRowReply = async");
   const replyEnd = source.indexOf("const [selMode", replyStart);
   assert.ok(replyStart >= 0 && replyEnd > replyStart);
-  assert.match(source.slice(replyStart, replyEnd), /sendSms\(phone,\s*replyText\.trim\(\),\s*\{[\s\S]*?inboxId:\s*row\.id/);
+  assert.match(source.slice(replyStart, replyEnd), /sendSms\(phone,\s*replyText\.trim\(\),\s*\{[\s\S]*?inboxId:\s*(?:row|replyAnchor)\.id/);
 
   const broadcastStart = source.indexOf("function BroadcastSection");
   const broadcastEnd = source.indexOf("function OwnerDigestSettings", broadcastStart);
@@ -1274,8 +1322,86 @@ test("inbound media is noted without retaining provider-hosted media URLs", asyn
   }));
 
   assert.equal(res.statusCode, 200);
-  assert.equal(calls.rows[0].body_text, "Please look at this photo [1 media attachment]");
+  assert.equal(calls.rows[0].body_text, "Please look at this photo [1 media attachment; secure copy pending]");
   assert.doesNotMatch(JSON.stringify(calls.rows[0]), /provider\.example/);
+});
+
+test("an inbound Test Mode echo between SPS-owned lines is not stored as a customer text", async () => {
+  let storageCalls = 0;
+  globalThis.fetch = async () => { storageCalls += 1; throw new Error("test echo must not reach storage"); };
+  const { res } = await invokeWebhook(webhookPayload("test-echo", {
+    from: "+15550001111",
+    to: "+15550002222",
+    body: "[TEST → (555) 010-0103] Hi David, your technician is on the way.",
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.skipped, "test redirect echo");
+  assert.equal(storageCalls, 0);
+});
+
+test("message.delivered stores an outgoing row under the intended Test Mode peer", async () => {
+  const calls = installInboxFetch();
+  const payload = webhookPayload("delivered");
+  payload.type = "message.delivered";
+  payload.data.object = {
+    id: "AC-delivered-1",
+    direction: "outgoing",
+    from: "+15550001111",
+    to: "+15550002222",
+    body: "[TEST → +1555010103] Hi David",
+    status: "delivered",
+    phoneNumberId: "PN-automation",
+    conversationId: "CN-1",
+    createdAt: "2026-07-21T15:00:00.000Z",
+    media: [],
+  };
+  const { res } = await invokeWebhook(payload);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.stored, true);
+  assert.equal(calls.rows.length, 1);
+  assert.equal(calls.rows[0].id, "sms_out_AC-delivered-1");
+  assert.equal(calls.rows[0].sms_direction, "outgoing");
+  assert.equal(calls.rows[0].sms_line, "automation");
+  assert.equal(calls.rows[0].sms_peer_phone, "+1555010103");
+  assert.equal(calls.rows[0].body_text, "Hi David");
+  assert.equal(calls.rows[0].sms_status, "test_redirected");
+  assert.equal(calls.rows[0].quo_conversation_id, null, "test-device conversation id must not attach to the intended client");
+});
+
+test("contact.updated writes one phone-keyed cache row instead of rewriting message history", async () => {
+  const calls = { contactWrites: 0, inboxWrites: 0, rows: [] };
+  globalThis.fetch = async (url, options = {}) => {
+    const target = String(url);
+    if (target.includes("/rest/v1/sps_sms_contacts?on_conflict=phone")) {
+      calls.contactWrites += 1;
+      calls.rows.push(...JSON.parse(options.body));
+      return response([]);
+    }
+    if (target.includes("/rest/v1/sps_inbox")) calls.inboxWrites += 1;
+    throw new Error(`Unexpected fetch: ${target}`);
+  };
+  const payload = webhookPayload("contact-updated");
+  payload.type = "contact.updated";
+  payload.data.object = {
+    id: "CT-1",
+    defaultFields: {
+      firstName: "Jordan",
+      lastName: "Hale",
+      phoneNumbers: [{ value: "+15552345678" }],
+    },
+  };
+  const { res } = await invokeWebhook(payload);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.contactUpdated, true);
+  assert.equal(calls.contactWrites, 1);
+  assert.equal(calls.inboxWrites, 0);
+  assert.deepEqual(calls.rows[0], {
+    phone: "+15552345678",
+    quo_contact_id: "CT-1",
+    contact_name: "Jordan Hale",
+    avatar_path: "",
+    updated_at: calls.rows[0].updated_at,
+  });
 });
 
 test("a fast client-list failure is stored as an explicit matching failure, not an empty lookup", async () => {

@@ -11,6 +11,7 @@
 // unexpected non-empty line value fails closed and is never returned or mutated here.
 
 import { memberHasCapability, requireStaff } from "./_staff-auth.js";
+import { SMS_MEDIA_BUCKET, signPrivateSmsMedia } from "./_sms-history.js";
 
 const SUPABASE_URL = (
   process.env.SUPABASE_URL ||
@@ -51,6 +52,9 @@ function parseStoredValue(value) {
 
 function rowLine(row) {
   if (!row || row.channel !== "sms") return null;
+  const storedLine = String(row.sms_line == null ? "" : row.sms_line).trim().toLowerCase();
+  if (storedLine === "automation" || storedLine === "main") return storedLine;
+  if (storedLine) return null;
   const ai = parseStoredValue(row.ai);
   if (ai != null && (typeof ai !== "object" || Array.isArray(ai))) return null;
   const raw = ai && typeof ai === "object"
@@ -59,6 +63,73 @@ function rowLine(row) {
   if (!raw || raw === "automation") return "automation";
   if (raw === "main") return "main";
   return null;
+}
+
+function serializeSmsRow(row) {
+  const descriptors = Array.isArray(row?.sms_media) ? row.sms_media : [];
+  // List refreshes can return hundreds of messages. Do not spend one Storage signing request per
+  // row; the authorized mediaFor branch below signs only when a staff member opens the thread.
+  return {
+    ...row,
+    sms_media_count: descriptors.length,
+    sms_media: [],
+    sms_contact_avatar_url: "",
+  };
+}
+
+async function enrichSmsContacts(rows) {
+  const phones = [...new Set((Array.isArray(rows) ? rows : [])
+    .map((row) => String(row?.sms_peer_phone || row?.from_phone || "").trim())
+    .filter((phone) => /^\+[1-9]\d{7,14}$/.test(phone)))];
+  if (!phones.length) return rows;
+  try {
+    const filter = phones.map(encodeURIComponent).join(",");
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/sps_sms_contacts?select=phone,quo_contact_id,contact_name,avatar_path&phone=in.(${filter})`,
+      { headers: serviceHeaders() },
+    );
+    if (!response.ok) return rows;
+    const contacts = await response.json().catch(() => null);
+    if (!Array.isArray(contacts)) return rows;
+    const byPhone = new Map(contacts.map((contact) => [String(contact?.phone || ""), contact]));
+    return rows.map((row) => {
+      const phone = String(row?.sms_peer_phone || row?.from_phone || "");
+      const contact = byPhone.get(phone);
+      if (!contact) return row;
+      return {
+        ...row,
+        quo_contact_id: row.quo_contact_id || contact.quo_contact_id || null,
+        // An SPS client match stored on the message stays first. Quo fills unknown contacts only.
+        sms_contact_name: row.sms_contact_name || contact.contact_name || null,
+        sms_contact_avatar_path: row.sms_contact_avatar_path || contact.avatar_path || null,
+      };
+    });
+  } catch {
+    return rows;
+  }
+}
+
+async function serializeSmsMedia(row) {
+  const descriptors = Array.isArray(row?.sms_media) ? row.sms_media : [];
+  const signedMedia = await signPrivateSmsMedia(descriptors, {
+    supabaseUrl: SUPABASE_URL,
+    serviceKey: SERVICE_KEY,
+    expiresIn: 300,
+  });
+  const avatarPath = String(row?.sms_contact_avatar_path || "").trim();
+  const signedAvatar = avatarPath
+    ? await signPrivateSmsMedia([{ bucket: SMS_MEDIA_BUCKET, path: avatarPath, mimeType: "image/jpeg" }], {
+      supabaseUrl: SUPABASE_URL,
+      serviceKey: SERVICE_KEY,
+      expiresIn: 300,
+    })
+    : [];
+  return {
+    id: row.id,
+    sms_media_count: descriptors.length,
+    sms_media: signedMedia,
+    sms_contact_avatar_url: signedAvatar[0]?.url || "",
+  };
 }
 
 function cleanIds(input) {
@@ -159,6 +230,21 @@ export default async function handler(req, res) {
   try {
     if (req.method === "GET") {
       const query = req.query || {};
+      if (query.mediaFor != null) {
+        const ids = cleanIds(query.mediaFor);
+        if (!ids || ids.length !== 1) return res.status(400).json({ error: "Provide one valid text-message id." });
+        const response = await fetch(
+          `${SUPABASE_URL}/rest/v1/sps_inbox?select=id,channel,ai,sms_line,from_phone,sms_peer_phone,sms_media,sms_contact_avatar_path&${idFilter(ids)}`,
+          { headers: serviceHeaders() },
+        );
+        if (!response.ok) return res.status(409).json({ error: "Text media is not ready. Run SMS-CONVERSATIONS-RUN.sql." });
+        const rows = await response.json().catch(() => null);
+        if (!Array.isArray(rows) || rows.length !== 1 || !canAccessRow(rows[0], access)) {
+          return res.status(403).json({ error: "That text message is unavailable with your current permissions." });
+        }
+        const [enriched] = await enrichSmsContacts(rows);
+        return res.status(200).json({ ok: true, media: await serializeSmsMedia(enriched), access });
+      }
       if (query.summary === "unread") {
         const response = await fetch(
           // `not.is.true` includes both false and legacy null values without adding a second
@@ -186,7 +272,8 @@ export default async function handler(req, res) {
       if (!Array.isArray(rows)) return res.status(502).json({ error: "The text inbox returned invalid data." });
       // The database predicate is the primary filter. Validate again before serialization so a
       // PostgREST/schema regression still cannot place a main or unknown-line row in a staff reply.
-      const safeRows = rows.filter((row) => canAccessRow(row, access)).slice(0, limit);
+      const authorizedRows = rows.filter((row) => canAccessRow(row, access)).slice(0, limit);
+      const safeRows = (await enrichSmsContacts(authorizedRows)).map(serializeSmsRow);
       return res.status(200).json({ ok: true, rows: safeRows, access });
     }
 

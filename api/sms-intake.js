@@ -4,7 +4,8 @@
 // inbox as work email (sps_inbox, channel 'sms'): an existing client's text is tagged "Client";
 // an unknown number is AI-triaged (lead/bill/other) and, when it's a lead, auto-imports into
 // Comms → Leads with a push — exactly like an email lead. Outbound texts WE send ride the same
-// Quo message stream with direction "outgoing"; we drop those so we never ingest our own sends.
+// Quo message stream with direction "outgoing"; delivered events repair/complete the same
+// conversation history written immediately by api/send-sms.js.
 //
 // Auth: the webhook URL carries ?key=<QUO_WEBHOOK_KEY> and every POST must also have Quo's valid
 // openphone-signature HMAC using QUO_WEBHOOK_SECRET. Both are mandatory. Valid requests return 2xx
@@ -12,7 +13,7 @@
 // retriable storage/delivery failures return 5xx so Quo retries for up to three days. The unique
 // envelope id and delivery ledger make those retries safe. Ships dark until both secrets are set.
 //
-// One-time SQL: run SMS-INBOX-MIGRATION.sql to add channel + from_phone.
+// One-time SQL: run SMS-INBOX-MIGRATION.sql, then SMS-CONVERSATIONS-RUN.sql.
 
 import crypto from "node:crypto";
 import { callClaude, extractJson, aiConfigured } from "./_ai.js";
@@ -20,6 +21,16 @@ import { mutateAppState, NO_APP_STATE_CHANGE, readAppStateVersioned } from "./_a
 import { pushConfigured, pushOwner, pushStaff } from "./_push.js";
 import { memberHasCapability } from "./_staff-auth.js";
 import { assessInboundLead } from "../leadQualification.js";
+import {
+  cleanSmsValue,
+  copyQuoMediaToPrivateStorage,
+  legacySmsInboxRow,
+  parseTestRedirect,
+  quoContactMetadata,
+  smsHistorySchemaMissing,
+  smsLineForNumber,
+  toSmsE164,
+} from "./_sms-history.js";
 
 export const config = { api: { bodyParser: false } }; // need the RAW body for HMAC verification
 
@@ -183,15 +194,209 @@ async function timedFetch(url, options, ms) {
   finally { clearTimeout(timer); }
 }
 async function insertInboxOnce(row, timeoutMs) {
-  const response = await timedFetch(`${SUPABASE_URL}/rest/v1/sps_inbox?on_conflict=id`, {
+  let response = await timedFetch(`${SUPABASE_URL}/rest/v1/sps_inbox?on_conflict=id`, {
     method: "POST",
     headers: { ...sbHeaders(), Prefer: "resolution=ignore-duplicates,return=representation" },
     body: JSON.stringify([row]),
   }, timeoutMs);
-  if (!response.ok) return { ok: false, response, text: await response.text().catch(() => "") };
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    // Keep inbound messaging live while the additive SQL waits for an operator to run it. Modern
+    // fields are omitted on the retry, but line metadata remains in ai and the attachment count
+    // remains in body_text. Once the migration is present every subsequent message is fully stored.
+    if (!smsHistorySchemaMissing(text)) return { ok: false, response, text };
+    response = await timedFetch(`${SUPABASE_URL}/rest/v1/sps_inbox?on_conflict=id`, {
+      method: "POST",
+      headers: { ...sbHeaders(), Prefer: "resolution=ignore-duplicates,return=representation" },
+      body: JSON.stringify([legacySmsInboxRow(row)]),
+    }, timeoutMs);
+    if (!response.ok) return { ok: false, response, text: await response.text().catch(() => "") };
+    const rows = await response.json().catch(() => []);
+    const inserted = Array.isArray(rows) && rows.length > 0;
+    return { ok: true, inserted, row: inserted ? rows[0] : null, legacySchema: true };
+  }
   const rows = await response.json().catch(() => []);
   const inserted = Array.isArray(rows) && rows.length > 0;
   return { ok: true, inserted, row: inserted ? rows[0] : null };
+}
+
+const acceptedQuoLines = () => [
+  { role: "automation", number: toSmsE164(QUO_NUMBER) },
+  { role: "main", number: toSmsE164(QUO_MAIN_NUMBER) },
+].filter((line, index, lines) => E164.test(line.number)
+  && lines.findIndex((candidate) => candidate.number === line.number) === index);
+
+async function copyWebhookMedia(media, messageId, remaining, folder = "messages") {
+  if (!Array.isArray(media) || !media.length || remaining(3500) < 250) return [];
+  return copyQuoMediaToPrivateStorage({
+    media,
+    messageId,
+    supabaseUrl: SUPABASE_URL,
+    serviceKey: SERVICE_KEY,
+    timeoutMs: Math.min(1200, Math.max(250, remaining(4300))),
+    maxItems: 4,
+    folder,
+  });
+}
+
+async function upsertContactMetadata(metadata, avatarPath, remaining) {
+  if (!metadata?.id || !Array.isArray(metadata.phones) || !metadata.phones.length) {
+    return { ok: true, skipped: "contact has no phone" };
+  }
+  const now = new Date().toISOString();
+  const rows = metadata.phones.map((phone) => ({
+    phone,
+    quo_contact_id: metadata.id,
+    contact_name: metadata.name || "",
+    avatar_path: avatarPath || "",
+    updated_at: now,
+  }));
+  const response = await timedFetch(`${SUPABASE_URL}/rest/v1/sps_sms_contacts?on_conflict=phone`, {
+    method: "POST",
+    headers: { ...sbHeaders(), Prefer: "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify(rows),
+  }, Math.min(1600, Math.max(250, remaining(600))));
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    if (/sps_sms_contacts|42P01|PGRST205|schema cache/i.test(text)) {
+      return { ok: true, skipped: "conversation schema not installed" };
+    }
+    return { ok: false, error: text.slice(0, 200) };
+  }
+  return { ok: true, updated: rows.length };
+}
+
+async function handleContactEvent(body, remaining) {
+  const eventType = String(body?.type || "");
+  const contact = body?.data?.object || {};
+  if (eventType === "contact.deleted") {
+    const contactId = cleanSmsValue(contact.id, 100);
+    if (!contactId) return { ok: true, skipped: "contact id missing" };
+    const response = await timedFetch(`${SUPABASE_URL}/rest/v1/sps_sms_contacts?quo_contact_id=eq.${encodeURIComponent(contactId)}`, {
+      method: "DELETE",
+      headers: { ...sbHeaders(), Prefer: "return=minimal" },
+    }, Math.min(1500, Math.max(200, remaining(1000))));
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      if (/sps_sms_contacts|42P01|PGRST205|schema cache/i.test(text)) return { ok: true, skipped: "conversation schema not installed" };
+      return { ok: false, error: text.slice(0, 200) };
+    }
+    return { ok: true, contactDeleted: true };
+  }
+
+  const metadata = quoContactMetadata(contact);
+  if (!metadata.id || !metadata.phones.length) return { ok: true, skipped: "contact has no phone" };
+  const avatar = metadata.pictureUrl
+    ? await copyWebhookMedia([{ url: metadata.pictureUrl, type: "image/jpeg" }], metadata.id, remaining, "contacts")
+    : [];
+  const saved = await upsertContactMetadata(metadata, avatar[0]?.path || "", remaining);
+  return {
+    ...saved,
+    contactUpdated: saved.ok && !saved.skipped,
+    phoneCount: metadata.phones.length,
+    avatarStored: !!avatar.length,
+  };
+}
+
+async function handleDeliveredMessage(body, remaining) {
+  const msg = body?.data?.object || {};
+  if (String(msg.direction || "").toLowerCase() !== "outgoing") {
+    return { ok: true, skipped: "delivered event was not outgoing" };
+  }
+  const quoLine = smsLineForNumber(msg.from, { automation: QUO_NUMBER, main: QUO_MAIN_NUMBER });
+  if (!quoLine) return { ok: true, skipped: "other business number" };
+  const recipients = Array.isArray(msg.to) ? msg.to : (msg.to ? [msg.to] : []);
+  const deliveredTo = toSmsE164(recipients[0]);
+  if (!E164.test(deliveredTo)) return { ok: true, skipped: "missing destination" };
+
+  const providerId = cleanSmsValue(msg.id, 100);
+  const eventId = cleanSmsValue(body.id, 100);
+  if (!providerId && !eventId) return { ok: true, skipped: "no id" };
+  const redirect = parseTestRedirect(msg.body ?? msg.text);
+  const peer = redirect?.intendedPeer || deliveredTo;
+  const bodyText = cleanSmsValue(redirect?.content ?? msg.body ?? msg.text, 3900);
+  const mediaCount = Array.isArray(msg.media) ? msg.media.length : 0;
+  const privateMedia = await copyWebhookMedia(msg.media, providerId || eventId, remaining);
+  const embeddedContact = quoContactMetadata(msg.contact);
+  const contactId = embeddedContact.id || cleanSmsValue(msg.contactId, 100);
+  const contactName = embeddedContact.name || cleanSmsValue(msg.contactName, 180);
+  const contactAvatar = embeddedContact.pictureUrl
+    ? await copyWebhookMedia([{ url: embeddedContact.pictureUrl, type: "image/jpeg" }], contactId || providerId || eventId, remaining, "contacts")
+    : [];
+  if (contactId) {
+    await upsertContactMetadata({
+      ...embeddedContact,
+      id: contactId,
+      name: contactName,
+      phones: embeddedContact.phones.length ? embeddedContact.phones : [peer],
+    }, contactAvatar[0]?.path || "", remaining).catch(() => {});
+  }
+  const mediaNote = mediaCount
+    ? `[${mediaCount} media attachment${mediaCount === 1 ? "" : "s"}${privateMedia.length < mediaCount ? "; secure copy pending" : ""}]`
+    : "";
+  const text = cleanSmsValue([bodyText, mediaNote].filter(Boolean).join(" "), 4000);
+  const id = `sms_out_${providerId || eventId}`;
+  const status = redirect ? "test_redirected" : cleanSmsValue(msg.status, 40) || "delivered";
+  const ai = {
+    quoLine,
+    smsDirection: "outgoing",
+    ...(redirect ? { testRedirected: true, intendedPeer: peer } : {}),
+  };
+  const row = {
+    id,
+    channel: "sms",
+    from_phone: peer,
+    from_name: fmtPhone(peer),
+    from_email: fmtPhone(peer),
+    subject: text.slice(0, 80) || "(text message)",
+    body_text: text,
+    body_html: "",
+    message_id: providerId || eventId,
+    kind: "other",
+    ai,
+    lead_id: "",
+    read: true,
+    replied: true,
+    sms_direction: "outgoing",
+    sms_line: quoLine,
+    sms_peer_phone: peer,
+    quo_message_id: providerId || null,
+    quo_conversation_id: redirect ? null : (cleanSmsValue(msg.conversationId, 120) || null),
+    quo_phone_number_id: cleanSmsValue(msg.phoneNumberId, 120) || null,
+    sms_status: status,
+    sms_media: privateMedia,
+    quo_contact_id: contactId || null,
+    sms_contact_name: contactName || null,
+    sms_contact_avatar_path: contactAvatar[0]?.path || null,
+    sms_provider_created_at: cleanSmsValue(msg.createdAt, 60) || null,
+  };
+  const claim = await insertInboxOnce(row, Math.min(2200, Math.max(300, remaining(900))));
+  if (!claim.ok) return { ok: false, error: String(claim.text || "outgoing history insert failed").slice(0, 200) };
+
+  // api/send-sms.js normally creates this row as soon as Quo accepts it. A delivered webhook then
+  // enriches that exact id with provider thread/status/media data rather than creating a duplicate.
+  if (!claim.inserted && !claim.legacySchema) {
+    const patch = await timedFetch(`${SUPABASE_URL}/rest/v1/sps_inbox?id=eq.${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { ...sbHeaders(), Prefer: "return=minimal" },
+      body: JSON.stringify({
+        sms_status: status,
+        ...(row.quo_conversation_id ? { quo_conversation_id: row.quo_conversation_id } : {}),
+        ...(row.quo_phone_number_id ? { quo_phone_number_id: row.quo_phone_number_id } : {}),
+        ...(row.sms_provider_created_at ? { sms_provider_created_at: row.sms_provider_created_at } : {}),
+        ...(privateMedia.length ? { sms_media: privateMedia } : {}),
+      }),
+    }, Math.min(1000, Math.max(200, remaining(300))));
+    if (!patch.ok) return { ok: false, error: (await patch.text().catch(() => "outgoing history update failed")).slice(0, 200) };
+  }
+  return {
+    ok: true,
+    stored: true,
+    duplicate: !claim.inserted,
+    legacySchema: !!claim.legacySchema,
+    line: quoLine,
+    mediaStored: privateMedia.length,
+  };
 }
 
 // Push delivery shares the existing inbox row so a successful durable insert can never make a
@@ -361,6 +566,14 @@ export default async function handler(req, res) {
   const remaining = (reserve = 0) => Math.max(0, deadline - Date.now() - reserve);
   const out = { ok: true };
   try {
+    if (body.type === "contact.updated" || body.type === "contact.deleted") {
+      const result = await handleContactEvent(body, remaining);
+      return res.status(result.ok ? 200 : 502).json(result);
+    }
+    if (body.type === "message.delivered") {
+      const result = await handleDeliveredMessage(body, remaining);
+      return res.status(result.ok ? 200 : 502).json(result);
+    }
     if (body.type !== "message.received") return res.status(200).json({ ok: true, skipped: body.type || "missing event type" });
     const msg = (body.data && body.data.object) || {};
     // Fail SAFE: only ingest explicitly-incoming texts. Our OWN outbound sends ride this same
@@ -370,10 +583,7 @@ export default async function handler(req, res) {
     // lines and preserve which one received the text so replies use the same conversation line.
     const recipients = Array.isArray(msg.to) ? msg.to : (msg.to ? [msg.to] : []);
     if (!recipients.length) return res.status(200).json({ ok: true, skipped: "missing destination" });
-    const acceptedLines = [
-      { role: "automation", number: toE164(QUO_NUMBER) },
-      { role: "main", number: toE164(QUO_MAIN_NUMBER) },
-    ].filter((line, index, lines) => E164.test(line.number) && lines.findIndex((candidate) => candidate.number === line.number) === index);
+    const acceptedLines = acceptedQuoLines();
     const matchedLine = acceptedLines.find((line) => recipients.some((recipient) => toE164(recipient) === line.number));
     if (!matchedLine) return res.status(200).json({ ok: true, skipped: "other business number" });
     const quoLine = matchedLine.role;
@@ -381,14 +591,42 @@ export default async function handler(req, res) {
     if (!eventId) return res.status(200).json({ ok: true, skipped: "no id" });
     const id = `sms_${eventId}`;
 
-    const fromPhone = clean(msg.from, 25);
+    const fromPhone = toSmsE164(msg.from);
     const mediaCount = Array.isArray(msg.media) ? msg.media.length : 0;
     const bodyText = clean(msg.body ?? msg.text, 3900);
-    // Record that media arrived without persisting Quo's provider-hosted URLs. The private-media
-    // rollout can import the bytes later; until then staff still see that a customer attached files.
-    const mediaNote = mediaCount ? `[${mediaCount} media attachment${mediaCount === 1 ? "" : "s"}]` : "";
+
+    // A Test Mode redirect can land on the other server-owned Quo line and arrive back as an
+    // inbound webhook from our own automation number. api/send-sms.js has already stored the true
+    // outgoing conversation under the intended client, so this second event is an internal echo.
+    const redirectEcho = parseTestRedirect(bodyText);
+    const fromOwnLine = !!smsLineForNumber(fromPhone, { automation: QUO_NUMBER, main: QUO_MAIN_NUMBER });
+    if (redirectEcho && fromOwnLine) {
+      return res.status(200).json({ ok: true, skipped: "test redirect echo", line: quoLine });
+    }
+
+    const providerId = cleanSmsValue(msg.id, 100);
+    const privateMedia = await copyWebhookMedia(msg.media, providerId || eventId, remaining);
+    const embeddedContact = quoContactMetadata(msg.contact);
+    const embeddedContactId = embeddedContact.id || cleanSmsValue(msg.contactId, 100);
+    const embeddedContactName = embeddedContact.name || cleanSmsValue(msg.contactName, 180);
+    const embeddedContactAvatar = embeddedContact.pictureUrl
+      ? await copyWebhookMedia([{ url: embeddedContact.pictureUrl, type: "image/jpeg" }], embeddedContactId || providerId || eventId, remaining, "contacts")
+      : [];
+    if (embeddedContactId) {
+      await upsertContactMetadata({
+        ...embeddedContact,
+        id: embeddedContactId,
+        name: embeddedContactName,
+        phones: embeddedContact.phones.length ? embeddedContact.phones : [fromPhone],
+      }, embeddedContactAvatar[0]?.path || "", remaining).catch(() => {});
+    }
+    // Provider URLs never enter the row. If a bounded private copy was unavailable, retain an
+    // honest note so staff know the original message included an attachment.
+    const mediaNote = mediaCount
+      ? `[${mediaCount} media attachment${mediaCount === 1 ? "" : "s"}${privateMedia.length < mediaCount ? "; secure copy pending" : ""}]`
+      : "";
     const text = clean([bodyText, mediaNote].filter(Boolean).join(" "), 4000);
-    if (!fromPhone) return res.status(200).json({ ok: true, skipped: "no from" });
+    if (!E164.test(fromPhone)) return res.status(200).json({ ok: true, skipped: "no from" });
 
     // Existing client? Keep this lookup bounded so a slow shared-state read cannot make Quo retry
     // a message that was actually stored. On timeout we store it unlinked for a human to review.
@@ -419,7 +657,19 @@ export default async function handler(req, res) {
       from_name: client ? client.name : fmtPhone(fromPhone),
       from_email: fmtPhone(fromPhone), // display fallback for the inbox row
       subject: text.slice(0, 80) || "(text message)",
-      body_text: text, body_html: "", message_id: eventId, kind, ai, lead_id: "", read: false, replied: false,
+      body_text: text, body_html: "", message_id: providerId || eventId, kind, ai, lead_id: "", read: false, replied: false,
+      sms_direction: "incoming",
+      sms_line: quoLine,
+      sms_peer_phone: fromPhone,
+      quo_message_id: providerId || null,
+      quo_conversation_id: cleanSmsValue(msg.conversationId, 120) || null,
+      quo_phone_number_id: cleanSmsValue(msg.phoneNumberId, 120) || null,
+      sms_status: cleanSmsValue(msg.status, 40) || "received",
+      sms_media: privateMedia,
+      quo_contact_id: embeddedContactId || null,
+      sms_contact_name: client ? cleanSmsValue(client.name, 180) : (embeddedContactName || null),
+      sms_contact_avatar_path: embeddedContactAvatar[0]?.path || null,
+      sms_provider_created_at: cleanSmsValue(msg.createdAt, 60) || null,
     };
     // Atomic inbox claim: `return=representation` tells us whether THIS invocation inserted the
     // row. A duplicate is acknowledged only after its delivery ledger is complete; otherwise it
@@ -498,7 +748,7 @@ export default async function handler(req, res) {
       out.duplicate = true;
       out.notificationRetry = true;
     }
-    out.stored = true; out.kind = kind; out.line = quoLine;
+    out.stored = true; out.kind = kind; out.line = quoLine; out.mediaStored = privateMedia.length; out.legacySchema = !!claim.legacySchema;
 
     // Notification delivery is deliberately AFTER the durable inbox claim and BEFORE optional AI.
     // Every inbound text now attempts an owner alert, including unknown numbers, ambiguous client

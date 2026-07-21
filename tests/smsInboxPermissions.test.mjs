@@ -227,3 +227,47 @@ test("delegates can update non-destructive state, while destructive inbox manage
   assert.deepEqual(ownerRes.body.deletedIds, ["sms-main"]);
   assert.deepEqual(ownerCalls.mutationMethods, ["DELETE"]);
 });
+
+test("private MMS is signed lazily only after exact line authorization", async (t) => {
+  const mediaRow = {
+    id: "sms-main-media",
+    channel: "sms",
+    ai: { quoLine: "main" },
+    sms_line: "main",
+    sms_media: [{ bucket: "sms-media", path: "messages/AC-1/1.jpg", mimeType: "image/jpeg", size: 10 }],
+    sms_contact_avatar_path: "",
+  };
+
+  const run = async (team) => {
+    let signCalls = 0;
+    globalThis.fetch = async (url) => {
+      const target = String(url);
+      if (target.endsWith("/auth/v1/user")) return response({ id: "auth-user-1", email: "tech@example.test" });
+      if (target.includes("/rest/v1/app_state?") && target.includes("key=eq.sps_team")) {
+        return response([{ value: JSON.stringify(team) }]);
+      }
+      if (target.includes("/rest/v1/sps_inbox?") && target.includes("sms_contact_avatar_path")) return response([mediaRow]);
+      if (target.includes("/storage/v1/object/sign/sms-media/")) {
+        signCalls += 1;
+        return response({ signedURL: "/object/sign/sms-media/private-token" });
+      }
+      throw new Error(`Unexpected fetch: ${target}`);
+    };
+    const res = makeRes();
+    await smsInboxHandler(request("GET", { query: { mediaFor: mediaRow.id } }), res);
+    return { res, signCalls };
+  };
+
+  await t.test("owner", async () => {
+    const { res, signCalls } = await run([ownerStaff()]);
+    assert.equal(res.statusCode, 200);
+    assert.equal(signCalls, 1);
+    assert.equal(res.body.media.sms_media[0].url, "https://supabase.test/storage/v1/object/sign/sms-media/private-token");
+  });
+
+  await t.test("automation-only delegate", async () => {
+    const { res, signCalls } = await run([inboxStaff()]);
+    assert.equal(res.statusCode, 403);
+    assert.equal(signCalls, 0);
+  });
+});
