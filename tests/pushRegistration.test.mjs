@@ -33,8 +33,8 @@ test("Xcode target explicitly enables the Push Notifications capability", async 
   assert.match(entitlements, /<key>aps-environment<\/key>/);
 });
 
-test("iOS release metadata is version 1.2.1 build 29 for the app and widgets", async () => {
+test("iOS release metadata is version 1.2.1 build 30 for the app and widgets", async () => {
   const project = await read("ios/App/App.xcodeproj/project.pbxproj");
   assert.equal((project.match(/MARKETING_VERSION = 1\.2\.1;/g) || []).length, 4);
-  assert.equal((project.match(/CURRENT_PROJECT_VERSION = 29;/g) || []).length, 4);
+  assert.equal((project.match(/CURRENT_PROJECT_VERSION = 30;/g) || []).length, 4);
 });
