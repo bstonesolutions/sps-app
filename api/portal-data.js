@@ -6,14 +6,12 @@ import {
   lc,
   readAppStateKeys,
   requirePortalClient,
-  resolvePortalClient,
   setPortalCors,
   signPortalMedia,
 } from "./_portal-auth.js";
 import { estimateTotals, formatEstimateMoney } from "../estimateMath.js";
 
 const KEYS = [
-  "sps_clients",
   "sps_invoices",
   "sps_schedule",
   "sps_estimates",
@@ -287,14 +285,12 @@ export default async function handler(req, res) {
 
   try {
     const state = await readAppStateKeys(KEYS);
-    // Re-resolve from the same snapshot used for the response so a removed/reassigned client
-    // cannot receive stale data between the initial auth lookup and this read.
-    const clients = Array.isArray(state.sps_clients) ? state.sps_clients : [];
-    const resolved = resolvePortalClient(clients, portal.user);
-    if (["duplicate_binding", "duplicate_email", "duplicate_client_id"].includes(resolved.reason)) {
-      return res.status(409).json({ error: "This sign-in matches more than one client record. Ask the office to link the correct portal account." });
-    }
-    const client = resolved.client;
+    // requirePortalClient already resolved exactly one client from this request's authoritative
+    // clients snapshot and fails closed on duplicate ids, auth bindings, or verified emails. Reuse
+    // that same snapshot for every ownership comparison below instead of downloading sps_clients a
+    // second time. This keeps the response internally consistent without broadening portal access.
+    const clients = Array.isArray(portal.clients) ? portal.clients : [];
+    const client = portal.client;
     if (!client || !["string", "number"].includes(typeof client.id) || String(client.id).trim() === "") return res.status(200).json({ client: null });
 
     const invoices = (Array.isArray(state.sps_invoices) ? state.sps_invoices : [])

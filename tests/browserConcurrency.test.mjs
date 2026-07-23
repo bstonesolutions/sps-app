@@ -86,6 +86,10 @@ function installDatabase(initialRows, options = {}) {
     if (name === "sps_app_state_cas") {
       casCalls += 1;
       if (options.beforeCas) await options.beforeCas({ call: casCalls, args, rows });
+      const casError = typeof options.casError === "function"
+        ? options.casError({ call: casCalls, args, rows })
+        : options.casError;
+      if (casError) return { data: null, error: casError };
       const current = rows.get(args.p_key);
       const expected = current ? current.version : 0;
       if (Number(args.p_expected_version) !== expected) {
@@ -295,7 +299,38 @@ test("failed targeted refresh leaves the confirmed schedule cache untouched", as
   assert.equal(result.error, readError);
   assert.deepEqual(JSON.parse(cached.value), base);
   assert.equal(cached.version, 7);
-  assert.equal(db.readCalls, 3);
+  assert.equal(db.readCalls, 1);
+});
+
+test("a transient CAS failure keeps the optimistic write durable and defers immediate queue drains", async () => {
+  const uid = "browser-transient-backoff";
+  const key = "sps_clients";
+  const base = [{ id: "c1", note: "saved" }];
+  const local = [{ id: "c1", note: "still queued" }];
+  const db = installDatabase(
+    { [key]: { value: json(base), version: 1, updated_at: null } },
+    { casError: { status: 522, message: "Gateway connection timed out (522)" } }
+  );
+  await loadAs(uid, key);
+
+  const result = await store.set(key, json(local), { baseValue: json(base) });
+  assert.equal(result.ok, false);
+  assert.equal(result.transient, true);
+  assert.ok(result.retryAt > Date.now());
+  assert.equal(db.casCalls, 1, "transient writes must not be replayed immediately");
+  assert.deepEqual(JSON.parse((await store.get(key)).value), local);
+
+  const durable = JSON.parse(localStorage.getItem(`sps_pending_writes:${uid}`));
+  assert.equal(durable[key].localValue, json(local));
+  assert.equal(durable[key].status, "pending");
+  assert.equal(durable[key].retryCount, 1);
+  assert.ok(durable[key].retryAt > Date.now());
+
+  const drain = await store.flush();
+  assert.equal(drain.deferred, true);
+  assert.equal(drain.retryAt, durable[key].retryAt);
+  assert.equal(db.casCalls, 1, "a 20-second safety drain must honor the durable cooldown");
+  assert.deepEqual(JSON.parse((await store.get(key)).value), local);
 });
 
 test("a refresh started by a prior signed-in identity cannot land after an account switch", async () => {

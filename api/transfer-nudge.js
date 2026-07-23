@@ -571,10 +571,35 @@ export default async function handler(req, res) {
   }
   if (!SERVICE_KEY) return res.status(501).json({ error: "Server missing SUPABASE_SERVICE_ROLE_KEY" });
 
-  const [cfgAll, branding, email] = await Promise.all([
-    sbGet("sps_schedule_cfg", {}), sbGet("sps_branding", {}), sbGet("sps_email", {}),
-  ]);
+  const test = q.test === "1", preview = q.preview === "1";
+  if (test || preview) {
+    const u = await requireOwner(req, res, "the money plan"); if (!u) return;
+  } else {
+    const cronOk = !!CRON_SECRET && req.headers.authorization === `Bearer ${CRON_SECRET}`;
+    if (!cronOk) return res.status(401).json({ error: "unauthorized", hint: "cron runs require CRON_SECRET; use ?test=1 signed in as the owner" });
+  }
+
+  // Read the small schedule row first. Most hourly invocations are off, before the send hour, or on
+  // the wrong day; those runs should not download branding/email or begin the heavier bank plan.
+  const cfgAll = await sbGet("sps_schedule_cfg", {});
   const cfg = cfgAll.transferNudge || {};
+  let et = null;
+  if (!test && !preview) {
+    if (!cfg.on) return res.status(200).json({ ok: true, skipped: "nudge is off" });
+    et = etNow();
+    const sendHour = Number.isFinite(+cfg.hour) ? Math.min(23, Math.max(0, Math.round(+cfg.hour))) : 8;
+    if (et.hour < sendHour) return res.status(200).json({ ok: true, note: `before send hour (ET ${et.hour}:00 < ${sendHour}:00)` });
+    const lastDom = new Date(Date.UTC(et.y, et.m, 0)).getUTCDate();
+    const due = cfg.freq === "monthly"
+      ? et.day === Math.min(Math.max(1, Math.round(+cfg.monthDay) || 1), lastDom)
+      : et.weekday === (Number.isFinite(+cfg.weekday) ? Math.min(6, Math.max(0, Math.round(+cfg.weekday))) : 5);
+    if (!due) return res.status(200).json({ ok: true, note: "not the scheduled day" });
+  }
+
+  const [branding, email] = await Promise.all([
+    sbGet("sps_branding", {}),
+    sbGet("sps_email", {}),
+  ]);
   // Wired to the SAME sending settings the working sends already use — zero extra setup:
   //   texts  → the Owner-Alerts contact (email.notify.ownerPhone — where visit/alert texts to the
   //            owner go), then the Test-Mode redirect phone.
@@ -586,9 +611,7 @@ export default async function handler(req, res) {
   const toPhone = cfg.toPhone || notify.ownerPhone || tmode.phone || "";
   const toEmail = cfg.toEmail || (cfgAll.ownerDigest && cfgAll.ownerDigest.to) || notify.ownerEmail || email.ownerEmail || branding.companyEmail || "";
 
-  const test = q.test === "1", preview = q.preview === "1";
   if (test || preview) {
-    const u = await requireOwner(req, res, "the money plan"); if (!u) return;
     const plan = await buildPlan();
     const message = planMessage(plan, branding);
     if (preview) return res.status(200).json({ ok: true, plan, message });
@@ -604,19 +627,6 @@ export default async function handler(req, res) {
   }
 
   // ── real (cron) run ──
-  const cronOk = !!CRON_SECRET && req.headers.authorization === `Bearer ${CRON_SECRET}`;
-  if (!cronOk) return res.status(401).json({ error: "unauthorized", hint: "cron runs require CRON_SECRET; use ?test=1 signed in as the owner" });
-  if (!cfg.on) return res.status(200).json({ ok: true, skipped: "nudge is off" });
-
-  const et = etNow();
-  const sendHour = Number.isFinite(+cfg.hour) ? Math.min(23, Math.max(0, Math.round(+cfg.hour))) : 8;
-  if (et.hour < sendHour) return res.status(200).json({ ok: true, note: `before send hour (ET ${et.hour}:00 < ${sendHour}:00)` });
-  const lastDom = new Date(Date.UTC(et.y, et.m, 0)).getUTCDate();
-  const due = cfg.freq === "monthly"
-    ? et.day === Math.min(Math.max(1, Math.round(+cfg.monthDay) || 1), lastDom)
-    : et.weekday === (Number.isFinite(+cfg.weekday) ? Math.min(6, Math.max(0, Math.round(+cfg.weekday))) : 5);
-  if (!due) return res.status(200).json({ ok: true, note: "not the scheduled day" });
-
   const plan = await buildPlan();
   const message = planMessage(plan, branding);
   const signature = planSignature(plan, branding);

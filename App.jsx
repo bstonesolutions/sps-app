@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useContext, createContext, useMemo, Component } from "react";
+import { useState, useRef, useEffect, useContext, createContext, useMemo, useCallback, Component } from "react";
 import { createPortal } from "react-dom";
 import { store, supabase } from "./supabaseClient";
 import { PROD_URL } from "./config";
@@ -19,6 +19,8 @@ import { resolveStaffDeepLink } from "./staffDeepLinks";
 import { arrivalDeliveryKey, runArrivalDeliveryOnce } from "./arrivalDelivery";
 
 import { inboxRowMessageIds, mergeInboxConversationRows } from "./smsConversations";
+import { shouldWriteLiveLocation } from "./liveLocationThrottle";
+
 // True only on a genuine fresh launch of the app shell (hard close / first open).
 // sessionStorage is wiped when the PWA is killed/swiped away, but survives reloads
 // and background→foreground resumes — so its absence marks a cold start.
@@ -4862,7 +4864,7 @@ function useStaffLocationTracking(opts) {
   useEffect(() => {
     if (typeof window === "undefined") return;
     let watchId = null;
-    let lastSent = 0;
+    let lastBroadcast = null;
     let activeId = null;
     let lastHere = null;
     // The signed-in user's Supabase auth uid. staff_locations RLS requires each row's auth_uid to
@@ -4882,39 +4884,16 @@ function useStaffLocationTracking(opts) {
 
     const start = (id) => {
       if (watchId != null || !navigator.geolocation || !id) return;
-      lastSent = 0;
+      lastBroadcast = null;
       try { localStorage.setItem(LIVE_LOCATION_ACTIVE_STAFF_KEY, String(id)); } catch (_) {}
       watchId = navigator.geolocation.watchPosition(
         (pos) => {
           const t = Date.now();
-          if (t - lastSent < 30000) return;   // never hammer GPS — at most once / 30s
-          lastSent = t;
-          const { latitude, longitude } = pos.coords;
-          const writeEpoch = _liveLocationWriteEpoch;
-          const writeLoc = async (uid) => {
-            try {
-              const { error } = await supabase.from("staff_locations").upsert(
-                { staff_id: String(id), lat: latitude, lng: longitude, updated_at: new Date().toISOString(), is_active: true, auth_uid: uid || null },
-                { onConflict: "staff_id" }
-              );
-              if (error) throw error;
-              const ready = optsRef.current || {};
-              if (typeof ready.onLocationReady === "function") ready.onLocationReady();
-            } catch (error) {
-              const current = optsRef.current || {};
-              if (typeof current.onLocationError === "function") {
-                current.onLocationError(0, error?.message || "Your live location couldn't reach SPS Way.");
-              }
-            }
-          };
-          if (authUid) queueLiveLocationWrite(writeEpoch, () => writeLoc(authUid));
-          else supabase.auth.getUser().then(({ data }) => {
-            authUid = (data && data.user && data.user.id) || null;
-            queueLiveLocationWrite(writeEpoch, () => writeLoc(authUid));
-          }, () => queueLiveLocationWrite(writeEpoch, () => writeLoc(null)));
+          const { latitude, longitude, accuracy } = pos.coords;
           // Geofence arrival prompt — fire once when the tech comes within GEOFENCE_MI of a not-yet-
           // arrived stop. Coordinates resolve async into coordRef (NEVER awaited inside this GPS
-          // callback), so a geocode/network failure can never disrupt the location broadcast.
+          // callback), so a geocode/network failure can never disrupt the location broadcast. This
+          // runs for EVERY GPS sample; database throttling below must never delay an arrival prompt.
           const go = optsRef.current || {};
           // Location sharing uses every stop in `stops` to define the day's broadcast window, but
           // arrival prompting is deliberately narrower: only the one selected candidate supplied in
@@ -4963,6 +4942,35 @@ function useStaffLocationTracking(opts) {
               }
             });
           }
+
+          const sample = { lat: latitude, lng: longitude, accuracy, status: "active", at: t };
+          if (!shouldWriteLiveLocation(lastBroadcast, sample, t)) return;
+          // Record the queued sample immediately so a slow database cannot let subsequent GPS
+          // callbacks enqueue duplicates. A stationary tech still refreshes the server lease every
+          // 90 seconds, while normal GPS jitter remains local.
+          lastBroadcast = sample;
+          const writeEpoch = _liveLocationWriteEpoch;
+          const writeLoc = async (uid) => {
+            try {
+              const { error } = await supabase.from("staff_locations").upsert(
+                { staff_id: String(id), lat: latitude, lng: longitude, updated_at: new Date().toISOString(), is_active: true, auth_uid: uid || null },
+                { onConflict: "staff_id" }
+              );
+              if (error) throw error;
+              const ready = optsRef.current || {};
+              if (typeof ready.onLocationReady === "function") ready.onLocationReady();
+            } catch (error) {
+              const current = optsRef.current || {};
+              if (typeof current.onLocationError === "function") {
+                current.onLocationError(0, error?.message || "Your live location couldn't reach SPS Way.");
+              }
+            }
+          };
+          if (authUid) queueLiveLocationWrite(writeEpoch, () => writeLoc(authUid));
+          else supabase.auth.getUser().then(({ data }) => {
+            authUid = (data && data.user && data.user.id) || null;
+            queueLiveLocationWrite(writeEpoch, () => writeLoc(authUid));
+          }, () => queueLiveLocationWrite(writeEpoch, () => writeLoc(null)));
         },
         (error) => {
           const go = optsRef.current || {};
@@ -23543,8 +23551,8 @@ function CopyLine({ icon, value, prominent = false }) {
 // Backed by the sps_messages table in Supabase.
 // ─────────────────────────────────────────────
 
-// Shared hook — loads messages for a given clientId, with real-time polling. Real client sessions
-// use the scoped portal API; staff continue using Supabase directly under staff-only RLS.
+// Shared hook — loads a bounded recent thread and refreshes from live/push invalidation. Real client
+// sessions use the scoped portal API; staff continue using Supabase directly under staff-only RLS.
 function useMessages(clientId, portalMode = false) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -23553,7 +23561,7 @@ function useMessages(clientId, portalMode = false) {
     if (!clientId) return;
     if (portalMode) {
       try {
-        const r = await fetch(`${PROD_URL}/api/portal-messages`, { headers: await authHeaders(), cache: "no-store" });
+        const r = await fetch(`${PROD_URL}/api/portal-messages?limit=200`, { headers: await authHeaders(), cache: "no-store" });
         const d = await r.json().catch(() => ({}));
         if (r.ok && Array.isArray(d.messages)) setMessages(d.messages);
       } finally { setLoading(false); }
@@ -23563,16 +23571,50 @@ function useMessages(clientId, portalMode = false) {
       .from("sps_messages")
       .select("*")
       .eq("client_id", String(clientId))
-      .order("created_at", { ascending: true });
-    if (!error && data) setMessages(data);
+      .order("created_at", { ascending: false })
+      .limit(300);
+    if (!error && data) setMessages([...data].reverse());
     setLoading(false);
   };
 
   useEffect(() => {
+    let channel = null;
+    let inFlight = false;
+    let queued = false;
+    const refreshWhenVisible = async () => {
+      if (document.hidden) return;
+      if (inFlight) { queued = true; return; }
+      inFlight = true;
+      try { await load(); }
+      finally {
+        inFlight = false;
+        if (queued) { queued = false; Promise.resolve().then(refreshWhenVisible); }
+      }
+    };
     setLoading(true);
     load();
-    const interval = setInterval(load, 8000); // poll every 8s
-    return () => clearInterval(interval);
+    // Staff can subscribe directly under staff-only RLS. Portal clients remain server-scoped and
+    // use push/foreground invalidation plus a slow visible-only fallback.
+    if (!portalMode) {
+      try {
+        channel = supabase.channel(`sps-messages-thread-${String(clientId)}`)
+          .on("postgres_changes", {
+            event: "*", schema: "public", table: "sps_messages",
+            filter: `client_id=eq.${String(clientId)}`,
+          }, refreshWhenVisible)
+          .subscribe();
+      } catch (_) {}
+    }
+    const interval = setInterval(refreshWhenVisible, 60000);
+    const onVisible = () => { if (!document.hidden) refreshWhenVisible(); };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("sps-push-received", refreshWhenVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("sps-push-received", refreshWhenVisible);
+      try { if (channel) supabase.removeChannel(channel); } catch (_) {}
+    };
   }, [clientId, portalMode]);
 
   const send = async (body, sender, senderName) => {
@@ -23639,12 +23681,18 @@ function MessagesScreen({ clients, currentUser, T }) {
   const [threadMap, setThreadMap] = useState({});
   const [threadsLoaded, setThreadsLoaded] = useState(false);
   useEffect(() => {
+    let channel = null;
+    let inFlight = false;
+    let queued = false;
     const load = async () => {
+      if (document.hidden || inFlight) return;
+      inFlight = true;
       try {
         const { data } = await supabase
           .from("sps_messages")
           .select("client_id, body, sender, created_at, read_at")
-          .order("created_at", { ascending: false });
+          .order("created_at", { ascending: false })
+          .limit(1000);
         const map = {};
         (data || []).forEach(m => {
           const cid = String(m.client_id);
@@ -23652,11 +23700,42 @@ function MessagesScreen({ clients, currentUser, T }) {
           if (m.sender === "client" && !m.read_at) map[cid].unread++;
         });
         setThreadMap(map);
-      } finally { setThreadsLoaded(true); }
+      } finally {
+        inFlight = false;
+        setThreadsLoaded(true);
+        if (queued) { queued = false; Promise.resolve().then(load); }
+      }
     };
-    load();
-    const interval = setInterval(load, 8000);
-    return () => clearInterval(interval);
+    const requestLoad = () => {
+      if (document.hidden) return;
+      if (inFlight) { queued = true; return; }
+      load();
+    };
+    // The initial load is intentional even if the tab mounted during a lifecycle transition.
+    // Subsequent refreshes pause while hidden and are driven by Realtime/push/foreground first.
+    const initialLoad = async () => {
+      if (document.hidden) {
+        setThreadsLoaded(true);
+        return;
+      }
+      await load();
+    };
+    initialLoad();
+    try {
+      channel = supabase.channel("sps-message-thread-list")
+        .on("postgres_changes", { event: "*", schema: "public", table: "sps_messages" }, requestLoad)
+        .subscribe();
+    } catch (_) {}
+    const interval = setInterval(requestLoad, 60000);
+    const onVisible = () => { if (!document.hidden) requestLoad(); };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("sps-push-received", requestLoad);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("sps-push-received", requestLoad);
+      try { if (channel) supabase.removeChannel(channel); } catch (_) {}
+    };
   }, []);
 
   // Two-pane (conversation list + open chat side-by-side) once the container is wide enough — adapts
@@ -25354,6 +25433,12 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   const [sentErr, setSentErr] = useState("");
   const [sentQ, setSentQ] = useState("");
   const [openSent, setOpenSent] = useState(null);           // expanded sent row id
+  // Inbox refreshes can come from the button, foreground timer, iOS resume, visibility changes,
+  // and a received push. Serialize them so those paths never race each other, and fence every
+  // async state update after unmount or an access/endpoint change.
+  const inboxMountedRef = useRef(false);
+  const inboxLoadRef = useRef({ promise: null, controller: null, requestId: 0 });
+  const emailDetailCacheRef = useRef(new Map());
   useEffect(() => {
     if (!smsOnly) return;
     setFolder("inbox");
@@ -25363,23 +25448,147 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     setComposeOpen(false);
     setImportOpen(false);
   }, [smsOnly]);
-  const load = async () => {
+  useEffect(() => {
+    inboxMountedRef.current = true;
+    return () => {
+      inboxMountedRef.current = false;
+      inboxLoadRef.current.requestId += 1;
+      try { inboxLoadRef.current.controller?.abort(); } catch (_) {}
+      inboxLoadRef.current.controller = null;
+      inboxLoadRef.current.promise = null;
+    };
+  }, []);
+  const load = useCallback((options = {}) => {
+    const background = options?.background === true;
+    const replace = options?.replace === true;
+    const state = inboxLoadRef.current;
+    if (!inboxMountedRef.current) return Promise.resolve({ ok: false, skipped: "unmounted" });
+    if (state.promise && !replace) {
+      // A manual tap while a quiet lifecycle refresh is running still gets honest activity UI,
+      // but reuses the same request rather than starting a second competing response.
+      if (!background) {
+        setRefreshing(true);
+        state.promise.finally(() => { if (inboxMountedRef.current) setRefreshing(false); });
+      }
+      return state.promise;
+    }
+    if (state.controller) {
+      try { state.controller.abort(); } catch (_) {}
+    }
+    const controller = new AbortController();
+    const requestId = state.requestId + 1;
+    state.requestId = requestId;
+    state.controller = controller;
     setErr("");
-    setRefreshing(true);
-    try {
-      const r = await fetch(`${inboxApiUrl}?limit=200`, { headers: await authHeaders() });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) { setErr(d.error || `Error ${r.status}`); setRows(prev => prev === null ? [] : prev); }
-      else {
+    if (!background) setRefreshing(true);
+    const requestIsCurrent = () => inboxMountedRef.current
+      && inboxLoadRef.current.requestId === requestId
+      && !controller.signal.aborted;
+    const promise = (async () => {
+      try {
+        const headers = await authHeaders();
+        if (!requestIsCurrent()) return { ok: false, skipped: "stale" };
+        // Owner email HTML can be hundreds of KB per row. Keep recurring list refreshes compact;
+        // the single opened email is hydrated below. The staff SMS endpoint is already metadata-
+        // only and deliberately keeps its existing query contract.
+        const listQuery = smsOnly ? "limit=200" : "limit=200&compact=1";
+        const r = await fetch(`${inboxApiUrl}?${listQuery}`, { headers, signal: controller.signal, cache: "no-store" });
+        const d = await r.json().catch(() => ({}));
+        if (!requestIsCurrent()) return { ok: false, skipped: "stale" };
+        if (!r.ok) {
+          setErr(d.error || `Error ${r.status}`);
+          setRows(prev => prev === null ? [] : prev);
+          return { ok: false, status: r.status };
+        }
         setInboxAccess(current => ({ ...current, ...(d.access || {}) }));
         setRows((d.rows || []).filter(row => !deletingIdsRef.current.has(String(row.id))));
+        return { ok: true };
+      } catch (error) {
+        if (!requestIsCurrent()) return { ok: false, skipped: "stale" };
+        setErr("Couldn't reach the server.");
+        setRows(prev => prev === null ? [] : prev);
+        return { ok: false, error: String(error?.message || error || "request failed") };
       }
-    } catch (_) { setErr("Couldn't reach the server."); setRows(prev => prev === null ? [] : prev); }
-    setRefreshing(false);
-  };
+    })();
+    state.promise = promise;
+    promise.finally(() => {
+      if (inboxLoadRef.current.promise === promise) {
+        inboxLoadRef.current.promise = null;
+        inboxLoadRef.current.controller = null;
+      }
+      if (!background && requestIsCurrent()) setRefreshing(false);
+    });
+    return promise;
+  }, [inboxApiUrl, smsOnly]);
   // Permission changes must immediately discard formerly visible line contents and re-read through
   // the server scope; never leave a revoked owner's conversation sitting in component state.
-  useEffect(() => { setRows(null); load(); }, [inboxApiUrl, smsOnly, perms?.commsTextInbox, perms?.commsMainLine]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setRows(null); load({ replace: true }); }, [load, smsOnly, perms?.commsTextInbox, perms?.commsMainLine]);
+  // Keep the visible Inbox live without burning requests while the app is backgrounded. Native iOS
+  // resume does not always emit a browser visibility event, so listen to both lifecycles. A push
+  // received while SPS Way is open refreshes immediately instead of waiting for the next interval.
+  useEffect(() => {
+    const quietRefresh = () => load({ background: true });
+    const refreshInboxWhenVisible = () => {
+      if (document.visibilityState === "visible") quietRefresh();
+    };
+    const refreshInboxAfterPush = () => quietRefresh();
+    const interval = window.setInterval(refreshInboxWhenVisible, 60000);
+    document.addEventListener("visibilitychange", refreshInboxWhenVisible);
+    window.addEventListener("sps-push-received", refreshInboxAfterPush);
+
+    let disposed = false;
+    let appStateHandle = null;
+    import("@capacitor/app")
+      .then(({ App }) => {
+        if (disposed || !App?.addListener) return null;
+        return App.addListener("appStateChange", (state) => {
+          if (state?.isActive) quietRefresh();
+        });
+      })
+      .then((handle) => {
+        if (!handle) return;
+        if (disposed) { try { handle.remove?.(); } catch (_) {} }
+        else appStateHandle = handle;
+      })
+      .catch(() => {});
+
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshInboxWhenVisible);
+      window.removeEventListener("sps-push-received", refreshInboxAfterPush);
+      try { appStateHandle?.remove?.(); } catch (_) {}
+    };
+  }, [load]);
+  // A compact owner-inbox refresh intentionally omits body_html. Load at most the one email being
+  // read and keep only a tiny in-memory cache so reopening it is instant without recreating the
+  // original repeated 200-row TOAST reads.
+  useEffect(() => {
+    const id = openRow?.channel !== "sms" && openRow?.id != null ? String(openRow.id) : "";
+    if (!id || smsOnly) return undefined;
+    const cache = emailDetailCacheRef.current;
+    if (cache.has(id)) {
+      const cached = cache.get(id);
+      if (cached) setOpenRow(current => current && String(current.id) === id ? { ...current, ...cached } : current);
+      return undefined;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch(
+          `${PROD_URL}/api/inbox?detail=${encodeURIComponent(id)}`,
+          { headers: await authHeaders(), cache: "no-store" },
+        );
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok || cancelled) return;
+        const detail = body?.row && typeof body.row === "object" ? body.row : null;
+        cache.set(id, detail);
+        while (cache.size > 6) cache.delete(cache.keys().next().value);
+        if (detail) setOpenRow(current => current && String(current.id) === id ? { ...current, ...detail } : current);
+      } catch (_) {}
+    })();
+    return () => { cancelled = true; };
+  }, [openRow?.id, openRow?.channel, smsOnly]);
   // MMS and contact photos stay private. The list request returns only counts/paths; fetch short-
   // lived signed URLs only for the conversation the employee actually opens. This avoids signing
   // hundreds of storage objects on every inbox refresh and rechecks exact line permission first.
@@ -25459,7 +25668,12 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     if (!openRow) return;
     const fresh = displayInboxRows.find(r => String(r.id) === String(openRow.id) || (openRow._smsConversationKey && r._smsConversationKey === openRow._smsConversationKey));
     if (!fresh) setOpenRow(null);
-    else if (fresh !== openRow) setOpenRow(fresh);
+    else if (fresh !== openRow) {
+      // Recurring compact email refreshes must not strip the one full body already hydrated for
+      // the active reading pane.
+      const detail = fresh.channel !== "sms" ? emailDetailCacheRef.current.get(String(fresh.id)) : null;
+      setOpenRow(detail ? { ...fresh, ...detail } : fresh);
+    }
   }, [rows, clients]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (openRow && !list.some(r => r.id === openRow.id)) setOpenRow(null);
@@ -32974,23 +33188,38 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
   // Poll for unread staff replies — shows dot on Messages tab
   const [portalUnread, setPortalUnread] = useState(0);
   useEffect(() => {
+    let inFlight = false;
     const load = async () => {
+      if (document.hidden || inFlight) return;
+      inFlight = true;
       if (!isStaffPreview) {
         try {
-          const r = await fetch(`${PROD_URL}/api/portal-messages`, { headers: await authHeaders(), cache: "no-store" });
+          const r = await fetch(`${PROD_URL}/api/portal-messages?summary=unread`, { headers: await authHeaders(), cache: "no-store" });
           const d = await r.json().catch(() => ({}));
-          const rows = r.ok && Array.isArray(d.messages) ? d.messages : [];
-          setPortalUnread(rows.filter(m => m.sender === "staff" && !m.read_at).length);
-        } catch (_) { setPortalUnread(0); }
+          if (r.ok) setPortalUnread(Math.max(0, Number(d.unread) || 0));
+        } catch (_) {
+        } finally { inFlight = false; }
         return;
       }
-      const { data } = await supabase.from("sps_messages").select("id")
-        .eq("client_id", client.id).eq("sender", "staff").is("read_at", null);
-      setPortalUnread(data ? data.length : 0);
+      try {
+        const { count, error } = await supabase.from("sps_messages")
+          .select("id", { count: "exact", head: true })
+          .eq("client_id", client.id).eq("sender", "staff").is("read_at", null);
+        if (!error) setPortalUnread(count || 0);
+      } finally { inFlight = false; }
     };
     load();
-    const iv = setInterval(load, 15000);
-    return () => clearInterval(iv);
+    const onVisible = () => { if (!document.hidden) load(); };
+    const iv = setInterval(load, 60000);
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    window.addEventListener("sps-push-received", load);
+    return () => {
+      clearInterval(iv);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+      window.removeEventListener("sps-push-received", load);
+    };
   }, [client.id, isStaffPreview]);
   const vp = useViewport();
   const portalKeyboardInset = useKeyboardInset();
@@ -33587,12 +33816,14 @@ export default function App({ authEmail = "", onSignOut }) {
     if (!hydrated || currentUser || !emailKey) { setPortalData(undefined); return; }
     let alive = true;
     let requestInFlight = false;
+    let disposed = false;
+    let appStateHandle = null;
     const load = async () => {
       if (requestInFlight) return;
       requestInFlight = true;
       const ticket = portalDataFenceRef.current.beginRequest();
       try {
-        const res = await fetch(`${PROD_URL}/api/portal-data`, { headers: await authHeaders() });
+        const res = await fetch(`${PROD_URL}/api/portal-data`, { headers: await authHeaders(), cache: "no-store" });
         const d = await res.json().catch(() => null);
         if (alive && portalDataFenceRef.current.canApply(ticket)) {
           setPortalData(prev => res.ok && d ? d : (prev && prev.client ? prev : null));
@@ -33607,9 +33838,35 @@ export default function App({ authEmail = "", onSignOut }) {
     };
     load();
     // Refresh the client's owned slice so a newly-created tracking token, arrival/completion,
-    // invoice, or estimate appears without a reload. The endpoint is allowlisted and no-store.
-    const interval = setInterval(load, 30000);
-    return () => { alive = false; clearInterval(interval); };
+    // invoice, or estimate appears without a reload. Foreground/push signals are the fast path;
+    // the two-minute visible-only interval is just a disconnected-socket safety fallback.
+    const refreshWhenVisible = () => { if (!document.hidden) load(); };
+    const interval = setInterval(refreshWhenVisible, 120000);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    window.addEventListener("focus", refreshWhenVisible);
+    window.addEventListener("sps-push-received", refreshWhenVisible);
+    import("@capacitor/app")
+      .then(({ App }) => {
+        if (disposed || !App?.addListener) return null;
+        return App.addListener("appStateChange", (state) => {
+          if (state?.isActive) refreshWhenVisible();
+        });
+      })
+      .then((handle) => {
+        if (!handle) return;
+        if (disposed) { try { handle.remove?.(); } catch (_) {} }
+        else appStateHandle = handle;
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+      disposed = true;
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      window.removeEventListener("focus", refreshWhenVisible);
+      window.removeEventListener("sps-push-received", refreshWhenVisible);
+      try { appStateHandle?.remove?.(); } catch (_) {}
+    };
   }, [hydrated, !!currentUser, emailKey]);
   // Keep the existing client-only effects (widgets, push registration, splash greeting, deep links)
   // pointed at the server-scoped portal identity. Never derive this from the shared clients array.
@@ -34650,6 +34907,7 @@ export default function App({ authEmail = "", onSignOut }) {
     const canReadMessages = !!(perms.isAdmin || perms.commsMessages);
     if (!canReadMessages) { setNavUnread(0); return undefined; }
     let inFlight = false;
+    let channel = null;
     const load = async () => {
       if (document.hidden || inFlight) return;
       inFlight = true;
@@ -34661,8 +34919,21 @@ export default function App({ authEmail = "", onSignOut }) {
     load();
     const onVisible = () => { if (!document.hidden) load(); };
     document.addEventListener("visibilitychange", onVisible);
-    const interval = setInterval(load, 15000);
-    return () => { clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
+    window.addEventListener("sps-push-received", load);
+    try {
+      channel = supabase.channel("sps-message-unread-live")
+        .on("postgres_changes", {
+          event: "*", schema: "public", table: "sps_messages", filter: "sender=eq.client",
+        }, load)
+        .subscribe();
+    } catch (_) {}
+    const interval = setInterval(load, 60000);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("sps-push-received", load);
+      try { if (channel) supabase.removeChannel(channel); } catch (_) {}
+    };
   }, [perms.isAdmin, perms.commsMessages]);
   useEffect(() => {
     const canReadExternalInbox = !!(perms.isAdmin || perms.commsTextInbox || perms.commsMainLine);
@@ -34685,14 +34956,16 @@ export default function App({ authEmail = "", onSignOut }) {
       if (Number.isFinite(count)) setInboxUnread(Math.max(0, count));
     };
     window.addEventListener("sps-inbox-unread", onLocalUpdate);
+    window.addEventListener("sps-push-received", load);
     const onVisible = () => { if (!document.hidden) load(); };
     document.addEventListener("visibilitychange", onVisible);
     load();
-    const interval = setInterval(load, 30000);
+    const interval = setInterval(load, 60000);
     return () => {
       alive = false;
       clearInterval(interval);
       window.removeEventListener("sps-inbox-unread", onLocalUpdate);
+      window.removeEventListener("sps-push-received", load);
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [perms.isAdmin, perms.commsTextInbox, perms.commsMainLine]);

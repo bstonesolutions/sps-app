@@ -10,6 +10,8 @@ import {
 } from "./_portal-auth.js";
 
 const MESSAGE_FIELDS = "id,client_id,sender,sender_name,body,created_at,read_at";
+const MESSAGE_HISTORY_LIMIT = 200;
+const UNREAD_SUMMARY_LIMIT = 100;
 const MARKER_RE = /\[\[(?:invcard|svccard|inv):|\[\[echo\]\]/i;
 
 const isRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value);
@@ -143,11 +145,35 @@ export default async function handler(req, res) {
 
   try {
     if (req.method === "GET") {
+      if (String((req.query && req.query.summary) || "").trim().toLowerCase() === "unread") {
+        // The portal navigation only needs a badge count. Keep this query on the small indexed
+        // identity/read fields instead of repeatedly downloading message bodies and sender metadata.
+        // The UI renders a capped badge, so reading beyond the cap would add database work with no
+        // reader-visible benefit.
+        const query = [
+          "select=id",
+          `client_id=eq.${encodeURIComponent(clientId)}`,
+          "sender=eq.staff",
+          "read_at=is.null",
+          `limit=${UNREAD_SUMMARY_LIMIT}`,
+        ].join("&");
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/sps_messages?${query}`, {
+          headers: portalServiceHeaders(),
+        });
+        if (!r.ok) return res.status(502).json({ error: "Could not load the unread message count." });
+        const rows = await r.json().catch(() => null);
+        if (!Array.isArray(rows)) return res.status(502).json({ error: "The unread message count returned invalid data." });
+        return res.status(200).json({
+          unread: rows.length,
+          capped: rows.length >= UNREAD_SUMMARY_LIMIT,
+        });
+      }
+
       const query = [
         `select=${MESSAGE_FIELDS}`,
         `client_id=eq.${encodeURIComponent(clientId)}`,
         "order=created_at.desc",
-        "limit=1000",
+        `limit=${MESSAGE_HISTORY_LIMIT}`,
       ].join("&");
       const r = await fetch(`${SUPABASE_URL}/rest/v1/sps_messages?${query}`, {
         headers: portalServiceHeaders(),

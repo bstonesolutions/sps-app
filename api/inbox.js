@@ -5,6 +5,11 @@
 // at all — the shared supabase client gets nothing, and this endpoint is the only door.
 //
 //   GET  ?limit=100&kind=lead&unimported=1   → { ok, rows: [...] } (newest first)
+//   GET  ?compact=1&limit=100                 → { ok, rows: [...] } without body_html
+//        Keeps the inbox list lightweight while retaining body_text and every field needed to
+//        render/search email and SMS rows. The default list remains select=* for old app builds.
+//   GET  ?detail=<inbox-id>                   → { ok, row: {...} } including body_html
+//        Fetches the one full message only when its reading pane is opened.
 //   GET  ?summary=unread                    → { ok, unread, capped }
 //        Lightweight nav-badge summary. It selects IDs only so the recurring badge refresh never
 //        downloads large email bodies or HTML from Supabase.
@@ -34,6 +39,39 @@ const sbHeaders = () => ({ apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE
 const parseVal = (v) => { try { return typeof v === "string" ? JSON.parse(v) : v; } catch { return null; } };
 const INBOX_OPERATION_FIELD = "_spsInboxOperation";
 const INBOX_OPERATION_TTL_MS = 90_000;
+// Intentionally excludes only body_html, the largest TOAST-backed inbox field (up to 300 KB).
+// Keep this list explicit: PostgREST otherwise reads every column for every recurring list refresh.
+const INBOX_COMPACT_FIELDS = [
+  "id",
+  "from_name",
+  "from_email",
+  "subject",
+  "body_text",
+  "message_id",
+  "kind",
+  "ai",
+  "lead_id",
+  "read",
+  "replied",
+  "channel",
+  "from_phone",
+  "source_type",
+  "gmail_uid",
+  "original_message_id",
+  "created_at",
+  "sms_direction",
+  "sms_line",
+  "sms_peer_phone",
+  "quo_message_id",
+  "quo_conversation_id",
+  "quo_phone_number_id",
+  "sms_status",
+  "sms_media",
+  "quo_contact_id",
+  "sms_contact_name",
+  "sms_contact_avatar_path",
+  "sms_provider_created_at",
+].join(",");
 const newOperationId = (type) => `${type}_${Date.now()}_${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`;
 const operationMarker = (lead) => {
   const marker = lead && lead[INBOX_OPERATION_FIELD];
@@ -119,11 +157,27 @@ export default async function handler(req, res) {
         const unread = Array.isArray(rows) ? rows.length : 0;
         return res.status(200).json({ ok: true, unread, capped: unread >= 100 });
       }
+      if (q.detail != null) {
+        const detailId = String(Array.isArray(q.detail) ? q.detail[0] : q.detail).trim();
+        if (!detailId || detailId.length > 500) return res.status(400).json({ error: "Need a valid inbox message id." });
+        // A detail read is deliberately select=* so the opened message includes body_html and any
+        // future rendering fields. It is bounded to one owner-authorized row.
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?select=*&id=eq.${encodeURIComponent(detailId)}&limit=1`, { headers: sbHeaders() });
+        if (!r.ok) {
+          const t = await r.text().catch(() => "");
+          const hint = /relation .*sps_inbox|42P01/i.test(t) ? "The sps_inbox table hasn't been created yet — run the SQL in CLAUDE.md." : t.slice(0, 200);
+          return res.status(502).json({ error: hint });
+        }
+        const rows = (await r.json().catch(() => [])) || [];
+        return res.status(200).json({ ok: true, row: Array.isArray(rows) ? (rows[0] || null) : null });
+      }
       const limit = Math.min(200, Math.max(1, parseInt(q.limit, 10) || 100));
       let filter = `order=created_at.desc&limit=${limit}`;
       if (q.kind && /^[a-z]+$/.test(String(q.kind))) filter += `&kind=eq.${q.kind}`;
       if (q.unimported === "1") filter += `&lead_id=eq.`;
-      const r = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?select=*&${filter}`, { headers: sbHeaders() });
+      const compact = q.compact === "1" || q.compact === "true";
+      const select = compact ? INBOX_COMPACT_FIELDS : "*";
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/sps_inbox?select=${encodeURIComponent(select)}&${filter}`, { headers: sbHeaders() });
       if (!r.ok) {
         const t = await r.text().catch(() => "");
         const hint = /relation .*sps_inbox|42P01/i.test(t) ? "The sps_inbox table hasn't been created yet — run the SQL in CLAUDE.md." : t.slice(0, 200);

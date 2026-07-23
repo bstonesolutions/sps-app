@@ -244,9 +244,42 @@ export default async function handler(req, res) {
   if (!SERVICE_KEY) return res.status(501).json({ error: "server missing SUPABASE_SERVICE_ROLE_KEY", missingEnv: true });
 
   const now = Date.now();
-  // Expired tracking links are already unusable; prune their small bearer records during the
-  // existing hourly cron instead of letting them accumulate in app_state and every snapshot.
-  // Dry-run previews never mutate data, and cleanup failure never blocks text safety or sending.
+  // Read the two small safety/config rows first. The scheduler is commonly off for long stretches;
+  // exiting here prevents the hourly cron from downloading clients, schedule, invoices, branding,
+  // and both ledgers merely to discover there is no work to do.
+  let cfg;
+  let email;
+  try {
+    [cfg, email] = await Promise.all([
+      sbGet("sps_schedule_cfg", {}),
+      sbGetRequiredObject("sps_email"),
+    ]);
+  } catch (error) {
+    console.error("automation text safety lookup failed:", error && error.message ? error.message : error);
+    return res.status(503).json({ ok: false, error: "Text safety settings are temporarily unavailable. No automated messages were sent." });
+  }
+  if (!email.testMode || typeof email.testMode !== "object" || Array.isArray(email.testMode)) {
+    return res.status(503).json({ ok: false, error: "Text safety settings are temporarily unavailable. No automated messages were sent." });
+  }
+  const savedTestModeOn = email.testMode.on;
+  const savedTestModeOnText = typeof savedTestModeOn === "string" ? savedTestModeOn.trim().toLowerCase() : "";
+  if (savedTestModeOn !== true && savedTestModeOn !== false && savedTestModeOnText !== "true" && savedTestModeOnText !== "false") {
+    return res.status(503).json({ ok: false, error: "Text safety settings are temporarily unavailable. No automated messages were sent." });
+  }
+
+  if (!cfg.schedulerOn) {
+    return res.status(200).json({
+      ok: true,
+      ran: new Date(now).toISOString(),
+      master: false,
+      maintenance: { tracking: { ok: true, skipped: "scheduler off", deleted: 0 } },
+      note: "Automatic sending is off (master switch). Nothing sent.",
+    });
+  }
+
+  // Expired tracking links are already unusable; prune their small bearer records only during an
+  // active scheduler run. Dry-run previews never mutate data, and cleanup failure never blocks text
+  // safety or sending.
   let trackingMaintenance = { ok: true, skipped: "dry run", deleted: 0 };
   if (!dryRun) {
     try {
@@ -257,27 +290,22 @@ export default async function handler(req, res) {
       console.warn("tracking cleanup failed:", trackingMaintenance.error);
     }
   }
+
   let state;
   try {
     state = await Promise.all([
-      sbGet("sps_schedule_cfg", {}), sbGetRequiredObject("sps_email"), sbGet("sps_clients", []), sbGet("sps_schedule", []),
-      sbGet("sps_invoices", []), sbGet("sps_branding", {}), sbGet("sps_reminders", {}), sbGet("sps_auto_log", {}),
+      sbGet("sps_clients", []),
+      sbGet("sps_schedule", []),
+      sbGet("sps_invoices", []),
+      sbGet("sps_branding", {}),
+      sbGet("sps_reminders", {}),
+      sbGet("sps_auto_log", {}),
     ]);
   } catch (error) {
-    console.error("automation text safety lookup failed:", error && error.message ? error.message : error);
-    return res.status(503).json({ ok: false, error: "Text safety settings are temporarily unavailable. No automated messages were sent." });
+    console.error("automation state lookup failed:", error && error.message ? error.message : error);
+    return res.status(503).json({ ok: false, error: "Automation data is temporarily unavailable. No automated messages were sent." });
   }
-  const [cfg, email, clients, schedule, invoices, branding, reminderLog, autoLog] = state;
-  if (!email.testMode || typeof email.testMode !== "object" || Array.isArray(email.testMode)) {
-    return res.status(503).json({ ok: false, error: "Text safety settings are temporarily unavailable. No automated messages were sent." });
-  }
-  const savedTestModeOn = email.testMode.on;
-  const savedTestModeOnText = typeof savedTestModeOn === "string" ? savedTestModeOn.trim().toLowerCase() : "";
-  if (savedTestModeOn !== true && savedTestModeOn !== false && savedTestModeOnText !== "true" && savedTestModeOnText !== "false") {
-    return res.status(503).json({ ok: false, error: "Text safety settings are temporarily unavailable. No automated messages were sent." });
-  }
-
-  if (!cfg.schedulerOn) return res.status(200).json({ ok: true, ran: new Date(now).toISOString(), master: false, maintenance: { tracking: trackingMaintenance }, note: "Automatic sending is off (master switch). Nothing sent." });
+  const [clients, schedule, invoices, branding, reminderLog, autoLog] = state;
 
   cfg._company = (branding && branding.companyName) || "Stone Property Solutions";
   const clientsById = {}; (clients || []).forEach(c => { if (c && c.id != null) clientsById[String(c.id)] = c; });

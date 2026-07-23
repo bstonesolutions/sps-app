@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { idb } from "./idbStore.js";
 import { describeStateConflicts, mergeStoredState, normalizeStoredValue } from "./stateMerge.js";
+import { isTransientAppStateError, nextAppStateRetry } from "./appStateBackoff.js";
 
 const SUPABASE_URL = "https://ysqarusrewceezckawlo.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlzcWFydXNyZXdjZWV6Y2thd2xvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2MjkzODEsImV4cCI6MjA5NjIwNTM4MX0.GCX-Bt3sSoDaaF-XT2xeu4h6wR4tXO2hqOydQUkl_CQ";
@@ -31,10 +32,10 @@ let _snapshotPersistTail = Promise.resolve();
 let _lastErrorAt = 0;
 let _initSelectAt = 0;
 let _cacheReadyState = { ready: false, hasData: false };
+let _retryAfterAt = 0;
 const _cacheAt = {};
 const _chains = {};
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 const sameStored = (a, b) => a === b;
 const pendingIdbKey = (uid = _uid) => (uid ? `pending-v2:${uid}` : "");
@@ -44,6 +45,14 @@ const newOpId = () => `${Date.now().toString(36)}-${Math.random().toString(36).s
 
 function clearObject(obj) {
   for (const key of Object.keys(obj)) delete obj[key];
+}
+
+function recalculateRetryWindow() {
+  _retryAfterAt = Object.values(_pending).reduce((latest, envelope) => {
+    if (!envelope || envelope.status !== "pending") return latest;
+    return Math.max(latest, Math.max(0, Number(envelope.retryAt) || 0));
+  }, 0);
+  return _retryAfterAt;
 }
 
 function notify(type, msg) {
@@ -87,6 +96,8 @@ function normalizeEnvelope(raw) {
       baseVersion: Number(raw.baseVersion) || 0,
       status: raw.status === "conflict" ? "conflict" : "pending",
       conflicts: publicConflicts(raw.conflicts),
+      retryCount: Math.max(0, Number(raw.retryCount) || 0),
+      retryAt: Math.max(0, Number(raw.retryAt) || 0),
     };
   }
   // Previous builds stored only the desired whole value. Without its original base it cannot be
@@ -115,6 +126,7 @@ function mergePendingSources(source) {
     const current = _pending[key];
     if (!current || Number(incoming.updatedAt || 0) >= Number(current.updatedAt || 0)) _pending[key] = incoming;
   }
+  recalculateRetryWindow();
 }
 
 function loadPendingFallback() {
@@ -273,6 +285,7 @@ function resetForIdentity() {
   _ensureHydratePromise = null;
   _cacheReadyState = { ready: false, hasData: false };
   _initSelectAt = 0;
+  _retryAfterAt = 0;
   clearObject(_cacheAt);
   clearObject(_chains);
 }
@@ -288,7 +301,11 @@ async function refreshForAuthError(error) {
 
 async function readRemote(key, identityVersion = _identityVersion) {
   let lastError = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  // supabase-js already retries transient GET failures. Repeating the same read three more times
+  // here multiplied outage traffic, so the only client-level replay left is one post-refresh auth
+  // attempt. Infrastructure failures are returned to the caller and writes enter the durable
+  // exponential retry lane below.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
     const { data, error } = await supabase.from("app_state")
       .select("key, value, version, updated_at")
       .eq("key", key)
@@ -305,8 +322,9 @@ async function readRemote(key, identityVersion = _identityVersion) {
       };
     }
     lastError = error;
+    const authError = isAuthError(error);
     await refreshForAuthError(error);
-    if (attempt < 2) await sleep(300 * (attempt + 1));
+    if (!authError) break;
   }
   return { ok: false, error: lastError };
 }
@@ -315,7 +333,7 @@ async function readRemoteVersions(keys, identityVersion = _identityVersion) {
   const safeKeys = Array.from(new Set((keys || []).filter((key) => typeof key === "string" && key)));
   if (!safeKeys.length) return { ok: true, versions: new Map() };
   let lastError = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
     const { data, error } = await supabase.from("app_state")
       .select("key, version")
       .in("key", safeKeys);
@@ -327,8 +345,9 @@ async function readRemoteVersions(keys, identityVersion = _identityVersion) {
       };
     }
     lastError = error;
+    const authError = isAuthError(error);
     await refreshForAuthError(error);
-    if (attempt < 2) await sleep(300 * (attempt + 1));
+    if (!authError) break;
   }
   return { ok: false, error: lastError };
 }
@@ -339,7 +358,7 @@ function rpcRow(data) {
 
 async function compareAndSwap(key, expectedVersion, value, identityVersion = _identityVersion) {
   let lastError = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
     const { data, error } = await supabase.rpc("sps_app_state_cas", {
       p_key: key,
       p_expected_version: expectedVersion,
@@ -357,15 +376,16 @@ async function compareAndSwap(key, expectedVersion, value, identityVersion = _id
       };
     }
     lastError = error;
+    const authError = isAuthError(error);
     await refreshForAuthError(error);
-    if (attempt < 2) await sleep(350 * (attempt + 1));
+    if (!authError) break;
   }
   return { ok: false, error: lastError };
 }
 
 async function compareAndDelete(key, expectedVersion, identityVersion = _identityVersion) {
   let lastError = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
     const { data, error } = await supabase.rpc("sps_app_state_delete_cas", {
       p_key: key,
       p_expected_version: expectedVersion,
@@ -376,15 +396,16 @@ async function compareAndDelete(key, expectedVersion, identityVersion = _identit
       return { ok: true, applied: row.applied === true, outcome: row.outcome || "conflict", version: Number(row.current_version) || 0 };
     }
     lastError = error;
+    const authError = isAuthError(error);
     await refreshForAuthError(error);
-    if (attempt < 2) await sleep(350 * (attempt + 1));
+    if (!authError) break;
   }
   return { ok: false, error: lastError };
 }
 
 async function compareAndSwapBatch(operations, identityVersion = _identityVersion) {
   let lastError = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
     const { data, error } = await supabase.rpc("sps_app_state_batch_cas", {
       p_operations: operations.map((operation) => ({
         key: operation.key,
@@ -404,8 +425,9 @@ async function compareAndSwapBatch(operations, identityVersion = _identityVersio
       };
     }
     lastError = error;
+    const authError = isAuthError(error);
     await refreshForAuthError(error);
-    if (attempt < 2) await sleep(350 * (attempt + 1));
+    if (!authError) break;
   }
   return { ok: false, error: lastError };
 }
@@ -536,7 +558,11 @@ function stagePending(key, value, options = {}) {
       updatedAt: now,
     };
   }
+  // A fresh user edit is a new intent and gets one immediate commit attempt. It must not inherit
+  // an outage cooldown from the older value it replaced.
+  envelope = { ...envelope, retryCount: 0, retryAt: 0 };
   _pending[key] = envelope;
+  recalculateRetryWindow();
   if (envelope.status === "conflict" || envelope.status === "legacy") _conflicts[key] = envelope;
   else delete _conflicts[key];
   _cache[key] = localValue;
@@ -566,10 +592,13 @@ function stageDelete(key, options = {}) {
     force: !!options.force,
     status: "pending",
     conflicts: [],
+    retryCount: 0,
+    retryAt: 0,
     createdAt: (existing && existing.createdAt) || now,
     updatedAt: now,
   };
   _pending[key] = envelope;
+  recalculateRetryWindow();
   delete _conflicts[key];
   delete _cache[key];
   _cacheAt[key] = now;
@@ -579,8 +608,16 @@ function stageDelete(key, options = {}) {
 
 function setConflict(key, envelope, conflicts) {
   const safe = publicConflicts(conflicts);
-  const next = { ...envelope, status: "conflict", conflicts: safe, updatedAt: Date.now() };
+  const next = {
+    ...envelope,
+    status: "conflict",
+    conflicts: safe,
+    retryCount: 0,
+    retryAt: 0,
+    updatedAt: Date.now(),
+  };
   _pending[key] = next;
+  recalculateRetryWindow();
   _conflicts[key] = next;
   if (next.deleteIntent) {
     if (hasOwn(_confirmed, key)) _cache[key] = _confirmed[key];
@@ -638,6 +675,7 @@ async function finishApplied(key, envelope, value, version, identityVersion, opt
     delete _conflicts[key];
     _cache[key] = value;
   }
+  recalculateRetryWindow();
   await persistPending();
   if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
   saveSnapshot();
@@ -674,6 +712,7 @@ async function finishDeleted(key, envelope, identityVersion, options = {}) {
     delete _conflicts[key];
     delete _cache[key];
   }
+  recalculateRetryWindow();
   await persistPending();
   if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
   saveSnapshot();
@@ -767,11 +806,32 @@ async function commitKey(key, identityVersion = _identityVersion) {
   return commitFailure(key, envelope, new Error("Several people are saving this section at once. Retrying shortly."));
 }
 
-function queueFailure(key, error) {
+function queueFailure(key, error, envelope = null) {
+  const current = _pending[key];
+  const sameIntent = !!(current && (!envelope || current.opId === envelope.opId));
+  let retry = null;
+  if (sameIntent && current.status === "pending" && isTransientAppStateError(error)) {
+    retry = nextAppStateRetry(current.retryCount);
+    _pending[key] = {
+      ...current,
+      retryCount: retry.retryCount,
+      retryAt: retry.retryAt,
+    };
+  } else if (sameIntent && current.status === "pending" && (current.retryAt || current.retryCount)) {
+    // Do not let an expired infrastructure cooldown hide a different, non-transient problem.
+    _pending[key] = { ...current, retryCount: 0, retryAt: 0 };
+  }
+  recalculateRetryWindow();
   persistPending();
   try { console.error("store.set failed (kept for retry):", key, error && error.message); } catch (_) {}
   throttledError(`Save failed: ${(error && error.message) || "your changes aren't syncing — retrying."}`);
-  return { ok: false, error };
+  return {
+    ok: false,
+    error,
+    queued: sameIntent,
+    transient: !!retry,
+    retryAt: retry ? retry.retryAt : 0,
+  };
 }
 
 function commitFailure(key, envelope, error) {
@@ -784,7 +844,7 @@ function commitFailure(key, envelope, error) {
       [{ path: "$", kind: "destructive-operation-interrupted" }]
     );
   }
-  return queueFailure(key, error);
+  return queueFailure(key, error, envelope);
 }
 
 function enqueueCommit(key, identityVersion = _identityVersion) {
@@ -910,15 +970,36 @@ async function refreshChangedKeys(keys, options = {}, identityVersion = _identit
 }
 
 async function flush() {
-  if (_flushing || !Object.keys(_pending).some((key) => _pending[key] && _pending[key].status === "pending")) return;
+  if (_flushing) return { ok: false, busy: true };
+  const pendingKeys = Object.keys(_pending).filter((key) => _pending[key] && _pending[key].status === "pending");
+  if (!pendingKeys.length) {
+    _retryAfterAt = 0;
+    return { ok: true, empty: true };
+  }
+  recalculateRetryWindow();
+  const now = Date.now();
+  if (_retryAfterAt > now) {
+    return { ok: false, deferred: true, retryAt: _retryAfterAt };
+  }
   const identityVersion = _identityVersion;
   _flushing = true;
+  const results = [];
   try {
-    for (const key of Object.keys(_pending)) {
+    for (const key of pendingKeys) {
       if (identityVersion !== _identityVersion || !_uid) return;
       if (!_pending[key] || _pending[key].status !== "pending") continue;
-      await enqueueCommit(key, identityVersion);
+      const result = await enqueueCommit(key, identityVersion);
+      results.push({ key, result });
+      // A shared infrastructure failure is unlikely to be key-specific. Stop this drain after one
+      // failed request instead of hammering every large app_state row in the queue.
+      if (result && result.transient) break;
     }
+    return {
+      ok: results.every(({ result }) => result && result.ok),
+      deferred: results.some(({ result }) => result && result.transient),
+      retryAt: _retryAfterAt,
+      results,
+    };
   } finally {
     if (identityVersion === _identityVersion) _flushing = false;
   }
@@ -935,7 +1016,7 @@ async function resolveConflict(key, strategy, identityVersion = _identityVersion
     if (!current || current.opId !== envelope.opId) return { ok: false, superseded: true };
     const remote = await readRemote(key, identityVersion);
     if (remote.staleIdentity) return { ok: false, staleIdentity: true };
-    if (!remote.ok) return queueFailure(key, remote.error);
+    if (!remote.ok) return queueFailure(key, remote.error, envelope);
     if (!_pending[key] || _pending[key].opId !== envelope.opId) return { ok: false, superseded: true };
     adoptRemote(key, remote, false);
 
@@ -946,7 +1027,7 @@ async function resolveConflict(key, strategy, identityVersion = _identityVersion
       }
       const deleted = await compareAndDelete(key, remote.version, identityVersion);
       if (deleted.staleIdentity) return { ok: false, staleIdentity: true };
-      if (!deleted.ok) return queueFailure(key, deleted.error);
+      if (!deleted.ok) return queueFailure(key, deleted.error, envelope);
       if (deleted.applied) return finishDeleted(key, envelope, identityVersion);
       continue;
     }
@@ -976,10 +1057,10 @@ async function resolveConflict(key, strategy, identityVersion = _identityVersion
     }
     const result = await compareAndSwap(key, remote.exists ? remote.version : 0, candidate, identityVersion);
     if (result.staleIdentity) return { ok: false, staleIdentity: true };
-    if (!result.ok) return queueFailure(key, result.error);
+    if (!result.ok) return queueFailure(key, result.error, envelope);
     if (result.applied) return finishApplied(key, envelope, candidate, result.version, identityVersion);
   }
-  return queueFailure(key, new Error("The shared version changed again. Please choose once more."));
+  return queueFailure(key, new Error("The shared version changed again. Please choose once more."), envelope);
 }
 
 async function verifyBatchValues(operations, identityVersion) {
