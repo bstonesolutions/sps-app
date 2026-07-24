@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useContext, createContext, useMemo, useCallback, Component } from "react";
+import { useState, useRef, useEffect, useContext, createContext, useMemo, useCallback, Component, Fragment } from "react";
 import { createPortal } from "react-dom";
 import { store, supabase } from "./supabaseClient";
 import { PROD_URL } from "./config";
@@ -25421,6 +25421,61 @@ function InboxPressPreview({ title, subtitle, pinned = false, canPin = false, re
   );
 }
 
+// A phone text opens as a real destination, not a card floating over the inbox. The shell owns the
+// whole viewport (including the app's bottom navigation), keeps its header and composer fixed, and
+// leaves only the conversation history scrollable—matching the interaction model people expect
+// from Messages while retaining SPS-specific organization controls.
+function MobileSmsThread({ title, subtitle, avatar, lineLabel, categoryLabel, categoryTone, callHref, onBack, onOrganize, children, composer, status, T }) {
+  const threadRef = useRef(null);
+  const keyboardInset = useKeyboardInset();
+  useBackgroundScrollLock(threadRef);
+  useEffect(() => {
+    const onKey = (event) => { if (event.key === "Escape") onBack(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onBack]);
+  return createPortal(
+    <section role="dialog" aria-modal="true" aria-label={`Conversation with ${title}`} data-sps-mobile-sms-thread
+      style={{ position: "fixed", inset: 0, zIndex: 220, display: "flex", flexDirection: "column", minHeight: 0, background: T.surface, color: T.text, overflow: "hidden", overscrollBehavior: "none" }}>
+      <header style={{ flexShrink: 0, paddingTop: "env(safe-area-inset-top)", background: hexA(T.surface, 0.975), borderBottom: `1px solid ${hexA(T.border, 0.8)}`, backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)" }}>
+        <div style={{ minHeight: 64, padding: "5px max(8px, env(safe-area-inset-right)) 5px max(8px, env(safe-area-inset-left))", boxSizing: "border-box", display: "grid", gridTemplateColumns: "minmax(78px, 1fr) minmax(0, 1.35fr) minmax(78px, 1fr)", alignItems: "center", gap: 4 }}>
+          <button type="button" onClick={onBack} aria-label="Back to messages"
+            style={{ minHeight: 44, justifySelf: "start", padding: "0 5px 0 0", border: "none", background: "transparent", color: T.primary, display: "inline-flex", alignItems: "center", gap: 2, fontFamily: "inherit", fontSize: 14.5, fontWeight: 680, cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
+            <Icon name="back" size={21} /><span>Messages</span>
+          </button>
+          <button type="button" onClick={onOrganize} aria-label={`Open details for ${title}`}
+            style={{ minWidth: 0, minHeight: 54, padding: "2px 3px", border: "none", background: "transparent", color: T.text, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 1, fontFamily: "inherit", cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
+            {avatar}
+            <span style={{ maxWidth: "100%", display: "flex", alignItems: "center", gap: 2, fontSize: 11.5, lineHeight: 1.15, fontWeight: 760, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}<Icon name="chevronR" size={10} /></span>
+          </button>
+          <div style={{ justifySelf: "end", display: "flex", alignItems: "center", gap: 2 }}>
+            {callHref && <a href={callHref} aria-label={`Call ${title}`} title={`Call ${title}`}
+              style={{ width: 42, height: 42, borderRadius: 21, color: T.primary, textDecoration: "none", display: "grid", placeItems: "center" }}><Icon name="phone" size={19} /></a>}
+            <button type="button" onClick={onOrganize} aria-label="Organize conversation" title="Organize conversation"
+              style={{ width: 42, height: 42, borderRadius: 21, border: "none", background: "transparent", color: T.primary, display: "grid", placeItems: "center", cursor: "pointer" }}><Icon name="sliders" size={19} /></button>
+          </div>
+        </div>
+        <button type="button" onClick={onOrganize} aria-label={`Organize as ${categoryLabel}`}
+          style={{ width: "100%", minHeight: 32, padding: "4px max(14px, env(safe-area-inset-right)) 6px max(14px, env(safe-area-inset-left))", border: "none", borderTop: `1px solid ${hexA(T.border, 0.45)}`, background: "transparent", color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, fontFamily: "inherit", cursor: "pointer" }}>
+          <span style={{ maxWidth: "44%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10.5, fontWeight: 650 }}>{subtitle}</span>
+          <span aria-hidden="true" style={{ color: T.border }}>·</span>
+          <span style={{ fontSize: 10, fontWeight: 820, color: categoryTone || T.textMuted, background: hexA(categoryTone || T.textMuted, 0.1), borderRadius: 100, padding: "2px 7px", textTransform: "uppercase", letterSpacing: "0.045em" }}>{categoryLabel}</span>
+          <span aria-hidden="true" style={{ color: T.border }}>·</span>
+          <span style={{ fontSize: 10.5, fontWeight: 650 }}>{lineLabel}</span>
+        </button>
+      </header>
+      <div ref={threadRef} style={{ flex: "1 1 auto", minHeight: 0, overflow: "hidden", background: T.surfaceAlt }}>
+        {children}
+      </div>
+      <footer style={{ flexShrink: 0, padding: `7px max(10px, env(safe-area-inset-right)) ${keyboardInset > 0 ? `${keyboardInset + 7}px` : "max(9px, env(safe-area-inset-bottom))"} max(10px, env(safe-area-inset-left))`, borderTop: `1px solid ${hexA(T.border, 0.8)}`, background: hexA(T.surface, 0.985), boxShadow: "0 -5px 18px rgba(0,0,0,0.045)", transition: "padding-bottom 0.18s ease" }}>
+        {status}
+        {composer}
+      </footer>
+    </section>,
+    document.body
+  );
+}
+
 // Comms → Inbox. The owner gets private work email plus both business text lines through the
 // owner-only api/inbox route. Staff use the SMS-only route, where each line has an independent
 // visibility grant. The owner's ported line remains read-only for every non-owner.
@@ -25519,6 +25574,23 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
             quo_conversation_id: row.quo_conversation_id || "", ai: { ...(row.ai || {}), quoLine: sent.line || lineRoleForRow(row), clientId },
           };
           setRows(current => (current || []).some(item => String(item.id) === String(localId)) ? current : [localRow, ...(current || [])]);
+          // Quo has already accepted the send, so place it in the open conversation immediately.
+          // Waiting for the next inbox refresh made a successful reply appear to disappear.
+          setOpenRow(current => {
+            if (!current || (row._smsConversationKey && current._smsConversationKey !== row._smsConversationKey)) return current;
+            const messages = Array.isArray(current._smsMessages) ? current._smsMessages : [current];
+            if (messages.some(message => String(message.id) === String(localId))) return current;
+            return {
+              ...current,
+              body_text: `You: ${sentBody}`,
+              subject: `You: ${sentBody}`,
+              created_at: localRow.created_at,
+              read: true,
+              replied: true,
+              _smsMessages: [...messages, localRow],
+              _messageCount: Number(current._messageCount || messages.length) + 1,
+            };
+          });
           setReplyMsg(`Text accepted from ${sent.line === "main" ? "your number" : "the staff number"}.`);
           // Keep the composer open like a real text thread so another message does not require
           // reopening a one-off "Text back" action after every send.
@@ -26524,8 +26596,14 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       </span>
     );
   };
-  const SmsConversationBody = ({ row, maxHeight = "46vh" }) => {
+  const SmsConversationBody = ({ row, maxHeight = "46vh", fullScreen = false }) => {
     const messages = Array.isArray(row?._smsMessages) && row._smsMessages.length ? row._smsMessages : [row];
+    const directionOf = (message) => (message?.sms_direction || message?._smsDirection) === "outgoing" ? "outgoing" : "incoming";
+    const messageTime = (message) => {
+      const value = new Date(message?.created_at || "").getTime();
+      return Number.isFinite(value) ? value : 0;
+    };
+    const lastOutgoingIndex = messages.reduce((last, message, index) => directionOf(message) === "outgoing" ? index : last, -1);
     const threadRef = useRef(null);
     useEffect(() => {
       const timer = setTimeout(() => {
@@ -26539,47 +26617,73 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       return <a key={i} href={part} onClick={(event) => { event.preventDefault(); openExternalBrowser(part); }} style={{ color: "inherit", fontWeight: 760, textDecoration: "underline", textUnderlineOffset: 2 }}>{host}</a>;
     });
     return (
-      <div ref={threadRef} aria-label={`Conversation with ${senderLabel(row)}`} style={{ maxHeight, overflowY: "auto", WebkitOverflowScrolling: "touch", border: `1px solid ${T.border}`, borderRadius: 14, padding: "14px 12px", background: T.surfaceAlt, display: "flex", flexDirection: "column", gap: 10 }}>
+      <div ref={threadRef} aria-label={`Conversation with ${senderLabel(row)}`} data-sps-sms-thread-history
+        style={{ height: fullScreen ? "100%" : "auto", maxHeight: fullScreen ? "none" : maxHeight, boxSizing: "border-box", overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", border: fullScreen ? "none" : `1px solid ${T.border}`, borderRadius: fullScreen ? 0 : 14, padding: fullScreen ? "15px 12px 18px" : "14px 12px", scrollPaddingBottom: fullScreen ? 22 : 0, background: T.surfaceAlt, display: "flex", flexDirection: "column", gap: fullScreen ? 0 : 10 }}>
         {messages.map((message, index) => {
-          const outgoing = (message.sms_direction || message._smsDirection) === "outgoing";
+          const outgoing = directionOf(message) === "outgoing";
+          const previous = messages[index - 1];
+          const next = messages[index + 1];
+          const previousGap = previous ? Math.max(0, messageTime(message) - messageTime(previous)) : Infinity;
+          const nextGap = next ? Math.max(0, messageTime(next) - messageTime(message)) : Infinity;
+          const previousSame = !!previous && directionOf(previous) === directionOf(message) && previousGap < 5 * 60 * 1000;
+          const nextSame = !!next && directionOf(next) === directionOf(message) && nextGap < 5 * 60 * 1000;
+          const showTimestamp = fullScreen && (index === 0 || previousGap >= 15 * 60 * 1000);
           const media = Array.isArray(message.sms_media) ? message.sms_media : [];
           const visibleBody = smsVisibleBodyText(message.body_text, media.filter(item => !!smsMediaSource(item)).length);
+          const rawStatus = String(message.sms_status || "").toLowerCase();
+          const deliveryLabel = rawStatus === "delivered" ? "Delivered"
+            : rawStatus === "read" ? "Read"
+              : rawStatus === "failed" || rawStatus === "undelivered" ? "Not delivered"
+                : rawStatus === "queued" || rawStatus === "sending" ? "Sending…"
+                  : rawStatus && rawStatus !== "received" ? "Sent"
+                    : "";
+          const showDelivery = fullScreen && outgoing && index === lastOutgoingIndex && !!deliveryLabel;
+          const bubbleRadius = !fullScreen
+            ? (outgoing ? "19px 19px 5px 19px" : "19px 19px 19px 5px")
+            : outgoing
+              ? `19px ${previousSame ? 7 : 19}px ${nextSame ? 7 : 5}px 19px`
+              : `${previousSame ? 7 : 19}px 19px 19px ${nextSame ? 7 : 5}px`;
           return (
-            <div key={message.id || index} style={{ alignSelf: outgoing ? "flex-end" : "flex-start", maxWidth: "84%", display: "flex", flexDirection: "column", alignItems: outgoing ? "flex-end" : "flex-start", gap: 4 }}>
-              <div style={{ borderRadius: outgoing ? "17px 17px 4px 17px" : "17px 17px 17px 4px", padding: visibleBody ? "9px 12px" : 0, background: outgoing ? T.primary : T.surface, color: outgoing ? "#fff" : T.text, boxShadow: outgoing ? "none" : "0 1px 3px rgba(0,0,0,0.08)", fontSize: 13.5, lineHeight: 1.48, whiteSpace: "pre-wrap", wordBreak: "break-word", overflow: "hidden" }}>
-                {visibleBody ? linkify(visibleBody) : null}
-                {media.map((item, mediaIndex) => {
-                  const src = smsMediaSource(item);
-                  const kind = smsMediaKind(item);
-                  const label = smsMediaLabel(item, mediaIndex);
-                  const size = smsMediaSizeLabel(item);
-                  const radius = visibleBody ? 10 : 16;
-                  if (src && kind === "image") {
+            <Fragment key={message.id || index}>
+              {showTimestamp && <div style={{ alignSelf: "center", maxWidth: "90%", margin: index === 0 ? "0 0 8px" : "15px 0 8px", color: T.textMuted, fontSize: 10.5, fontWeight: 640, textAlign: "center" }}>{fmtWhen(message.created_at)}</div>}
+              <div style={{ alignSelf: outgoing ? "flex-end" : "flex-start", maxWidth: fullScreen ? "80%" : "84%", marginTop: fullScreen && !showTimestamp ? (previousSame ? 3 : 9) : 0, display: "flex", flexDirection: "column", alignItems: outgoing ? "flex-end" : "flex-start", gap: 4 }}>
+                <div style={{ borderRadius: bubbleRadius, padding: visibleBody ? (fullScreen ? "10px 13px" : "9px 12px") : 0, background: outgoing ? T.primary : T.surface, color: outgoing ? "#fff" : T.text, boxShadow: outgoing ? "none" : "0 1px 2px rgba(0,0,0,0.08)", fontSize: fullScreen ? 15 : 13.5, lineHeight: 1.42, whiteSpace: "pre-wrap", wordBreak: "break-word", overflow: "hidden" }}>
+                  {visibleBody ? linkify(visibleBody) : null}
+                  {media.map((item, mediaIndex) => {
+                    const src = smsMediaSource(item);
+                    const kind = smsMediaKind(item);
+                    const label = smsMediaLabel(item, mediaIndex);
+                    const size = smsMediaSizeLabel(item);
+                    const radius = visibleBody ? 10 : 16;
+                    if (src && kind === "image") {
+                      return (
+                        <button key={mediaIndex} type="button" aria-label={`Open ${label}`} onClick={() => openInAppBrowser(src)}
+                          style={{ display: "block", width: "100%", marginTop: visibleBody ? 8 : 0, padding: 0, border: 0, borderRadius: radius, overflow: "hidden", background: outgoing ? "rgba(255,255,255,0.12)" : T.surfaceAlt, cursor: "pointer" }}>
+                          <img src={src} alt={label} loading="lazy" style={{ display: "block", width: "100%", maxHeight: 300, objectFit: "contain", borderRadius: radius }} />
+                        </button>
+                      );
+                    }
+                    if (src && kind === "video") {
+                      return <video key={mediaIndex} src={src} controls playsInline preload="metadata" aria-label={label} style={{ display: "block", width: "100%", maxHeight: 300, marginTop: visibleBody ? 8 : 0, borderRadius: radius, background: "#000" }} />;
+                    }
+                    if (src && kind === "audio") {
+                      return <audio key={mediaIndex} src={src} controls preload="metadata" aria-label={label} style={{ display: "block", width: "100%", minWidth: 230, marginTop: visibleBody ? 8 : 0 }} />;
+                    }
                     return (
-                      <button key={mediaIndex} type="button" aria-label={`Open ${label}`} onClick={() => openInAppBrowser(src)}
-                        style={{ display: "block", width: "100%", marginTop: visibleBody ? 8 : 0, padding: 0, border: 0, borderRadius: radius, overflow: "hidden", background: outgoing ? "rgba(255,255,255,0.12)" : T.surfaceAlt, cursor: "pointer" }}>
-                        <img src={src} alt={label} loading="lazy" style={{ display: "block", width: "100%", maxHeight: 300, objectFit: "contain", borderRadius: radius }} />
+                      <button key={mediaIndex} type="button" disabled={!src} onClick={() => { if (src) openInAppBrowser(src); }}
+                        style={{ width: "100%", display: "flex", alignItems: "center", gap: 9, marginTop: visibleBody ? 8 : 0, padding: "10px 11px", border: 0, background: outgoing ? "rgba(255,255,255,0.15)" : T.surface, color: "inherit", borderRadius: 10, textAlign: "left", font: "inherit", cursor: src ? "pointer" : "default", opacity: src ? 1 : 0.72 }}>
+                        <Icon name={src ? "download" : "paperclip"} size={15} />
+                        <span style={{ flex: 1, minWidth: 0, fontWeight: 720, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{src ? `Open ${label}` : `${label} unavailable`}</span>
+                        {size && <span style={{ flexShrink: 0, fontSize: 10.5, opacity: 0.72 }}>{size}</span>}
                       </button>
                     );
-                  }
-                  if (src && kind === "video") {
-                    return <video key={mediaIndex} src={src} controls playsInline preload="metadata" aria-label={label} style={{ display: "block", width: "100%", maxHeight: 300, marginTop: visibleBody ? 8 : 0, borderRadius: radius, background: "#000" }} />;
-                  }
-                  if (src && kind === "audio") {
-                    return <audio key={mediaIndex} src={src} controls preload="metadata" aria-label={label} style={{ display: "block", width: "100%", minWidth: 230, marginTop: visibleBody ? 8 : 0 }} />;
-                  }
-                  return (
-                    <button key={mediaIndex} type="button" disabled={!src} onClick={() => { if (src) openInAppBrowser(src); }}
-                      style={{ width: "100%", display: "flex", alignItems: "center", gap: 9, marginTop: visibleBody ? 8 : 0, padding: "10px 11px", border: 0, background: outgoing ? "rgba(255,255,255,0.15)" : T.surface, color: "inherit", borderRadius: 10, textAlign: "left", font: "inherit", cursor: src ? "pointer" : "default", opacity: src ? 1 : 0.72 }}>
-                      <Icon name={src ? "download" : "paperclip"} size={15} />
-                      <span style={{ flex: 1, minWidth: 0, fontWeight: 720, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{src ? `Open ${label}` : `${label} unavailable`}</span>
-                      {size && <span style={{ flexShrink: 0, fontSize: 10.5, opacity: 0.72 }}>{size}</span>}
-                    </button>
-                  );
-                })}
+                  })}
+                </div>
+                {fullScreen
+                  ? (showDelivery && <span style={{ padding: "0 4px", fontSize: 9.5, color: rawStatus === "failed" || rawStatus === "undelivered" ? "#d9282f" : T.textMuted, fontWeight: 620 }}>{deliveryLabel}</span>)
+                  : <span style={{ padding: "0 4px", fontSize: 9.5, color: T.textMuted, fontWeight: 600 }}>{outgoing ? "You · " : ""}{fmtMailboxWhen(message.created_at)}{message.sms_status && message.sms_status !== "received" ? ` · ${message.sms_status}` : ""}</span>}
               </div>
-              <span style={{ padding: "0 4px", fontSize: 9.5, color: T.textMuted, fontWeight: 600 }}>{outgoing ? "You · " : ""}{fmtMailboxWhen(message.created_at)}{message.sms_status && message.sms_status !== "received" ? ` · ${message.sms_status}` : ""}</span>
-            </div>
+            </Fragment>
           );
         })}
       </div>
@@ -26665,7 +26769,6 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   // remain explicit, but become quiet inline metadata instead of a row of competing badge pills.
   const mobileRows = mobileList.map((r, i) => {
     const sms = isSmsRow(r);
-    const channelTone = sms ? "#7c3aed" : "#2563eb";
     const kind = KIND[r.kind] || KIND.other;
     const selected = !!sel[r.id];
     const emailSummary = String((r.ai && r.ai.summary) || r.body_text || "").trim();
@@ -26673,7 +26776,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       ? String(r.subject || r.body_text || "Text message").replace(/^You:\s*/i, "You: ").trim()
       : [String(r.subject || "(no subject)").trim(), emailSummary].filter(Boolean).join(" — ");
     const channelLabel = sms ? `Text · ${lineRoleForRow(r) === "main" ? (ownerView ? "My number" : "Owner number") : "Staff number"}` : `Email${kind.label && kind.label !== "Other" ? ` · ${kind.label}` : ""}`;
-    const dividerLeft = dense ? 65 : 71;
+    const dividerLeft = dense ? 69 : 77;
     return (
       <InboxSwipeRow key={r.id} rowId={r.id} ariaLabel={`${r.read ? "" : "Unread "}${sms ? "text" : "email"} from ${senderLabel(r)}: ${r.subject || (sms ? "Message" : "No subject")}`} revealed={openSwipeId === r.id} disabled={selMode} selected={selected} read={!!r.read} isText={sms} T={T}
         onReveal={(id) => setOpenSwipeId(id)} onClose={(id) => setOpenSwipeId(cur => cur === id ? null : cur)}
@@ -26689,16 +26792,16 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
             <span aria-hidden="true" style={{ width: dense ? 42 : 46, height: dense ? 42 : 46, borderRadius: "50%", border: `2px solid ${selected ? T.primary : T.border}`, background: selected ? T.primary : T.surface, color: "#fff", display: "grid", placeItems: "center", flexShrink: 0 }}>
               {selected && <Icon name="check" size={17} />}
             </span>
-          ) : <Avatar name={r.from_name} email={r.from_email} channel={r.channel} photo={r._contactPhoto} size={dense ? 42 : 46} showChannelMarker />}
+          ) : <Avatar name={r.from_name} email={r.from_email} channel={r.channel} photo={r._contactPhoto} size={dense ? 44 : 48} />}
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-              <span style={{ flex: 1, minWidth: 0, fontSize: dense ? 14 : 15, fontWeight: r.read ? 600 : 820, color: T.text, letterSpacing: "-0.012em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{senderLabel(r)}</span>
+              <span style={{ flex: 1, minWidth: 0, fontSize: dense ? 14.5 : 15.5, fontWeight: r.read ? 600 : 820, color: T.text, letterSpacing: "-0.015em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{senderLabel(r)}</span>
               {r.replied && <span title="Replied" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="reply" size={12} /></span>}
-              <span style={{ fontSize: dense ? 10.5 : 11.5, color: T.textMuted, fontWeight: 560, flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{fmtMailboxWhen(r.created_at)}</span>
+              <span style={{ fontSize: dense ? 10.5 : 11.5, color: r.read ? T.textMuted : T.primary, fontWeight: r.read ? 560 : 720, flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{fmtMailboxWhen(r.created_at)}</span>
               <span aria-hidden="true" style={{ display: "inline-flex", color: hexA(T.textMuted, 0.55), flexShrink: 0 }}><Icon name="chevronR" size={13} /></span>
             </div>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 5, minWidth: 0, marginTop: dense ? 3 : 4, fontSize: dense ? 11.5 : 12.5, lineHeight: 1.3 }}>
-              <span style={{ color: channelTone, fontSize: dense ? 9.5 : 10, fontWeight: 820, letterSpacing: "0.015em", flexShrink: 0 }}>{channelLabel}</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0, marginTop: dense ? 3 : 4, fontSize: dense ? 12 : 13, lineHeight: 1.3 }}>
+              <span style={{ color: T.textMuted, fontSize: dense ? 9.5 : 10.5, fontWeight: 690, letterSpacing: "0.005em", flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 3 }}><Icon name={sms ? "message" : "mail"} size={10} />{channelLabel}</span>
               <span aria-hidden="true" style={{ color: T.border, flexShrink: 0 }}>·</span>
               <span style={{ minWidth: 0, color: r.read ? T.textMuted : T.text, fontWeight: r.read ? 460 : 620, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{messagePreview || (sms ? "Text message" : "(no subject)")}</span>
               {!sms && inLeads(r.id) && <span aria-label="In Leads" title="In Leads" style={{ width: 6, height: 6, borderRadius: "50%", background: "#16a34a", flexShrink: 0 }} />}
@@ -26709,18 +26812,14 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     );
   });
   const pinnedRail = pinnedRows.length > 0 ? (
-    <section aria-label="Pinned conversations" style={{ padding: dense ? "2px 1px 5px" : "4px 1px 7px" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 5px 3px" }}>
-        <span style={{ fontSize: 10.5, fontWeight: 820, color: T.textMuted, letterSpacing: "0.065em", textTransform: "uppercase" }}>Pinned</span>
-        <span style={{ fontSize: 10.5, fontWeight: 650, color: T.textMuted }}>{pinnedRows.length}</span>
-      </div>
+    <section aria-label="Pinned conversations" style={{ padding: dense ? "3px 1px 6px" : "5px 1px 8px" }}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: dense ? 3 : 6, overflowX: "auto", padding: "1px 3px 4px", WebkitOverflowScrolling: "touch", scrollbarWidth: "none", msOverflowStyle: "none", scrollSnapType: "x proximity" }}>
         {pinnedRows.map((row) => {
           const unreadCount = row._smsConversation ? Number(row._unreadCount || 0) : (row.read ? 0 : 1);
           return (
             <div key={`pin-${row._smsConversationKey || row.id}`} style={{ scrollSnapAlign: "start" }}>
               <InboxPinnedConversation label={senderLabel(row)} unread={unreadCount} onOpen={() => openMessage(row)} onPreview={() => setPreviewRow(row)} T={T}>
-                <Avatar name={row.from_name} email={row.from_email} channel={row.channel} photo={row._contactPhoto} size={dense ? 56 : 60} showChannelMarker unreadCount={unreadCount} />
+                <Avatar name={row.from_name} email={row.from_email} channel={row.channel} photo={row._contactPhoto} size={dense ? 60 : 64} unreadCount={unreadCount} />
               </InboxPinnedConversation>
             </div>
           );
@@ -26841,6 +26940,54 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       {!replying && replyMsg && <div style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</div>}
     </div>
   );
+  const mobileSmsCategory = openRow && isSmsRow(openRow)
+    ? (rowInLeads(openRow) || openRow.kind === "lead" ? KIND.lead : (KIND[openRow.kind] || KIND.other))
+    : KIND.other;
+  const mobileSmsThread = openRow && !wide && isSmsRow(openRow) ? (
+    <MobileSmsThread
+      title={senderLabel(openRow)}
+      subtitle={senderDetail(openRow)}
+      avatar={<Avatar name={openRow.from_name} email={openRow.from_email} channel={openRow.channel} photo={openRow._contactPhoto} size={32} />}
+      lineLabel={lineLabelForRow(openRow)}
+      categoryLabel={mobileSmsCategory.label}
+      categoryTone={mobileSmsCategory.color || T.textMuted}
+      callHref={openRow.from_phone && canTextFromRow(openRow) ? quoCallHref(openRow.from_phone, quoCallerForRow(openRow)) : ""}
+      onBack={() => setOpenRow(null)}
+      onOrganize={() => setManageRow(openRow)}
+      T={T}
+      status={replyMsg ? (
+        <div role="status" aria-live="polite" style={{ padding: "0 8px 6px", color: replySucceeded ? "#168548" : T.warning, fontSize: 11, lineHeight: 1.3, fontWeight: 680, textAlign: "center" }}>{replyMsg}</div>
+      ) : null}
+      composer={canTextFromRow(openRow) ? (
+        <div style={{ display: "flex", alignItems: "flex-end", gap: 7 }}>
+          <div style={{ flex: 1, minWidth: 0, minHeight: 40, display: "flex", alignItems: "center", padding: "3px 4px 3px 13px", border: `1px solid ${hexA(T.textMuted, 0.3)}`, borderRadius: 21, background: T.surface }}>
+            <textarea
+              aria-label={`Text ${senderLabel(openRow)}`}
+              value={replyText}
+              maxLength={1600}
+              rows={1}
+              onChange={(event) => {
+                setReplyText(event.target.value);
+                event.target.style.height = "auto";
+                event.target.style.height = `${Math.min(event.target.scrollHeight, 92)}px`;
+              }}
+              placeholder="Text Message"
+              style={{ flex: 1, width: "100%", minWidth: 0, height: 32, maxHeight: 92, padding: "6px 0 4px", border: "none", outline: "none", resize: "none", overflowY: "auto", background: "transparent", color: T.text, fontFamily: "inherit", fontSize: 16, lineHeight: 1.35, boxSizing: "border-box" }}
+            />
+            {replyText.length > 1400 && <span style={{ padding: "0 5px", color: T.textMuted, fontSize: 9.5, fontWeight: 650, alignSelf: "flex-end", marginBottom: 6 }}>{replyText.length}/1600</span>}
+          </div>
+          <button type="button" aria-label="Send text" title="Send text" disabled={replyBusy || !replyText.trim()} onClick={sendOpenRowReply}
+            style={{ width: 38, height: 38, marginBottom: 1, flexShrink: 0, border: "none", borderRadius: 19, background: replyBusy || !replyText.trim() ? hexA(T.textMuted, 0.18) : T.primary, color: replyBusy || !replyText.trim() ? T.textMuted : "#fff", display: "grid", placeItems: "center", cursor: replyBusy || !replyText.trim() ? "default" : "pointer", transition: "background 0.15s, color 0.15s, transform 0.15s" }}>
+            <Icon name="send" size={17} />
+          </button>
+        </div>
+      ) : (
+        <div style={{ minHeight: 40, display: "flex", alignItems: "center", justifyContent: "center", color: T.textMuted, fontSize: 11.5, fontWeight: 680, textAlign: "center" }}>View only · you do not have permission to reply from this number.</div>
+      )}
+    >
+      <SmsConversationBody row={openRow} fullScreen maxHeight="none" />
+    </MobileSmsThread>
+  ) : null;
   // ── Sent folder — the emails you composed/replied from here. Read from sps_comms_log (already
   // owner-readable); no schema change. Only the two work-email origins, not every system email. ──
   const loadSent = async () => {
@@ -27143,10 +27290,11 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
         document.body
       )}
       {inboxNotice && createPortal(
-        <div role="status" aria-live="polite" style={{ position: "fixed", left: 16, right: 16, bottom: `calc(${phone && selMode ? 144 : 84}px + var(--sps-mail-dock-lift, 0px) + env(safe-area-inset-bottom))`, zIndex: 280, maxWidth: 520, margin: "0 auto", padding: "11px 14px", borderRadius: 13, background: "rgba(28,28,30,0.94)", color: "#fff", boxShadow: "0 8px 28px rgba(0,0,0,0.24)", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)", fontSize: 12.5, fontWeight: 720, textAlign: "center", pointerEvents: "none" }}>{inboxNotice}</div>,
+        <div role="status" aria-live="polite" style={{ position: "fixed", left: 16, right: 16, bottom: `calc(${phone && selMode ? 144 : 84}px + var(--sps-mail-dock-lift, 0px) + env(safe-area-inset-bottom))`, zIndex: 340, maxWidth: 520, margin: "0 auto", padding: "11px 14px", borderRadius: 13, background: "rgba(28,28,30,0.94)", color: "#fff", boxShadow: "0 8px 28px rgba(0,0,0,0.24)", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)", fontSize: 12.5, fontWeight: 720, textAlign: "center", pointerEvents: "none" }}>{inboxNotice}</div>,
         document.body
       )}
       {pressPreview}
+      {mobileSmsThread}
       {manageRow && (
         <InboxActionSheet title={isSmsRow(manageRow) ? "Organize conversation" : "Manage email"} onClose={() => setManageRow(null)} T={T}>
           <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
@@ -27167,7 +27315,17 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
               <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
                 {["lead", "bill", "client", "other"].map(k => {
                   const kk = KIND[k]; const on = k === "lead" ? (rowInLeads(manageRow) || manageRow.kind === "lead") : manageRow.kind === k;
-                  return <button key={k} type="button" onClick={() => { if (!on) { if (k === "lead") addToLeads(manageRow); else setKindOf(manageRow, k); } setManageRow(null); }}
+                  return <button key={k} type="button" onClick={async () => {
+                    if (on) { setManageRow(null); return; }
+                    const row = manageRow;
+                    const saved = k === "lead" ? await addToLeads(row) : await setKindOf(row, k);
+                    if (!saved) {
+                      notifyInbox(`Couldn't organize this conversation as ${kk.label}. Try again.`);
+                      return;
+                    }
+                    setManageRow(null);
+                    notifyInbox(`Conversation organized as ${kk.label}.`);
+                  }}
                     style={{ minHeight: 44, borderRadius: 12, border: `1.5px solid ${on ? (kk.color || T.text) : T.border}`, background: on ? hexA(kk.color || T.text, 0.09) : T.surface, color: on ? (kk.color || T.text) : T.textMuted, fontFamily: "inherit", fontSize: 12.5, fontWeight: 780, cursor: on ? "default" : "pointer" }}>{kk.label}{on ? " · Current" : ""}</button>;
                 })}
               </div>
@@ -27200,8 +27358,8 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
           </div>
         </InboxActionSheet>
       )}
-      {openRow && !wide && (
-        <Modal title={isSmsRow(openRow) ? `Text · ${senderLabel(openRow)}` : `Email · ${openRow.subject || "(no subject)"}`} onClose={() => setOpenRow(null)} maxWidth={640}>
+      {openRow && !wide && !isSmsRow(openRow) && (
+        <Modal title={`Email · ${openRow.subject || "(no subject)"}`} onClose={() => setOpenRow(null)} maxWidth={640}>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {/* Sender header — channel-aware identity for both email and text. */}
             <div style={{ display: "flex", alignItems: "center", gap: 11 }}>

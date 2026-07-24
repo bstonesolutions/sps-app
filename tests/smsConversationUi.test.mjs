@@ -44,7 +44,8 @@ test("SMS list and thread omit email-triage chrome", () => {
 
 test("phone rows use compact conversation chrome while retaining swipe actions", () => {
   assert.match(inbox, /const mobileRows = mobileList\.map/);
-  assert.match(phoneRows, /showChannelMarker/);
+  assert.doesNotMatch(phoneRows, /showChannelMarker/);
+  assert.match(phoneRows, /<Icon name=\{sms \? "message" : "mail"\}/);
   assert.match(phoneRows, /fmtMailboxWhen\(r\.created_at\)/);
   assert.match(phoneRows, /<Icon name="chevronR"/);
   assert.match(phoneRows, /onToggleRead=\{\(\) => \{ markRead\(inboxRowMessageIds\(r\), !r\.read\); \}\}/);
