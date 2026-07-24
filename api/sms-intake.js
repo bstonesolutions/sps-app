@@ -31,16 +31,32 @@ import {
   smsLineForNumber,
   toSmsE164,
 } from "./_sms-history.js";
+import {
+  lookupAndCacheQuoContactForPhone,
+  quoContactIdsFromMessage,
+} from "./_quo-contacts.js";
 
 export const config = { api: { bodyParser: false } }; // need the RAW body for HMAC verification
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
 const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const KEY          = process.env.QUO_WEBHOOK_KEY;
-const SIGN_SECRET  = process.env.QUO_WEBHOOK_SECRET; // Quo's base64 signing secret
+const QUO_API_KEY  = process.env.QUO_API_KEY;
 const QUO_NUMBER   = process.env.QUO_PHONE_NUMBER;      // automation line
 const QUO_MAIN_NUMBER = process.env.QUO_MAIN_PHONE_NUMBER; // ported main work line
 export const INBOUND_TEXT_PUSH_LINK = "comms/inbox";
+
+export function configuredWebhookSecrets(env = process.env) {
+  const many = String(env.QUO_WEBHOOK_SECRETS || "").split(/[\r\n,]+/);
+  return [...new Set([
+    env.QUO_WEBHOOK_SECRET,
+    env.QUO_MESSAGE_WEBHOOK_SECRET,
+    env.QUO_CONTACT_WEBHOOK_SECRET,
+    ...many,
+  ].map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
+const SIGN_SECRETS = configuredWebhookSecrets();
 
 const sbHeaders = () => ({ apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" });
 async function inboxStatus() {
@@ -266,6 +282,51 @@ async function upsertContactMetadata(metadata, avatarPath, remaining) {
   return { ok: true, updated: rows.length };
 }
 
+async function resolveMessageContact(msg, peerPhone, remaining, reserveMs) {
+  const peer = toSmsE164(peerPhone);
+  const embedded = quoContactMetadata(msg?.contact);
+  const embeddedMatchesPeer = !embedded.phones.length || embedded.phones.includes(peer);
+  let id = embeddedMatchesPeer ? (embedded.id || cleanSmsValue(msg?.contactId, 100)) : "";
+  let name = embeddedMatchesPeer ? (embedded.name || cleanSmsValue(msg?.contactName, 180)) : "";
+  let avatarPath = "";
+
+  if (id && embeddedMatchesPeer) {
+    const avatar = embedded.pictureUrl
+      ? await copyWebhookMedia([{ url: embedded.pictureUrl, type: "image/jpeg" }], id, remaining, "contacts")
+      : [];
+    avatarPath = avatar[0]?.path || "";
+    await upsertContactMetadata({
+      ...embedded,
+      id,
+      name,
+      phones: embedded.phones.length ? embedded.phones : [peer],
+    }, avatarPath, remaining).catch(() => {});
+  }
+
+  // Current Quo v4 message events identify contacts with `contactIds[]`, not an embedded contact.
+  // Resolve at most three exact IDs, then accept a result only when exactly one contact contains the
+  // message peer's E.164 number. This keeps group/duplicate contacts from being attached by guess.
+  const contactIds = quoContactIdsFromMessage(msg);
+  const lookupWindow = Math.min(1200, Math.max(0, remaining(reserveMs)));
+  if (contactIds.length && QUO_API_KEY && E164.test(peer) && lookupWindow >= 250) {
+    const lookup = await settleWithin(lookupAndCacheQuoContactForPhone({
+      contactIds,
+      phone: peer,
+      apiKey: QUO_API_KEY,
+      supabaseUrl: SUPABASE_URL,
+      serviceKey: SERVICE_KEY,
+      timeoutMs: Math.min(700, lookupWindow),
+    }), lookupWindow);
+    if (lookup.completed && !lookup.error && lookup.value?.matched) {
+      id = lookup.value.metadata?.id || id;
+      name = lookup.value.metadata?.name || name;
+      avatarPath = lookup.value.avatarPath || avatarPath;
+    }
+  }
+
+  return { id, name, avatarPath };
+}
+
 async function handleContactEvent(body, remaining) {
   const eventType = String(body?.type || "");
   const contact = body?.data?.object || {};
@@ -317,20 +378,7 @@ async function handleDeliveredMessage(body, remaining) {
   const bodyText = cleanSmsValue(redirect?.content ?? msg.body ?? msg.text, 3900);
   const mediaCount = Array.isArray(msg.media) ? msg.media.length : 0;
   const privateMedia = await copyWebhookMedia(msg.media, providerId || eventId, remaining);
-  const embeddedContact = quoContactMetadata(msg.contact);
-  const contactId = embeddedContact.id || cleanSmsValue(msg.contactId, 100);
-  const contactName = embeddedContact.name || cleanSmsValue(msg.contactName, 180);
-  const contactAvatar = embeddedContact.pictureUrl
-    ? await copyWebhookMedia([{ url: embeddedContact.pictureUrl, type: "image/jpeg" }], contactId || providerId || eventId, remaining, "contacts")
-    : [];
-  if (contactId) {
-    await upsertContactMetadata({
-      ...embeddedContact,
-      id: contactId,
-      name: contactName,
-      phones: embeddedContact.phones.length ? embeddedContact.phones : [peer],
-    }, contactAvatar[0]?.path || "", remaining).catch(() => {});
-  }
+  const contact = await resolveMessageContact(msg, peer, remaining, 1200);
   const mediaNote = mediaCount
     ? `[${mediaCount} media attachment${mediaCount === 1 ? "" : "s"}${privateMedia.length < mediaCount ? "; secure copy pending" : ""}]`
     : "";
@@ -365,9 +413,9 @@ async function handleDeliveredMessage(body, remaining) {
     quo_phone_number_id: cleanSmsValue(msg.phoneNumberId, 120) || null,
     sms_status: status,
     sms_media: privateMedia,
-    quo_contact_id: contactId || null,
-    sms_contact_name: contactName || null,
-    sms_contact_avatar_path: contactAvatar[0]?.path || null,
+    quo_contact_id: contact.id || null,
+    sms_contact_name: contact.name || null,
+    sms_contact_avatar_path: contact.avatarPath || null,
     sms_provider_created_at: cleanSmsValue(msg.createdAt, 60) || null,
   };
   const claim = await insertInboxOnce(row, Math.min(2200, Math.max(300, remaining(900))));
@@ -496,11 +544,15 @@ function readRaw(req, maxBytes = 1024 * 1024) {
   });
 }
 // openphone-signature: "hmac;1;<ts_ms>;<base64sig>", HMAC-SHA256 of `ts + "." + rawBody`,
-// key base64-decoded. Quo may rotate keys by sending comma-separated signature candidates.
-function verifySig(raw, header, secretB64) {
+// key base64-decoded. Quo may rotate keys by sending comma-separated signature candidates, and
+// separate message/contact webhooks have separate signing keys. Every candidate is still checked
+// with the same five-minute replay window and timing-safe digest comparison.
+function verifySig(raw, header, secretValues) {
   try {
-    const key = Buffer.from(secretB64, "base64");
-    if (!key.length) return false;
+    const keys = (Array.isArray(secretValues) ? secretValues : [secretValues])
+      .map((secret) => Buffer.from(String(secret || ""), "base64"))
+      .filter((key) => key.length > 0);
+    if (!keys.length) return false;
     const payloads = [raw];
     // Quo's Node example signs JSON.stringify(req.body). Raw requests are normally already compact,
     // but also try the canonical JSON representation so harmless transport whitespace cannot break it.
@@ -521,8 +573,10 @@ function verifySig(raw, header, secretB64) {
       try { supplied = Buffer.from(provided, "base64"); } catch { continue; }
       if (!supplied.length) continue;
       for (const payload of payloads) {
-        const computed = crypto.createHmac("sha256", key).update(`${ts}.${payload}`, "utf8").digest();
-        if (supplied.length === computed.length && crypto.timingSafeEqual(supplied, computed)) return true;
+        for (const key of keys) {
+          const computed = crypto.createHmac("sha256", key).update(`${ts}.${payload}`, "utf8").digest();
+          if (supplied.length === computed.length && crypto.timingSafeEqual(supplied, computed)) return true;
+        }
       }
     }
     return false;
@@ -545,17 +599,17 @@ export default async function handler(req, res) {
     const mainLine = toE164(QUO_MAIN_NUMBER);
     const mainConfigured = !!String(QUO_MAIN_NUMBER || "").trim();
     const mainLineReady = !mainConfigured || (E164.test(mainLine) && mainLine !== automationLine);
-    return res.status(200).json({ ok: true, configured: { key: !!KEY, ai: aiConfigured(), sig: !!SIGN_SECRET, line: E164.test(automationLine), mainConfigured, mainLine: E164.test(mainLine) && mainLine !== automationLine, duplicateLines: !!mainLine && mainLine === automationLine, schema, observed, observedLines, lastInboundAt, lastInboundByLine, push: pushConfigured(), ready: !!KEY && !!SIGN_SECRET && !!SERVICE_KEY && E164.test(automationLine) && mainLineReady && schema } });
+    return res.status(200).json({ ok: true, configured: { key: !!KEY, ai: aiConfigured(), sig: SIGN_SECRETS.length > 0, line: E164.test(automationLine), mainConfigured, mainLine: E164.test(mainLine) && mainLine !== automationLine, duplicateLines: !!mainLine && mainLine === automationLine, schema, observed, observedLines, lastInboundAt, lastInboundByLine, push: pushConfigured(), ready: !!KEY && SIGN_SECRETS.length > 0 && !!SERVICE_KEY && E164.test(automationLine) && mainLineReady && schema } });
   }
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
-  if (!KEY || !SIGN_SECRET) return res.status(501).json({ error: "Inbound texting is not fully configured.", missingEnv: true });
+  if (!KEY || !SIGN_SECRETS.length) return res.status(501).json({ error: "Inbound texting is not fully configured.", missingEnv: true });
   if (String((req.query || {}).key || "") !== KEY) return res.status(401).json({ error: "Unauthorized" });
   if (!SERVICE_KEY) return res.status(501).json({ error: "Server missing SUPABASE_SERVICE_ROLE_KEY", missingEnv: true });
   if (!QUO_NUMBER) return res.status(501).json({ error: "Server missing QUO_PHONE_NUMBER", missingEnv: true });
 
   const { raw, tooLarge } = await readRaw(req);
   if (tooLarge) return res.status(413).json({ error: "Webhook payload is too large." });
-  if (!verifySig(raw, req.headers["openphone-signature"], SIGN_SECRET)) {
+  if (!verifySig(raw, req.headers["openphone-signature"], SIGN_SECRETS)) {
     return res.status(401).json({ error: "Invalid webhook signature." });
   }
   let body; try { body = JSON.parse(raw || "{}"); } catch { return res.status(200).json({ ok: true, skipped: "unparseable" }); }
@@ -606,20 +660,7 @@ export default async function handler(req, res) {
 
     const providerId = cleanSmsValue(msg.id, 100);
     const privateMedia = await copyWebhookMedia(msg.media, providerId || eventId, remaining);
-    const embeddedContact = quoContactMetadata(msg.contact);
-    const embeddedContactId = embeddedContact.id || cleanSmsValue(msg.contactId, 100);
-    const embeddedContactName = embeddedContact.name || cleanSmsValue(msg.contactName, 180);
-    const embeddedContactAvatar = embeddedContact.pictureUrl
-      ? await copyWebhookMedia([{ url: embeddedContact.pictureUrl, type: "image/jpeg" }], embeddedContactId || providerId || eventId, remaining, "contacts")
-      : [];
-    if (embeddedContactId) {
-      await upsertContactMetadata({
-        ...embeddedContact,
-        id: embeddedContactId,
-        name: embeddedContactName,
-        phones: embeddedContact.phones.length ? embeddedContact.phones : [fromPhone],
-      }, embeddedContactAvatar[0]?.path || "", remaining).catch(() => {});
-    }
+    const contact = await resolveMessageContact(msg, fromPhone, remaining, 5400);
     // Provider URLs never enter the row. If a bounded private copy was unavailable, retain an
     // honest note so staff know the original message included an attachment.
     const mediaNote = mediaCount
@@ -666,9 +707,9 @@ export default async function handler(req, res) {
       quo_phone_number_id: cleanSmsValue(msg.phoneNumberId, 120) || null,
       sms_status: cleanSmsValue(msg.status, 40) || "received",
       sms_media: privateMedia,
-      quo_contact_id: embeddedContactId || null,
-      sms_contact_name: client ? cleanSmsValue(client.name, 180) : (embeddedContactName || null),
-      sms_contact_avatar_path: embeddedContactAvatar[0]?.path || null,
+      quo_contact_id: contact.id || null,
+      sms_contact_name: client ? cleanSmsValue(client.name, 180) : (contact.name || null),
+      sms_contact_avatar_path: contact.avatarPath || null,
       sms_provider_created_at: cleanSmsValue(msg.createdAt, 60) || null,
     };
     // Atomic inbox claim: `return=representation` tells us whether THIS invocation inserted the

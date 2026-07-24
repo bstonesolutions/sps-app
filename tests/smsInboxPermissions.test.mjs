@@ -71,8 +71,10 @@ function idsFromUrl(target) {
   return match ? match[1].split(",").map(decodeURIComponent) : [];
 }
 
-function installFetch({ team, listRows = rows } = {}) {
-  const calls = { list: 0, lookups: 0, mutations: 0, mutationMethods: [], urls: [] };
+function installFetch({ team, listRows = rows, threadMeta = {} } = {}) {
+  let savedThreadMeta = { ...threadMeta };
+  let threadMetaVersion = Object.keys(savedThreadMeta).length ? 1 : 0;
+  const calls = { list: 0, lookups: 0, mutations: 0, mutationMethods: [], urls: [], threadMetaWrites: 0, threadMeta: () => savedThreadMeta };
   globalThis.fetch = async (url, options = {}) => {
     const target = String(url);
     calls.urls.push(target);
@@ -80,11 +82,23 @@ function installFetch({ team, listRows = rows } = {}) {
     if (target.includes("/rest/v1/app_state?") && target.includes("key=eq.sps_team")) {
       return response([{ value: JSON.stringify(team || [inboxStaff()]) }]);
     }
+    if (target.includes("/rest/v1/app_state?") && target.includes("key=eq.sps_sms_thread_meta")) {
+      return response(threadMetaVersion ? [{ key: "sps_sms_thread_meta", value: JSON.stringify(savedThreadMeta), version: threadMetaVersion, updated_at: "2026-07-21T12:00:00Z" }] : []);
+    }
+    if (target.endsWith("/rest/v1/rpc/sps_app_state_cas") && options.method === "POST") {
+      const body = JSON.parse(String(options.body || "{}"));
+      const expected = Number(body.p_expected_version);
+      if (expected !== threadMetaVersion) return response({ applied: false, outcome: "conflict", current_version: threadMetaVersion });
+      savedThreadMeta = JSON.parse(String(body.p_value || "{}"));
+      threadMetaVersion += 1;
+      calls.threadMetaWrites += 1;
+      return response({ applied: true, outcome: expected === 0 ? "inserted" : "updated", current_version: threadMetaVersion, changed_at: "2026-07-21T12:00:01Z" });
+    }
     if (target.includes("/rest/v1/sps_inbox?") && ["PATCH", "DELETE"].includes(options.method)) {
       calls.mutations += 1;
       calls.mutationMethods.push(options.method);
       const wanted = new Set(idsFromUrl(target));
-      return response(listRows.filter((row) => wanted.has(row.id)).map(({ id, channel, ai }) => ({ id, channel, ai })));
+      return response(listRows.filter((row) => wanted.has(row.id)).map(({ id, channel, ai, sms_line, from_phone, sms_peer_phone, quo_conversation_id, body_text }) => ({ id, channel, ai, sms_line, from_phone, sms_peer_phone, quo_conversation_id, body_text })));
     }
     if (target.includes("/rest/v1/sps_inbox?") && target.includes("select=id,channel,ai")) {
       if (target.includes("read=not.is.true")) {
@@ -92,13 +106,14 @@ function installFetch({ team, listRows = rows } = {}) {
       }
       calls.lookups += 1;
       const wanted = new Set(idsFromUrl(target));
-      return response(listRows.filter((row) => wanted.has(row.id)).map(({ id, channel, ai }) => ({ id, channel, ai })));
+      return response(listRows.filter((row) => wanted.has(row.id)).map(({ id, channel, ai, sms_line, from_phone, sms_peer_phone, quo_conversation_id, body_text }) => ({ id, channel, ai, sms_line, from_phone, sms_peer_phone, quo_conversation_id, body_text })));
     }
     if (target.includes("/rest/v1/sps_inbox?") && target.includes("select=*")) {
       calls.list += 1;
       // Deliberately return rows outside the PostgREST predicate. The endpoint must still apply its
       // fail-closed serializer filter before anything reaches a staff browser.
-      return response(listRows);
+      const wanted = new Set(idsFromUrl(target));
+      return response(wanted.size ? listRows.filter((row) => wanted.has(row.id)) : listRows);
     }
     if (target.includes("/rest/v1/sps_inbox?") && target.includes("select=id")) {
       return response(listRows.filter((row) => row.read !== true).map(({ id }) => ({ id })));
@@ -166,6 +181,65 @@ test("the owner can grant the owner-number inbox without exposing the staff-numb
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body.access, { automation: false, main: true });
   assert.deepEqual(res.body.rows.map((row) => row.id), ["sms-main"]);
+});
+
+test("the owner categorizes one durable conversation by its authorized anchor", async () => {
+  const conversationRows = [
+    { id: "sms-main", channel: "sms", from_phone: "+15551110003", sms_peer_phone: "+15551110003", sms_line: "main", ai: { quoLine: "main" } },
+  ];
+  const calls = installFetch({ team: [ownerStaff()], listRows: conversationRows });
+  const writeRes = makeRes();
+  await smsInboxHandler(request("POST", { body: { action: "setThreadKind", id: "sms-main", kind: "bill" } }), writeRes);
+
+  assert.equal(writeRes.statusCode, 200);
+  assert.equal(writeRes.body.threadKey, "main|phone:5551110003");
+  assert.equal(writeRes.body.meta.kind, "bill");
+  assert.equal(calls.threadMetaWrites, 1);
+  assert.equal(calls.threadMeta()["main|phone:5551110003"].kind, "bill");
+
+  const readRes = makeRes();
+  await smsInboxHandler(request("GET", { query: { threadMeta: "1" } }), readRes);
+  assert.equal(readRes.statusCode, 200);
+  assert.equal(readRes.body.threads["main|phone:5551110003"].kind, "bill");
+});
+
+test("a delegated text-inbox permission cannot categorize a conversation", async () => {
+  const calls = installFetch({ team: [inboxStaff({ main: true })] });
+  const res = makeRes();
+  await smsInboxHandler(request("POST", { body: { action: "setThreadKind", id: "sms-main", kind: "lead" } }), res);
+
+  assert.equal(res.statusCode, 403);
+  assert.match(res.body.error, /owner access/i);
+  assert.equal(calls.threadMetaWrites, 0);
+});
+
+test("an authorized conversation anchor hydrates older rows for only its exact line and peer", async () => {
+  const conversationRows = [
+    { id: "sms-new", channel: "sms", from_phone: "+15551110001", sms_peer_phone: "+15551110001", sms_line: "automation", sms_direction: "incoming", created_at: "2026-07-21T12:00:00Z", read: false, ai: { quoLine: "automation" } },
+    { id: "sms-old", channel: "sms", from_phone: "+15551110001", sms_peer_phone: "+15551110001", sms_line: "automation", sms_direction: "outgoing", created_at: "2026-07-20T12:00:00Z", read: true, ai: { quoLine: "automation" } },
+    { id: "sms-other-peer", channel: "sms", from_phone: "+15551110002", sms_peer_phone: "+15551110002", sms_line: "automation", sms_direction: "incoming", created_at: "2026-07-21T11:00:00Z", read: false, ai: { quoLine: "automation" } },
+    { id: "sms-main-same-peer", channel: "sms", from_phone: "+15551110001", sms_peer_phone: "+15551110001", sms_line: "main", sms_direction: "incoming", created_at: "2026-07-21T10:00:00Z", read: false, ai: { quoLine: "main" } },
+    { id: "private-email", channel: "email", from_email: "private@example.test", created_at: "2026-07-21T09:00:00Z", read: false, ai: {} },
+  ];
+  const calls = installFetch({ team: [inboxStaff()], listRows: conversationRows });
+  const res = makeRes();
+  await smsInboxHandler(request("GET", { query: { conversationFor: "sms-new", limit: "200" } }), res);
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.rows.map((row) => row.id), ["sms-new", "sms-old"]);
+  assert.equal(res.body.hasMore, false);
+  assert.equal(calls.list, 2, "one anchored authorization read plus one scoped history read");
+  assert.ok(calls.urls.some((url) => url.includes("sms_line=eq.automation") && url.includes("sms_peer_phone=eq.%2B15551110001")));
+});
+
+test("a conversation anchor cannot hydrate a text line the employee cannot access", async () => {
+  const calls = installFetch({ team: [inboxStaff()] });
+  const res = makeRes();
+  await smsInboxHandler(request("GET", { query: { conversationFor: "sms-main" } }), res);
+
+  assert.equal(res.statusCode, 403);
+  assert.match(res.body.error, /unavailable with your current permissions/i);
+  assert.equal(calls.list, 1, "the endpoint must stop after the unauthorized anchor read");
 });
 
 test("forged non-destructive mutations of the owner line, email, or unknown-line rows fail before Supabase changes anything", async (t) => {

@@ -120,6 +120,44 @@ test("legacy inbox lists keep their select-all response unless compact mode is r
   assert.equal(query.get("select"), "*");
 });
 
+test("owner inbox lists expose an MMS count without leaking private Storage descriptors", async () => {
+  const privateDescriptor = {
+    bucket: "sms-media",
+    path: "messages/private/photo.jpg",
+    mimeType: "image/jpeg",
+    size: 300_170,
+  };
+  const smsRow = {
+    id: "sms-1",
+    channel: "sms",
+    body_text: "[1 media attachment]",
+    sms_media: [privateDescriptor],
+  };
+  const emailRow = {
+    id: "email-1",
+    channel: "email",
+    body_text: "Normal email",
+  };
+  installOwnerHarness([smsRow, emailRow]);
+  const res = makeRes();
+
+  await inboxHandler({
+    method: "GET",
+    query: { compact: "1", limit: "25" },
+    headers: { authorization: "Bearer owner-token" },
+  }, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.rows[0], {
+    ...smsRow,
+    sms_media_count: 1,
+    sms_media: [],
+    sms_contact_avatar_url: "",
+  });
+  assert.deepEqual(res.body.rows[1], emailRow);
+  assert.doesNotMatch(JSON.stringify(res.body), /messages\/private\/photo\.jpg/);
+});
+
 test("single-message detail reads one full row including body_html", async () => {
   const detailRow = {
     id: "mail/id+1",

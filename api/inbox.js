@@ -72,6 +72,19 @@ const INBOX_COMPACT_FIELDS = [
   "sms_contact_avatar_path",
   "sms_provider_created_at",
 ].join(",");
+const serializeInboxListRow = (row) => {
+  if (!row || row.channel !== "sms") return row;
+  const media = Array.isArray(row.sms_media) ? row.sms_media : [];
+  // MMS descriptors name private Storage paths. List responses expose only the count; the app
+  // re-authorizes the exact text line and requests short-lived signed URLs from /api/sms-inbox
+  // when the owner opens that conversation.
+  return {
+    ...row,
+    sms_media_count: media.length,
+    sms_media: [],
+    sms_contact_avatar_url: "",
+  };
+};
 const newOperationId = (type) => `${type}_${Date.now()}_${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`;
 const operationMarker = (lead) => {
   const marker = lead && lead[INBOX_OPERATION_FIELD];
@@ -183,7 +196,11 @@ export default async function handler(req, res) {
         const hint = /relation .*sps_inbox|42P01/i.test(t) ? "The sps_inbox table hasn't been created yet — run the SQL in CLAUDE.md." : t.slice(0, 200);
         return res.status(502).json({ error: hint });
       }
-      return res.status(200).json({ ok: true, rows: (await r.json().catch(() => [])) || [] });
+      const rows = (await r.json().catch(() => [])) || [];
+      return res.status(200).json({
+        ok: true,
+        rows: Array.isArray(rows) ? rows.map(serializeInboxListRow) : [],
+      });
     }
 
     if (req.method !== "POST") return res.status(405).json({ error: "GET or POST" });

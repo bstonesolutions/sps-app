@@ -10,10 +10,10 @@ test("mobile inbox uses a compact mailbox dropdown with inline search and compos
 
   assert.match(source, /aria-label="Choose mailbox and inbox filters"/);
   assert.match(source, /aria-label="Mailbox and inbox views"/);
-  assert.match(source, /aria-label="Mail search and compose"/);
-  assert.match(source, /placeholder=\{folder === "inbox" \? "Search inbox" : "Search sent"\}/);
+  assert.match(source, /aria-label="Search messages and compose"/);
+  assert.match(source, /placeholder=\{folder === "inbox" \? "Search messages" : "Search sent"\}/);
   assert.match(source, /label: "All channels"/);
-  assert.match(source, /quiet touch/);
+  assert.match(source, /<CommsIconAction icon="edit" label="Compose a new email"[\s\S]*?active/);
   assert.match(source, /!phone && <div[\s\S]*?\{!smsOnly && folderBar\}/);
   assert.match(source, /const inboxEndpoint = smsOnly \? "\/api\/sms-inbox" : "\/api\/inbox"/);
   assert.match(source, /!smsOnly && phoneMenuOption\(\{ key: "mailbox-sent"/);

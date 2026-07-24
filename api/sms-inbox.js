@@ -11,7 +11,13 @@
 // unexpected non-empty line value fails closed and is never returned or mutated here.
 
 import { memberHasCapability, requireStaff } from "./_staff-auth.js";
-import { SMS_MEDIA_BUCKET, signPrivateSmsMedia } from "./_sms-history.js";
+import { mutateAppState, readAppStateVersioned } from "./_app-state.js";
+import {
+  parseTestRedirect,
+  SMS_MEDIA_BUCKET,
+  signPrivateSmsMedia,
+  toSmsE164,
+} from "./_sms-history.js";
 
 const SUPABASE_URL = (
   process.env.SUPABASE_URL ||
@@ -24,6 +30,11 @@ const MAX_IDS = 200;
 const MAX_ID_LENGTH = 120;
 const VALID_ID = /^[A-Za-z0-9._:-]+$/;
 const VALID_KINDS = new Set(["lead", "bill", "client", "other"]);
+const SMS_THREAD_META_KEY = "sps_sms_thread_meta";
+const MAX_THREAD_META = 2500;
+const SMS_THREAD_PREFERENCES_TABLE = "sps_sms_thread_preferences";
+const MAX_THREAD_PREFERENCES = 500;
+const MAX_IDENTITY_IDS = 50;
 
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -63,6 +74,148 @@ function rowLine(row) {
   if (!raw || raw === "automation") return "automation";
   if (raw === "main") return "main";
   return null;
+}
+
+function rowConversationPeer(row) {
+  const redirected = parseTestRedirect(row?.body_text);
+  return redirected?.intendedPeer || toSmsE164(row?.sms_peer_phone || row?.from_phone);
+}
+
+function sameConversation(row, { line, peer, providerId }) {
+  if (!row || row.channel !== "sms" || rowLine(row) !== line) return false;
+  const rowPeer = rowConversationPeer(row);
+  // The normalized counterparty is the durable identity across legacy rows and newer Quo
+  // metadata. Provider ids are a fallback only when neither row has a usable phone; trusting a
+  // provider id over two different phones can join unrelated people into one employee-visible
+  // thread.
+  if (peer || rowPeer) return !!peer && rowPeer === peer;
+  return !!providerId && String(row.quo_conversation_id || "").trim() === providerId;
+}
+
+function browserPeerPhone(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
+  return digits.length >= 10 ? digits.slice(-10) : digits;
+}
+
+function rowThreadKey(row) {
+  const line = rowLine(row);
+  const peer = browserPeerPhone(rowConversationPeer(row));
+  if (line && peer) return `${line}|phone:${peer}`;
+  const provider = String(row?.quo_conversation_id || "").trim();
+  return line && provider && !parseTestRedirect(row?.body_text) ? `${line}|quo:${provider}` : "";
+}
+
+function canAccessThreadKey(threadKey, access) {
+  const key = String(threadKey || "").trim();
+  if (!key || key.length > 240) return false;
+  const separator = key.indexOf("|");
+  const line = separator > 0 ? key.slice(0, separator) : "";
+  if (line === "automation" && !access.automation) return false;
+  if (line === "main" && !access.main) return false;
+  if (line !== "automation" && line !== "main") return false;
+  return /^(phone:[0-9]{10}|quo:[A-Za-z0-9._:-]{1,160})$/.test(key.slice(separator + 1));
+}
+
+async function readThreadPreferences(userId, access) {
+  const response = await fetch(
+    `${SUPABASE_URL}/rest/v1/${SMS_THREAD_PREFERENCES_TABLE}`
+      + `?select=user_id,thread_key,pinned_at&user_id=eq.${encodeURIComponent(userId)}`
+      + `&order=pinned_at.desc&limit=${MAX_THREAD_PREFERENCES}`,
+    { headers: serviceHeaders() },
+  );
+  if (!response.ok) {
+    const details = await response.json().catch(() => ({}));
+    const missingTable = response.status === 404
+      || ["42P01", "PGRST205"].includes(String(details?.code || "").toUpperCase());
+    if (missingTable) return null;
+    throw new Error(`text preference read failed (${response.status})`);
+  }
+  const rows = await response.json().catch(() => null);
+  if (!Array.isArray(rows)) throw new Error("text preference read returned invalid data");
+
+  const preferences = {};
+  for (const row of rows) {
+    const threadKey = String(row?.thread_key || "");
+    // The service role bypasses RLS. Re-check both the authenticated user id and the employee's
+    // current line grant before returning even this small piece of personal UI state.
+    if (String(row?.user_id || "") !== userId || !canAccessThreadKey(threadKey, access)) continue;
+    preferences[threadKey] = {
+      pinned: true,
+      pinnedAt: String(row?.pinned_at || ""),
+    };
+  }
+  return preferences;
+}
+
+async function setThreadPinned(userId, threadKey, pinned) {
+  const userFilter = `user_id=eq.${encodeURIComponent(userId)}`;
+  const threadFilter = `thread_key=eq.${encodeURIComponent(threadKey)}`;
+  if (!pinned) {
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/${SMS_THREAD_PREFERENCES_TABLE}`
+        + `?${userFilter}&${threadFilter}&select=user_id,thread_key`,
+      {
+        method: "DELETE",
+        headers: serviceHeaders({ Prefer: "return=representation" }),
+      },
+    );
+    if (!response.ok) return null;
+    const rows = await response.json().catch(() => null);
+    if (!Array.isArray(rows)) return null;
+    // No returned row means this conversation was already unpinned. That is an idempotent success.
+    if (rows.some((row) => String(row?.user_id || "") !== userId || String(row?.thread_key || "") !== threadKey)) {
+      return null;
+    }
+    return { pinned: false, pinnedAt: null };
+  }
+
+  const now = new Date().toISOString();
+  const response = await fetch(
+    `${SUPABASE_URL}/rest/v1/${SMS_THREAD_PREFERENCES_TABLE}`
+      + "?on_conflict=user_id,thread_key&select=user_id,thread_key,pinned_at",
+    {
+      method: "POST",
+      headers: serviceHeaders({ Prefer: "resolution=merge-duplicates,return=representation" }),
+      body: JSON.stringify([{
+        user_id: userId,
+        thread_key: threadKey,
+        pinned_at: now,
+        updated_at: now,
+      }]),
+    },
+  );
+  if (!response.ok) return null;
+  const rows = await response.json().catch(() => null);
+  const saved = Array.isArray(rows) && rows.length === 1 ? rows[0] : null;
+  if (
+    !saved
+    || String(saved.user_id || "") !== userId
+    || String(saved.thread_key || "") !== threadKey
+  ) return null;
+  return { pinned: true, pinnedAt: String(saved.pinned_at || now) };
+}
+
+function cleanThreadMetadata(value, access) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const entries = Object.entries(source)
+    .filter(([key, meta]) => {
+      const line = String(key || "").split("|", 1)[0];
+      return ((line === "automation" && access.automation) || (line === "main" && access.main))
+        && meta && typeof meta === "object" && VALID_KINDS.has(String(meta.kind || "").toLowerCase());
+    })
+    .slice(-MAX_THREAD_META)
+    .map(([key, meta]) => [key, {
+      kind: String(meta.kind).toLowerCase(),
+      leadId: String(meta.leadId || "").slice(0, 160),
+      updatedAt: String(meta.updatedAt || "").slice(0, 40),
+    }]);
+  return Object.fromEntries(entries);
+}
+
+async function readThreadMetadata(access) {
+  const state = await readAppStateVersioned(SMS_THREAD_META_KEY);
+  return cleanThreadMetadata(state.exists ? state.value : {}, access);
 }
 
 function serializeSmsRow(row) {
@@ -132,6 +285,29 @@ async function serializeSmsMedia(row) {
   };
 }
 
+async function serializeSmsIdentities(rows) {
+  const enriched = await enrichSmsContacts(rows);
+  const paths = [...new Set(enriched
+    .map((row) => String(row?.sms_contact_avatar_path || "").trim())
+    .filter(Boolean))];
+  const signed = await signPrivateSmsMedia(paths.map((path) => ({
+    bucket: SMS_MEDIA_BUCKET,
+    path,
+    identityPath: path,
+    mimeType: "image/jpeg",
+  })), {
+    supabaseUrl: SUPABASE_URL,
+    serviceKey: SERVICE_KEY,
+    expiresIn: 300,
+  });
+  const avatarByPath = new Map(signed.map((item) => [String(item?.identityPath || item?.path || ""), String(item?.url || "")]));
+  return Object.fromEntries(enriched.map((row) => [String(row.id), {
+    name: String(row?.sms_contact_name || "").trim().slice(0, 180),
+    contactId: String(row?.quo_contact_id || "").trim().slice(0, 120),
+    avatarUrl: avatarByPath.get(String(row?.sms_contact_avatar_path || "").trim()) || "",
+  }]));
+}
+
 function cleanIds(input) {
   const source = Array.isArray(input) ? input : (input == null ? [] : [input]);
   const ids = [];
@@ -166,7 +342,7 @@ function canAccessRow(row, access) {
 
 async function readRequestedRows(ids) {
   const response = await fetch(
-    `${SUPABASE_URL}/rest/v1/sps_inbox?select=id,channel,ai&${idFilter(ids)}`,
+    `${SUPABASE_URL}/rest/v1/sps_inbox?select=id,channel,ai,sms_line,from_phone,sms_peer_phone,quo_conversation_id,body_text&${idFilter(ids)}`,
     { headers: serviceHeaders() },
   );
   if (!response.ok) throw new Error(`inbox lookup failed (${response.status})`);
@@ -230,6 +406,22 @@ export default async function handler(req, res) {
   try {
     if (req.method === "GET") {
       const query = req.query || {};
+      if (query.threadMeta === "1") {
+        return res.status(200).json({ ok: true, threads: await readThreadMetadata(access), access });
+      }
+      if (query.threadPrefs === "1") {
+        const userId = String(staff.id || "");
+        const preferences = await readThreadPreferences(userId, access);
+        if (!preferences) {
+          return res.status(200).json({
+            ok: true,
+            preferences: {},
+            setupRequired: true,
+            access,
+          });
+        }
+        return res.status(200).json({ ok: true, preferences, access });
+      }
       if (query.mediaFor != null) {
         const ids = cleanIds(query.mediaFor);
         if (!ids || ids.length !== 1) return res.status(400).json({ error: "Provide one valid text-message id." });
@@ -244,6 +436,87 @@ export default async function handler(req, res) {
         }
         const [enriched] = await enrichSmsContacts(rows);
         return res.status(200).json({ ok: true, media: await serializeSmsMedia(enriched), access });
+      }
+      if (query.identityFor != null) {
+        const ids = cleanIds(query.identityFor);
+        if (!ids || ids.length > MAX_IDENTITY_IDS) {
+          return res.status(400).json({ error: `Provide one to ${MAX_IDENTITY_IDS} valid text-message ids.` });
+        }
+        const response = await fetch(
+          `${SUPABASE_URL}/rest/v1/sps_inbox`
+            + "?select=id,channel,ai,sms_line,from_phone,sms_peer_phone,quo_conversation_id,body_text,"
+            + `quo_contact_id,sms_contact_name,sms_contact_avatar_path&${idFilter(ids)}`,
+          { headers: serviceHeaders() },
+        );
+        if (!response.ok) {
+          return res.status(409).json({ error: "Text identities are not ready. Run SMS-CONVERSATIONS-RUN.sql." });
+        }
+        const rows = await response.json().catch(() => null);
+        if (!Array.isArray(rows) || rows.length !== ids.length) {
+          return res.status(403).json({ error: "One or more text conversations are unavailable with your current permissions." });
+        }
+        const byId = new Map(rows.map((row) => [String(row?.id || ""), row]));
+        const ordered = ids.map((id) => byId.get(id));
+        if (ordered.some((row) => !row || !canAccessRow(row, access))) {
+          return res.status(403).json({ error: "One or more text conversations are unavailable with your current permissions." });
+        }
+        return res.status(200).json({
+          ok: true,
+          identities: await serializeSmsIdentities(ordered),
+          access,
+        });
+      }
+      if (query.conversationFor != null) {
+        const ids = cleanIds(query.conversationFor);
+        if (!ids || ids.length !== 1) return res.status(400).json({ error: "Provide one valid text-message id." });
+        const anchorResponse = await fetch(
+          `${SUPABASE_URL}/rest/v1/sps_inbox?select=*&${idFilter(ids)}&limit=1`,
+          { headers: serviceHeaders() },
+        );
+        if (!anchorResponse.ok) {
+          return res.status(409).json({ error: "Text history is not ready. Run SMS-CONVERSATIONS-RUN.sql." });
+        }
+        const anchorRows = await anchorResponse.json().catch(() => null);
+        const anchor = Array.isArray(anchorRows) ? anchorRows[0] : null;
+        if (!anchor || !canAccessRow(anchor, access)) {
+          return res.status(403).json({ error: "That text conversation is unavailable with your current permissions." });
+        }
+
+        const line = rowLine(anchor);
+        const peer = rowConversationPeer(anchor);
+        const storedPeer = toSmsE164(anchor.sms_peer_phone || anchor.from_phone);
+        const providerId = String(anchor.quo_conversation_id || "").trim();
+        if (!line || (!peer && !providerId)) {
+          return res.status(409).json({ error: "That text conversation has no usable participant information." });
+        }
+
+        const limit = Math.min(300, Math.max(20, Number.parseInt(query.limit, 10) || 200));
+        const params = [
+          "select=*",
+          "channel=eq.sms",
+          `sms_line=eq.${encodeURIComponent(line)}`,
+          "order=created_at.desc",
+          `limit=${limit + 1}`,
+        ];
+        // Test Mode history can store the carrier/test number while its protected body prefix
+        // identifies the intended customer. Fetch that narrow stored peer, then filter each row by
+        // the intended peer below. Normal live rows use their customer E.164 directly.
+        if (storedPeer) params.push(`sms_peer_phone=eq.${encodeURIComponent(storedPeer)}`);
+        else params.push(`quo_conversation_id=eq.${encodeURIComponent(providerId)}`);
+        const historyResponse = await fetch(
+          `${SUPABASE_URL}/rest/v1/sps_inbox?${params.join("&")}`,
+          { headers: serviceHeaders() },
+        );
+        if (!historyResponse.ok) {
+          return res.status(409).json({ error: "Text history is not ready. Run SMS-CONVERSATIONS-RUN.sql." });
+        }
+        const historyRows = await historyResponse.json().catch(() => null);
+        if (!Array.isArray(historyRows)) return res.status(502).json({ error: "The text conversation returned invalid data." });
+        const authorizedRows = historyRows
+          .filter((row) => canAccessRow(row, access) && sameConversation(row, { line, peer, providerId }));
+        const hasMore = authorizedRows.length > limit;
+        const safeRows = (await enrichSmsContacts(authorizedRows.slice(0, limit))).map(serializeSmsRow);
+        return res.status(200).json({ ok: true, rows: safeRows, hasMore, access });
       }
       if (query.summary === "unread") {
         const response = await fetch(
@@ -280,16 +553,28 @@ export default async function handler(req, res) {
     if (req.method !== "POST") return res.status(405).json({ error: "GET or POST only" });
     const body = req.body || {};
     const action = String(body.action || "");
-    const ids = cleanIds(action === "markImported" ? body.id : (body.ids != null ? body.ids : body.id));
+    const ids = cleanIds(
+      action === "setPinned"
+        ? body.anchorId
+        : (action === "markImported" ? body.id : (body.ids != null ? body.ids : body.id)),
+    );
     if (!ids) return res.status(400).json({ error: "Provide one to 200 valid text-message ids." });
 
-    const allowedActions = new Set(["markRead", "markReplied", "setKind", "markImported", "delete"]);
+    const allowedActions = new Set([
+      "markRead",
+      "markReplied",
+      "setKind",
+      "setThreadKind",
+      "setPinned",
+      "markImported",
+      "delete",
+    ]);
     if (!allowedActions.has(action)) return res.status(400).json({ error: "Unknown text-inbox action." });
 
     // A line visibility/reply grant must never imply authority to destroy shared history or alter
     // its business classification. Keep those actions owner-only until the product has a separate,
     // explicit inbox-management permission.
-    const ownerOnlyActions = new Set(["delete", "setKind", "markImported"]);
+    const ownerOnlyActions = new Set(["delete", "setKind", "setThreadKind", "markImported"]);
     if (ownerOnlyActions.has(action) && staff.teamRole !== "owner") {
       return res.status(403).json({ ok: false, error: "Owner access is required to manage text-message records." });
     }
@@ -300,6 +585,48 @@ export default async function handler(req, res) {
     }
     if (action === "markReplied" && staff.teamRole !== "owner" && authorizedRows.some((row) => rowLine(row) === "main")) {
       return res.status(403).json({ ok: false, error: "Only the owner can reply from the owner's work line." });
+    }
+
+    if (action === "setPinned") {
+      if (authorizedRows.length !== 1) return res.status(400).json({ error: "Choose one text conversation." });
+      if (typeof body.pinned !== "boolean") return res.status(400).json({ error: "Choose whether to pin or unpin this conversation." });
+      const threadKey = rowThreadKey(authorizedRows[0]);
+      if (!threadKey || !canAccessThreadKey(threadKey, access)) {
+        return res.status(409).json({ error: "That text conversation has no usable participant information." });
+      }
+      const result = await setThreadPinned(String(staff.id || ""), threadKey, body.pinned);
+      if (!result) {
+        return res.status(409).json({
+          ok: false,
+          error: "The pin could not be saved. Run SMS-THREAD-PREFERENCES-RUN.sql, then try again.",
+        });
+      }
+      return res.status(200).json({
+        ok: true,
+        threadKey,
+        pinned: result.pinned,
+        pinnedAt: result.pinnedAt,
+        access,
+      });
+    }
+
+    if (action === "setThreadKind") {
+      if (authorizedRows.length !== 1) return res.status(400).json({ error: "Choose one text conversation." });
+      const kind = String(body.kind || "").trim().toLowerCase();
+      if (!VALID_KINDS.has(kind)) return res.status(400).json({ error: "Choose a valid conversation category." });
+      const threadKey = rowThreadKey(authorizedRows[0]);
+      if (!threadKey) return res.status(409).json({ error: "That text conversation has no usable participant information." });
+      const leadId = kind === "lead" ? String(body.leadId || "").trim().slice(0, 160) : "";
+      const updatedAt = new Date().toISOString();
+      const mutation = await mutateAppState(SMS_THREAD_META_KEY, (current) => {
+        const source = current && typeof current === "object" && !Array.isArray(current) ? current : {};
+        const next = { ...source, [threadKey]: { kind, leadId, updatedAt } };
+        const entries = Object.entries(next);
+        if (entries.length <= MAX_THREAD_META) return next;
+        entries.sort((a, b) => String(a[1]?.updatedAt || "").localeCompare(String(b[1]?.updatedAt || "")));
+        return Object.fromEntries(entries.slice(entries.length - MAX_THREAD_META));
+      });
+      return res.status(200).json({ ok: true, threadKey, meta: mutation.value?.[threadKey] || { kind, leadId, updatedAt }, access });
     }
 
     let fields = null;

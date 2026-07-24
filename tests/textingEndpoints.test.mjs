@@ -13,6 +13,7 @@ process.env.QUO_PHONE_NUMBER = "+15550001111";
 process.env.QUO_MAIN_PHONE_NUMBER = "+15550002222";
 process.env.QUO_WEBHOOK_KEY = "test-webhook-key";
 process.env.QUO_WEBHOOK_SECRET = Buffer.from("test-webhook-signing-secret", "utf8").toString("base64");
+process.env.QUO_CONTACT_WEBHOOK_SECRET = Buffer.from("test-contact-webhook-signing-secret", "utf8").toString("base64");
 delete process.env.ANTHROPIC_API_KEY;
 delete process.env.APNS_KEY_ID;
 delete process.env.APNS_TEAM_ID;
@@ -178,11 +179,12 @@ function installOutboundFetch({
 
 const WEBHOOK_KEY = process.env.QUO_WEBHOOK_KEY;
 const WEBHOOK_SECRET = process.env.QUO_WEBHOOK_SECRET;
+const CONTACT_WEBHOOK_SECRET = process.env.QUO_CONTACT_WEBHOOK_SECRET;
 
-function webhookSignature(raw, timestamp = Date.now()) {
+function webhookSignature(raw, timestamp = Date.now(), secret = WEBHOOK_SECRET) {
   const ts = String(timestamp);
   const digest = crypto
-    .createHmac("sha256", Buffer.from(WEBHOOK_SECRET, "base64"))
+    .createHmac("sha256", Buffer.from(secret, "base64"))
     .update(`${ts}.${raw}`, "utf8")
     .digest("base64");
   return `hmac;1;${ts};${digest}`;
@@ -225,11 +227,39 @@ async function invokeWebhook(payload, options = {}) {
   return { res, raw };
 }
 
-function installInboxFetch({ duplicate = false, duplicateAi = null, storageFailure = false, clientReadFailure = false, patchFailure = false } = {}) {
+function installInboxFetch({
+  duplicate = false,
+  duplicateAi = null,
+  storageFailure = false,
+  clientReadFailure = false,
+  patchFailure = false,
+  quoContacts = {},
+} = {}) {
   let storedRow = duplicate ? { ai: duplicateAi || { quoLine: "automation" }, kind: "other" } : null;
-  const calls = { inserts: 0, patches: 0, patchBodies: [], reads: 0, rows: [] };
+  const calls = {
+    inserts: 0,
+    patches: 0,
+    patchBodies: [],
+    reads: 0,
+    rows: [],
+    contactLookups: [],
+    contactRows: [],
+  };
   globalThis.fetch = async (url, options = {}) => {
     const target = String(url);
+    if (target.startsWith("https://api.quo.com/v1/contacts/")) {
+      const contactId = decodeURIComponent(target.split("/").pop());
+      calls.contactLookups.push(contactId);
+      const contact = quoContacts[contactId];
+      return contact
+        ? response({ data: contact })
+        : response({ error: "not found" }, { ok: false, status: 404 });
+    }
+    if (target.includes("/rest/v1/sps_sms_contacts?select=")) return response([]);
+    if (target.includes("/rest/v1/sps_sms_contacts?on_conflict=phone")) {
+      calls.contactRows.push(...JSON.parse(options.body));
+      return response([]);
+    }
     if (target.includes("/rest/v1/app_state?") && target.includes("key=eq.sps_clients")) {
       return clientReadFailure
         ? response({ error: "client state unavailable" }, { ok: false, status: 503 })
@@ -1266,6 +1296,18 @@ test("inbound webhook accepts a valid signature among comma-separated candidates
   assert.equal(calls.inserts, 1);
 });
 
+test("inbound webhook accepts the separately configured contact-webhook signing secret", async () => {
+  const calls = installInboxFetch();
+  const payload = webhookPayload("second-webhook-secret");
+  const raw = JSON.stringify(payload);
+  const signature = webhookSignature(raw, Date.now(), CONTACT_WEBHOOK_SECRET);
+  const { res } = await invokeWebhook(raw, { signature });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.stored, true);
+  assert.equal(calls.inserts, 1);
+});
+
 test("every durably stored inbound text attempts an owner push even when it is not a client or lead", async () => {
   const calls = installInboxFetch();
   const { res } = await invokeWebhook(webhookPayload("unknown-owner-push", {
@@ -1312,6 +1354,55 @@ test("inbound webhook stores Quo's body field and supports the legacy text fallb
   assert.equal(calls.rows[0].subject, "Current Quo payload");
   assert.equal(calls.rows[1].body_text, "Legacy payload");
   assert.equal(calls.rows[1].subject, "Legacy payload");
+});
+
+test("modern Quo contactIds resolve one exact phone match into the private contact cache", async () => {
+  const calls = installInboxFetch({
+    quoContacts: {
+      "CT-modern-1": {
+        id: "CT-modern-1",
+        defaultFields: {
+          firstName: "Jonathan",
+          lastName: "Lauchner",
+          phoneNumbers: [{ value: "+15552345678" }],
+        },
+      },
+    },
+  });
+  const { res } = await invokeWebhook(webhookPayload("modern-contact-id", {
+    contactIds: ["CT-modern-1"],
+  }));
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(calls.contactLookups, ["CT-modern-1"]);
+  assert.equal(calls.contactRows.length, 1);
+  assert.equal(calls.contactRows[0].contact_name, "Jonathan Lauchner");
+  assert.equal(calls.rows[0].quo_contact_id, "CT-modern-1");
+  assert.equal(calls.rows[0].sms_contact_name, "Jonathan Lauchner");
+});
+
+test("modern Quo contactIds are not attached when the exact contact phone does not match the sender", async () => {
+  const calls = installInboxFetch({
+    quoContacts: {
+      "CT-other-phone": {
+        id: "CT-other-phone",
+        defaultFields: {
+          firstName: "Wrong",
+          lastName: "Person",
+          phoneNumbers: [{ value: "+15559998888" }],
+        },
+      },
+    },
+  });
+  const { res } = await invokeWebhook(webhookPayload("mismatched-contact-id", {
+    contactIds: ["CT-other-phone"],
+  }));
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(calls.contactLookups, ["CT-other-phone"]);
+  assert.equal(calls.contactRows.length, 0);
+  assert.equal(calls.rows[0].quo_contact_id, null);
+  assert.equal(calls.rows[0].sms_contact_name, null);
 });
 
 test("inbound media is noted without retaining provider-hosted media URLs", async () => {
