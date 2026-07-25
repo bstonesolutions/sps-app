@@ -1,10 +1,15 @@
-import { useState, useEffect, useRef } from "react";
+import { Component, useState, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { supabase, store } from "./supabaseClient";
 import { PROD_URL } from "./config";
 import { Capacitor } from "@capacitor/core";
 import App, { LiveTrack, SIGNOUT_CLEANUP_MARKER, cleanupNativeSessionAfterUnexpectedSignOut } from "./App.jsx";
 import { brandLogoSource } from "./brandAssets";
+import {
+  AUTH_BOOTSTRAP_TIMEOUT_MS,
+  createStartupReference,
+  loadInitialSession,
+} from "./authBootstrap";
 
 // Remove the static boot splash (in index.html) once a real React screen is up. Hold it at least
 // ~1.8s (matches the app path) so the full welcome motion always plays and it never flashes, then
@@ -26,6 +31,106 @@ const card = { width: "100%", maxWidth: 360, background: "#fff", borderRadius: 2
 const inp = { width: "100%", padding: "13px 14px", border: "1px solid #e5e7eb", borderRadius: 12, fontSize: 15, marginBottom: 10, boxSizing: "border-box", outline: "none", fontFamily: "inherit" };
 const btn = { width: "100%", padding: "13px", border: "none", borderRadius: 12, background: "#B81D24", color: "#fff", fontWeight: 700, fontSize: 15, cursor: "pointer", fontFamily: "inherit" };
 const linkBtn = { background: "none", border: "none", color: "#B81D24", fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "inherit", padding: 0 };
+
+function reloadFreshEntry() {
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set("_sps_retry", String(Date.now()));
+    window.location.replace(url.toString());
+  } catch (_) {
+    window.location.reload();
+  }
+}
+
+function StartupScreen({
+  loading = false,
+  title = "Starting SPS Way",
+  message = "Connecting to your workspace…",
+  primaryLabel,
+  onPrimary,
+  secondaryLabel,
+  onSecondary,
+  reference,
+}) {
+  useEffect(() => {
+    removeBootSplash();
+    document.body.classList.add("auth-active");
+    return () => document.body.classList.remove("auth-active");
+  }, []);
+
+  return (
+    <main
+      role={loading ? "status" : "alert"}
+      aria-live={loading ? "polite" : "assertive"}
+      style={{ ...wrap, position: "fixed", inset: 0, boxSizing: "border-box" }}
+    >
+      <section style={{ ...card, maxWidth: 390, textAlign: "center", padding: "32px 28px" }}>
+        <img
+          src="/icon-192.png"
+          alt=""
+          aria-hidden="true"
+          style={{ width: 66, height: 66, borderRadius: 18, objectFit: "cover", boxShadow: "0 10px 28px rgba(184,29,36,0.2)" }}
+        />
+        {loading ? (
+          <div
+            aria-hidden="true"
+            style={{ width: 24, height: 24, margin: "20px auto 0", border: "3px solid #f1d3d5", borderTopColor: "#B81D24", borderRadius: "50%", animation: "spin .85s linear infinite" }}
+          />
+        ) : null}
+        <h1 style={{ margin: loading ? "14px 0 7px" : "20px 0 8px", color: "#111827", fontSize: 22, lineHeight: 1.2, letterSpacing: "-0.02em" }}>{title}</h1>
+        <p style={{ margin: 0, color: "#667085", fontSize: 14, lineHeight: 1.55 }}>{message}</p>
+        {!loading && primaryLabel && onPrimary ? (
+          <button type="button" style={{ ...btn, marginTop: 24 }} onClick={onPrimary}>{primaryLabel}</button>
+        ) : null}
+        {!loading && secondaryLabel && onSecondary ? (
+          <button type="button" style={{ ...linkBtn, marginTop: 16, minHeight: 36, padding: "6px 10px" }} onClick={onSecondary}>{secondaryLabel}</button>
+        ) : null}
+        {!loading && reference ? (
+          <div style={{ marginTop: 18, color: "#98A2B3", fontSize: 11, lineHeight: 1.4 }}>Reference: {reference}</div>
+        ) : null}
+      </section>
+    </main>
+  );
+}
+
+class RootErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { failed: false, reference: "" };
+  }
+
+  static getDerivedStateFromError() {
+    return { failed: true, reference: createStartupReference("screen") };
+  }
+
+  componentDidCatch(error, info) {
+    removeBootSplash();
+    const safeName = typeof error?.name === "string" ? error.name.slice(0, 80) : "Error";
+    const safeComponents = typeof info?.componentStack === "string"
+      ? info.componentStack.split("\n").slice(0, 6).join("\n")
+      : "";
+    console.error("SPS Way root screen failed", {
+      reference: this.state.reference,
+      errorName: safeName,
+      componentStack: safeComponents,
+    });
+  }
+
+  render() {
+    if (this.state.failed) {
+      return (
+        <StartupScreen
+          title="This screen didn’t finish loading"
+          message="SPS Way hit an unexpected screen error. Reload the app to recover; your account will not be changed."
+          primaryLabel="Reload SPS Way"
+          onPrimary={reloadFreshEntry}
+          reference={this.state.reference}
+        />
+      );
+    }
+    return this.props.children;
+  }
+}
 
 function hasMagicLinkToken() {
   const hash = window.location.hash || "";
@@ -296,40 +401,78 @@ function SetPassword({ email, recovery, onDone }) {
 function Root() {
   const [session, setSession] = useState(undefined);
   const [pwdDone, setPwdDone] = useState(false);
+  const [authAttempt, setAuthAttempt] = useState(0);
+  const [authBootFailure, setAuthBootFailure] = useState(null);
 
   useEffect(() => {
+    let active = true;
     let authEventVersion = 0;
-    supabase.auth.getSession().then(({ data }) => {
-      if (authEventVersion !== 0) return;
-      const s = data.session;
+    let subscription = null;
+
+    const failBootstrap = (error) => {
+      if (!active || authEventVersion !== 0) return;
+      const reference = createStartupReference(
+        error?.code === "AUTH_BOOTSTRAP_TIMEOUT" ? "auth-timeout" : "auth",
+      );
+      const safeName = typeof error?.name === "string" ? error.name.slice(0, 80) : "Error";
+      console.error("SPS Way auth startup failed", { reference, errorName: safeName });
+      setAuthBootFailure({ reference });
+      removeBootSplash();
+    };
+
+    loadInitialSession(
+      () => supabase.auth.getSession(),
+      { timeoutMs: AUTH_BOOTSTRAP_TIMEOUT_MS },
+    ).then((s) => {
+      if (!active || authEventVersion !== 0) return;
       if (s && s.user) { try { store.setUser(s.user.id); } catch (_) {} }  // namespace the read cache BEFORE <App> mounts
+      setAuthBootFailure(null);
       setSession(s);
-    });
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_e, s) => {
-      const eventVersion = ++authEventVersion;
-      // Clear the on-disk cache ONLY on a real sign-out (not TOKEN_REFRESHED/USER_UPDATED), so a shared
-      // device never serves the prior account's cached data; otherwise keep the cache uid-namespaced.
-      if (_e === "SIGNED_OUT") {
-        let alreadyCleaned = false;
-        try {
-          alreadyCleaned = sessionStorage.getItem(SIGNOUT_CLEANUP_MARKER) === "1";
-          sessionStorage.removeItem(SIGNOUT_CLEANUP_MARKER);
-        } catch (_) {}
-        if (!alreadyCleaned) {
-          try { await cleanupNativeSessionAfterUnexpectedSignOut(); } catch (_) {}
+    }).catch(failBootstrap);
+
+    try {
+      const { data: sub } = supabase.auth.onAuthStateChange(async (_e, s) => {
+        if (!active) return;
+        const eventVersion = ++authEventVersion;
+        // Clear the on-disk cache ONLY on a real sign-out (not TOKEN_REFRESHED/USER_UPDATED), so a shared
+        // device never serves the prior account's cached data; otherwise keep the cache uid-namespaced.
+        if (_e === "SIGNED_OUT") {
+          let alreadyCleaned = false;
+          try {
+            alreadyCleaned = sessionStorage.getItem(SIGNOUT_CLEANUP_MARKER) === "1";
+            sessionStorage.removeItem(SIGNOUT_CLEANUP_MARKER);
+          } catch (_) {}
+          if (!alreadyCleaned) {
+            try { await cleanupNativeSessionAfterUnexpectedSignOut(); } catch (_) {}
+          }
+          try { await store.clearCache(); } catch (_) {}
+          if (!active || eventVersion !== authEventVersion) return;
+        } else if (s && s.user) {
+          try { store.setUser(s.user.id); } catch (_) {}
         }
-        try { await store.clearCache(); } catch (_) {}
-        if (eventVersion !== authEventVersion) return;
-      } else if (s && s.user) {
-        try { store.setUser(s.user.id); } catch (_) {}
-      }
-      setSession(s);
-      if (s && window.location.hash.includes("access_token")) {
-        window.history.replaceState(null, "", window.location.pathname);
-      }
-    });
-    return () => sub.subscription.unsubscribe();
-  }, []);
+        if (!active || eventVersion !== authEventVersion) return;
+        setAuthBootFailure(null);
+        setSession(s);
+        if (s && window.location.hash.includes("access_token")) {
+          window.history.replaceState(null, "", window.location.pathname);
+        }
+      });
+      subscription = sub?.subscription || null;
+    } catch (error) {
+      failBootstrap(error);
+    }
+
+    return () => {
+      active = false;
+      subscription?.unsubscribe();
+    };
+  }, [authAttempt]);
+
+  const retryAuthBootstrap = () => {
+    setAuthBootFailure(null);
+    setSession(undefined);
+    setAuthAttempt((attempt) => attempt + 1);
+  };
 
   // Scale the whole UI up on a real DESKTOP browser (≥1024px, not iPad, not the native app):
   // the layout is pixel-based, so it reads tiny on large Mac screens. CSS zoom scales
@@ -351,7 +494,23 @@ function Root() {
     return () => { window.removeEventListener("resize", apply); document.body.style.zoom = ""; };
   }, []);
 
-  if (session === undefined) return <div style={{ ...wrap, color: "#6b7280", fontSize: 14 }}>Loading…</div>;
+  if (authBootFailure) {
+    const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+    return (
+      <StartupScreen
+        title={offline ? "You appear to be offline" : "SPS Way couldn’t finish starting"}
+        message={offline
+          ? "Reconnect this device, then try again. Your account was not changed."
+          : "We couldn’t verify this session. Check your connection and try again; your account was not changed."}
+        primaryLabel="Try again"
+        onPrimary={retryAuthBootstrap}
+        secondaryLabel="Reload app"
+        onSecondary={reloadFreshEntry}
+        reference={authBootFailure.reference}
+      />
+    );
+  }
+  if (session === undefined) return <StartupScreen loading />;
   if (!session) return <Login />;
   // First login via invite link (no password yet), or a password-reset link →
   // make them set a password before continuing into the app.
@@ -366,7 +525,11 @@ function Root() {
 // Public live-tracking page — ?track=<token> opens the tech's live map with no login,
 // bypassing the auth gate entirely.
 const _trackToken = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("track") : null;
-createRoot(document.getElementById("root")).render(_trackToken ? <LiveTrack token={_trackToken} /> : <Root />);
+createRoot(document.getElementById("root")).render(
+  <RootErrorBoundary>
+    {_trackToken ? <LiveTrack token={_trackToken} /> : <Root />}
+  </RootErrorBoundary>,
+);
 
 // Native (Capacitor): the iOS launch screen stays up (launchAutoHide:false) until
 // the web is painted, then hands off to the boot/React splash — no white flash.

@@ -34,6 +34,7 @@ function installDatabase(initialRows, options = {}) {
   let deleteCalls = 0;
   let readCalls = 0;
   let versionProbeCalls = 0;
+  let initialSelectCalls = 0;
 
   supabase.auth.refreshSession = async () => ({ data: {}, error: null });
   supabase.from = (table) => {
@@ -54,6 +55,13 @@ function installDatabase(initialRows, options = {}) {
           },
           then(resolve, reject) {
             if (columns === "key, version") versionProbeCalls += 1;
+            if (columns === "key, value, version") {
+              initialSelectCalls += 1;
+              const selectError = typeof options.initialSelectError === "function"
+                ? options.initialSelectError({ call: initialSelectCalls, rows })
+                : options.initialSelectError;
+              if (selectError) return Promise.resolve({ data: null, error: selectError }).then(resolve, reject);
+            }
             const data = [...rows.entries()]
               .filter(([key]) => !selectedKeys || selectedKeys.has(key))
               .map(([key, row]) => columns === "key, version" ? { key, version: row.version } : { key, ...row });
@@ -111,7 +119,14 @@ function installDatabase(initialRows, options = {}) {
     }
     throw new Error(`Unexpected RPC ${name}`);
   };
-  return { rows, get casCalls() { return casCalls; }, get deleteCalls() { return deleteCalls; }, get readCalls() { return readCalls; }, get versionProbeCalls() { return versionProbeCalls; } };
+  return {
+    rows,
+    get casCalls() { return casCalls; },
+    get deleteCalls() { return deleteCalls; },
+    get readCalls() { return readCalls; },
+    get versionProbeCalls() { return versionProbeCalls; },
+    get initialSelectCalls() { return initialSelectCalls; },
+  };
 }
 
 async function loadAs(uid, key) {
@@ -119,6 +134,87 @@ async function loadAs(uid, key) {
   await store.get(key);
   await tick();
 }
+
+test("failed initial SELECT stays uninitialized and a later in-session retry can recover", async () => {
+  const originalNow = Date.now;
+  let now = 1_000_000;
+  let initialError = { status: 503, message: "Database temporarily unavailable" };
+  Date.now = () => now;
+  try {
+    const key = "sps_schedule";
+    const shared = [{ date: "07/24/2026", stops: [{ sid: "remote" }] }];
+    const db = installDatabase(
+      { [key]: { value: json(shared), version: 4, updated_at: null } },
+      { initialSelectError: () => initialError }
+    );
+    store.setUser("init-retry-recovers");
+
+    const failed = await store.initialize();
+    assert.equal(failed.ok, false);
+    assert.equal(failed.loaded, false);
+    assert.equal(failed.retryable, true);
+    assert.ok(failed.retryAt > now);
+    assert.equal(db.initialSelectCalls, 1);
+
+    const deferred = await store.initialize();
+    assert.equal(deferred.ok, false);
+    assert.equal(deferred.deferred, true);
+    assert.equal(db.initialSelectCalls, 1, "the retry window must prevent outage request loops");
+
+    initialError = null;
+    now += 301_000;
+    const recovered = await store.initialize();
+    assert.deepEqual(
+      { ok: recovered.ok, loaded: recovered.loaded, rowCount: recovered.rowCount },
+      { ok: true, loaded: true, rowCount: 1 }
+    );
+    assert.equal(db.initialSelectCalls, 2);
+    assert.deepEqual(JSON.parse((await store.get(key)).value), shared);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("refresh and commit stop safely until the initial snapshot is confirmed", async () => {
+  const originalNow = Date.now;
+  let now = 2_000_000;
+  let initialError = { status: 522, message: "Connection timed out" };
+  Date.now = () => now;
+  try {
+    const key = "sps_clients";
+    const base = [{ id: "c1", note: "shared" }];
+    const local = [{ id: "c1", note: "kept locally" }];
+    const db = installDatabase(
+      { [key]: { value: json(base), version: 2, updated_at: null } },
+      { initialSelectError: () => initialError }
+    );
+    store.setUser("init-gates-refresh-and-commit");
+
+    const refresh = await store.refresh(key);
+    assert.equal(refresh.ok, false);
+    assert.equal(refresh.initFailed, true);
+    assert.equal(db.readCalls, 0, "a keyed refresh must not run after initialization failed");
+
+    const save = await store.set(key, json(local), { baseValue: json(base) });
+    assert.equal(save.ok, false);
+    assert.equal(save.initFailed, true);
+    assert.equal(save.queued, true);
+    assert.equal(db.casCalls, 0, "CAS must not run against an unconfirmed initial snapshot");
+    assert.deepEqual(JSON.parse((await store.get(key)).value), local);
+    const durable = JSON.parse(localStorage.getItem("sps_pending_writes:init-gates-refresh-and-commit"));
+    assert.equal(durable[key].localValue, json(local));
+
+    initialError = null;
+    now += 301_000;
+    const drained = await store.flush();
+    assert.equal(drained.ok, true);
+    assert.equal(db.initialSelectCalls, 2);
+    assert.equal(db.casCalls, 1);
+    assert.deepEqual(JSON.parse(db.rows.get(key).value), local);
+  } finally {
+    Date.now = originalNow;
+  }
+});
 
 test("browser CAS merges independent cross-device edits instead of overwriting", async () => {
   const base = [{ id: "c1", phone: "111" }, { id: "c2", city: "Old" }];

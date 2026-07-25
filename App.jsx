@@ -34656,10 +34656,13 @@ async function readStopMutationBaseline(fallbacks) {
   return { values, versions };
 }
 
-export default function App({ authEmail = "", onSignOut }) {
+export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   const appMainRef = useRef(null);
+  const softRefreshRef = useRef(null);
+  const initialWorkspaceRef = useRef(null);
+  if (!initialWorkspaceRef.current) initialWorkspaceRef.current = readWorkspaceState(authUserId);
   const [selectedClient, setSelectedClient] = useState(null);
-  const [clientOpenTab, setClientOpenTab] = useState(null); // which ClientDetail tab to open (e.g. from a Home alert)
+  const [clientOpenTab, setClientOpenTab] = useState(() => initialWorkspaceRef.current.client?.tab || null); // which ClientDetail tab to open (e.g. from a Home alert)
   const [scheduleFocus, setScheduleFocus] = useState(null); // { sid, date } — open a specific stop from Home
   const [portalDeepLink, setPortalDeepLink] = useState(null); // route the client portal from a deep link (e.g. invoice "Pay in the app")
   const [payBanner, setPayBanner] = useState(null); // Build 15, Item 6 — in-app "payment received" banner (owner, while in the app)

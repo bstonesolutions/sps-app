@@ -13,6 +13,7 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 const SNAP_KEY = "snapshot";
 const PENDING_KEY = "sps_pending_writes";
 const MAX_CAS_ATTEMPTS = 6;
+const MAX_INIT_BACKOFF_STEP = 7;
 
 let _uid = null;
 let _identityVersion = 0;
@@ -31,6 +32,9 @@ let _pendingPersistTail = Promise.resolve();
 let _snapshotPersistTail = Promise.resolve();
 let _lastErrorAt = 0;
 let _initSelectAt = 0;
+let _initRetryCount = 0;
+let _initRetryAt = 0;
+let _initLastError = null;
 let _cacheReadyState = { ready: false, hasData: false };
 let _retryAfterAt = 0;
 const _cacheAt = {};
@@ -285,6 +289,9 @@ function resetForIdentity() {
   _ensureHydratePromise = null;
   _cacheReadyState = { ready: false, hasData: false };
   _initSelectAt = 0;
+  _initRetryCount = 0;
+  _initRetryAt = 0;
+  _initLastError = null;
   _retryAfterAt = 0;
   clearObject(_cacheAt);
   clearObject(_chains);
@@ -447,20 +454,46 @@ function adoptRemote(key, remote, updateDisplay = true) {
 }
 
 async function init() {
-  if (_loaded) return;
+  if (_loaded) return { ok: true, loaded: true, alreadyLoaded: true };
   if (_loadPromise) return _loadPromise;
+  if (!_uid) return { ok: false, loaded: false, noUser: true, error: new Error("No signed-in account") };
+  if (_initRetryAt > Date.now()) {
+    return {
+      ok: false,
+      loaded: false,
+      deferred: true,
+      retryable: isTransientAppStateError(_initLastError) || isAuthError(_initLastError),
+      retryAt: _initRetryAt,
+      retryCount: _initRetryCount,
+      error: _initLastError || new Error("The shared data connection is retrying shortly"),
+    };
+  }
   const identityVersion = _identityVersion;
   _initSelectAt = Date.now();
-  _loadPromise = (async () => {
+  const run = (async () => {
     try {
       const { data, error } = await supabase.from("app_state").select("key, value, version");
-      if (identityVersion !== _identityVersion || !_uid) return;
+      if (identityVersion !== _identityVersion || !_uid) return { ok: false, loaded: false, staleIdentity: true };
       if (error) {
         console.error("store.init failed:", error.message);
         const denied = /row.level security|permission denied|not authorized|insufficient privilege/i.test(error.message || "");
         if (denied) notify("restricted", "Using scoped account access.");
         else notify("error", "Cannot reach the database.");
-        return;
+        await refreshForAuthError(error);
+        if (identityVersion !== _identityVersion || !_uid) return { ok: false, loaded: false, staleIdentity: true };
+        const retry = nextAppStateRetry(Math.min(_initRetryCount, MAX_INIT_BACKOFF_STEP - 1));
+        _initRetryCount = Math.min(retry.retryCount, MAX_INIT_BACKOFF_STEP);
+        _initRetryAt = retry.retryAt;
+        _initLastError = error;
+        _loaded = false;
+        return {
+          ok: false,
+          loaded: false,
+          retryable: isTransientAppStateError(error) || isAuthError(error),
+          retryAt: _initRetryAt,
+          retryCount: _initRetryCount,
+          error,
+        };
       }
       if (!data || data.length === 0) {
         const deletedKeys = Object.keys(_confirmed).filter((key) => !_pending[key]);
@@ -468,9 +501,19 @@ async function init() {
         _versions = {};
         _exists = {};
         deletedKeys.forEach((key) => { delete _cache[key]; notifyReconciled(key, true); });
+        _loaded = true;
+        _initialReadConfirmed = true;
+        _initRetryCount = 0;
+        _initRetryAt = 0;
+        _initLastError = null;
         saveSnapshot();
+        // An empty result is still a fully confirmed initial read. Release the frontend's
+        // write fence so a legitimate new workspace can create its first shared records.
+        notify("read-ok", "Connected");
         notify("restricted", "Using scoped account access.");
-        return;
+        notifyReconciled();
+        flush();
+        return { ok: true, loaded: true, empty: true, rowCount: 0 };
       }
       const remoteKeys = new Set(data.map((row) => row.key));
       const deletedKeys = [];
@@ -494,21 +537,41 @@ async function init() {
         if (pending && pending.deleteIntent && pending.status === "conflict") _cache[row.key] = value;
         else if (!pending && !(_cacheAt[row.key] > _initSelectAt)) _cache[row.key] = value;
       }
+      _loaded = true;
       _initialReadConfirmed = true;
+      _initRetryCount = 0;
+      _initRetryAt = 0;
+      _initLastError = null;
       notify("read-ok", "Connected");
       saveSnapshot();
       notifyReconciled();
       deletedKeys.forEach((key) => notifyReconciled(key, true));
       flush();
+      return { ok: true, loaded: true, empty: false, rowCount: data.length };
     } catch (error) {
-      if (identityVersion !== _identityVersion || !_uid) return;
+      if (identityVersion !== _identityVersion || !_uid) return { ok: false, loaded: false, staleIdentity: true };
       try { console.error("store.init error:", error && error.message); } catch (_) {}
       notify("error", "Cannot reach the database.");
-    } finally {
-      if (identityVersion === _identityVersion) _loaded = true;
+      const retry = nextAppStateRetry(Math.min(_initRetryCount, MAX_INIT_BACKOFF_STEP - 1));
+      _initRetryCount = Math.min(retry.retryCount, MAX_INIT_BACKOFF_STEP);
+      _initRetryAt = retry.retryAt;
+      _initLastError = error;
+      _loaded = false;
+      return {
+        ok: false,
+        loaded: false,
+        retryable: isTransientAppStateError(error) || isAuthError(error),
+        retryAt: _initRetryAt,
+        retryCount: _initRetryCount,
+        error,
+      };
     }
   })();
-  return _loadPromise;
+  _loadPromise = run;
+  run.then(() => {
+    if (_loadPromise === run) _loadPromise = null;
+  });
+  return run;
 }
 
 function stagePending(key, value, options = {}) {
@@ -726,9 +789,26 @@ async function commitKey(key, identityVersion = _identityVersion) {
   await awaitPendingDurability();
   if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
   await ensureHydrate();
-  await init();
+  const initialized = await init();
   if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
   const envelope = _pending[key];
+  if (!initialized.ok) {
+    if (initialized.staleIdentity) return { ok: false, staleIdentity: true };
+    if (!envelope || initialized.deferred) {
+      return {
+        ...initialized,
+        ok: false,
+        initFailed: true,
+        queued: !!envelope,
+      };
+    }
+    const queued = queueFailure(key, initialized.error, envelope);
+    return {
+      ...queued,
+      initFailed: true,
+      retryAt: Math.max(Number(queued.retryAt) || 0, Number(initialized.retryAt) || 0),
+    };
+  }
   if (!envelope) return { ok: true, value: _confirmed[key], version: Number(_versions[key]) || 0 };
   if (envelope.status === "conflict") return { ok: false, conflict: true, key, conflicts: envelope.conflicts || [] };
 
@@ -861,8 +941,9 @@ async function refreshKey(key, identityVersion = _identityVersion) {
   if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
   try {
     await ensureHydrate();
-    await init();
+    const initialized = await init();
     if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+    if (!initialized.ok) return { ...initialized, ok: false, initFailed: true };
 
     const remote = await readRemote(key, identityVersion);
     if (remote.staleIdentity) return { ok: false, staleIdentity: true };
@@ -929,8 +1010,9 @@ async function refreshChangedKeys(keys, options = {}, identityVersion = _identit
   if (!safeKeys.length) return { ok: true, changedKeys: [], results: [] };
   try {
     await ensureHydrate();
-    await init();
+    const initialized = await init();
     if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+    if (!initialized.ok) return { ...initialized, ok: false, initFailed: true };
 
     // Poll only the tiny version counters. Full JSON values are fetched through enqueueRefresh only
     // for rows whose version/existence changed, preserving the same dirty-aware, per-key ordering as
@@ -992,12 +1074,16 @@ async function flush() {
       results.push({ key, result });
       // A shared infrastructure failure is unlikely to be key-specific. Stop this drain after one
       // failed request instead of hammering every large app_state row in the queue.
-      if (result && result.transient) break;
+      if (result && (result.transient || result.initFailed)) break;
     }
+    const initRetryAt = results.reduce(
+      (latest, { result }) => Math.max(latest, Number(result && result.retryAt) || 0),
+      0
+    );
     return {
       ok: results.every(({ result }) => result && result.ok),
-      deferred: results.some(({ result }) => result && result.transient),
-      retryAt: _retryAfterAt,
+      deferred: results.some(({ result }) => result && (result.transient || result.deferred || result.initFailed)),
+      retryAt: Math.max(_retryAfterAt, initRetryAt),
       results,
     };
   } finally {
@@ -1098,8 +1184,9 @@ function replaceMany(changes) {
     try { await Promise.all(priors); } catch (_) {}
     if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
     await ensureHydrate();
-    await init();
+    const initialized = await init();
     if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+    if (!initialized.ok) return { ...initialized, ok: false, initFailed: true };
     const blockedKey = keys.find((key) => _pending[key]);
     if (blockedKey) return { ok: false, conflict: true, conflictKey: blockedKey, error: new Error("A local edit is still pending") };
 
@@ -1191,6 +1278,10 @@ export const store = {
 
   cacheReady() { return _cacheReadyState; },
 
+  // Awaitable readiness contract for callers that must not mutate or refresh shared state until
+  // the complete initial snapshot has been confirmed. Cache-first reads should continue using get().
+  initialize() { return init(); },
+
   async get(key) {
     await ensureHydrate();
     init();
@@ -1269,6 +1360,9 @@ export const store = {
     _loaded = false;
     _initialReadConfirmed = false;
     _loadPromise = null;
+    _initRetryCount = 0;
+    _initRetryAt = 0;
+    _initLastError = null;
     _ensureHydratePromise = null;
     _cacheReadyState = { ready: false, hasData: false };
     clearObject(_cacheAt);
