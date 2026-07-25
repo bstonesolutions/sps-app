@@ -447,6 +447,28 @@ function reloadAfterDrain(delay = 0) {
   catch (_) { setTimeout(go, delay); }
   setTimeout(go, 2500);
 }
+// Shared-state operations return receipts rather than throwing for several important failure modes
+// (deferred offline writes, an initialization failure, an active drain, or a merge conflict). UI
+// callers must inspect those receipts before claiming that a sync completed.
+function storeReceiptIssue(receipt, label = "Sync") {
+  if (receipt && receipt.ok === true) return "";
+  if (!receipt) return `${label} did not receive server confirmation.`;
+  if (receipt.busy) return `${label} is still finishing another save. Try again in a moment.`;
+  if (receipt.conflict || receipt.conflictKey) return `${label} needs a data conflict reviewed before it can finish.`;
+  if (receipt.deferred || receipt.initFailed || receipt.queued) {
+    return `${label} is waiting for the database connection. Your pending work was kept on this device.`;
+  }
+  if (receipt.staleIdentity) return `${label} stopped because the signed-in account changed.`;
+  const failedEntry = Array.isArray(receipt.results)
+    ? receipt.results.find((entry) => {
+      const result = entry && entry.result ? entry.result : entry;
+      return result && result.ok !== true;
+    })
+    : null;
+  const nested = failedEntry && failedEntry.result ? failedEntry.result : failedEntry;
+  const detail = receipt.error?.message || nested?.error?.message || receipt.error || nested?.error;
+  return detail ? `${label} was not confirmed: ${String(detail)}` : `${label} was not confirmed by the database.`;
+}
 const qbIsConnected = () => { try { return localStorage.getItem("qb_connected") === "1"; } catch { return false; } };
 const qbSetConnected = (v) => { try { v ? localStorage.setItem("qb_connected", "1") : localStorage.removeItem("qb_connected"); } catch {} };
 const qbCheckStatus = async () => {
@@ -23585,45 +23607,107 @@ function CopyLine({ icon, value, prominent = false }) {
 // Shared hook — loads a bounded recent thread and refreshes from live/push invalidation. Real client
 // sessions use the scoped portal API; staff continue using Supabase directly under staff-only RLS.
 function useMessages(clientId, portalMode = false) {
-  const [messages, setMessages] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const threadKey = `${portalMode ? "portal" : "staff"}:${String(clientId || "")}`;
+  // Keep the client key alongside the rows. On a rapid client switch, the old rows therefore become
+  // invisible in the very first render—before an effect has a chance to clear state—and a late
+  // response can never be painted under the newly-selected client's name.
+  const [threadState, setThreadState] = useState({ key: "", messages: [] });
+  const [loadingKey, setLoadingKey] = useState("");
+  const messageRequestRef = useRef({ requestId: 0, controller: null });
+  const activeThreadKeyRef = useRef(threadKey);
+  activeThreadKeyRef.current = threadKey;
+  const messages = threadState.key === threadKey ? threadState.messages : [];
+  const loading = !!clientId && (loadingKey === threadKey || threadState.key !== threadKey);
 
-  const load = async () => {
-    if (!clientId) return;
-    if (portalMode) {
-      try {
-        const r = await fetch(`${PROD_URL}/api/portal-messages?limit=200`, { headers: await authHeaders(), cache: "no-store" });
-        const d = await r.json().catch(() => ({}));
-        if (r.ok && Array.isArray(d.messages)) setMessages(d.messages);
-      } finally { setLoading(false); }
-      return;
+  const setCurrentMessages = useCallback((updater) => {
+    if (activeThreadKeyRef.current !== threadKey) return;
+    setThreadState((current) => {
+      const prior = current.key === threadKey ? current.messages : [];
+      const next = typeof updater === "function" ? updater(prior) : updater;
+      return { key: threadKey, messages: Array.isArray(next) ? next : [] };
+    });
+  }, [threadKey]);
+
+  const load = useCallback(async () => {
+    if (!clientId) {
+      if (activeThreadKeyRef.current === threadKey) {
+        setThreadState({ key: threadKey, messages: [] });
+        setLoadingKey("");
+      }
+      return { ok: true, empty: true };
     }
-    const { data, error } = await supabase
-      .from("sps_messages")
-      .select("*")
-      .eq("client_id", String(clientId))
-      .order("created_at", { ascending: false })
-      .limit(300);
-    if (!error && data) setMessages([...data].reverse());
-    setLoading(false);
-  };
+
+    const state = messageRequestRef.current;
+    if (state.controller) {
+      try { state.controller.abort(); } catch (_) {}
+    }
+    const controller = new AbortController();
+    const requestId = state.requestId + 1;
+    state.requestId = requestId;
+    state.controller = controller;
+    setLoadingKey(threadKey);
+    const requestIsCurrent = () => (
+      activeThreadKeyRef.current === threadKey
+      && messageRequestRef.current.requestId === requestId
+      && !controller.signal.aborted
+    );
+
+    try {
+      if (portalMode) {
+        const r = await fetch(`${PROD_URL}/api/portal-messages?limit=200`, {
+          headers: await authHeaders(),
+          signal: controller.signal,
+          cache: "no-store",
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!requestIsCurrent()) return { ok: false, skipped: "stale" };
+        if (r.ok && Array.isArray(d.messages)) setCurrentMessages(d.messages);
+        return { ok: r.ok };
+      }
+
+      let query = supabase
+        .from("sps_messages")
+        .select("*")
+        .eq("client_id", String(clientId))
+        .order("created_at", { ascending: false })
+        .limit(300);
+      if (typeof query.abortSignal === "function") query = query.abortSignal(controller.signal);
+      const { data, error } = await query;
+      if (!requestIsCurrent()) return { ok: false, skipped: "stale" };
+      if (!error && data) setCurrentMessages([...data].reverse());
+      return { ok: !error, error };
+    } catch (error) {
+      if (!requestIsCurrent()) return { ok: false, skipped: "stale" };
+      return { ok: false, error };
+    } finally {
+      if (requestIsCurrent()) {
+        setLoadingKey("");
+        messageRequestRef.current.controller = null;
+      }
+    }
+  }, [clientId, portalMode, setCurrentMessages, threadKey]);
 
   useEffect(() => {
+    let disposed = false;
     let channel = null;
     let inFlight = false;
     let queued = false;
     const refreshWhenVisible = async () => {
-      if (document.hidden) return;
+      if (disposed || document.hidden) return;
       if (inFlight) { queued = true; return; }
       inFlight = true;
       try { await load(); }
       finally {
         inFlight = false;
-        if (queued) { queued = false; Promise.resolve().then(refreshWhenVisible); }
+        if (!disposed && queued) { queued = false; Promise.resolve().then(refreshWhenVisible); }
       }
     };
-    setLoading(true);
-    load();
+    setThreadState((current) => current.key === threadKey ? current : { key: threadKey, messages: [] });
+    if (!clientId) {
+      setLoadingKey("");
+      return () => {};
+    }
+    refreshWhenVisible();
     // Staff can subscribe directly under staff-only RLS. Portal clients remain server-scoped and
     // use push/foreground invalidation plus a slow visible-only fallback.
     if (!portalMode) {
@@ -23641,12 +23725,16 @@ function useMessages(clientId, portalMode = false) {
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("sps-push-received", refreshWhenVisible);
     return () => {
+      disposed = true;
       clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("sps-push-received", refreshWhenVisible);
       try { if (channel) supabase.removeChannel(channel); } catch (_) {}
+      messageRequestRef.current.requestId += 1;
+      try { messageRequestRef.current.controller?.abort(); } catch (_) {}
+      messageRequestRef.current.controller = null;
     };
-  }, [clientId, portalMode]);
+  }, [clientId, load, portalMode, threadKey]);
 
   const send = async (body, sender, senderName) => {
     if (!body.trim() || !clientId) return;
@@ -23657,7 +23745,7 @@ function useMessages(clientId, portalMode = false) {
         body: JSON.stringify({ body: body.trim() }),
       });
       const d = await r.json().catch(() => ({}));
-      if (r.ok && d.message) setMessages(prev => [...prev, d.message]);
+      if (r.ok && d.message && activeThreadKeyRef.current === threadKey) setCurrentMessages(prev => [...prev, d.message]);
       return { ok: !!(r.ok && d.message), held: false };
     }
     const result = await postToPortalSafe({
@@ -23668,7 +23756,7 @@ function useMessages(clientId, portalMode = false) {
     }, { select: true });
     if (result?.held) return { ok: true, held: true };
     const data = Array.isArray(result?.data) ? result.data[0] : result?.data;
-    if (!result?.error && data) setMessages(prev => [...prev, data]);
+    if (!result?.error && data && activeThreadKeyRef.current === threadKey) setCurrentMessages(prev => [...prev, data]);
     return { ok: !result?.error, held: false };
   };
 
@@ -35948,25 +36036,6 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     return () => { window.removeEventListener("online", drain); document.removeEventListener("visibilitychange", onVis); clearInterval(iv); };
   }, []);
 
-  // Recover from a FAILED initial database read. supabaseClient's _init serves an EMPTY cache on a
-  // failed first SELECT (every useStoredState then falls back to its DEFAULT — the "team reset to
-  // seeded Brandon+David" / "nothing saved" symptom) and never retries within the session. So when
-  // the init-failure signal fires, reset the cache + reload to re-fetch the real data — capped to a
-  // few attempts so a genuine outage can't loop, and cleared the moment a load succeeds.
-  useEffect(() => {
-    const onStatus = (e) => {
-      if (e.detail.type === "read-ok") { try { sessionStorage.removeItem("sps_init_retry"); } catch (_) {} return; }
-      if (e.detail.type !== "error" || !/reach the database/i.test(e.detail.msg || "")) return; // only the _init read failure
-      let n = 0; try { n = parseInt(sessionStorage.getItem("sps_init_retry") || "0", 10) || 0; } catch (_) {}
-      if (n >= 3) return; // give up auto-retry; the on-screen Retry button + banner take over
-      try { sessionStorage.setItem("sps_init_retry", String(n + 1)); } catch (_) {}
-      try { store.reset(); } catch (_) {}
-      setTimeout(() => reloadAfterDrain(), 1200 * (n + 1));
-    };
-    document.addEventListener("sps-db-status", onStatus);
-    return () => document.removeEventListener("sps-db-status", onStatus);
-  }, []);
-
   // Track unread message count for nav badge
   const [navUnread, setNavUnread] = useState(0);
   const [inboxUnread, setInboxUnread] = useState(0);
@@ -36011,7 +36080,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   }, []);
   const bootReady = cacheReady || hydrated;
 
-  // Trigger a visible sync pulse whenever any stored state saves
+  // Trigger a visible sync pulse whenever any stored state saves.
   const triggerSync = () => {
     setSyncState("syncing");
     clearTimeout(syncTimer.current);
@@ -36024,17 +36093,43 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     clearTimeout(syncTimer.current);
     setSyncState("syncing");
     syncInFlight.current = (async () => {
-      await store.flush();
+      const flushReceipt = await store.flush();
+      const flushIssue = storeReceiptIssue(flushReceipt, "Saving pending changes");
+      if (flushIssue) throw new Error(flushIssue);
+
+      let refreshReceipt;
       if (typeof store.refreshChanged === "function") {
-        await store.refreshChanged(APP_REFRESH_KEYS, { reconcileUnchanged: true });
+        refreshReceipt = await store.refreshChanged(APP_REFRESH_KEYS, { reconcileUnchanged: true });
       } else if (typeof store.refresh === "function") {
-        await Promise.all(APP_REFRESH_KEYS.map(key => store.refresh(key)));
+        const results = await Promise.all(APP_REFRESH_KEYS.map(async (key) => ({
+          key,
+          result: await store.refresh(key),
+        })));
+        refreshReceipt = { ok: results.every(({ result }) => result && result.ok === true), results };
+      } else {
+        refreshReceipt = { ok: false, error: new Error("The shared-data refresh service is unavailable.") };
       }
+      const refreshIssue = storeReceiptIssue(refreshReceipt, "Refreshing shared data");
+      if (refreshIssue) throw new Error(refreshIssue);
+
+      const conflicts = (store.listConflicts && store.listConflicts()) || [];
+      if (conflicts.length) {
+        throw new Error("Sync needs a data conflict reviewed before it can finish.");
+      }
+
+      // A refresh can reconcile local state and enqueue a follow-up write. Do not announce success
+      // until a second drain confirms there is no pending work left behind.
+      const finalFlushReceipt = await store.flush();
+      const finalFlushIssue = storeReceiptIssue(finalFlushReceipt, "Confirming refreshed data");
+      if (finalFlushIssue) throw new Error(finalFlushIssue);
+
       try { window.dispatchEvent(new CustomEvent("sps-manual-refresh")); } catch (_) {}
+      setDbError(null);
       setSyncState("saved");
       syncTimer.current = setTimeout(() => setSyncState("idle"), 2000);
-      return { ok: true };
+      return { ok: true, flushReceipt, refreshReceipt, finalFlushReceipt };
     })().catch((error) => {
+      clearTimeout(syncTimer.current);
       setSyncState("idle");
       setDbError((error && error.message) || "Sync could not finish. Your screen and pending work were kept in place.");
       return { ok: false, error };
@@ -36044,6 +36139,107 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   softRefreshRef.current = refreshWorkspaceInPlace;
   const manualSync = () => { refreshWorkspaceInPlace(); };
 
+  // Recover a failed first database read in place. A hard reload used to tear down the document,
+  // clear the user's current screen, and could loop back into the same transient outage. The store
+  // now exposes an awaitable initialization receipt, so retry at its server/backoff deadline, then
+  // refresh the live records without remounting the app. Attempts are deliberately bounded; after
+  // that the existing error banner and manual Sync control remain available.
+  useEffect(() => {
+    const MAX_INITIAL_READ_RETRIES = 3;
+    let disposed = false;
+    let timer = null;
+    let inFlight = false;
+    let attempts = 0;
+
+    const clearRetryTimer = () => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+    };
+    const retryDelay = (receipt) => {
+      const retryAt = Math.max(0, Number(receipt && receipt.retryAt) || 0);
+      if (retryAt > Date.now()) return Math.max(250, retryAt - Date.now() + 50);
+      return Math.min(6000, 900 * Math.max(1, attempts));
+    };
+    const scheduleRetry = (receipt) => {
+      if (disposed || inFlight || timer || attempts >= MAX_INITIAL_READ_RETRIES) return;
+      timer = setTimeout(runRetry, retryDelay(receipt));
+    };
+    const runRetry = async () => {
+      timer = null;
+      if (disposed || inFlight || attempts >= MAX_INITIAL_READ_RETRIES) return;
+      inFlight = true;
+      attempts += 1;
+      let retryReceipt = null;
+      let retryNeeded = false;
+      try {
+        const initReceipt = await store.initialize();
+        if (disposed) return;
+        const initIssue = storeReceiptIssue(initReceipt, "Reconnecting to the database");
+        if (initIssue) {
+          retryReceipt = initReceipt;
+          retryNeeded = true;
+          setDbError(`${initIssue}${attempts < MAX_INITIAL_READ_RETRIES ? " Retrying here without leaving this screen." : " Use Sync to try again."}`);
+          return;
+        }
+
+        let refreshReceipt;
+        if (typeof store.refreshChanged === "function") {
+          refreshReceipt = await store.refreshChanged(APP_REFRESH_KEYS, { reconcileUnchanged: true });
+        } else if (typeof store.refresh === "function") {
+          const results = await Promise.all(APP_REFRESH_KEYS.map(async (key) => ({
+            key,
+            result: await store.refresh(key),
+          })));
+          refreshReceipt = { ok: results.every(({ result }) => result && result.ok === true), results };
+        } else {
+          refreshReceipt = { ok: false, error: new Error("The shared-data refresh service is unavailable.") };
+        }
+        if (disposed) return;
+        const refreshIssue = storeReceiptIssue(refreshReceipt, "Refreshing shared data");
+        if (refreshIssue) {
+          retryReceipt = refreshReceipt;
+          retryNeeded = true;
+          setDbError(`${refreshIssue}${attempts < MAX_INITIAL_READ_RETRIES ? " Retrying here without leaving this screen." : " Use Sync to try again."}`);
+          return;
+        }
+
+        attempts = 0;
+        setDbError(null);
+        try { sessionStorage.removeItem("sps_init_retry"); } catch (_) {}
+      } catch (error) {
+        retryNeeded = true;
+        retryReceipt = error;
+        setDbError((error && error.message) || "The database connection could not be restored. Your screen and pending work were kept in place.");
+      } finally {
+        inFlight = false;
+        if (retryNeeded && attempts < MAX_INITIAL_READ_RETRIES) scheduleRetry(retryReceipt);
+      }
+    };
+    const onStatus = (event) => {
+      const detail = (event && event.detail) || {};
+      if (detail.type === "read-ok") {
+        clearRetryTimer();
+        if (!inFlight) attempts = 0;
+        try { sessionStorage.removeItem("sps_init_retry"); } catch (_) {}
+        return;
+      }
+      if (detail.type !== "error" || !/reach the database/i.test(detail.msg || "")) return;
+      setDbError(detail.msg || "Cannot reach the database.");
+      scheduleRetry();
+    };
+
+    document.addEventListener("sps-db-status", onStatus);
+    // The module-level status listener may have observed a very fast failure before this component
+    // effect mounted. Joining initialize after a short delay covers that race; a normal successful
+    // first read emits read-ok and cancels this timer without doing another network read.
+    if (!DB_READ_OK) scheduleRetry();
+    return () => {
+      disposed = true;
+      clearRetryTimer();
+      document.removeEventListener("sps-db-status", onStatus);
+    };
+  }, []);
+
   // Register global sync hooks so useStoredState can drive the indicator HONESTLY:
   //  • start   → "syncing" when a write begins
   //  • success → "saved" only after the write is CONFIRMED (never claims saved on failure)
@@ -36051,6 +36247,10 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   useEffect(() => {
     window.__onSpsSyncStart = () => { clearTimeout(syncTimer.current); setSyncState("syncing"); };
     window.__onSpsSync = () => {
+      // refreshWorkspaceInPlace owns the visible result while a manual sync is running. An
+      // individual queued write may confirm before the following refresh fails, so its global
+      // save pulse must not briefly claim the whole manual sync succeeded.
+      if (syncInFlight.current) return;
       clearTimeout(syncTimer.current);
       setSyncState("saved");
       syncTimer.current = setTimeout(() => setSyncState("idle"), 2000);
@@ -36845,19 +37045,10 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
 
   // Bottom-bar / sidebar / menu navigation. Switching to a DIFFERENT section keeps that
   // section where you left it (e.g. the client you had open) for the rest of the session.
-  // Tapping the section you're ALREADY on resets it to its root (back to the client list).
-  // The account-scoped workspace snapshot carries that location across app resumes and soft syncs.
+  // Re-tapping the active section only scrolls that same view to its top; it must not silently
+  // discard a selected client, filter, editor, or Schedule day/tech.
   const handleTabNav = (id) => {
     if (id === page) {
-      // Re-tap the active tab → back to the section's root view.
-      setSelectedClient(null);
-      setAdding(false);
-      setInvoiceFilter("All");
-      setSettingsTab(null);
-      setCommsSection(null);
-      // Schedule keeps its day/tech in a module cache; clear it and remount so a re-tap
-      // returns to today's overview (matches how re-tapping Clients returns to the list).
-      if (id === "schedule") { SCHED_VIEW = { date: null, tech: null }; setSchedNonce(n => n + 1); }
       resetAppMainScroll(id);
       return;
     }
@@ -37830,7 +38021,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
             {dbError && (
               <div style={{ background: hexA("#F59E0B", 0.1), borderBottom: `1px solid ${hexA("#F59E0B", 0.3)}`, padding: "10px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: T.text }}>
                 <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Icon name="warning" size={15} />{dbError}</span>
-                <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 10, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Retry</button>
+                <button onClick={manualSync} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 10, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Retry</button>
               </div>
             )}
             <main ref={appMainRef} style={{ flex: 1, minHeight: 0, ...(dtMasterDetail
@@ -37957,7 +38148,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
         {dbError && (
           <div style={{ background: hexA("#F59E0B", 0.1), borderBottom: `1px solid ${hexA("#F59E0B", 0.3)}`, padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: T.text }}>
             <span style={{ display:"flex", alignItems:"center", gap:6 }}><Icon name="warning" size={15} />{dbError}</span>
-            <button onClick={() => window.location.reload()} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 10, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, display:"flex", alignItems:"center", gap:5 }}>Retry</button>
+            <button onClick={manualSync} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 12, padding: "7px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, display:"flex", alignItems:"center", gap:5 }}>Retry</button>
           </div>
         )}
         <main ref={appMainRef} data-sps-app-scroll onFocusCapture={keepFocusedControlVisible} style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", alignSelf: "center", padding: isCommsRoute ? (vp.isPhone ? "0 16px" : "0 32px") : (vp.isPhone ? `${isEstimatesRoute ? 0 : 22}px 16px` : "28px 32px"), maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", marginBottom: keyboardOpen ? 0 : "var(--sps-mobile-nav-reserve)", width: "100%", boxSizing: "border-box", paddingBottom: 0, scrollPaddingBottom: keyboardOpen ? keyboardInset + 40 : "var(--sps-page-bottom-clearance)" }}>
