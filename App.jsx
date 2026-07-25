@@ -5445,11 +5445,11 @@ function HomeCommsWidget({ leads = [], clients = [], onNav, T, perms = {} }) {
   const AV = ["#B81D24", "#0E9488", "#2563eb", "#b45309", "#7c3aed", "#c2410c", "#0891b2", "#be185d"];
   const col = (s) => { let h = 0; const x = String(s || "?"); for (let i = 0; i < x.length; i++) h = (h * 31 + x.charCodeAt(i)) >>> 0; return AV[h % AV.length]; };
   const fmtT = (iso) => { try { const d = new Date(iso), n = new Date(); return d.toDateString() === n.toDateString() ? d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : d.toLocaleDateString("en-US", { month: "short", day: "numeric" }); } catch (_) { return ""; } };
-  const kindBadge = { chat: ["CHAT", T.primary], lead: ["LEAD", "#16a34a"], bill: ["BILL", "#b45309"], email: ["EMAIL", "#2563eb"], sms: ["TEXT", "#7c3aed"] };
+  const kindBadge = { chat: ["CHAT", T.primary], lead: ["LEAD", "#16a34a"], bill: ["BILL", "#b45309"], email: ["EMAIL", "#2563eb"], sms: ["TEXT", T.primary] };
   const tiles = [
     canChat && ["Unread chats", unreadChats, T.primary, () => onNav("messages")],
     canLeads && ["New leads", newLeads, "#16a34a", () => onNav("leads")],
-    canExternalInbox && [perms.isAdmin ? "Inbox unread" : "Texts unread", unreadInbox, "#7c3aed", () => onNav("comms", { commsSection: "email" })],
+    canExternalInbox && [perms.isAdmin ? "Inbox unread" : "Texts unread", unreadInbox, T.primary, () => onNav("comms", { commsSection: "email" })],
   ].filter(Boolean);
   const openComms = () => canChat ? onNav("messages") : canLeads ? onNav("leads") : onNav("comms", { commsSection: "email" });
   const loading = (canChat && msgs === null) || (canExternalInbox && emails === null);
@@ -23848,7 +23848,7 @@ function MessagesScreen({ clients, currentUser, T, workspaceScope = "" }) {
     </div>
   );
   // Circular, deterministic-hue avatar (matches the Email inbox look) instead of the old red squares.
-  const MSG_AV = ["#B81D24", "#0E9488", "#2563eb", "#b45309", "#7c3aed", "#c2410c", "#0891b2", "#be185d"];
+  const MSG_AV = ["#B81D24", "#0E9488", "#2563eb", "#b45309", "#64748b", "#c2410c", "#0891b2", "#be185d"];
   const msgAvColor = (seed) => { let h = 0; const s = String(seed || "?"); for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return MSG_AV[h % MSG_AV.length]; };
   const convBtn = (t, card, rowIndex = 0) => {
     const c = t.client, hasUnread = t.unread > 0, col = msgAvColor(c.name || c.id);
@@ -24997,7 +24997,7 @@ function BroadcastSection({ clients, invoices, email, branding, T, workspaceScop
     if (!r.ok) setErr(r.error || "Couldn't send the test text.");
   };
 
-  const channelTone = isEmail ? "#2563eb" : "#7c3aed";
+  const channelTone = isEmail ? "#2563eb" : T.primary;
   const pilotN = Math.max(1, Math.min(parseInt(testN) || 1, total || 1));
   const chip = (on, label, onClick) => <button key={label} onClick={onClick} style={{ minHeight: 40, padding: "8px 15px", borderRadius: 100, border: `1.5px solid ${on ? channelTone : T.border}`, background: on ? hexA(channelTone, 0.09) : T.surface, color: on ? channelTone : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>;
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
@@ -25008,7 +25008,7 @@ function BroadcastSection({ clients, invoices, email, branding, T, workspaceScop
   return (
     <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 14, maxWidth: 820, margin: "0 auto" }}>
       <CommsPageHeader T={T} icon="mail" title="Broadcast" description="Reach a client group with one carefully reviewed message." />
-      <div style={{ display: "flex", gap: 4, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 14, padding: 4 }}>{chanBtn("text", "Text message", "message", "#7c3aed")}{chanBtn("email", "Email", "mail", "#2563eb")}</div>
+      <div style={{ display: "flex", gap: 4, background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 14, padding: 4 }}>{chanBtn("text", "Text message", "message", T.primary)}{chanBtn("email", "Email", "mail", "#2563eb")}</div>
       {!isEmail && <QuoSenderPicker value={senderRole} onChange={(next) => { setSenderRole(next); setResult(""); setErr(""); }} lines={lines} compact />}
       {!isEmail && <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 11px", borderRadius: 11, background: hexA("#16a34a", 0.07), border: `1px solid ${hexA("#16a34a", 0.18)}`, color: T.text, fontSize: 11.5, lineHeight: 1.4 }}><Icon name="inbox" size={14} color="#15803d" /><span>Customer replies return to the same unified Comms inbox and stay attached to this number.</span></div>}
       <div style={panel}>
@@ -25663,6 +25663,8 @@ function MobileSmsThread({ title, subtitle, avatar, lineLabel, categoryLabel, ca
 // visibility grant. The owner's ported line remains read-only for every non-owner.
 function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOnly = false, workspaceScope = "" }) {
   const { T, branding, perms } = useApp();
+  const smsTone = T.primary;
+  const emailTone = "#2563eb";
   const vp = useViewport();
   const quoLines = useQuoMainLine(branding?.companyPhone);
   const ownerView = !!perms?.isAdmin;
@@ -26808,7 +26810,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   };
   const channelTab = (id, label, count, icon) => {
     const on = channelFilter === id;
-    const tone = id === "sms" ? "#7c3aed" : id === "email" ? "#2563eb" : T.primary;
+    const tone = id === "sms" ? smsTone : id === "email" ? emailTone : T.primary;
     return (
       <button key={id} type="button" onClick={() => setChannelFilter(id)} aria-pressed={on}
         style={{ minWidth: 0, minHeight: dense ? 40 : 42, padding: dense ? "6px 7px" : "8px 9px", borderRadius: 10, border: "none", background: on ? T.surface : "transparent", color: on ? tone : T.textMuted, boxShadow: on ? "0 1px 3px rgba(0,0,0,0.1)" : "none", display: "flex", alignItems: "center", justifyContent: "center", gap: dense ? 4 : 6, fontSize: dense ? 12 : 12.5, fontWeight: on ? 800 : 700, fontFamily: "inherit", cursor: "pointer", whiteSpace: "nowrap" }}>
@@ -26849,7 +26851,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   };
   const channelBadge = (row) => {
     const sms = isSmsRow(row);
-    const tone = sms ? "#7c3aed" : "#2563eb";
+    const tone = sms ? smsTone : emailTone;
     const label = sms ? lineLabelForRow(row) : "Email";
     return <span title={sms ? `${label} through Quo` : "Email message"} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 9.5, fontWeight: 850, letterSpacing: "0.045em", textTransform: "uppercase", color: tone, background: hexA(tone, 0.1), padding: "2px 8px", borderRadius: 100, flexShrink: 0 }}><Icon name={sms ? "message" : "mail"} size={11} />{label}</span>;
   };
@@ -26859,11 +26861,11 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   const senderDetail = (row) => isSmsRow(row) ? (phoneDisplay(row.from_phone) || row.from_name || "") : (row.from_email || "");
   // Gmail-style colored sender avatar — deterministic hue from the address so the same sender
   // always gets the same color.
-  const AV = ["#B81D24", "#0E9488", "#2563eb", "#b45309", "#7c3aed", "#c2410c", "#0891b2", "#be185d"];
+  const AV = ["#B81D24", "#0E9488", "#2563eb", "#b45309", "#64748b", "#c2410c", "#0891b2", "#be185d"];
   const avatarColor = (seed) => { let h = 0; const s = String(seed || "?"); for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return AV[h % AV.length]; };
   const Avatar = ({ name, email, channel, photo, size = 40, showChannelMarker = false, unreadCount = 0 }) => {
     const sms = channel === "sms";
-    const tone = sms ? "#7c3aed" : "#2563eb";
+    const tone = sms ? smsTone : emailTone;
     let face = null;
     if (photo) {
       face = <img src={photo} alt="" style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", background: T.surfaceAlt }} />;
@@ -27063,7 +27065,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     const messagePreview = sms
       ? String(r.subject || r.body_text || "Text message").replace(/^You:\s*/i, "You: ").trim()
       : [String(r.subject || "(no subject)").trim(), emailSummary].filter(Boolean).join(" — ");
-    const channelTone = sms ? "#7c3aed" : "#2563eb";
+    const channelTone = sms ? smsTone : emailTone;
     const channelLabel = sms
       ? (lineRoleForRow(r) === "main" ? (ownerView ? "My line" : "Owner line") : "Staff line")
       : (kind.label && kind.label !== "Other" ? kind.label : "Email");
@@ -27442,7 +27444,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
           description={folder === "inbox" ? (smsOnly ? `${unread} unread · ${visibleLineSummary}` : `${unread} unread · business texts and work email, clearly separated`) : "Email you compose and reply to from SPS Way."}
           icon={folder === "inbox" ? "inbox" : "send"}
           meta={folder === "inbox" && !smsOnly ? <>
-            <span style={{ color: "#7c3aed", background: hexA("#7c3aed", 0.1), borderRadius: 100, padding: "3px 9px", fontSize: 10.5, fontWeight: 800 }}>{textCount} text{textCount === 1 ? "" : "s"}</span>
+            <span style={{ color: smsTone, background: hexA(smsTone, 0.1), borderRadius: 100, padding: "3px 9px", fontSize: 10.5, fontWeight: 800 }}>{textCount} text{textCount === 1 ? "" : "s"}</span>
             <span style={{ color: "#2563eb", background: hexA("#2563eb", 0.1), borderRadius: 100, padding: "3px 9px", fontSize: 10.5, fontWeight: 800 }}>{emailCount} email{emailCount === 1 ? "" : "s"}</span>
           </> : null}
           action={!smsOnly && wide
@@ -27975,7 +27977,7 @@ function LogsScreen({ clients, showOwnerRows = false, workspaceScope = "" }) {
   const groups = [];
   let ck = null;
   list.forEach(r => { const k = dayKey(r.created_at); if (k !== ck) { groups.push({ key: k, label: dayLabel(r.created_at), rows: [] }); ck = k; } groups[groups.length - 1].rows.push(r); });
-  const chColor = (r) => r.ok === false ? "#dc2626" : (r.channel === "email" ? "#2563eb" : "#7c3aed");
+  const chColor = (r) => r.ok === false ? "#dc2626" : (r.channel === "email" ? "#2563eb" : T.primary);
   const selectedActivity = (rows || []).find((row) => String(row.id) === String(openId)) || null;
   const chip = (id, label) => (
     <button key={id} onClick={() => setFilter(id)} aria-pressed={filter === id} style={{ minHeight: 40, padding: "7px 13px", borderRadius: 100, border: `1.5px solid ${filter === id ? T.primary : T.border}`, background: filter === id ? hexA(T.primary, 0.08) : T.surface, color: filter === id ? T.primary : T.textMuted, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, whiteSpace: "nowrap" }}>{label}</button>

@@ -55,6 +55,13 @@ test("phone rows use compact conversation chrome while retaining swipe actions",
   assert.match(phoneRows, /onDelete=\{smsOnly \? undefined : \(\) => \{ deleteEmails\(inboxRowMessageIds\(r\), \{ ask: false \}\); \}\}/);
 });
 
+test("SMS accents use the SPS brand palette instead of purple", () => {
+  assert.match(inbox, /const smsTone = T\.primary/);
+  assert.match(inbox, /const tone = sms \? smsTone : emailTone/);
+  assert.match(phoneRows, /const channelTone = sms \? smsTone : emailTone/);
+  assert.doesNotMatch(inbox, /#7c3aed/i);
+});
+
 test("touch-and-hold previews without opening or marking read", () => {
   assert.match(swipe, /previewTimerRef/);
   assert.match(swipe, /window\.setTimeout\(\(\) => \{[\s\S]*?onPreview\(\);[\s\S]*?\}, 450\)/);
