@@ -21,17 +21,19 @@ import { arrivalDeliveryKey, runArrivalDeliveryOnce } from "./arrivalDelivery";
 import { inboxRowMessageIds, mergeInboxConversationRows } from "./smsConversations";
 import { smsMediaKind, smsMediaLabel, smsMediaSizeLabel, smsMediaSource, smsVisibleBodyText } from "./smsMediaPresentation";
 import { shouldWriteLiveLocation } from "./liveLocationThrottle";
+import { clearWorkspaceState, patchWorkspaceState, readWorkspaceState } from "./workspaceState";
 
-// True only on a genuine fresh launch of the app shell (hard close / first open).
-// sessionStorage is wiped when the PWA is killed/swiped away, but survives reloads
-// and background→foreground resumes — so its absence marks a cold start.
-const APP_COLD_START = (() => {
-  try {
-    if (sessionStorage.getItem("sps_session")) return false;
-    sessionStorage.setItem("sps_session", "1");
-    return true;
-  } catch (_) { return true; }
-})();
+// Manual/foreground refreshes compare these small version counters first and download only the
+// shared slices that changed. Keeping this list explicit prevents a Sync tap from tearing down the
+// whole app (and the user's current screen) merely to refresh server data.
+const APP_REFRESH_KEYS = [
+  "sps_arrivals", "sps_branding", "sps_budget", "sps_catalog", "sps_clients",
+  "sps_completed", "sps_costs", "sps_email", "sps_enroute", "sps_estimates",
+  "sps_home", "sps_invoices", "sps_invoicing", "sps_leads", "sps_nav_dock",
+  "sps_officeAlerts", "sps_palette", "sps_reminders", "sps_roles",
+  "sps_route_assignments", "sps_schedule", "sps_schedule_cfg", "sps_service_tiers",
+  "sps_session", "sps_stop_drafts", "sps_team",
+];
 
 // Render an email template's text vars (everything except {link}, which the
 // server injects when it mints the sign-in link).
@@ -7419,7 +7421,7 @@ function ClientDocuments({ client, onChange }) {
   );
 }
 
-function ClientDetail({ client: init, invoices, invoicing, branding, catalog, setCatalog, team, schedule, email, onBack, onUpdate, onSaveInvoice, onDeleteInvoice, onDelete, onPreviewClient, initialTab }) {
+function ClientDetail({ client: init, invoices, invoicing, branding, catalog, setCatalog, team, schedule, email, onBack, onUpdate, onSaveInvoice, onDeleteInvoice, onDelete, onPreviewClient, initialTab, onTabChange }) {
   const { T, perms, tiers } = useApp();
   const clientVp = useViewport();
   const [client, setClient] = useState(init);
@@ -7434,6 +7436,9 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
   const eTier = effectiveTier(client);
   const pm = planMeta(eTier, T, tiers);
   const tabs = ["overview", "equipment", "history", ...((perms.canInvoice || perms.viewInvoices) ? ["invoices"] : []), "docs", "portal"];
+  useEffect(() => {
+    if (initialTab && tabs.includes(initialTab) && initialTab !== tab) setTab(initialTab);
+  }, [initialTab]); // eslint-disable-line react-hooks/exhaustive-deps
   const owed = clientOutstanding(client, invoices);
 
   // keep local view in sync if the stored record changes (e.g. a completed stop adds history)
@@ -7572,7 +7577,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
 
       <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 10, padding: 4, marginBottom: 16, gap: 3, overflowX: clientVp.isPhone ? "auto" : "visible", WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
         {tabs.map(t => (
-          <button key={t} onClick={() => setTab(t)} style={{
+          <button key={t} onClick={() => { setTab(t); if (onTabChange) onTabChange(t); }} style={{
             flex: clientVp.isPhone ? "0 0 auto" : 1, minWidth: clientVp.isPhone ? 88 : 0, minHeight: 44, padding: "8px 10px", border: "none", borderRadius: 7,
             fontSize: 12, fontWeight: 700, textTransform: "capitalize", cursor: "pointer",
             background: tab === t ? T.surface : "transparent",
@@ -22510,20 +22515,26 @@ function CommsGroupHeader({ title, count, tone, T }) {
 
 // ── Leads (intake funnel) — the owner's pipeline of prospects → one-tap convert to client. ──
 // Owner-only (the nav entry is ownerOnly). Reads/writes the sps_leads app_state collection.
-function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, onLeadOpened, vp = {} }) {
+function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, onLeadOpened, vp = {}, workspaceScope = "" }) {
   const { T, perms, branding } = useApp();
   const dense = useCompactComms();
   const phone = !!vp.isPhone;
-  const [filter, setFilter] = useState("active"); // active | all | <stage>
-  const [search, setSearch] = useState("");
-  const [selId, setSelId] = useState(null);
-  const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState({ ...BLANK_LEAD });
+  const savedViewRef = useRef(null);
+  if (!savedViewRef.current) savedViewRef.current = readWorkspaceState(workspaceScope).comms?.leads || {};
+  const savedLeadFilter = ["active", "all", ...LEAD_STAGES.map(stage => stage.id)].includes(savedViewRef.current.filter) ? savedViewRef.current.filter : "active";
+  const [filter, setFilter] = useState(savedLeadFilter); // active | all | <stage>
+  const [search, setSearch] = useState(() => savedViewRef.current.search || "");
+  const [selId, setSelId] = useState(() => savedViewRef.current.selectedId ?? null);
+  const [adding, setAdding] = useState(() => !!savedViewRef.current.adding);
+  const [form, setForm] = useState(() => ({ ...BLANK_LEAD, ...((savedViewRef.current.manualForm && typeof savedViewRef.current.manualForm === "object") ? savedViewRef.current.manualForm : {}) }));
   const [dupModal, setDupModal] = useState(null); // { lead, dup } — convert hit an existing client
   const [lightbox, setLightbox] = useState(null);  // full-screen photo URL (in-app, no browser hop)
   const [directTextLead, setDirectTextLead] = useState(null);
   const quoDefaultLine = useDefaultQuoIdentity(branding?.companyPhone);
   const [leadRepair, setLeadRepair] = useState({ busy: false, error: "", undo: null, message: "" });
+  useEffect(() => {
+    patchWorkspaceState(workspaceScope, { comms: { leads: { filter, search, selectedId: selId == null ? null : String(selId), adding, manualForm: form } } });
+  }, [workspaceScope, filter, search, selId, adding, form]);
   // Deep-link: reopen a specific lead (e.g. returning from a cancelled convert).
   useEffect(() => {
     if (openLeadId) { setSelId(openLeadId); if (onLeadOpened) onLeadOpened(); }
@@ -22551,7 +22562,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
   const searchTerm = search.trim().toLowerCase();
   const stageFiltered = sorted.filter(l => filter === "all" ? true : filter === "active" ? !["won", "lost"].includes(l.status) : l.status === filter);
   const shown = stageFiltered.filter(l => !searchTerm || [l.name, l.phone, l.email, l.address, l.service, l.message, l.sourceDetail].some(v => String(v || "").toLowerCase().includes(searchTerm)));
-  const sel = sorted.find(l => l.id === selId) || null;
+  const sel = sorted.find(l => String(l.id) === String(selId)) || null;
 
   const updateLead = (id, patch, note) => setLeads(ls => (ls || []).map(l => l.id === id ? { ...l, ...patch, updatedAt: new Date().toISOString(), timeline: note ? [...(l.timeline || []), { at: new Date().toISOString(), by: "owner", kind: "note", text: note }] : (l.timeline || []) } : l));
   const setStatus = (lead, status) => updateLead(lead.id, { status }, `Moved to ${LEAD_STAGES.find(s => s.id === status)?.label || status}`);
@@ -22649,6 +22660,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
     const lead = { ...BLANK_LEAD, ...form, id: `lead_m${Date.now()}`, source: "manual", mappedDivision: leadDivisionFromService(form.service), status: "new", createdAt: now, updatedAt: now, timeline: [{ at: now, by: "owner", kind: "captured", text: "Added manually" }] };
     setLeads(ls => [lead, ...(ls || [])]); setForm({ ...BLANK_LEAD }); setAdding(false);
   };
+  const openAddLead = () => setAdding(true);
   const ago = (iso) => { const t = Date.parse(iso || ""); if (!t) return ""; const d = (Date.now() - t) / 86400000; if (d < 1) return "today"; if (d < 2) return "yesterday"; return `${Math.floor(d)}d ago`; };
 
   const STATUS_COLOR = { new: T.primary, contacted: "#2563EB", qualified: "#7c3aed", won: "#16a34a", lost: T.textMuted };
@@ -22662,10 +22674,10 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
     <div style={{ padding: phone ? "7px 12px 8px" : (dense ? "10px 12px 8px" : "16px 16px 12px") }}>
       {phone ? (
         <CommsMobileHeader T={T} title="Leads" description={`${activeCount} active · ${sorted.length} total`}
-          action={<CommsIconAction T={T} icon="plus" label="Add lead" onClick={() => { setForm({ ...BLANK_LEAD }); setAdding(true); }} />} />
+          action={<CommsIconAction T={T} icon="plus" label="Add lead" onClick={openAddLead} />} />
       ) : (
         <CommsPageHeader T={T} compact={twoPane} icon="funnel" title="Leads" description={`${activeCount} active · ${sorted.length} total`}
-          action={<Btn sm onClick={() => { setForm({ ...BLANK_LEAD }); setAdding(true); }} style={{ gap: 6 }}><Icon name="plus" size={13} />Add lead</Btn>} />
+          action={<Btn sm onClick={openAddLead} style={{ gap: 6 }}><Icon name="plus" size={13} />Add lead</Btn>} />
       )}
     </div>
   );
@@ -22691,7 +22703,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
   );
   const listCards = (
     <div style={{ display: "flex", flexDirection: "column", gap: phone ? 0 : (dense ? 7 : 10), padding: phone ? 0 : (dense ? "0 12px 12px" : "0 16px 16px"), margin: phone ? "0 12px 16px" : 0, background: phone && shown.length ? T.surface : "transparent", borderTop: phone && shown.length ? `1px solid ${T.border}` : "none", borderBottom: phone && shown.length ? `1px solid ${T.border}` : "none" }}>
-      {shown.length === 0 && <CommsEmptyState T={T} icon="funnel" title={searchTerm ? "No matching leads" : "No leads in this stage"} copy={searchTerm ? "Try another name, service, phone number, or email." : "Website leads appear here automatically, or you can add one manually."} action={!searchTerm && <Btn sm onClick={() => { setForm({ ...BLANK_LEAD }); setAdding(true); }}>Add a lead</Btn>} />}
+      {shown.length === 0 && <CommsEmptyState T={T} icon="funnel" title={searchTerm ? "No matching leads" : "No leads in this stage"} copy={searchTerm ? "Try another name, service, phone number, or email." : "Website leads appear here automatically, or you can add one manually."} action={!searchTerm && <Btn sm onClick={openAddLead}>Add a lead</Btn>} />}
       {shown.map((l, rowIndex) => {
         const initials = (l.name || "?").trim().split(/\s+/).map(w => w[0]).slice(0, 2).join("").toUpperCase() || "?";
         const isNew = l.status === "new";
@@ -22806,11 +22818,22 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
         </>
       )}
       {sel && !twoPane && (
-        <Modal title="Lead" onClose={() => setSelId(null)}>{leadDetailInner}</Modal>
+        <CommsMobileDetailShell
+          title={sel.name || sel.phone || "Lead"}
+          subtitle={`${LEAD_SOURCE_LABEL[sel.source] || sel.source || "Lead"} · ${LEAD_STAGES.find(stage => stage.id === sel.status)?.label || sel.status || "New"}`}
+          avatar={<span style={{ width: 34, height: 34, borderRadius: "50%", background: sel.status === "new" ? T.primary : hexA(T.primary, 0.12), color: sel.status === "new" ? "#fff" : T.primary, display: "grid", placeItems: "center", fontSize: 11.5, fontWeight: 820 }}>{((sel.name || "?").trim().split(/\s+/).map(word => word[0]).slice(0, 2).join("") || "?").toUpperCase()}</span>}
+          backLabel="Leads"
+          onBack={() => setSelId(null)}
+          kind="lead"
+          bodyStyle={{ padding: "18px max(16px, env(safe-area-inset-left)) 28px", boxSizing: "border-box" }}
+          T={T}
+        >
+          <div style={{ width: "100%", maxWidth: 720, margin: "0 auto" }}>{leadDetailInner}</div>
+        </CommsMobileDetailShell>
       )}
 
       {adding && (
-        <Modal title="Add Lead" onClose={() => setAdding(false)}>
+        <CommsResponsiveDetail phone={phone} title="Add lead" subtitle="Create a new opportunity" backLabel="Leads" onClose={() => setAdding(false)} kind="new-lead" T={T}>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             <div><label style={lbl}>Name</label><input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} style={field} placeholder="Name" /></div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10 }}>
@@ -22821,7 +22844,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
             <div><label style={lbl}>Notes</label><textarea rows={3} value={form.message} onChange={e => setForm(f => ({ ...f, message: e.target.value }))} style={{ ...field, resize: "vertical" }} placeholder="What do they need?" /></div>
             <Btn block lg onClick={addManual} style={{ opacity: (form.name || form.phone || form.email) ? 1 : 0.5, pointerEvents: (form.name || form.phone || form.email) ? "auto" : "none" }}>Add lead</Btn>
           </div>
-        </Modal>
+        </CommsResponsiveDetail>
       )}
 
       {directTextLead && (
@@ -23668,19 +23691,28 @@ function fmtMsgTime(ts) {
 }
 
 // ── STAFF: Full messages inbox ──
-function MessagesScreen({ clients, currentUser, T }) {
+function MessagesScreen({ clients, currentUser, T, workspaceScope = "" }) {
   const dense = useCompactComms();
   const msgVp = useViewport();
   const phone = msgVp.isPhone;
-  const [selectedClientId, setSelectedClientId] = useState(null);
-  const [showNewMsg, setShowNewMsg] = useState(false);
-  const [newSearch, setNewSearch] = useState("");
-  const [threadSearch, setThreadSearch] = useState("");
+  const savedViewRef = useRef(null);
+  if (!savedViewRef.current) savedViewRef.current = readWorkspaceState(workspaceScope).comms?.messages || {};
+  const [selectedClientId, setSelectedClientId] = useState(() => savedViewRef.current.selectedClientId ?? null);
+  const [showNewMsg, setShowNewMsg] = useState(() => !!savedViewRef.current.showNewMsg);
+  const [newSearch, setNewSearch] = useState(() => savedViewRef.current.newSearch || "");
+  const [threadSearch, setThreadSearch] = useState(() => savedViewRef.current.search || "");
   const selectedClient = (clients || []).find(c => String(c.id) === String(selectedClientId)) || null;
+  useEffect(() => {
+    patchWorkspaceState(workspaceScope, { comms: { messages: { selectedClientId: selectedClientId == null ? null : String(selectedClientId), showNewMsg, newSearch, search: threadSearch } } });
+  }, [workspaceScope, selectedClientId, showNewMsg, newSearch, threadSearch]);
 
   // Load all threads — last message + unread count per client
   const [threadMap, setThreadMap] = useState({});
   const [threadsLoaded, setThreadsLoaded] = useState(false);
+  useEffect(() => {
+    if (!selectedClientId || !threadsLoaded || !(clients || []).length || selectedClient) return;
+    setSelectedClientId(null);
+  }, [selectedClientId, selectedClient, threadsLoaded, clients]);
   useEffect(() => {
     let channel = null;
     let inFlight = false;
@@ -23771,7 +23803,7 @@ function MessagesScreen({ clients, currentUser, T }) {
   // ── New Message picker (fills the left pane in two-pane, or the whole screen when narrow) ──
   const newMsgPane = (
     <div style={{ display: "flex", flexDirection: "column", height: twoPane ? "100%" : "auto", minHeight: 0, gap: twoPane ? 0 : 14 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: twoPane ? "14px 16px" : 0, borderBottom: twoPane ? `1px solid ${T.border}` : "none", flexShrink: 0 }}>
+      <div style={{ display: phone && !twoPane ? "none" : "flex", alignItems: "center", gap: 10, padding: twoPane ? "14px 16px" : 0, borderBottom: twoPane ? `1px solid ${T.border}` : "none", flexShrink: 0 }}>
         <button onClick={() => { setShowNewMsg(false); setNewSearch(""); }}
           title="Back" style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4, padding: 0 }}>
           <Icon name="back" size={16} />{twoPane ? "" : " Messages"}
@@ -23866,7 +23898,7 @@ function MessagesScreen({ clients, currentUser, T }) {
   );
 
   const chatPane = selectedClient
-    ? <StaffChat client={selectedClient} currentUser={currentUser} T={T} embedded onBack={() => setSelectedClientId(null)} />
+    ? <StaffChat client={selectedClient} currentUser={currentUser} T={T} embedded workspaceScope={workspaceScope} onBack={() => setSelectedClientId(null)} />
     : (
       <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: T.textMuted, gap: 10, padding: 40, textAlign: "center" }}>
         <div style={{ width: 60, height: 60, borderRadius: 18, background: hexA(T.primary, 0.06), color: T.primary, display: "grid", placeItems: "center" }}><Icon name="message" size={28} /></div>
@@ -23884,11 +23916,36 @@ function MessagesScreen({ clients, currentUser, T }) {
     );
   }
   // Narrow: single column — the list, or a full-screen chat / new-message view.
+  const selectedInitials = (selectedClient?.name || "?").trim().split(/\s+/).map(word => word[0]).slice(0, 2).join("").toUpperCase() || "?";
   return (
     <div ref={wrapRef}>
       {selectedClient
-        ? <StaffChat client={selectedClient} currentUser={currentUser} T={T} onBack={() => setSelectedClientId(null)} />
-        : showNewMsg ? newMsgPane : listPane}
+        ? <CommsMobileDetailShell
+            title={selectedClient.name || "Client"}
+            subtitle={[selectedClient.division ? `${selectedClient.division} client` : "Client", selectedClient.phone || selectedClient.email].filter(Boolean).join(" · ")}
+            avatar={<span style={{ width: 34, height: 34, borderRadius: "50%", background: hexA(T.primary, 0.11), color: T.primary, display: "grid", placeItems: "center", fontSize: 11.5, fontWeight: 820 }}>{selectedInitials}</span>}
+            backLabel="Chats"
+            onBack={() => setSelectedClientId(null)}
+            kind="chat"
+            bodyScroll={false}
+            T={T}
+          >
+            <StaffChat client={selectedClient} currentUser={currentUser} T={T} embedded hideHeader workspaceScope={workspaceScope} />
+          </CommsMobileDetailShell>
+        : showNewMsg
+          ? phone
+            ? <CommsMobileDetailShell
+                title="New message"
+                subtitle="Choose a client conversation"
+                backLabel="Chats"
+                onBack={() => { setShowNewMsg(false); setNewSearch(""); }}
+                kind="new-chat"
+                T={T}
+              >
+                {newMsgPane}
+              </CommsMobileDetailShell>
+            : newMsgPane
+          : listPane}
     </div>
   );
 }
@@ -24058,16 +24115,26 @@ function VisitCommsGroup({ group, T, fmt, fmtDay, stepOf, line }) {
   );
 }
 
-function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onSent, onOpenInvoice, onOpenService, portalMode = false, keyboardAware = false }) {
+function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onSent, onOpenInvoice, onOpenService, portalMode = false, keyboardAware = false, workspaceScope = "", draftId = "" }) {
   const { messages, loading, send, markRead } = useMessages(clientId, portalMode);
   const kb = useKeyboardInset();
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(() => {
+    if (!workspaceScope || !draftId) return "";
+    const saved = readWorkspaceState(workspaceScope).comms?.chatDrafts;
+    return saved && typeof saved[String(draftId)] === "string" ? saved[String(draftId)] : "";
+  });
   const [sending, setSending] = useState(false);
   const [sendErr, setSendErr] = useState("");
   const bottomRef = useRef(null);
   const composerInset = kb > 0
     ? (portalMode ? Math.max(0, kb - 96) + 8 : (keyboardAware ? kb + 8 : 0))
     : 0;
+  useEffect(() => {
+    if (!workspaceScope || !draftId) return;
+    patchWorkspaceState(workspaceScope, {
+      comms: { chatDrafts: { [String(draftId)]: draft } },
+    });
+  }, [workspaceScope, draftId, draft]);
 
   // Scroll to bottom on new messages
   useEffect(() => {
@@ -24122,19 +24189,18 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
               )}
               <div style={{ display: "flex", justifyContent: isMine ? "flex-end" : "flex-start", paddingLeft: isMine ? 48 : 0, paddingRight: isMine ? 0 : 48 }}>
                 <div style={{
-                  // Build 15, Item 4 — roomier bubbles (more padding, rounder) + a defined gray
-                  // bubble (border + soft shadow) so the other person's messages read as distinct
-                  // bubbles, not background. Red = you sending, gray = them (both perspectives).
+                  // Flat Messages-style bubbles: SPS red for this user, quiet gray for the other
+                  // person. Hairlines and card shadows made a conversation feel like a form.
                   background: isMine ? T.primary : T.surfaceAlt,
                   color: isMine ? "#fff" : T.text,
-                  border: isMine ? "none" : `1px solid ${T.border}`,
+                  border: "none",
                   borderRadius: isMine ? "20px 20px 6px 20px" : "20px 20px 20px 6px",
-                  padding: "12px 16px",
-                  fontSize: 15,
-                  lineHeight: 1.5,
+                  padding: "10px 14px",
+                  fontSize: 15.5,
+                  lineHeight: 1.42,
                   maxWidth: 520,
                   wordBreak: "break-word",
-                  boxShadow: isMine ? `0 2px 8px ${hexA(T.primary, 0.28)}` : `0 1px 3px ${hexA("#000", 0.07)}`,
+                  boxShadow: "none",
                 }}>
                   {renderChatBody(m.body, isMine ? null : onOpenInvoice, T, isMine ? null : onOpenService)}
                 </div>
@@ -24150,17 +24216,17 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
       )}
 
       {/* Input */}
-      <div style={{ position: "sticky", bottom: 0, zIndex: 2, borderTop: `1px solid ${T.border}`, padding: `12px 0 ${composerInset}px`, display: "flex", gap: 10, alignItems: "flex-end", transition: "padding-bottom 0.18s ease", background: T.surface }}>
+      <div style={{ position: "sticky", bottom: 0, zIndex: 2, borderTop: `1px solid ${hexA(T.border, 0.45)}`, padding: `8px max(10px, env(safe-area-inset-right)) ${composerInset || 8}px max(10px, env(safe-area-inset-left))`, display: "flex", gap: 8, alignItems: "flex-end", transition: "padding-bottom 0.18s ease", background: hexA(T.surface, 0.975) }}>
         <textarea
           value={draft}
           onChange={e => setDraft(e.target.value)}
           onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
           placeholder="Type a message..."
           rows={1}
-          style={{ flex: 1, minWidth: 0, minHeight: 44, padding: "10px 14px", border: `1.5px solid ${T.border}`, borderRadius: 14, fontSize: 14, fontFamily: "inherit", resize: "none", outline: "none", color: T.text, background: T.surface, lineHeight: 1.5, maxHeight: 120, overflowY: "auto" }}
+          style={{ flex: 1, minWidth: 0, minHeight: 40, padding: "8px 14px", border: `1px solid ${hexA(T.textMuted, 0.24)}`, borderRadius: 20, fontSize: 16, fontFamily: "inherit", resize: "none", outline: "none", color: T.text, background: T.surface, lineHeight: 1.4, maxHeight: 120, overflowY: "auto" }}
         />
         <button onClick={handleSend} disabled={!draft.trim() || sending}
-          style={{ width: 44, height: 44, borderRadius: 13, background: draft.trim() ? T.primary : T.surfaceAlt, border: "none", color: draft.trim() ? "#fff" : T.textMuted, cursor: (draft.trim() && !sending) ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "background 0.15s" }}>
+          style={{ width: 38, height: 38, marginBottom: 1, borderRadius: 19, background: draft.trim() ? T.primary : T.surfaceAlt, border: "none", color: draft.trim() ? "#fff" : T.textMuted, cursor: (draft.trim() && !sending) ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "background 0.15s" }}>
           {sending
             ? <div style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.5)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />
             : <svg viewBox="0 0 24 24" width={18} height={18} fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>}
@@ -24171,11 +24237,11 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
 }
 
 // ── Staff chat view (single client thread) ──
-function StaffChat({ client, currentUser, T, onBack, embedded = false }) {
+function StaffChat({ client, currentUser, T, onBack, embedded = false, hideHeader = false, workspaceScope = "" }) {
   const initials = (client?.name || "?").trim().split(/\s+/).map(w => w[0]).slice(0, 2).join("").toUpperCase() || "?";
   return (
     <div style={{ display: "flex", flexDirection: "column", height: embedded ? "100%" : "min(760px, calc(100dvh - 238px))", maxHeight: embedded ? "100%" : "calc(100dvh - 238px)", minHeight: 0 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 11, marginBottom: 10, paddingBottom: 12, borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
+      {!hideHeader && <div style={{ display: "flex", alignItems: "center", gap: 11, marginBottom: 10, paddingBottom: 12, borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
         {!embedded && (
           <button onClick={onBack} aria-label="Back to conversations" style={{ width: 40, height: 40, borderRadius: 12, background: T.surfaceAlt, border: "none", color: T.primary, cursor: "pointer", padding: 0, display: "grid", placeItems: "center", flexShrink: 0 }}>
             <Icon name="back" size={17} />
@@ -24186,13 +24252,15 @@ function StaffChat({ client, currentUser, T, onBack, embedded = false }) {
           <div style={{ fontSize: 15, fontWeight: 780, color: T.text, letterSpacing: "-0.01em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{client.name}</div>
           <div style={{ fontSize: 12, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{[client.division ? `${client.division} client` : "Client", client.phone || client.email].filter(Boolean).join(" · ")}</div>
         </div>
-      </div>
+      </div>}
       <ChatThread
         clientId={client.id}
         sender="staff"
         senderName={currentUser?.name || "SPS"}
         T={T}
         keyboardAware
+        workspaceScope={workspaceScope}
+        draftId={client.id}
       />
     </div>
   );
@@ -24517,7 +24585,8 @@ function ReminderSettings({ scheduleCfg, setScheduleCfg, email, setEmail, brandi
   );
 }
 
-function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, reminderLog, setReminderLog, T }) {
+function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, reminderLog, setReminderLog, T, workspaceScope = "" }) {
+  const reminderVp = useViewport();
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
   const setCfg = (k, v) => setScheduleCfg(cur => ({ ...DEFAULT_SCHEDULE_CFG, ...(cur || {}), [k]: v }));
   const now = new Date();
@@ -24547,12 +24616,19 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
       : filled;
   };
 
+  const savedViewRef = useRef(null);
+  if (!savedViewRef.current) savedViewRef.current = readWorkspaceState(workspaceScope).comms?.reminders || {};
+  const reminderEntries = [...queue.due, ...payments.due, ...seasonal.due];
+  const initialReview = reminderEntries.find(entry => String(entry.sid) === String(savedViewRef.current.reviewSid)) || null;
   const [reminderErr, setReminderErr] = useState("");
-  const [review, setReview] = useState(null);       // the entry being reviewed in the send modal
-  const [reviewMsg, setReviewMsg] = useState("");
+  const [review, setReview] = useState(initialReview);       // the entry being reviewed
+  const [reviewMsg, setReviewMsg] = useState(() => savedViewRef.current.reviewMsg || (initialReview ? buildMsg(initialReview) : ""));
   const [aiBusy, setAiBusy] = useState(false);
   const [sendBusy, setSendBusy] = useState(false);
   const [manualCopied, setManualCopied] = useState(false);
+  useEffect(() => {
+    patchWorkspaceState(workspaceScope, { comms: { reminders: { reviewSid: review?.sid == null ? null : String(review.sid), reviewMsg } } });
+  }, [workspaceScope, review?.sid, reviewMsg]);
   const markSent = (sid, method) => setReminderLog(m => ({ ...m, [sid]: { sentAt: new Date().toISOString(), method } }));
   const undoSent = (sid) => setReminderLog(m => { const n = { ...m }; delete n[sid]; return n; });
 
@@ -24606,6 +24682,25 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
 
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
   const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
+  const reviewContent = review ? (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div>
+        <div style={{ fontSize: 17, fontWeight: 800, color: T.text }}>{review.client?.name || "Client"}</div>
+        <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 3, lineHeight: 1.45 }}>
+          {review.kind === "payment" ? `Invoice ${review.number || "—"} · ${review.amount} · ${review.daysOverdue} days overdue` : `${review.stop?.type || "Service"} · ${review.date}${review.stop?.time ? ` · ${review.stop.time}` : ""}`}
+          <br />{review.phone ? `Texting ${review.client?.phone || ""}` : "No phone on file — the message will copy to your clipboard"}
+        </div>
+      </div>
+      <div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }}>
+          <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted }}>Message</label>
+          <button onClick={aiImprove} disabled={aiBusy} style={{ minHeight: 40, padding: "0 4px", background: "none", border: "none", color: T.primary, fontSize: 12.5, fontWeight: 800, cursor: aiBusy ? "default" : "pointer", fontFamily: "inherit" }}>{aiBusy ? "Improving…" : "✨ Improve with AI"}</button>
+        </div>
+        <textarea rows={7} value={reviewMsg} onChange={e => setReviewMsg(e.target.value)} style={{ width: "100%", minHeight: 170, padding: "13px 14px", border: `1px solid ${T.border}`, borderRadius: 14, fontSize: 16, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical", lineHeight: 1.5 }} />
+      </div>
+      {reminderErr && <div role="status" style={{ fontSize: 12.5, fontWeight: 700, color: T.accent }}>{reminderErr}</div>}
+    </div>
+  ) : null;
 
   const KIND_BADGE = { payment: { label: "Payment", color: "#C0392B" }, seasonal: { label: "Seasonal", color: "#B45309" }, service: { label: "Service", color: T.primary } };
   const card = (entry, isDue) => {
@@ -24735,26 +24830,24 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
         <CommsEmptyState T={T} icon="calendar" title="Nothing needs attention" copy={cfg.remindersOn ? "Upcoming visits and overdue invoices will appear here when a reminder is due." : "Appointment reminders are off. Payment and seasonal reminders will still appear when needed."} />
       )}
 
-      {review && (
+      {review && reminderVp.isPhone && (
+        <CommsMobileDetailShell
+          title={review.kind === "payment" ? "Payment reminder" : "Send reminder"}
+          subtitle={review.client?.name || "Client"}
+          backLabel="Reminders"
+          onBack={() => setReview(null)}
+          kind="reminder"
+          bodyStyle={{ padding: "20px 16px 28px", boxSizing: "border-box" }}
+          footer={<Btn onClick={sendReview} disabled={sendBusy} block lg>{sendBusy ? "Sending…" : review.phone ? "Send text" : manualCopied ? "Mark sent manually" : "Copy message"}</Btn>}
+          T={T}
+        >
+          {reviewContent}
+        </CommsMobileDetailShell>
+      )}
+      {review && !reminderVp.isPhone && (
         <Modal title={review.kind === "payment" ? "Payment reminder" : "Send reminder"} onClose={() => setReview(null)}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <div>
-              <div style={{ fontSize: 17, fontWeight: 800, color: T.text }}>{review.client?.name || "Client"}</div>
-              <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 3, lineHeight: 1.45 }}>
-                {review.kind === "payment" ? `Invoice ${review.number || "—"} · ${review.amount} · ${review.daysOverdue} days overdue` : `${review.stop?.type || "Service"} · ${review.date}${review.stop?.time ? ` · ${review.stop.time}` : ""}`}
-                <br />{review.phone ? `Texting ${review.client?.phone || ""}` : "No phone on file — the message will copy to your clipboard"}
-              </div>
-            </div>
-            <div>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }}>
-                <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted }}>Message</label>
-                <button onClick={aiImprove} disabled={aiBusy} style={{ background: "none", border: "none", color: T.primary, fontSize: 12.5, fontWeight: 800, cursor: aiBusy ? "default" : "pointer", fontFamily: "inherit" }}>{aiBusy ? "Improving…" : "✨ Improve with AI"}</button>
-              </div>
-              <textarea rows={4} value={reviewMsg} onChange={e => setReviewMsg(e.target.value)} style={{ width: "100%", padding: "12px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical", lineHeight: 1.5 }} />
-            </div>
-            {reminderErr && <div style={{ fontSize: 12.5, fontWeight: 700, color: T.accent }}>{reminderErr}</div>}
-            <Btn onClick={sendReview} disabled={sendBusy} block lg>{sendBusy ? "Sending…" : review.phone ? "Send text" : manualCopied ? "Mark sent manually" : "Copy message"}</Btn>
-          </div>
+          {reviewContent}
+          <div style={{ marginTop: 14 }}><Btn onClick={sendReview} disabled={sendBusy} block lg>{sendBusy ? "Sending…" : review.phone ? "Send text" : manualCopied ? "Mark sent manually" : "Copy message"}</Btn></div>
         </Modal>
       )}
     </div>
@@ -24768,15 +24861,22 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
 // stay live during rollout. See [[intake-funnel-plan]].
 // Broadcast — text a whole segment of clients at once. AI draft, test-first-N, then send-to-all with
 // throttling so a big blast never trips carrier / Quo rate limits. Reuses sendSms (Test Mode + opt-outs).
-function BroadcastSection({ clients, invoices, email, branding, T }) {
+function BroadcastSection({ clients, invoices, email, branding, T, workspaceScope = "" }) {
   const { perms } = useApp();
   const lines = useQuoMainLine(branding?.companyPhone);
-  const [senderRole, setSenderRole] = useState(() => perms?.isAdmin ? "main" : "automation");
-  const [channel, setChannel] = useState("text"); // "text" | "email"
-  const [seg, setSeg] = useState("active");
-  const [subject, setSubject] = useState("");
-  const [msg, setMsg] = useState("");
-  const [testN, setTestN] = useState("2");
+  const savedBroadcastRef = useRef(null);
+  if (!savedBroadcastRef.current) savedBroadcastRef.current = readWorkspaceState(workspaceScope).comms?.broadcast || {};
+  const savedBroadcast = savedBroadcastRef.current;
+  const savedSenderRole = ["main", "automation"].includes(savedBroadcast.senderRole) ? savedBroadcast.senderRole : null;
+  const savedChannel = ["text", "email"].includes(savedBroadcast.channel) ? savedBroadcast.channel : "text";
+  const savedSegment = ["active", "Pond", "Pool", "Seasonal", "overdue"].includes(savedBroadcast.segment) ? savedBroadcast.segment : "active";
+  const defaultSenderRole = perms?.isAdmin ? "main" : "automation";
+  const [senderRole, setSenderRole] = useState(() => (perms?.isAdmin && savedSenderRole) ? savedSenderRole : defaultSenderRole);
+  const [channel, setChannel] = useState(savedChannel); // "text" | "email"
+  const [seg, setSeg] = useState(savedSegment);
+  const [subject, setSubject] = useState(() => String(savedBroadcast.subject || ""));
+  const [msg, setMsg] = useState(() => String(savedBroadcast.message || ""));
+  const [testN, setTestN] = useState(() => String(savedBroadcast.pilotSize || "2"));
   const [aiBusy, setAiBusy] = useState(false);
   const [sending, setSending] = useState(false);
   const [progress, setProgress] = useState(null);
@@ -24788,6 +24888,20 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
   useEffect(() => {
     if (!perms?.isAdmin && senderRole === "main") setSenderRole("automation");
   }, [perms?.isAdmin, senderRole]);
+  useEffect(() => {
+    patchWorkspaceState(workspaceScope, {
+      comms: {
+        broadcast: {
+          senderRole: !perms?.isAdmin ? "automation" : senderRole,
+          channel,
+          segment: seg,
+          subject,
+          message: msg,
+          pilotSize: testN,
+        },
+      },
+    });
+  }, [workspaceScope, perms?.isAdmin, senderRole, channel, seg, subject, msg, testN]);
   const testMode = !!(email && email.testMode && email.testMode.on);
   const isEmail = channel === "email";
 
@@ -24920,7 +25034,7 @@ function BroadcastSection({ clients, invoices, email, branding, T }) {
         {testMode && <div style={{ fontSize: 12, fontWeight: 700, color: "#B45309", background: hexA("#F59E0B", 0.12), border: `1px solid ${hexA("#F59E0B", 0.35)}`, borderRadius: 11, padding: "10px 12px" }}>{(() => { const lv = recipients.filter(c => clientIsLive(c.id)).length; const protectedCount = Math.max(0, total - lv); return `Test Mode is ON — ${protectedCount} message${protectedCount === 1 ? "" : "s"} ${TEST_MODE.mode === "hold" ? "will be held" : "will route to you"}.${lv ? ` ${lv} pilot client${lv === 1 ? "" : "s"} will receive it for real.` : " No clients will receive it."}`; })()}</div>}
         {err && <div style={{ fontSize: 12.5, fontWeight: 700, color: "#dc2626", background: hexA("#dc2626", 0.08), borderRadius: 11, padding: "10px 12px" }}>{err}</div>}
         {progress ? <div><div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12.5, fontWeight: 750, color: T.text, marginBottom: 7 }}><span>Sending</span><span>{progress.done}/{progress.total}{progress.failed ? ` · ${progress.failed} failed` : ""}</span></div><div style={{ height: 7, background: T.surfaceAlt, borderRadius: 100, overflow: "hidden" }}><div style={{ width: `${Math.round((progress.done / Math.max(1, progress.total)) * 100)}%`, height: "100%", background: channelTone, transition: "width 0.2s" }} /></div></div>
-        : result ? <div style={{ fontSize: 12.5, fontWeight: 700, lineHeight: 1.5, color: resultStatus === "error" ? "#dc2626" : resultStatus === "warning" ? "#B45309" : "#16a34a", background: hexA(resultStatus === "error" ? "#dc2626" : resultStatus === "warning" ? "#F59E0B" : "#16a34a", 0.09), borderRadius: 11, padding: "10px 12px" }}>{result}<button onClick={() => setResult("")} style={{ marginLeft: 6, minHeight: 32, background: "none", border: "none", color: T.textMuted, fontWeight: 750, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>Start another</button></div>
+        : result ? <div style={{ fontSize: 12.5, fontWeight: 700, lineHeight: 1.5, color: resultStatus === "error" ? "#dc2626" : resultStatus === "warning" ? "#B45309" : "#16a34a", background: hexA(resultStatus === "error" ? "#dc2626" : resultStatus === "warning" ? "#F59E0B" : "#16a34a", 0.09), borderRadius: 11, padding: "10px 12px" }}>{result}<button onClick={() => { setResult(""); setSubject(""); setMsg(""); }} style={{ marginLeft: 6, minHeight: 32, background: "none", border: "none", color: T.textMuted, fontWeight: 750, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>Start another</button></div>
         : <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 9 }}>
             {isEmail ? <button type="button" disabled={sending || !ready || !total} onClick={() => setConfirmPilot(true)} style={{ minHeight: 46, border: `1px solid ${T.border}`, borderRadius: 12, background: T.surfaceAlt, color: T.text, padding: "9px 13px", fontFamily: "inherit", fontSize: 12.5, fontWeight: 750, cursor: (sending || !ready || !total) ? "default" : "pointer", opacity: (sending || !ready || !total) ? 0.45 : 1 }}>Pilot: email first {pilotN}</button>
             : <Btn variant="ghost" disabled={sending || !ready || !total} onClick={sendTextTestToOwner}>Text test to me</Btn>}
@@ -25062,16 +25176,25 @@ function OwnerDigestSettings({ scheduleCfg, setScheduleCfg, email, branding, T }
 
 // Lightweight rich-text editor for composing / replying to email — a contentEditable body with a
 // small formatting toolbar (bold / italic / underline, bullet + numbered lists, links). Uncontrolled
-// (owns its DOM); emits (html, plainText) on every change so the caller can send both parts. Remounts
-// fresh whenever its host modal opens, so there's no stale content to clear.
-function RichEditor({ onChange, placeholder = "Write your message…", minHeight = 190, apiRef }) {
+// (owns its DOM); emits (html, plainText) on every change so the caller can send both parts. A saved
+// draft can be restored as inert text, avoiding executable HTML from device storage.
+function RichEditor({ onChange, placeholder = "Write your message…", minHeight = 190, apiRef, initialText = "" }) {
   const { T } = useApp();
   const ref = useRef(null);
-  const [empty, setEmpty] = useState(true);
+  const initialTextRef = useRef(String(initialText || ""));
+  const [empty, setEmpty] = useState(() => !initialTextRef.current.trim());
   const emit = () => { const el = ref.current; if (!el) return; setEmpty(!el.textContent.trim()); onChange && onChange(el.innerHTML, el.innerText); };
   const cmd = (c, val) => { const el = ref.current; if (el) el.focus(); try { document.execCommand(c, false, val); } catch (_) {} emit(); };
   const addLink = () => { const url = window.prompt("Link URL"); if (!url) return; cmd("createLink", /^https?:\/\//i.test(url) ? url : `https://${url}`); };
   // Optional imperative handle so a host (e.g. Compose) can drop reference snippets into the body.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || !initialTextRef.current) return;
+    // Restore drafts as text, not executable HTML. Formatting can be reapplied, while pasted
+    // scripts/event attributes can never become active after a resume or account switch.
+    el.textContent = initialTextRef.current;
+    setEmpty(!el.textContent.trim());
+  }, []);
   useEffect(() => {
     if (!apiRef) return undefined;
     apiRef.current = {
@@ -25092,7 +25215,7 @@ function RichEditor({ onChange, placeholder = "Write your message…", minHeight
       <div style={{ position: "relative" }}>
         {empty && <div style={{ position: "absolute", top: 12, left: 14, color: T.textMuted, fontSize: 14.5, pointerEvents: "none" }}>{placeholder}</div>}
         <div ref={ref} contentEditable suppressContentEditableWarning onInput={emit} onBlur={emit}
-          style={{ minHeight, maxHeight: "42vh", overflowY: "auto", padding: "12px 14px", fontSize: 14.5, lineHeight: 1.6, color: T.text, outline: "none", WebkitUserSelect: "text", wordBreak: "break-word" }} />
+          style={{ minHeight, maxHeight: "42vh", overflowY: "auto", padding: "12px 14px", fontSize: 14.5, lineHeight: 1.6, color: T.text, outline: "none", WebkitUserSelect: "text", wordBreak: "break-word", whiteSpace: "pre-wrap" }} />
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 2, padding: "6px 8px", borderTop: `1px solid ${T.border}`, background: T.surfaceAlt, flexWrap: "wrap" }}>
         {tb("B", () => cmd("bold"), { fontWeight: 900, fontSize: 15 })}
@@ -25421,63 +25544,124 @@ function InboxPressPreview({ title, subtitle, pinned = false, canPin = false, re
   );
 }
 
-// A phone text opens as a real destination, not a card floating over the inbox. The shell owns the
-// whole viewport (including the app's bottom navigation), keeps its header and composer fixed, and
-// leaves only the conversation history scrollable—matching the interaction model people expect
-// from Messages while retaining SPS-specific organization controls.
-function MobileSmsThread({ title, subtitle, avatar, lineLabel, categoryLabel, categoryTone, callHref, onBack, onOrganize, children, composer, status, T }) {
-  const threadRef = useRef(null);
+// One phone destination for every row-driven Comms surface. It owns the whole viewport (including
+// the app nav), locks the page behind it, keeps navigation/actions fixed, and lets only its content
+// region scroll. SMS, client chat, email, leads, reminders, and Activity all compose this same shell.
+function CommsMobileDetailShell({
+  title,
+  subtitle,
+  avatar,
+  backLabel = "Messages",
+  onBack,
+  onHeaderPress,
+  actions,
+  children,
+  footer,
+  status,
+  bodyScroll = true,
+  bodyStyle,
+  kind = "detail",
+  T,
+}) {
+  const shellRef = useRef(null);
+  const previousFocusRef = useRef(null);
   const keyboardInset = useKeyboardInset();
+  useBackgroundScrollLock(shellRef);
+  useEffect(() => {
+    previousFocusRef.current = document.activeElement;
+    const frame = requestAnimationFrame(() => shellRef.current?.focus({ preventScroll: true }));
+    const onKey = (event) => { if (event.key === "Escape") onBack(); };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("keydown", onKey);
+      try { previousFocusRef.current?.focus?.({ preventScroll: true }); } catch (_) {}
+    };
+  }, [onBack]);
+  return createPortal(
+    <section ref={shellRef} role="dialog" aria-modal="true" aria-label={title || "Communication details"} tabIndex={-1}
+      data-sps-comms-detail-shell data-comms-kind={kind}
+      style={{ position: "fixed", inset: 0, zIndex: 220, display: "flex", flexDirection: "column", minHeight: 0, background: T.surface, color: T.text, overflow: "hidden", overscrollBehavior: "none" }}>
+      <header data-sps-comms-detail-header style={{ flexShrink: 0, paddingTop: "env(safe-area-inset-top)", background: hexA(T.surface, 0.975), borderBottom: `1px solid ${hexA(T.border, 0.5)}`, backdropFilter: "saturate(180%) blur(24px)", WebkitBackdropFilter: "saturate(180%) blur(24px)" }}>
+        <div style={{ minHeight: 70, padding: "3px max(8px, env(safe-area-inset-right)) 4px max(8px, env(safe-area-inset-left))", boxSizing: "border-box", display: "grid", gridTemplateColumns: "minmax(80px, 1fr) minmax(0, 1.35fr) minmax(80px, 1fr)", alignItems: "center", gap: 3 }}>
+          <button type="button" onClick={onBack} aria-label={`Back to ${backLabel}`}
+            style={{ minHeight: 44, justifySelf: "start", padding: "0 5px 0 0", border: "none", background: "transparent", color: T.primary, display: "inline-flex", alignItems: "center", gap: 1, fontFamily: "inherit", fontSize: 14.5, fontWeight: 660, cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
+            <Icon name="back" size={22} /><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{backLabel}</span>
+          </button>
+          <button type="button" onClick={onHeaderPress} disabled={!onHeaderPress} aria-label={onHeaderPress ? `Open details for ${title}` : undefined}
+            style={{ minWidth: 0, minHeight: 62, padding: "2px 3px", border: "none", background: "transparent", color: T.text, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 1, fontFamily: "inherit", cursor: onHeaderPress ? "pointer" : "default", WebkitTapHighlightColor: "transparent" }}>
+            {avatar}
+            <span style={{ maxWidth: "100%", display: "flex", alignItems: "center", gap: 2, fontSize: avatar ? 12 : 16, lineHeight: 1.12, fontWeight: 780, letterSpacing: avatar ? 0 : "-0.02em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}{onHeaderPress && <Icon name="chevronR" size={9} />}</span>
+            {subtitle && <span style={{ maxWidth: "125%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.textMuted, fontSize: 9.5, lineHeight: 1.15, fontWeight: 650 }}>{subtitle}</span>}
+          </button>
+          <div style={{ justifySelf: "end", display: "flex", alignItems: "center", gap: 5 }}>{actions}</div>
+        </div>
+      </header>
+      <div data-sps-comms-detail-body style={{ flex: "1 1 auto", minHeight: 0, overflowY: bodyScroll ? "auto" : "hidden", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", background: T.surface, ...bodyStyle }}>
+        {children}
+      </div>
+      {(footer || status) && (
+        <footer data-sps-comms-detail-footer style={{ flexShrink: 0, padding: `6px max(10px, env(safe-area-inset-right)) ${keyboardInset > 0 ? `${keyboardInset + 6}px` : "max(8px, env(safe-area-inset-bottom))"} max(10px, env(safe-area-inset-left))`, borderTop: `1px solid ${hexA(T.border, 0.42)}`, background: hexA(T.surface, 0.975), backdropFilter: "saturate(180%) blur(22px)", WebkitBackdropFilter: "saturate(180%) blur(22px)", transition: "padding-bottom 0.18s ease" }}>
+          {status}
+          {footer}
+        </footer>
+      )}
+    </section>,
+    document.body
+  );
+}
+
+function CommsResponsiveDetail({ phone, title, subtitle = "", backLabel = "Messages", onClose, kind = "detail", maxWidth, T, children }) {
+  if (phone) {
+    return (
+      <CommsMobileDetailShell
+        title={title}
+        subtitle={subtitle}
+        backLabel={backLabel}
+        onBack={onClose}
+        kind={kind}
+        bodyStyle={{ padding: "18px max(16px, env(safe-area-inset-right)) 30px max(16px, env(safe-area-inset-left))", boxSizing: "border-box" }}
+        T={T}
+      >
+        <div style={{ width: "100%", maxWidth: 720, margin: "0 auto" }}>{children}</div>
+      </CommsMobileDetailShell>
+    );
+  }
+  return <Modal title={title} onClose={onClose} maxWidth={maxWidth}>{children}</Modal>;
+}
+
+function MobileSmsThread({ title, subtitle, avatar, lineLabel, categoryLabel, categoryTone, callHref, onBack, onOrganize, children, composer, status, T }) {
   const titleDigits = String(title || "").replace(/\D/g, "");
   const subtitleDigits = String(subtitle || "").replace(/\D/g, "");
   const distinctSubtitle = subtitle && subtitle !== title && (!titleDigits || !subtitleDigits || titleDigits !== subtitleDigits) ? subtitle : "";
   const visibleCategory = categoryLabel && String(categoryLabel).toLowerCase() !== "other" ? categoryLabel : "";
   const contactMeta = [visibleCategory, lineLabel, distinctSubtitle].filter(Boolean).join(" · ");
-  useBackgroundScrollLock(threadRef);
-  useEffect(() => {
-    const onKey = (event) => { if (event.key === "Escape") onBack(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onBack]);
-  return createPortal(
-    <section role="dialog" aria-modal="true" aria-label={`Conversation with ${title}`} data-sps-mobile-sms-thread
-      style={{ position: "fixed", inset: 0, zIndex: 220, display: "flex", flexDirection: "column", minHeight: 0, background: T.surface, color: T.text, overflow: "hidden", overscrollBehavior: "none" }}>
-      <header data-sps-thread-header style={{ flexShrink: 0, paddingTop: "env(safe-area-inset-top)", background: hexA(T.surface, 0.965), borderBottom: `1px solid ${hexA(T.border, 0.38)}`, backdropFilter: "saturate(180%) blur(24px)", WebkitBackdropFilter: "saturate(180%) blur(24px)" }}>
-        <div style={{ minHeight: 76, padding: "4px max(8px, env(safe-area-inset-right)) 5px max(8px, env(safe-area-inset-left))", boxSizing: "border-box", display: "grid", gridTemplateColumns: "minmax(82px, 1fr) minmax(0, 1.2fr) minmax(82px, 1fr)", alignItems: "center", gap: 3 }}>
-          <button type="button" onClick={onBack} aria-label="Back to messages"
-            style={{ minHeight: 44, justifySelf: "start", padding: "0 5px 0 0", border: "none", background: "transparent", color: T.primary, display: "inline-flex", alignItems: "center", gap: 1, fontFamily: "inherit", fontSize: 14.5, fontWeight: 660, cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
-            <Icon name="back" size={22} /><span>Messages</span>
-          </button>
-          <button type="button" onClick={onOrganize} aria-label={`Open details for ${title}`}
-            style={{ minWidth: 0, minHeight: 68, padding: "2px 3px", border: "none", background: "transparent", color: T.text, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 1, fontFamily: "inherit", cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
-            {avatar}
-            <span style={{ maxWidth: "100%", display: "flex", alignItems: "center", gap: 2, fontSize: 12, lineHeight: 1.12, fontWeight: 740, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}<Icon name="chevronR" size={9} /></span>
-            {contactMeta && <span style={{ maxWidth: "125%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: categoryTone || T.textMuted, fontSize: 9, lineHeight: 1.15, fontWeight: 680 }}>{contactMeta}</span>}
-          </button>
-          <div style={{ justifySelf: "end", display: "flex", alignItems: "center", gap: 5 }}>
-            {callHref && <a href={callHref} aria-label={`Call ${title}`} title={`Call ${title}`}
-              style={{ width: 38, height: 38, borderRadius: 19, background: T.surfaceAlt, color: T.primary, textDecoration: "none", display: "grid", placeItems: "center" }}><Icon name="phone" size={17} /></a>}
-            <button type="button" onClick={onOrganize} aria-label="Organize conversation" title="Organize conversation"
-              style={{ width: 38, height: 38, borderRadius: 19, border: "none", background: T.surfaceAlt, color: T.primary, display: "grid", placeItems: "center", cursor: "pointer" }}><Icon name="info" size={17} /></button>
-          </div>
-        </div>
-      </header>
-      <div ref={threadRef} style={{ flex: "1 1 auto", minHeight: 0, overflow: "hidden", background: T.surface }}>
-        {children}
-      </div>
-      <footer data-sps-thread-composer style={{ flexShrink: 0, padding: `6px max(10px, env(safe-area-inset-right)) ${keyboardInset > 0 ? `${keyboardInset + 6}px` : "max(8px, env(safe-area-inset-bottom))"} max(10px, env(safe-area-inset-left))`, borderTop: `1px solid ${hexA(T.border, 0.36)}`, background: hexA(T.surface, 0.965), backdropFilter: "saturate(180%) blur(22px)", WebkitBackdropFilter: "saturate(180%) blur(22px)", transition: "padding-bottom 0.18s ease" }}>
-        {status}
-        {composer}
-      </footer>
-    </section>,
-    document.body
+  return (
+    <CommsMobileDetailShell
+      title={title}
+      subtitle={contactMeta}
+      avatar={avatar}
+      onBack={onBack}
+      onHeaderPress={onOrganize}
+      kind="sms"
+      bodyScroll={false}
+      actions={<>
+        {callHref && <a href={callHref} aria-label={`Call ${title}`} title={`Call ${title}`} style={{ width: 38, height: 38, borderRadius: 19, background: T.surfaceAlt, color: T.primary, textDecoration: "none", display: "grid", placeItems: "center" }}><Icon name="phone" size={17} /></a>}
+        <button type="button" onClick={onOrganize} aria-label="Organize conversation" title="Organize conversation" style={{ width: 38, height: 38, borderRadius: 19, border: "none", background: T.surfaceAlt, color: categoryTone || T.primary, display: "grid", placeItems: "center", cursor: "pointer" }}><Icon name="info" size={17} /></button>
+      </>}
+      footer={composer}
+      status={status}
+      T={T}
+    >
+      {children}
+    </CommsMobileDetailShell>
   );
 }
 
 // Comms → Inbox. The owner gets private work email plus both business text lines through the
 // owner-only api/inbox route. Staff use the SMS-only route, where each line has an independent
 // visibility grant. The owner's ported line remains read-only for every non-owner.
-function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOnly = false }) {
+function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOnly = false, workspaceScope = "" }) {
   const { T, branding, perms } = useApp();
   const vp = useViewport();
   const quoLines = useQuoMainLine(branding?.companyPhone);
@@ -25490,15 +25674,22 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   // global sidebar AND the Comms sidebar, so isDesktop (>=700, incl. portrait iPad) is too narrow and
   // would crush the reader. Below this, use the clean single-column list + full-screen modal reader.
   const wide = vp.width >= 1080;
+  const savedInboxRef = useRef(null);
+  if (!savedInboxRef.current) savedInboxRef.current = readWorkspaceState(workspaceScope).comms?.inbox || {};
+  const savedInbox = savedInboxRef.current;
+  const savedCompose = savedInbox.compose && typeof savedInbox.compose === "object" ? savedInbox.compose : {};
+  const savedChannel = ["all", "sms", "email"].includes(savedInbox.channel) ? savedInbox.channel : (smsOnly ? "sms" : "all");
+  const savedFilter = ["all", "unread", "lead", "bill", "client", "other"].includes(savedInbox.filter) ? savedInbox.filter : "all";
+  const savedFolder = !smsOnly && savedInbox.folder === "sent" ? "sent" : "inbox";
   const [rows, setRows] = useState(null);
   const [smsMediaById, setSmsMediaById] = useState({});
   const [smsThreadMeta, setSmsThreadMeta] = useState({});
   const [smsThreadPrefs, setSmsThreadPrefs] = useState({});
   const [err, setErr] = useState("");
-  const [q, setQ] = useState("");              // inbox search
-  const [channelFilter, setChannelFilter] = useState(smsOnly ? "sms" : "all"); // all | sms | email
+  const [q, setQ] = useState(() => String(savedInbox.search || ""));              // inbox search
+  const [channelFilter, setChannelFilter] = useState(savedChannel); // all | sms | email
   const [inboxAccess, setInboxAccess] = useState({ automation: ownerView || !!perms?.commsTextInbox, main: ownerView || !!perms?.commsMainLine });
-  const [filter, setFilter] = useState("all"); // all | unread | lead | bill | client | other
+  const [filter, setFilter] = useState(savedFilter); // all | unread | lead | bill | client | other
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [phoneMailMenuOpen, setPhoneMailMenuOpen] = useState(false);
   const phoneMailMenuRef = useRef(null);
@@ -25533,6 +25724,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   const [replyHtml, setReplyHtml] = useState("");
   const [replyBusy, setReplyBusy] = useState(false);
   const [replyMsg, setReplyMsg] = useState("");
+  const [replyDraftKeyLoaded, setReplyDraftKeyLoaded] = useState("");
   const replyComposerRef = useRef(null);
   const replySucceeded = /^(Sent|Text accepted)/.test(replyMsg);
   useEffect(() => {
@@ -25641,10 +25833,13 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     noticeTimer.current = setTimeout(() => setInboxNotice(""), 3200);
   };
   useEffect(() => () => clearTimeout(noticeTimer.current), []);
-  const [composeOpen, setComposeOpen] = useState(false);
-  const [compose, setCompose] = useState({ to: "", subject: "" });
-  const [composeHtml, setComposeHtml] = useState("");   // rich body (HTML) from the editor
-  const [composeText, setComposeText] = useState("");   // plain-text mirror (validation + text part)
+  const [composeOpen, setComposeOpen] = useState(() => !!savedCompose.open);
+  const [compose, setCompose] = useState(() => ({ to: String(savedCompose.to || ""), subject: String(savedCompose.subject || "") }));
+  const [composeHtml, setComposeHtml] = useState(() => {
+    const text = String(savedCompose.text || "");
+    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
+  });   // rich body (HTML) from the editor
+  const [composeText, setComposeText] = useState(() => String(savedCompose.text || ""));   // plain-text mirror (validation + text part)
   const [composeBusy, setComposeBusy] = useState(false);
   const [composeMsg, setComposeMsg] = useState("");
   const [composeClient, setComposeClient] = useState(null); // client picked as recipient (enables reference starters)
@@ -25652,11 +25847,41 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   const [attachments, setAttachments] = useState([]);       // [{ name, type, size, content(base64) }]
   const [attachErr, setAttachErr] = useState("");
   const composeEditorRef = useRef(null);                    // RichEditor insert API for reference snippets
-  const [folder, setFolder] = useState("inbox");            // "inbox" | "sent"
+  const savedComposeClientIdRef = useRef(savedCompose.clientId == null ? null : String(savedCompose.clientId));
+  const [folder, setFolder] = useState(savedFolder);            // "inbox" | "sent"
   const [sentRows, setSentRows] = useState(null);           // outbound emails (from sps_comms_log)
   const [sentErr, setSentErr] = useState("");
-  const [sentQ, setSentQ] = useState("");
-  const [openSent, setOpenSent] = useState(null);           // expanded sent row id
+  const [sentQ, setSentQ] = useState(() => String(savedInbox.sentSearch || ""));
+  const [openSent, setOpenSent] = useState(() => savedInbox.openSentId ?? null); // expanded sent row id
+  const restoreOpenInboxKeyRef = useRef(String(savedInbox.openKey || ""));
+  const inboxRestoreTriedRef = useRef(false);
+  useEffect(() => {
+    patchWorkspaceState(workspaceScope, {
+      comms: {
+        inbox: {
+          folder,
+          channel: channelFilter,
+          filter,
+          search: q,
+          sentSearch: sentQ,
+          openSentId: openSent == null ? null : String(openSent),
+          compose: {
+            open: composeOpen,
+            to: compose.to,
+            subject: compose.subject,
+            text: composeText,
+            clientId: composeClient?.id == null ? savedComposeClientIdRef.current : String(composeClient.id),
+          },
+        },
+      },
+    });
+  }, [workspaceScope, folder, channelFilter, filter, q, sentQ, openSent, composeOpen, compose.to, compose.subject, composeText, composeClient?.id]);
+  useEffect(() => {
+    const savedClientId = savedComposeClientIdRef.current;
+    if (!savedClientId || composeClient) return;
+    const match = (clients || []).find(client => String(client.id) === savedClientId);
+    if (match) setComposeClient(match);
+  }, [clients, composeClient]);
   // Inbox refreshes can come from the button, foreground timer, iOS resume, visibility changes,
   // and a received push. Serialize them so those paths never race each other, and fence every
   // async state update after unmount or an access/endpoint change.
@@ -25829,6 +26054,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     const interval = window.setInterval(refreshInboxWhenVisible, 60000);
     document.addEventListener("visibilitychange", refreshInboxWhenVisible);
     window.addEventListener("sps-push-received", refreshInboxAfterPush);
+    window.addEventListener("sps-manual-refresh", quietRefresh);
 
     let disposed = false;
     let appStateHandle = null;
@@ -25851,6 +26077,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", refreshInboxWhenVisible);
       window.removeEventListener("sps-push-received", refreshInboxAfterPush);
+      window.removeEventListener("sps-manual-refresh", quietRefresh);
       try { appStateHandle?.remove?.(); } catch (_) {}
     };
   }, [load]);
@@ -25958,14 +26185,40 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     const count = mergeInboxConversationRows(rows || [], clients, quoLines, smsThreadMeta).reduce((total, row) => total + (row._smsConversation ? Number(row._unreadCount || 0) : (row.read ? 0 : 1)), 0);
     window.dispatchEvent(new CustomEvent("sps-inbox-unread", { detail: { count } }));
   }, [rows, clients, quoLines.automation, quoLines.main, smsThreadMeta, err, refreshing]);
+  const openReplyWorkspaceKey = workspaceKeyForInboxRow(openRow);
   useEffect(() => {
+    const key = openReplyWorkspaceKey;
+    if (!key) {
+      setReplyDraftKeyLoaded("");
+      setReplying(false);
+      setReplyText(""); setReplyHtml(""); setReplyMsg("");
+      return;
+    }
     const smsCanReply = openRow?.channel === "sms" && !!perms?.sendTexts
       && (ownerView || ((openRow?.sms_line !== "main" && openRow?.ai?.quoLine !== "main") && !!perms?.commsTextInbox));
-    // Texts open as conversations with the composer ready. Email keeps the deliberate Reply
-    // action because it has subject/threading semantics and a richer editor.
-    setReplying(!!smsCanReply);
-    setReplyText(""); setReplyHtml(""); setReplyMsg("");
-  }, [openRow && openRow.id]); // eslint-disable-line react-hooks/exhaustive-deps
+    const savedDraft = readWorkspaceState(workspaceScope).comms?.inbox?.replyDrafts?.[key] || {};
+    const savedText = typeof savedDraft.text === "string" ? savedDraft.text : "";
+    const safeHtml = savedText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
+    // A conversation is keyed by business line + customer, not by its newest message ID. New
+    // inbound messages can now refresh the open thread without erasing what the employee typed.
+    setReplyText(savedText);
+    setReplyHtml(safeHtml);
+    setReplyMsg("");
+    setReplying(!!smsCanReply || (!!savedDraft.replying && openRow?.channel !== "sms"));
+    setReplyDraftKeyLoaded(key);
+  }, [openReplyWorkspaceKey, workspaceScope, openRow?.channel, openRow?.sms_line, openRow?.ai?.quoLine, perms?.sendTexts, perms?.commsTextInbox, ownerView]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!openReplyWorkspaceKey || replyDraftKeyLoaded !== openReplyWorkspaceKey) return;
+    patchWorkspaceState(workspaceScope, {
+      comms: {
+        inbox: {
+          replyDrafts: {
+            [openReplyWorkspaceKey]: { text: replyText, replying: !!replying },
+          },
+        },
+      },
+    });
+  }, [workspaceScope, openReplyWorkspaceKey, replyDraftKeyLoaded, replyText, replying]);
   useEffect(() => {
     if (!phoneMailMenuOpen) return undefined;
     const closeOutside = (event) => {
@@ -26021,6 +26274,32 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     if (!preference) return row;
     return { ...row, _smsPinned: preference.pinned === true, _smsPinnedAt: preference.pinnedAt || "" };
   }), [rows, smsMediaById, clients, quoLines.automation, quoLines.main, smsThreadMeta, smsThreadPrefs]);
+  function workspaceKeyForInboxRow(row) {
+    if (!row) return "";
+    if (row.channel === "sms" && row._smsConversationKey) return `sms:${row._smsConversationKey}`;
+    return row.id == null ? "" : `id:${String(row.id)}`;
+  }
+  useEffect(() => {
+    if (inboxRestoreTriedRef.current || rows === null) return;
+    const remembered = restoreOpenInboxKeyRef.current;
+    if (!remembered) {
+      inboxRestoreTriedRef.current = true;
+      return;
+    }
+    const restored = displayInboxRows.find((row) => workspaceKeyForInboxRow(row) === remembered);
+    if (restored) {
+      inboxRestoreTriedRef.current = true;
+      setOpenRow(restored);
+    }
+    // If the compact inbox window does not contain the remembered item yet, keep its key intact
+    // and try again on the next hydrated refresh. Never rewrite a valid saved location as blank.
+  }, [rows, displayInboxRows]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!inboxRestoreTriedRef.current) return;
+    patchWorkspaceState(workspaceScope, {
+      comms: { inbox: { openKey: workspaceKeyForInboxRow(openRow) } },
+    });
+  }, [workspaceScope, openRow?.id, openRow?._smsConversationKey, openRow?.channel]); // eslint-disable-line react-hooks/exhaustive-deps
   const textCount = displayInboxRows.filter(isSmsRow).length;
   const emailCount = displayInboxRows.length - textCount;
   const channelRows = displayInboxRows.filter(r => channelFilter === "all" ? true : channelFilter === "sms" ? isSmsRow(r) : !isSmsRow(r));
@@ -26086,17 +26365,13 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   useEffect(() => {
     if (!openRow) return;
     const fresh = displayInboxRows.find(r => String(r.id) === String(openRow.id) || (openRow._smsConversationKey && r._smsConversationKey === openRow._smsConversationKey));
-    if (!fresh) setOpenRow(null);
-    else if (fresh !== openRow) {
+    if (fresh && fresh !== openRow) {
       // Recurring compact email refreshes must not strip the one full body already hydrated for
       // the active reading pane.
       const detail = fresh.channel !== "sms" ? emailDetailCacheRef.current.get(String(fresh.id)) : null;
       setOpenRow(detail ? { ...fresh, ...detail } : fresh);
     }
   }, [rows, clients, smsThreadMeta, smsThreadPrefs]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (openRow && !list.some(r => r.id === openRow.id)) setOpenRow(null);
-  }, [channelFilter, filter, q]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     setOpenSwipeId(null);
   }, [channelFilter, filter, q, folder, selMode]);
@@ -26476,7 +26751,10 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     },
   };
   const insertRef = (kind) => { if (composeClient && composeEditorRef.current) composeEditorRef.current.insert(REF[kind](composeClient)); };
-  const pickClient = (c) => { setComposeClient(c); setCompose(x => ({ ...x, to: c.email || x.to })); setToFocus(false); };
+  const pickClient = (c) => {
+    savedComposeClientIdRef.current = c?.id == null ? null : String(c.id);
+    setComposeClient(c); setCompose(x => ({ ...x, to: c.email || x.to })); setToFocus(false);
+  };
   const fmtSize = (b) => b < 1024 ? `${b} B` : b < 1048576 ? `${Math.round(b / 1024)} KB` : `${(b / 1048576).toFixed(1)} MB`;
   const ATTACH_MAX = Math.floor(2.5 * 1024 * 1024); // ~2.5MB of files → base64 (~+33%) + the message body stays under Vercel's ~4.5MB request-body limit
   const addFiles = async (fileList) => {
@@ -26494,7 +26772,10 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     }
     setAttachments(next);
   };
-  const resetCompose = () => { setComposeOpen(false); setCompose({ to: "", subject: "" }); setComposeHtml(""); setComposeText(""); setComposeMsg(""); setComposeClient(null); setToFocus(false); setAttachments([]); setAttachErr(""); };
+  const resetCompose = () => {
+    savedComposeClientIdRef.current = null;
+    setComposeOpen(false); setCompose({ to: "", subject: "" }); setComposeHtml(""); setComposeText(""); setComposeMsg(""); setComposeClient(null); setToFocus(false); setAttachments([]); setAttachErr("");
+  };
   const sendCompose = async () => {
     if (composeBusy || !compose.to.trim() || !composeText.trim()) return;
     setComposeBusy(true); setComposeMsg("");
@@ -26709,8 +26990,9 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     : (smsOnly ? "Incoming business texts you are allowed to see will appear here." : "Incoming texts and work email will appear here with clear channel labels.");
   const openMessage = (r) => {
     setOpenSwipeId(null);
+    inboxRestoreTriedRef.current = true;
+    restoreOpenInboxKeyRef.current = "";
     setOpenRow(r);
-    setReplying(isSmsRow(r) && canTextFromRow(r)); setReplyText(""); setReplyHtml(""); setReplyMsg("");
     if (!r.read) markRead(inboxRowMessageIds(r));
   };
   const setConversationPinned = async (row, pinned) => {
@@ -26877,7 +27159,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   // The open-email body — rendered in a desktop reading pane OR a mobile modal.
   const readerInner = !openRow ? null : (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
+      {wide && <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
         <Avatar name={openRow.from_name} email={openRow.from_email} channel={openRow.channel} photo={openRow._contactPhoto} size={44} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -26887,7 +27169,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
           </div>
           <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{senderDetail(openRow)} · {fmtWhen(openRow.created_at)}</div>
         </div>
-      </div>
+      </div>}
       {!isSmsRow(openRow) && openRow.ai && openRow.ai.summary && (
         <div style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12.5, color: T.text, background: hexA(T.primary, 0.05), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 10, padding: "9px 12px", lineHeight: 1.5 }}><span style={{ color: T.primary, flexShrink: 0, display: "inline-flex", marginTop: 1 }}><Icon name="sparkle" size={14} /></span><span>{openRow.ai.summary}</span></div>
       )}
@@ -26939,7 +27221,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
                 style={{ width: "100%", minHeight: 116, resize: "vertical", padding: "12px 14px", border: `1.5px solid ${T.border}`, borderRadius: 12, background: T.surface, color: T.text, fontFamily: "inherit", fontSize: 16, lineHeight: 1.5, boxSizing: "border-box", outline: "none" }} />
               <div style={{ textAlign: "right", marginTop: 3, fontSize: 11, color: T.textMuted }}>{replyText.length}/1600</div>
             </div>
-          ) : <RichEditor onChange={(html, text) => { setReplyHtml(html); setReplyText(text); }} placeholder={`Reply to ${openRow.from_name || openRow.from_email}…`} minHeight={130} />}
+          ) : <RichEditor initialText={replyText} onChange={(html, text) => { setReplyHtml(html); setReplyText(text); }} placeholder={`Reply to ${openRow.from_name || openRow.from_email}…`} minHeight={130} />}
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <Btn variant="primary" sm disabled={replyBusy || !replyText.trim()} onClick={sendOpenRowReply}>{replyBusy ? "Sending…" : openRow.channel === "sms" ? "Send text" : "Send reply"}</Btn>
             {replyMsg && <span style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</span>}
@@ -27016,6 +27298,14 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     const qq = sentQ.trim().toLowerCase(); if (!qq) return true;
     return `${r.recipient || ""} ${nameForSent(r)} ${r.body || ""} ${r.origin || ""}`.toLowerCase().includes(qq);
   });
+  const sentPartsFor = (row) => {
+    const parts = String(row?.body || "").split(" — ");
+    return {
+      subject: (parts[0] || "").trim() || "(no subject)",
+      preview: parts.slice(1).join(" — ").trim(),
+    };
+  };
+  const selectedSent = (sentRows || []).find(row => String(row.id) === String(openSent)) || null;
   const phoneMailViewLabel = (() => {
     if (folder === "sent") return "Sent";
     const parts = [];
@@ -27094,13 +27384,11 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
         <div style={{ display: "flex", flexDirection: "column", gap: phone ? 0 : (dense ? 7 : 10), paddingBottom: wide ? 8 : (phone ? 0 : 12), background: phone ? T.surface : "transparent", borderTop: phone ? `1px solid ${T.border}` : "none", borderBottom: phone ? `1px solid ${T.border}` : "none" }}>
           {sentList.map((r, rowIndex) => {
             const to = r.recipient || nameForSent(r) || "—";
-            const parts = String(r.body || "").split(" — ");
-            const subj = (parts[0] || "").trim() || "(no subject)";
-            const prev = parts.slice(1).join(" — ").trim();
-            const open = openSent === r.id;
+            const { subject: subj, preview: prev } = sentPartsFor(r);
+            const open = !phone && String(openSent) === String(r.id);
             const isReply = /reply/i.test(r.type || "");
             return (
-              <div key={r.id} onClick={() => setOpenSent(open ? null : r.id)}
+              <div key={r.id} onClick={() => setOpenSent(phone ? r.id : (open ? null : r.id))}
                 style={{ display: "flex", gap: 12, padding: phone ? "11px 3px" : "13px 14px", background: T.surface, border: phone ? "none" : `1px solid ${T.border}`, borderTop: phone && rowIndex > 0 ? `1px solid ${T.border}` : (phone ? "none" : undefined), borderRadius: phone ? 0 : 16, boxShadow: phone ? "none" : "0 2px 8px rgba(0,0,0,0.045)", cursor: "pointer" }}>
                 <Avatar name={nameForSent(r) || to} email={r.recipient} size={40} />
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -27306,6 +27594,37 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       )}
       {pressPreview}
       {mobileSmsThread}
+      {phone && folder === "sent" && selectedSent && (() => {
+        const to = selectedSent.recipient || nameForSent(selectedSent) || "—";
+        const { subject, preview } = sentPartsFor(selectedSent);
+        const isReply = /reply/i.test(selectedSent.type || "");
+        return (
+          <CommsMobileDetailShell
+            title={subject}
+            subtitle={`To ${to} · ${fmtWhen(selectedSent.created_at)}`}
+            avatar={<Avatar name={nameForSent(selectedSent) || to} email={selectedSent.recipient} size={34} />}
+            backLabel="Sent"
+            onBack={() => setOpenSent(null)}
+            kind="sent-email"
+            bodyStyle={{ padding: "18px max(16px, env(safe-area-inset-right)) 30px max(16px, env(safe-area-inset-left))", boxSizing: "border-box" }}
+            T={T}
+          >
+            <article style={{ background: T.surface, color: T.text, border: `1px solid ${T.border}`, borderRadius: 16, padding: "18px 17px", boxShadow: "0 1px 3px rgba(0,0,0,0.035)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", paddingBottom: 14, borderBottom: `1px solid ${T.border}` }}>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10.5, fontWeight: 820, color: T.primary, background: hexA(T.primary, 0.09), padding: "4px 9px", borderRadius: 100 }}>
+                  <Icon name={isReply ? "reply" : "send"} size={12} />{isReply ? "Reply sent" : "Sent"}
+                </span>
+                {selectedSent.ok === false && <span style={{ fontSize: 10.5, fontWeight: 820, color: "#dc2626", background: hexA("#dc2626", 0.09), padding: "4px 9px", borderRadius: 100 }}>Delivery failed</span>}
+                <span style={{ marginLeft: "auto", fontSize: 11.5, color: T.textMuted }}>{fmtWhen(selectedSent.created_at)}</span>
+              </div>
+              <div style={{ marginTop: 15, fontSize: 11, fontWeight: 790, letterSpacing: "0.055em", textTransform: "uppercase", color: T.textMuted }}>To</div>
+              <div style={{ marginTop: 4, fontSize: 14, fontWeight: 720, wordBreak: "break-word" }}>{to}</div>
+              <h2 style={{ margin: "19px 0 10px", fontSize: 20, lineHeight: 1.25, letterSpacing: "-0.025em" }}>{subject}</h2>
+              <div style={{ fontSize: 15, lineHeight: 1.65, color: T.text, whiteSpace: "pre-wrap", wordBreak: "break-word", userSelect: "text", WebkitUserSelect: "text" }}>{preview || "No message preview was recorded."}</div>
+            </article>
+          </CommsMobileDetailShell>
+        );
+      })()}
       {manageRow && (
         <InboxActionSheet title={isSmsRow(manageRow) ? "Organize conversation" : "Manage email"} onClose={() => setManageRow(null)} T={T}>
           <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
@@ -27370,7 +27689,20 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
         </InboxActionSheet>
       )}
       {openRow && !wide && !isSmsRow(openRow) && (
-        <Modal title={`Email · ${openRow.subject || "(no subject)"}`} onClose={() => setOpenRow(null)} maxWidth={640}>
+        <CommsMobileDetailShell
+          title={senderLabel(openRow)}
+          subtitle={`${openRow.subject || "(no subject)"} · ${fmtWhen(openRow.created_at)}`}
+          avatar={<Avatar name={openRow.from_name} email={openRow.from_email} channel={openRow.channel} photo={openRow._contactPhoto} size={34} />}
+          backLabel="Inbox"
+          onBack={() => setOpenRow(null)}
+          kind="email"
+          actions={<>
+            <button type="button" onClick={toggleReply} aria-label="Reply to email" title="Reply" style={{ width: 38, height: 38, borderRadius: 19, border: "none", background: T.surfaceAlt, color: T.primary, display: "grid", placeItems: "center", cursor: "pointer" }}><Icon name="reply" size={17} /></button>
+            <button type="button" onClick={() => setManageRow(openRow)} aria-label="Organize email" title="Organize" style={{ width: 38, height: 38, borderRadius: 19, border: "none", background: T.surfaceAlt, color: T.primary, display: "grid", placeItems: "center", cursor: "pointer" }}><Icon name="info" size={17} /></button>
+          </>}
+          bodyStyle={{ padding: "16px max(16px, env(safe-area-inset-right)) 28px max(16px, env(safe-area-inset-left))", boxSizing: "border-box" }}
+          T={T}
+        >
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {/* Sender header — channel-aware identity for both email and text. */}
             <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
@@ -27438,7 +27770,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
                       style={{ width: "100%", minHeight: 116, resize: "vertical", padding: "12px 14px", border: `1.5px solid ${T.border}`, borderRadius: 12, background: T.surface, color: T.text, fontFamily: "inherit", fontSize: 16, lineHeight: 1.5, boxSizing: "border-box", outline: "none" }} />
                     <div style={{ textAlign: "right", marginTop: 3, fontSize: 11, color: T.textMuted }}>{replyText.length}/1600</div>
                   </div>
-                ) : <RichEditor onChange={(html, text) => { setReplyHtml(html); setReplyText(text); }} placeholder={`Reply to ${openRow.from_name || openRow.from_email}…`} minHeight={130} />}
+                ) : <RichEditor initialText={replyText} onChange={(html, text) => { setReplyHtml(html); setReplyText(text); }} placeholder={`Reply to ${openRow.from_name || openRow.from_email}…`} minHeight={130} />}
                 <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                   <Btn variant="primary" sm disabled={replyBusy || !replyText.trim()} onClick={sendOpenRowReply}>{replyBusy ? "Sending…" : openRow.channel === "sms" ? "Send text" : "Send reply"}</Btn>
                   {replyMsg && <span style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</span>}
@@ -27448,11 +27780,11 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
             )}
             {!replying && replyMsg && <div style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</div>}
           </div>
-        </Modal>
+        </CommsMobileDetailShell>
       )}
 
       {!smsOnly && composeOpen && (
-        <Modal title="New email" onClose={resetCompose} maxWidth={620}>
+        <CommsResponsiveDetail phone={phone} title="New email" subtitle="Compose a work message" backLabel={folder === "sent" ? "Sent" : "Inbox"} onClose={() => setComposeOpen(false)} kind="compose-email" maxWidth={620} T={T}>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {(() => {
               const cLabel = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 };
@@ -27463,7 +27795,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
                   <div style={{ position: "relative" }}>
                     <label style={cLabel}>To</label>
                     <input type="text" inputMode="email" value={compose.to}
-                      onChange={e => { setCompose(c => ({ ...c, to: e.target.value })); setComposeClient(null); setToFocus(true); }}
+                      onChange={e => { savedComposeClientIdRef.current = null; setCompose(c => ({ ...c, to: e.target.value })); setComposeClient(null); setToFocus(true); }}
                       onFocus={() => setToFocus(true)} onBlur={() => setTimeout(() => setToFocus(false), 150)}
                       placeholder="Search clients or type an email" style={cInp} />
                     {toFocus && clientMatches.length > 0 && (
@@ -27497,7 +27829,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
                     <label style={cLabel}>Subject</label>
                     <input type="text" value={compose.subject} onChange={e => setCompose(c => ({ ...c, subject: e.target.value }))} placeholder="Subject" style={cInp} />
                   </div>
-                  <RichEditor apiRef={composeEditorRef} onChange={(html, text) => { setComposeHtml(html); setComposeText(text); }} placeholder="Write your message…" />
+                  <RichEditor apiRef={composeEditorRef} initialText={composeText} onChange={(html, text) => { setComposeHtml(html); setComposeText(text); }} placeholder="Write your message…" />
                   {/* Attachments */}
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
@@ -27526,11 +27858,12 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
             })()}
             <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
               <Btn variant="primary" sm onClick={sendCompose} disabled={composeBusy || !compose.to.trim() || !composeText.trim()}>{composeBusy ? "Sending…" : "Send"}</Btn>
+              <Btn variant="ghost" sm onClick={resetCompose} disabled={composeBusy}>Discard draft</Btn>
               {composeMsg && <span style={{ fontSize: 12.5, fontWeight: 700, color: composeMsg.startsWith("Sent") ? "#16a34a" : T.warning }}>{composeMsg}</span>}
             </div>
             <div style={{ fontSize: 11.5, color: T.textMuted }}>Sends from your Sending Identity with your signature (Comms → Settings). A copy is kept for your records.</div>
           </div>
-        </Modal>
+        </CommsResponsiveDetail>
       )}
     </div>
   );
@@ -27540,14 +27873,24 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
 // the report crons, and the lead webhook have sent, WITH its origin (who/what triggered it)
 // and real recipient. Reads sps_comms_log (authenticated RLS read already in place). Rows
 // older than the origin/recipient columns show "—" for origin; everything new is stamped.
-function LogsScreen({ clients, showOwnerRows = false }) {
+function LogsScreen({ clients, showOwnerRows = false, workspaceScope = "" }) {
   const { T } = useApp();
+  const logsVp = useViewport();
+  const savedActivityRef = useRef(null);
+  if (!savedActivityRef.current) savedActivityRef.current = readWorkspaceState(workspaceScope).comms?.activity || {};
+  const savedActivity = savedActivityRef.current;
+  const savedActivityFilter = ["all", "sms", "email", "auto", "alerts", "failed"].includes(savedActivity.filter) ? savedActivity.filter : "all";
   const [rows, setRows] = useState(null);
   const [loadErr, setLoadErr] = useState("");
   const [loading, setLoading] = useState(false);
-  const [filter, setFilter] = useState("all"); // all | sms | email | auto | alerts | failed
-  const [q, setQ] = useState("");
-  const [openId, setOpenId] = useState(null);
+  const [filter, setFilter] = useState(savedActivityFilter); // all | sms | email | auto | alerts | failed
+  const [q, setQ] = useState(() => String(savedActivity.search || ""));
+  const [openId, setOpenId] = useState(() => savedActivity.openId ?? null);
+  useEffect(() => {
+    patchWorkspaceState(workspaceScope, {
+      comms: { activity: { filter, search: q, openId: openId == null ? null : String(openId) } },
+    });
+  }, [workspaceScope, filter, q, openId]);
   const load = async () => {
     if (loading) return;
     setLoading(true);
@@ -27562,7 +27905,12 @@ function LogsScreen({ clients, showOwnerRows = false }) {
     }
     setLoading(false);
   };
-  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    load();
+    const refresh = () => load();
+    window.addEventListener("sps-manual-refresh", refresh);
+    return () => window.removeEventListener("sps-manual-refresh", refresh);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const nameOf = (cid) => {
     if (cid == null || cid === "") return "";
     const c = (clients || []).find(x => String(x.id) === String(cid));
@@ -27628,6 +27976,7 @@ function LogsScreen({ clients, showOwnerRows = false }) {
   let ck = null;
   list.forEach(r => { const k = dayKey(r.created_at); if (k !== ck) { groups.push({ key: k, label: dayLabel(r.created_at), rows: [] }); ck = k; } groups[groups.length - 1].rows.push(r); });
   const chColor = (r) => r.ok === false ? "#dc2626" : (r.channel === "email" ? "#2563eb" : "#7c3aed");
+  const selectedActivity = (rows || []).find((row) => String(row.id) === String(openId)) || null;
   const chip = (id, label) => (
     <button key={id} onClick={() => setFilter(id)} aria-pressed={filter === id} style={{ minHeight: 40, padding: "7px 13px", borderRadius: 100, border: `1.5px solid ${filter === id ? T.primary : T.border}`, background: filter === id ? hexA(T.primary, 0.08) : T.surface, color: filter === id ? T.primary : T.textMuted, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, whiteSpace: "nowrap" }}>{label}</button>
   );
@@ -27647,10 +27996,12 @@ function LogsScreen({ clients, showOwnerRows = false }) {
         <div key={g.key} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <CommsGroupHeader title={g.label} count={g.rows.length} T={T} />
           {g.rows.map(r => {
-            const open = openId === r.id;
+            const open = !logsVp.isPhone && String(openId) === String(r.id);
             return (
-              <div key={r.id} onClick={() => setOpenId(open ? null : r.id)} style={{ display: "flex", gap: 12, padding: "12px 14px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, boxShadow: "0 2px 8px rgba(0,0,0,0.035)", cursor: "pointer" }}>
-                <div style={{ width: 38, height: 38, borderRadius: 11, background: hexA(chColor(r), 0.12), color: chColor(r), display: "grid", placeItems: "center", flexShrink: 0 }}>
+              <div key={r.id} role="button" tabIndex={0} onClick={() => setOpenId(logsVp.isPhone ? r.id : (open ? null : r.id))}
+                onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setOpenId(logsVp.isPhone ? r.id : (open ? null : r.id)); } }}
+                style={{ display: "flex", gap: logsVp.isPhone ? 10 : 12, padding: logsVp.isPhone ? "11px 2px" : "12px 14px", background: T.surface, border: logsVp.isPhone ? "none" : `1px solid ${T.border}`, borderBottom: logsVp.isPhone ? `1px solid ${hexA(T.border, 0.7)}` : undefined, borderRadius: logsVp.isPhone ? 0 : 14, boxShadow: logsVp.isPhone ? "none" : "0 2px 8px rgba(0,0,0,0.035)", cursor: "pointer", outline: "none" }}>
+                <div style={{ width: 38, height: 38, borderRadius: logsVp.isPhone ? "50%" : 11, background: hexA(chColor(r), 0.12), color: chColor(r), display: "grid", placeItems: "center", flexShrink: 0 }}>
                   <Icon name={r.channel === "email" ? "mail" : "message"} size={16} />
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -27675,13 +28026,38 @@ function LogsScreen({ clients, showOwnerRows = false }) {
       {rows !== null && !loadErr && rows.length > 0 && (
         <div style={{ fontSize: 11.5, color: T.textMuted, textAlign: "center", padding: "4px 0 12px" }}>Showing the last {rows.length} sends.</div>
       )}
+      {logsVp.isPhone && selectedActivity && (
+        <CommsMobileDetailShell
+          title={titleOf(selectedActivity)}
+          subtitle={`${timeOnly(selectedActivity.created_at)} · ${subOf(selectedActivity)}`}
+          avatar={<div style={{ width: 34, height: 34, borderRadius: "50%", background: hexA(chColor(selectedActivity), 0.12), color: chColor(selectedActivity), display: "grid", placeItems: "center" }}><Icon name={selectedActivity.channel === "email" ? "mail" : "message"} size={15} /></div>}
+          backLabel="Activity"
+          onBack={() => setOpenId(null)}
+          kind="activity"
+          bodyStyle={{ padding: "18px max(16px, env(safe-area-inset-right)) 32px max(16px, env(safe-area-inset-left))", boxSizing: "border-box", background: T.surfaceAlt }}
+          T={T}
+        >
+          <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, padding: "16px 17px", boxShadow: "0 1px 3px rgba(0,0,0,0.04)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+              <span style={{ fontSize: 10, fontWeight: 820, letterSpacing: "0.06em", textTransform: "uppercase", color: chColor(selectedActivity), background: hexA(chColor(selectedActivity), 0.1), borderRadius: 100, padding: "4px 9px" }}>{selectedActivity.channel === "email" ? "Email" : "Text"}</span>
+              {selectedActivity.ok === false && <span style={{ fontSize: 10, fontWeight: 820, letterSpacing: "0.05em", color: "#dc2626", background: hexA("#dc2626", 0.1), borderRadius: 100, padding: "4px 9px" }}>Failed</span>}
+            </div>
+            <div style={{ fontSize: 15, color: T.text, lineHeight: 1.62, whiteSpace: "pre-wrap", wordBreak: "break-word", userSelect: "text", WebkitUserSelect: "text" }}>{selectedActivity.body || "(no content recorded)"}</div>
+          </div>
+          <div style={{ marginTop: 13, padding: "13px 15px", borderRadius: 14, background: T.surface, border: `1px solid ${T.border}`, color: T.textMuted, fontSize: 12.5, lineHeight: 1.55 }}>
+            {[selectedActivity.recipient && `To ${selectedActivity.recipient}`, selectedActivity.origin && `via ${selectedActivity.origin}`].filter(Boolean).join(" · ") || "Sent from SPS Way"}
+          </div>
+        </CommsMobileDetailShell>
+      )}
     </div>
   );
 }
 
-function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, currentUser, schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, setBranding, reminderLog, setReminderLog, leads, setLeads, onConvertLead, onLinkLead, openLeadId, onLeadOpened, vp = {} }) {
+function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, currentUser, schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, setBranding, reminderLog, setReminderLog, leads, setLeads, onConvertLead, onLinkLead, openLeadId, onLeadOpened, vp = {}, workspaceScope = "" }) {
   const { T } = useApp();
   const vpx = useViewport();   // desktop → left sidebar shell; phone → sleek top section nav
+  const savedCommsRef = useRef(null);
+  if (!savedCommsRef.current) savedCommsRef.current = readWorkspaceState(workspaceScope);
   const [commsDensity, setCommsDensityState] = useState(() => {
     try {
       const saved = localStorage.getItem("sps_comms_density_v1");
@@ -27725,12 +28101,21 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
   const firstId = SECTIONS[0] ? SECTIONS[0].id : "messages";
   const secKey = SECTIONS.map(s => s.id).join(",");
   const single = SECTIONS.length <= 1;
-  const [section, setSection] = useState(SECTIONS.some(s => s.id === initialSection) ? initialSection : firstId);
+  const rememberedSection = savedCommsRef.current.comms?.section;
+  const [section, setSection] = useState(
+    SECTIONS.some(s => s.id === initialSection)
+      ? initialSection
+      : SECTIONS.some(s => s.id === rememberedSection) ? rememberedSection : firstId
+  );
   useEffect(() => { if (SECTIONS.some(s => s.id === initialSection)) setSection(initialSection); }, [initialSection, initialSectionNonce]); // eslint-disable-line react-hooks/exhaustive-deps
   // If the permitted set changes and the current section is no longer allowed, snap to the first.
   useEffect(() => { if (!SECTIONS.some(s => s.id === section)) setSection(firstId); }, [secKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    patchWorkspaceState(workspaceScope, { comms: { section } });
+  }, [workspaceScope, section]);
   const mobileNavRef = useRef(null);
   const commsRootRef = useRef(null);
+  const commsSectionScrollRef = useRef({ ...(savedCommsRef.current.scroll?.commsSections || {}) });
   useEffect(() => {
     const nav = mobileNavRef.current;
     const active = nav && nav.querySelector(`[data-comms-section="${section}"]`);
@@ -27745,8 +28130,9 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
         catch (_) { nav.scrollLeft = target; }
       }
     }
-    // <main> is the app's real scroll container. Reset that element when changing Comms sections;
-    // window.scrollTo/scrollIntoView either do nothing here or can tuck the new heading under tabs.
+    // <main> is the app's real scroll container. Each Comms section remembers its own position so
+    // switching between Inbox, Leads, and Activity feels like returning to a workspace—not opening
+    // each tool from scratch. The account-scoped snapshot also survives native resume and reload.
     let scroller = commsRootRef.current && commsRootRef.current.parentElement;
     while (scroller) {
       let overflow = "";
@@ -27755,11 +28141,33 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
       scroller = scroller.parentElement;
     }
     if (!scroller) return undefined;
-    const reset = () => { scroller.scrollTop = 0; };
-    reset();
-    const frame = typeof requestAnimationFrame === "function" ? requestAnimationFrame(reset) : null;
-    return () => { if (frame != null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(frame); };
-  }, [section, initialSectionNonce]);
+    let saveTimer = null;
+    const restore = () => {
+      const remembered = Number(commsSectionScrollRef.current[section]);
+      scroller.scrollTop = Number.isFinite(remembered) && remembered >= 0 ? remembered : 0;
+    };
+    const frame = typeof requestAnimationFrame === "function" ? requestAnimationFrame(restore) : null;
+    const save = () => {
+      commsSectionScrollRef.current[section] = Math.max(0, Number(scroller.scrollTop) || 0);
+      patchWorkspaceState(workspaceScope, { scroll: { commsSections: { [section]: commsSectionScrollRef.current[section] } } });
+    };
+    const onScroll = () => {
+      if (saveTimer != null) window.clearTimeout(saveTimer);
+      saveTimer = window.setTimeout(save, 180);
+    };
+    const onVisibility = () => { if (document.hidden) save(); };
+    scroller.addEventListener("scroll", onScroll, { passive: true });
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", save);
+    return () => {
+      if (frame != null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(frame);
+      if (saveTimer != null) window.clearTimeout(saveTimer);
+      scroller.removeEventListener("scroll", onScroll);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", save);
+      save();
+    };
+  }, [section, initialSectionNonce, workspaceScope]);
   // Collapsible Comms sidebar — reclaim horizontal space on desktop (icon-only rail). Persisted.
   const [navCollapsed, setNavCollapsed] = useState(() => { try { return localStorage.getItem("sps_comms_nav_collapsed") === "1"; } catch { return false; } });
   const toggleNav = () => setNavCollapsed(c => { const n = !c; try { localStorage.setItem("sps_comms_nav_collapsed", n ? "1" : "0"); } catch (_) {} return n; });
@@ -27774,9 +28182,9 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
   const content = (
     <CommsDensityContext.Provider value={compactComms}>
     <>
-      {section === "messages" && CAN.messages && <div style={{ padding: `0 ${compactComms ? 12 : 16}px` }}><MessagesScreen clients={clients} currentUser={currentUser} T={T} /></div>}
-      {section === "reminders" && CAN.reminders && <div style={{ padding: `0 ${compactComms ? 12 : 16}px` }}><RemindersScreen schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} /></div>}
-      {section === "inbox" && CAN.inbox && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={onConvertLead} onLink={onLinkLead} openLeadId={openLeadId} onLeadOpened={onLeadOpened} vp={vp} />}
+      {section === "messages" && CAN.messages && <div style={{ padding: `0 ${compactComms ? 12 : 16}px` }}><MessagesScreen clients={clients} currentUser={currentUser} T={T} workspaceScope={workspaceScope} /></div>}
+      {section === "reminders" && CAN.reminders && <div style={{ padding: `0 ${compactComms ? 12 : 16}px` }}><RemindersScreen schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} workspaceScope={workspaceScope} /></div>}
+      {section === "inbox" && CAN.inbox && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={onConvertLead} onLink={onLinkLead} openLeadId={openLeadId} onLeadOpened={onLeadOpened} vp={vp} workspaceScope={workspaceScope} />}
       {section === "settings" && CAN.settings && <div style={{ padding: `0 ${compactComms ? 12 : 16}px`, display: "flex", flexDirection: "column", gap: compactComms ? 12 : 18, maxWidth: 920, margin: "0 auto" }}>
         <CommsPageHeader title="Communication settings" description="Sending identity, safety controls, reminders, automation, and message templates." icon="sliders" T={T} />
         <Card>
@@ -27809,9 +28217,9 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
         {(perms.isAdmin || perms.editNotifications) && <div><EmailSettings email={emailTpl} setEmail={setEmailTpl} branding={brandTpl} setBranding={setBrandTpl} /></div>}
         {(perms.isAdmin || perms.editSettings || perms.canInvoice) && <Card><CardHeader title="Staff Invite & Login Emails" /><InviteEmailSettings email={emailTpl} setEmail={setEmailTpl} branding={brandTpl} /></Card>}
       </div>}
-      {section === "broadcast" && CAN.broadcast && <BroadcastSection clients={clients} invoices={invoices} email={email} branding={branding} T={T} />}
-      {section === "email" && CAN.email && <div style={{ padding: `0 ${compactComms ? 12 : 16}px` }}><EmailInboxSection leads={leads} setLeads={setLeads} clients={clients} invoices={invoices} smsOnly={!isAdmin} /></div>}
-      {section === "log" && CAN.log && <div style={{ padding: `0 ${compactComms ? 12 : 16}px` }}><LogsScreen clients={clients} showOwnerRows={!!perms.isAdmin} /></div>}
+      {section === "broadcast" && CAN.broadcast && <BroadcastSection clients={clients} invoices={invoices} email={email} branding={branding} T={T} workspaceScope={workspaceScope} />}
+      {section === "email" && CAN.email && <div style={{ padding: `0 ${compactComms ? 12 : 16}px` }}><EmailInboxSection leads={leads} setLeads={setLeads} clients={clients} invoices={invoices} smsOnly={!isAdmin} workspaceScope={workspaceScope} /></div>}
+      {section === "log" && CAN.log && <div style={{ padding: `0 ${compactComms ? 12 : 16}px` }}><LogsScreen clients={clients} showOwnerRows={!!perms.isAdmin} workspaceScope={workspaceScope} /></div>}
     </>
     </CommsDensityContext.Provider>
   );
@@ -34305,34 +34713,63 @@ export default function App({ authEmail = "", onSignOut }) {
     return () => { alive = false; try { if (ch) supabase.removeChannel(ch); } catch (_) {} };
   }, []);
   const [branding, setBranding, lb] = useStoredState("sps_branding", DEFAULT_BRANDING);
-  // Persist the current page so a quick reopen lands me back where I was. On a hard
-  // close (cold start), always start on Home for a definitive fresh start.
+  // Persist the current page per signed-in account. A killed/recreated iOS WebView is a resume, not
+  // an instruction to discard the user's workspace and return to Home.
   const [page, setPage] = useState(() => {
-    if (APP_COLD_START) return "dashboard";
+    const remembered = initialWorkspaceRef.current.page;
+    if (remembered) return remembered;
     try { const p = localStorage.getItem("sps_page"); if (p) return p; } catch (_) {}
     return DEFAULT_BRANDING.staffDefaultPage || "dashboard";
   });
-  useEffect(() => { try { localStorage.setItem("sps_page", page); } catch (_) {} }, [page]);
+  useEffect(() => {
+    patchWorkspaceState(authUserId, { page });
+    // One-release compatibility for an existing install that has not created its account-scoped
+    // snapshot yet. The account-scoped value above is authoritative from this point forward.
+    try { localStorage.setItem("sps_page", page); } catch (_) {}
+  }, [authUserId, page]);
 
   // Remember the open client + tab so a resume/sync returns you to it, not the bare list.
-  useEffect(() => {
-    try {
-      if (selectedClient && selectedClient.id != null) { localStorage.setItem("sps_sel_client", String(selectedClient.id)); localStorage.setItem("sps_sel_tab", clientOpenTab || ""); }
-      else { localStorage.removeItem("sps_sel_client"); localStorage.removeItem("sps_sel_tab"); }
-    } catch (_) {}
-  }, [selectedClient, clientOpenTab]);
-  // On load, reopen the client you had open (once data is in) — keeps a resume/sync from dumping you on the list.
   const selRestored = useRef(false);
   useEffect(() => {
+    // Do not erase the remembered client during the initial null render while client data hydrates.
+    if (!selRestored.current && !selectedClient) return;
+    try {
+      if (selectedClient && selectedClient.id != null) {
+        patchWorkspaceState(authUserId, { client: { id: String(selectedClient.id), tab: clientOpenTab || "" } });
+      } else {
+        patchWorkspaceState(authUserId, { client: { id: null, tab: "" } });
+      }
+    } catch (_) {}
+  }, [authUserId, selectedClient, clientOpenTab]);
+  // On load, reopen the client you had open (once data is in) — keeps a resume/sync from dumping you on the list.
+  useEffect(() => {
     if (selRestored.current) return;
-    if (page !== "clients") { selRestored.current = true; return; }  // only the Clients detail restores
+    if (page !== "clients") return;                                  // wait until Clients is actually opened
     if (!Array.isArray(clients) || !clients.length) return;          // wait for data
     selRestored.current = true;
     try {
-      const id = localStorage.getItem("sps_sel_client");
-      if (id) { const c = clients.find(x => String(x.id) === String(id)); if (c) { setSelectedClient(c); const t = localStorage.getItem("sps_sel_tab"); if (t) setClientOpenTab(t); } }
+      const saved = readWorkspaceState(authUserId).client || {};
+      const legacyId = localStorage.getItem("sps_sel_client");
+      const id = saved.id || legacyId;
+      if (id) {
+        const c = clients.find(x => String(x.id) === String(id));
+        if (c) {
+          setSelectedClient(c);
+          const tab = saved.tab || localStorage.getItem("sps_sel_tab");
+          if (tab) setClientOpenTab(tab);
+        } else {
+          patchWorkspaceState(authUserId, { client: { id: null, tab: "" } });
+        }
+      }
     } catch (_) {}
-  }, [clients, page]);
+  }, [authUserId, clients, page]);
+  // Soft sync replaces records in the clients array without remounting the workspace. Keep the
+  // selected detail pointed at that latest record instead of leaving a stale pre-sync object open.
+  useEffect(() => {
+    if (!selectedClient?.id || !Array.isArray(clients) || !clients.length) return;
+    const latest = clients.find(client => String(client.id) === String(selectedClient.id));
+    if (latest && latest !== selectedClient) setSelectedClient(latest);
+  }, [clients, selectedClient]);
   const [invoiceFilter, setInvoiceFilter] = useState("All"); // deep-link from dashboard tiles
   const [settingsTab, setSettingsTab] = useState(null); // deep-link into a Customize sub-tab (e.g. the Test pill → Business)
   const [settingsSection, setSettingsSection] = useState(null); // deep-link further: open + scroll to a specific section (e.g. Budget → Cost Settings → "budgetCosts")
@@ -34412,6 +34849,39 @@ export default function App({ authEmail = "", onSignOut }) {
   const isDesktopWeb = vp.width >= (isMacApp ? 1024 : 1200) && isWebDesktopEnv;
   const [reminderLog, setReminderLog, lrem] = useStoredState("sps_reminders", {}); // { [sid]: { sentAt, method } }
   const hydrated = lc && lb && ls && lcat && lem && lco && lh && lbud && loa && lld && lscfg && lrol && ltm && lsesh && linv && linvc && lcomp && lrem && larr;
+
+  // Restore each top-level workspace exactly where it was scrolled. Cleanup records the outgoing
+  // page before React swaps its contents; the next effect restores the incoming page after paint.
+  useEffect(() => {
+    if (!hydrated) return undefined;
+    // Comms owns this same <main> scroller at a finer per-section granularity. Giving it two
+    // independent restore effects caused Inbox/Leads/Activity to fight and occasionally jump home.
+    if (["comms", "reminders", "messages", "leads"].includes(page)) return undefined;
+    const scroller = appMainRef.current;
+    if (!scroller) return undefined;
+    const saved = Number(readWorkspaceState(authUserId).scroll?.[page]);
+    const frame = requestAnimationFrame(() => {
+      scroller.scrollTop = Number.isFinite(saved) && saved > 0 ? saved : 0;
+    });
+    let timer = null;
+    const persist = () => patchWorkspaceState(authUserId, { scroll: { [page]: Math.max(0, Math.round(scroller.scrollTop || 0)) } });
+    const onScroll = () => {
+      clearTimeout(timer);
+      timer = setTimeout(persist, 140);
+    };
+    const onVisibility = () => { if (document.hidden) persist(); };
+    scroller.addEventListener("scroll", onScroll, { passive: true });
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", persist);
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(timer);
+      scroller.removeEventListener("scroll", onScroll);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", persist);
+      persist();
+    };
+  }, [authUserId, hydrated, page]);
 
   // Backfill newer catalog/cost fields for anyone with older saved data
   useEffect(() => {
@@ -35343,10 +35813,8 @@ export default function App({ authEmail = "", onSignOut }) {
     registerWidgetPush(pushClient);
     pushClient();
   }, [hydrated, currentUser, clientUser, schedule, invoices, completedSids, team, branding.appFont, widgetLogo]);
-  // Smart reopen on a warm resume (the app wasn't killed):
-  //  • backgrounded ~30 min or more  → land on Home with the full splash (fresh start)
-  //  • backgrounded under ~30 min     → stay exactly where I left off (no disruption)
-  // (A hard close is a fresh document load and is handled by APP_COLD_START instead.)
+  // A long background stay should refresh shared data, not destroy the current workspace. The
+  // soft-refresh ref is assigned below after the sync indicator is initialized.
   useEffect(() => {
     const IDLE_MS = 30 * 60 * 1000; // ~30 minutes
     let lastActive = Date.now();
@@ -35357,10 +35825,8 @@ export default function App({ authEmail = "", onSignOut }) {
     const onVis = () => {
       if (document.hidden) { markActive(); return; }
       if (Date.now() - lastActive < IDLE_MS) return; // quick return → leave everything as-is
-      // Long idle → refresh data but RETURN TO WHERE YOU WERE: keep the page + open client, and show
-      // the sync strip instead of a full splash. (Was: wipe the page and reset to Home.)
-      try { sessionStorage.setItem("sps_resyncing", "1"); } catch (_) {}
-      reloadAfterDrain();
+      markActive();
+      if (softRefreshRef.current) softRefreshRef.current();
     };
     markActive();
     document.addEventListener("visibilitychange", onVis);
@@ -35467,6 +35933,7 @@ export default function App({ authEmail = "", onSignOut }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [syncState, setSyncState] = useState("idle");
   const syncTimer = useRef(null);
+  const syncInFlight = useRef(null);
   // The boot splash (index.html: crimson + logo + company name + tagline + a personal
   // welcome) is the ONE and only load screen. There's no separate React splash — we
   // personalize it (below) and keep it up until the app is ready, then remove it, so
@@ -35496,12 +35963,30 @@ export default function App({ authEmail = "", onSignOut }) {
     setTimeout(() => setSyncState("idle"), 2400);
   };
 
-  const manualSync = () => {
-    triggerSync();
-    // Flag so the sync strip reappears after the reload instead of a splash.
-    try { sessionStorage.setItem("sps_resyncing", "1"); } catch (_) {}
-    setTimeout(() => reloadAfterDrain(), 300);
+  const refreshWorkspaceInPlace = () => {
+    if (syncInFlight.current) return syncInFlight.current;
+    clearTimeout(syncTimer.current);
+    setSyncState("syncing");
+    syncInFlight.current = (async () => {
+      await store.flush();
+      if (typeof store.refreshChanged === "function") {
+        await store.refreshChanged(APP_REFRESH_KEYS, { reconcileUnchanged: true });
+      } else if (typeof store.refresh === "function") {
+        await Promise.all(APP_REFRESH_KEYS.map(key => store.refresh(key)));
+      }
+      try { window.dispatchEvent(new CustomEvent("sps-manual-refresh")); } catch (_) {}
+      setSyncState("saved");
+      syncTimer.current = setTimeout(() => setSyncState("idle"), 2000);
+      return { ok: true };
+    })().catch((error) => {
+      setSyncState("idle");
+      setDbError((error && error.message) || "Sync could not finish. Your screen and pending work were kept in place.");
+      return { ok: false, error };
+    }).finally(() => { syncInFlight.current = null; });
+    return syncInFlight.current;
   };
+  softRefreshRef.current = refreshWorkspaceInPlace;
+  const manualSync = () => { refreshWorkspaceInPlace(); };
 
   // Register global sync hooks so useStoredState can drive the indicator HONESTLY:
   //  • start   → "syncing" when a write begins
@@ -35560,19 +36045,10 @@ export default function App({ authEmail = "", onSignOut }) {
     return () => clearTimeout(t);
   }, [bootReady]);
 
-  // After a manual sync (which reloads), show the subtle sync strip rather than a splash.
+  // The storage layer already hydrates current server data on a genuine launch. Show the normal
+  // confirmation pulse without changing routes or discarding a remembered destination.
   useEffect(() => {
     if (!hydrated) return;
-    let flag = null;
-    try { flag = sessionStorage.getItem("sps_resyncing"); } catch (_) {}
-    if (flag) { try { sessionStorage.removeItem("sps_resyncing"); } catch (_) {} triggerSync(); }
-  }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Hard close / fresh launch → full resync. On a cold start every stored slice is
-  // already reloaded fresh from the store and the QB auto-sync runs (below); surface
-  // the sync indicator so it reads as a definitive fresh start.
-  useEffect(() => {
-    if (!APP_COLD_START || !hydrated) return;
     triggerSync();
   }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -35711,13 +36187,20 @@ export default function App({ authEmail = "", onSignOut }) {
       try {
         const authResult = await onSignOut();
         if (authResult?.error) throw authResult.error;
+        clearWorkspaceState(authUserId);
+        try {
+          localStorage.removeItem("sps_page");
+          localStorage.removeItem("sps_sel_client");
+          localStorage.removeItem("sps_sel_tab");
+        } catch (_) {}
       } catch (error) {
         try { sessionStorage.removeItem(SIGNOUT_CLEANUP_MARKER); } catch (_) {}
         setSignOutError(error?.message || "Native data was cleared, but the account could not sign out. Check your connection and retry.");
       }
     }
   };
-  const resetAppMainScroll = () => {
+  const resetAppMainScroll = (targetPage = page) => {
+    patchWorkspaceState(authUserId, { scroll: { [targetPage]: 0 } });
     requestAnimationFrame(() => {
       if (appMainRef.current) appMainRef.current.scrollTop = 0;
     });
@@ -35737,7 +36220,7 @@ export default function App({ authEmail = "", onSignOut }) {
     });
   }, [ltm, emailKey, currentUser, anyEmail]);
 
-  const handleClientSelect = (c, tab) => { setSelectedClient(c); setClientOpenTab(tab || null); setAdding(false); setPage("clients"); resetAppMainScroll(); };
+  const handleClientSelect = (c, tab) => { setSelectedClient(c); setClientOpenTab(tab || null); setAdding(false); setPage("clients"); resetAppMainScroll("clients"); };
   // Tap a Home alert → open that client's record at their service history (where the flagged visit's report + photos live).
   const handleOpenAlert = (a) => { const c = (clients || []).find(x => String(x.id) === String(a && a.clientId)); if (c) handleClientSelect(c, "history"); };
   // Tap a Home "Today's Route" stop → jump to Schedule and open that stop to edit.
@@ -35786,7 +36269,7 @@ export default function App({ authEmail = "", onSignOut }) {
         if (remoteId !== localId) {
           // New build detected — update ID and reload once
           sessionStorage.setItem("sps_build_id", remoteId);
-          window.location.reload();
+          reloadAfterDrain();
         }
       } catch (e) {
         // Network error — silently ignore
@@ -36301,13 +36784,13 @@ export default function App({ authEmail = "", onSignOut }) {
     setSettingsSection(opts.settingsSection || null);
     setCommsSection(opts.commsSection || null);
     if (opts.commsSection) setCommsSectionNonce(n => n + 1);
-    resetAppMainScroll();
+    resetAppMainScroll(id);
   };
 
   // Bottom-bar / sidebar / menu navigation. Switching to a DIFFERENT section keeps that
   // section where you left it (e.g. the client you had open) for the rest of the session.
   // Tapping the section you're ALREADY on resets it to its root (back to the client list).
-  // Everything resets naturally on app close / resync (state isn't persisted past that).
+  // The account-scoped workspace snapshot carries that location across app resumes and soft syncs.
   const handleTabNav = (id) => {
     if (id === page) {
       // Re-tap the active tab → back to the section's root view.
@@ -36319,14 +36802,13 @@ export default function App({ authEmail = "", onSignOut }) {
       // Schedule keeps its day/tech in a module cache; clear it and remount so a re-tap
       // returns to today's overview (matches how re-tapping Clients returns to the list).
       if (id === "schedule") { SCHED_VIEW = { date: null, tech: null }; setSchedNonce(n => n + 1); }
-      resetAppMainScroll();
+      resetAppMainScroll(id);
       return;
     }
     // Switching sections → just change page; leave sub-state (open client, Schedule day/tech) intact.
     setPage(id);
     setSettingsTab(null); // clear any Customize deep-link so a normal Customize tap opens its default tab
     setCommsSection(null); // normal Comms navigation should not retain a one-time deep link
-    resetAppMainScroll();
   };
 
   // Consume in-app deep links (spsway://alerts / schedule / invoices). Owner-email "Open
@@ -37196,7 +37678,7 @@ export default function App({ authEmail = "", onSignOut }) {
           </div>
           <div style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: vp.isTablet ? "20px 16px" : "24px 30px" }}>
             {selectedClient
-              ? <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} initialTab={clientOpenTab} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>
+              ? <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} initialTab={clientOpenTab} onTabChange={setClientOpenTab} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>
               : (
                 <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: T.textMuted, gap: 12, padding: 40, textAlign: "center" }}>
                   <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.06), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="clients" size={30} /></div>
@@ -37210,7 +37692,7 @@ export default function App({ authEmail = "", onSignOut }) {
       ) : (
         <>
           {!selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => { setConvertLead(null); setAdding(true); }} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
-          {selectedClient && <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>}
+          {selectedClient && <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} initialTab={clientOpenTab} onTabChange={setClientOpenTab} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>}
         </>
       ))}
       {page === "schedule" && <SectionErrorBoundary key={"schedule-" + schedNonce}><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} onValidateArrival={validateArrivalStop} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
@@ -37219,7 +37701,7 @@ export default function App({ authEmail = "", onSignOut }) {
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} isAdmin={perms.isAdmin} />}
       {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} setCatalog={setCatalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
       {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
-      {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : commsSection || undefined} initialSectionNonce={commsSectionNonce} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} setBranding={setBranding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} onLinkLead={handleLinkLead} openLeadId={openLeadId} onLeadOpened={() => setOpenLeadId(null)} vp={vp} />}
+      {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : commsSection || undefined} initialSectionNonce={commsSectionNonce} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} setBranding={setBranding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} onLinkLead={handleLinkLead} openLeadId={openLeadId} onLeadOpened={() => setOpenLeadId(null)} vp={vp} workspaceScope={authUserId} />}
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
       {page === "duplicates" && perms.canImport && <DuplicatesScreen clients={clients} invoices={invoices} schedule={schedule} onMerge={handleMergeClients} onGoToClients={() => handleNav("clients")} />}

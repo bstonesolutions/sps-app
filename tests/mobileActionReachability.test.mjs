@@ -36,7 +36,7 @@ test("navigation resets the real app scrollers instead of the locked window", as
   const app = await loadApp();
 
   assert.match(app, /const appMainRef = useRef\(null\)/);
-  assert.match(app, /const resetAppMainScroll = \(\) => \{[\s\S]*?appMainRef\.current\.scrollTop = 0/);
+  assert.match(app, /const resetAppMainScroll = \(targetPage = page\) => \{[\s\S]*?scroll: \{ \[targetPage\]: 0 \}[\s\S]*?appMainRef\.current\.scrollTop = 0/);
   assert.ok((app.match(/ref=\{appMainRef\}/g) || []).length >= 2, "desktop and mobile staff mains should share the reset ref");
   assert.ok((app.match(/ref=\{portalMainRef\}/g) || []).length >= 2, "desktop and mobile portal mains should share the reset ref");
   assert.doesNotMatch(app, /window\.scrollTo\(\{ top: 0/);

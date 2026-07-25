@@ -360,7 +360,7 @@ function Root() {
   if (needsPassword) return <SetPassword email={session.user.email} recovery={AUTH_FLAGS.recovery} onDone={() => setPwdDone(true)} />;
   // Remount every stored-state hook when the authenticated identity changes. The storage cache is
   // UID-scoped; the React tree must be too so account B never retains account A's in-memory values.
-  return <App key={session.user.id} authEmail={session.user.email} onSignOut={() => supabase.auth.signOut()} />;
+  return <App key={session.user.id} authUserId={session.user.id} authEmail={session.user.email} onSignOut={() => supabase.auth.signOut()} />;
 }
 
 // Public live-tracking page — ?track=<token> opens the tech's live map with no login,

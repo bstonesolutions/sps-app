@@ -21,7 +21,8 @@ test("texts render as chronological conversations with a ready reply composer", 
   assert.match(inbox, /function|const SmsConversationBody/);
   assert.match(inbox, /messages\.map\(\(message, index\)/);
   assert.match(inbox, /alignSelf: outgoing \? "flex-end" : "flex-start"/);
-  assert.match(inbox, /setReplying\(isSmsRow\(r\) && canTextFromRow\(r\)\)/);
+  assert.match(inbox, /const openReplyWorkspaceKey = workspaceKeyForInboxRow\(openRow\)/);
+  assert.match(inbox, /setReplying\(!!smsCanReply \|\| \(!!savedDraft\.replying && openRow\?\.channel !== "sms"\)\)/);
   assert.match(inbox, /openRow\.channel !== "sms" && <Btn variant="outline" sm onClick=\{toggleReply\}/);
   assert.match(inbox, /<textarea[\s\S]*?value=\{replyText\}[\s\S]*?maxLength=\{1600\}/);
   assert.match(inbox, /sendSms\(phone, replyText\.trim\(\), \{ clientId, preserveRecipient: true,[\s\S]*?inboxId: replyAnchor\.id/);
