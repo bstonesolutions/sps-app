@@ -25349,9 +25349,9 @@ function InboxPinnedConversation({ label, unread = 0, onOpen, onPreview, T, chil
       onPointerDown={begin} onPointerMove={move} onPointerUp={end} onPointerCancel={end}
       onContextMenu={(event) => { event.preventDefault(); suppressRef.current = Date.now() + 500; onPreview(); }}
       onClick={(event) => { if (Date.now() < suppressRef.current) { event.preventDefault(); return; } onOpen(); }}
-      style={{ width: 74, minHeight: 83, padding: "5px 3px 4px", border: "none", background: "transparent", color: T.text, display: "flex", flexDirection: "column", alignItems: "center", gap: 5, fontFamily: "inherit", cursor: "pointer", flexShrink: 0, WebkitTouchCallout: "none", WebkitTapHighlightColor: "transparent" }}>
+      style={{ width: "clamp(88px, 25vw, 104px)", minHeight: 91, padding: "5px 4px 6px", border: "none", background: "transparent", color: T.text, display: "flex", flexDirection: "column", alignItems: "center", gap: 6, fontFamily: "inherit", cursor: "pointer", flexShrink: 0, WebkitTouchCallout: "none", WebkitTapHighlightColor: "transparent" }}>
       {children}
-      <span style={{ width: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10.5, lineHeight: 1.2, fontWeight: 650, textAlign: "center" }}>{label}</span>
+      <span style={{ width: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, lineHeight: 1.2, fontWeight: 620, textAlign: "center" }}>{label}</span>
     </button>
   );
 }
@@ -25428,6 +25428,11 @@ function InboxPressPreview({ title, subtitle, pinned = false, canPin = false, re
 function MobileSmsThread({ title, subtitle, avatar, lineLabel, categoryLabel, categoryTone, callHref, onBack, onOrganize, children, composer, status, T }) {
   const threadRef = useRef(null);
   const keyboardInset = useKeyboardInset();
+  const titleDigits = String(title || "").replace(/\D/g, "");
+  const subtitleDigits = String(subtitle || "").replace(/\D/g, "");
+  const distinctSubtitle = subtitle && subtitle !== title && (!titleDigits || !subtitleDigits || titleDigits !== subtitleDigits) ? subtitle : "";
+  const visibleCategory = categoryLabel && String(categoryLabel).toLowerCase() !== "other" ? categoryLabel : "";
+  const contactMeta = [visibleCategory, lineLabel, distinctSubtitle].filter(Boolean).join(" · ");
   useBackgroundScrollLock(threadRef);
   useEffect(() => {
     const onKey = (event) => { if (event.key === "Escape") onBack(); };
@@ -25437,37 +25442,30 @@ function MobileSmsThread({ title, subtitle, avatar, lineLabel, categoryLabel, ca
   return createPortal(
     <section role="dialog" aria-modal="true" aria-label={`Conversation with ${title}`} data-sps-mobile-sms-thread
       style={{ position: "fixed", inset: 0, zIndex: 220, display: "flex", flexDirection: "column", minHeight: 0, background: T.surface, color: T.text, overflow: "hidden", overscrollBehavior: "none" }}>
-      <header style={{ flexShrink: 0, paddingTop: "env(safe-area-inset-top)", background: hexA(T.surface, 0.975), borderBottom: `1px solid ${hexA(T.border, 0.8)}`, backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)" }}>
-        <div style={{ minHeight: 64, padding: "5px max(8px, env(safe-area-inset-right)) 5px max(8px, env(safe-area-inset-left))", boxSizing: "border-box", display: "grid", gridTemplateColumns: "minmax(78px, 1fr) minmax(0, 1.35fr) minmax(78px, 1fr)", alignItems: "center", gap: 4 }}>
+      <header data-sps-thread-header style={{ flexShrink: 0, paddingTop: "env(safe-area-inset-top)", background: hexA(T.surface, 0.965), borderBottom: `1px solid ${hexA(T.border, 0.38)}`, backdropFilter: "saturate(180%) blur(24px)", WebkitBackdropFilter: "saturate(180%) blur(24px)" }}>
+        <div style={{ minHeight: 76, padding: "4px max(8px, env(safe-area-inset-right)) 5px max(8px, env(safe-area-inset-left))", boxSizing: "border-box", display: "grid", gridTemplateColumns: "minmax(82px, 1fr) minmax(0, 1.2fr) minmax(82px, 1fr)", alignItems: "center", gap: 3 }}>
           <button type="button" onClick={onBack} aria-label="Back to messages"
-            style={{ minHeight: 44, justifySelf: "start", padding: "0 5px 0 0", border: "none", background: "transparent", color: T.primary, display: "inline-flex", alignItems: "center", gap: 2, fontFamily: "inherit", fontSize: 14.5, fontWeight: 680, cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
-            <Icon name="back" size={21} /><span>Messages</span>
+            style={{ minHeight: 44, justifySelf: "start", padding: "0 5px 0 0", border: "none", background: "transparent", color: T.primary, display: "inline-flex", alignItems: "center", gap: 1, fontFamily: "inherit", fontSize: 14.5, fontWeight: 660, cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
+            <Icon name="back" size={22} /><span>Messages</span>
           </button>
           <button type="button" onClick={onOrganize} aria-label={`Open details for ${title}`}
-            style={{ minWidth: 0, minHeight: 54, padding: "2px 3px", border: "none", background: "transparent", color: T.text, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 1, fontFamily: "inherit", cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
+            style={{ minWidth: 0, minHeight: 68, padding: "2px 3px", border: "none", background: "transparent", color: T.text, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 1, fontFamily: "inherit", cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
             {avatar}
-            <span style={{ maxWidth: "100%", display: "flex", alignItems: "center", gap: 2, fontSize: 11.5, lineHeight: 1.15, fontWeight: 760, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}<Icon name="chevronR" size={10} /></span>
+            <span style={{ maxWidth: "100%", display: "flex", alignItems: "center", gap: 2, fontSize: 12, lineHeight: 1.12, fontWeight: 740, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}<Icon name="chevronR" size={9} /></span>
+            {contactMeta && <span style={{ maxWidth: "125%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: categoryTone || T.textMuted, fontSize: 9, lineHeight: 1.15, fontWeight: 680 }}>{contactMeta}</span>}
           </button>
-          <div style={{ justifySelf: "end", display: "flex", alignItems: "center", gap: 2 }}>
+          <div style={{ justifySelf: "end", display: "flex", alignItems: "center", gap: 5 }}>
             {callHref && <a href={callHref} aria-label={`Call ${title}`} title={`Call ${title}`}
-              style={{ width: 42, height: 42, borderRadius: 21, color: T.primary, textDecoration: "none", display: "grid", placeItems: "center" }}><Icon name="phone" size={19} /></a>}
+              style={{ width: 38, height: 38, borderRadius: 19, background: T.surfaceAlt, color: T.primary, textDecoration: "none", display: "grid", placeItems: "center" }}><Icon name="phone" size={17} /></a>}
             <button type="button" onClick={onOrganize} aria-label="Organize conversation" title="Organize conversation"
-              style={{ width: 42, height: 42, borderRadius: 21, border: "none", background: "transparent", color: T.primary, display: "grid", placeItems: "center", cursor: "pointer" }}><Icon name="sliders" size={19} /></button>
+              style={{ width: 38, height: 38, borderRadius: 19, border: "none", background: T.surfaceAlt, color: T.primary, display: "grid", placeItems: "center", cursor: "pointer" }}><Icon name="info" size={17} /></button>
           </div>
         </div>
-        <button type="button" onClick={onOrganize} aria-label={`Organize as ${categoryLabel}`}
-          style={{ width: "100%", minHeight: 32, padding: "4px max(14px, env(safe-area-inset-right)) 6px max(14px, env(safe-area-inset-left))", border: "none", borderTop: `1px solid ${hexA(T.border, 0.45)}`, background: "transparent", color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, fontFamily: "inherit", cursor: "pointer" }}>
-          <span style={{ maxWidth: "44%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10.5, fontWeight: 650 }}>{subtitle}</span>
-          <span aria-hidden="true" style={{ color: T.border }}>·</span>
-          <span style={{ fontSize: 10, fontWeight: 820, color: categoryTone || T.textMuted, background: hexA(categoryTone || T.textMuted, 0.1), borderRadius: 100, padding: "2px 7px", textTransform: "uppercase", letterSpacing: "0.045em" }}>{categoryLabel}</span>
-          <span aria-hidden="true" style={{ color: T.border }}>·</span>
-          <span style={{ fontSize: 10.5, fontWeight: 650 }}>{lineLabel}</span>
-        </button>
       </header>
-      <div ref={threadRef} style={{ flex: "1 1 auto", minHeight: 0, overflow: "hidden", background: T.surfaceAlt }}>
+      <div ref={threadRef} style={{ flex: "1 1 auto", minHeight: 0, overflow: "hidden", background: T.surface }}>
         {children}
       </div>
-      <footer style={{ flexShrink: 0, padding: `7px max(10px, env(safe-area-inset-right)) ${keyboardInset > 0 ? `${keyboardInset + 7}px` : "max(9px, env(safe-area-inset-bottom))"} max(10px, env(safe-area-inset-left))`, borderTop: `1px solid ${hexA(T.border, 0.8)}`, background: hexA(T.surface, 0.985), boxShadow: "0 -5px 18px rgba(0,0,0,0.045)", transition: "padding-bottom 0.18s ease" }}>
+      <footer data-sps-thread-composer style={{ flexShrink: 0, padding: `6px max(10px, env(safe-area-inset-right)) ${keyboardInset > 0 ? `${keyboardInset + 6}px` : "max(8px, env(safe-area-inset-bottom))"} max(10px, env(safe-area-inset-left))`, borderTop: `1px solid ${hexA(T.border, 0.36)}`, background: hexA(T.surface, 0.965), backdropFilter: "saturate(180%) blur(22px)", WebkitBackdropFilter: "saturate(180%) blur(22px)", transition: "padding-bottom 0.18s ease" }}>
         {status}
         {composer}
       </footer>
@@ -25535,7 +25533,11 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   const [replyHtml, setReplyHtml] = useState("");
   const [replyBusy, setReplyBusy] = useState(false);
   const [replyMsg, setReplyMsg] = useState("");
+  const replyComposerRef = useRef(null);
   const replySucceeded = /^(Sent|Text accepted)/.test(replyMsg);
+  useEffect(() => {
+    if (!replyText && replyComposerRef.current) replyComposerRef.current.style.height = "32px";
+  }, [replyText]);
   const toggleReply = () => { setReplying(v => !v); setReplyMsg(""); };
   const flagReplied = (rowOrId) => {
     const target = rowOrId && typeof rowOrId === "object" ? rowOrId : { id: rowOrId };
@@ -25571,6 +25573,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
             id: localId, channel: "sms", from_phone: phone, body_text: sentBody,
             created_at: new Date().toISOString(), read: true, replied: true, kind: row.kind || "other",
             sms_direction: "outgoing", sms_line: sent.line || lineRoleForRow(row), sms_peer_phone: phone,
+            sms_status: sent.status || "sent",
             quo_conversation_id: row.quo_conversation_id || "", ai: { ...(row.ai || {}), quoLine: sent.line || lineRoleForRow(row), clientId },
           };
           setRows(current => (current || []).some(item => String(item.id) === String(localId)) ? current : [localRow, ...(current || [])]);
@@ -25591,7 +25594,9 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
               _messageCount: Number(current._messageCount || messages.length) + 1,
             };
           });
-          setReplyMsg(`Text accepted from ${sent.line === "main" ? "your number" : "the staff number"}.`);
+          // The accepted message is already visible as the newest outgoing bubble; keep success out
+          // of the fixed composer and reserve that space for held, redirected, or failed deliveries.
+          setReplyMsg("");
           // Keep the composer open like a real text thread so another message does not require
           // reopening a one-off "Text back" action after every send.
           setReplyText(""); setReplyHtml(""); setReplying(true); flagReplied(row);
@@ -26618,7 +26623,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     });
     return (
       <div ref={threadRef} aria-label={`Conversation with ${senderLabel(row)}`} data-sps-sms-thread-history
-        style={{ height: fullScreen ? "100%" : "auto", maxHeight: fullScreen ? "none" : maxHeight, boxSizing: "border-box", overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", border: fullScreen ? "none" : `1px solid ${T.border}`, borderRadius: fullScreen ? 0 : 14, padding: fullScreen ? "15px 12px 18px" : "14px 12px", scrollPaddingBottom: fullScreen ? 22 : 0, background: T.surfaceAlt, display: "flex", flexDirection: "column", gap: fullScreen ? 0 : 10 }}>
+        style={{ height: fullScreen ? "100%" : "auto", maxHeight: fullScreen ? "none" : maxHeight, boxSizing: "border-box", overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", border: fullScreen ? "none" : `1px solid ${T.border}`, borderRadius: fullScreen ? 0 : 14, padding: fullScreen ? "12px 11px 20px" : "14px 12px", scrollPaddingBottom: fullScreen ? 22 : 0, background: fullScreen ? T.surface : T.surfaceAlt, display: "flex", flexDirection: "column", gap: fullScreen ? 0 : 10 }}>
         {messages.map((message, index) => {
           const outgoing = directionOf(message) === "outgoing";
           const previous = messages[index - 1];
@@ -26646,8 +26651,9 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
           return (
             <Fragment key={message.id || index}>
               {showTimestamp && <div style={{ alignSelf: "center", maxWidth: "90%", margin: index === 0 ? "0 0 8px" : "15px 0 8px", color: T.textMuted, fontSize: 10.5, fontWeight: 640, textAlign: "center" }}>{fmtWhen(message.created_at)}</div>}
-              <div style={{ alignSelf: outgoing ? "flex-end" : "flex-start", maxWidth: fullScreen ? "80%" : "84%", marginTop: fullScreen && !showTimestamp ? (previousSame ? 3 : 9) : 0, display: "flex", flexDirection: "column", alignItems: outgoing ? "flex-end" : "flex-start", gap: 4 }}>
-                <div style={{ borderRadius: bubbleRadius, padding: visibleBody ? (fullScreen ? "10px 13px" : "9px 12px") : 0, background: outgoing ? T.primary : T.surface, color: outgoing ? "#fff" : T.text, boxShadow: outgoing ? "none" : "0 1px 2px rgba(0,0,0,0.08)", fontSize: fullScreen ? 15 : 13.5, lineHeight: 1.42, whiteSpace: "pre-wrap", wordBreak: "break-word", overflow: "hidden" }}>
+              <div style={{ alignSelf: outgoing ? "flex-end" : "flex-start", maxWidth: fullScreen ? "79%" : "84%", marginTop: fullScreen && !showTimestamp ? (previousSame ? 3 : 8) : 0, display: "flex", flexDirection: "column", alignItems: outgoing ? "flex-end" : "flex-start", gap: 4 }}>
+                <div data-sps-message-bubble data-direction={outgoing ? "outgoing" : "incoming"}
+                  style={{ borderRadius: bubbleRadius, padding: visibleBody ? (fullScreen ? "9px 13px" : "9px 12px") : 0, background: outgoing ? T.primary : (fullScreen ? T.surfaceAlt : T.surface), color: outgoing ? "#fff" : T.text, boxShadow: "none", fontSize: fullScreen ? 15.5 : 13.5, lineHeight: 1.4, whiteSpace: "pre-wrap", wordBreak: "break-word", overflow: "hidden" }}>
                   {visibleBody ? linkify(visibleBody) : null}
                   {media.map((item, mediaIndex) => {
                     const src = smsMediaSource(item);
@@ -26775,7 +26781,10 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     const messagePreview = sms
       ? String(r.subject || r.body_text || "Text message").replace(/^You:\s*/i, "You: ").trim()
       : [String(r.subject || "(no subject)").trim(), emailSummary].filter(Boolean).join(" — ");
-    const channelLabel = sms ? `Text · ${lineRoleForRow(r) === "main" ? (ownerView ? "My number" : "Owner number") : "Staff number"}` : `Email${kind.label && kind.label !== "Other" ? ` · ${kind.label}` : ""}`;
+    const channelTone = sms ? "#7c3aed" : "#2563eb";
+    const channelLabel = sms
+      ? (lineRoleForRow(r) === "main" ? (ownerView ? "My line" : "Owner line") : "Staff line")
+      : (kind.label && kind.label !== "Other" ? kind.label : "Email");
     const dividerLeft = dense ? 69 : 77;
     return (
       <InboxSwipeRow key={r.id} rowId={r.id} ariaLabel={`${r.read ? "" : "Unread "}${sms ? "text" : "email"} from ${senderLabel(r)}: ${r.subject || (sms ? "Message" : "No subject")}`} revealed={openSwipeId === r.id} disabled={selMode} selected={selected} read={!!r.read} isText={sms} T={T}
@@ -26785,8 +26794,8 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
         onToggleRead={() => { markRead(inboxRowMessageIds(r), !r.read); }}
         onMore={smsOnly ? undefined : () => setManageRow(r)}
         onDelete={smsOnly ? undefined : () => { deleteEmails(inboxRowMessageIds(r), { ask: false }); }}>
-        <div style={{ position: "relative", display: "flex", alignItems: "center", gap: dense ? 10 : 12, minHeight: dense ? 66 : 74, boxSizing: "border-box", padding: dense ? "8px 10px 8px 15px" : "10px 11px 10px 17px", background: selected ? hexA(T.primary, 0.07) : T.surface }}>
-          {i > 0 && <span aria-hidden="true" style={{ position: "absolute", left: dividerLeft, right: 0, top: 0, height: 1, background: phone ? T.border : hexA(T.border, 0.7) }} />}
+        <div data-sps-conversation-row data-channel={sms ? "sms" : "email"} style={{ position: "relative", display: "flex", alignItems: "center", gap: dense ? 10 : 12, minHeight: dense ? 66 : 74, boxSizing: "border-box", padding: dense ? "8px 10px 8px 15px" : "10px 11px 10px 17px", background: selected ? hexA(T.primary, 0.07) : T.surface }}>
+          {i > 0 && <span aria-hidden="true" style={{ position: "absolute", left: dividerLeft, right: 0, top: 0, height: 1, background: hexA(T.border, phone ? 0.5 : 0.7) }} />}
           {!r.read && !selMode && <span aria-label="Unread" style={{ position: "absolute", left: 6, top: "50%", width: 6, height: 6, marginTop: -3, borderRadius: "50%", background: T.primary }} />}
           {selMode ? (
             <span aria-hidden="true" style={{ width: dense ? 42 : 46, height: dense ? 42 : 46, borderRadius: "50%", border: `2px solid ${selected ? T.primary : T.border}`, background: selected ? T.primary : T.surface, color: "#fff", display: "grid", placeItems: "center", flexShrink: 0 }}>
@@ -26796,14 +26805,15 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
               <span style={{ flex: 1, minWidth: 0, fontSize: dense ? 14.5 : 15.5, fontWeight: r.read ? 600 : 820, color: T.text, letterSpacing: "-0.015em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{senderLabel(r)}</span>
+              <span aria-label={sms ? "Text conversation" : "Email conversation"} title={sms ? "Text" : "Email"} style={{ display: "inline-flex", color: hexA(channelTone, 0.88), flexShrink: 0 }}><Icon name={sms ? "message" : "mail"} size={11} /></span>
               {r.replied && <span title="Replied" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="reply" size={12} /></span>}
               <span style={{ fontSize: dense ? 10.5 : 11.5, color: r.read ? T.textMuted : T.primary, fontWeight: r.read ? 560 : 720, flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{fmtMailboxWhen(r.created_at)}</span>
               <span aria-hidden="true" style={{ display: "inline-flex", color: hexA(T.textMuted, 0.55), flexShrink: 0 }}><Icon name="chevronR" size={13} /></span>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0, marginTop: dense ? 3 : 4, fontSize: dense ? 12 : 13, lineHeight: 1.3 }}>
-              <span style={{ color: T.textMuted, fontSize: dense ? 9.5 : 10.5, fontWeight: 690, letterSpacing: "0.005em", flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 3 }}><Icon name={sms ? "message" : "mail"} size={10} />{channelLabel}</span>
+              <span style={{ flex: 1, minWidth: 0, color: r.read ? T.textMuted : T.text, fontWeight: r.read ? 460 : 620, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{messagePreview || (sms ? "Text message" : "(no subject)")}</span>
               <span aria-hidden="true" style={{ color: T.border, flexShrink: 0 }}>·</span>
-              <span style={{ minWidth: 0, color: r.read ? T.textMuted : T.text, fontWeight: r.read ? 460 : 620, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{messagePreview || (sms ? "Text message" : "(no subject)")}</span>
+              <span style={{ color: T.textMuted, fontSize: dense ? 9.5 : 10, fontWeight: 650, letterSpacing: "0.005em", flexShrink: 0, whiteSpace: "nowrap" }}>{channelLabel}</span>
               {!sms && inLeads(r.id) && <span aria-label="In Leads" title="In Leads" style={{ width: 6, height: 6, borderRadius: "50%", background: "#16a34a", flexShrink: 0 }} />}
             </div>
           </div>
@@ -26812,14 +26822,14 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     );
   });
   const pinnedRail = pinnedRows.length > 0 ? (
-    <section aria-label="Pinned conversations" style={{ padding: dense ? "3px 1px 6px" : "5px 1px 8px" }}>
-      <div style={{ display: "flex", alignItems: "flex-start", gap: dense ? 3 : 6, overflowX: "auto", padding: "1px 3px 4px", WebkitOverflowScrolling: "touch", scrollbarWidth: "none", msOverflowStyle: "none", scrollSnapType: "x proximity" }}>
+    <section aria-label="Pinned conversations" style={{ padding: dense ? "4px 1px 9px" : "6px 1px 11px" }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 2, overflowX: "auto", padding: "1px 2px 4px", WebkitOverflowScrolling: "touch", scrollbarWidth: "none", msOverflowStyle: "none", scrollSnapType: "x mandatory" }}>
         {pinnedRows.map((row) => {
           const unreadCount = row._smsConversation ? Number(row._unreadCount || 0) : (row.read ? 0 : 1);
           return (
             <div key={`pin-${row._smsConversationKey || row.id}`} style={{ scrollSnapAlign: "start" }}>
               <InboxPinnedConversation label={senderLabel(row)} unread={unreadCount} onOpen={() => openMessage(row)} onPreview={() => setPreviewRow(row)} T={T}>
-                <Avatar name={row.from_name} email={row.from_email} channel={row.channel} photo={row._contactPhoto} size={dense ? 60 : 64} unreadCount={unreadCount} />
+                <Avatar name={row.from_name} email={row.from_email} channel={row.channel} photo={row._contactPhoto} size={dense ? 62 : 66} unreadCount={unreadCount} />
               </InboxPinnedConversation>
             </div>
           );
@@ -26947,7 +26957,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     <MobileSmsThread
       title={senderLabel(openRow)}
       subtitle={senderDetail(openRow)}
-      avatar={<Avatar name={openRow.from_name} email={openRow.from_email} channel={openRow.channel} photo={openRow._contactPhoto} size={32} />}
+      avatar={<Avatar name={openRow.from_name} email={openRow.from_email} channel={openRow.channel} photo={openRow._contactPhoto} size={36} />}
       lineLabel={lineLabelForRow(openRow)}
       categoryLabel={mobileSmsCategory.label}
       categoryTone={mobileSmsCategory.color || T.textMuted}
@@ -26955,13 +26965,14 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       onBack={() => setOpenRow(null)}
       onOrganize={() => setManageRow(openRow)}
       T={T}
-      status={replyMsg ? (
-        <div role="status" aria-live="polite" style={{ padding: "0 8px 6px", color: replySucceeded ? "#168548" : T.warning, fontSize: 11, lineHeight: 1.3, fontWeight: 680, textAlign: "center" }}>{replyMsg}</div>
+      status={replyMsg && !replySucceeded ? (
+        <div role="status" aria-live="polite" style={{ padding: "0 8px 6px", color: T.warning, fontSize: 11, lineHeight: 1.3, fontWeight: 680, textAlign: "center" }}>{replyMsg}</div>
       ) : null}
       composer={canTextFromRow(openRow) ? (
         <div style={{ display: "flex", alignItems: "flex-end", gap: 7 }}>
-          <div style={{ flex: 1, minWidth: 0, minHeight: 40, display: "flex", alignItems: "center", padding: "3px 4px 3px 13px", border: `1px solid ${hexA(T.textMuted, 0.3)}`, borderRadius: 21, background: T.surface }}>
+          <div style={{ flex: 1, minWidth: 0, minHeight: 38, display: "flex", alignItems: "center", padding: "2px 4px 2px 12px", border: `1px solid ${hexA(T.textMuted, 0.22)}`, borderRadius: 20, background: hexA(T.surface, 0.92) }}>
             <textarea
+              ref={replyComposerRef}
               aria-label={`Text ${senderLabel(openRow)}`}
               value={replyText}
               maxLength={1600}
@@ -26972,13 +26983,13 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
                 event.target.style.height = `${Math.min(event.target.scrollHeight, 92)}px`;
               }}
               placeholder="Text Message"
-              style={{ flex: 1, width: "100%", minWidth: 0, height: 32, maxHeight: 92, padding: "6px 0 4px", border: "none", outline: "none", resize: "none", overflowY: "auto", background: "transparent", color: T.text, fontFamily: "inherit", fontSize: 16, lineHeight: 1.35, boxSizing: "border-box" }}
+              style={{ flex: 1, width: "100%", minWidth: 0, height: 32, maxHeight: 92, padding: "6px 0 4px", border: "none", outline: "none", resize: "none", overflowY: "auto", background: "transparent", color: T.text, fontFamily: "inherit", fontSize: 16, lineHeight: 1.35, boxSizing: "border-box", boxShadow: "none" }}
             />
             {replyText.length > 1400 && <span style={{ padding: "0 5px", color: T.textMuted, fontSize: 9.5, fontWeight: 650, alignSelf: "flex-end", marginBottom: 6 }}>{replyText.length}/1600</span>}
           </div>
           <button type="button" aria-label="Send text" title="Send text" disabled={replyBusy || !replyText.trim()} onClick={sendOpenRowReply}
-            style={{ width: 38, height: 38, marginBottom: 1, flexShrink: 0, border: "none", borderRadius: 19, background: replyBusy || !replyText.trim() ? hexA(T.textMuted, 0.18) : T.primary, color: replyBusy || !replyText.trim() ? T.textMuted : "#fff", display: "grid", placeItems: "center", cursor: replyBusy || !replyText.trim() ? "default" : "pointer", transition: "background 0.15s, color 0.15s, transform 0.15s" }}>
-            <Icon name="send" size={17} />
+            style={{ width: 36, height: 36, marginBottom: 1, flexShrink: 0, border: "none", borderRadius: 18, background: replyBusy || !replyText.trim() ? hexA(T.textMuted, 0.15) : T.primary, color: replyBusy || !replyText.trim() ? hexA(T.textMuted, 0.72) : "#fff", display: "grid", placeItems: "center", cursor: replyBusy || !replyText.trim() ? "default" : "pointer", transition: "background 0.15s, color 0.15s, transform 0.15s" }}>
+            <Icon name="send" size={16} />
           </button>
         </div>
       ) : (
@@ -27026,7 +27037,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   const phoneMailDropdown = (
     <div ref={phoneMailMenuRef} style={{ position: "relative", flex: 1, minWidth: 0 }}>
       <button type="button" aria-label="Choose mailbox and inbox filters" aria-haspopup="menu" aria-expanded={phoneMailMenuOpen} onClick={() => setPhoneMailMenuOpen(open => !open)}
-        style={{ width: "100%", height: 44, padding: "0 6px", border: "none", borderRadius: 22, background: phoneMailMenuOpen ? hexA(T.primary, 0.065) : "transparent", color: T.text, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, fontFamily: "inherit", cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
+        style={{ width: "100%", height: 42, padding: "0 6px", border: "none", borderRadius: 21, background: phoneMailMenuOpen ? hexA(T.primary, 0.065) : "transparent", color: T.text, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, fontFamily: "inherit", cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
         <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "center", fontSize: 16.5, fontWeight: 830, letterSpacing: "-0.025em" }}>{phoneMailViewLabel}</span>
         <span style={{ color: T.textMuted, display: "inline-flex", transform: phoneMailMenuOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }}><Icon name="chevronD" size={14} /></span>
       </button>
@@ -27127,14 +27138,14 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
           <button type="button" onClick={toggleSelectAll} style={{ minHeight: 44, justifySelf: "end", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13.5, fontWeight: 800, padding: "8px 2px", cursor: "pointer" }}>{allVisibleSelected ? "Clear" : "Select All"}</button>
         </div>
       ) : (
-        <div style={{ minHeight: 44, display: "grid", gridTemplateColumns: "72px minmax(0, 1fr) 72px", alignItems: "center", gap: 2 }}>
+        <div style={{ minHeight: 42, display: "grid", gridTemplateColumns: "64px minmax(0, 1fr) 64px", alignItems: "center", gap: 2 }}>
           {!smsOnly && folder === "inbox" && (list.length > 0 || selMode)
-            ? <button type="button" onClick={() => setSelMode(true)} style={{ minHeight: 44, justifySelf: "start", padding: "7px 3px", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13.5, fontWeight: 760, cursor: "pointer" }}>Edit</button>
+            ? <button type="button" onClick={() => setSelMode(true)} style={{ minHeight: 42, justifySelf: "start", padding: "6px 3px", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13, fontWeight: 760, cursor: "pointer" }}>Edit</button>
             : <span />}
           {phoneMailDropdown}
           <button type="button" data-phone-mail-menu-trigger aria-label="Filter messages" aria-haspopup="menu" aria-expanded={phoneMailMenuOpen} onClick={() => setPhoneMailMenuOpen(open => !open)}
-            style={{ width: 42, height: 42, justifySelf: "end", border: `1px solid ${phoneMailMenuOpen ? hexA(T.primary, 0.35) : T.border}`, borderRadius: 21, background: phoneMailMenuOpen ? hexA(T.primary, 0.09) : T.surface, color: phoneMailMenuOpen ? T.primary : T.text, display: "grid", placeItems: "center", cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
-            <Icon name="sliders" size={17} />
+            style={{ width: 38, height: 38, justifySelf: "end", border: `1px solid ${phoneMailMenuOpen ? hexA(T.primary, 0.35) : hexA(T.border, 0.8)}`, borderRadius: 19, background: phoneMailMenuOpen ? hexA(T.primary, 0.09) : T.surface, color: phoneMailMenuOpen ? T.primary : T.text, display: "grid", placeItems: "center", cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
+            <Icon name="sliders" size={16} />
           </button>
         </div>
       )) : (
@@ -27259,17 +27270,17 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       ) : (
         <>
           {pinnedRail}
-          {mobileRows.length > 0 && <div style={{ border: phone ? "none" : `1px solid ${hexA(T.border, 1)}`, borderTop: phone ? `1px solid ${T.border}` : undefined, borderBottom: phone ? `1px solid ${T.border}` : undefined, borderRadius: phone ? 0 : (dense ? 14 : 17), overflow: "hidden", background: T.surface, boxShadow: phone ? "none" : "0 2px 10px rgba(0,0,0,0.035)", marginBottom: 12 }}>{mobileRows}</div>}
+          {mobileRows.length > 0 && <div style={{ border: phone ? "none" : `1px solid ${hexA(T.border, 1)}`, borderRadius: phone ? 0 : (dense ? 14 : 17), overflow: "hidden", background: T.surface, boxShadow: phone ? "none" : "0 2px 10px rgba(0,0,0,0.035)", marginBottom: phone ? 8 : 12 }}>{mobileRows}</div>}
         </>
       ))}
         </>
       ) : sentView}
       {phone && !selMode && createPortal(
-        <div role="search" aria-label="Search messages and compose" style={{ position: "fixed", left: "max(12px, env(safe-area-inset-left))", right: "max(12px, env(safe-area-inset-right))", bottom: "var(--sps-floating-action-bottom, calc(env(safe-area-inset-bottom) + 76px))", zIndex: 98, maxWidth: 560, height: 54, margin: "0 auto", display: "flex", alignItems: "center", gap: 8, pointerEvents: "none" }}>
-          <div style={{ flex: 1, minWidth: 0, height: 54, padding: 4, boxSizing: "border-box", pointerEvents: "auto", borderRadius: 27, background: hexA(T.surface, 0.97), boxShadow: "0 8px 28px rgba(0,0,0,0.15)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}>
+        <div role="search" aria-label="Search messages and compose" style={{ position: "fixed", left: "max(12px, env(safe-area-inset-left))", right: "max(12px, env(safe-area-inset-right))", bottom: "var(--sps-floating-action-bottom, calc(env(safe-area-inset-bottom) + 76px))", zIndex: 98, maxWidth: 560, height: 52, margin: "0 auto", display: "flex", alignItems: "center", gap: 8, pointerEvents: "none" }}>
+          <div style={{ flex: 1, minWidth: 0, height: 52, padding: 3, boxSizing: "border-box", pointerEvents: "auto", border: `1px solid ${hexA(T.border, 0.7)}`, borderRadius: 26, background: hexA(T.surface, 0.965), boxShadow: "0 5px 18px rgba(0,0,0,0.11)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}>
             <CommsSearchField value={folder === "inbox" ? q : sentQ} onChange={folder === "inbox" ? setQ : setSentQ} placeholder={folder === "inbox" ? "Search messages" : "Search sent"} T={T} ariaLabel={folder === "inbox" ? "Search messages" : "Search sent email"} touch pill />
           </div>
-          {showMobileCompose && <div style={{ pointerEvents: "auto", width: 54, height: 54, borderRadius: 27, display: "grid", placeItems: "center", background: hexA(T.surface, 0.98), border: `1px solid ${T.border}`, boxShadow: "0 8px 28px rgba(0,0,0,0.15)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}><CommsIconAction icon="edit" label="Compose a new email" onClick={() => { setComposeMsg(""); setComposeOpen(true); }} T={T} active /></div>}
+          {showMobileCompose && <div style={{ pointerEvents: "auto", width: 52, height: 52, borderRadius: 26, display: "grid", placeItems: "center", background: hexA(T.surface, 0.97), border: `1px solid ${hexA(T.border, 0.7)}`, boxShadow: "0 5px 18px rgba(0,0,0,0.11)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}><CommsIconAction icon="edit" label="Compose a new email" onClick={() => { setComposeMsg(""); setComposeOpen(true); }} T={T} active /></div>}
         </div>,
         document.body
       )}
@@ -27814,14 +27825,14 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
         {!single && (
           // Pinned section switcher — sticks flush under the app header instead of scrolling away and
           // resting half-hidden (which read as janky). The opaque background hides content passing under it.
-          <div style={{ position: "sticky", top: 0, zIndex: 30, background: hexA(T.bg, 0.97), backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)", padding: vpx.isPhone ? "2px 12px 0" : "8px 12px 6px" }}>
+          <div style={{ position: "sticky", top: 0, zIndex: 30, background: hexA(T.bg, 0.97), backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)", padding: vpx.isPhone ? "0 10px" : "8px 12px 6px" }}>
             <div style={{ display: "flex", alignItems: "stretch", gap: 6, minWidth: 0 }}>
-            <nav ref={mobileNavRef} aria-label="Communications sections" style={{ minWidth: 0, flex: 1, display: "flex", gap: vpx.isPhone ? 12 : 4, overflowX: "auto", WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", scrollPadding: 4, background: vpx.isPhone ? "transparent" : T.surfaceAlt, border: vpx.isPhone ? "none" : `1px solid ${T.border}`, borderRadius: vpx.isPhone ? 0 : (compactComms ? 12 : 14), padding: vpx.isPhone ? 0 : (compactComms ? 3 : 4) }}>
+            <nav ref={mobileNavRef} aria-label="Communications sections" style={{ minWidth: 0, flex: 1, display: "flex", gap: vpx.isPhone ? 10 : 4, overflowX: "auto", WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", scrollPadding: 4, background: vpx.isPhone ? "transparent" : T.surfaceAlt, border: vpx.isPhone ? "none" : `1px solid ${T.border}`, borderRadius: vpx.isPhone ? 0 : (compactComms ? 12 : 14), padding: vpx.isPhone ? 0 : (compactComms ? 3 : 4) }}>
               {SECTIONS.map(s => {
                 const on = section === s.id;
                 return (
-                  <button key={s.id} data-comms-section={s.id} onClick={() => setSection(s.id)} aria-current={on ? "page" : undefined} style={{ minHeight: vpx.isPhone ? 44 : (compactComms ? 40 : 42), flexShrink: 0, scrollSnapAlign: "start", display: "flex", alignItems: "center", gap: compactComms ? 5 : 7, padding: vpx.isPhone ? "7px 3px 6px" : (compactComms ? "6px 9px" : "9px 12px"), background: vpx.isPhone ? "transparent" : (on ? T.surface : "transparent"), border: "none", borderBottom: vpx.isPhone ? `2px solid ${on ? T.primary : "transparent"}` : "none", borderRadius: vpx.isPhone ? 0 : 10, boxShadow: vpx.isPhone ? "none" : (on ? "0 1px 3px rgba(0,0,0,0.07)" : "none"), fontSize: compactComms ? 12.5 : 13.5, fontWeight: on ? 800 : 700, cursor: "pointer", fontFamily: "inherit", color: on ? T.primary : T.textMuted, whiteSpace: "nowrap" }}>
-                    <Icon name={s.icon} size={15} />{s.label}
+                  <button key={s.id} data-comms-section={s.id} onClick={() => setSection(s.id)} aria-current={on ? "page" : undefined} style={{ minHeight: vpx.isPhone ? 42 : (compactComms ? 40 : 42), flexShrink: 0, scrollSnapAlign: "start", display: "flex", alignItems: "center", gap: compactComms ? 5 : 7, padding: vpx.isPhone ? "6px 2px 5px" : (compactComms ? "6px 9px" : "9px 12px"), background: vpx.isPhone ? "transparent" : (on ? T.surface : "transparent"), border: "none", borderBottom: vpx.isPhone ? `2px solid ${on ? T.primary : "transparent"}` : "none", borderRadius: vpx.isPhone ? 0 : 10, boxShadow: vpx.isPhone ? "none" : (on ? "0 1px 3px rgba(0,0,0,0.07)" : "none"), fontSize: vpx.isPhone ? 12 : (compactComms ? 12.5 : 13.5), fontWeight: on ? 800 : 700, cursor: "pointer", fontFamily: "inherit", color: on ? T.primary : T.textMuted, whiteSpace: "nowrap" }}>
+                    <Icon name={s.icon} size={vpx.isPhone ? 14 : 15} />{s.label}
                   </button>
                 );
               })}
@@ -27829,7 +27840,7 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
             </div>
           </div>
         )}
-        <div style={{ paddingTop: vpx.isPhone ? 7 : (compactComms ? 8 : 16) }}>{content}</div>
+        <div style={{ paddingTop: vpx.isPhone ? 3 : (compactComms ? 8 : 16) }}>{content}</div>
       </div>
     );
   }
@@ -37165,6 +37176,7 @@ export default function App({ authEmail = "", onSignOut }) {
     `}</style>
   );
   const isCommsRoute = ["comms", "reminders", "messages", "leads"].includes(page);
+  const compactCommsHeader = isCommsRoute && vp.isPhone;
   const isEstimatesRoute = page === "estimates";
   const pageBody = (
     <>
@@ -37370,14 +37382,14 @@ export default function App({ authEmail = "", onSignOut }) {
         <header style={{ background: hexA(T.surface, 0.94), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, position: "relative", zIndex: 100, flexShrink: 0, borderBottom: `1px solid ${T.border}`, boxShadow: "0 1px 0 rgba(0,0,0,0.02)" }}>
           {/* Safe area spacer — grows to exactly the status bar height on any iPhone, zero on Android */}
           <div style={{ height: "env(safe-area-inset-top)", background: "transparent" }} />
-          <div style={{ minHeight: 62, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "7px 12px 7px 16px" }}>
+          <div style={{ minHeight: compactCommsHeader ? 54 : 62, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: compactCommsHeader ? "5px 11px 5px 14px" : "7px 12px 7px 16px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: 1 }}>
-            <div style={{ width: 36, height: 36, borderRadius: 11, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, boxShadow: `0 2px 8px ${hexA(T.primary, 0.18)}` }}>
+            <div style={{ width: compactCommsHeader ? 34 : 36, height: compactCommsHeader ? 34 : 36, borderRadius: compactCommsHeader ? 10 : 11, background: hexA(T.primary, 0.12), display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, boxShadow: `0 2px 8px ${hexA(T.primary, 0.18)}` }}>
               <ProtectedImage src={brandLogoSource(branding)} alt="logo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
             </div>
             <div style={{ minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "center", gap: 2 }}>
-              <div style={{ fontSize: 15, fontWeight: 800, letterSpacing: "-0.025em", lineHeight: 1.12, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.companyName}</div>
-              <div style={{ fontSize: 11, fontWeight: 500, color: T.textMuted, letterSpacing: "0.01em", lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.division}</div>
+              <div style={{ fontSize: compactCommsHeader ? 14.5 : 15, fontWeight: 800, letterSpacing: "-0.025em", lineHeight: 1.12, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.companyName}</div>
+              {!compactCommsHeader && <div style={{ fontSize: 11, fontWeight: 500, color: T.textMuted, letterSpacing: "0.01em", lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branding.division}</div>}
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -37386,12 +37398,12 @@ export default function App({ authEmail = "", onSignOut }) {
               (canSeeComms(perms) && (perms.isAdmin || perms.commsSettings || perms.editNotifications))
                 ? <button type="button" onClick={() => handleNav("comms", { commsSection: "settings" })}
                     aria-label="Test mode is on. Open Comms settings." title="Test mode is on — tap to manage it in Comms → Settings"
-                    style={{ minWidth: 48, height: 32, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 850, letterSpacing: "0.07em", color: "#A64B08", background: hexA("#F59E0B", 0.13), padding: "0 9px", border: `1px solid ${hexA("#F59E0B", 0.18)}`, borderRadius: 10, textTransform: "uppercase", whiteSpace: "nowrap", cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Test</button>
-                : <span title="Test mode is on" style={{ minWidth: 48, height: 32, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 850, letterSpacing: "0.07em", color: "#A64B08", background: hexA("#F59E0B", 0.13), padding: "0 9px", border: `1px solid ${hexA("#F59E0B", 0.18)}`, borderRadius: 10, textTransform: "uppercase", whiteSpace: "nowrap", flexShrink: 0 }}>Test</span>
+                    style={{ minWidth: compactCommsHeader ? 44 : 48, height: compactCommsHeader ? 30 : 32, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 850, letterSpacing: "0.07em", color: "#A64B08", background: hexA("#F59E0B", 0.13), padding: "0 9px", border: `1px solid ${hexA("#F59E0B", 0.18)}`, borderRadius: 10, textTransform: "uppercase", whiteSpace: "nowrap", cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Test</button>
+                : <span title="Test mode is on" style={{ minWidth: compactCommsHeader ? 44 : 48, height: compactCommsHeader ? 30 : 32, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 850, letterSpacing: "0.07em", color: "#A64B08", background: hexA("#F59E0B", 0.13), padding: "0 9px", border: `1px solid ${hexA("#F59E0B", 0.18)}`, borderRadius: 10, textTransform: "uppercase", whiteSpace: "nowrap", flexShrink: 0 }}>Test</span>
             )}
             {/* Sync button — far-right header action */}
             <button onClick={manualSync} title="Sync"
-              aria-label="Sync data" style={{ background: hexA(T.primary, 0.1), border: "none", color: syncState === "saved" ? "#16a34a" : T.primary, cursor: "pointer", width: 44, height: 44, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", transition: "color 0.3s" }}>
+              aria-label="Sync data" style={{ background: hexA(T.primary, 0.1), border: "none", color: syncState === "saved" ? "#16a34a" : T.primary, cursor: "pointer", width: compactCommsHeader ? 40 : 44, height: compactCommsHeader ? 40 : 44, borderRadius: compactCommsHeader ? 11 : 12, display: "flex", alignItems: "center", justifyContent: "center", transition: "color 0.3s" }}>
               <Icon name="refresh" size={15} style={{ animation: syncState === "syncing" ? "spin 0.7s linear infinite" : "none" }} />
             </button>
           </div>

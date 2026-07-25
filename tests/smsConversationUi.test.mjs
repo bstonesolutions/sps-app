@@ -23,7 +23,7 @@ test("texts render as chronological conversations with a ready reply composer", 
   assert.match(inbox, /alignSelf: outgoing \? "flex-end" : "flex-start"/);
   assert.match(inbox, /setReplying\(isSmsRow\(r\) && canTextFromRow\(r\)\)/);
   assert.match(inbox, /openRow\.channel !== "sms" && <Btn variant="outline" sm onClick=\{toggleReply\}/);
-  assert.match(inbox, /<textarea value=\{replyText\} maxLength=\{1600\}/);
+  assert.match(inbox, /<textarea[\s\S]*?value=\{replyText\}[\s\S]*?maxLength=\{1600\}/);
   assert.match(inbox, /sendSms\(phone, replyText\.trim\(\), \{ clientId, preserveRecipient: true,[\s\S]*?inboxId: replyAnchor\.id/);
   assert.match(inbox, /openRow\.channel === "sms" \? "Send text" : "Send reply"/);
   assert.match(inbox, /Sends through Quo from the same/);
@@ -31,7 +31,7 @@ test("texts render as chronological conversations with a ready reply composer", 
 
 test("SMS list and thread omit email-triage chrome", () => {
   assert.match(inbox, /!isSmsRow\(r\) && badge\(r\.kind\)/);
-  assert.match(inbox, /const channelLabel = sms \?[\s\S]*?: `Email\$\{kind\.label && kind\.label !== "Other" \? ` · \$\{kind\.label\}` : ""\}`/);
+  assert.match(inbox, /const channelLabel = sms[\s\S]*?"My line"[\s\S]*?"Staff line"[\s\S]*?: \(kind\.label && kind\.label !== "Other" \? kind\.label : "Email"\)/);
   assert.match(inbox, /!isSmsRow\(openRow\) && openRow\.ai && openRow\.ai\.summary/);
   assert.match(inbox, /!smsOnly && !isSmsRow\(openRow\) && <div style=\{\{ display: "flex", gap: 8/);
   assert.match(inbox, /!smsOnly && isSmsRow\(openRow\)[\s\S]*?>Organize<\/Btn>/);
@@ -46,6 +46,8 @@ test("phone rows use compact conversation chrome while retaining swipe actions",
   assert.match(inbox, /const mobileRows = mobileList\.map/);
   assert.doesNotMatch(phoneRows, /showChannelMarker/);
   assert.match(phoneRows, /<Icon name=\{sms \? "message" : "mail"\}/);
+  assert.match(phoneRows, /data-sps-conversation-row data-channel=\{sms \? "sms" : "email"\}/);
+  assert.match(phoneRows, /\{messagePreview \|\| \(sms \? "Text message" : "\(no subject\)"\)\}[\s\S]*?\{channelLabel\}/, "the actual message should precede secondary channel metadata");
   assert.match(phoneRows, /fmtMailboxWhen\(r\.created_at\)/);
   assert.match(phoneRows, /<Icon name="chevronR"/);
   assert.match(phoneRows, /onToggleRead=\{\(\) => \{ markRead\(inboxRowMessageIds\(r\), !r\.read\); \}\}/);

@@ -35,31 +35,33 @@ test("a phone SMS opens as a full-screen destination instead of the generic mess
 });
 
 test("the full-screen thread has an iMessage-style header and explicit back action", () => {
-  assert.match(mobileThread, /<header/);
+  assert.match(mobileThread, /<header data-sps-thread-header/);
   assert.match(mobileThread, /onClick=\{onBack\} aria-label="Back to messages"/);
   assert.match(mobileThread, /<Icon name="back"/);
   assert.match(mobileThread, /<span>Messages<\/span>/);
   assert.match(mobileThread, /aria-label=\{`Open details for \$\{title\}`\}/);
   assert.match(mobileThread, /aria-label=\{`Call \$\{title\}`\}/);
+  assert.match(mobileThread, /const contactMeta = \[visibleCategory, lineLabel, distinctSubtitle\]\.filter\(Boolean\)\.join\(" · "\)/);
+  assert.doesNotMatch(mobileThread, /aria-label=\{`Organize as \$\{categoryLabel\}`\}/, "contact metadata should not occupy a second CRM-style header row");
 });
 
 test("the full-screen thread keeps its reply composer fixed and the history independently scrollable", () => {
   assert.match(mobileThread, /data-sps-mobile-sms-thread[\s\S]*?display: "flex", flexDirection: "column"/);
   assert.match(mobileThread, /<div ref=\{threadRef\}[\s\S]*?flex: "1 1 auto"[\s\S]*?overflow: "hidden"/);
-  assert.match(mobileThread, /<footer[\s\S]*?flexShrink: 0[\s\S]*?\{composer\}[\s\S]*?<\/footer>/);
+  assert.match(mobileThread, /<footer data-sps-thread-composer[\s\S]*?flexShrink: 0[\s\S]*?\{composer\}[\s\S]*?<\/footer>/);
 
   assert.match(inbox, /<SmsConversationBody row=\{openRow\}[\s\S]*?fullScreen/);
   assert.match(inbox, /data-sps-sms-thread-history/);
+  assert.match(inbox, /data-sps-message-bubble data-direction=\{outgoing \? "outgoing" : "incoming"\}/);
   assert.match(
     inbox,
-    /composer=\{[\s\S]*?<textarea[\s\S]*?value=\{replyText\}[\s\S]*?maxLength=\{1600\}[\s\S]*?Send text/,
+    /composer=\{[\s\S]*?<textarea[\s\S]*?aria-label=\{`Text \$\{senderLabel\(openRow\)\}`\}[\s\S]*?value=\{replyText\}[\s\S]*?maxLength=\{1600\}[\s\S]*?Send text/,
     "SMS composer should be supplied directly to the full-screen shell"
   );
 });
 
 test("organization and categorization remain accessible from inside the full-screen thread", () => {
   assert.match(mobileThread, /onClick=\{onOrganize\} aria-label="Organize conversation"/);
-  assert.match(mobileThread, /aria-label=\{`Organize as \$\{categoryLabel\}`\}/);
   assert.match(
     inbox,
     /<MobileSmsThread[\s\S]*?onOrganize=\{\(\) => setManageRow\(openRow\)\}/,
