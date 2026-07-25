@@ -232,7 +232,7 @@ function serializeSmsRow(row) {
 
 async function enrichSmsContacts(rows) {
   const phones = [...new Set((Array.isArray(rows) ? rows : [])
-    .map((row) => String(row?.sms_peer_phone || row?.from_phone || "").trim())
+    .map((row) => toSmsE164(row?.sms_peer_phone || row?.from_phone))
     .filter((phone) => /^\+[1-9]\d{7,14}$/.test(phone)))];
   if (!phones.length) return rows;
   try {
@@ -244,9 +244,9 @@ async function enrichSmsContacts(rows) {
     if (!response.ok) return rows;
     const contacts = await response.json().catch(() => null);
     if (!Array.isArray(contacts)) return rows;
-    const byPhone = new Map(contacts.map((contact) => [String(contact?.phone || ""), contact]));
+    const byPhone = new Map(contacts.map((contact) => [toSmsE164(contact?.phone), contact]));
     return rows.map((row) => {
-      const phone = String(row?.sms_peer_phone || row?.from_phone || "");
+      const phone = toSmsE164(row?.sms_peer_phone || row?.from_phone);
       const contact = byPhone.get(phone);
       if (!contact) return row;
       return {

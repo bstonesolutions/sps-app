@@ -18,7 +18,14 @@ import { driveTimeErrorMessage, getCurrentPositionWithDeadline, requestGoogleDri
 import { resolveStaffDeepLink } from "./staffDeepLinks";
 import { arrivalDeliveryKey, runArrivalDeliveryOnce } from "./arrivalDelivery";
 
-import { inboxRowMessageIds, mergeInboxConversationRows } from "./smsConversations";
+import {
+  applySmsConversationIdentities,
+  inboxRowMessageIds,
+  mergeInboxConversationRows,
+  rememberSmsConversationIdentities,
+  smsConversationKeyForRow,
+  stabilizeSmsConversationRows,
+} from "./smsConversations";
 import { smsMediaKind, smsMediaLabel, smsMediaSizeLabel, smsMediaSource, smsVisibleBodyText } from "./smsMediaPresentation";
 import { shouldWriteLiveLocation } from "./liveLocationThrottle";
 import { clearWorkspaceState, patchWorkspaceState, readWorkspaceState } from "./workspaceState";
@@ -25824,9 +25831,10 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   const [inboxNotice, setInboxNotice] = useState("");
   const noticeTimer = useRef(null);
   const deletingIdsRef = useRef(new Set());
-  // Signed contact-photo URLs are intentionally short lived. Remember when each visible thread was
-  // hydrated, not merely that it was hydrated once, so a long-running inbox refreshes an expired
-  // avatar without re-querying on every render.
+  // Durable names/contact IDs survive compact one-minute inbox refreshes by conversation key.
+  // Signed avatar URLs remain separate because they expire and must be refreshed periodically.
+  const smsIdentityCacheRef = useRef(new Map());
+  const smsAvatarCacheRef = useRef(new Map());
   const smsIdentityLoadedRef = useRef(new Map());
   const quoContactSyncStartedRef = useRef(false);
   const notifyInbox = (message) => {
@@ -25953,7 +25961,13 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
           return { ok: false, status: r.status };
         }
         setInboxAccess(current => ({ ...current, ...(d.access || {}) }));
-        setRows((d.rows || []).filter(row => !deletingIdsRef.current.has(String(row.id))));
+        const freshRows = (d.rows || []).filter(row => !deletingIdsRef.current.has(String(row.id)));
+        setRows(current => stabilizeSmsConversationRows(
+          freshRows,
+          current,
+          smsIdentityCacheRef.current,
+          quoLines,
+        ));
         // Pins are private per-employee preferences rather than shared business classification.
         // Load them only on an intentional/foreground refresh; quiet minute polling can reuse the
         // tiny in-memory map and avoid another app_state read.
@@ -25995,10 +26009,16 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       if (!background && requestIsCurrent()) setRefreshing(false);
     });
     return promise;
-  }, [inboxApiUrl, ownerView, smsOnly]);
+  }, [inboxApiUrl, ownerView, smsOnly, quoLines.automation, quoLines.main]);
   // Permission changes must immediately discard formerly visible line contents and re-read through
   // the server scope; never leave a revoked owner's conversation sitting in component state.
-  useEffect(() => { setRows(null); load({ replace: true }); }, [load, smsOnly, perms?.commsTextInbox, perms?.commsMainLine]);
+  useEffect(() => {
+    smsIdentityCacheRef.current.clear();
+    smsAvatarCacheRef.current.clear();
+    smsIdentityLoadedRef.current.clear();
+    setRows(null);
+    load({ replace: true });
+  }, [load, smsOnly, perms?.commsTextInbox, perms?.commsMainLine]);
   // Quo message webhooks identify contacts by ID, while older messages predate that identity cache.
   // Once the owner reaches Comms, advance through one bounded contact page and then re-read the
   // inbox only when an identity actually changed. The opaque cursor lets later visits progress
@@ -26266,9 +26286,20 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   const quoCallerForRow = (row) => lineRoleForRow(row) === "main"
     ? (quoLines.main || quoLines.automation || branding?.companyPhone)
     : (quoLines.automation || quoLines.main || branding?.companyPhone);
-  const inboxRows = (rows || []).map(row => {
+  const identityStableRows = applySmsConversationIdentities(rows || [], smsIdentityCacheRef.current, quoLines);
+  const inboxRows = identityStableRows.map(row => {
     const media = smsMediaById[String(row?.id)];
-    return media ? { ...row, sms_media: media.sms_media || [], sms_contact_avatar_url: media.sms_contact_avatar_url || row.sms_contact_avatar_url || "" } : row;
+    const identityKey = row?.channel === "sms" ? smsConversationKeyForRow(row, quoLines) : "";
+    const cachedAvatar = identityKey ? smsAvatarCacheRef.current.get(identityKey) : null;
+    const cachedAvatarUrl = cachedAvatar && Date.now() - Number(cachedAvatar.loadedAt || 0) <= 300000
+      ? String(cachedAvatar.url || "")
+      : "";
+    if (!media && !cachedAvatarUrl) return row;
+    return {
+      ...row,
+      sms_media: media?.sms_media || row.sms_media || [],
+      sms_contact_avatar_url: media?.sms_contact_avatar_url || cachedAvatarUrl || row.sms_contact_avatar_url || "",
+    };
   });
   const displayInboxRows = useMemo(() => mergeInboxConversationRows(inboxRows, clients, quoLines, smsThreadMeta).map((row) => {
     if (row?.channel !== "sms" || !row._smsConversationKey) return row;
@@ -26316,19 +26347,26 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     ? list.filter(rowIsPinned).sort((a, b) => String(b._smsPinnedAt || "").localeCompare(String(a._smsPinnedAt || "")))
     : [];
   const mobileList = pinnedRows.length ? list.filter(row => !rowIsPinned(row)) : list;
-  // Contact photos stay private just like MMS. Hydrate only the SMS conversations currently in the
-  // phone list, in one bounded signed-URL request, rather than leaking provider URLs or signing the
-  // entire inbox on every refresh.
+  // Contact photos stay private just like MMS. Hydrate only the visible SMS conversations in one
+  // bounded signed-URL request, rather than leaking provider URLs or signing the entire inbox on
+  // every refresh. This runs consistently on phone, iPad, and desktop.
   useEffect(() => {
-    if (!phone || folder !== "inbox" || rows === null) return undefined;
+    if (folder !== "inbox" || rows === null) return undefined;
     const now = Date.now();
     const anchors = list
-      .filter(row => isSmsRow(row) && row._smsConversation && row.id != null
-        && now - Number(smsIdentityLoadedRef.current.get(String(row.id)) || 0) > 240000)
+      .filter((row) => {
+        if (!isSmsRow(row) || !row._smsConversation || row.id == null) return false;
+        const key = String(row._smsConversationKey || smsConversationKeyForRow(row, quoLines));
+        return !!key && now - Number(smsIdentityLoadedRef.current.get(key) || 0) > 240000;
+      })
       .slice(0, 50);
     if (!anchors.length) return undefined;
     const ids = anchors.map(row => String(row.id));
-    ids.forEach(id => smsIdentityLoadedRef.current.set(id, now));
+    const anchorById = new Map(anchors.map((row) => [String(row.id), {
+      row,
+      key: String(row._smsConversationKey || smsConversationKeyForRow(row, quoLines)),
+    }]));
+    anchorById.forEach(({ key }) => smsIdentityLoadedRef.current.set(key, now));
     let cancelled = false;
     (async () => {
       try {
@@ -26338,7 +26376,20 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
         const body = await response.json().catch(() => ({}));
         if (!response.ok || cancelled || !body.identities || typeof body.identities !== "object") throw new Error("identity unavailable");
         const identities = body.identities;
-        setRows(current => (current || []).map(row => {
+        for (const id of ids) {
+          const identity = identities[id];
+          const anchor = anchorById.get(id);
+          if (!identity || !anchor) continue;
+          rememberSmsConversationIdentities(smsIdentityCacheRef.current, [{
+            ...anchor.row,
+            sms_contact_name: identity.name || anchor.row.sms_contact_name || "",
+            quo_contact_id: identity.contactId || anchor.row.quo_contact_id || null,
+          }], quoLines);
+          if (identity.avatarUrl) {
+            smsAvatarCacheRef.current.set(anchor.key, { url: identity.avatarUrl, loadedAt: Date.now() });
+          }
+        }
+        setRows(current => applySmsConversationIdentities((current || []).map(row => {
           const identity = identities[String(row.id)];
           if (!identity) return row;
           return {
@@ -26346,7 +26397,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
             sms_contact_name: identity.name || row.sms_contact_name || "",
             quo_contact_id: identity.contactId || row.quo_contact_id || null,
           };
-        }));
+        }), smsIdentityCacheRef.current, quoLines));
         setSmsMediaById(current => {
           let changed = false;
           const next = { ...current };
@@ -26359,11 +26410,11 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
           return changed ? next : current;
         });
       } catch (_) {
-        if (!cancelled) ids.forEach(id => smsIdentityLoadedRef.current.delete(id));
+        if (!cancelled) anchorById.forEach(({ key }) => smsIdentityLoadedRef.current.delete(key));
       }
     })();
     return () => { cancelled = true; };
-  }, [phone, folder, rows, channelFilter, filter, q]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [folder, rows, channelFilter, filter, q, quoLines.automation, quoLines.main]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!openRow) return;
     const fresh = displayInboxRows.find(r => String(r.id) === String(openRow.id) || (openRow._smsConversationKey && r._smsConversationKey === openRow._smsConversationKey));

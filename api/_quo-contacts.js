@@ -321,7 +321,9 @@ export async function cacheQuoContacts(contacts, {
     const row = {
       phone,
       quo_contact_id: metadata.id,
-      contact_name: metadata.name || "",
+      // Quo sometimes returns partial contacts during paging/updates. A missing display name is
+      // not a rename and must never erase a name already confirmed in the durable cache.
+      contact_name: metadata.name || String(existing?.contact_name || ""),
       avatar_path: avatarPath,
       updated_at: now,
     };

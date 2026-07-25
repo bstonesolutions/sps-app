@@ -1460,9 +1460,13 @@ test("message.delivered stores an outgoing row under the intended Test Mode peer
 });
 
 test("contact.updated writes one phone-keyed cache row instead of rewriting message history", async () => {
-  const calls = { contactWrites: 0, inboxWrites: 0, rows: [] };
+  const calls = { contactReads: 0, contactWrites: 0, inboxWrites: 0, rows: [] };
   globalThis.fetch = async (url, options = {}) => {
     const target = String(url);
+    if (target.includes("/rest/v1/sps_sms_contacts?select=")) {
+      calls.contactReads += 1;
+      return response([]);
+    }
     if (target.includes("/rest/v1/sps_sms_contacts?on_conflict=phone")) {
       calls.contactWrites += 1;
       calls.rows.push(...JSON.parse(options.body));
@@ -1484,6 +1488,7 @@ test("contact.updated writes one phone-keyed cache row instead of rewriting mess
   const { res } = await invokeWebhook(payload);
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.contactUpdated, true);
+  assert.equal(calls.contactReads, 1);
   assert.equal(calls.contactWrites, 1);
   assert.equal(calls.inboxWrites, 0);
   assert.deepEqual(calls.rows[0], {
@@ -1493,6 +1498,29 @@ test("contact.updated writes one phone-keyed cache row instead of rewriting mess
     avatar_path: "",
     updated_at: calls.rows[0].updated_at,
   });
+});
+
+test("a partial Quo contact update cannot erase a cached name or avatar", async () => {
+  let storageCalls = 0;
+  globalThis.fetch = async () => {
+    storageCalls += 1;
+    throw new Error("an identity-free contact event must not reach storage");
+  };
+  const payload = webhookPayload("contact-partial");
+  payload.type = "contact.updated";
+  payload.data.object = {
+    id: "CT-1",
+    defaultFields: {
+      phoneNumbers: [{ value: "+15552345678" }],
+    },
+  };
+
+  const { res } = await invokeWebhook(payload);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.contactUpdated, false);
+  assert.equal(res.body.skipped, "contact identity not supplied");
+  assert.equal(storageCalls, 0);
 });
 
 test("a fast client-list failure is stored as an explicit matching failure, not an empty lookup", async () => {

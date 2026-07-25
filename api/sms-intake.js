@@ -259,14 +259,48 @@ async function upsertContactMetadata(metadata, avatarPath, remaining) {
   if (!metadata?.id || !Array.isArray(metadata.phones) || !metadata.phones.length) {
     return { ok: true, skipped: "contact has no phone" };
   }
+  const phones = [...new Set(metadata.phones.map(toSmsE164).filter((phone) => E164.test(phone)))];
+  if (!phones.length) return { ok: true, skipped: "contact has no valid phone" };
+  const incomingName = String(metadata.name || "").trim();
+  const incomingAvatarPath = String(avatarPath || "").trim();
+  // An ID-only Quo payload has no identity improvement to persist. Skipping it entirely avoids a
+  // read/write race where a delayed partial event could overwrite a newer rename with stale data.
+  if (!incomingName && !incomingAvatarPath) {
+    return { ok: true, skipped: "contact identity not supplied" };
+  }
+  const filter = phones.map(encodeURIComponent).join(",");
+  let existingRows = [];
+  try {
+    const existingResponse = await timedFetch(
+      `${SUPABASE_URL}/rest/v1/sps_sms_contacts?select=phone,quo_contact_id,contact_name,avatar_path&phone=in.(${filter})`,
+      { headers: sbHeaders() },
+      Math.min(900, Math.max(250, remaining(1000))),
+    );
+    if (!existingResponse.ok) {
+      const text = await existingResponse.text().catch(() => "");
+      if (/sps_sms_contacts|42P01|PGRST205|schema cache/i.test(text)) {
+        return { ok: true, skipped: "conversation schema not installed" };
+      }
+      return { ok: false, error: text.slice(0, 200) || "contact cache lookup failed" };
+    }
+    existingRows = await existingResponse.json().catch(() => []);
+  } catch (error) {
+    return { ok: false, error: String(error?.message || "contact cache lookup failed").slice(0, 200) };
+  }
+  const existingByPhone = new Map((Array.isArray(existingRows) ? existingRows : [])
+    .map((row) => [toSmsE164(row?.phone), row]));
   const now = new Date().toISOString();
-  const rows = metadata.phones.map((phone) => ({
-    phone,
-    quo_contact_id: metadata.id,
-    contact_name: metadata.name || "",
-    avatar_path: avatarPath || "",
-    updated_at: now,
-  }));
+  const rows = phones.map((phone) => {
+    const existing = existingByPhone.get(phone);
+    return {
+      phone,
+      quo_contact_id: metadata.id,
+      // Quo message/contact events can be partial. Empty values mean "not supplied", not "erase".
+      contact_name: incomingName || String(existing?.contact_name || ""),
+      avatar_path: incomingAvatarPath || String(existing?.avatar_path || ""),
+      updated_at: now,
+    };
+  });
   const response = await timedFetch(`${SUPABASE_URL}/rest/v1/sps_sms_contacts?on_conflict=phone`, {
     method: "POST",
     headers: { ...sbHeaders(), Prefer: "resolution=merge-duplicates,return=minimal" },

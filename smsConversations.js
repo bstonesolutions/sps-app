@@ -69,7 +69,7 @@ export function findSmsContact(clients, phone) {
   return matches.length === 1 ? matches[0] : null;
 }
 
-function conversationKeyForRow(row, lineNumbers) {
+export function smsConversationKeyForRow(row, lineNumbers = {}) {
   const line = smsLineForRow(row, lineNumbers);
   const testRedirect = !!parseSmsTestRedirect(row?.body_text)
     || String(row?.sms_status || "").toLowerCase().includes("test_redirect")
@@ -86,6 +86,62 @@ function conversationKeyForRow(row, lineNumbers) {
   // that id belongs to the redirect device and must never be used as a customer conversation key.
   if (provider && !testRedirect) return `${line}|quo:${provider}`;
   return `${line}|unknown:${String(row?.id || "")}`;
+}
+
+function durableSmsContactName(row) {
+  const explicit = String(row?.sms_contact_name || row?.quo_contact_name || "").trim();
+  if (explicit) return explicit;
+  const fallback = String(row?.from_name || "").trim();
+  return fallback && normalizeSmsPhone(fallback).length !== 10 ? fallback : "";
+}
+
+/**
+ * Keep durable text-contact identity separate from short-lived message rows.
+ *
+ * The unified inbox is replaced by a compact server response every minute. Most historical SMS
+ * rows intentionally do not duplicate Quo's contact name, so replacing a hydrated row used to
+ * make a known person fall back to a phone number until the next identity request. This cache is
+ * keyed by protected business line + normalized peer, never by the newest message id.
+ */
+export function rememberSmsConversationIdentities(cache, rows, lineNumbers = {}) {
+  const target = cache instanceof Map ? cache : new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!row || row.channel !== "sms") continue;
+    const key = smsConversationKeyForRow(row, lineNumbers);
+    if (!key || key.includes("|unknown:")) continue;
+    const current = target.get(key) || {};
+    const name = durableSmsContactName(row);
+    const contactId = String(row?.quo_contact_id || row?.contact_id || "").trim();
+    if (!name && !contactId) continue;
+    target.set(key, {
+      name: name || current.name || "",
+      contactId: contactId || current.contactId || "",
+    });
+  }
+  return target;
+}
+
+export function applySmsConversationIdentities(rows, cache, lineNumbers = {}) {
+  if (!(cache instanceof Map) || !cache.size) return Array.isArray(rows) ? rows : [];
+  return (Array.isArray(rows) ? rows : []).map((row) => {
+    if (!row || row.channel !== "sms") return row;
+    const identity = cache.get(smsConversationKeyForRow(row, lineNumbers));
+    if (!identity) return row;
+    const name = durableSmsContactName(row) || String(identity.name || "").trim();
+    const contactId = String(row.quo_contact_id || row.contact_id || identity.contactId || "").trim();
+    if ((!name || name === row.sms_contact_name) && (!contactId || contactId === row.quo_contact_id)) return row;
+    return {
+      ...row,
+      sms_contact_name: name || row.sms_contact_name || null,
+      quo_contact_id: contactId || row.quo_contact_id || null,
+    };
+  });
+}
+
+export function stabilizeSmsConversationRows(nextRows, previousRows, cache, lineNumbers = {}) {
+  const target = rememberSmsConversationIdentities(cache, previousRows, lineNumbers);
+  rememberSmsConversationIdentities(target, nextRows, lineNumbers);
+  return applySmsConversationIdentities(nextRows, target, lineNumbers);
 }
 
 function messageBody(row) {
@@ -140,7 +196,7 @@ export function groupSmsConversations(rows, clients = [], lineNumbers = {}, thre
       _smsDirection: direction,
       _isTestRedirect: !!parseSmsTestRedirect(raw.body_text),
     };
-    const key = conversationKeyForRow(raw, lineNumbers);
+    const key = smsConversationKeyForRow(raw, lineNumbers);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(message);
   }
