@@ -11,6 +11,7 @@ import { assessInboundLead, findMisfiledImportedLead } from "./leadQualification
 import { brandLogoSource } from "./brandAssets";
 import { estimateHasValidDays, estimateHasValidTaxRate, estimateLineAmount, estimateLineCost, estimateLineHasKnownCost, estimateLineQuantity, estimateLineUnitPrice, estimateNumberIsValid, estimateNumberValue, estimateProfitTotals, estimateTotals, formatEstimateMoney, withEstimateRevision, withEstimateTotals } from "./estimateMath";
 import { catalogItemFinancials, estimateLineFromCatalog, estimateLineFromPartsBundle } from "./estimateCatalog";
+import { estimateToDraftInvoice, findInvoiceForEstimate } from "./estimateInvoiceConversion";
 import { automaticReportChannels, reportEmailUiResult } from "./reportDelivery";
 import { buildCompletedReportIndex, canRebuildCompletedReport, resolveCompletedReport } from "./completedReport";
 import { appendClientLinks, clientLinkFooter, withoutClientLinks } from "./clientMessageLinks";
@@ -19095,7 +19096,7 @@ const canManageEstimates = (perms = {}) => !!(
   || (perms.tabAccess ? perms.tabAccess.estimates === "edit" : perms.canInvoice)
 );
 
-function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoicing, T, estimates: estimatesProp, setEstimates: setEstimatesProp }) {
+function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoicing, T, estimates: estimatesProp, setEstimates: setEstimatesProp, invoices = [], onSaveInvoice, onConvertEstimate }) {
   const { perms = {} } = useApp();
   const vp = useViewport();
   const showProfit = !!(perms.isAdmin || perms.seeProfit);
@@ -19107,6 +19108,7 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
   const [selected, setSelected] = useState(null);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("active");
+  const [invoiceEditor, setInvoiceEditor] = useState(null);
   const screenRef = useRef(null);
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -19134,24 +19136,61 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
     setView("list");
   };
 
+  const linkedInvoiceForEstimate = (estimateId) => (
+    findInvoiceForEstimate(invoices, { id: estimateId })
+  );
+
+  const convertEstimateToInvoice = async (estimate) => {
+    if (typeof onConvertEstimate !== "function") {
+      return { ok: false, error: "Invoice conversion is unavailable. Refresh SPS Way and try again." };
+    }
+    const result = await onConvertEstimate(estimate);
+    if (!result?.ok) {
+      return { ok: false, error: result?.error || "The draft invoice was not confirmed by the database." };
+    }
+    const saved = result.invoice;
+    setInvoiceEditor(saved);
+    return { ok: true, invoice: saved, existing: !!result.existing };
+  };
+
+  const saveConvertedInvoice = (invoice) => {
+    if (typeof onSaveInvoice === "function") onSaveInvoice(invoice);
+    setInvoiceEditor(invoice);
+    return { ok: true, invoice };
+  };
+
   if (view === "new" || (view === "detail" && selected)) {
     return (
-      <div ref={screenRef} data-estimates-editor-root style={{ minWidth: 0 }}><EstimateForm
-        estimate={view === "detail" ? selected : null}
-        clients={clients}
-        catalog={catalog}
-        setCatalog={setCatalog}
-        branding={branding}
-        email={email}
-        invoicing={invoicing}
-        T={T}
-        onSave={saveEstimate}
-        onPersist={persistEstimate}
-        onDelete={deleteEstimate}
-        canManage={canManage}
-        nextNumber={nextEstimateNumber(estimates)}
-        onBack={() => { setView("list"); setSelected(null); }}
-      /></div>
+      <>
+        <div ref={screenRef} data-estimates-editor-root style={{ minWidth: 0 }}><EstimateForm
+          estimate={view === "detail" ? selected : null}
+          clients={clients}
+          catalog={catalog}
+          setCatalog={setCatalog}
+          branding={branding}
+          email={email}
+          invoicing={invoicing}
+          T={T}
+          onSave={saveEstimate}
+          onPersist={persistEstimate}
+          onDelete={deleteEstimate}
+          onConvertToInvoice={convertEstimateToInvoice}
+          findLinkedInvoice={linkedInvoiceForEstimate}
+          canManage={canManage}
+          nextNumber={nextEstimateNumber(estimates)}
+          onBack={() => { setView("list"); setSelected(null); }}
+        /></div>
+        {invoiceEditor && <InvoiceEditor
+          invoice={invoiceEditor}
+          clients={clients}
+          invoices={invoices}
+          invoicing={invoicing}
+          catalog={catalog}
+          setCatalog={setCatalog}
+          onSave={saveConvertedInvoice}
+          onClose={() => setInvoiceEditor(null)}
+        />}
+      </>
     );
   }
 
@@ -19260,7 +19299,7 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
   );
 }
 
-function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email, invoicing, T, onSave, onPersist, onDelete, onBack, nextNumber, canManage: canManageProp }) {
+function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email, invoicing, T, onSave, onPersist, onDelete, onConvertToInvoice, findLinkedInvoice, onBack, nextNumber, canManage: canManageProp }) {
   const { perms = {} } = useApp();
   const vp = useViewport();
   // Keep portrait iPads in the single-column editor. At the old 700px split point the line-item
@@ -19325,17 +19364,21 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   const [sentMsg, setSentMsg] = useState("");
   const [formError, setFormError] = useState("");
   const [pdfBusy, setPdfBusy] = useState(false);
+  const [conversionBusy, setConversionBusy] = useState(false);
+  const [conversionMsg, setConversionMsg] = useState("");
   const [dirty, setDirty] = useState(false);
   const shareBusyRef = useRef(false);
   const pendingLineRef = useRef("");
   const [picker, setPicker] = useState(false);
-  const shareBusy = sending || smsSending || pdfBusy;
+  const shareBusy = sending || smsSending || pdfBusy || conversionBusy;
   const totals = estimateTotals(form, defaultTaxRate);
   const financials = estimateProfitTotals(form);
   const canEmailEstimate = canManage && perms.invoiceSend !== false;
   // Estimate texts still use the shared Quo endpoint, whose server permission is sendTexts.
   // Keep the UI aligned so a staff member never sees an action that the server must reject.
   const canTextEstimate = canEmailEstimate && perms.sendTexts !== false;
+  const canCreateInvoice = canManage && !!(perms.isAdmin || perms.invoiceCreate);
+  const linkedInvoice = typeof findLinkedInvoice === "function" ? findLinkedInvoice(form.id) : null;
   const canDelete = canManage && perms.invoiceDelete !== false;
   const validateEstimateSettings = () => {
     if (!estimateHasValidDays(form)) return "Valid for must be a whole number of at least 1 day.";
@@ -19602,6 +19645,41 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
     setFormError("");
     onSave(withEstimateTotals(form, defaultTaxRate));
   };
+  const convertToInvoice = async () => {
+    if (!canCreateInvoice || conversionBusy || typeof onConvertToInvoice !== "function") return;
+    if (!linkedInvoice) {
+      const client = (clients || []).find(entry => String(entry.id) === String(form.clientId));
+      const validation = validateForSend(client);
+      if (validation) { setFormError(validation); setConversionMsg(validation); return; }
+      if (String(form.status || "").toLowerCase() === "declined") {
+        const message = "Change this estimate from Declined before creating an invoice.";
+        setFormError(message); setConversionMsg(message); return;
+      }
+    }
+    setFormError("");
+    setConversionMsg("");
+    setConversionBusy(true);
+    try {
+      const current = normalizedForSend();
+      if (!linkedInvoice && onPersist) {
+        onPersist(current);
+        setForm(current);
+        setDirty(false);
+      }
+      const result = await onConvertToInvoice(current);
+      if (!result?.ok) {
+        setConversionMsg(result?.error || "The draft invoice was not confirmed. Try again.");
+        return;
+      }
+      setConversionMsg(result.existing
+        ? `Opened invoice ${result.invoice?.number || ""}.`
+        : `Draft invoice ${result.invoice?.number || ""} created and opened for review.`);
+    } catch (error) {
+      setConversionMsg(error?.message || "The estimate could not be converted.");
+    } finally {
+      setConversionBusy(false);
+    }
+  };
   const handleBack = () => {
     if (dirty && canManage && !confirm("Discard the unsaved changes to this estimate?")) return;
     onBack();
@@ -19779,6 +19857,29 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
                 </div>
               </div>
             </fieldset>
+
+            {canCreateInvoice && <div data-estimate-invoice-conversion style={{ ...card, display: "flex", flexDirection: "column", gap: 9 }}>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>{linkedInvoice ? "Linked invoice" : "Ready to bill?"}</div>
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2, lineHeight: 1.45 }}>
+                  {linkedInvoice
+                    ? `This estimate is linked to invoice ${linkedInvoice.number || ""}. Open it without creating a duplicate.`
+                    : "Create one local draft with this client, pricing, costs, notes, and tax. You can review it before sending or syncing to QuickBooks."}
+                </div>
+              </div>
+              <Btn
+                onClick={convertToInvoice}
+                disabled={conversionBusy || (!linkedInvoice && String(form.status || "").toLowerCase() === "declined")}
+                variant={linkedInvoice ? "outline" : undefined}
+                block
+                style={{ gap: 7 }}
+              >
+                <Icon name="invoice" size={15} />
+                {conversionBusy ? "Confirming…" : linkedInvoice ? `Open invoice ${linkedInvoice.number || ""}` : "Create draft invoice"}
+              </Btn>
+              {!linkedInvoice && String(form.status || "").toLowerCase() === "declined" && <div style={{ fontSize: 11, color: T.warning, lineHeight: 1.4 }}>Change the estimate from Declined before invoicing it.</div>}
+              {conversionMsg && <div role="status" style={{ fontSize: 11.5, color: T.textMuted, textAlign: "center", lineHeight: 1.45 }}>{conversionMsg}</div>}
+            </div>}
 
             <div data-estimate-actions style={{ ...card, display: "flex", flexDirection: "column", gap: 8 }}>
               <div><div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>{canManage ? "Share with client" : "Estimate copy"}</div><div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{canManage ? "Sending saves the estimate as Sent after the server confirms delivery." : "View-only access can download a copy without changing this estimate."}</div></div>
@@ -37509,6 +37610,77 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       if (!(perms && perms.isAdmin)) sendPushEvent("invoice_paid", { body: `${cl?.name || "A client"} — ${amount}${inv.number ? ` (invoice ${inv.number})` : ""}`, collapseId: `paid-${inv.id}` });
     }
   };
+  const handleConvertEstimateToInvoice = async (estimate) => {
+    if (!estimate || String(estimate.status || "").toLowerCase() === "declined") {
+      return { ok: false, error: "A declined estimate cannot be converted to an invoice." };
+    }
+    const client = (clients || []).find(entry => String(entry.id) === String(estimate.clientId));
+    if (!client) return { ok: false, error: "Choose a client before converting this estimate." };
+
+    try {
+      const flushed = await store.flush();
+      if (!flushed?.ok && !flushed?.empty) {
+        return { ok: false, error: "Another invoice change is still waiting to sync. Check the connection, then try again." };
+      }
+
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const refreshed = await store.refresh("sps_invoices");
+        if (!refreshed?.ok) {
+          return { ok: false, error: refreshed?.error?.message || "The latest invoices could not be loaded. Nothing was created." };
+        }
+        const list = refreshed.exists ? JSON.parse(refreshed.value || "[]") : [];
+        if (!Array.isArray(list)) {
+          return { ok: false, error: "The shared invoice list could not be read. Nothing was created." };
+        }
+
+        const linked = findInvoiceForEstimate(list, estimate);
+        if (linked) {
+          setInvoices(list);
+          return { ok: true, invoice: linked, existing: true };
+        }
+
+        const dueDays = Number.parseInt(invoicing?.dueDays, 10);
+        const safeDueDays = Number.isFinite(dueDays) && dueDays >= 0 ? dueDays : 15;
+        const converted = estimateToDraftInvoice(estimate, {
+          client,
+          number: `${invoicing?.numberPrefix != null ? invoicing.numberPrefix : "INV-"}${nextInvoiceNumber(list, invoicing)}`,
+          issueDate: todayMDY(),
+          dueDate: addDaysMDY(todayMDY(), safeDueDays),
+          dueDays: safeDueDays,
+          defaultTaxRate: invoicing?.taxRate,
+          paymentTerms: invoicing?.terms,
+        });
+        const next = [converted, ...list];
+        const saved = await store.replaceMany([{
+          key: "sps_invoices",
+          value: JSON.stringify(next),
+          expectedVersion: Number(refreshed.version) || 0,
+        }]);
+        if (!saved?.ok) {
+          if (saved?.conflict && attempt < 2) continue;
+          return {
+            ok: false,
+            error: saved?.conflict
+              ? "Another device changed invoices at the same time. Refresh and try again."
+              : (saved?.error?.message || "The server did not confirm the draft invoice. Nothing was reported as created."),
+          };
+        }
+
+        const confirmedSnapshot = await store.get("sps_invoices");
+        const confirmedList = confirmedSnapshot?.value ? JSON.parse(confirmedSnapshot.value) : next;
+        const confirmed = findInvoiceForEstimate(confirmedList, estimate);
+        if (!confirmed) {
+          return { ok: false, error: "The server confirmed the save, but the draft could not be reopened. Refresh before trying again." };
+        }
+        setInvoices(confirmedList);
+        return { ok: true, invoice: confirmed, existing: false };
+      }
+    } catch (error) {
+      return { ok: false, error: error?.message || "The draft invoice could not be created." };
+    }
+
+    return { ok: false, error: "Invoices changed repeatedly on another device. Refresh and try again." };
+  };
   const handleDeleteInvoice = (id) => {
     const target = (invoices || []).find(iv => iv.id === id);
     // If this invoice was pushed to QuickBooks, delete it there too
@@ -37946,7 +38118,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <SectionErrorBoundary key="inventory"><InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} /></SectionErrorBoundary>}
       {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} branding={branding} T={T} budget={budget} />}
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} isAdmin={perms.isAdmin} />}
-      {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} setCatalog={setCatalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} />}
+      {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} setCatalog={setCatalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} invoices={invoices} onSaveInvoice={handleSaveInvoice} onConvertEstimate={handleConvertEstimateToInvoice} />}
       {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
       {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : commsSection || undefined} initialSectionNonce={commsSectionNonce} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} setBranding={setBranding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} onLinkLead={handleLinkLead} openLeadId={openLeadId} onLeadOpened={() => setOpenLeadId(null)} vp={vp} workspaceScope={authUserId} />}
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
