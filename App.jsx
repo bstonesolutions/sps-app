@@ -35,6 +35,7 @@ import {
 import { smsMediaKind, smsMediaLabel, smsMediaSizeLabel, smsMediaSource, smsVisibleBodyText } from "./smsMediaPresentation";
 import { shouldWriteLiveLocation } from "./liveLocationThrottle";
 import { clearWorkspaceState, patchWorkspaceState, readWorkspaceState } from "./workspaceState";
+import { reminderSystemEnabled } from "./reminderSystem";
 
 // Manual/foreground refreshes compare these small version counters first and download only the
 // shared slices that changed. Keeping this list explicit prevents a Sync tap from tearing down the
@@ -2461,7 +2462,7 @@ const mapsRouteUrl = (origin, addresses) => {
 // Build the reminder queue: upcoming stops within the lead window that haven't been reminded yet.
 // Each entry carries its scheduled send time and whether it's due now.
 function buildReminderQueue(schedule, clients, cfg, reminderLog, now = new Date()) {
-  if (!cfg || !cfg.remindersOn) return { due: [], upcoming: [], sent: [] };
+  if (!reminderSystemEnabled(cfg) || !cfg.remindersOn) return { due: [], upcoming: [], sent: [] };
   const leadMs = (parseFloat(cfg.reminderLeadHours) || 24) * 3600 * 1000;
   const [sendH, sendM] = String(cfg.reminderSendAt || "17:00").split(":").map(Number);
 
@@ -2507,7 +2508,7 @@ function buildReminderQueue(schedule, clients, cfg, reminderLog, now = new Date(
 // Reuses the existing payment-nudge config (paymentNudgeOn / AfterDays / RepeatDays / Max) + the
 // per-client paymentNudges opt-out; dedup by reminderLog (same ledger as service reminders).
 function buildInvoiceReminderQueue(invoices, clients, cfg, reminderLog, now = new Date()) {
-  if (!cfg || !cfg.paymentNudgeOn) return { due: [], upcoming: [], sent: [] };
+  if (!reminderSystemEnabled(cfg) || !cfg.paymentNudgeOn) return { due: [], upcoming: [], sent: [] };
   const afterDays = parseInt(cfg.paymentNudgeAfterDays) || 3;
   const repeatDays = Math.max(1, parseInt(cfg.paymentNudgeRepeatDays) || 7);
   const maxNudges = parseInt(cfg.paymentNudgeMax) || 3;
@@ -2548,6 +2549,7 @@ function buildInvoiceReminderQueue(invoices, clients, cfg, reminderLog, now = ne
 // client is only nudged once per reminder per year. Triggers/divisions/messages
 // all come from Brandon's config — nothing hardcoded.
 function buildSeasonalQueue(cfg, clients, reminderLog, now = new Date()) {
+  if (!reminderSystemEnabled(cfg)) return { due: [], sent: [] };
   const list = (cfg && cfg.seasonalReminders) || [];
   if (!list.length) return { due: [], sent: [] };
   const year = now.getFullYear();
@@ -2737,8 +2739,11 @@ const DEFAULT_SCHEDULE_CFG = {
   showAddress: true,
   showServices: true,
   showDuration: true,
+  // Reminders workspace. This master pauses appointment, payment, and seasonal
+  // reminder queues/sends without deleting any of their saved configuration.
+  remindersMasterOn: false,
   // Appointment reminders
-  remindersOn: false,         // master switch (off until you turn it on)
+  remindersOn: false,         // appointment reminders only
   reminderLeadHours: 24,      // default: how far ahead to send (24 = day before)
   reminderSendAt: "17:00",    // preferred send time for day-before reminders (24h)
   reminderAutoSend: false,    // when true + backend wired, sends automatically; else surfaces a queue
@@ -25032,12 +25037,34 @@ function CommunicationsHub({ scheduleCfg, setScheduleCfg, email, setEmail, brand
 
 function ReminderSettings({ scheduleCfg, setScheduleCfg, email, setEmail, branding, T }) {
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
+  const remindersEnabled = reminderSystemEnabled(cfg);
   const setCfg = (k, v) => setScheduleCfg(cur => ({ ...DEFAULT_SCHEDULE_CFG, ...(cur || {}), [k]: v }));
   const tpl = (email && email.smsReminder) || DEFAULT_EMAIL.smsReminder;
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 8 };
   const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ background: remindersEnabled ? hexA("#16a34a", 0.08) : T.surfaceAlt, border: `1.5px solid ${remindersEnabled ? hexA("#16a34a", 0.4) : T.border}`, borderRadius: 14, padding: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>Reminders {remindersEnabled ? "are on" : "are paused"}</div>
+            <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.45, marginTop: 2 }}>
+              {remindersEnabled
+                ? "Appointment, payment, and seasonal reminders can appear and send according to the saved settings below."
+                : "No appointment, payment, or seasonal reminders will appear or send. Your setup stays saved for when you turn this back on."}
+            </div>
+          </div>
+          <Toggle on={remindersEnabled} onChange={v => setCfg("remindersMasterOn", v)} />
+        </div>
+      </div>
+
+      {!remindersEnabled && (
+        <div style={{ background: hexA(T.primary, 0.06), borderRadius: 12, padding: "12px 14px", fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>
+          Reminders are safely paused. Reports, invoices, normal texts, On My Way messages, and other app features are unaffected.
+        </div>
+      )}
+
+      {remindersEnabled && (<>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Appointment Reminders</div>
@@ -25125,6 +25152,7 @@ function ReminderSettings({ scheduleCfg, setScheduleCfg, email, setEmail, brandi
           Tags: {"{first}"}, {"{company}"}, {"{date}"}. When a reminder's date is ~2 weeks out, eligible clients appear in your Reminders queue to send. Fields start empty.
         </div>
       </div>
+      </>)}
     </div>
   );
 }
@@ -25132,6 +25160,7 @@ function ReminderSettings({ scheduleCfg, setScheduleCfg, email, setEmail, brandi
 function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setScheduleCfg, email, setEmail, branding, reminderLog, setReminderLog, T, workspaceScope = "" }) {
   const reminderVp = useViewport();
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
+  const remindersEnabled = reminderSystemEnabled(cfg);
   const setCfg = (k, v) => setScheduleCfg(cur => ({ ...DEFAULT_SCHEDULE_CFG, ...(cur || {}), [k]: v }));
   const now = new Date();
   const queue = buildReminderQueue(schedule, clients, cfg, reminderLog, now);
@@ -25173,6 +25202,13 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
   useEffect(() => {
     patchWorkspaceState(workspaceScope, { comms: { reminders: { reviewSid: review?.sid == null ? null : String(review.sid), reviewMsg } } });
   }, [workspaceScope, review?.sid, reviewMsg]);
+  useEffect(() => {
+    if (!remindersEnabled && review) {
+      setReview(null);
+      setReviewMsg("");
+      setReminderErr("");
+    }
+  }, [remindersEnabled, review]);
   const markSent = (sid, method) => setReminderLog(m => ({ ...m, [sid]: { sentAt: new Date().toISOString(), method } }));
   const undoSent = (sid) => setReminderLog(m => { const n = { ...m }; delete n[sid]; return n; });
 
@@ -25194,6 +25230,10 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
 
   const sendReview = async () => {
     if (!review) return;
+    if (!remindersEnabled) {
+      setReminderErr("Reminders are paused. Turn them on under Comms → Settings before sending.");
+      return;
+    }
     setSendBusy(true);
     const paymentUrl = review.kind === "payment" && /^https?:\/\//i.test(String(review.link || "")) ? String(review.link) : "";
     const outgoing = review.kind === "payment"
@@ -25273,6 +25313,23 @@ function RemindersScreen({ schedule, clients, invoices, scheduleCfg, setSchedule
       </div>
     );
   };
+
+  if (!remindersEnabled) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+        <CommsPageHeader T={T} icon="calendar" title="Reminders" description="Appointment, payment, and seasonal reminders are paused." />
+        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 18, padding: reminderVp.isPhone ? "24px 18px" : "28px 24px", textAlign: "center" }}>
+          <div style={{ width: 48, height: 48, margin: "0 auto 12px", borderRadius: 16, background: hexA(T.primary, 0.09), color: T.primary, display: "grid", placeItems: "center" }}>
+            <Icon name="calendar" size={21} />
+          </div>
+          <div style={{ fontSize: 17, fontWeight: 850, color: T.text }}>Reminders are paused</div>
+          <div style={{ maxWidth: 430, margin: "6px auto 0", fontSize: 12.5, lineHeight: 1.55, color: T.textMuted }}>
+            Nothing will appear here or send while the master switch is off. Your appointment, payment, and seasonal reminder setup is still saved. Turn it back on under Comms → Settings when you are ready.
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>

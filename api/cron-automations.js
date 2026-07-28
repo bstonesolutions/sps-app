@@ -23,6 +23,7 @@ import { mutateAppState, NO_APP_STATE_CHANGE, readAppStateVersioned } from "./_a
 import { pushOwner } from "./_push.js";
 import { pruneExpiredTrackingRecords } from "./_tracking-cleanup.js";
 import { appendClientLinks, ensureClientLinkChoices } from "../clientMessageLinks.js";
+import { reminderSystemEnabled } from "../reminderSystem.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://ysqarusrewceezckawlo.supabase.co";
 const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -128,7 +129,7 @@ async function sendQuo(to, message) {
 // ── due-message collectors (pure: build the list, no sends) ─────────────────────────────────────
 function collectAppointments(now, schedule, clientsById, cfg, email, reminderLog) {
   const out = [];
-  if (!cfg.remindersOn) return out;
+  if (!reminderSystemEnabled(cfg) || !cfg.remindersOn) return out;
   const tpl = email.smsReminder ?? T.smsReminder;
   const leadMs = (Number(cfg.reminderLeadHours) || 24) * 3600000;
   const [sh, sm] = String(cfg.reminderSendAt || "17:00").split(":").map(Number);
@@ -152,7 +153,9 @@ function collectAppointments(now, schedule, clientsById, cfg, email, reminderLog
 }
 function collectSeasonal(now, clients, cfg, email, reminderLog) {
   const out = [];
-  if (!cfg.remindersOn) return out;
+  // Seasonal reminders have their own saved definitions and are independent of
+  // the appointment-only toggle. The Reminders master still pauses them all.
+  if (!reminderSystemEnabled(cfg)) return out;
   const year = new Date(now).getFullYear();
   const today = new Date(new Date(now).toDateString()).getTime();
   for (const r of (cfg.seasonalReminders || [])) {
@@ -172,7 +175,7 @@ function collectSeasonal(now, clients, cfg, email, reminderLog) {
 }
 function collectPaymentNudges(now, invoices, clientsById, cfg, email, autoLog) {
   const out = [];
-  if (!cfg.paymentNudgeOn) return out;
+  if (!reminderSystemEnabled(cfg) || !cfg.paymentNudgeOn) return out;
   const tpl = email.smsPaymentNudge ?? T.smsPaymentNudge;
   const after = Number(cfg.paymentNudgeAfterDays) || 3, repeat = Number(cfg.paymentNudgeRepeatDays) || 7, max = Number(cfg.paymentNudgeMax) || 3;
   const today = new Date(new Date(now).toDateString()).getTime();
