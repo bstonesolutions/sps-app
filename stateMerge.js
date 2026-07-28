@@ -80,8 +80,8 @@ const ESTIMATE_LEGACY_AGGREGATE_FIELDS = [
   "tax",
 ];
 
-const ESTIMATE_STATUS_FIELDS = ["status", "sentAt", "approvedAt", "declinedAt"];
-const ESTIMATE_CUSTOMER_STATUSES = new Set(["sent", "approved", "declined"]);
+const ESTIMATE_STATUS_FIELDS = ["status", "sentAt", "approvedAt", "declinedAt", "completedAt"];
+const ESTIMATE_CUSTOMER_STATUSES = new Set(["sent", "approved", "declined", "complete"]);
 
 function fieldSnapshot(value, fields) {
   if (!isObject(value)) return value;
@@ -405,6 +405,7 @@ function mergeObject(base, local, remote, path, ctx) {
     delete result.sentAt;
     delete result.approvedAt;
     delete result.declinedAt;
+    delete result.completedAt;
   }
   return result;
 }

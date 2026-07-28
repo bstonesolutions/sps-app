@@ -135,11 +135,12 @@ export function withEstimateTotals(estimate, fallbackRate = 0) {
 
 export function withEstimateRevision(current, patch, fallbackRate = 0, { customerVisible = true } = {}) {
   const next = { ...current, ...patch };
-  if (customerVisible && ["sent", "approved", "declined"].includes(String(current?.status || "").toLowerCase())) {
+  if (customerVisible && ["sent", "approved", "declined", "complete"].includes(String(current?.status || "").toLowerCase())) {
     next.status = "draft";
     delete next.approvedAt;
     delete next.declinedAt;
     delete next.sentAt;
+    delete next.completedAt;
   }
   const normalized = withEstimateTotals(next, fallbackRate);
   // A controlled decimal field must be allowed to hold an in-progress value such as "6."

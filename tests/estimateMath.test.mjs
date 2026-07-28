@@ -228,6 +228,43 @@ test("internal cost corrections preserve client approval while visible quote edi
   assert.equal(repriced.sentAt, undefined);
 });
 
+test("customer-visible edits reopen complete estimates without discarding their invoice link", () => {
+  const completed = withEstimateTotals({
+    id: "est-complete",
+    status: "complete",
+    completedAt: "2026-07-28T16:00:00.000Z",
+    linkedInvoiceId: "invoice-1",
+    linkedInvoiceNumber: "INV-101",
+    items: [{ id: "line-1", desc: "Service", qty: "1", price: "100" }],
+  });
+
+  const revised = withEstimateRevision(completed, { title: "Revised service" });
+
+  assert.equal(revised.status, "draft");
+  assert.equal(revised.completedAt, undefined);
+  assert.equal(revised.linkedInvoiceId, "invoice-1");
+  assert.equal(revised.linkedInvoiceNumber, "INV-101");
+});
+
+test("internal edits preserve a complete estimate and its completion metadata", () => {
+  const completedAt = "2026-07-28T16:00:00.000Z";
+  const completed = withEstimateTotals({
+    id: "est-complete",
+    status: "complete",
+    completedAt,
+    linkedInvoiceId: "invoice-1",
+    items: [{ id: "line-1", desc: "Service", qty: "1", price: "100" }],
+  });
+
+  const corrected = withEstimateRevision(completed, {
+    items: [{ ...completed.items[0], unitCost: "40", costKnown: true }],
+  }, 0, { customerVisible: false });
+
+  assert.equal(corrected.status, "complete");
+  assert.equal(corrected.completedAt, completedAt);
+  assert.equal(corrected.linkedInvoiceId, "invoice-1");
+});
+
 test("a zero-revenue estimate keeps margin undefined without inventing a percentage", () => {
   const totals = estimateProfitTotals({
     items: [{ id: "free", desc: "Warranty visit", qty: "1", price: "0", unitCost: "0", costKnown: true }],

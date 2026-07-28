@@ -24,13 +24,64 @@ export function estimateDraftInvoiceId(estimate) {
 }
 
 export function findInvoiceForEstimate(invoices, estimate) {
+  const list = Array.isArray(invoices) ? invoices : [];
+  const linkedInvoiceId = text(estimate?.linkedInvoiceId);
+  if (linkedInvoiceId) {
+    const linked = list.find((invoice) => text(invoice?.id) === linkedInvoiceId);
+    if (linked) return linked;
+  }
+
   const estimateId = text(estimate?.id);
   let deterministicId = "";
-  try { deterministicId = estimateDraftInvoiceId(estimate); } catch (_) { return null; }
-  return (Array.isArray(invoices) ? invoices : []).find((invoice) => (
+  try { deterministicId = estimateDraftInvoiceId(estimate); } catch (_) {}
+  return list.find((invoice) => (
     (!!estimateId && text(invoice?.sourceEstimateId) === estimateId)
-    || text(invoice?.id) === deterministicId
+    || (!!deterministicId && text(invoice?.id) === deterministicId)
   )) || null;
+}
+
+const normalizedClientName = (value) => text(value).replace(/\s+/g, " ").toLocaleLowerCase();
+
+export function completeEstimateWithInvoice(
+  estimate,
+  invoice,
+  { completedAt = new Date().toISOString() } = {},
+) {
+  const estimateId = text(estimate?.id);
+  if (!estimate || typeof estimate !== "object" || !estimateId) {
+    throw new Error("Save the estimate before completing it.");
+  }
+
+  const invoiceId = text(invoice?.id);
+  if (!invoice || typeof invoice !== "object" || !invoiceId) {
+    throw new Error("Save the invoice before completing the estimate.");
+  }
+
+  const estimateClientId = text(estimate.clientId);
+  const invoiceClientId = text(invoice.clientId);
+  let sameClient = false;
+  if (estimateClientId && invoiceClientId) {
+    sameClient = estimateClientId === invoiceClientId;
+  } else {
+    const estimateClientName = normalizedClientName(estimate.clientName);
+    const invoiceClientName = normalizedClientName(invoice.clientName);
+    sameClient = !!estimateClientName && estimateClientName === invoiceClientName;
+  }
+  if (!sameClient) {
+    throw new Error("The estimate and invoice must belong to the same client.");
+  }
+
+  if (text(invoice.status).toLowerCase() === "void") {
+    throw new Error("A void invoice cannot complete an estimate.");
+  }
+
+  return {
+    ...estimate,
+    status: "complete",
+    linkedInvoiceId: invoice.id,
+    linkedInvoiceNumber: invoice.number || "",
+    completedAt,
+  };
 }
 
 function invoiceLineFromEstimate(line, estimate, index) {

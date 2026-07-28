@@ -229,6 +229,7 @@ test("returns a concurrently revised estimate to draft instead of preserving an 
     { status: "sent", sentAt: "2026-07-14T14:00:00.000Z" },
     { status: "approved", sentAt: "2026-07-14T14:00:00.000Z", approvedAt: "2026-07-14T14:05:00.000Z" },
     { status: "declined", sentAt: "2026-07-14T14:00:00.000Z", declinedAt: "2026-07-14T14:05:00.000Z" },
+    { status: "complete", completedAt: "2026-07-14T14:05:00.000Z", linkedInvoiceId: "invoice-1" },
   ];
 
   transitions.forEach((transition) => {
@@ -242,6 +243,7 @@ test("returns a concurrently revised estimate to draft instead of preserving an 
     assert.equal(Object.hasOwn(estimate, "sentAt"), false);
     assert.equal(Object.hasOwn(estimate, "approvedAt"), false);
     assert.equal(Object.hasOwn(estimate, "declinedAt"), false);
+    assert.equal(Object.hasOwn(estimate, "completedAt"), false);
   });
 });
 

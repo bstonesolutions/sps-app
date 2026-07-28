@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  completeEstimateWithInvoice,
   estimateDraftInvoiceId,
   estimateToDraftInvoice,
   findInvoiceForEstimate,
@@ -135,6 +136,105 @@ test("conversion identity is deterministic and an existing linked invoice is reu
 
   const legacy = { id: estimateDraftInvoiceId({ number: "EST-7" }), number: "INV-78" };
   assert.equal(findInvoiceForEstimate([legacy], { number: "EST-7" }), legacy);
+});
+
+test("an estimate's explicit invoice link takes precedence over source and deterministic matches", () => {
+  const estimate = {
+    id: "est-42",
+    number: "EST-42",
+    linkedInvoiceId: "invoice-selected",
+  };
+  const deterministic = { id: estimateDraftInvoiceId(estimate), number: "INV-1" };
+  const sourced = { id: "invoice-sourced", sourceEstimateId: estimate.id, number: "INV-2" };
+  const selected = { id: "invoice-selected", number: "INV-3" };
+
+  assert.equal(findInvoiceForEstimate([deterministic, sourced, selected], estimate), selected);
+  assert.equal(
+    findInvoiceForEstimate([sourced], { ...estimate, linkedInvoiceId: "invoice-missing" }),
+    sourced,
+  );
+});
+
+test("an invoice can complete a saved estimate without matching approval state or totals", () => {
+  const estimate = {
+    id: "estimate-1",
+    clientId: 42,
+    clientName: "Original name",
+    status: "draft",
+    total: "$100.00",
+    title: "Repair",
+  };
+  const invoice = {
+    id: "invoice-1",
+    clientId: "42",
+    clientName: "Updated name",
+    number: "INV-101",
+    status: "Sent",
+    total: "$250.00",
+  };
+  const completedAt = "2026-07-28T16:00:00.000Z";
+
+  const completed = completeEstimateWithInvoice(estimate, invoice, { completedAt });
+
+  assert.deepEqual(completed, {
+    ...estimate,
+    status: "complete",
+    linkedInvoiceId: "invoice-1",
+    linkedInvoiceNumber: "INV-101",
+    completedAt,
+  });
+  assert.notEqual(completed, estimate);
+});
+
+test("completion uses normalized client names when an imported invoice has no client ID", () => {
+  const estimate = { id: "estimate-1", clientName: "  Jordan   HALE " };
+  const invoice = { id: "invoice-1", clientName: "jordan hale", status: "Paid" };
+
+  assert.equal(
+    completeEstimateWithInvoice(estimate, invoice, { completedAt: "now" }).status,
+    "complete",
+  );
+  assert.equal(completeEstimateWithInvoice(
+    { ...estimate, clientId: "client-1" },
+    invoice,
+    { completedAt: "now" },
+  ).status, "complete");
+});
+
+test("completion rejects unsaved records, client mismatches, and void invoices", () => {
+  const estimate = { id: "estimate-1", clientId: "client-1", clientName: "Jordan Hale" };
+  const invoice = {
+    id: "invoice-1",
+    clientId: "client-1",
+    clientName: "Jordan Hale",
+    number: "INV-101",
+    status: "Sent",
+  };
+
+  assert.throws(
+    () => completeEstimateWithInvoice({ ...estimate, id: "" }, invoice, { completedAt: "now" }),
+    /Save the estimate/i,
+  );
+  assert.throws(
+    () => completeEstimateWithInvoice(estimate, { ...invoice, id: "" }, { completedAt: "now" }),
+    /Save the invoice/i,
+  );
+  assert.throws(
+    () => completeEstimateWithInvoice(
+      estimate,
+      { ...invoice, clientId: "client-2" },
+      { completedAt: "now" },
+    ),
+    /same client/i,
+  );
+  assert.throws(
+    () => completeEstimateWithInvoice(
+      estimate,
+      { ...invoice, status: " void " },
+      { completedAt: "now" },
+    ),
+    /void invoice/i,
+  );
 });
 
 test("conversion fails closed for missing client, empty work, or a cents mismatch", () => {
