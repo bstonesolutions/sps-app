@@ -26,6 +26,21 @@ export const estimateHasValidDays = (estimate) => {
 const roundMoney = (value) => Math.round((estimateNumberValue(value) + Number.EPSILON) * 100) / 100;
 
 const hasValue = (value) => value != null && String(value).trim() !== "";
+export const ESTIMATE_LINE_TAX_MODEL = "line-item-v1";
+
+export function defaultEstimateLineTaxable(kind, item = {}) {
+  if (typeof item.taxable === "boolean") return item.taxable;
+  return ["product", "treatment", "part", "bundle"].includes(String(kind || item.kind || "").trim().toLowerCase());
+}
+
+export function estimateLineIsTaxable(item, estimate) {
+  if (!estimate || estimate.taxEnabled !== true) return false;
+  if (typeof item?.taxable === "boolean") return item.taxable;
+  // Estimates saved before line-item tax existed were quote-wide. Preserve those customer-visible
+  // totals until a draft is deliberately upgraded or an old sent estimate is revised.
+  if (estimate.taxModel !== ESTIMATE_LINE_TAX_MODEL) return true;
+  return defaultEstimateLineTaxable(item?.kind, item);
+}
 
 export const estimateLineQuantity = (item) => {
   const raw = item && item.qty;
@@ -99,15 +114,18 @@ export function estimateProfitTotals(estimate) {
 export function estimateTotals(estimate, fallbackRate = 0) {
   const items = Array.isArray(estimate && estimate.items) ? estimate.items : [];
   const subtotal = roundMoney(items.reduce((sum, item) => sum + estimateLineAmount(item), 0));
+  const taxableSubtotal = roundMoney(items.reduce((sum, item) => (
+    sum + (estimateLineIsTaxable(item, estimate) ? estimateLineAmount(item) : 0)
+  ), 0));
   const rawRate = estimate && estimate.taxRate != null ? estimate.taxRate : fallbackRate;
   const taxRate = Math.max(0, estimateNumberValue(rawRate));
   // Legacy estimates predate taxEnabled. Treating only an explicit true as taxable prevents
-  // historical sent/approved estimates from silently increasing when this feature ships.
-  // Estimate tax is quote-wide: the single toggle/rate applies to the entire subtotal. Do not
-  // imply a selective per-line rule that the estimate workflow does not offer.
+  // historical estimates from silently increasing when this feature ships. Estimates without the
+  // line-item model retain their original quote-wide calculation; new estimates tax only the
+  // service/product lines explicitly marked taxable.
   const taxEnabled = !!(estimate && estimate.taxEnabled === true);
-  const tax = taxEnabled ? roundMoney(subtotal * taxRate / 100) : 0;
-  return { subtotal, taxRate, taxEnabled, tax, total: roundMoney(subtotal + tax) };
+  const tax = taxEnabled ? roundMoney(taxableSubtotal * taxRate / 100) : 0;
+  return { subtotal, taxableSubtotal, taxRate, taxEnabled, tax, total: roundMoney(subtotal + tax) };
 }
 
 export function formatEstimateMoney(value) {

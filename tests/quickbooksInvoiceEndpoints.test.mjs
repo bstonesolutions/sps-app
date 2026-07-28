@@ -134,6 +134,9 @@ test("QuickBooks sync emits stable line identity, item identity, tax code, and c
       if (query.includes("FROM Payment")) {
         return jsonResponse({ QueryResponse: { Payment: [] } });
       }
+      if (query.includes("FROM CreditMemo")) {
+        return jsonResponse({ QueryResponse: { CreditMemo: [] } });
+      }
     }
     throw new Error(`Unexpected fetch: ${href}`);
   });
@@ -156,6 +159,115 @@ test("QuickBooks sync emits stable line identity, item identity, tax code, and c
   assert.equal(first.qbContentFingerprint, fingerprintQuickBooksInvoiceContent(invoice));
   assert.equal(second.lineItems[0].id, first.lineItems[0].id);
   assert.equal(second.qbContentFingerprint, first.qbContentFingerprint);
+  assert.deepEqual(firstRes.body.creditMemos, []);
+  assert.deepEqual(firstRes.body.unappliedPayments, []);
+  assert.deepEqual(firstRes.body.reconciliation.qbInvoiceIds, ["1964"]);
+  assert.equal(firstRes.body.reconciliation.complete, true);
+  assert.equal(firstRes.body.accounting.openInvoiceBalance, 1502.02);
+});
+
+test("QuickBooks sync returns credit memos and exact net receivables metadata", async () => {
+  const invoice = {
+    ...existingInvoice(),
+    TotalAmt: 500,
+    Balance: 274.46,
+  };
+  const creditMemo = {
+    Id: "cm-9",
+    SyncToken: "2",
+    MetaData: { LastUpdatedTime: "2026-07-28T13:00:00-04:00" },
+    DocNumber: "CM-9",
+    TxnDate: "2026-07-28",
+    TotalAmt: 100,
+    RemainingCredit: 74.46,
+    CustomerRef: { value: "42", name: "Generic Client" },
+  };
+
+  installAuthAndTokenMocks(async (href) => {
+    const url = new URL(href);
+    if (url.pathname.endsWith("/query")) {
+      const query = url.searchParams.get("query") || "";
+      if (query.includes("FROM Invoice")) {
+        return jsonResponse({ QueryResponse: { Invoice: [invoice] } });
+      }
+      if (query.includes("FROM Customer")) {
+        return jsonResponse({ QueryResponse: { Customer: [] } });
+      }
+      if (query.includes("FROM Payment")) {
+        return jsonResponse({ QueryResponse: { Payment: [] } });
+      }
+      if (query.includes("FROM CreditMemo")) {
+        return jsonResponse({ QueryResponse: { CreditMemo: [creditMemo] } });
+      }
+    }
+    throw new Error(`Unexpected fetch: ${href}`);
+  });
+
+  const res = mockResponse();
+  await syncHandler(authenticatedRequest(), res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.creditMemos.length, 1);
+  assert.equal(res.body.creditMemos[0].remainingCredit, 74.46);
+  assert.deepEqual(res.body.reconciliation.qbInvoiceIds, ["1964"]);
+  assert.deepEqual(res.body.reconciliation.qbCreditMemoIds, ["cm-9"]);
+  assert.equal(res.body.accounting.openInvoiceBalance, 274.46);
+  assert.equal(res.body.accounting.availableCreditBalance, 74.46);
+  assert.equal(res.body.accounting.netOpenReceivables, 200);
+  assert.equal(res.body.accounting.complete, true);
+});
+
+test("QuickBooks sync subtracts unapplied payments from net receivables", async () => {
+  const invoice = {
+    ...existingInvoice(),
+    TotalAmt: 500,
+    Balance: 500,
+  };
+  const payment = {
+    Id: "payment-9",
+    SyncToken: "2",
+    MetaData: { LastUpdatedTime: "2026-07-28T13:00:00-04:00" },
+    PaymentRefNum: "ACH-9",
+    TxnDate: "2026-07-28",
+    TotalAmt: 143.05,
+    UnappliedAmt: 143.05,
+    CustomerRef: { value: "42", name: "Generic Client" },
+    Line: [],
+  };
+
+  installAuthAndTokenMocks(async (href) => {
+    const url = new URL(href);
+    if (url.pathname.endsWith("/query")) {
+      const query = url.searchParams.get("query") || "";
+      if (query.includes("FROM Invoice")) {
+        return jsonResponse({ QueryResponse: { Invoice: [invoice] } });
+      }
+      if (query.includes("FROM Customer")) {
+        return jsonResponse({ QueryResponse: { Customer: [] } });
+      }
+      if (query.includes("FROM Payment")) {
+        return jsonResponse({ QueryResponse: { Payment: [payment] } });
+      }
+      if (query.includes("FROM CreditMemo")) {
+        return jsonResponse({ QueryResponse: { CreditMemo: [] } });
+      }
+    }
+    throw new Error(`Unexpected fetch: ${href}`);
+  });
+
+  const res = mockResponse();
+  await syncHandler(authenticatedRequest(), res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.unappliedPayments.length, 1);
+  assert.equal(res.body.unappliedPayments[0].unappliedAmount, 143.05);
+  assert.equal(res.body.accounting.openInvoiceBalance, 500);
+  assert.equal(res.body.accounting.availableCreditBalance, 143.05);
+  assert.equal(res.body.accounting.netOpenReceivables, 356.95);
+  assert.equal(res.body.accounting.openTransactionCount, 2);
+  assert.equal(res.body.accounting.paymentsReceivedThisMonth, 143.05);
+  assert.equal(res.body.accounting.complete, true);
+  assert.deepEqual(res.body.reconciliation.qbPaymentIds, ["payment-9"]);
 });
 
 test("QuickBooks update preserves line/item ids, uses sparse update, sends exact native tax, and returns canonical fingerprint", async () => {

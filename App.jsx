@@ -9,9 +9,11 @@ import { createPortalDataFence, portalVisitMatchesReference, portalVisitReferenc
 import { foregroundFenceTransition, selectActiveEnRouteStop, selectArrivalWatchStop } from "./geofenceSafety";
 import { assessInboundLead, findMisfiledImportedLead } from "./leadQualification";
 import { brandLogoSource } from "./brandAssets";
-import { estimateHasValidDays, estimateHasValidTaxRate, estimateLineAmount, estimateLineCost, estimateLineHasKnownCost, estimateLineQuantity, estimateLineUnitPrice, estimateNumberIsValid, estimateNumberValue, estimateProfitTotals, estimateTotals, formatEstimateMoney, withEstimateRevision, withEstimateTotals } from "./estimateMath";
+import { ESTIMATE_LINE_TAX_MODEL, defaultEstimateLineTaxable, estimateHasValidDays, estimateHasValidTaxRate, estimateLineAmount, estimateLineCost, estimateLineHasKnownCost, estimateLineIsTaxable, estimateLineQuantity, estimateLineUnitPrice, estimateNumberIsValid, estimateNumberValue, estimateProfitTotals, estimateTotals, formatEstimateMoney, withEstimateRevision, withEstimateTotals } from "./estimateMath";
 import { catalogItemFinancials, estimateLineFromCatalog, estimateLineFromPartsBundle } from "./estimateCatalog";
-import { completeEstimateWithInvoice, estimateToDraftInvoice, findInvoiceForEstimate } from "./estimateInvoiceConversion";
+import { completeEstimateWithInvoice, estimateTaxMigrationImpact, estimateToDraftInvoice, findInvoiceForEstimate, normalizeEstimateTaxForInvoice } from "./estimateInvoiceConversion";
+import { findScheduledStopForEstimate, scheduleApprovedEstimate } from "./estimateScheduleLink";
+import { findInvoiceDeletionReferences, invoiceDeletionBlockedMessage } from "./invoiceDeletionGuard";
 import { automaticReportChannels, reportEmailUiResult } from "./reportDelivery";
 import { buildCompletedReportIndex, canRebuildCompletedReport, resolveCompletedReport } from "./completedReport";
 import { appendClientLinks, clientLinkFooter, withoutClientLinks } from "./clientMessageLinks";
@@ -9739,12 +9741,18 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
   });
   const [readings, setReadings] = useState({});
   const [readingStatus, setReadingStatus] = useState({}); // testName -> "good" | "attention" | "treated"
-  const [tx, setTx] = useState({});       // treatmentId -> oz
-  const [partsUsed, setPartsUsedState] = useState({}); // partId -> qty
-  const [partBill, setPartBill] = useState({}); // partId -> bool (bill to client?)
+  const plannedMaterials = Array.isArray(stop.plannedMaterials) ? stop.plannedMaterials : [];
+  const plannedQuantities = (kind) => Object.fromEntries(
+    plannedMaterials
+      .filter((item) => String(item?.kind || "").toLowerCase() === kind && item?.refId != null)
+      .map((item) => [item.refId, String(item.quantity || "")]),
+  );
+  const [tx, setTx] = useState(() => plannedQuantities("treatment"));       // treatmentId -> oz
+  const [partsUsed, setPartsUsedState] = useState(() => plannedQuantities("part")); // partId -> qty
+  const [partBill, setPartBill] = useState(() => Object.fromEntries(Object.keys(plannedQuantities("part")).map((id) => [id, false]))); // estimate-included parts are not billed twice
   const [usageLoc, setUsageLoc] = useState(""); // which location stock is pulled from
-  const [productsQty, setProductsQty] = useState({}); // productId -> qty purchased (billed like parts)
-  const [productBill, setProductBill] = useState({}); // productId -> bill client at sale price (default true)
+  const [productsQty, setProductsQty] = useState(() => plannedQuantities("product")); // productId -> qty purchased (billed like parts)
+  const [productBill, setProductBill] = useState(() => Object.fromEntries(Object.keys(plannedQuantities("product")).map((id) => [id, false]))); // estimate-included products are not billed twice
   const [notesClient, setNotesClient] = useState("");
   const [notesOffice, setNotesOffice] = useState("");
   const [lastOpen, setLastOpen] = useState(false);   // "Last visit" context card (collapsed by default)
@@ -9756,9 +9764,9 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
   // All three inventory sections (Treatments / Products / Parts) are collapsed by default and
   // each has its own search box that shows whenever the section is open. Keeps the complete
   // sheet short — tap a section to expand, search to find an item fast.
-  const [txOpen, setTxOpen] = useState(false);            // Treatments collapsed by default
-  const [partsOpen, setPartsOpen] = useState(false);      // Parts collapsed by default
-  const [productsOpen, setProductsOpen] = useState(false); // Products Purchased collapsed by default
+  const [txOpen, setTxOpen] = useState(() => plannedMaterials.some((item) => item.kind === "treatment"));
+  const [partsOpen, setPartsOpen] = useState(() => plannedMaterials.some((item) => item.kind === "part"));
+  const [productsOpen, setProductsOpen] = useState(() => plannedMaterials.some((item) => item.kind === "product"));
   const [txSearch, setTxSearch] = useState("");           // filter the treatments list
   const [partSearch, setPartSearch] = useState("");       // filter the parts list (big catalogs)
   const [productSearch, setProductSearch] = useState("");  // filter the products list
@@ -9771,7 +9779,9 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     if (!onUpdateStop) return;
     const [y, m, d] = (edDateISO || "").split("-");
     const newDate = (y && m && d) ? `${m}/${d}/${y}` : (dayDate || "");
-    const c = (clients || []).find(x => String(x.id) === String(edClientId));
+    const c = stop.sourceEstimateId
+      ? (clients || []).find(x => String(x.id) === String(stop.clientId ?? stop.id ?? ""))
+      : (clients || []).find(x => String(x.id) === String(edClientId));
     onUpdateStop({ date: newDate, ...(c ? { id: c.id, clientId: c.id, client: c.name, address: c.address || "" } : {}) });
     if (newDate && dayDate && newDate !== dayDate) onClose(); else setDetailsOpen(false);
   };
@@ -9813,7 +9823,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
   // Services on this stop (editable price per stop). Blank prices default to the per-visit rate;
   // a stop added with just a type seeds one service at that rate.
   const initServices = (() => {
-    const fromStop = (stop.services || []).map(s => typeof s === "string" ? { name: s, price: "" } : { name: s.name, price: s.price || "" });
+    const fromStop = (stop.services || []).map(s => typeof s === "string" ? { name: s, price: "" } : { ...s, name: s.name, price: s.price || "" });
     if (fromStop.length) return fromStop.map(s => ({ ...s, price: s.price || perVisitMaintRate }));
     if (perVisitMaintRate || stop.type) return [{ name: stop.type || "Service", price: perVisitMaintRate }];
     return [];
@@ -9979,7 +9989,10 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
   const effRate = effHours > 0 ? num(revenue) / effHours : null;
   const profState = effRate == null ? "none" : (snapshotTarget == null ? "neutral" : (effRate >= snapshotTarget ? "good" : "low"));
   const profColor = profState === "good" ? "#16a34a" : profState === "low" ? "#E5484D" : T.textMuted;
-  const savedInvoice = normalizeCompletionInvoice(revenue);
+  // Estimate-origin work is billed through its one linked/converted invoice. Keep the approved
+  // amount in quoted_price/breakdown for profit reporting, but never assign the same sale to the
+  // client's legacy visit balance a second time.
+  const savedInvoice = stop.sourceEstimateId ? "$0" : normalizeCompletionInvoice(revenue);
 
   const buildEntry = () => ({
     sid: stop.sid,
@@ -10004,6 +10017,12 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     actual_hours: effHours > 0 ? effHours : null,
     target_hourly_rate: snapshotTarget,
     arrivedAt: arrivedAt || null,
+    ...(stop.sourceEstimateId ? {
+      sourceEstimateId: stop.sourceEstimateId,
+      sourceEstimateNumber: stop.sourceEstimateNumber || "",
+      linkedInvoiceId: stop.linkedInvoiceId || "",
+      billingDisposition: stop.linkedInvoiceId ? "linked-invoice" : "convert-estimate-once",
+    } : {}),
     breakdown: {
       revenue: num(revenue), minutes: Math.round(num(actualHours) * 60), hourlyRate: num(hourlyRate),
       labor: laborCost, treatment: treatmentCost, treatmentRetail, parts: partsCost, partsBilledRetail, product: productCost, productBilledRetail: productsBilledRetail,
@@ -10019,6 +10038,9 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     setSaveError("");
     try {
       if (!savedInvoice) throw new Error("Enter a valid nonnegative visit amount before saving.");
+      if (stop.sourceEstimateId && !stop.linkedInvoiceId) {
+        throw new Error("This estimate-linked stop needs its draft invoice first. Open the estimate, choose Create draft invoice, then reopen this stop.");
+      }
       const completionEntry = buildEntry();
       const fingerprint = JSON.stringify(completionEntry);
       // An exact manual retry reuses its key after a lost response. If the tech edits the draft
@@ -10359,7 +10381,9 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
             <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 10 }}>
               <div>
                 <label style={labelStyle}>Client</label>
-                <ClientCombobox clients={clients} value={edClientId} onChange={setEdClientId} T={T} />
+                {stop.sourceEstimateId
+                  ? <div style={{ minHeight: 44, padding: "11px 13px", border: `1px solid ${T.border}`, borderRadius: 12, background: T.surfaceAlt, color: T.text, fontSize: 13.5, fontWeight: 700, boxSizing: "border-box" }}>{client?.name || stop.client || "Estimate client"} <span style={{ color: T.textMuted, fontWeight: 500 }}>· locked to estimate</span></div>
+                  : <ClientCombobox clients={clients} value={edClientId} onChange={setEdClientId} T={T} />}
               </div>
               <div>
                 <label style={labelStyle}>Date</label>
@@ -10728,6 +10752,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
               const over = qty > here;
               const unit = p.unit || "pieces";
               const willBill = partBill[p.id] !== false; // default true
+              const includedInEstimate = !!stop.sourceEstimateId && plannedMaterials.some((item) => item.kind === "part" && String(item.refId) === String(p.id));
               const shownPrice = willBill ? num(p.retailPer) : num(p.costPer);
               return (
                 <div key={p.id} style={{ background: T.surfaceAlt, borderRadius: 10, padding: "8px 12px" }}>
@@ -10743,13 +10768,14 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
                     <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: qty > 0 ? T.text : T.textMuted }}>{money(qty * shownPrice)}</div>
                   </div>
                   {qty > 0 && (
-                    <button onClick={() => setPartBill(b => ({ ...b, [p.id]: !willBill }))}
+                    <button onClick={() => { if (!includedInEstimate) setPartBill(b => ({ ...b, [p.id]: !willBill })); }}
+                      disabled={includedInEstimate}
                       style={{ minHeight: 44, marginTop: 4, display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", padding: "8px 0" }}>
                       <div style={{ width: 34, height: 20, borderRadius: 100, background: willBill ? T.primary : T.border, position: "relative", transition: "background 0.2s", flexShrink: 0 }}>
                         <div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: willBill ? 16 : 2, transition: "left 0.2s" }} />
                       </div>
                       <span style={{ fontSize: 11.5, color: willBill ? T.primary : T.textMuted, fontWeight: 700 }}>
-                        {willBill ? `Bill client at retail (${money(qty * num(p.retailPer))})` : "Internal cost only — not billed"}
+                        {includedInEstimate ? "Included in approved estimate — inventory only" : willBill ? `Bill client at retail (${money(qty * num(p.retailPer))})` : "Internal cost only — not billed"}
                       </span>
                     </button>
                   )}
@@ -10774,6 +10800,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
             {renderByCategory(products.filter(p => { const s = productSearch.trim().toLowerCase(); return !s || (p.name || "").toLowerCase().includes(s); }), "product", (p) => {
               const qty = num(productsQty[p.id]);
               const willBill = productBill[p.id] !== false; // default: billed to client
+              const includedInEstimate = !!stop.sourceEstimateId && plannedMaterials.some((item) => item.kind === "product" && String(item.refId) === String(p.id));
               return (
                 <div key={p.id} style={{ background: T.surfaceAlt, borderRadius: 10, padding: "8px 12px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: completeVp.isPhone ? "wrap" : "nowrap" }}>
@@ -10788,13 +10815,14 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
                     <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: qty > 0 ? T.text : T.textMuted }}>{money(qty * (willBill ? num(p.price) : num(p.cost)))}</div>
                   </div>
                   {qty > 0 && (
-                    <button onClick={() => setProductBill(b => ({ ...b, [p.id]: !willBill }))}
+                    <button onClick={() => { if (!includedInEstimate) setProductBill(b => ({ ...b, [p.id]: !willBill })); }}
+                      disabled={includedInEstimate}
                       style={{ minHeight: 44, marginTop: 4, display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", padding: "8px 0" }}>
                       <div style={{ width: 34, height: 20, borderRadius: 100, background: willBill ? T.primary : T.border, position: "relative", transition: "background 0.2s", flexShrink: 0 }}>
                         <div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: willBill ? 16 : 2, transition: "left 0.2s" }} />
                       </div>
                       <span style={{ fontSize: 11.5, color: willBill ? T.primary : T.textMuted, fontWeight: 700 }}>
-                        {willBill ? `Bill client (${money(qty * num(p.price))})` : "Not billed — internal"}
+                        {includedInEstimate ? "Included in approved estimate — inventory only" : willBill ? `Bill client (${money(qty * num(p.price))})` : "Not billed — internal"}
                       </span>
                     </button>
                   )}
@@ -10952,7 +10980,7 @@ const dayLabel = (dateStr) => {
   return date.toLocaleDateString([], { weekday: "short", month: "numeric", day: "numeric" });
 };
 
-function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose }) {
+function AddStopForm({ clients, catalog, team, estimates = [], seedClientIds, seedEstimate, onSave, onScheduleEstimate, onClose }) {
   const { T } = useApp();
   const addStopVp = useViewport();
   const compact = addStopVp.width <= 360;
@@ -10972,6 +11000,22 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
   const [serviceSearch, setServiceSearch] = useState("");
   const [productsOpen, setProductsOpen] = useState(false);
   const [productSearch, setProductSearch] = useState("");
+  const [estimateId, setEstimateId] = useState(() => String(seedEstimate?.id || ""));
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [saveError, setSaveError] = useState("");
+
+  const approvedEstimates = useMemo(() => (estimates || []).filter((entry) => {
+    const status = String(entry?.status || "").toLowerCase();
+    return ["approved", "accepted"].includes(status);
+  }), [estimates]);
+  const linkedEstimate = approvedEstimates.find((entry) => String(entry.id) === estimateId) || null;
+
+  useEffect(() => {
+    if (!linkedEstimate) return;
+    const clientId = linkedEstimate.clientId;
+    if (clientId != null && String(clientId).trim()) setSelClients({ [clientId]: true });
+    if (linkedEstimate.title) setStopType(linkedEstimate.title);
+  }, [estimateId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const q = clientSearch.toLowerCase();
   const filteredClients = selectableClients(clients).filter(c => (c.name || "").toLowerCase().includes(q));
@@ -11006,8 +11050,43 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
 
   const canSave = selClientIds.length > 0 && dateISO; // time is optional — an untimed stop rides the day's route order
 
-  const handleSave = () => {
+  const handleSave = async () => {
+    if (saveBusy) return;
     const { time, ampm } = to12h(timeISO);
+    if (linkedEstimate) {
+      if (typeof onScheduleEstimate !== "function") {
+        setSaveError("Estimate scheduling is unavailable. Refresh SPS Way and try again.");
+        return;
+      }
+      setSaveBusy(true);
+      setSaveError("");
+      try {
+        const taxMigration = estimateTaxMigrationImpact(linkedEstimate);
+        if (
+          taxMigration.requiresConfirmation
+          && !window.confirm(
+            `This older estimate taxes service labor. Current invoice rules make services non-taxable, changing the total from ${formatEstimateMoney(taxMigration.priorTotal)} to ${formatEstimateMoney(taxMigration.normalizedTotal)}. Continue and record this revision?`,
+          )
+        ) {
+          return;
+        }
+        const result = await onScheduleEstimate(linkedEstimate, {
+          date: toMMDDYYYY(dateISO),
+          time: time ? `${time} ${ampm}` : "",
+          duration,
+          assigneeId,
+          stopType,
+          taxMigrationConfirmed: taxMigration.requiresConfirmation,
+        });
+        if (!result?.ok) throw new Error(result?.error || "The scheduled stop was not confirmed.");
+        onClose();
+      } catch (error) {
+        setSaveError(error?.message || "The estimate could not be scheduled.");
+      } finally {
+        setSaveBusy(false);
+      }
+      return;
+    }
     const services = catalog.services.filter(s => selServices[s.id]).map(s => ({ name: s.name, price: (svcPrices[s.id] ?? s.price ?? "") }));
     const products = catalog.products.filter(p => selProducts[p.id]).map(p => ({ name: p.name, price: p.price || "" }));
     const stops = selClientIds.map((id, i) => {
@@ -11037,6 +11116,39 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
 
   return (
     <Modal title="New Service Stop" onClose={onClose}>
+      {approvedEstimates.length > 0 && (
+        <div style={{ marginBottom: 18 }}>
+          <label style={labelStyle}>Approved estimate (optional)</label>
+          <select
+            value={estimateId}
+            onChange={(event) => { setEstimateId(event.target.value); setSaveError(""); }}
+            style={nativeInput}
+          >
+            <option value="">Create a regular service stop</option>
+            {approvedEstimates.map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {entry.number || "Estimate"} · {entry.clientName || "Client"} · {entry.title || "Approved work"}
+              </option>
+            ))}
+          </select>
+          {linkedEstimate && (
+            <div style={{ marginTop: 9, padding: "10px 12px", borderRadius: 11, background: hexA(T.primary, 0.06), border: `1px solid ${hexA(T.primary, 0.18)}` }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>Approved scope carried into this stop</div>
+              <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 4 }}>
+                {(linkedEstimate.items || []).filter((item) => String(item?.desc || item?.description || "").trim()).map((item, index) => (
+                  <div key={item.id || index} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 11.5, color: T.textMuted }}>
+                    <span style={{ minWidth: 0 }}>{item.desc || item.description}</span>
+                    <span style={{ flexShrink: 0 }}>× {item.qty || 1}</span>
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: 7, fontSize: 10.5, lineHeight: 1.45, color: T.textMuted }}>
+                Materials are planned now and deducted only once, when this stop is completed.
+              </div>
+            </div>
+          )}
+        </div>
+      )}
       {/* Clients */}
       <div style={{ marginBottom: 18 }}>
         <label style={labelStyle}>Client(s) — {selClientIds.length} selected</label>
@@ -11196,8 +11308,15 @@ function AddStopForm({ clients, catalog, team, seedClientIds, onSave, onClose })
         })()}
       </div>
 
-      <Btn onClick={handleSave} style={{ width: "100%", padding: "13px", fontSize: 14, borderRadius: 12, opacity: canSave ? 1 : 0.5, pointerEvents: canSave ? "auto" : "none" }}>
-        {selClientIds.length > 1 ? `Create ${selClientIds.length} Stops` : "Create Stop"}
+      {saveError && <div role="alert" style={{ color: T.warning, fontSize: 12, fontWeight: 700, lineHeight: 1.45, marginBottom: 9 }}>{saveError}</div>}
+      <Btn onClick={handleSave} disabled={!canSave || saveBusy} style={{ width: "100%", padding: "13px", fontSize: 14, borderRadius: 12, opacity: canSave && !saveBusy ? 1 : 0.5, pointerEvents: canSave && !saveBusy ? "auto" : "none" }}>
+        {saveBusy
+          ? "Scheduling…"
+          : linkedEstimate
+            ? "Schedule approved estimate"
+            : selClientIds.length > 1
+              ? `Create ${selClientIds.length} Stops`
+              : "Create Stop"}
       </Btn>
       {!canSave && <div style={{ fontSize: 11, color: T.textMuted, textAlign: "center", marginTop: 8 }}>Pick at least one client and a date. Time is optional.</div>}
     </Modal>
@@ -12916,7 +13035,7 @@ function StopChangeModal({ stop, client, dayDate, email, onReschedule, onCancelS
 // reload / resync / close (the module re-initializes then). Cleared on a Schedule re-tap.
 let SCHED_VIEW = { date: null, tech: null };
 
-function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, me, onClientSelect, seedClientIds, clearSeed, focusStop, clearFocus, stopDrafts = {}, setStopDrafts, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {}, arrivals = {}, onArrived, onValidateArrival, enRoute = {}, onEnRoute }) {
+function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, me, onClientSelect, estimates = [], seedClientIds, clearSeed, seedEstimate, clearEstimateSeed, onScheduleEstimate, focusStop, clearFocus, stopDrafts = {}, setStopDrafts, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {}, arrivals = {}, onArrived, onValidateArrival, enRoute = {}, onEnRoute }) {
   const { T, perms, branding } = useApp();
   const wx = useAreaWeather((branding && branding.companyAddress) || "");  // service-area forecast for weather flags
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
@@ -13010,6 +13129,10 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
 
   const deleteStop = (origDate, sid) => {
     const deleted = (schedule || []).flatMap(d => d.stops || []).find(s => String(s.sid) === String(sid));
+    if (deleted?.sourceEstimateId) {
+      window.alert("This stop is linked to an approved estimate. Reschedule or cancel it instead so the estimate and its materials stay linked.");
+      return;
+    }
     if (deleted && deleted.trackToken) writeTrackRecord(deleted, "complete");
     setSchedule(prev => {
       let copy = prev.map(d => ({ ...d, stops: d.stops.filter(s => s.sid !== sid) }));
@@ -13047,6 +13170,9 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   useEffect(() => {
     if (seedClientIds && seedClientIds.length) setShowAdd(true);
   }, [seedClientIds]);
+  useEffect(() => {
+    if (seedEstimate && seedEstimate.id) setShowAdd(true);
+  }, [seedEstimate]);
 
   // Open a specific stop's editor when deep-linked from Home ("Today's Route" tap).
   useEffect(() => {
@@ -13145,6 +13271,13 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
   };
 
   const deleteSelected = () => {
+    const selectedStops = (schedule || [])
+      .flatMap(d => d.stops || [])
+      .filter(s => selected[s.sid]);
+    if (selectedStops.some(s => s?.sourceEstimateId)) {
+      window.alert("One or more selected stops are linked to approved estimates. Reschedule or cancel those stops instead so their scope and materials stay linked. Nothing was removed.");
+      return;
+    }
     setSchedule(prev => prev
       .map(d => ({ ...d, stops: d.stops.filter(s => !selected[s.sid]) }))
       .filter(d => d.stops.length > 0)
@@ -13162,7 +13295,11 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
     exitSelect();
   };
 
-  const closeAdd = () => { setShowAdd(false); if (clearSeed) clearSeed(); };
+  const closeAdd = () => {
+    setShowAdd(false);
+    if (clearSeed) clearSeed();
+    if (clearEstimateSeed) clearEstimateSeed();
+  };
 
   // ── Route optimization (nearest-neighbor using ZIP codes as proxy) ──
   // When Google Maps API is connected, swap the distance function for real geodistance
@@ -14011,8 +14148,11 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           clients={clients}
           catalog={catalog}
           team={team}
+          estimates={estimates}
           seedClientIds={seedClientIds}
+          seedEstimate={seedEstimate}
           onSave={addStops}
+          onScheduleEstimate={onScheduleEstimate}
           onClose={closeAdd}
         />
       )}
@@ -17394,6 +17534,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   };
   const [qbState, setQbState] = useState("idle"); // idle | sending | done | error
   const [qbMsg, setQbMsg] = useState("");
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const qbConnected = qbIsConnected();
 
   const loadQuickBooksReview = async () => {
@@ -17960,7 +18101,31 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           <div style={{ background: hexA("#E5484D", 0.06), border: `1px solid ${hexA("#E5484D", 0.25)}`, borderRadius: 12, padding: "11px 14px", fontSize: 13, fontWeight: 600, color: "#E5484D" }}>{qbMsg}</div>
         )}
 
-        {invoice && onDelete && perms.invoiceDelete && <button onClick={() => { onDelete(inv.id); onClose(); }} style={{ background: "none", border: "none", color: "#C0392B", fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 6, fontFamily: "inherit" }}>Delete this invoice</button>}
+        {invoice && onDelete && perms.invoiceDelete && (
+          <button
+            disabled={deleteBusy}
+            onClick={async () => {
+              if (!confirm(`Delete invoice ${inv.number || ""}? This cannot be undone.`)) return;
+              setDeleteBusy(true);
+              try {
+                const result = await onDelete(inv.id);
+                if (!result?.ok) {
+                  window.alert(result?.error || "The invoice was not deleted.");
+                  return;
+                }
+                if (result.warning) window.alert(result.warning);
+                onClose();
+              } catch (error) {
+                window.alert(error?.message || "The invoice was not deleted.");
+              } finally {
+                setDeleteBusy(false);
+              }
+            }}
+            style={{ background: "none", border: "none", color: "#C0392B", fontSize: 13, fontWeight: 700, cursor: deleteBusy ? "default" : "pointer", padding: 6, fontFamily: "inherit", opacity: deleteBusy ? 0.6 : 1 }}
+          >
+            {deleteBusy ? "Checking links…" : "Delete this invoice"}
+          </button>
+        )}
       </div>
 
       {/* Catalog item picker sheet */}
@@ -18205,7 +18370,7 @@ function QBConnect({ onSyncData }) {
       }
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      if (onSyncData && data.invoices) onSyncData(data.invoices, data.customers);
+      if (onSyncData && data.invoices) onSyncData(data.invoices, data.customers, data);
       setResult(data);
       setStatus("done");
     } catch (err) {
@@ -19439,7 +19604,7 @@ const canManageEstimates = (perms = {}) => !!(
   || (perms.tabAccess ? perms.tabAccess.estimates === "edit" : perms.canInvoice)
 );
 
-function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoicing, T, estimates: estimatesProp, setEstimates: setEstimatesProp, invoices = [], onSaveInvoice, onConvertEstimate, onCompleteEstimate }) {
+function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoicing, T, estimates: estimatesProp, setEstimates: setEstimatesProp, invoices = [], schedule = [], onSaveInvoice, onConvertEstimate, onCompleteEstimate, onScheduleEstimate }) {
   const { perms = {} } = useApp();
   const vp = useViewport();
   const showProfit = !!(perms.isAdmin || perms.seeProfit);
@@ -19475,17 +19640,35 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
 
   const deleteEstimate = (id) => {
     if (!canManage) return;
+    const target = (estimates || []).find((entry) => String(entry?.id || "") === String(id || ""));
+    if (target) {
+      const linkedInvoice = findInvoiceForEstimate(invoices, target);
+      if (target.linkedScheduledStopId || target.linkedInvoiceId || linkedInvoice) {
+        window.alert("This estimate is linked to scheduled work or billing. Keep it as the job record, or complete it and link the final invoice instead of deleting it.");
+        return;
+      }
+      try {
+        const linked = findScheduledStopForEstimate(schedule, target);
+        if (linked) {
+          window.alert("This estimate is linked to scheduled work. Reschedule or cancel that stop before deleting the estimate so its scope and materials are not orphaned.");
+          return;
+        }
+      } catch (error) {
+        window.alert(error?.message || "This estimate's schedule link could not be verified, so it was not deleted.");
+        return;
+      }
+    }
     setEstimates(prev => (prev||[]).filter(e => e.id !== id));
     setView("list");
   };
 
   const linkedInvoiceForEstimate = (estimate) => findInvoiceForEstimate(invoices, estimate);
 
-  const convertEstimateToInvoice = async (estimate) => {
+  const convertEstimateToInvoice = async (estimate, options = {}) => {
     if (typeof onConvertEstimate !== "function") {
       return { ok: false, error: "Invoice conversion is unavailable. Refresh SPS Way and try again." };
     }
-    const result = await onConvertEstimate(estimate);
+    const result = await onConvertEstimate(estimate, options);
     if (!result?.ok) {
       return { ok: false, error: result?.error || "The draft invoice was not confirmed by the database." };
     }
@@ -19519,6 +19702,8 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
           onCompleteEstimate={onCompleteEstimate}
           findLinkedInvoice={linkedInvoiceForEstimate}
           invoices={invoices}
+          schedule={schedule}
+          onScheduleEstimate={onScheduleEstimate}
           canManage={canManage}
           nextNumber={nextEstimateNumber(estimates)}
           onBack={() => { setView("list"); setSelected(null); }}
@@ -19621,7 +19806,7 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
                       <span style={{ fontSize: 9.5, fontWeight: 850, textTransform: "uppercase", letterSpacing: "0.05em", color: statusColor(status), background: hexA(statusColor(status), 0.09), borderRadius: 100, padding: "3px 7px", flexShrink: 0 }}>{estimateStatusLabel(status)}</span>
                     </div>
                     <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{estimate.number || "Estimate"} · {estimate.title || "Untitled"} · {fmtDate(estimate.date)}</div>
-                    {totals.taxEnabled && <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 3 }}>{totals.taxRate}% tax included</div>}
+                    {totals.taxEnabled && <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 3 }}>{totals.tax > 0 ? `${totals.taxRate}% tax on taxable items` : "No taxable items"}</div>}
                   </div>
                   <div style={{ textAlign: "right", flexShrink: 0 }}>
                     <div style={{ fontSize: 16, fontWeight: 850, color: T.text }}>{formatEstimateMoney(totals.total)}</div>
@@ -19642,7 +19827,7 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
   );
 }
 
-function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email, invoicing, T, invoices = [], onSave, onPersist, onDelete, onConvertToInvoice, onCompleteEstimate, findLinkedInvoice, onBack, nextNumber, canManage: canManageProp }) {
+function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email, invoicing, T, invoices = [], schedule = [], onSave, onPersist, onDelete, onConvertToInvoice, onCompleteEstimate, onScheduleEstimate, findLinkedInvoice, onBack, nextNumber, canManage: canManageProp }) {
   const { perms = {} } = useApp();
   const vp = useViewport();
   // Keep portrait iPads in the single-column editor. At the old 700px split point the line-item
@@ -19655,10 +19840,12 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   const configuredTaxRate = String(invoicing?.taxRate ?? "").trim();
   const defaultTaxRate = configuredTaxRate || String(DEFAULT_INVOICING.taxRate);
   const newLineId = () => `eli_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const emptyEstimateLine = () => ({ id: newLineId(), desc: "", qty: "1", price: "", unitCost: "", costKnown: false, kind: "custom" });
+  const emptyEstimateLine = () => ({ id: newLineId(), desc: "", qty: "1", price: "", unitCost: "", costKnown: false, kind: "custom", taxable: false });
   const [form, setForm] = useState(() => {
+    const savedTaxModel = estimate?.taxModel || "";
     const base = estimate ? {
       ...estimate,
+      ...(savedTaxModel ? { taxModel: savedTaxModel } : {}),
       items: Array.isArray(estimate.items) && estimate.items.length
         ? estimate.items.map((item, index) => {
             const parsedQty = Number.parseFloat(item.qty);
@@ -19675,6 +19862,11 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
               unitCost: hasStoredCost ? String(storedCost) : "",
               costKnown: item.costKnown === true || (item.costKnown !== false && hasStoredCost),
               kind: item.kind || "custom",
+              ...(typeof item.taxable === "boolean"
+                ? { taxable: item.taxable }
+                : savedTaxModel
+                  ? { taxable: defaultEstimateLineTaxable(item.kind || "custom", item) }
+                  : {}),
             };
           })
         : (() => {
@@ -19698,6 +19890,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
       notes: "",
       taxEnabled: true,
       taxRate: defaultTaxRate,
+      taxModel: ESTIMATE_LINE_TAX_MODEL,
       createdAt: Date.now(),
     };
     return withEstimateTotals(base, defaultTaxRate);
@@ -19748,6 +19941,14 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
       : null,
     [findLinkedInvoice, form.id, form.number, form.linkedInvoiceId],
   );
+  const linkedScheduledStop = useMemo(() => {
+    if (!form.id) return null;
+    try {
+      return findScheduledStopForEstimate(schedule, form);
+    } catch (_) {
+      return null;
+    }
+  }, [schedule, form.id, form.linkedScheduledStopId]);
   const canDelete = canManage && perms.invoiceDelete !== false;
   const validateEstimateSettings = () => {
     if (!estimateHasValidDays(form)) return "Valid for must be a whole number of at least 1 day.";
@@ -19763,6 +19964,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
     if (lines.some((item) => item.price == null || String(item.price).trim() === "")) return "Every estimate line needs a retail price. Enter 0 for no-charge work.";
     if (lines.some((item) => !estimateNumberIsValid(item.price))) return "Every retail price must be a valid number. Use 0 only for no-charge work.";
     if (lines.some((item) => item.kind === "bundle" && (item.retailComplete === false || (item.bundleItems || []).some((child) => child.priceKnown === false)))) return "Every part in a bundle needs a retail price. Update the catalog and rebuild that bundle; use 0 only for an intentionally free part.";
+    if (lines.some((item) => item.kind === "bundle" && item.taxabilityMixed === true)) return "Taxable and non-taxable parts cannot share one bundled estimate line. Add them as separate lines.";
     if (lines.some((item) => String(item.qty ?? "").trim() !== "" && (!estimateNumberIsValid(item.qty) || !(estimateNumberValue(item.qty) > 0)))) return "Every estimate quantity must be a valid number greater than zero.";
     if (lines.some((item) => String(item.unitCost ?? "").trim() !== "" && !estimateNumberIsValid(item.unitCost))) return "Every entered cost must be a valid number. Leave it blank if the cost is not known yet.";
     if (lines.some((item) => estimateLineUnitPrice(item) < 0 || (estimateNumberIsValid(item.unitCost) && estimateNumberValue(item.unitCost) < 0))) return "Estimate prices and costs cannot be negative.";
@@ -19794,7 +19996,31 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   };
 
   const revise = (current, patch, contentChanged = true) => {
-    return withEstimateRevision(current, patch, defaultTaxRate, { customerVisible: contentChanged });
+    const taxUpgrade = contentChanged && !current.taxModel
+      ? {
+          taxModel: ESTIMATE_LINE_TAX_MODEL,
+          items: (patch.items || current.items || []).map((item) => ({
+            ...item,
+            taxable: typeof item.taxable === "boolean"
+              ? item.taxable
+              : defaultEstimateLineTaxable(item.kind, item),
+          })),
+        }
+      : {};
+    return withEstimateRevision(current, { ...patch, ...taxUpgrade }, defaultTaxRate, { customerVisible: contentChanged });
+  };
+  const applyCurrentTaxRules = () => {
+    if (!canManage || shareBusyRef.current) return;
+    setFormError("");
+    setSentMsg("");
+    setDirty(true);
+    setForm((current) => {
+      const normalized = normalizeEstimateTaxForInvoice(current);
+      return withEstimateRevision(current, {
+        taxModel: normalized.taxModel,
+        items: normalized.items,
+      }, defaultTaxRate, { customerVisible: true });
+    });
   };
   const set = (key, value, contentChanged = true) => {
     if (!canManage || shareBusyRef.current) return;
@@ -19805,8 +20031,13 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   };
 
   const setItem = (idx, key, val) => {
-    const items = form.items.map((it, i) => i === idx ? { ...it, [key]: val } : it);
-    set("items", items);
+    if (!canManage || shareBusyRef.current) return;
+    setFormError("");
+    setCompletionMsg("");
+    setDirty(true);
+    setForm((current) => revise(current, {
+      items: (current.items || []).map((item, index) => index === idx ? { ...item, [key]: val } : item),
+    }));
   };
   const setItemCost = (idx, val) => {
     if (!canManage || shareBusyRef.current) return;
@@ -19968,9 +20199,10 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
             number: current.number || "",
             date: current.date || "",
             service: current.title || "",
-            items: (current.items || []).map(it => ({ desc: it.desc, qty: it.qty, price: it.price, kind: it.kind, unit: it.unit, bundleNote: it.bundleNote })),
+            items: (current.items || []).map(it => ({ desc: it.desc, qty: it.qty, price: it.price, kind: it.kind, unit: it.unit, bundleNote: it.bundleNote, taxable: estimateLineIsTaxable(it, current) })),
             taxEnabled: sentTotals.taxEnabled,
             taxRate: sentTotals.taxRate,
+            taxModel: current.taxModel || "",
             subtotal: sentTotals.subtotal,
             taxAmount: sentTotals.tax,
             tax: sentTotals.tax,
@@ -20041,24 +20273,48 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
     setConversionBusy(true);
     try {
       const current = normalizedForSend();
+      const taxMigration = estimateTaxMigrationImpact(current, defaultTaxRate);
+      if (
+        !linkedInvoice
+        && taxMigration.requiresConfirmation
+        && !window.confirm(
+          `This older estimate taxes service labor. Current invoice rules make services non-taxable, changing the total from ${formatEstimateMoney(taxMigration.priorTotal)} to ${formatEstimateMoney(taxMigration.normalizedTotal)}. Create the draft with the corrected total?`,
+        )
+      ) {
+        return;
+      }
       if (!linkedInvoice && onPersist) {
         onPersist(current);
         setForm(current);
         setDirty(false);
       }
-      const result = await onConvertToInvoice(current);
+      const result = await onConvertToInvoice(current, {
+        taxMigrationConfirmed: taxMigration.requiresConfirmation,
+      });
       if (!result?.ok) {
         setConversionMsg(result?.error || "The draft invoice was not confirmed. Try again.");
         return;
       }
-      setConversionMsg(result.existing
+      const taxNote = result.invoice?.sourceEstimateTaxMigration
+        ? " Service labor was set to non-taxable; review the taxable item switches before sending."
+        : "";
+      setConversionMsg((result.existing
         ? `Opened invoice ${result.invoice?.number || ""}.`
-        : `Draft invoice ${result.invoice?.number || ""} created and opened for review.`);
+        : `Draft invoice ${result.invoice?.number || ""} created and opened for review.`) + taxNote);
     } catch (error) {
       setConversionMsg(error?.message || "The estimate could not be converted.");
     } finally {
       setConversionBusy(false);
     }
+  };
+  const scheduleEstimateWork = () => {
+    if (!canManage || shareBusyRef.current || isNew || dirty || typeof onScheduleEstimate !== "function") return;
+    if (!["approved", "accepted"].includes(String(form.status || "").toLowerCase())) {
+      setFormError("Approve this estimate before putting the work on the schedule.");
+      return;
+    }
+    setFormError("");
+    onScheduleEstimate(withEstimateTotals(form, defaultTaxRate));
   };
   const openCompletion = () => {
     if (!canManage || shareBusyRef.current || isNew || dirty || typeof onCompleteEstimate !== "function") return;
@@ -20107,6 +20363,10 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   };
   const confirmDelete = () => {
     if (!canDelete || shareBusyRef.current) return;
+    if (linkedScheduledStop) {
+      window.alert("This estimate is linked to scheduled work. Reschedule or cancel that stop before deleting the estimate so its scope and materials stay attached.");
+      return;
+    }
     if (!confirm(`Delete ${form.number || "this estimate"}? This cannot be undone.`)) return;
     onDelete(form.id);
   };
@@ -20133,6 +20393,16 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
           <div style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "10px 12px", background: hexA(T.primary, 0.07), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 12, color: T.text, fontSize: 12, lineHeight: 1.45 }}>
             <Icon name="info" size={14} style={{ color: T.primary, marginTop: 1, flexShrink: 0 }} />
             Pricing or scope changed, so this estimate returned to Draft. Send it again when the revision is ready.
+          </div>
+        )}
+
+        {form.taxEnabled && !form.taxModel && (
+          <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: 10, alignItems: "center", padding: "10px 12px", background: hexA(T.warning, 0.07), border: `1px solid ${hexA(T.warning, 0.24)}`, borderRadius: 12 }}>
+            <div style={{ minWidth: 0, flex: "1 1 220px" }}>
+              <div style={{ color: T.text, fontSize: 12.5, fontWeight: 800 }}>Review this older estimate's tax</div>
+              <div style={{ color: T.textMuted, fontSize: 11, lineHeight: 1.45, marginTop: 2 }}>It predates per-line tax. Apply current rules to make services non-taxable and keep taxable products/items selected.</div>
+            </div>
+            {canManage && <Btn type="button" sm variant="outline" onClick={applyCurrentTaxRules}>Apply current tax rules</Btn>}
           </div>
         )}
 
@@ -20207,6 +20477,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
                       <div style={{ display: "flex", alignItems: "center", gap: 6, minHeight: 18 }}>
                         <span style={{ display: "inline-flex", alignItems: "center", borderRadius: 100, padding: "3px 7px", background: item.refId || item.kind === "bundle" ? hexA(T.primary, 0.08) : T.surfaceAlt, color: item.refId || item.kind === "bundle" ? T.primary : T.textMuted, fontSize: 9.5, fontWeight: 850, textTransform: "uppercase", letterSpacing: "0.04em" }}>{kindLabel}</span>
                         {(item.refId || item.kind === "bundle") && <span style={{ color: T.textMuted, fontSize: 10.5 }}>Catalog pricing saved to this estimate</span>}
+                        {form.taxEnabled && <button type="button" onClick={() => setItem(idx, "taxable", !estimateLineIsTaxable(item, form))} aria-pressed={estimateLineIsTaxable(item, form)} style={{ marginLeft: "auto", border: `1px solid ${estimateLineIsTaxable(item, form) ? hexA(T.primary, 0.35) : T.border}`, borderRadius: 100, padding: "4px 8px", background: estimateLineIsTaxable(item, form) ? hexA(T.primary, 0.08) : T.surface, color: estimateLineIsTaxable(item, form) ? T.primary : T.textMuted, fontFamily: "inherit", fontSize: 9.5, fontWeight: 850, cursor: "pointer" }}>{estimateLineIsTaxable(item, form) ? "Taxable" : "No tax"}</button>}
                       </div>
                       <div style={{ display: "flex", alignItems: "flex-end", gap: 7 }}>
                         <div style={{ flex: 1, minWidth: 0 }}><label style={label}>Description</label><input style={field} value={item.desc} onChange={e => setItem(idx, "desc", e.target.value)} placeholder="Service or item description" /></div>
@@ -20257,12 +20528,13 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
             <fieldset disabled={!canManage} style={{ display: "flex", flexDirection: "column", gap: 13, border: 0, padding: 0, margin: 0, minWidth: 0 }}>
               <div style={card}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-                  <div><div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>Sales tax</div><div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{totals.taxEnabled ? `${totals.taxRate}% applied to the entire estimate` : "Removed from this estimate"}</div></div>
+                  <div><div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>Sales tax</div><div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{totals.taxEnabled ? `${totals.taxRate}% applied only to taxable products and items` : "Removed from this estimate"}</div></div>
                   <Toggle on={totals.taxEnabled} onChange={(on) => set("taxEnabled", on)} />
                 </div>
                 {totals.taxEnabled && <div style={{ marginTop: 12 }}><label style={label}>Tax rate</label><div style={{ position: "relative", maxWidth: 120 }}><input inputMode="decimal" style={{ ...field, paddingRight: 28 }} value={form.taxRate} onChange={e => set("taxRate", e.target.value.replace(/[^\d.]/g, ""))} /><span style={{ position: "absolute", right: 11, top: "50%", transform: "translateY(-50%)", color: T.textMuted, fontSize: 13 }}>%</span></div></div>}
                 <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${T.border}`, display: "flex", flexDirection: "column", gap: 7 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: T.textMuted }}><span>Subtotal</span><span>{formatEstimateMoney(totals.subtotal)}</span></div>
+                  {totals.taxEnabled && totals.taxableSubtotal !== totals.subtotal && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.textMuted }}><span>Taxable items</span><span>{formatEstimateMoney(totals.taxableSubtotal)}</span></div>}
                   {totals.taxEnabled && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: T.textMuted }}><span>Sales tax ({totals.taxRate}%)</span><span>{formatEstimateMoney(totals.tax)}</span></div>}
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", fontSize: 17, fontWeight: 850, color: T.text, borderTop: `1px solid ${T.border}`, paddingTop: 9 }}><span>Total</span><span style={{ color: T.primary, fontSize: 21 }}>{formatEstimateMoney(totals.total)}</span></div>
                 </div>
@@ -20278,6 +20550,28 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
                 </div>
               </div>
             </fieldset>
+
+            {canManage && (["approved", "accepted"].includes(String(form.status || "").toLowerCase()) || linkedScheduledStop) && (
+              <div data-estimate-schedule-link style={{ ...card, display: "flex", flexDirection: "column", gap: 9, borderColor: linkedScheduledStop ? hexA(T.accent, 0.35) : T.border }}>
+                <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                  <div style={{ width: 34, height: 34, borderRadius: 11, display: "grid", placeItems: "center", flexShrink: 0, color: linkedScheduledStop ? T.accent : T.primary, background: hexA(linkedScheduledStop ? T.accent : T.primary, 0.09) }}>
+                    <Icon name={linkedScheduledStop ? "check" : "calendar"} size={16} />
+                  </div>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 850, color: T.text }}>{linkedScheduledStop ? "Work is scheduled" : "Put approved work on the schedule"}</div>
+                    <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2, lineHeight: 1.45 }}>
+                      {linkedScheduledStop
+                        ? `${linkedScheduledStop.day?.date || form.scheduledDate || "Scheduled"} · products and services remain linked to this estimate.`
+                        : "Choose the date and technician next. SPS creates or reuses one draft invoice, carries the quoted items into the stop, and waits until completion to deduct inventory."}
+                    </div>
+                  </div>
+                </div>
+                <Btn onClick={scheduleEstimateWork} disabled={isNew || dirty} variant={linkedScheduledStop ? "outline" : undefined} block style={{ gap: 7 }}>
+                  <Icon name="calendar" size={15} />
+                  {linkedScheduledStop ? "Open scheduled stop" : "Schedule approved estimate"}
+                </Btn>
+              </div>
+            )}
 
             {canManage && <div data-estimate-completion style={{ ...card, display: "flex", flexDirection: "column", gap: 9, borderColor: form.status === "complete" ? hexA(T.accent, 0.35) : T.border }}>
               <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
@@ -20866,9 +21160,9 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
   );
 }
 
-function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCatalog, onSave, onDelete, onSyncData, initialFilter = "All", vp = {} }) {
+function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCatalog, qbAccounting = null, onSave, onDelete, onSyncData, initialFilter = "All", vp = {} }) {
   const { T, perms } = useApp();
-  const moneyFmt = (n) => `$${Math.round(n).toLocaleString()}`;
+  const moneyFmt = (n) => Number(n || 0).toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const moneyExact = (n) => `$${parseFloat(n||0).toFixed(2)}`;
 
   // ── Filter / sort state ──
@@ -20909,9 +21203,12 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
       }
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      if (onSyncData && data.invoices) onSyncData(data.invoices, data.customers);
+      if (onSyncData && data.invoices) onSyncData(data.invoices, data.customers, data);
       setQbSynced(true);
-      setQbSyncMsg(`Synced ${data.invoices?.length || 0} invoices from QuickBooks.`);
+      const creditCount = Number(data.accounting?.openCreditMemoCount || 0);
+      setQbSyncMsg(data.accounting?.complete
+        ? `Reconciled ${data.invoices?.length || 0} QuickBooks invoices${creditCount ? ` and ${creditCount} open credit${creditCount === 1 ? "" : "s"}` : ""}.`
+        : `QuickBooks returned ${data.invoices?.length || 0} invoices, but part of the accounting snapshot was incomplete. Totals were not presented as final.`);
       // Let the "done" confirmation linger before clearing.
       setTimeout(() => { setQbSynced(false); setQbSyncMsg(""); }, 4500);
     } catch (err) {
@@ -20943,13 +21240,32 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
     _balance: invoiceTotals(iv).balance,
     _status: effectiveStatus(iv),
     _date:   parseAnyDate(iv.date) || parseAnyDate(iv.paidDate) || new Date(iv.createdAt || 0),
+    _paidDate: parseAnyDate(iv.paidDate) || parseAnyDate(iv.date) || new Date(iv.createdAt || 0),
     _num:    parseInt((String(iv.number || "0")).replace(/[^0-9]/g, "")) || 0,
   }));
 
   // ── Summary stats ──
-  const outstanding   = all.filter(iv => iv._status !== "Paid" && iv.status !== "Draft").reduce((s, iv) => s + iv._balance, 0);
-  const paidThisMonth = all.filter(iv => iv._status === "Paid").filter(iv => { const d = iv._date; return d && d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); }).reduce((s, iv) => s + iv._total, 0);
-  const overdueCount  = all.filter(iv => iv._status === "Overdue").length;
+  const qbAccountingComplete = qbAccounting?.complete === true;
+  const localReviewInvoices = all.filter((iv) => (
+    iv.qbNeedsReview
+    || iv.qbSyncStatus === "missing-remote"
+    || (!iv.qbId && iv._status !== "Paid" && iv.status !== "Draft" && iv.status !== "Void" && iv._balance > 0)
+  ));
+  const localReviewBalance = localReviewInvoices.reduce((sum, invoice) => sum + invoice._balance, 0);
+  const fallbackOpen = all.filter(iv => iv._status !== "Paid" && iv.status !== "Draft" && iv.status !== "Void");
+  const outstanding = qbAccountingComplete
+    ? Number(qbAccounting.openInvoiceBalance || 0)
+    : fallbackOpen.reduce((sum, invoice) => sum + invoice._balance, 0);
+  const outstandingCount = qbAccountingComplete ? Number(qbAccounting.openInvoiceCount || 0) : fallbackOpen.length;
+  const paidThisMonth = qbAccountingComplete
+    ? Number(qbAccounting.paymentsReceivedThisMonth || 0)
+    : all
+      .filter(iv => iv._status === "Paid" && (!qbConnected || iv.qbId))
+      .filter(iv => { const d = iv._paidDate; return d && d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); })
+      .reduce((s, iv) => s + iv._total, 0);
+  const overdueCount = qbAccountingComplete
+    ? Number(qbAccounting.overdueInvoiceCount || 0)
+    : all.filter(iv => iv._status === "Overdue").length;
   const totalAll      = all.filter(iv => iv.status !== "Draft").reduce((s, iv) => s + iv._total, 0);
 
   // ── Date range helper ──
@@ -21062,6 +21378,15 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
           {qbSyncMsg}
         </div>
       )}
+      {localReviewInvoices.length > 0 && (
+        <div style={{ marginBottom: 12, padding: "11px 14px", borderRadius: 12, background: hexA(T.warning, 0.08), border: `1px solid ${hexA(T.warning, 0.28)}`, color: T.text, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 12.5, fontWeight: 800 }}>{localReviewInvoices.length} SPS invoice record{localReviewInvoices.length === 1 ? "" : "s"} need review</div>
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>Kept safely, but excluded from the QuickBooks accounting total until matched.</div>
+          </div>
+          <div style={{ fontSize: 13, fontWeight: 850, color: T.warning, flexShrink: 0 }}>{moneyFmt(localReviewBalance)}</div>
+        </div>
+      )}
 
       {/* Summary tiles — tap to see Total Sales */}
       <div style={{ display: "grid", gridTemplateColumns: vp.isDesktop ? "repeat(2, minmax(0, 260px))" : "1fr 1fr", gap: 10, marginBottom: 16 }}>
@@ -21069,11 +21394,17 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
           onMouseEnter={e => { if (perms.seeTotalSales || perms.isAdmin) e.currentTarget.style.boxShadow="0 4px 16px rgba(0,0,0,0.08)"; }}
           onMouseLeave={e => e.currentTarget.style.boxShadow="none"}>
           <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 6, display:"flex", justifyContent:"space-between" }}>
-            Outstanding
+            {qbAccountingComplete ? "QuickBooks outstanding" : "Outstanding"}
             {(perms.seeTotalSales || perms.isAdmin) && <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{opacity:0.5}}><path d="m9 18 6-6-6-6"/></svg>}
           </div>
           <div style={{ fontSize: 24, fontWeight: 800, color: outstanding > 0 ? T.warning : T.accent, letterSpacing: "-0.02em" }}>{moneyFmt(outstanding)}</div>
-          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>{all.filter(iv => iv._status !== "Paid" && iv.status !== "Draft").length} invoices{(perms.seeTotalSales || perms.isAdmin) ? " · tap for sales" : ""}</div>
+          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>
+            {qbAccountingComplete
+              ? `${outstandingCount} open invoice${outstandingCount === 1 ? "" : "s"}`
+              : `${outstandingCount} open invoice${outstandingCount === 1 ? "" : "s"}`}
+            {qbAccountingComplete && Number(qbAccounting.availableCreditBalance || 0) > 0 ? ` · ${moneyFmt(qbAccounting.availableCreditBalance)} available credits` : ""}
+            {(perms.seeTotalSales || perms.isAdmin) ? " · tap for sales" : ""}
+          </div>
         </div>
         <div onClick={() => (perms.seeTotalSales || perms.isAdmin) && setShowSales(true)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "14px 16px", cursor: (perms.seeTotalSales || perms.isAdmin) ? "pointer" : "default" }}
           onMouseEnter={e => { if (perms.seeTotalSales || perms.isAdmin) e.currentTarget.style.boxShadow="0 4px 16px rgba(0,0,0,0.08)"; }}
@@ -35461,6 +35792,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   const [signOutError, setSignOutError] = useState("");
   const [clientsView, setClientsView] = useState("split"); // desktop only: "split" (master-detail) | "table"
   const [scheduleSeed, setScheduleSeed] = useState(null);
+  const [scheduleEstimateSeed, setScheduleEstimateSeed] = useState(null);
   // Staff "Preview Portal as X" lives at the App top level (rendered OUTSIDE the shell's
   // <main> scroll container) so iOS doesn't clip this position:fixed overlay.
   const [previewClient, setPreviewClient] = useState(null);
@@ -35609,6 +35941,16 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   });
   const [session, setSession, lsesh] = useStoredState("sps_session", { userId: DEFAULT_OWNER_ID });
   const [invoices, setInvoices, linv] = useStoredState("sps_invoices", DEMO_INVOICES);
+  const [qbAccounting, setQbAccounting] = useState(() => {
+    try {
+      const cached = JSON.parse(localStorage.getItem("sps_qb_accounting") || "null");
+      if (!cached) return null;
+      const age = Date.now() - Date.parse(cached.fetchedAt || "");
+      return Number.isFinite(age) && age <= 15 * 60 * 1000
+        ? cached
+        : { ...cached, complete: false, stale: true };
+    } catch (_) { return null; }
+  });
   const [invoicing, setInvoicing, linvc] = useStoredState("sps_invoicing", DEFAULT_INVOICING);
   const [completedSids, setCompletedSids, lcomp] = useStoredState("sps_completed", {});
   // Feature 3B: arrival timestamps per stop ({ [sid]: ISO }). Set when the tech taps
@@ -37253,7 +37595,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           if (!res.ok) return null;
           const data = await res.json().catch(() => ({}));
           if (disposed || !data || data.error || !Array.isArray(data.invoices)) return null;
-          handleQBSync(data.invoices, data.customers);
+          handleQBSync(data.invoices, data.customers, data);
           // Record only a confirmed, applied refresh. Failed requests remain immediately retryable.
           try { localStorage.setItem("qb_autosync_at", String(Date.now())); } catch (_) {}
           return data;
@@ -37540,7 +37882,21 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     })();
   }, [hydrated, currentUser, dbOk]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleQBSync = (qbInvoices, qbCustomers) => {
+  const handleQBSync = (qbInvoices, qbCustomers, syncPayload = {}) => {
+    const reconciliation = syncPayload?.reconciliation || null;
+    const accounting = syncPayload?.accounting || reconciliation?.accounting || null;
+    const invoiceSnapshotComplete = reconciliation?.pagination?.invoices?.complete === true;
+    if (accounting) {
+      const snapshot = {
+        ...accounting,
+        creditMemos: Array.isArray(syncPayload.creditMemos) ? syncPayload.creditMemos : [],
+        unappliedPayments: Array.isArray(syncPayload.unappliedPayments) ? syncPayload.unappliedPayments : [],
+        reconciliation,
+        fetchedAt: reconciliation?.fetchedAt || new Date().toISOString(),
+      };
+      setQbAccounting(snapshot);
+      try { localStorage.setItem("sps_qb_accounting", JSON.stringify(snapshot)); } catch (_) {}
+    }
     // Build client lookup maps from current clients snapshot
     const currentClients = clients || [];
 
@@ -37656,9 +38012,8 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     setInvoices(prev => {
       const prevList = prev || [];
       const usedQbIds = new Set();
-      // Keep one local record per QB id. Prefer the app-created record when an
-      // old duplicate pair exists, but never discard the only QB-created record:
-      // it may contain pending SPS edits that must reach the conflict fence.
+      // Choose one record per QB id as the reconciliation target. Any older duplicate stays
+      // visible and is fenced for review below — sync must never silently discard SPS data.
       const preferredByQbId = new Map();
       prevList.forEach(iv => {
         if (!iv.qbId) return;
@@ -37668,11 +38023,27 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           preferredByQbId.set(key, iv);
         }
       });
-      const kept = prevList.filter(iv => !iv.qbId || preferredByQbId.get(String(iv.qbId)) === iv);
-      const merged = kept.map(iv => {
+      const merged = prevList.map(iv => {
         if (!iv.qbId) return iv;
+        const preferred = preferredByQbId.get(String(iv.qbId));
+        if (preferred && preferred !== iv) {
+          return {
+            ...iv,
+            qbNeedsReview: true,
+            qbSyncStatus: "duplicate-local-qb-id",
+            qbDuplicateOfId: preferred.id || "",
+          };
+        }
         const qi = newInvoices.find(n => String(n.qbId) === String(iv.qbId));
-        if (!qi) return iv;
+        if (!qi) {
+          if (!invoiceSnapshotComplete) return iv;
+          return {
+            ...iv,
+            qbNeedsReview: true,
+            qbSyncStatus: "missing-remote",
+            qbMissingSince: iv.qbMissingSince || reconciliation?.fetchedAt || new Date().toISOString(),
+          };
+        }
         usedQbIds.add(String(iv.qbId));
         // QuickBooks is authoritative for customer-facing accounting fields after
         // a clean pull. Preserve SPS-only costs, estimate/visit links, notes and
@@ -37894,6 +38265,125 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     setScheduleSeed(ids);
     setSelectedClient(null);
     setPage("schedule");
+  };
+  const handleOpenEstimateSchedule = (estimate) => {
+    try {
+      const linked = findScheduledStopForEstimate(schedule, estimate);
+      if (linked) {
+        setScheduleFocus({ sid: linked.stop.sid, date: linked.day.date });
+        setPage("schedule");
+        return;
+      }
+    } catch (_) {
+      // The server-confirmed scheduling flow below will surface duplicate-link errors.
+    }
+    setScheduleEstimateSeed(estimate);
+    setSelectedClient(null);
+    setPage("schedule");
+  };
+  const handleScheduleApprovedEstimate = async (estimate, options = {}) => {
+    const estimateId = String(estimate?.id || "").trim();
+    if (!estimateId) return { ok: false, error: "Save the estimate before scheduling it." };
+    try {
+      const flushed = await store.flush();
+      if (!flushed?.ok && !flushed?.empty) {
+        return { ok: false, error: "Pending schedule changes must finish syncing before this estimate can be scheduled." };
+      }
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const [estimateRead, scheduleRead, invoiceRead] = await Promise.all([
+          store.refresh("sps_estimates"),
+          store.refresh("sps_schedule"),
+          store.refresh("sps_invoices"),
+        ]);
+        if (!estimateRead?.ok || !scheduleRead?.ok || !invoiceRead?.ok) {
+          return { ok: false, error: estimateRead?.error?.message || scheduleRead?.error?.message || invoiceRead?.error?.message || "The latest estimate, schedule, or invoice data could not be loaded." };
+        }
+        let latestEstimates;
+        let latestSchedule;
+        let latestInvoices;
+        try {
+          latestEstimates = estimateRead.exists ? JSON.parse(estimateRead.value || "[]") : [];
+          latestSchedule = scheduleRead.exists ? JSON.parse(scheduleRead.value || "[]") : [];
+          latestInvoices = invoiceRead.exists ? JSON.parse(invoiceRead.value || "[]") : [];
+        } catch (_) {
+          return { ok: false, error: "The shared estimate, schedule, or invoice data is invalid. Nothing was scheduled." };
+        }
+        const current = latestEstimates.find((entry) => String(entry?.id || "") === estimateId);
+        if (!current) return { ok: false, error: "This estimate no longer exists." };
+        const client = (clients || []).find((entry) => String(entry?.id || "") === String(current.clientId || estimate.clientId));
+        if (!client) return { ok: false, error: "The estimate's client no longer exists." };
+        // Scheduling is the point where approved scope becomes planned work. Make the one
+        // deterministic draft invoice in the same CAS transaction, so completion can never count
+        // the quoted sale twice or leave the finished stop with no billing record.
+        const taxMigration = estimateTaxMigrationImpact(current, invoicing?.taxRate);
+        if (taxMigration.requiresConfirmation && options.taxMigrationConfirmed !== true) {
+          return {
+            ok: false,
+            error: "Review and confirm the corrected service-tax total before scheduling this older estimate.",
+          };
+        }
+        const billingEstimate = taxMigration.requiresConfirmation
+          ? {
+            ...taxMigration.normalizedEstimate,
+            taxMigrationConfirmedAt: new Date().toISOString(),
+            taxMigrationSource: "schedule",
+            taxMigrationPriorTotal: taxMigration.priorTotal,
+            taxMigrationCorrectedTotal: taxMigration.normalizedTotal,
+          }
+          : taxMigration.normalizedEstimate;
+        let linkedInvoice = findInvoiceForEstimate(latestInvoices, billingEstimate);
+        let nextInvoices = latestInvoices;
+        let createdInvoice = null;
+        if (!linkedInvoice) {
+          const dueDays = Number.parseInt(invoicing?.dueDays, 10);
+          const safeDueDays = Number.isFinite(dueDays) && dueDays >= 0 ? dueDays : 15;
+          createdInvoice = estimateToDraftInvoice(billingEstimate, {
+            client,
+            number: `${invoicing?.numberPrefix != null ? invoicing.numberPrefix : "INV-"}${nextInvoiceNumber(latestInvoices, invoicing)}`,
+            issueDate: todayMDY(),
+            dueDate: addDaysMDY(todayMDY(), safeDueDays),
+            dueDays: safeDueDays,
+            defaultTaxRate: invoicing?.taxRate,
+            paymentTerms: invoicing?.terms,
+          });
+          linkedInvoice = createdInvoice;
+          nextInvoices = [createdInvoice, ...latestInvoices];
+        }
+        const source = {
+          ...billingEstimate,
+          linkedInvoiceId: linkedInvoice.id,
+          linkedInvoiceNumber: linkedInvoice.number || "",
+        };
+        let result;
+        try {
+          result = scheduleApprovedEstimate(source, latestSchedule, { client, ...options });
+        } catch (error) {
+          return { ok: false, error: error?.message || "The estimate could not be scheduled safely." };
+        }
+        const nextEstimates = latestEstimates.map((entry) => String(entry?.id || "") === estimateId ? result.estimate : entry);
+        const operations = [
+          { key: "sps_estimates", value: JSON.stringify(nextEstimates), expectedVersion: Number(estimateRead.version) || 0 },
+          { key: "sps_schedule", value: JSON.stringify(result.schedule), expectedVersion: Number(scheduleRead.version) || 0 },
+          // This is both the new-draft write and the version fence for an existing link. A
+          // concurrent invoice delete must conflict instead of leaving an orphaned stop.
+          { key: "sps_invoices", value: JSON.stringify(nextInvoices), expectedVersion: Number(invoiceRead.version) || 0 },
+        ];
+        const saved = await store.replaceMany(operations);
+        if (!saved?.ok) {
+          if (saved?.conflict && attempt < 2) continue;
+          return { ok: false, error: saved?.conflict ? "Another employee changed the schedule at the same time. Try once more." : (saved?.error?.message || "The server did not confirm the scheduled stop.") };
+        }
+        setEstimatesRaw(nextEstimates);
+        setSchedule(result.schedule);
+        setInvoices(nextInvoices);
+        setScheduleEstimateSeed(null);
+        setScheduleFocus({ sid: result.stop.sid, date: options.date || result.estimate.scheduledDate });
+        return { ok: true, ...result, invoice: linkedInvoice, invoiceCreated: !!createdInvoice };
+      }
+    } catch (error) {
+      return { ok: false, error: error?.message || "The estimate could not be scheduled." };
+    }
+    return { ok: false, error: "The schedule changed repeatedly. Refresh and try again." };
   };
 
   const handleResetData = async () => {
@@ -38203,12 +38693,19 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       if (!(perms && perms.isAdmin)) sendPushEvent("invoice_paid", { body: `${cl?.name || "A client"} — ${amount}${inv.number ? ` (invoice ${inv.number})` : ""}`, collapseId: `paid-${inv.id}` });
     }
   };
-  const handleConvertEstimateToInvoice = async (estimate) => {
+  const handleConvertEstimateToInvoice = async (estimate, options = {}) => {
     if (!estimate || String(estimate.status || "").toLowerCase() === "declined") {
       return { ok: false, error: "A declined estimate cannot be converted to an invoice." };
     }
     const client = (clients || []).find(entry => String(entry.id) === String(estimate.clientId));
     if (!client) return { ok: false, error: "Choose a client before converting this estimate." };
+    const taxMigration = estimateTaxMigrationImpact(estimate, invoicing?.taxRate);
+    if (taxMigration.requiresConfirmation && options.taxMigrationConfirmed !== true) {
+      return {
+        ok: false,
+        error: "Review and confirm the corrected service-tax total before creating this invoice.",
+      };
+    }
 
     try {
       const flushed = await store.flush();
@@ -38234,7 +38731,17 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
 
         const dueDays = Number.parseInt(invoicing?.dueDays, 10);
         const safeDueDays = Number.isFinite(dueDays) && dueDays >= 0 ? dueDays : 15;
-        const converted = estimateToDraftInvoice(estimate, {
+        const converted = estimateToDraftInvoice(
+          taxMigration.requiresConfirmation
+            ? {
+              ...taxMigration.normalizedEstimate,
+              taxMigrationConfirmedAt: new Date().toISOString(),
+              taxMigrationSource: "invoice-conversion",
+              taxMigrationPriorTotal: taxMigration.priorTotal,
+              taxMigrationCorrectedTotal: taxMigration.normalizedTotal,
+            }
+            : taxMigration.normalizedEstimate,
+          {
           client,
           number: `${invoicing?.numberPrefix != null ? invoicing.numberPrefix : "INV-"}${nextInvoiceNumber(list, invoicing)}`,
           issueDate: todayMDY(),
@@ -38242,7 +38749,8 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           dueDays: safeDueDays,
           defaultTaxRate: invoicing?.taxRate,
           paymentTerms: invoicing?.terms,
-        });
+          },
+        );
         const next = [converted, ...list];
         const saved = await store.replaceMany([{
           key: "sps_invoices",
@@ -38399,21 +38907,147 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
 
     return { ok: false, error: "Estimates changed repeatedly on another device. Refresh and try again." };
   };
-  const handleDeleteInvoice = (id) => {
-    const target = (invoices || []).find(iv => iv.id === id);
-    // If this invoice was pushed to QuickBooks, delete it there too
-    if (target && target.qbId && qbIsConnected()) {
-      authHeaders({ "Content-Type": "application/json" }).then(h =>
-        fetch(`${QB_API}/delete-invoice`, {
-          method: "POST",
-          headers: h,
-          body: JSON.stringify({ qb_id: target.qbId }), // tokens handled server-side
-        }).then(r => r.json()).then(d => {
-          if (d.error) console.error("QB delete failed:", d.error);
-        }).catch(e => console.error("QB delete error:", e.message))
-      );
+  const handleDeleteInvoice = async (id) => {
+    const targetId = String(id || "").trim();
+    if (!targetId) return { ok: false, error: "Choose an invoice to delete." };
+
+    try {
+      const flushed = await store.flush();
+      if (!flushed?.ok && !flushed?.empty) {
+        return { ok: false, error: "Pending invoice, estimate, or schedule changes must finish syncing before an invoice can be deleted." };
+      }
+      const hasRelevantConflict = (typeof store.listConflicts === "function" ? store.listConflicts() : [])
+        .some(({ key }) => key === "sps_invoices" || key === "sps_estimates" || key === "sps_schedule");
+      if (hasRelevantConflict) {
+        return { ok: false, error: "Resolve the invoice, estimate, or schedule sync conflict before deleting this invoice." };
+      }
+
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const [invoiceRead, estimateRead, scheduleRead] = await Promise.all([
+          store.refresh("sps_invoices"),
+          store.refresh("sps_estimates"),
+          store.refresh("sps_schedule"),
+        ]);
+        if (!invoiceRead?.ok || !estimateRead?.ok || !scheduleRead?.ok) {
+          return {
+            ok: false,
+            error: invoiceRead?.error?.message
+              || estimateRead?.error?.message
+              || scheduleRead?.error?.message
+              || "The latest invoice links could not be checked. Nothing was deleted.",
+          };
+        }
+
+        let latestInvoices;
+        let latestEstimates;
+        let latestSchedule;
+        try {
+          latestInvoices = invoiceRead.exists ? JSON.parse(invoiceRead.value || "[]") : [];
+          latestEstimates = estimateRead.exists ? JSON.parse(estimateRead.value || "[]") : [];
+          latestSchedule = scheduleRead.exists ? JSON.parse(scheduleRead.value || "[]") : [];
+        } catch (_) {
+          return { ok: false, error: "The shared invoice, estimate, or schedule data is invalid. Nothing was deleted." };
+        }
+        if (!Array.isArray(latestInvoices) || !Array.isArray(latestEstimates) || !Array.isArray(latestSchedule)) {
+          return { ok: false, error: "The shared invoice, estimate, or schedule data is invalid. Nothing was deleted." };
+        }
+
+        const target = latestInvoices.find((invoice) => String(invoice?.id || "") === targetId);
+        if (!target) {
+          setInvoices(latestInvoices);
+          setEstimatesRaw(latestEstimates);
+          setSchedule(latestSchedule);
+          return { ok: true, existing: true };
+        }
+
+        const references = findInvoiceDeletionReferences(target, latestEstimates, latestSchedule);
+        if (references.blocked) {
+          return {
+            ok: false,
+            linked: true,
+            error: invoiceDeletionBlockedMessage(target, references),
+          };
+        }
+
+        const nextInvoices = latestInvoices.filter((invoice) => String(invoice?.id || "") !== targetId);
+        const saved = await store.replaceMany([
+          {
+            key: "sps_invoices",
+            value: JSON.stringify(nextInvoices),
+            expectedVersion: Number(invoiceRead.version) || 0,
+          },
+          {
+            key: "sps_estimates",
+            value: estimateRead.exists ? estimateRead.value : "[]",
+            expectedVersion: Number(estimateRead.version) || 0,
+          },
+          {
+            key: "sps_schedule",
+            value: scheduleRead.exists ? scheduleRead.value : "[]",
+            expectedVersion: Number(scheduleRead.version) || 0,
+          },
+        ]);
+        if (!saved?.ok) {
+          if (saved?.conflict && attempt < 2) continue;
+          return {
+            ok: false,
+            error: saved?.conflict
+              ? "Another employee changed an invoice or job link at the same time. Refresh and try again."
+              : (saved?.error?.message || "The server did not confirm the invoice deletion."),
+          };
+        }
+
+        const confirmedRead = await store.get("sps_invoices");
+        let confirmedInvoices;
+        try {
+          confirmedInvoices = confirmedRead?.value ? JSON.parse(confirmedRead.value) : nextInvoices;
+        } catch (_) {
+          confirmedInvoices = [];
+        }
+        if (
+          !Array.isArray(confirmedInvoices)
+          || confirmedInvoices.some((invoice) => String(invoice?.id || "") === targetId)
+        ) {
+          return { ok: false, error: "The server confirmed the save, but the deleted invoice is still present. Refresh before trying again." };
+        }
+
+        setInvoices(confirmedInvoices);
+        setEstimatesRaw(latestEstimates);
+        setSchedule(latestSchedule);
+
+        // QuickBooks deletion is deliberately last. A linked estimate/stop must never lose its
+        // external invoice before the three local sections atomically confirm that deletion is safe.
+        if (target.qbId && qbIsConnected()) {
+          try {
+            const response = await fetch(`${QB_API}/delete-invoice`, {
+              method: "POST",
+              headers: await authHeaders({ "Content-Type": "application/json" }),
+              body: JSON.stringify({ qb_id: target.qbId }),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || data.error) {
+              const detail = data.error || "QuickBooks did not confirm the deletion.";
+              console.error("QB delete failed:", detail);
+              return {
+                ok: true,
+                warning: `Deleted from SPS Way, but QuickBooks did not confirm it: ${detail} Sync again before recreating this invoice.`,
+              };
+            }
+          } catch (error) {
+            console.error("QB delete error:", error?.message || error);
+            return {
+              ok: true,
+              warning: "Deleted from SPS Way, but QuickBooks could not be reached. Sync again before recreating this invoice.",
+            };
+          }
+        }
+        return { ok: true };
+      }
+    } catch (error) {
+      return { ok: false, error: error?.message || "The invoice could not be deleted." };
     }
-    setInvoices(list => (list || []).filter(iv => iv.id !== id));
+
+    return { ok: false, error: "Invoice links changed repeatedly on another device. Refresh and try again." };
   };
 
   // Re-read the three authoritative sections immediately before an arrival is recorded or any
@@ -38832,12 +39466,12 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           {selectedClient && <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} initialTab={clientOpenTab} onTabChange={setClientOpenTab} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>}
         </>
       ))}
-      {page === "schedule" && <SectionErrorBoundary key={"schedule-" + schedNonce}><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} onValidateArrival={validateArrivalStop} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
+      {page === "schedule" && <SectionErrorBoundary key={"schedule-" + schedNonce}><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} estimates={estimatesRaw} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} seedEstimate={scheduleEstimateSeed} clearEstimateSeed={() => setScheduleEstimateSeed(null)} onScheduleEstimate={handleScheduleApprovedEstimate} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} onValidateArrival={validateArrivalStop} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <SectionErrorBoundary key="inventory"><InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} /></SectionErrorBoundary>}
       {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} branding={branding} T={T} budget={budget} />}
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} isAdmin={perms.isAdmin} />}
-      {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} setCatalog={setCatalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} invoices={invoices} onSaveInvoice={handleSaveInvoice} onConvertEstimate={handleConvertEstimateToInvoice} onCompleteEstimate={handleCompleteEstimate} />}
-      {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
+      {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} setCatalog={setCatalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} invoices={invoices} schedule={schedule} onSaveInvoice={handleSaveInvoice} onConvertEstimate={handleConvertEstimateToInvoice} onCompleteEstimate={handleCompleteEstimate} onScheduleEstimate={handleOpenEstimateSchedule} />}
+      {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} qbAccounting={qbAccounting} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
       {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : commsSection || undefined} initialSectionNonce={commsSectionNonce} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} setBranding={setBranding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} onLinkLead={handleLinkLead} openLeadId={openLeadId} onLeadOpened={() => setOpenLeadId(null)} vp={vp} workspaceScope={authUserId} />}
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}

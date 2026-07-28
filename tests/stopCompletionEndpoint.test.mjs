@@ -164,6 +164,376 @@ test("field completion is validated server-side and committed through one servic
   assert.equal(writtenClients[0].history.length, 1);
 });
 
+test("estimate-linked completion and reopening advance the same fulfillment receipt without double posting sales", async () => {
+  const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
+  const linkedStop = {
+    sid: "stop-estimate-1",
+    clientId: "c1",
+    assigneeId: "e1",
+    source: "estimate",
+    sourceEstimateId: "estimate-1",
+    sourceEstimateNumber: "EST-1001",
+    linkedInvoiceId: "invoice-1",
+    plannedMaterials: [{
+      id: "planned-product",
+      kind: "product",
+      refId: "p1",
+      name: "Pump treatment",
+      quantity: "2",
+      unit: "bottles",
+      billingDisposition: "included-in-estimate",
+    }],
+    estimateFulfillment: {
+      state: "scheduled",
+      inventoryDisposition: "consume-on-completion",
+      billingDisposition: "linked-invoice",
+      completionReceiptId: null,
+    },
+  };
+  const state = {
+    sps_clients: { value: [{ id: "c1", name: "Client", balance: "$0", history: [] }], version: 1 },
+    sps_catalog: {
+      value: {
+        locations: [{ id: "truck", name: "Truck" }],
+        treatments: [],
+        parts: [],
+        products: [{ id: "p1", name: "Renamed catalog treatment", unit: "bottles", stockByLoc: { truck: 5 } }],
+      },
+      version: 1,
+    },
+    sps_completed: { value: {}, version: 1 },
+    sps_schedule: { value: [{ date: "07/28/2026", stops: [linkedStop] }], version: 1 },
+    sps_invoices: {
+      value: [{
+        id: "invoice-1",
+        clientId: "c1",
+        source: "estimate",
+        sourceEstimateId: "estimate-1",
+        status: "Draft",
+      }],
+      version: 1,
+    },
+  };
+  const batchWrites = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
+    if (href.includes("/rest/v1/app_state?")) {
+      const match = href.match(/key=eq\.([^&]+)/);
+      const key = match ? decodeURIComponent(match[1]) : "";
+      const row = state[key];
+      return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+    }
+    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+      const operations = JSON.parse(options.body).p_operations;
+      batchWrites.push(operations);
+      for (const operation of operations) {
+        assert.equal(operation.expected_version, state[operation.key].version);
+        state[operation.key] = {
+          value: JSON.parse(operation.value),
+          version: state[operation.key].version + 1,
+        };
+      }
+      return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
+    }
+    throw new Error(`Unexpected fetch: ${href}`);
+  };
+
+  const completedResponse = mockResponse();
+  await stopCompletionHandler({
+    method: "POST",
+    headers: { authorization: "Bearer field-token" },
+    body: {
+      mode: "complete",
+      clientId: "c1",
+      sid: linkedStop.sid,
+      idempotencyKey: "estimate-completion-attempt-1",
+      entry: {
+        invoice: "$0",
+        sourceEstimateId: "estimate-1",
+        linkedInvoiceId: "invoice-1",
+        billingDisposition: "linked-invoice",
+        // The server must restore the scheduled plan even when a stale/malicious form omits it.
+        productsPurchased: [],
+      },
+    },
+  }, completedResponse);
+
+  assert.equal(completedResponse.statusCode, 200);
+  assert.equal(completedResponse.body.estimateFulfillment.state, "completed");
+  assert.equal(completedResponse.body.estimateFulfillment.shouldCreateInvoice, false);
+  const completedStop = state.sps_schedule.value[0].stops[0];
+  assert.equal(completedStop.estimateFulfillment.completionReceiptId, completedResponse.body.receiptId);
+  assert.equal(state.sps_clients.value[0].balance, "$0");
+  assert.equal(state.sps_catalog.value.products[0].stockByLoc.truck, 3);
+  assert.deepEqual(
+    state.sps_clients.value[0].history[0].productsPurchased,
+    [{
+      id: "p1",
+      name: "Renamed catalog treatment",
+      unit: "bottles",
+      qty: 2,
+    }],
+    "the durable plan is rebuilt with the current catalog name instead of trusting the browser",
+  );
+  assert.equal(
+    batchWrites[0].some((operation) => operation.key === "sps_invoices"),
+    true,
+    "the unchanged linked invoice is included as a CAS fence",
+  );
+
+  const reopenedResponse = mockResponse();
+  await stopCompletionHandler({
+    method: "POST",
+    headers: { authorization: "Bearer field-token" },
+    body: {
+      mode: "reverse",
+      clientId: "c1",
+      sid: linkedStop.sid,
+    },
+  }, reopenedResponse);
+
+  assert.equal(reopenedResponse.statusCode, 200);
+  assert.equal(reopenedResponse.body.estimateFulfillment.state, "reopened");
+  assert.equal(state.sps_schedule.value[0].stops[0].estimateFulfillment.completionReceiptId, null);
+  assert.equal(state.sps_catalog.value.products[0].stockByLoc.truck, 5);
+  assert.equal(batchWrites.length, 2);
+});
+
+test("estimate completion fails closed when a planned catalog item is missing or cannot be fully deducted", async () => {
+  const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
+  const makeStop = () => ({
+    sid: "stop-estimate-stock",
+    clientId: "c1",
+    assigneeId: "e1",
+    source: "estimate",
+    sourceEstimateId: "estimate-stock",
+    linkedInvoiceId: "invoice-stock",
+    plannedMaterials: [{
+      id: "planned-p1",
+      kind: "product",
+      refId: "p1",
+      name: "Quoted product",
+      quantity: "2",
+      unit: "bottles",
+    }],
+    estimateFulfillment: {
+      state: "scheduled",
+      inventoryDisposition: "consume-on-completion",
+      billingDisposition: "linked-invoice",
+      completionReceiptId: null,
+    },
+  });
+
+  for (const scenario of [
+    { products: [], expectedCode: "inventory-item-missing" },
+    {
+      products: [{ id: "p1", name: "Quoted product", unit: "bottles", stockByLoc: { truck: 1 } }],
+      expectedCode: "estimate-inventory-not-applied",
+    },
+  ]) {
+    const stop = makeStop();
+    const state = {
+      sps_clients: { value: [{ id: "c1", name: "Client", balance: "$0", history: [] }], version: 1 },
+      sps_catalog: {
+        value: {
+          locations: [{ id: "truck", name: "Truck" }],
+          treatments: [],
+          parts: [],
+          products: scenario.products,
+        },
+        version: 1,
+      },
+      sps_completed: { value: {}, version: 1 },
+      sps_schedule: { value: [{ date: "07/28/2026", stops: [stop] }], version: 1 },
+      sps_invoices: {
+        value: [{
+          id: "invoice-stock",
+          clientId: "c1",
+          sourceEstimateId: "estimate-stock",
+          status: "Draft",
+        }],
+        version: 1,
+      },
+    };
+    let batchWrites = 0;
+    globalThis.fetch = async (url) => {
+      const href = String(url);
+      if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+      if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
+      if (href.includes("/rest/v1/app_state?")) {
+        const match = href.match(/key=eq\.([^&]+)/);
+        const key = match ? decodeURIComponent(match[1]) : "";
+        const row = state[key];
+        return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+      }
+      if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+        batchWrites += 1;
+        throw new Error("No shared state may be written when planned inventory cannot be applied");
+      }
+      throw new Error(`Unexpected fetch: ${href}`);
+    };
+
+    const res = mockResponse();
+    await stopCompletionHandler({
+      method: "POST",
+      headers: { authorization: "Bearer field-token" },
+      body: {
+        mode: "complete",
+        clientId: "c1",
+        sid: stop.sid,
+        idempotencyKey: `estimate-stock-${scenario.expectedCode}`,
+        entry: { invoice: "$0", productsPurchased: [] },
+      },
+    }, res);
+
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.body.code, scenario.expectedCode);
+    assert.equal(batchWrites, 0);
+    assert.deepEqual(state.sps_completed.value, {});
+    assert.equal(state.sps_clients.value[0].history.length, 0);
+  }
+});
+
+test("estimate completion validates the linked invoice's client and source estimate before any write", async () => {
+  const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
+  const stop = {
+    sid: "stop-invoice-integrity",
+    clientId: "c1",
+    source: "estimate",
+    sourceEstimateId: "estimate-integrity",
+    linkedInvoiceId: "invoice-integrity",
+    plannedMaterials: [],
+    estimateFulfillment: {
+      state: "scheduled",
+      inventoryDisposition: "consume-on-completion",
+      billingDisposition: "linked-invoice",
+      completionReceiptId: null,
+    },
+  };
+
+  for (const scenario of [
+    {
+      invoice: { id: "invoice-integrity", clientId: "different-client", sourceEstimateId: "estimate-integrity" },
+      expectedCode: "estimate-invoice-client-mismatch",
+    },
+    {
+      invoice: { id: "invoice-integrity", clientId: "c1", sourceEstimateId: "different-estimate" },
+      expectedCode: "estimate-invoice-source-mismatch",
+    },
+  ]) {
+    const state = {
+      sps_clients: { value: [{ id: "c1", name: "Client", history: [] }], version: 1 },
+      sps_catalog: { value: { locations: [], treatments: [], parts: [], products: [] }, version: 1 },
+      sps_completed: { value: {}, version: 1 },
+      sps_schedule: { value: [{ date: "07/28/2026", stops: [stop] }], version: 1 },
+      sps_invoices: { value: [scenario.invoice], version: 1 },
+    };
+    let batchWrites = 0;
+    globalThis.fetch = async (url) => {
+      const href = String(url);
+      if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+      if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
+      if (href.includes("/rest/v1/app_state?")) {
+        const match = href.match(/key=eq\.([^&]+)/);
+        const key = match ? decodeURIComponent(match[1]) : "";
+        const row = state[key];
+        return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+      }
+      if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+        batchWrites += 1;
+        throw new Error("No shared state may be written with a mismatched invoice link");
+      }
+      throw new Error(`Unexpected fetch: ${href}`);
+    };
+
+    const res = mockResponse();
+    await stopCompletionHandler({
+      method: "POST",
+      headers: { authorization: "Bearer field-token" },
+      body: {
+        mode: "complete",
+        clientId: "c1",
+        sid: stop.sid,
+        idempotencyKey: `invoice-integrity-${scenario.expectedCode}`,
+        entry: { invoice: "$0" },
+      },
+    }, res);
+
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.body.code, scenario.expectedCode);
+    assert.equal(batchWrites, 0);
+  }
+});
+
+test("estimate-linked completion without a draft invoice fails before any shared write", async () => {
+  const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
+  const stop = {
+    sid: "stop-needs-invoice",
+    clientId: "c1",
+    assigneeId: "e1",
+    source: "estimate",
+    sourceEstimateId: "estimate-needs-invoice",
+    sourceEstimateNumber: "EST-1002",
+    plannedMaterials: [],
+    estimateFulfillment: {
+      state: "scheduled",
+      inventoryDisposition: "consume-on-completion",
+      billingDisposition: "convert-estimate-once",
+      completionReceiptId: null,
+    },
+  };
+  const state = {
+    sps_clients: { value: [{ id: "c1", name: "Client", balance: "$0", history: [] }], version: 1 },
+    sps_catalog: { value: { locations: [], treatments: [], parts: [], products: [] }, version: 1 },
+    sps_completed: { value: {}, version: 1 },
+    sps_schedule: { value: [{ date: "07/28/2026", stops: [stop] }], version: 1 },
+  };
+  let batchWrites = 0;
+  globalThis.fetch = async (url) => {
+    const href = String(url);
+    if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
+    if (href.includes("/rest/v1/app_state?")) {
+      const match = href.match(/key=eq\.([^&]+)/);
+      const key = match ? decodeURIComponent(match[1]) : "";
+      const row = state[key];
+      return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+    }
+    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+      batchWrites += 1;
+      throw new Error("The endpoint must not write without a linked invoice");
+    }
+    throw new Error(`Unexpected fetch: ${href}`);
+  };
+
+  const res = mockResponse();
+  await stopCompletionHandler({
+    method: "POST",
+    headers: { authorization: "Bearer field-token" },
+    body: {
+      mode: "complete",
+      clientId: "c1",
+      sid: stop.sid,
+      idempotencyKey: "estimate-needs-invoice-attempt",
+      entry: {
+        invoice: "$0",
+        sourceEstimateId: stop.sourceEstimateId,
+        billingDisposition: "convert-estimate-once",
+        productsPurchased: [],
+      },
+    },
+  }, res);
+
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.code, "estimate-invoice-required");
+  assert.match(res.body.error, /draft invoice/i);
+  assert.equal(batchWrites, 0);
+  assert.deepEqual(state.sps_completed.value, {});
+  assert.equal(state.sps_clients.value[0].history.length, 0);
+});
+
 test("server rejects completing a cancelled scheduled stop before any batch write", async () => {
   const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
   const state = {

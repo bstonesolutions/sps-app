@@ -18,6 +18,7 @@ test("the client portal estimate allowlist keeps units but excludes internal cat
   const allowlist = source.slice(start, end);
   assert.match(allowlist, /"unit"/);
   assert.match(allowlist, /"bundleNote"/);
+  assert.match(allowlist, /"taxable"/);
   forbidden.forEach((field) => assert.doesNotMatch(allowlist, new RegExp(`\\b${field}\\b`)));
 });
 
@@ -27,6 +28,7 @@ test("estimate email and app payloads carry customer units without carrying cost
   assert.ok(payloadMatch, "estimate email item serializer should stay explicit");
   assert.match(payloadMatch[1], /unit:\s*it\.unit/);
   assert.match(payloadMatch[1], /bundleNote:\s*it\.bundleNote/);
+  assert.match(payloadMatch[1], /taxable:\s*estimateLineIsTaxable/);
   forbidden.forEach((field) => assert.doesNotMatch(payloadMatch[1], new RegExp(`\\b${field}\\b`)));
   forbidden.forEach((field) => assert.doesNotMatch(endpoint, new RegExp(`\\b${field}\\b`)));
   assert.match(endpoint, /estimateLineQuantity/);

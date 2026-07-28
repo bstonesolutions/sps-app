@@ -4,9 +4,11 @@ import test from "node:test";
 import {
   completeEstimateWithInvoice,
   estimateDraftInvoiceId,
+  estimateTaxMigrationImpact,
   estimateToDraftInvoice,
   findInvoiceForEstimate,
 } from "../estimateInvoiceConversion.js";
+import { estimateTotals } from "../estimateMath.js";
 
 test("approved estimate becomes one local draft with client, catalog, cost, notes, and tax preserved", () => {
   const estimate = {
@@ -65,7 +67,7 @@ test("approved estimate becomes one local draft with client, catalog, cost, note
   assert.equal(invoice.lineItems.length, 2);
   assert.equal(invoice.lineItems[0].unitPrice, "125");
   assert.equal(invoice.lineItems[0].unitCost, "70");
-  assert.equal(invoice.lineItems[0].taxable, true);
+  assert.equal(invoice.lineItems[0].taxable, false);
   assert.equal(invoice.lineItems[0].refId, "svc-pump");
   assert.equal(invoice.lineItems[1].costKnown, false);
   assert.equal(invoice.lineItems[1].unitCost, "");
@@ -77,9 +79,102 @@ test("approved estimate becomes one local draft with client, catalog, cost, note
   assert.equal(invoice.sourceEstimateId, "est-42");
   assert.equal(invoice.sourceEstimateNumber, "EST-1042");
   assert.equal(invoice.convertedFromEstimate, true);
+  assert.equal(invoice.sourceEstimateTaxModel, "line-item-v1");
+  assert.equal(invoice.sourceEstimateTaxMigration, "services-nontaxable-v1");
   assert.equal(invoice.qbSyncStatus, "local");
   assert.equal("qbId" in invoice, false);
   assert.equal("qbPushed" in invoice, false);
+});
+
+test("legacy approved service estimates are normalized before billing instead of taxing labor", () => {
+  const estimate = {
+    id: "legacy-taxed-service",
+    number: "EST-10",
+    clientId: "client-1",
+    status: "approved",
+    taxEnabled: true,
+    taxRate: "6",
+    items: [
+      // A partially-migrated quote-wide record can carry this stale flag. Without a tax model it
+      // is not evidence that service labor was deliberately made taxable.
+      { id: "service", desc: "Repair labor", kind: "service", qty: "1", price: "200", taxable: true },
+      { id: "product", desc: "Replacement part", kind: "product", qty: "1", price: "100" },
+    ],
+  };
+
+  // The saved estimate retains its historical quote-wide display until someone deliberately
+  // revises it, while the explicit conversion action applies the current line tax rules.
+  assert.equal(estimateTotals(estimate).total, 318);
+  const invoice = estimateToDraftInvoice(estimate, {
+    client: { id: "client-1", name: "Generic Client" },
+    number: "INV-10",
+    issueDate: "07/28/2026",
+    dueDate: "08/12/2026",
+  });
+
+  assert.deepEqual(invoice.lineItems.map((line) => line.taxable), [false, true]);
+  assert.equal(invoice.taxRate, "6");
+  assert.equal(invoice.sourceEstimateTaxMigration, "services-nontaxable-v1");
+});
+
+test("legacy service-tax migration exposes the exact customer-total change for confirmation", () => {
+  const impact = estimateTaxMigrationImpact({
+    id: "legacy-confirmation",
+    status: "approved",
+    taxEnabled: true,
+    taxRate: "6",
+    items: [
+      { id: "labor", kind: "service", qty: "1", price: "200" },
+      { id: "part", kind: "product", qty: "1", price: "100" },
+    ],
+  });
+
+  assert.equal(impact.requiresConfirmation, true);
+  assert.equal(impact.priorTotal, 318);
+  assert.equal(impact.normalizedTotal, 306);
+  assert.equal(impact.normalizedEstimate.items[0].taxable, false);
+  assert.equal(impact.normalizedEstimate.items[1].taxable, true);
+});
+
+test("legacy tax normalization does not ask for confirmation when the quoted total is unchanged", () => {
+  const impact = estimateTaxMigrationImpact({
+    id: "legacy-products-only",
+    status: "approved",
+    taxEnabled: true,
+    taxRate: "6",
+    items: [{ id: "part", kind: "product", qty: "1", price: "100" }],
+  });
+
+  assert.equal(impact.requiresConfirmation, false);
+  assert.equal(impact.priorTotal, impact.normalizedTotal);
+});
+
+test("a confirmed legacy-tax correction remains auditable on the created invoice", () => {
+  const invoice = estimateToDraftInvoice({
+    id: "confirmed-tax-correction",
+    clientId: "client-1",
+    status: "approved",
+    taxEnabled: true,
+    taxRate: "6",
+    taxModel: "line-item-v1",
+    taxMigrationConfirmedAt: "2026-07-28T18:00:00.000Z",
+    taxMigrationSource: "invoice-conversion",
+    taxMigrationPriorTotal: 318,
+    taxMigrationCorrectedTotal: 306,
+    items: [
+      { id: "labor", kind: "service", qty: "1", price: "200", taxable: false },
+      { id: "part", kind: "product", qty: "1", price: "100", taxable: true },
+    ],
+  }, {
+    client: { id: "client-1", name: "Generic Client" },
+    number: "INV-CONFIRMED",
+  });
+
+  assert.equal(invoice.sourceEstimateTaxMigration, "services-nontaxable-v1");
+  assert.equal(invoice.sourceEstimateTaxMigrationConfirmedAt, "2026-07-28T18:00:00.000Z");
+  assert.equal(invoice.sourceEstimateTaxMigrationSource, "invoice-conversion");
+  assert.equal(invoice.sourceEstimatePriorTotal, 318);
+  assert.equal(invoice.sourceEstimateCorrectedTotal, 306);
 });
 
 test("tax-off and legacy amount-only estimates remain tax-free and keep their quoted cents", () => {
@@ -101,6 +196,58 @@ test("tax-off and legacy amount-only estimates remain tax-free and keep their qu
   assert.equal(invoice.lineItems[0].taxable, false);
   assert.equal(invoice.lineItems[0].qty, "2");
   assert.equal(invoice.lineItems[0].unitPrice, "37.5");
+});
+
+test("line-item tax keeps service labor non-taxable and taxes only products during conversion", () => {
+  const estimate = {
+    id: "estimate-line-tax",
+    number: "EST-11",
+    clientId: "client-1",
+    status: "approved",
+    taxEnabled: true,
+    taxRate: "6",
+    taxModel: "line-item-v1",
+    items: [
+      { id: "service", desc: "Repair labor", kind: "service", qty: "1", price: "200", taxable: false },
+      { id: "product", desc: "Replacement pump", kind: "product", qty: "1", price: "100", taxable: true },
+    ],
+  };
+  const invoice = estimateToDraftInvoice(estimate, {
+    client: { id: "client-1", name: "Generic Client" },
+    number: "INV-11",
+    issueDate: "07/28/2026",
+    dueDate: "08/12/2026",
+  });
+
+  assert.equal(estimateTotals(estimate).taxableSubtotal, 100);
+  assert.equal(estimateTotals(estimate).total, 306);
+  assert.equal(invoice.lineItems[0].taxable, false);
+  assert.equal(invoice.lineItems[1].taxable, true);
+  assert.equal(invoice.taxRate, "6");
+});
+
+test("turning estimate tax off forces every converted invoice line non-taxable", () => {
+  const invoice = estimateToDraftInvoice({
+    id: "estimate-tax-off",
+    number: "EST-12",
+    clientId: "client-1",
+    status: "approved",
+    taxEnabled: false,
+    taxRate: "6",
+    taxModel: "line-item-v1",
+    items: [
+      { id: "service", desc: "Service", kind: "service", qty: "1", price: "100", taxable: true },
+      { id: "product", desc: "Product", kind: "product", qty: "1", price: "50", taxable: true },
+    ],
+  }, {
+    client: { id: "client-1", name: "Generic Client" },
+    number: "INV-12",
+    issueDate: "07/28/2026",
+    dueDate: "08/12/2026",
+  });
+
+  assert.equal(invoice.taxRate, "0");
+  assert.deepEqual(invoice.lineItems.map((line) => line.taxable), [false, false]);
 });
 
 test("conversion ignores unfinished blank editor rows without dropping a real zero-priced line", () => {

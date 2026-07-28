@@ -1,6 +1,9 @@
 import {
+  ESTIMATE_LINE_TAX_MODEL,
+  defaultEstimateLineTaxable,
   estimateLineAmount,
   estimateLineHasKnownCost,
+  estimateLineIsTaxable,
   estimateLineQuantity,
   estimateLineUnitPrice,
   estimateNumberIsValid,
@@ -16,6 +19,43 @@ const estimateLineHasContent = (line) => (
   [line?.price, line?.unitPrice, line?.amount]
     .some((value) => value != null && text(value) !== "")
 );
+
+// Estimates created before per-line tax existed treated the entire quote as taxable. That legacy
+// display rule protects already-sent customer totals, but it must never leak into a newly-created
+// invoice and make service labor taxable. Conversion is the explicit billing action, so normalize
+// missing line flags here while preserving any tax choice that was actually stored.
+export function normalizeEstimateTaxForInvoice(estimate) {
+  if (!estimate || typeof estimate !== "object") return estimate;
+  if (estimate.taxModel === ESTIMATE_LINE_TAX_MODEL || estimate.taxEnabled !== true) return estimate;
+  return {
+    ...estimate,
+    taxModel: ESTIMATE_LINE_TAX_MODEL,
+    items: (Array.isArray(estimate.items) ? estimate.items : []).map((line) => ({
+      ...line,
+      // A few partially-migrated records picked up `taxable:true` while they still had no
+      // line-item model. Never let that stale quote-wide flag make service labor taxable.
+      // Preserve an explicit opt-out, while deriving every other legacy line from its kind.
+      taxable: line?.taxable === false
+        ? false
+        : defaultEstimateLineTaxable(line?.kind, { ...line, taxable: undefined }),
+    })),
+  };
+}
+
+export function estimateTaxMigrationImpact(estimate, fallbackRate = 0) {
+  const normalizedEstimate = normalizeEstimateTaxForInvoice(estimate);
+  const priorTotal = estimateTotals(estimate, fallbackRate).total;
+  const normalizedTotal = estimateTotals(normalizedEstimate, fallbackRate).total;
+  const priorCents = Math.round((priorTotal + Number.EPSILON) * 100);
+  const normalizedCents = Math.round((normalizedTotal + Number.EPSILON) * 100);
+  return {
+    normalizedEstimate,
+    priorTotal,
+    normalizedTotal,
+    changesCustomerTotal: priorCents !== normalizedCents,
+    requiresConfirmation: normalizedEstimate !== estimate && priorCents !== normalizedCents,
+  };
+}
 
 export function estimateDraftInvoiceId(estimate) {
   const source = safeIdPart(estimate?.id || estimate?.number);
@@ -103,7 +143,7 @@ function invoiceLineFromEstimate(line, estimate, index) {
     unitCost: knownCost ? String(unitCost) : "",
     costKnown: knownCost,
     ...(estimateNumberIsValid(line?.knownUnitCost) ? { knownUnitCost: String(line.knownUnitCost) } : {}),
-    taxable: estimate?.taxEnabled === true,
+    taxable: estimateLineIsTaxable(line, estimate),
     kind: line?.kind || "custom",
     ...(line?.refId != null ? { refId: line.refId } : {}),
     ...(line?.unit ? { unit: line.unit } : {}),
@@ -125,22 +165,26 @@ export function estimateToDraftInvoice(estimate, {
 } = {}) {
   if (!estimate || typeof estimate !== "object") throw new Error("Choose an estimate to convert.");
   if (!client || client.id == null) throw new Error("Choose a client before converting this estimate.");
-  const lines = (Array.isArray(estimate.items) ? estimate.items : []).filter(estimateLineHasContent);
+  const billingEstimate = normalizeEstimateTaxForInvoice(estimate);
+  const lines = (Array.isArray(billingEstimate.items) ? billingEstimate.items : []).filter(estimateLineHasContent);
   if (!lines.length) throw new Error("Add at least one line item before converting this estimate.");
   if (!text(number)) throw new Error("An invoice number could not be assigned.");
 
-  const taxEnabled = estimate.taxEnabled === true;
+  const taxEnabled = billingEstimate.taxEnabled === true;
   const taxRate = taxEnabled
-    ? estimateNumberValue(estimate.taxRate ?? defaultTaxRate)
+    ? estimateNumberValue(billingEstimate.taxRate ?? defaultTaxRate)
     : 0;
-  const notes = [...new Set([text(estimate.notes), text(paymentTerms)].filter(Boolean))].join("\n\n");
-  const lineItems = lines.map((line, index) => invoiceLineFromEstimate(line, estimate, index));
+  const notes = [...new Set([text(billingEstimate.notes), text(paymentTerms)].filter(Boolean))].join("\n\n");
+  const lineItems = lines.map((line, index) => invoiceLineFromEstimate(line, billingEstimate, index));
   const invoiceSubtotal = lineItems.reduce((sum, line) => (
     sum + estimateNumberValue(line.qty) * estimateNumberValue(line.unitPrice)
   ), 0);
-  const invoiceTax = taxEnabled ? invoiceSubtotal * taxRate / 100 : 0;
+  const invoiceTaxableSubtotal = lineItems.reduce((sum, line) => (
+    sum + (line.taxable ? estimateNumberValue(line.qty) * estimateNumberValue(line.unitPrice) : 0)
+  ), 0);
+  const invoiceTax = taxEnabled ? invoiceTaxableSubtotal * taxRate / 100 : 0;
   const invoiceCents = Math.round((invoiceSubtotal + invoiceTax + Number.EPSILON) * 100);
-  const estimateCents = Math.round((estimateTotals(estimate, defaultTaxRate).total + Number.EPSILON) * 100);
+  const estimateCents = Math.round((estimateTotals(billingEstimate, defaultTaxRate).total + Number.EPSILON) * 100);
   if (invoiceCents !== estimateCents) {
     throw new Error("The estimate and draft invoice totals do not match. Review the line pricing before converting.");
   }
@@ -165,6 +209,26 @@ export function estimateToDraftInvoice(estimate, {
     sourceEstimateNumber: estimate.number || "",
     sourceEstimateTitle: estimate.title || "",
     sourceEstimateStatus: estimate.status || "draft",
+    sourceEstimateTaxModel: billingEstimate.taxModel || "",
+    ...(
+      billingEstimate !== estimate || estimate.taxMigrationConfirmedAt
+        ? {
+          sourceEstimateTaxMigration: "services-nontaxable-v1",
+          ...(estimate.taxMigrationConfirmedAt
+            ? { sourceEstimateTaxMigrationConfirmedAt: estimate.taxMigrationConfirmedAt }
+            : {}),
+          ...(estimate.taxMigrationSource
+            ? { sourceEstimateTaxMigrationSource: estimate.taxMigrationSource }
+            : {}),
+          ...(estimate.taxMigrationPriorTotal != null
+            ? { sourceEstimatePriorTotal: estimate.taxMigrationPriorTotal }
+            : {}),
+          ...(estimate.taxMigrationCorrectedTotal != null
+            ? { sourceEstimateCorrectedTotal: estimate.taxMigrationCorrectedTotal }
+            : {}),
+        }
+        : {}
+    ),
     convertedFromEstimate: true,
     convertedAt: new Date(createdAt).toISOString(),
     qbSyncStatus: "local",

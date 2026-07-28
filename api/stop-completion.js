@@ -7,6 +7,12 @@ import { randomUUID } from "node:crypto";
 import { requireCapability } from "./_staff-auth.js";
 import { compareAndSetAppStateBatch, readAppStateVersioned } from "./_app-state.js";
 import { applyStopCompletion, hasPositiveTrackedUsage, isNonnegativeMoneyString, reverseStopCompletion } from "../stopCompletion.js";
+import {
+  assertScheduledEstimateInventoryApplied,
+  claimScheduledEstimateCompletion,
+  prepareScheduledEstimateCompletionEntry,
+  releaseScheduledEstimateCompletion,
+} from "../estimateScheduleLink.js";
 
 const MAX_ATTEMPTS = 6;
 const ENTRY_KEYS = new Set([
@@ -14,6 +20,7 @@ const ENTRY_KEYS = new Set([
   "readings", "readingStatus", "ph", "ammonia", "nitrite", "temp", "invoice", "photos",
   "treatmentsUsed", "productsUsed", "productsPurchased", "partsUsed", "usageLoc",
   "quoted_price", "actual_hours", "target_hourly_rate", "arrivedAt", "breakdown",
+  "sourceEstimateId", "sourceEstimateNumber", "linkedInvoiceId", "billingDisposition",
 ]);
 
 const isRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value);
@@ -57,6 +64,15 @@ function scheduledStops(schedule, sid) {
   return matches;
 }
 
+function replaceScheduledStop(schedule, sid, nextStop) {
+  return (Array.isArray(schedule) ? schedule : []).map((day) => ({
+    ...day,
+    stops: (Array.isArray(day?.stops) ? day.stops : []).map((stop) => (
+      stop && sameId(stop.sid, sid) ? nextStop : stop
+    )),
+  }));
+}
+
 function mutationMessage(code, itemName) {
   const messages = {
     "missing-stop-id": "This stop has no stable ID.",
@@ -77,22 +93,80 @@ function mutationMessage(code, itemName) {
     "history-receipt-count-invalid": "The completed report no longer has exactly one matching history record. Nothing was changed.",
     "balance-chain-unprovable": "The prior balance chain cannot be proven from the saved receipts. Nothing was changed.",
     "reversal-ledger-invalid": "The completion receipt ledger is inconsistent. Nothing was changed.",
+    "estimate-materials-invalid": "This estimate stop has no reliable material plan. Reopen the estimate and schedule it again before completing the work.",
+    "inventory-item-missing": `${itemName || "An estimate material"} is no longer in inventory. Restore or relink it before completing the stop.`,
+    "inventory-item-ambiguous": `${itemName || "An estimate material"} appears more than once in inventory. Merge the duplicates before completing the stop.`,
+    "estimate-inventory-not-applied": `${itemName || "An estimate material"} could not be fully deducted from inventory. Correct its stock quantity or location before completing the stop.`,
+    "estimate-linked-invoice-missing": "The invoice linked to this estimate stop no longer exists. Restore or relink it before completing the work.",
+    "estimate-linked-invoice-ambiguous": "The invoice linked to this estimate stop appears more than once. Resolve the duplicate records before completing the work.",
+    "estimate-invoice-client-mismatch": "The invoice linked to this estimate belongs to a different client. Review the link before completing the work.",
+    "estimate-invoice-source-mismatch": "The linked invoice does not belong to this estimate. Review the link before completing the work.",
   };
   return messages[code] || "The stop could not be changed safely.";
 }
 
 async function readBaseline() {
-  const [clients, catalog, completed, schedule] = await Promise.all([
+  const [clients, catalog, completed, schedule, invoices] = await Promise.all([
     readAppStateVersioned("sps_clients"),
     readAppStateVersioned("sps_catalog"),
     readAppStateVersioned("sps_completed"),
     readAppStateVersioned("sps_schedule"),
+    readAppStateVersioned("sps_invoices"),
   ]);
   if (!clients.exists || !Array.isArray(clients.value)) throw new Error("shared_clients_invalid");
   if (!catalog.exists || !isRecord(catalog.value)) throw new Error("shared_catalog_invalid");
   if (completed.exists && !isRecord(completed.value)) throw new Error("shared_completions_invalid");
   if (!schedule.exists || !Array.isArray(schedule.value)) throw new Error("shared_schedule_invalid");
-  return { clients, catalog, completed, schedule };
+  return { clients, catalog, completed, schedule, invoices };
+}
+
+function validateEstimateInvoiceLink(stop, invoicesState, clientId) {
+  const linkedInvoiceId = cleanId(stop?.linkedInvoiceId);
+  if (!linkedInvoiceId) {
+    return {
+      ok: false,
+      code: "estimate-invoice-required",
+      error: "Create or link the draft invoice from this estimate before completing the stop. Nothing was changed.",
+    };
+  }
+  if (!invoicesState?.exists || !Array.isArray(invoicesState.value)) {
+    return {
+      ok: false,
+      code: "estimate-linked-invoice-missing",
+      error: mutationMessage("estimate-linked-invoice-missing"),
+    };
+  }
+  const matches = invoicesState.value.filter((invoice) => invoice && sameId(invoice.id, linkedInvoiceId));
+  if (!matches.length) {
+    return {
+      ok: false,
+      code: "estimate-linked-invoice-missing",
+      error: mutationMessage("estimate-linked-invoice-missing"),
+    };
+  }
+  if (matches.length !== 1) {
+    return {
+      ok: false,
+      code: "estimate-linked-invoice-ambiguous",
+      error: mutationMessage("estimate-linked-invoice-ambiguous"),
+    };
+  }
+  const invoice = matches[0];
+  if (!sameId(invoice.clientId, clientId)) {
+    return {
+      ok: false,
+      code: "estimate-invoice-client-mismatch",
+      error: mutationMessage("estimate-invoice-client-mismatch"),
+    };
+  }
+  if (!sameId(invoice.sourceEstimateId, stop.sourceEstimateId)) {
+    return {
+      ok: false,
+      code: "estimate-invoice-source-mismatch",
+      error: mutationMessage("estimate-invoice-source-mismatch"),
+    };
+  }
+  return { ok: true, invoice };
 }
 
 export default async function handler(req, res) {
@@ -139,13 +213,50 @@ export default async function handler(req, res) {
       }
 
       const completedValue = baseline.completed.exists ? baseline.completed.value : {};
+      const isNewCompletion = mode === "complete" && !completedValue[sid];
+      let completionEntry = entry;
+      let estimateInventoryRequirements = [];
+      let estimateInvoiceFenceRequired = false;
+      if (isNewCompletion && stop.sourceEstimateId) {
+        const invoiceValidation = validateEstimateInvoiceLink(stop, baseline.invoices, clientId);
+        if (!invoiceValidation.ok) {
+          return res.status(409).json({
+            ok: false,
+            code: invoiceValidation.code,
+            error: invoiceValidation.error,
+          });
+        }
+        try {
+          const prepared = prepareScheduledEstimateCompletionEntry(
+            stop,
+            {
+              ...entry,
+              sourceEstimateId: stop.sourceEstimateId,
+              sourceEstimateNumber: stop.sourceEstimateNumber || "",
+              linkedInvoiceId: stop.linkedInvoiceId,
+              billingDisposition: "linked-invoice",
+            },
+            baseline.catalog.value,
+          );
+          completionEntry = prepared.entry;
+          estimateInventoryRequirements = prepared.requirements;
+          estimateInvoiceFenceRequired = true;
+        } catch (error) {
+          const code = error?.code || "estimate-materials-invalid";
+          return res.status(409).json({
+            ok: false,
+            code,
+            error: mutationMessage(code, error?.itemName),
+          });
+        }
+      }
       const mutation = mode === "complete"
         ? applyStopCompletion({
           clients: baseline.clients.value,
           catalog: baseline.catalog.value,
           completed: completedValue,
           clientId,
-          entry,
+          entry: completionEntry,
           sid,
           receiptId,
           idempotencyKey,
@@ -166,6 +277,21 @@ export default async function handler(req, res) {
         }
         return res.status(409).json({ ok: false, code: mutation.code, error: mutationMessage(mutation.code, mutation.itemName) });
       }
+      if (isNewCompletion && stop.sourceEstimateId) {
+        try {
+          assertScheduledEstimateInventoryApplied(
+            estimateInventoryRequirements,
+            mutation.receipt?.inventory,
+          );
+        } catch (error) {
+          const code = error?.code || "estimate-inventory-not-applied";
+          return res.status(409).json({
+            ok: false,
+            code,
+            error: mutationMessage(code, error?.itemName),
+          });
+        }
+      }
       const client = mutation.clients.find((item) => item && sameId(item.id, clientId));
       if (mutation.alreadyCompleted || mutation.alreadyReversed) {
         return res.status(200).json({
@@ -178,15 +304,51 @@ export default async function handler(req, res) {
         });
       }
 
+      let nextSchedule = baseline.schedule.value;
+      let estimateFulfillment = null;
+      if (stop.sourceEstimateId) {
+        try {
+          estimateFulfillment = mode === "complete"
+            ? claimScheduledEstimateCompletion(stop, {
+              completionReceiptId: mutation.receipt?.id,
+              completedAt: mutation.receipt?.completedAt || completedAt,
+              linkedInvoiceId: stop.linkedInvoiceId,
+            })
+            : releaseScheduledEstimateCompletion(stop, {
+              completionReceiptId: mutation.receipt?.id,
+              reopenedAt: completedAt,
+            });
+          if (mode === "complete" && estimateFulfillment.shouldCreateInvoice) {
+            return res.status(409).json({
+              ok: false,
+              code: "estimate-invoice-required",
+              error: "Create or link the draft invoice from this estimate before completing the stop. Nothing was changed.",
+            });
+          }
+          nextSchedule = replaceScheduledStop(baseline.schedule.value, sid, estimateFulfillment.stop);
+        } catch (error) {
+          return res.status(409).json({
+            ok: false,
+            code: "estimate-fulfillment-conflict",
+            error: error?.message || "The estimate fulfillment link could not be updated safely.",
+          });
+        }
+      }
+
       const operations = [
         { key: "sps_clients", expectedVersion: baseline.clients.version, value: mutation.clients },
         { key: "sps_completed", expectedVersion: baseline.completed.exists ? baseline.completed.version : 0, value: mutation.completed },
-        // Unchanged value, version fence: if the stop is deleted, cancelled, or assigned to a
-        // different client after validation, the whole transaction conflicts and is recomputed.
-        { key: "sps_schedule", expectedVersion: baseline.schedule.version, value: baseline.schedule.value },
+        // Estimate-linked stops also advance/release their fulfillment receipt here. Regular
+        // stops keep the same value as a version fence, so a concurrent edit still conflicts.
+        { key: "sps_schedule", expectedVersion: baseline.schedule.version, value: nextSchedule },
       ];
+      if (estimateInvoiceFenceRequired) operations.push({
+        key: "sps_invoices",
+        expectedVersion: baseline.invoices.version,
+        value: baseline.invoices.value,
+      });
       const catalogFenceRequired = mode === "complete"
-        ? hasPositiveTrackedUsage(entry)
+        ? hasPositiveTrackedUsage(completionEntry)
         : !!mutation.receipt?.inventory?.length;
       if (catalogFenceRequired) operations.push({
         key: "sps_catalog",
@@ -204,6 +366,11 @@ export default async function handler(req, res) {
           clientName: client && client.name ? String(client.name).slice(0, 160) : "",
           inventoryDeducted: mode === "complete" ? mutation.inventoryDeducted : [],
           inventoryRestored: mode === "reverse" ? mutation.inventoryRestored : [],
+          estimateFulfillment: estimateFulfillment ? {
+            sourceEstimateId: estimateFulfillment.stop.sourceEstimateId,
+            state: estimateFulfillment.stop.estimateFulfillment?.state || "",
+            shouldCreateInvoice: !!estimateFulfillment.shouldCreateInvoice,
+          } : null,
         });
       }
       if (saved.outcome !== "conflict") throw new Error(`unexpected_batch_outcome:${saved.outcome || "unknown"}`);

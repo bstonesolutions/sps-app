@@ -1,6 +1,13 @@
 // api/quickbooks/sync.js
 import { getValidAccessToken, QB_API_BASE, setCors } from "./qb-store.js";
 import { mapQuickBooksInvoice } from "./invoice-mapper.js";
+import {
+  buildQuickBooksReconciliationMetadata,
+  fetchAllQuickBooksQueryPages,
+  mapQuickBooksCreditMemo,
+  mapQuickBooksPayment,
+  QuickBooksQueryError,
+} from "./sync-helpers.js";
 import { requireUser } from "../_auth.js";
 
 export default async function handler(req, res) {
@@ -50,46 +57,77 @@ export default async function handler(req, res) {
   }
 
   try {
-    const invoiceQuery = encodeURIComponent(
-      "SELECT * FROM Invoice ORDER BY MetaData.LastUpdatedTime DESC MAXRESULTS 1000"
-    );
-    const customerQuery = encodeURIComponent(
-      "SELECT * FROM Customer WHERE Active = true MAXRESULTS 1000"
-    );
-    // Build 15, Item 3 — pull Payments too so we can report the real DATE PAID per invoice.
-    // QB's LinkedTxn on the invoice only references the payment; the date lives on Payment.
-    const paymentQuery = encodeURIComponent(
-      "SELECT * FROM Payment ORDER BY MetaData.LastUpdatedTime DESC MAXRESULTS 1000"
-    );
+    const query = (entity, options = {}) => fetchAllQuickBooksQueryPages({
+      fetchImpl: fetch,
+      base,
+      headers,
+      entity,
+      ...options,
+    });
 
-    const [invoiceRes, customerRes, paymentRes] = await Promise.all([
-      fetch(`${base}/query?query=${invoiceQuery}&minorversion=65`, { headers }),
-      fetch(`${base}/query?query=${customerQuery}&minorversion=65`, { headers }),
-      fetch(`${base}/query?query=${paymentQuery}&minorversion=65`, { headers }),
+    // Invoice and Customer are required for the legacy sync contract. Payments
+    // and CreditMemos enrich it; a failure there is returned explicitly as an
+    // incomplete reconciliation rather than silently pretending the numbers
+    // match QuickBooks.
+    const [
+      invoiceResult,
+      customerResult,
+      paymentResult,
+      creditMemoResult,
+    ] = await Promise.allSettled([
+      query("Invoice", { orderBy: "MetaData.LastUpdatedTime DESC" }),
+      query("Customer", { where: "Active = true" }),
+      query("Payment", { orderBy: "MetaData.LastUpdatedTime DESC" }),
+      query("CreditMemo", { orderBy: "MetaData.LastUpdatedTime DESC" }),
     ]);
 
-    if (invoiceRes.status === 401) {
-      const body401 = await invoiceRes.text().catch(() => "");
-      console.error("QB sync 401 from QuickBooks API:", body401);
-      return res.status(401).json({ error: 'Token expired', action: 'reconnect', detail: body401.slice(0, 400) });
-    }
-    if (!invoiceRes.ok || !customerRes.ok) {
-      const bad = invoiceRes.ok ? customerRes : invoiceRes;
-      const errBody = await bad.text().catch(() => "");
-      console.error("QB sync API error:", "invoice", invoiceRes.status, "customer", customerRes.status, errBody);
-      throw new Error('QB API error (invoice ' + invoiceRes.status + ', customer ' + customerRes.status + ')' + (errBody ? ': ' + errBody.slice(0, 300) : ''));
+    const requiredFailure = [invoiceResult, customerResult]
+      .find((result) => result.status === "rejected");
+    if (requiredFailure) {
+      const error = requiredFailure.reason;
+      if (error instanceof QuickBooksQueryError && error.status === 401) {
+        console.error("QB sync 401 from QuickBooks API:", error.detail);
+        return res.status(401).json({
+          error: "Token expired",
+          action: "reconnect",
+          detail: error.detail.slice(0, 400),
+        });
+      }
+      throw error;
     }
 
-    const invoiceData  = await invoiceRes.json();
-    const customerData = await customerRes.json();
+    const invoices = invoiceResult.value.records;
+    const customers = customerResult.value.records;
+    const payments = paymentResult.status === "fulfilled"
+      ? paymentResult.value.records
+      : [];
+    const creditMemos = creditMemoResult.status === "fulfilled"
+      ? creditMemoResult.value.records
+      : [];
 
-    const invoices  = invoiceData?.QueryResponse?.Invoice   || [];
-    const customers = customerData?.QueryResponse?.Customer || [];
+    const fetchInfo = (result) => {
+      if (result.status === "fulfilled") {
+        return {
+          count: result.value.records.length,
+          pageCount: result.value.pageCount,
+          complete: result.value.complete,
+          truncated: result.value.truncated,
+        };
+      }
+      const error = result.reason;
+      return {
+        count: 0,
+        pageCount: 0,
+        complete: false,
+        truncated: false,
+        error: (error && error.message) || String(error),
+      };
+    };
+
     // Map invoice id -> most recent payment date applied to it (Item 3). Payments are
     // supplementary: if the query failed (e.g. scope), date-paid is simply omitted.
-    const paymentData = (paymentRes && paymentRes.ok) ? await paymentRes.json().catch(() => ({})) : {};
     const paidDateByInvoice = {};
-    for (const pm of (paymentData?.QueryResponse?.Payment || [])) {
+    for (const pm of payments) {
       const when = pm.TxnDate || String(pm.MetaData?.CreateTime || "").slice(0, 10);
       for (const line of (pm.Line || [])) {
         for (const lt of (line.LinkedTxn || [])) {
@@ -106,6 +144,11 @@ export default async function handler(req, res) {
       ...(paidDateByInvoice[inv.Id] ? { paidDate: paidDateByInvoice[inv.Id] } : {}),
       todayISO,
     }));
+    const mappedCreditMemos = creditMemos.map(mapQuickBooksCreditMemo);
+    const mappedPayments = payments.map(mapQuickBooksPayment);
+    const mappedUnappliedPayments = mappedPayments.filter(
+      payment => Number(payment.unappliedAmount || 0) > 0,
+    );
 
     const mappedCustomers = customers.map(c => ({
       qbId:    c.Id,
@@ -119,10 +162,32 @@ export default async function handler(req, res) {
       balance: c.Balance || 0,
     }));
 
-    res.status(200).json({
-      invoices:  mappedInvoices,
+    const fetchedAt = new Date().toISOString();
+    const reconciliation = buildQuickBooksReconciliationMetadata({
+      invoices: mappedInvoices,
       customers: mappedCustomers,
-      realmId:   realm_id,
+      creditMemos: mappedCreditMemos,
+      payments: mappedPayments,
+      fetchedAt,
+      todayISO,
+      fetches: {
+        invoices: fetchInfo(invoiceResult),
+        customers: fetchInfo(customerResult),
+        payments: fetchInfo(paymentResult),
+        creditMemos: fetchInfo(creditMemoResult),
+      },
+    });
+
+    res.status(200).json({
+      invoices: mappedInvoices,
+      customers: mappedCustomers,
+      creditMemos: mappedCreditMemos,
+      unappliedPayments: mappedUnappliedPayments,
+      // These totals are calculated exclusively from the current QuickBooks
+      // snapshots. They deliberately do not include unsynced SPS invoices.
+      accounting: reconciliation.accounting,
+      reconciliation,
+      realmId: realm_id,
     });
 
   } catch (err) {

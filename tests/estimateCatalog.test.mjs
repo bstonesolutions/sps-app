@@ -11,14 +11,14 @@ test("every catalog kind snapshots the correct retail, cost, unit, and reference
   const service = estimateLineFromCatalog("service", { id: "svc", name: "Repair", price: "200", cost: "80", price_type: "flat" }, "line-svc");
   assert.deepEqual(service, {
     id: "line-svc", desc: "Repair", qty: "1", price: "200", unitCost: "80", costKnown: true,
-    kind: "service", refId: "svc", unit: "service",
+    kind: "service", refId: "svc", unit: "service", taxable: false,
   });
 
   const treatment = estimateLineFromCatalog("treatment", { id: "tx", name: "Algaecide", retailPerOz: "7.5", costPerOz: "2.25", unit: "oz" }, "line-tx");
   assert.equal(treatment.price, "7.5");
   assert.equal(treatment.unitCost, "2.25");
   assert.equal(treatment.unit, "oz");
-  assert.equal("taxable" in treatment, false, "estimate tax is quote-wide, not a hidden per-line rule");
+  assert.equal(treatment.taxable, true);
 
   const part = estimateLineFromCatalog("part", { id: "part", name: "Valve", retailPer: "30", costPer: "12", unit: "piece" }, "line-part");
   assert.equal(part.refId, "part");
@@ -28,6 +28,19 @@ test("every catalog kind snapshots the correct retail, cost, unit, and reference
   const product = estimateLineFromCatalog("product", { id: "prod", name: "Filter", price: "90", cost: "50" }, "line-prod");
   assert.equal(product.kind, "product");
   assert.equal(product.unit, "each");
+  assert.equal(product.taxable, true);
+});
+
+test("an explicit catalog tax override wins over the kind default", () => {
+  const taxableService = estimateLineFromCatalog("service", {
+    id: "svc-taxable", name: "Taxable service", price: "100", taxable: true,
+  }, "line-taxable-service");
+  const exemptProduct = estimateLineFromCatalog("product", {
+    id: "product-exempt", name: "Exempt product", price: "50", taxable: false,
+  }, "line-exempt-product");
+
+  assert.equal(taxableService.taxable, true);
+  assert.equal(exemptProduct.taxable, false);
 });
 
 test("missing service cost stays unknown while an explicit zero is a known cost", () => {
@@ -76,9 +89,22 @@ test("parts bundles snapshot child quantities plus aggregate retail and cost", (
   assert.equal(bundle.unitCost, "20.50");
   assert.equal(bundle.knownUnitCost, "20.50");
   assert.equal(bundle.costKnown, true);
+  assert.equal(bundle.taxable, true);
+  assert.equal(bundle.taxabilityMixed, false);
   assert.equal(bundle.bundleItems.length, 2);
   assert.equal(bundle.bundleItems[0].qty, "2");
   assert.match(bundle.desc, /Valve ×2/);
+});
+
+test("a mixed-tax parts bundle is flagged so the editor can require separate lines", () => {
+  const bundle = estimateLineFromPartsBundle([
+    { part: { id: "taxable", name: "Taxable", retailPer: "20", taxable: true }, qty: "1" },
+    { part: { id: "exempt", name: "Exempt", retailPer: "5", taxable: false }, qty: "1" },
+  ], "bundle-mixed-tax");
+
+  assert.equal(bundle.taxable, false);
+  assert.equal(bundle.taxabilityMixed, true);
+  assert.deepEqual(bundle.bundleItems.map((item) => item.taxable), [true, false]);
 });
 
 test("a bundle with any missing child cost keeps profit incomplete", () => {

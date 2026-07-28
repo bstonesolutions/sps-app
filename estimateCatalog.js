@@ -1,4 +1,4 @@
-import { estimateNumberIsValid, estimateNumberValue } from "./estimateMath.js";
+import { defaultEstimateLineTaxable, estimateNumberIsValid, estimateNumberValue } from "./estimateMath.js";
 
 const hasValue = (value) => value != null && String(value).trim() !== "";
 const roundMoney = (value) => Math.round((estimateNumberValue(value) + Number.EPSILON) * 100) / 100;
@@ -44,6 +44,7 @@ export function catalogItemFinancials(kind, item = {}) {
     unit,
     inventoryTracked,
     onHand,
+    taxable: defaultEstimateLineTaxable(normalizedKind, item),
   };
 }
 
@@ -59,6 +60,7 @@ export function estimateLineFromCatalog(kind, item, id) {
     kind: financials.kind,
     refId: item?.id ?? null,
     unit: financials.unit,
+    taxable: financials.taxable,
   };
 }
 
@@ -85,6 +87,7 @@ export function estimateLineFromPartsBundle(selected, id) {
     priceKnown: financials.priceKnown,
     unitCost: financials.costKnown ? String(financials.cost) : "",
     costKnown: financials.costKnown,
+    taxable: financials.taxable,
   }));
   const retailComplete = parts.every(({ financials }) => financials.priceKnown);
   const totalPrice = roundMoney(parts.reduce((sum, { qty, financials }) => sum + qty * estimateNumberValue(financials.price), 0));
@@ -93,6 +96,7 @@ export function estimateLineFromPartsBundle(selected, id) {
     sum + (financials.costKnown ? qty * estimateNumberValue(financials.cost) : 0)
   ), 0));
   const totalCost = costKnown ? knownUnitCost : null;
+  const taxability = new Set(bundleItems.map((item) => item.taxable));
   const bundleNote = parts
     .map(({ entry, qty, financials }) => {
       const unit = String(financials.unit || "").trim();
@@ -112,6 +116,8 @@ export function estimateLineFromPartsBundle(selected, id) {
     costKnown,
     kind: "bundle",
     unit: "bundle",
+    taxable: taxability.size === 1 ? bundleItems[0].taxable : false,
+    taxabilityMixed: taxability.size > 1,
     bundleNote,
     bundleItems,
   };

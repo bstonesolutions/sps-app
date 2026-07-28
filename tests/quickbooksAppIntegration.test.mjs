@@ -12,6 +12,8 @@ test("linked invoice pulls use the conflict-safe QuickBooks reconciler", () => {
   assert.match(source, /qbHasUnsupportedLines:\s*!!qi\.qbHasUnsupportedLines/);
   assert.doesNotMatch(source, /filter\(iv => iv\.source !== "quickbooks"\)/);
   assert.match(source, /preferredByQbId/);
+  assert.match(source, /qbSyncStatus:\s*"duplicate-local-qb-id"/);
+  assert.doesNotMatch(source, /const kept = prevList\.filter/);
 });
 
 test("authoritative linked snapshots use QuickBooks totals until the editor changes them", () => {
@@ -97,4 +99,8 @@ test("outstanding summaries and client amount-due actions use remaining balance"
   assert.match(source, /const totalOwed = outstanding\.reduce\(\(s, iv\) => s \+ invoiceTotals\(iv\)\.balance/);
   assert.match(source, /Pay \$\$\{\(tot\.balance\|\|0\)\.toFixed\(2\)\} Now/);
   assert.match(source, />Amount Due<\/span>[\s\S]*?money\(totals\.balance\)/);
+  assert.match(source, /qbAccounting\.openInvoiceCount/);
+  assert.match(source, /qbAccounting\.openInvoiceBalance/);
+  assert.match(source, /qbAccounting\.paymentsReceivedThisMonth/);
+  assert.match(source, /available credits/);
 });

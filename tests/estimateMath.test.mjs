@@ -31,12 +31,44 @@ test("taxable estimates calculate and round line amounts, tax, and total to cent
   // Each line is rounded to cents before the estimate subtotal is calculated.
   assert.deepEqual(totals, {
     subtotal: 26.06,
+    taxableSubtotal: 26.06,
     taxRate: 6,
     taxEnabled: true,
     tax: 1.56,
     total: 27.62,
   });
   assert.equal(formatEstimateMoney(totals.total), "$27.62");
+});
+
+test("line-item tax excludes services while taxing products and supports explicit overrides", () => {
+  const totals = estimateTotals({
+    taxEnabled: true,
+    taxRate: "6",
+    taxModel: "line-item-v1",
+    items: [
+      { kind: "service", qty: "1", price: "200" },
+      { kind: "product", qty: "2", price: "25" },
+      { kind: "product", taxable: false, qty: "1", price: "10" },
+      { kind: "service", taxable: true, qty: "1", price: "5" },
+    ],
+  });
+
+  assert.equal(totals.subtotal, 265);
+  assert.equal(totals.taxableSubtotal, 55);
+  assert.equal(totals.tax, 3.3);
+  assert.equal(totals.total, 268.3);
+});
+
+test("legacy tax-enabled estimates remain quote-wide until deliberately revised", () => {
+  const totals = estimateTotals({
+    taxEnabled: true,
+    taxRate: "6",
+    items: [{ kind: "service", qty: "1", price: "200" }],
+  });
+
+  assert.equal(totals.taxableSubtotal, 200);
+  assert.equal(totals.tax, 12);
+  assert.equal(totals.total, 212);
 });
 
 test("legacy estimates without taxEnabled remain tax-free", () => {

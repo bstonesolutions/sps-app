@@ -170,7 +170,7 @@ function publicInvoice(invoice) {
 }
 
 function publicEstimateItem(line) {
-  return pick(line, ["id", "desc", "description", "qty", "price", "unitPrice", "kind", "unit", "bundleNote", "amount"]);
+  return pick(line, ["id", "desc", "description", "qty", "price", "unitPrice", "kind", "unit", "bundleNote", "amount", "taxable"]);
 }
 
 function estimateMoneyNumber(value) {
@@ -181,7 +181,7 @@ function estimateMoneyNumber(value) {
 function publicEstimate(estimate) {
   const out = pick(estimate, [
     "id", "number", "clientId", "title", "service", "date", "issueDate", "status",
-    "notes", "validDays", "createdAt", "sentAt", "approvedAt",
+    "notes", "validDays", "createdAt", "sentAt", "approvedAt", "taxModel",
   ]);
   out.items = Array.isArray(estimate && estimate.items)
     ? estimate.items.slice(0, 250).map(publicEstimateItem)
@@ -193,6 +193,7 @@ function publicEstimate(estimate) {
     items: out.items,
     taxEnabled: estimate && estimate.taxEnabled === true,
     taxRate: estimate && estimate.taxRate,
+    taxModel: estimate && estimate.taxModel,
   });
   // Older estimates occasionally stored only aggregate values. Keep those readable without ever
   // making a legacy estimate taxable: new/itemized estimates are still rebuilt from their lines.
