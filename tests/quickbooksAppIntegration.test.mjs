@@ -76,8 +76,10 @@ test("QuickBooks update payload carries the reconciliation and jurisdiction fiel
   }
 });
 
-test("invoice conflicts and QuickBooks-only cost gaps are visible and reviewable", () => {
-  assert.match(source, /QuickBooks changed this invoice/);
+test("invoice conflicts, failed links, and QuickBooks-only cost gaps are visible and reviewable", () => {
+  assert.match(source, /invoiceReconciliationIssue/);
+  assert.match(source, /editorReviewIssue\?\.title/);
+  assert.match(source, /editorReviewIssue\?\.reason/);
   assert.match(source, /Use QuickBooks version/);
   assert.match(source, /Keep SPS version/);
   assert.match(source, /Added in QuickBooks · add its cost for accurate profit reporting/);

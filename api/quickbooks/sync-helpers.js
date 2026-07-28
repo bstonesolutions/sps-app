@@ -294,3 +294,9 @@ export function buildQuickBooksReconciliationMetadata({
     warnings,
   };
 }
+
+export function escapeQuickBooksQueryLiteral(value) {
+  return String(value == null ? "" : value)
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "\\'");
+}

@@ -166,6 +166,137 @@ test("QuickBooks sync emits stable line identity, item identity, tax code, and c
   assert.equal(firstRes.body.accounting.openInvoiceBalance, 1502.02);
 });
 
+test("targeted invoice review reads one linked invoice without downloading the ledger", async () => {
+  const invoice = existingInvoice();
+  installAuthAndTokenMocks(async (href) => {
+    const url = new URL(href);
+    if (url.pathname.endsWith("/invoice/1964")) {
+      return jsonResponse({ Invoice: invoice });
+    }
+    throw new Error(`Unexpected fetch: ${href}`);
+  });
+
+  const req = authenticatedRequest();
+  req.query = {
+    reviewInvoiceId: "1964",
+    reviewInvoiceNumber: "1964",
+    reviewCustomerId: "42",
+    reviewTotal: "1417",
+  };
+  const res = mockResponse();
+  await syncHandler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.mode, "invoice-review");
+  assert.equal(res.body.linkedStatus, "found");
+  assert.equal(res.body.invoice.qbId, "1964");
+  assert.equal(res.body.candidates.length, 1);
+  assert.equal(res.body.candidates[0].safeToLink, true);
+});
+
+test("targeted invoice review accepts private POST criteria instead of URL query parameters", async () => {
+  const invoice = existingInvoice();
+  installAuthAndTokenMocks(async (href) => {
+    const url = new URL(href);
+    if (url.pathname.endsWith("/invoice/1964")) {
+      return jsonResponse({ Invoice: invoice });
+    }
+    throw new Error(`Unexpected fetch: ${href}`);
+  });
+
+  const req = authenticatedRequest({
+    mode: "invoice-review",
+    reviewInvoiceId: "1964",
+    reviewInvoiceNumber: "1964",
+    reviewCustomerId: "42",
+    reviewClientName: "Generic Client",
+    reviewTotal: "1417",
+  });
+  const res = mockResponse();
+  await syncHandler(req, res);
+
+  assert.deepEqual(req.query, {});
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.mode, "invoice-review");
+  assert.equal(res.body.linkedStatus, "found");
+  assert.equal(res.body.invoice.qbId, "1964");
+});
+
+test("targeted review scores a unique replacement only by number, customer and total", async () => {
+  const replacement = { ...existingInvoice(), Id: "replacement-1964" };
+  installAuthAndTokenMocks(async (href) => {
+    const url = new URL(href);
+    if (url.pathname.endsWith("/invoice/missing-1964")) {
+      // QuickBooks commonly reports a missing object as HTTP 400 + fault 610,
+      // rather than a conventional HTTP 404.
+      return jsonResponse({
+        Fault: {
+          Error: [{
+            code: "610",
+            Message: "Object Not Found",
+            Detail: "The invoice could not be found.",
+          }],
+        },
+      }, 400);
+    }
+    if (url.pathname.endsWith("/query")) {
+      const query = url.searchParams.get("query") || "";
+      assert.match(query, /FROM Invoice WHERE DocNumber = '1964'/);
+      return jsonResponse({ QueryResponse: { Invoice: [replacement] } });
+    }
+    throw new Error(`Unexpected fetch: ${href}`);
+  });
+
+  const req = authenticatedRequest();
+  req.query = {
+    reviewInvoiceId: "missing-1964",
+    reviewInvoiceNumber: "1964",
+    reviewCustomerId: "42",
+    reviewTotal: "1417",
+  };
+  const res = mockResponse();
+  await syncHandler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.linkedStatus, "missing");
+  assert.equal(res.body.safeCandidate.qbId, "replacement-1964");
+  assert.equal(res.body.candidates[0].safeToLink, true);
+  assert.deepEqual(res.body.candidates[0].assessment.evidence, [
+    "document-number",
+    "customer",
+    "total",
+  ]);
+});
+
+test("targeted review never marks a document-number-only candidate safe", async () => {
+  const differentCustomer = {
+    ...existingInvoice(),
+    Id: "candidate-1964",
+    CustomerRef: { value: "other-customer", name: "Other Client" },
+  };
+  installAuthAndTokenMocks(async (href) => {
+    const url = new URL(href);
+    if (url.pathname.endsWith("/query")) {
+      return jsonResponse({ QueryResponse: { Invoice: [differentCustomer] } });
+    }
+    throw new Error(`Unexpected fetch: ${href}`);
+  });
+
+  const req = authenticatedRequest();
+  req.query = {
+    reviewInvoiceNumber: "1964",
+    reviewCustomerId: "42",
+    reviewTotal: "1417",
+  };
+  const res = mockResponse();
+  await syncHandler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.safeCandidate, null);
+  assert.equal(res.body.candidates[0].safeToLink, false);
+  assert.equal(res.body.candidates[0].assessment.eligible, false);
+});
+
 test("QuickBooks sync returns credit memos and exact net receivables metadata", async () => {
   const invoice = {
     ...existingInvoice(),

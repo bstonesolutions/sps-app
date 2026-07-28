@@ -198,6 +198,46 @@ export function hasPendingLocalInvoiceEdits(invoice) {
   return PENDING_SYNC_STATUSES.has(normalizedText(invoice.qbSyncStatus));
 }
 
+const quickBooksSyncFailureCode = (error, explicitCode = "") => {
+  const supplied = canonicalText(explicitCode).toUpperCase();
+  if (supplied) return supplied;
+  const source = error && typeof error === "object"
+    ? `${error.code || ""} ${error.error || ""} ${error.message || ""}`
+    : String(error || "");
+  if (/create.?outcome.?unknown|may have created/i.test(source)) return "QB_CREATE_OUTCOME_UNKNOWN";
+  if (/duplicate document number|docnumber=.*already/i.test(source)) return "QB_DUPLICATE_DOCUMENT_NUMBER";
+  if (/not connected|session expired|token expired|refresh_failed|401/i.test(source)) return "QB_AUTH_EXPIRED";
+  if (/network|failed to fetch|could not reach|socket|timed? ?out|econn/i.test(source)) return "QB_NETWORK_ERROR";
+  if (/changed in quickbooks|sync required|conflict/i.test(source)) return "QB_CONFLICT";
+  return "QB_SYNC_FAILED";
+};
+
+/**
+ * Preserve a failed QuickBooks attempt on the SPS record so the review queue
+ * can explain what failed and offer a deliberate retry. This function performs
+ * no network or storage writes and never drops invoice content.
+ */
+export function applyQuickBooksInvoiceSyncFailure(localInvoice, options = {}) {
+  if (!localInvoice || typeof localInvoice !== "object" || Array.isArray(localInvoice)) {
+    throw new TypeError("A local SPS invoice is required.");
+  }
+  const source = options.error ?? options.message ?? "";
+  const message = canonicalText(
+    source && typeof source === "object"
+      ? (source.error || source.message || "")
+      : source,
+  ) || "QuickBooks sync failed.";
+  const attemptedAt = canonicalText(options.attemptedAt) || new Date().toISOString();
+
+  return {
+    ...clone(localInvoice),
+    qbNeedsReview: true,
+    qbSyncError: message.slice(0, 500),
+    qbSyncErrorCode: quickBooksSyncFailureCode(source, options.code),
+    qbSyncAttemptedAt: attemptedAt,
+  };
+}
+
 function findLineMatch(remoteLine, remoteIndex, localLines, claimed, remoteCount) {
   const available = localLines
     .map((line, index) => ({ line, index }))
@@ -392,6 +432,9 @@ export function reconcileQuickBooksInvoice(localInvoice, quickBooksInvoice) {
   delete next.qbCreateOutcomeUnknown;
   delete next.qbCreateIntentSignature;
   delete next.qbCreateRequestId;
+  delete next.qbSyncError;
+  delete next.qbSyncErrorCode;
+  delete next.qbSyncAttemptedAt;
 
   return next;
 }
@@ -423,6 +466,9 @@ export function applyQuickBooksInvoiceSaveResult(localInvoice, result) {
   delete settledLocal.qbCreateOutcomeUnknown;
   delete settledLocal.qbCreateIntentSignature;
   delete settledLocal.qbCreateRequestId;
+  delete settledLocal.qbSyncError;
+  delete settledLocal.qbSyncErrorCode;
+  delete settledLocal.qbSyncAttemptedAt;
 
   if (!response.invoice || !Array.isArray(response.invoice.lineItems)) {
     if (response.qbContentFingerprint) {

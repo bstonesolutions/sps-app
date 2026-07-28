@@ -3,11 +3,15 @@ import { getValidAccessToken, QB_API_BASE, setCors } from "./qb-store.js";
 import { mapQuickBooksInvoice } from "./invoice-mapper.js";
 import {
   buildQuickBooksReconciliationMetadata,
+  escapeQuickBooksQueryLiteral,
   fetchAllQuickBooksQueryPages,
   mapQuickBooksCreditMemo,
   mapQuickBooksPayment,
   QuickBooksQueryError,
 } from "./sync-helpers.js";
+import {
+  rankQuickBooksInvoiceCandidates,
+} from "../../invoiceReconciliationActions.js";
 import { requireUser } from "../_auth.js";
 
 export default async function handler(req, res) {
@@ -36,6 +40,111 @@ export default async function handler(req, res) {
     'Authorization': `Bearer ${access_token}`,
     'Accept':        'application/json',
   };
+
+  // Targeted invoice review. The editor previously downloaded the entire
+  // QuickBooks ledger merely to inspect one flagged record. This branch is
+  // read-only: it never links, updates, recreates, or deletes an invoice.
+  //
+  // If a stored QB id no longer exists, an optional document number lookup
+  // returns candidates with conservative evidence. Number alone is never
+  // marked safe; replacement linking requires a unique number + customer +
+  // total match and remains an explicit client-side owner action.
+  const postedReview = req.method === "POST" && req.body?.mode === "invoice-review"
+    ? req.body
+    : null;
+  const reviewRequest = postedReview || req.query || {};
+  if (reviewRequest.reviewInvoiceId || reviewRequest.reviewInvoiceNumber) {
+    const reviewInvoiceId = String(reviewRequest.reviewInvoiceId || "").trim();
+    const reviewInvoiceNumber = String(reviewRequest.reviewInvoiceNumber || "").trim();
+    const localInvoice = {
+      qbId: reviewInvoiceId,
+      number: reviewInvoiceNumber,
+      qbCustomerId: String(reviewRequest.reviewCustomerId || "").trim(),
+      clientName: String(reviewRequest.reviewClientName || "").trim(),
+      total: reviewRequest.reviewTotal,
+    };
+
+    try {
+      if (reviewInvoiceId) {
+        const linkedResponse = await fetch(
+          `${base}/invoice/${encodeURIComponent(reviewInvoiceId)}?minorversion=65`,
+          { headers },
+        );
+        if (linkedResponse.status === 401) {
+          return res.status(401).json({ error: "Token expired", action: "reconnect" });
+        }
+        if (linkedResponse.ok) {
+          const linkedData = await linkedResponse.json().catch(() => ({}));
+          const invoice = linkedData?.Invoice
+            ? mapQuickBooksInvoice(linkedData.Invoice)
+            : null;
+          if (!invoice) {
+            return res.status(502).json({ error: "QuickBooks returned an invalid invoice response." });
+          }
+          return res.status(200).json({
+            mode: "invoice-review",
+            linkedStatus: "found",
+            invoice,
+            candidates: [{
+              invoice,
+              assessment: rankQuickBooksInvoiceCandidates(localInvoice, [invoice]).candidates[0].assessment,
+              safeToLink: true,
+            }],
+          });
+        }
+        if (!linkedResponse.ok) {
+          const detail = await linkedResponse.text().catch(() => "");
+          const missing = linkedResponse.status === 404
+            || /object not found|"code"\s*:\s*"?610"?|could not be found|does not exist/i.test(detail);
+          if (missing) {
+            // Continue below and look for a safe replacement by DocNumber.
+          } else {
+            return res.status(502).json({
+              error: `QuickBooks could not inspect invoice ${reviewInvoiceId}.`,
+              detail: detail.slice(0, 400),
+            });
+          }
+        }
+      }
+
+      if (!reviewInvoiceNumber) {
+        return res.status(200).json({
+          mode: "invoice-review",
+          linkedStatus: reviewInvoiceId ? "missing" : "not-linked",
+          candidates: [],
+          safeCandidate: null,
+          ambiguous: false,
+        });
+      }
+
+      const queryResult = await fetchAllQuickBooksQueryPages({
+        fetchImpl: fetch,
+        base,
+        headers,
+        entity: "Invoice",
+        where: `DocNumber = '${escapeQuickBooksQueryLiteral(reviewInvoiceNumber)}'`,
+        maxPages: 2,
+      });
+      const mappedCandidates = queryResult.records.map((invoice) => mapQuickBooksInvoice(invoice));
+      const ranked = rankQuickBooksInvoiceCandidates(localInvoice, mappedCandidates);
+      return res.status(200).json({
+        mode: "invoice-review",
+        linkedStatus: reviewInvoiceId ? "missing" : "not-linked",
+        candidates: ranked.candidates,
+        safeCandidate: ranked.safeCandidate,
+        ambiguous: ranked.ambiguous,
+        complete: queryResult.complete,
+      });
+    } catch (error) {
+      if (error instanceof QuickBooksQueryError && error.status === 401) {
+        return res.status(401).json({ error: "Token expired", action: "reconnect" });
+      }
+      console.error("QB invoice review failed:", error);
+      return res.status(500).json({
+        error: "Failed to inspect the QuickBooks invoice: " + (error?.message || String(error)),
+      });
+    }
+  }
 
   // On-demand single-invoice pay link (folded in here rather than its own /api file, to avoid
   // adding another Vercel Serverless Function). Client portal calls /api/quickbooks/sync?invoiceLink=<id>

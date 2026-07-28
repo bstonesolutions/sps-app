@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  applyQuickBooksInvoiceSyncFailure,
   applyQuickBooksInvoiceSaveResult,
   hasPendingLocalInvoiceEdits,
   quickBooksInvoiceIntentSignature,
@@ -172,6 +173,41 @@ test("invoice create intent signatures are deterministic and normalize equivalen
       qbItemRef: "8",
     }],
   });
+});
+
+test("failed QuickBooks attempts remain visible and successful reconciliation clears the error", () => {
+  const failed = applyQuickBooksInvoiceSyncFailure(localInvoice(), {
+    error: "QuickBooks rejected the invoice: Duplicate Document Number Error",
+    attemptedAt: "2026-07-28T16:30:00.000Z",
+  });
+
+  assert.equal(failed.qbNeedsReview, true);
+  assert.equal(failed.qbSyncError, "QuickBooks rejected the invoice: Duplicate Document Number Error");
+  assert.equal(failed.qbSyncErrorCode, "QB_DUPLICATE_DOCUMENT_NUMBER");
+  assert.equal(failed.qbSyncAttemptedAt, "2026-07-28T16:30:00.000Z");
+  assert.deepEqual(failed.lineItems, localInvoice().lineItems);
+
+  const settled = reconcileQuickBooksInvoice({
+    ...failed,
+    // This test exercises a retry that is now safe to adopt.
+    qbNeedsReview: false,
+  }, quickBooksInvoice());
+  assert.equal(settled.qbSyncError, undefined);
+  assert.equal(settled.qbSyncErrorCode, undefined);
+  assert.equal(settled.qbSyncAttemptedAt, undefined);
+});
+
+test("QuickBooks failure metadata classifies authentication and network failures", () => {
+  assert.equal(applyQuickBooksInvoiceSyncFailure(localInvoice(), {
+    error: "QuickBooks session expired — reconnect",
+  }).qbSyncErrorCode, "QB_AUTH_EXPIRED");
+  assert.equal(applyQuickBooksInvoiceSyncFailure(localInvoice(), {
+    error: new Error("Failed to fetch"),
+  }).qbSyncErrorCode, "QB_NETWORK_ERROR");
+  assert.equal(applyQuickBooksInvoiceSyncFailure(localInvoice(), {
+    error: "custom failure",
+    code: "qb_item_inactive",
+  }).qbSyncErrorCode, "QB_ITEM_INACTIVE");
 });
 
 test("invoice create intent signatures change when customer-facing accounting intent changes", () => {

@@ -21,10 +21,16 @@ import { driveTimeErrorMessage, getCurrentPositionWithDeadline, requestGoogleDri
 import { resolveStaffDeepLink } from "./staffDeepLinks";
 import { arrivalDeliveryKey, runArrivalDeliveryOnce } from "./arrivalDelivery";
 import {
+  applyQuickBooksInvoiceSyncFailure,
   applyQuickBooksInvoiceSaveResult,
   quickBooksInvoiceIntentSignature,
   reconcileQuickBooksInvoice,
 } from "./quickbooksInvoiceReconciliation";
+import {
+  invoiceNeedsReconciliationReview,
+  invoiceReconciliationIssue,
+} from "./invoiceReconciliationReview";
+import { resolveInvoiceReconciliationReview } from "./invoiceReconciliationActions";
 
 import {
   applySmsConversationIdentities,
@@ -17536,6 +17542,18 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const [qbMsg, setQbMsg] = useState("");
   const [deleteBusy, setDeleteBusy] = useState(false);
   const qbConnected = qbIsConnected();
+  const editorInvoiceTotals = invoiceTotals(inv);
+  const editorNeedsReview = invoiceNeedsReconciliationReview(inv, {
+    effectiveStatus: effectiveStatus(inv),
+    balance: editorInvoiceTotals.balance,
+  });
+  const editorReviewIssue = editorNeedsReview
+    ? invoiceReconciliationIssue(inv, {
+      effectiveStatus: effectiveStatus(inv),
+      balance: editorInvoiceTotals.balance,
+    })
+    : null;
+  const canCompareQuickBooksVersions = inv.qbSyncStatus === "conflict" || !!inv.qbPendingRemoteInvoice;
 
   const loadQuickBooksReview = async () => {
     if (!inv.qbId || qbReviewLoading) return;
@@ -17671,7 +17689,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     let createAttempted = !inv.qbId;
 
     const rememberUnknownCreate = (details = {}) => {
-      const pending = {
+      const pending = applyQuickBooksInvoiceSyncFailure({
         ...baseInv,
         locallyEdited: true,
         qbAuthoritative: false,
@@ -17682,7 +17700,10 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         // editor contents with this snapshot before accepting QB's replay.
         qbCreateIntentSignature: originalCreateIntent || currentCreateIntent,
         qbCreateRequestId: details.qbRequestId || inv.qbCreateRequestId || "",
-      };
+      }, {
+        error: details.error || "QuickBooks may have created this invoice, but SPS did not receive a final response.",
+        code: "QB_CREATE_OUTCOME_UNKNOWN",
+      });
       setInv(pending);
       onSave(pending);
       setQbState("error");
@@ -17756,7 +17777,12 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
       });
       if (res.status === 401) {
         // Session expired — still save locally so work isn't lost
-        onSave(baseInv);
+        const failedInvoice = applyQuickBooksInvoiceSyncFailure(baseInv, {
+          message: "QuickBooks session expired. Reconnect under Customize to sync.",
+          code: "QB_AUTH_EXPIRED",
+        });
+        setInv(failedInvoice);
+        onSave(failedInvoice);
         setQbState("error"); setQbMsg("Saved locally. QuickBooks session expired — reconnect under Customize to sync.");
         return;
       }
@@ -17780,7 +17806,17 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         const createData = await createRes.json();
         if (createData.error) {
           if (createData.createOutcomeUnknown) rememberUnknownCreate(createData);
-          else { onSave(baseInv); setQbState("error"); setQbMsg("Saved locally. QuickBooks sync failed: " + createData.error); }
+          else {
+            const failedInvoice = applyQuickBooksInvoiceSyncFailure(baseInv, {
+              error: createData,
+              message: createData.error,
+              code: createData.code,
+            });
+            setInv(failedInvoice);
+            onSave(failedInvoice);
+            setQbState("error");
+            setQbMsg("Saved locally. QuickBooks sync failed: " + createData.error);
+          }
           return;
         }
         acceptCreateResult(createData);
@@ -17792,7 +17828,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           return;
         }
         // QB failed but keep the local save
-        const failedInvoice = inv.qbId ? {
+        const failedBase = inv.qbId ? {
           ...baseInv,
           locallyEdited: true,
           qbAuthoritative: false,
@@ -17813,6 +17849,11 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
             },
           } : {}),
         } : baseInv;
+        const failedInvoice = applyQuickBooksInvoiceSyncFailure(failedBase, {
+          error: data,
+          message: data.error,
+          code: data.code,
+        });
         setInv(failedInvoice);
         onSave(failedInvoice);
         setQbState("error"); setQbMsg("Saved locally. QuickBooks sync failed: " + data.error);
@@ -17827,7 +17868,12 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     } catch (err) {
       if (createAttempted) rememberUnknownCreate();
       else {
-        onSave(baseInv);
+        const failedInvoice = applyQuickBooksInvoiceSyncFailure(baseInv, {
+          error: err,
+          code: "QB_NETWORK_ERROR",
+        });
+        setInv(failedInvoice);
+        onSave(failedInvoice);
         setQbState("error"); setQbMsg("Saved locally. Could not reach QuickBooks: " + (err.message || "network error"));
       }
     }
@@ -17843,16 +17889,22 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   return (
     <Modal title={invoice ? `Edit ${inv.number}` : "New Invoice"} onClose={onClose}>
       <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-        {inv.qbNeedsReview && (
+        {editorNeedsReview && (
           <div style={{ background: hexA("#D97706", 0.08), border: `1px solid ${hexA("#D97706", 0.3)}`, borderRadius: 13, padding: 13 }}>
             <div style={{ color: "#B45309", fontSize: 13.5, fontWeight: 800 }}>
-              QuickBooks changed this invoice
+              {editorReviewIssue?.title || "Invoice needs reconciliation review"}
             </div>
             <div style={{ color: T.textMuted, fontSize: 12, lineHeight: 1.5, marginTop: 4 }}>
-              SPS stopped before replacing any QuickBooks lines. Review both versions, then choose which line list to keep.
+              {editorReviewIssue?.reason || "SPS kept this invoice unchanged because its QuickBooks link could not be confirmed safely."}
+              {editorReviewIssue?.nextStep && <><br /><b style={{ color: T.text }}>Next:</b> {editorReviewIssue.nextStep}</>}
             </div>
+            {editorReviewIssue?.lastError && (
+              <div style={{ color: "#B91C1C", fontSize: 12, lineHeight: 1.45, marginTop: 8 }}>
+                <b>Last sync error{editorReviewIssue.errorCode ? ` · ${editorReviewIssue.errorCode}` : ""}:</b> {editorReviewIssue.lastError}
+              </div>
+            )}
             {qbReviewError && <div style={{ color: "#B91C1C", fontSize: 12, fontWeight: 650, marginTop: 8 }}>{qbReviewError}</div>}
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+            {canCompareQuickBooksVersions && <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
               {!inv.qbPendingRemoteInvoice ? (
                 <button type="button" onClick={loadQuickBooksReview} disabled={qbReviewLoading}
                   style={{ border: "none", borderRadius: 10, padding: "9px 12px", background: T.primary, color: "#fff", fontSize: 12, fontWeight: 800, cursor: qbReviewLoading ? "default" : "pointer", fontFamily: "inherit", opacity: qbReviewLoading ? 0.65 : 1 }}>
@@ -17870,7 +17922,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
                   </button>
                 </>
               )}
-            </div>
+            </div>}
           </div>
         )}
         <div style={{ display: "flex", flexDirection: narrowInvoice ? "column" : "row", gap: 10 }}>
@@ -21160,6 +21212,232 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
   );
 }
 
+function InvoiceReconciliationReviewQueue({
+  invoices,
+  allInvoices,
+  canManage,
+  syncing,
+  inspections,
+  inspecting,
+  moneyFmt,
+  onClose,
+  onRefresh,
+  onInspect,
+  onResolve,
+  onReview,
+  onViewRelated,
+  T,
+}) {
+  const [spsOnlyConfirmationId, setSpsOnlyConfirmationId] = useState("");
+  const [resolutionErrors, setResolutionErrors] = useState({});
+  useEffect(() => {
+    if (invoices.length === 0) onClose();
+  }, [invoices.length, onClose]);
+  const resolveInvoice = async (invoice, options) => {
+    const key = String(invoice?.id || "");
+    setResolutionErrors((current) => ({ ...current, [key]: "" }));
+    try {
+      await onResolve(invoice, options);
+      setSpsOnlyConfirmationId("");
+    } catch (error) {
+      setResolutionErrors((current) => ({
+        ...current,
+        [key]: error?.message || "This invoice could not be resolved safely.",
+      }));
+    }
+  };
+
+  return (
+    <Modal title="Invoice reconciliation" onClose={onClose} maxWidth={760}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ padding: "12px 14px", borderRadius: 13, background: hexA(T.warning, 0.08), border: `1px solid ${hexA(T.warning, 0.25)}` }}>
+          <div style={{ fontSize: 13.5, fontWeight: 800, color: T.text }}>Nothing in this queue was deleted</div>
+          <div style={{ fontSize: 12, lineHeight: 1.5, color: T.textMuted, marginTop: 3 }}>
+            These SPS records are kept outside the QuickBooks headline total until their links are confirmed. Open one to review it; SPS will not resolve or discard it automatically.
+          </div>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 12.5, color: T.textMuted }}>
+            {invoices.length} record{invoices.length === 1 ? "" : "s"} · {moneyFmt(invoices.reduce((sum, invoice) => sum + Number(invoice._balance || 0), 0))} remaining balance
+          </div>
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={syncing}
+            style={{ border: `1px solid ${T.border}`, borderRadius: 10, padding: "8px 11px", background: T.surface, color: T.text, fontSize: 12, fontWeight: 750, cursor: syncing ? "default" : "pointer", fontFamily: "inherit", opacity: syncing ? 0.65 : 1 }}
+          >
+            {syncing ? "Refreshing…" : "Refresh QuickBooks"}
+          </button>
+        </div>
+
+        <div role="list" aria-label="Invoices needing reconciliation" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {invoices.map((invoice) => {
+            const issue = invoiceReconciliationIssue(invoice, {
+              effectiveStatus: invoice._status,
+              balance: invoice._balance,
+            });
+            const clientName = invoice._client?.name || invoice.clientName || "Unmatched client";
+            const related = issue.relatedInvoiceId
+              ? (allInvoices || []).find((entry) => String(entry.id || "") === issue.relatedInvoiceId)
+              : null;
+            const inspection = inspections?.[String(invoice.id || "")] || null;
+            const isInspecting = !!inspecting?.[String(invoice.id || "")];
+            const inspectionInvoice = inspection?.invoice || inspection?.safeCandidate || null;
+            const candidateCount = Array.isArray(inspection?.candidates) ? inspection.candidates.length : 0;
+            const canUseConfirmedMatch = !!(
+              canManage
+              && issue.code !== "conflict"
+              && issue.code !== "duplicate-local-qb-id"
+              && inspectionInvoice
+              && (
+                inspection?.linkedStatus === "found"
+                || !!inspection?.safeCandidate
+              )
+            );
+            const canKeepSpsOnly = !!(
+              canManage
+              && inspection
+              && !inspection.error
+              && issue.code !== "conflict"
+              && (
+                issue.code === "duplicate-local-qb-id"
+                || (
+                  inspection?.linkedStatus !== "found"
+                  && !inspection?.safeCandidate
+                )
+              )
+            );
+            const confirmingSpsOnly = spsOnlyConfirmationId === String(invoice.id || "");
+            const resolutionError = resolutionErrors[String(invoice.id || "")] || "";
+            return (
+              <div key={invoice.id || `${invoice.number}-${issue.code}`} role="listitem" style={{ border: `1px solid ${T.border}`, borderRadius: 15, padding: "13px 14px", background: T.surface }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 14, alignItems: "flex-start" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 15, fontWeight: 850, color: T.text }}>Invoice {invoice.number || "—"}</span>
+                      <span style={{ borderRadius: 999, padding: "3px 7px", background: hexA(T.warning, 0.1), color: T.warning, fontSize: 10, fontWeight: 850, textTransform: "uppercase", letterSpacing: "0.04em" }}>{issue.code.replace(/-/g, " ")}</span>
+                    </div>
+                    <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 3 }}>{clientName} · {invoice._status || invoice.status || "Unknown status"}</div>
+                  </div>
+                  <div style={{ flexShrink: 0, fontSize: 15, fontWeight: 850, color: T.text }}>{moneyFmt(invoice._balance)}</div>
+                </div>
+
+                <div style={{ marginTop: 11, fontSize: 13, fontWeight: 800, color: T.text }}>{issue.title}</div>
+                <div style={{ marginTop: 4, fontSize: 12, lineHeight: 1.5, color: T.textMuted }}>{issue.reason}</div>
+                <div style={{ marginTop: 5, fontSize: 12, lineHeight: 1.5, color: T.text }}><b>Next:</b> {issue.nextStep}</div>
+                {issue.lastError && (
+                  <div role="alert" style={{ marginTop: 8, padding: "8px 10px", borderRadius: 10, background: hexA("#B42318", 0.07), color: "#B42318", fontSize: 11.5, lineHeight: 1.45 }}>
+                    <b>Last sync error{issue.errorCode ? ` · ${issue.errorCode}` : ""}:</b> {issue.lastError}
+                    {issue.attemptedAt && <div style={{ marginTop: 2, color: T.textMuted }}>Attempted {new Date(issue.attemptedAt).toLocaleString()}</div>}
+                  </div>
+                )}
+
+                {inspection && (
+                  <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 10, background: inspection.error ? hexA("#B42318", 0.07) : T.surfaceAlt, color: inspection.error ? "#B42318" : T.text, fontSize: 11.5, lineHeight: 1.45 }}>
+                    {inspection.error ? (
+                      <><b>QuickBooks check failed:</b> {inspection.error}</>
+                    ) : inspection.linkedStatus === "found" && inspectionInvoice ? (
+                      <><b>QuickBooks confirms this link:</b> invoice {inspectionInvoice.number || "—"} · QB ID {inspectionInvoice.qbId || issue.qbId || "—"} · {moneyFmt(inspectionInvoice.total)} total · {moneyFmt(inspectionInvoice.balance)} open.</>
+                    ) : inspection.safeCandidate ? (
+                      <><b>One exact candidate found:</b> invoice {inspection.safeCandidate.number || "—"} · QB ID {inspection.safeCandidate.qbId || "—"} · {moneyFmt(inspection.safeCandidate.total)}. SPS has not linked it automatically.</>
+                    ) : candidateCount > 0 ? (
+                      <><b>{candidateCount} possible QuickBooks match{candidateCount === 1 ? "" : "es"} found.</b> None met the unique number, customer, and exact-total safety rule, so SPS made no change.</>
+                    ) : (
+                      <><b>No matching QuickBooks invoice was found.</b> SPS kept this record and made no change.</>
+                    )}
+                  </div>
+                )}
+                {resolutionError && <div role="alert" style={{ marginTop: 8, color: "#B42318", fontSize: 11.5, fontWeight: 650 }}>{resolutionError}</div>}
+
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
+                  <span title={String(invoice.id || "")} style={{ maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", borderRadius: 8, padding: "4px 7px", background: T.surfaceAlt, color: T.textMuted, fontSize: 10.5, fontWeight: 700 }}>
+                    SPS ID: {invoice.id || "Unavailable"}
+                  </span>
+                  <span style={{ borderRadius: 8, padding: "4px 7px", background: T.surfaceAlt, color: T.textMuted, fontSize: 10.5, fontWeight: 700 }}>
+                    QB ID: {issue.qbId || "Not linked"}
+                  </span>
+                  {issue.relatedInvoiceId && (
+                    <span title={issue.relatedInvoiceId} style={{ maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", borderRadius: 8, padding: "4px 7px", background: T.surfaceAlt, color: T.textMuted, fontSize: 10.5, fontWeight: 700 }}>
+                      Preferred SPS ID: {issue.relatedInvoiceId}
+                    </span>
+                  )}
+                </div>
+
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 11 }}>
+                  <button
+                    type="button"
+                    onClick={() => onInspect(invoice)}
+                    disabled={isInspecting}
+                    style={{ border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 12px", background: T.surface, color: T.text, fontSize: 12, fontWeight: 750, cursor: isInspecting ? "default" : "pointer", fontFamily: "inherit", opacity: isInspecting ? 0.65 : 1 }}
+                  >
+                    {isInspecting ? "Checking…" : inspection ? "Check again" : "Check QuickBooks"}
+                  </button>
+                  {canUseConfirmedMatch && (
+                    <button
+                      type="button"
+                      onClick={() => resolveInvoice(invoice, {
+                        action: inspection.linkedStatus === "found" ? "retry-linked" : "match-remote",
+                        quickBooksInvoice: inspectionInvoice,
+                        eligibleCandidateCount: 1,
+                      })}
+                      style={{ border: "none", borderRadius: 10, padding: "9px 12px", background: "#2CA01C", color: "#fff", fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}
+                    >
+                      {inspection.linkedStatus === "found" ? "Use confirmed QuickBooks record" : "Link exact QuickBooks match"}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => onReview(invoice)}
+                    style={{ border: "none", borderRadius: 10, padding: "9px 12px", background: T.primary, color: "#fff", fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}
+                  >
+                    {canManage ? issue.actionLabel : "View invoice"}
+                  </button>
+                  {related && (
+                    <button
+                      type="button"
+                      onClick={() => onViewRelated(related)}
+                      style={{ border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 12px", background: T.surface, color: T.text, fontSize: 12, fontWeight: 750, cursor: "pointer", fontFamily: "inherit" }}
+                    >
+                      {issue.relatedActionLabel || "View related record"}
+                    </button>
+                  )}
+                  {canKeepSpsOnly && !confirmingSpsOnly && (
+                    <button
+                      type="button"
+                      onClick={() => setSpsOnlyConfirmationId(String(invoice.id || ""))}
+                      style={{ border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 12px", background: T.surface, color: T.textMuted, fontSize: 12, fontWeight: 750, cursor: "pointer", fontFamily: "inherit" }}
+                    >
+                      Keep SPS-only…
+                    </button>
+                  )}
+                </div>
+                {canKeepSpsOnly && confirmingSpsOnly && (
+                  <div style={{ marginTop: 10, padding: "10px 11px", borderRadius: 11, border: `1px solid ${hexA(T.warning, 0.35)}`, background: hexA(T.warning, 0.07) }}>
+                    <div style={{ fontSize: 11.5, color: T.text, lineHeight: 1.45 }}>
+                      This removes the stale QuickBooks link from SPS and keeps the invoice as an SPS-only record. It will stay excluded from QuickBooks totals. Nothing in QuickBooks will be edited or deleted.
+                    </div>
+                    <div style={{ display: "flex", gap: 8, marginTop: 9 }}>
+                      <button type="button" onClick={() => setSpsOnlyConfirmationId("")} style={{ border: `1px solid ${T.border}`, borderRadius: 9, padding: "8px 10px", background: T.surface, color: T.text, fontSize: 11.5, fontWeight: 750, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+                      <button
+                        type="button"
+                        onClick={() => resolveInvoice(invoice, { action: "keep-sps-only", acknowledged: true })}
+                        style={{ border: "none", borderRadius: 9, padding: "8px 10px", background: T.warning, color: "#fff", fontSize: 11.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}
+                      >
+                        Confirm SPS-only
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCatalog, qbAccounting = null, onSave, onDelete, onSyncData, initialFilter = "All", vp = {} }) {
   const { T, perms } = useApp();
   const moneyFmt = (n) => Number(n || 0).toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -21221,6 +21499,39 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
   const [editing,    setEditing]    = useState(null);
   const [preview,    setPreview]    = useState(null);
   const [showSales,  setShowSales]  = useState(false);
+  const [reviewingReconciliation, setReviewingReconciliation] = useState(false);
+  const [reviewInspections, setReviewInspections] = useState({});
+  const [reviewInspecting, setReviewInspecting] = useState({});
+
+  const inspectReviewInvoice = async (invoice) => {
+    const key = String(invoice?.id || "");
+    if (!key || reviewInspecting[key]) return;
+    setReviewInspecting((current) => ({ ...current, [key]: true }));
+    try {
+      const response = await fetch(`${QB_API}/sync`, {
+        method: "POST",
+        headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          mode: "invoice-review",
+          reviewInvoiceId: invoice.qbId ? String(invoice.qbId) : "",
+          reviewInvoiceNumber: invoice.number ? String(invoice.number) : "",
+          reviewCustomerId: invoice.qbCustomerId ? String(invoice.qbCustomerId) : "",
+          reviewClientName: invoice._client?.name || invoice.clientName || "",
+          reviewTotal: String(invoice._total || 0),
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.error) throw new Error(data.error || "QuickBooks could not inspect this invoice.");
+      setReviewInspections((current) => ({ ...current, [key]: data }));
+    } catch (error) {
+      setReviewInspections((current) => ({
+        ...current,
+        [key]: { error: error?.message || "QuickBooks could not inspect this invoice." },
+      }));
+    } finally {
+      setReviewInspecting((current) => ({ ...current, [key]: false }));
+    }
+  };
 
   const now = new Date();
 
@@ -21246,11 +21557,10 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
 
   // ── Summary stats ──
   const qbAccountingComplete = qbAccounting?.complete === true;
-  const localReviewInvoices = all.filter((iv) => (
-    iv.qbNeedsReview
-    || iv.qbSyncStatus === "missing-remote"
-    || (!iv.qbId && iv._status !== "Paid" && iv.status !== "Draft" && iv.status !== "Void" && iv._balance > 0)
-  ));
+  const localReviewInvoices = all.filter((iv) => invoiceNeedsReconciliationReview(iv, {
+    effectiveStatus: iv._status,
+    balance: iv._balance,
+  }));
   const localReviewBalance = localReviewInvoices.reduce((sum, invoice) => sum + invoice._balance, 0);
   const fallbackOpen = all.filter(iv => iv._status !== "Paid" && iv.status !== "Draft" && iv.status !== "Void");
   const outstanding = qbAccountingComplete
@@ -21379,13 +21689,22 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
         </div>
       )}
       {localReviewInvoices.length > 0 && (
-        <div style={{ marginBottom: 12, padding: "11px 14px", borderRadius: 12, background: hexA(T.warning, 0.08), border: `1px solid ${hexA(T.warning, 0.28)}`, color: T.text, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+        <button
+          type="button"
+          aria-label={`Review ${localReviewInvoices.length} SPS invoice record${localReviewInvoices.length === 1 ? "" : "s"}`}
+          onClick={() => setReviewingReconciliation(true)}
+          style={{ width: "100%", marginBottom: 12, padding: "11px 14px", borderRadius: 12, background: hexA(T.warning, 0.08), border: `1px solid ${hexA(T.warning, 0.28)}`, color: T.text, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}
+        >
           <div>
-            <div style={{ fontSize: 12.5, fontWeight: 800 }}>{localReviewInvoices.length} SPS invoice record{localReviewInvoices.length === 1 ? "" : "s"} need review</div>
-            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>Kept safely, but excluded from the QuickBooks accounting total until matched.</div>
+            <div style={{ fontSize: 12.5, fontWeight: 800 }}>{localReviewInvoices.length} SPS invoice record{localReviewInvoices.length === 1 ? " needs" : "s need"} review</div>
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>Tap to see the exact invoice, reason, IDs, and safe next step.</div>
           </div>
-          <div style={{ fontSize: 13, fontWeight: 850, color: T.warning, flexShrink: 0 }}>{moneyFmt(localReviewBalance)}</div>
-        </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 7, flexShrink: 0 }}>
+            <span style={{ fontSize: 13, fontWeight: 850, color: T.warning }}>{moneyFmt(localReviewBalance)}</span>
+            <span style={{ fontSize: 11.5, fontWeight: 800, color: T.warning }}>Review now</span>
+            <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke={T.warning} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+          </div>
+        </button>
       )}
 
       {/* Summary tiles — tap to see Total Sales */}
@@ -21394,7 +21713,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
           onMouseEnter={e => { if (perms.seeTotalSales || perms.isAdmin) e.currentTarget.style.boxShadow="0 4px 16px rgba(0,0,0,0.08)"; }}
           onMouseLeave={e => e.currentTarget.style.boxShadow="none"}>
           <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 6, display:"flex", justifyContent:"space-between" }}>
-            {qbAccountingComplete ? "QuickBooks outstanding" : "Outstanding"}
+            {qbAccountingComplete ? "QuickBooks outstanding · all dates" : "Outstanding"}
             {(perms.seeTotalSales || perms.isAdmin) && <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{opacity:0.5}}><path d="m9 18 6-6-6-6"/></svg>}
           </div>
           <div style={{ fontSize: 24, fontWeight: 800, color: outstanding > 0 ? T.warning : T.accent, letterSpacing: "-0.02em" }}>{moneyFmt(outstanding)}</div>
@@ -21580,6 +21899,50 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
         );
       })()}
 
+      {reviewingReconciliation && (
+        <InvoiceReconciliationReviewQueue
+          invoices={localReviewInvoices}
+          allInvoices={all}
+          canManage={perms.canInvoice}
+          syncing={qbSyncing}
+          inspections={reviewInspections}
+          inspecting={reviewInspecting}
+          moneyFmt={moneyFmt}
+          onClose={() => setReviewingReconciliation(false)}
+          onRefresh={() => {
+            setReviewInspections({});
+            syncQuickBooks();
+          }}
+          onInspect={inspectReviewInvoice}
+          onResolve={(invoice, options) => {
+            const rawInvoice = (invoices || []).find((entry) => String(entry.id || "") === String(invoice.id || "")) || invoice;
+            const resolutionInvoice = {
+              ...rawInvoice,
+              total: invoice._total,
+              clientName: invoice._client?.name || rawInvoice.clientName || "",
+              qbCustomerId: invoice.qbCustomerId || rawInvoice.qbCustomerId || "",
+            };
+            const resolved = resolveInvoiceReconciliationReview(resolutionInvoice, options);
+            onSave(resolved);
+            setReviewInspections((current) => {
+              const next = { ...current };
+              delete next[String(invoice.id || "")];
+              return next;
+            });
+            return resolved;
+          }}
+          onReview={(invoice) => {
+            setReviewingReconciliation(false);
+            if (perms.canInvoice) setEditing(invoice);
+            else setPreview(invoice);
+          }}
+          onViewRelated={(invoice) => {
+            setReviewingReconciliation(false);
+            setPreview(invoice);
+          }}
+          T={T}
+        />
+      )}
       {creating && <InvoiceEditor clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onClose={() => setCreating(false)} />}
       {batching && <BatchInvoiceModal clients={clients} invoices={invoices} invoicing={invoicing} onSave={onSave} onClose={() => setBatching(false)} />}
       {editing  && <InvoiceEditor invoice={editing} clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onDelete={onDelete} onClose={() => setEditing(null)} />}
