@@ -13,11 +13,8 @@ const text = (value) => String(value == null ? "" : value).trim();
 const safeIdPart = (value) => text(value).replace(/[^a-zA-Z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
 
 const estimateLineHasContent = (line) => (
-  !!text(line?.desc ?? line?.description)
-  || line?.price != null
-  || line?.unitPrice != null
-  || line?.amount != null
-  || line?.refId != null
+  [line?.price, line?.unitPrice, line?.amount]
+    .some((value) => value != null && text(value) !== "")
 );
 
 export function estimateDraftInvoiceId(estimate) {

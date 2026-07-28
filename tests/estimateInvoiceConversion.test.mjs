@@ -102,6 +102,28 @@ test("tax-off and legacy amount-only estimates remain tax-free and keep their qu
   assert.equal(invoice.lineItems[0].unitPrice, "37.5");
 });
 
+test("conversion ignores unfinished blank editor rows without dropping a real zero-priced line", () => {
+  const invoice = estimateToDraftInvoice({
+    id: "estimate-with-editor-row",
+    number: "EST-10",
+    clientId: "client-1",
+    status: "draft",
+    items: [
+      { id: "real", desc: "Included inspection", qty: "1", price: "0" },
+      { id: "blank", desc: "", qty: "1", price: "", unitPrice: "", amount: "", refId: "unused-picker-row" },
+    ],
+  }, {
+    client: { id: "client-1", name: "Generic Client" },
+    number: "INV-10",
+    issueDate: "07/27/2026",
+    dueDate: "08/11/2026",
+  });
+
+  assert.equal(invoice.lineItems.length, 1);
+  assert.equal(invoice.lineItems[0].desc, "Included inspection");
+  assert.equal(invoice.lineItems[0].unitPrice, "0");
+});
+
 test("conversion identity is deterministic and an existing linked invoice is reused", () => {
   const estimate = { id: "est:shared/42", number: "EST-42" };
   const id = estimateDraftInvoiceId(estimate);
