@@ -18,6 +18,11 @@ import { appendClientLinks, clientLinkFooter, withoutClientLinks } from "./clien
 import { driveTimeErrorMessage, getCurrentPositionWithDeadline, requestGoogleDrivingRoute, summarizeGoogleRoute, withDeadline } from "./driveTime";
 import { resolveStaffDeepLink } from "./staffDeepLinks";
 import { arrivalDeliveryKey, runArrivalDeliveryOnce } from "./arrivalDelivery";
+import {
+  applyQuickBooksInvoiceSaveResult,
+  quickBooksInvoiceIntentSignature,
+  reconcileQuickBooksInvoice,
+} from "./quickbooksInvoiceReconciliation";
 
 import {
   applySmsConversationIdentities,
@@ -1361,8 +1366,9 @@ function generateStatementPDF(client, invoices, branding) {
     let totalPaid = 0, totalOpen = 0;
     doc.setFont("helvetica", "normal");
     (invoices || []).forEach(iv => {
-      const amt = parseFloat((iv.total || "0").replace(/[^0-9.-]/g, "")) || 0;
-      const isPaid = iv.status === "paid";
+      const totals = invoiceTotals(iv);
+      const isPaid = effectiveStatus(iv) === "Paid";
+      const amt = isPaid ? totals.total : totals.balance;
       if (isPaid) totalPaid += amt; else totalOpen += amt;
       doc.setTextColor(isPaid ? "#6B7280" : "#1D1D1F");
       doc.text(String(iv.number || iv.id), 52, y);
@@ -1514,8 +1520,9 @@ function generateClientProfilePDF(client, invoices, branding, tiers, opts = {}) 
     doc.setDrawColor("#E5E7EB"); doc.line(M, y, W - M, y); y += 14;
     let paid = 0, open = 0;
     (invoices || []).forEach(iv => {
-      const amt = parseFloat(String(iv.total || "0").replace(/[^0-9.-]/g, "")) || 0;
-      const isPaid = String(iv.status || "").toLowerCase() === "paid";
+      const totals = invoiceTotals(iv);
+      const isPaid = effectiveStatus(iv) === "Paid";
+      const amt = isPaid ? totals.total : totals.balance;
       if (isPaid) paid += amt; else open += amt;
       row([[String(iv.number || iv.id || ""), M], [String(iv.date || ""), M + 95], [isPaid ? "Paid" : "Outstanding", M + 210], [`$${amt.toFixed(2)}`, W - M, "right"]], { color: isPaid ? "#6B7280" : "#1D1D1F" });
     });
@@ -4162,12 +4169,44 @@ const invoiceTotals = (inv) => {
   // recompute from line items (qty*unitPrice + a re-derived rate drifts from QB on rounding and
   // multi-rate tax). So every report reads the same revenue + sales tax QuickBooks shows. App-made
   // invoices — and a QB invoice the owner edits in-app (locallyEdited) — still recompute below.
-  if (inv.source === "quickbooks" && inv.total != null && inv.locallyEdited !== true) {
+  if (inv.qbAuthoritative === true && inv.total != null && inv.locallyEdited !== true) {
     const total = n(inv.total);
     const tax = n(inv.taxAmount);
     const subtotal = inv.subTotal != null ? n(inv.subTotal) : Math.max(0, total - tax);
     const balance = inv.balance != null ? n(inv.balance) : total;
-    return { subtotal, grossSubtotal: subtotal, taxableBase: subtotal, tax, total, balance, discountTotal: 0, lineDiscountTotal: 0, invDiscount: 0, cost: 0, profit: 0, margin: 0 };
+    const items = inv.lineItems || [];
+    const grossSubtotal = items.reduce((sum, line) => (
+      sum + (n(line.qty) * n(line.unitPrice))
+    ), 0);
+    const discountTotal = Math.max(0, grossSubtotal - subtotal);
+    const cost = items.reduce((sum, line) => sum + (n(line.qty) * n(line.unitCost)), 0);
+    const costComplete = items.length > 0 && items.every((line) => (
+      line.costKnown !== false
+      && line.unitCost != null
+      && String(line.unitCost).trim() !== ""
+      && Number.isFinite(Number(line.unitCost))
+    ));
+    const profit = costComplete ? subtotal - cost : null;
+    const margin = costComplete && subtotal > 0 ? (profit / subtotal) * 100 : null;
+    const taxRate = n(inv.taxRate);
+    const taxableBase = tax > 0 && taxRate > 0
+      ? tax / (taxRate / 100)
+      : items.reduce((sum, line) => sum + (line.taxable ? n(line.qty) * n(line.unitPrice) : 0), 0);
+    return {
+      subtotal,
+      grossSubtotal: Math.max(grossSubtotal, subtotal),
+      taxableBase,
+      tax,
+      total,
+      balance,
+      discountTotal,
+      lineDiscountTotal: 0,
+      invDiscount: discountTotal,
+      cost,
+      costComplete,
+      profit,
+      margin,
+    };
   }
   const items = inv.lineItems || [];
   // Per-line: gross = qty * unitPrice, then subtract the line discount (flat $ or %)
@@ -4249,7 +4288,20 @@ function applyLateFees(invoices, invoicing, todayISO) {
     if (!(fee > 0)) return inv;
     const feeLine = { id: `lf_${inv.id}_${todayISO}`, desc: label, qty: "1", unitPrice: fee.toFixed(2), amount: fee, taxable: false, isLateFee: true, kind: "lateFee" };
     changed = true;
-    return { ...inv, lineItems: [...inv.lineItems, feeLine], lateFeeAppliedAt: todayISO };
+    return {
+      ...inv,
+      lineItems: [...inv.lineItems, feeLine],
+      lateFeeAppliedAt: todayISO,
+      // A late fee changes the customer-facing line set. For an invoice already
+      // linked to QuickBooks, stop trusting the old QB totals and fence the next
+      // pull until the owner deliberately pushes or reviews the local change.
+      ...(inv.qbId ? {
+        locallyEdited: true,
+        qbAuthoritative: false,
+        qbPendingLocalEdits: true,
+        qbSyncStatus: "pending-push",
+      } : {}),
+    };
   });
   return { invoices: changed ? next : invoices, changed };
 }
@@ -5537,12 +5589,10 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
   const ma = monthActuals(clients, new Date(), invoices);
   const derived = deriveAlerts(clients, invoices, catalog).filter(a => perms.seeBalances || !/outstanding/i.test(a.title || ""));
   const flags = (officeAlerts || []).filter(a => !a.resolved);
-  // Outstanding mirrors the Invoices page EXACTLY: same filter (not Paid, not Draft) and the same
-  // invoiceTotals(iv).total it sums there — so the home tile and the Invoices screen always agree.
-  // (The old per-client version summed each invoice's remaining .balance AND fell back to a manual
-  // client.balance field for clients with no invoice, which inflated this tile above the real total.)
+  // Outstanding mirrors the Invoices page: open invoices only, using each invoice's remaining
+  // balance. This matters after a partial payment because the original face total is no longer AR.
   const outstandingInvoices = (invoices || []).filter(iv => effectiveStatus(iv) !== "Paid" && iv.status !== "Draft");
-  const outstandingTotal = outstandingInvoices.reduce((s, iv) => s + invoiceTotals(iv).total, 0);
+  const outstandingTotal = outstandingInvoices.reduce((s, iv) => s + invoiceTotals(iv).balance, 0);
   const outstandingClients = Array.from(new Set(outstandingInvoices.map(iv => {
     const c = (clients || []).find(cc => invoiceMatchesClient(iv, cc));
     return c ? c.id : (iv.clientId ?? iv.clientName ?? iv.id);
@@ -17062,7 +17112,7 @@ function InvoiceSendChannelRow({ T, icon, title, sub, on, setOn, disabled, opted
 // Lets the owner notify the client via text, in-app message, and/or the branded
 // email — prefilled from Settings defaults, editable per-send, with skip. Nothing
 // sends silently. Defaults live in Settings; edits here don't change them.
-function InvoiceSendStep({ invoice, client, onClose }) {
+function InvoiceSendStep({ invoice, client, onClose, onSent }) {
   const { T, branding, email } = useApp();
   const { isPhone } = useViewport();
   const e = email || {};
@@ -17110,12 +17160,14 @@ function InvoiceSendStep({ invoice, client, onClose }) {
     setSending(true); setErr("");
     const fails = [];
     const protectedChannels = [];
+    let deliveredToClient = false;
     if (doSms && phone) {
       try {
         const outgoingSms = appendClientLinks(smsMsg, { target: "invoices", origin: PROD_URL, heading: "View and pay in SPS Way", protectedLines: smsProtectedLines });
         const r = await sendSms(phone, outgoingSms, { clientId: client.id, type: "Invoice" }); // gated: honors Test Mode (hold/redirect)
         if (!r.ok) fails.push(`Text: ${r.error || "failed"}`);
         else if (!r.acceptedForClient) protectedChannels.push(r.held ? "Test Mode held the invoice text" : "the test text went only to you");
+        else deliveredToClient = true;
       } catch (_) { fails.push("Text: couldn't reach server"); }
     }
     if (doChat && client?.id) {
@@ -17123,6 +17175,7 @@ function InvoiceSendStep({ invoice, client, onClose }) {
         const { error, held } = await postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: chatMsg });
         if (error) fails.push(`In-app: ${error.message}`);
         else if (held) protectedChannels.push("Test Mode held the in-app invoice notice");
+        else deliveredToClient = true;
       } catch (_) { fails.push("In-app: failed"); }
     }
     if (doEmail && clientEmail) {
@@ -17143,7 +17196,12 @@ function InvoiceSendStep({ invoice, client, onClose }) {
         const d = await r.json().catch(() => ({}));
         logComm({ clientId: client.id, type: "Invoice", channel: "email", body: `Invoice ${invoice.number || ""} emailed`, ok: r.ok, origin: ACTOR ? `${ACTOR} — invoice send` : "invoice send", recipient: clientEmail });
         if (!r.ok) fails.push(`Email: ${d.error || "failed"}`);
+        else if (d.held) protectedChannels.push("Test Mode held the invoice email");
+        else deliveredToClient = true;
       } catch (_) { fails.push("Email: couldn't reach server"); }
+    }
+    if (deliveredToClient && typeof onSent === "function") {
+      onSent({ ...invoice, status: "Sent", sentDate: todayMDY() });
     }
     setSending(false);
     if (fails.length || protectedChannels.length) {
@@ -17223,10 +17281,34 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const [inv, setInv] = useState(() => invoice ? { ...invoice, lineItems: (invoice.lineItems || []).map(l => ({ ...l })) } : fresh());
   const [visitPick, setVisitPick] = useState(false);
   const [sendStep, setSendStep] = useState(null); // B9-2: client-notification step after a successful save
-  const set = (k, v) => setInv(s => ({ ...s, [k]: v }));
-  const setLine = (id, k, v) => setInv(s => ({ ...s, lineItems: s.lineItems.map(l => l.id === id ? { ...l, [k]: v } : l) }));
-  const addLine = () => setInv(s => ({ ...s, lineItems: [...s.lineItems, { id: `l${Date.now()}`, desc: "", qty: "1", unitPrice: "", unitCost: "", taxable: false, kind: "custom" }] }));
-  const removeLine = (id) => setInv(s => ({ ...s, lineItems: s.lineItems.filter(l => l.id !== id) }));
+  const [qbReviewLoading, setQbReviewLoading] = useState(false);
+  const [qbReviewError, setQbReviewError] = useState("");
+  const withLocalInvoiceEdit = (current, patch) => ({
+    ...current,
+    ...patch,
+    ...(current.qbId ? {
+      locallyEdited: true,
+      qbAuthoritative: false,
+      qbSyncStatus: "pending-push",
+      qbPendingLocalEdits: true,
+    } : {}),
+  });
+  const set = (k, v) => setInv(s => withLocalInvoiceEdit(s, { [k]: v }));
+  const setLine = (id, k, v) => setInv(s => withLocalInvoiceEdit(s, { lineItems: s.lineItems.map(l => l.id === id ? { ...l, [k]: v } : l) }));
+  const setLineCost = (id, rawValue) => {
+    const value = String(rawValue || "").replace(/[^\d.]/g, "");
+    const costKnown = value.trim() !== "" && Number.isFinite(Number(value));
+    setInv(s => withLocalInvoiceEdit(s, {
+      lineItems: s.lineItems.map(l => l.id === id ? {
+        ...l,
+        unitCost: value,
+        knownUnitCost: costKnown ? value : "",
+        costKnown,
+      } : l),
+    }));
+  };
+  const addLine = () => setInv(s => withLocalInvoiceEdit(s, { lineItems: [...s.lineItems, { id: `l${Date.now()}`, desc: "", qty: "1", unitPrice: "", unitCost: "", taxable: false, kind: "custom" }] }));
+  const removeLine = (id) => setInv(s => withLocalInvoiceEdit(s, { lineItems: s.lineItems.filter(l => l.id !== id) }));
 
   // ── Catalog item picker — add Services, Products, Treatments, Parts ──
   const [picker, setPicker] = useState(false);       // show the add-from-catalog sheet
@@ -17246,7 +17328,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     } else if (kind === "part") {
       line = { id: `l${Date.now()}`, desc: item.name, qty: "1", unitPrice: String(item.retailPer || ""), unitCost: String(item.costPer || "0"), taxable: true, kind: "part", refId: item.id, unit: item.unit || "pieces" };
     }
-    setInv(s => ({ ...s, lineItems: [...s.lineItems, line] }));
+    setInv(s => withLocalInvoiceEdit(s, { lineItems: [...s.lineItems, line] }));
     setPicker(false);
   };
 
@@ -17268,7 +17350,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
       bundleNote: names, // shows under the line so the client sees what's included
       bundleItems: selected.map(x => ({ refId: x.part.id, name: x.part.name, qty: x.qty, unit: x.part.unit })),
     };
-    setInv(s => ({ ...s, lineItems: [...s.lineItems, line] }));
+    setInv(s => withLocalInvoiceEdit(s, { lineItems: [...s.lineItems, line] }));
     setBundleMode(null);
     setPicker(false);
   };
@@ -17302,15 +17384,74 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
       if (p.bill === false) return;
       items.push({ id: `lp${Date.now()}${i}`, desc: `${p.name} (${p.qty} ${p.unit || "pieces"})`, qty: String(p.qty || 1), unitPrice: String(p.retailPer || p.costPer || ""), taxable: true });
     });
-    if (items.length) setInv(s => ({ ...s, lineItems: items }));
+    if (items.length) setInv(s => withLocalInvoiceEdit(s, { lineItems: items }));
     setVisitPick(false);
   };
   const [qbState, setQbState] = useState("idle"); // idle | sending | done | error
   const [qbMsg, setQbMsg] = useState("");
   const qbConnected = qbIsConnected();
 
+  const loadQuickBooksReview = async () => {
+    if (!inv.qbId || qbReviewLoading) return;
+    setQbReviewLoading(true);
+    setQbReviewError("");
+    try {
+      const response = await fetch(`${QB_API}/sync`, { headers: await authHeaders() });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.error) throw new Error(data.error || "QuickBooks could not be refreshed.");
+      const remote = (data.invoices || []).find(entry => String(entry.qbId) === String(inv.qbId));
+      if (!remote) throw new Error("This invoice was not found in the latest QuickBooks data.");
+      setInv(current => reconcileQuickBooksInvoice({
+        ...current,
+        locallyEdited: true,
+        qbPendingLocalEdits: true,
+        qbSyncStatus: "pending-push",
+      }, remote));
+    } catch (error) {
+      setQbReviewError(error?.message || "QuickBooks could not be refreshed.");
+    } finally {
+      setQbReviewLoading(false);
+    }
+  };
+
+  const useQuickBooksReview = () => {
+    setInv(current => {
+      if (!current.qbPendingRemoteInvoice) return current;
+      return reconcileQuickBooksInvoice({
+        ...current,
+        locallyEdited: false,
+        qbPendingLocalEdits: false,
+        qbLocalChangesPending: false,
+        qbSyncStatus: "synced",
+      }, current.qbPendingRemoteInvoice);
+    });
+    setQbReviewError("");
+  };
+
+  const keepSpsReview = () => {
+    setInv(current => {
+      const remote = current.qbPendingRemoteInvoice;
+      const remoteFingerprint = remote?.qbContentFingerprint || current.qbSyncConflict?.currentFingerprint || "";
+      const next = {
+        ...current,
+        qbBaseContentFingerprint: remoteFingerprint,
+        locallyEdited: true,
+        qbAuthoritative: false,
+        qbPendingLocalEdits: true,
+        qbSyncStatus: "pending-push",
+      };
+      delete next.qbNeedsReview;
+      delete next.qbRemoteChangesPending;
+      delete next.qbSyncConflict;
+      delete next.qbPendingRemoteInvoice;
+      return next;
+    });
+    setQbReviewError("");
+  };
+
   // Build the QB payload from the current invoice
   const buildQbPayload = () => ({
+    spsInvoiceId: inv.id,
     number: inv.number,
     // QuickBooks rejects invoices with no TxnDate — default an empty issue date to today.
     date: toISO(inv.date) || toISO(todayMDY()),
@@ -17318,8 +17459,15 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     clientName: client?.name || "",
     clientEmail: client?.email || "",
     clientPhone: client?.phone || "",
-    qbCustomerId: client?.qbCustomerId || null,
+    clientAddress: client?.address || "",
+    clientStreet: client?.street || "",
+    clientCity: client?.city || "",
+    clientState: client?.state || "",
+    clientZip: client?.zip || "",
+    qbCustomerId: client?.qbId || client?.qbCustomerId || null,
     qbId: inv.qbId || null,
+    qbBaseContentFingerprint: inv.qbBaseContentFingerprint || inv.qbContentFingerprint || "",
+    qbTaxCodeRef: inv.qbTaxCodeRef || null,
     // Tax rate so QuickBooks can apply sales tax to the taxable lines.
     taxRate: parseFloat(inv.taxRate) || 0,
     // Which online payment methods to offer on the QB pay link (default on).
@@ -17341,6 +17489,8 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         kind: l.isLateFee ? "lateFee" : (l.kind || "custom"),
         taxable: !!l.taxable,
         isLateFee: !!l.isLateFee,
+        qbLineId: l.qbLineId || null,
+        qbItemRef: l.qbItemRef || null,
       };
     }),
     invoiceDiscountType: inv.discountType || "",
@@ -17369,12 +17519,94 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     }
 
     setQbState("sending"); setQbMsg("");
+    const qbPayload = buildQbPayload();
+    const currentCreateIntent = quickBooksInvoiceIntentSignature(qbPayload);
+    const originalCreateIntent = inv.qbCreateIntentSignature || "";
+    let createAttempted = !inv.qbId;
+
+    const rememberUnknownCreate = (details = {}) => {
+      const pending = {
+        ...baseInv,
+        locallyEdited: true,
+        qbAuthoritative: false,
+        qbPendingLocalEdits: true,
+        qbSyncStatus: "create-outcome-unknown",
+        qbCreateOutcomeUnknown: true,
+        // Keep the FIRST attempted intent. A later retry compares the current
+        // editor contents with this snapshot before accepting QB's replay.
+        qbCreateIntentSignature: originalCreateIntent || currentCreateIntent,
+        qbCreateRequestId: details.qbRequestId || inv.qbCreateRequestId || "",
+      };
+      setInv(pending);
+      onSave(pending);
+      setQbState("error");
+      setQbMsg("Saved locally. QuickBooks may have created this invoice, but the response was interrupted. Tap Save again to recover it safely; SPS will not create a duplicate.");
+    };
+
+    const acceptCreateResult = (createData) => {
+      const result = {
+        ...createData,
+        qbId: createData.qbId || null,
+        paymentLink: createData.paymentLink || inv.paymentLink,
+      };
+      const changedAfterUnknownCreate = !!(
+        inv.qbCreateOutcomeUnknown
+        && originalCreateIntent
+        && originalCreateIntent !== currentCreateIntent
+      );
+      if (!changedAfterUnknownCreate) {
+        finishSave(applyQuickBooksInvoiceSaveResult(baseInv, result));
+        return;
+      }
+
+      // QuickBooks replayed the original idempotent create, but the user edited
+      // SPS while its first response was unknown. Link the records without
+      // replacing either version and require an explicit review choice.
+      const remote = result.invoice && Array.isArray(result.invoice.lineItems)
+        ? {
+          ...result.invoice,
+          qbId: result.qbId || result.invoice.qbId,
+          paymentLink: result.paymentLink || result.invoice.paymentLink || "",
+          qbContentFingerprint: result.qbContentFingerprint || result.invoice.qbContentFingerprint || "",
+        }
+        : null;
+      const conflict = {
+        ...baseInv,
+        qbId: result.qbId || baseInv.qbId || null,
+        paymentLink: result.paymentLink || baseInv.paymentLink || "",
+        qbPushed: true,
+        locallyEdited: true,
+        qbAuthoritative: false,
+        qbPendingLocalEdits: true,
+        qbRemoteChangesPending: true,
+        qbSyncStatus: "conflict",
+        qbNeedsReview: true,
+        qbContentFingerprint: result.qbContentFingerprint || baseInv.qbContentFingerprint || "",
+        qbBaseContentFingerprint: result.qbContentFingerprint || baseInv.qbBaseContentFingerprint || "",
+        qbSyncConflict: {
+          type: "quickbooks-create-replay",
+          reason: "newer-local-edits-after-unknown-create",
+          qbId: result.qbId || null,
+          qbRequestId: result.qbRequestId || inv.qbCreateRequestId || null,
+          currentFingerprint: result.qbContentFingerprint || null,
+        },
+        ...(remote ? { qbPendingRemoteInvoice: remote } : {}),
+      };
+      delete conflict.qbCreateOutcomeUnknown;
+      delete conflict.qbCreateIntentSignature;
+      delete conflict.qbCreateRequestId;
+      setInv(conflict);
+      onSave(conflict);
+      setQbState("error");
+      setQbMsg("QuickBooks recovered the original invoice, but SPS has newer edits. Review the two versions above before syncing again.");
+    };
+
     try {
       const endpoint = inv.qbId ? `${QB_API}/update-invoice` : `${QB_API}/create-invoice`;
       const res = await fetch(endpoint, {
         method: "POST",
         headers: await authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ invoice: buildQbPayload() }),
+        body: JSON.stringify({ invoice: qbPayload }),
       });
       if (res.status === 401) {
         // Session expired — still save locally so work isn't lost
@@ -17385,32 +17617,73 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
       const data = await res.json();
       // If updating and QB says the invoice is gone, recreate it fresh
       if (data.recreate) {
+        createAttempted = true;
         const createRes = await fetch(`${QB_API}/create-invoice`, {
           method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
-          body: JSON.stringify({ invoice: { ...buildQbPayload(), qbId: null } }),
+          body: JSON.stringify({
+            invoice: {
+              ...qbPayload,
+              qbId: null,
+              // A deleted QuickBooks twin is a new create generation. Keep this
+              // key stable across retries of that recreation, but distinct from
+              // the invoice's original create request id.
+              qbCreateRequestKey: `${inv.id}:recreate:${inv.qbId}`,
+            },
+          }),
         });
         const createData = await createRes.json();
-        if (createData.error) { onSave(baseInv); setQbState("error"); setQbMsg("Saved locally. QuickBooks sync failed: " + createData.error); return; }
-        finishSave({ ...baseInv, qbId: createData.qbId, paymentLink: createData.paymentLink, status: inv.status === "Draft" ? "Sent" : inv.status, qbPushed: true });
+        if (createData.error) {
+          if (createData.createOutcomeUnknown) rememberUnknownCreate(createData);
+          else { onSave(baseInv); setQbState("error"); setQbMsg("Saved locally. QuickBooks sync failed: " + createData.error); }
+          return;
+        }
+        acceptCreateResult(createData);
         return;
       }
       if (data.error) {
+        if (data.createOutcomeUnknown && createAttempted) {
+          rememberUnknownCreate(data);
+          return;
+        }
         // QB failed but keep the local save
-        onSave(baseInv);
+        const failedInvoice = inv.qbId ? {
+          ...baseInv,
+          locallyEdited: true,
+          qbAuthoritative: false,
+          qbPendingLocalEdits: true,
+          qbSyncStatus: (
+            res.status === 409
+            && ["quickbooks_invoice_changed", "quickbooks_invoice_sync_required"].includes(data.code)
+          ) ? "conflict" : "pending-push",
+          ...((
+            res.status === 409
+            && ["quickbooks_invoice_changed", "quickbooks_invoice_sync_required"].includes(data.code)
+          ) ? {
+            qbNeedsReview: true,
+            qbSyncConflict: {
+              type: "quickbooks-remote-update",
+              reason: data.code || "quickbooks-update-rejected",
+              currentFingerprint: data.currentFingerprint || null,
+            },
+          } : {}),
+        } : baseInv;
+        setInv(failedInvoice);
+        onSave(failedInvoice);
         setQbState("error"); setQbMsg("Saved locally. QuickBooks sync failed: " + data.error);
         return;
       }
-      const updated = {
-        ...baseInv,
-        qbId: data.qbId || inv.qbId,
-        paymentLink: data.paymentLink || inv.paymentLink,
-        status: inv.status === "Draft" ? "Sent" : inv.status,
-        qbPushed: true,
-      };
-      finishSave(updated);
+      if (createAttempted) acceptCreateResult(data);
+      else finishSave(applyQuickBooksInvoiceSaveResult(baseInv, {
+          ...data,
+          qbId: data.qbId || inv.qbId,
+          paymentLink: data.paymentLink || inv.paymentLink,
+        }));
     } catch (err) {
-      onSave(baseInv);
-      setQbState("error"); setQbMsg("Saved locally. Could not reach QuickBooks: " + (err.message || "network error"));
+      if (createAttempted) rememberUnknownCreate();
+      else {
+        onSave(baseInv);
+        setQbState("error"); setQbMsg("Saved locally. Could not reach QuickBooks: " + (err.message || "network error"));
+      }
     }
   };
 
@@ -17419,11 +17692,41 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const label = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 6 };
 
   // B9-2: after a successful save, swap to the client-notification step (same flow).
-  if (sendStep) return <InvoiceSendStep invoice={sendStep} client={client} onClose={onClose} />;
+  if (sendStep) return <InvoiceSendStep invoice={sendStep} client={client} onSent={onSave} onClose={onClose} />;
 
   return (
     <Modal title={invoice ? `Edit ${inv.number}` : "New Invoice"} onClose={onClose}>
       <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+        {inv.qbNeedsReview && (
+          <div style={{ background: hexA("#D97706", 0.08), border: `1px solid ${hexA("#D97706", 0.3)}`, borderRadius: 13, padding: 13 }}>
+            <div style={{ color: "#B45309", fontSize: 13.5, fontWeight: 800 }}>
+              QuickBooks changed this invoice
+            </div>
+            <div style={{ color: T.textMuted, fontSize: 12, lineHeight: 1.5, marginTop: 4 }}>
+              SPS stopped before replacing any QuickBooks lines. Review both versions, then choose which line list to keep.
+            </div>
+            {qbReviewError && <div style={{ color: "#B91C1C", fontSize: 12, fontWeight: 650, marginTop: 8 }}>{qbReviewError}</div>}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+              {!inv.qbPendingRemoteInvoice ? (
+                <button type="button" onClick={loadQuickBooksReview} disabled={qbReviewLoading}
+                  style={{ border: "none", borderRadius: 10, padding: "9px 12px", background: T.primary, color: "#fff", fontSize: 12, fontWeight: 800, cursor: qbReviewLoading ? "default" : "pointer", fontFamily: "inherit", opacity: qbReviewLoading ? 0.65 : 1 }}>
+                  {qbReviewLoading ? "Loading…" : "Load QuickBooks version"}
+                </button>
+              ) : (
+                <>
+                  <button type="button" onClick={useQuickBooksReview}
+                    style={{ border: "none", borderRadius: 10, padding: "9px 12px", background: T.primary, color: "#fff", fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}>
+                    Use QuickBooks version
+                  </button>
+                  <button type="button" onClick={keepSpsReview}
+                    style={{ border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 12px", background: T.surface, color: T.text, fontSize: 12, fontWeight: 750, cursor: "pointer", fontFamily: "inherit" }}>
+                    Keep SPS version
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
         <div style={{ display: "flex", flexDirection: narrowInvoice ? "column" : "row", gap: 10 }}>
           <div style={{ flex: 2 }}>
             <label style={label}>Client</label>
@@ -17515,6 +17818,11 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
                   {l.bundleNote && (
                     <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 8, paddingLeft: 2, fontStyle: "italic" }}>Includes: {l.bundleNote}</div>
                   )}
+                  {l.qbLineId && l.costKnown === false && (
+                    <div style={{ fontSize: 11, color: "#B45309", fontWeight: 700, marginBottom: 8, paddingLeft: 2 }}>
+                      Added in QuickBooks · add its cost for accurate profit reporting.
+                    </div>
+                  )}
                   <div style={{ display: narrowInvoice ? "grid" : "flex", gridTemplateColumns: narrowInvoice ? "repeat(2, minmax(0, 1fr))" : undefined, gap: 8, alignItems: "flex-end" }}>
                     <div style={{ width: narrowInvoice ? "auto" : 44, minWidth: 0 }}>
                       <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 3 }}>Qty</div>
@@ -17531,7 +17839,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
                       <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 3 }}>Cost ea</div>
                       <div style={{ position: "relative" }}>
                         <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
-                        <input style={{ ...small, paddingLeft: 18, textAlign: "left" }} value={l.unitCost || ""} onChange={e => setLine(l.id, "unitCost", e.target.value.replace(/[^\d.]/g, ""))} placeholder="0" />
+                        <input style={{ ...small, paddingLeft: 18, textAlign: "left" }} value={l.unitCost || ""} onChange={e => setLineCost(l.id, e.target.value)} placeholder="0" />
                       </div>
                     </div>}
                     <div style={{ textAlign: narrowInvoice ? "left" : "center", minWidth: 0 }}>
@@ -17601,7 +17909,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textMuted, marginTop: 4 }}><span>Tax</span><span>{money(totals.tax)}</span></div>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 16, fontWeight: 800, color: T.text, marginTop: 6, borderTop: `1px solid ${T.border}`, paddingTop: 6 }}><span>Total</span><span>{money(totals.total)}</span></div>
             {/* Admin profit readout — never sent to the client, and staff-gated (owner/full only) */}
-            {perms.seeProfit && totals.cost > 0 && (
+            {perms.seeProfit && totals.cost > 0 && totals.costComplete !== false && (
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginTop: 6, paddingTop: 6, borderTop: `1px dashed ${T.border}`, color: totals.profit >= 0 ? T.accent : "#E5484D", fontWeight: 700 }}>
                 <span>Your profit</span><span>{money(totals.profit)} ({Math.round(totals.margin)}%)</span>
               </div>
@@ -18483,7 +18791,7 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
       {cfg.showDueBanner && eff !== "Paid" && (
         <div style={{ background: hexA(accent, 0.08), padding: `10px ${pad}px`, display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: `1px solid ${T.border}` }}>
           <span style={{ fontSize: 12, fontWeight: 700, color: accent, textTransform: "uppercase", letterSpacing: "0.05em" }}>Amount Due</span>
-          <span style={{ fontSize: 18, fontWeight: 800, color: accent }}>{money(totals.total)}</span>
+          <span style={{ fontSize: 18, fontWeight: 800, color: accent }}>{money(totals.balance)}</span>
         </div>
       )}
 
@@ -18536,7 +18844,7 @@ function InvoiceDocument({ invoice, client, branding, cfg, T, scale = 1 }) {
           <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13, color: T.textMuted }}><span>Subtotal</span><span style={amtStyle}>{money(totals.subtotal)}</span></div>
         )}
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13, color: T.textMuted, marginTop: 4 }}><span>Tax ({invoice.taxRate || 0}%{totals.taxableBase > 0 ? " on taxable" : ""})</span><span style={amtStyle}>{money(totals.tax)}</span></div>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 18, fontWeight: 800, color: accent, marginTop: 8, borderTop: `2px solid ${T.border}`, paddingTop: 8 }}><span>Total Due</span><span style={amtStyle}>{money(totals.total)}</span></div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 18, fontWeight: 800, color: accent, marginTop: 8, borderTop: `2px solid ${T.border}`, paddingTop: 8 }}><span>Total Due</span><span style={amtStyle}>{money(totals.balance)}</span></div>
         {anyTaxable && cfg.showItemTax !== false && <div style={{ fontSize: 10, color: T.textMuted, marginTop: 6 }}>* taxable item</div>}
       </div>
 
@@ -18649,7 +18957,7 @@ async function buildInvoicePdf({ invoice, client, totals, branding, cfg, eff, ac
   totRow("Subtotal", money(totals.subtotal));
   totRow(`Tax (${invoice.taxRate || 0}%)`, money(totals.tax));
   doc.setDrawColor("#E5E7EB"); doc.line(W - 200, y - 6, W - M, y - 6); y += 4;
-  totRow("Total Due", money(totals.total), true);
+  totRow("Total Due", money(totals.balance), true);
 
   if (cfg.showThankYou && cfg.thankYou) { ensure(26); doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.setTextColor(accentHex); doc.text(String(cfg.thankYou), M, y + 8); y += 26; }
   if (invoice.notes) { ensure(30); doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor("#6B7280"); const nl = doc.splitTextToSize(String(invoice.notes), W - 2 * M); doc.text(nl, M, y + 8); y += nl.length * 12 + 12; }
@@ -18923,17 +19231,25 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
       const d = await r.json().catch(() => ({}));
       logComm({ clientId: client?.id, type: "Invoice", channel: "email", body: `Invoice ${invoice.number || ""} emailed`, ok: r.ok, origin: ACTOR ? `${ACTOR} — invoice send` : "invoice send", recipient: clientEmail });
       if (!r.ok) throw new Error(d.error || "Email send failed");
+      let deliveredToClient = !d.held;
 
       // 2) In-app notification in the client's portal (drives the Messages badge on login)
       if (client?.id) {
         const note = `New invoice from ${branding.companyName || "us"}.` + invCardMarker(invoice, money(totals.total), branding.companyName);
-        const { error: msgErr } = await postToPortalSafe({
+        const { error: msgErr, held: portalHeld } = await postToPortalSafe({
           client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: note,
         });
-        if (msgErr) { setSendState("error"); setSendMsg(`Emailed, but the portal notification failed: ${msgErr.message}`); return; }
+        if (!msgErr && !portalHeld) deliveredToClient = true;
+        if (msgErr) {
+          if (deliveredToClient) onSave({ ...invoice, status: "Sent", sentDate: todayMDY() });
+          setSendState("error");
+          setSendMsg(`Emailed, but the portal notification failed: ${msgErr.message}`);
+          return;
+        }
       }
 
       setSendState("sent");
+      if (deliveredToClient) onSave({ ...invoice, status: "Sent", sentDate: todayMDY() });
       setSendMsg(d.held ? "Test Mode (hold) — invoice NOT emailed to the client." : TEST_MODE.on && !clientIsLive(client?.id) ? "Test Mode — invoice sent to you, tagged [TEST]." : `Invoice sent to ${clientEmail}${TEST_MODE.on && clientIsLive(client?.id) ? " (pilot — live)" : ""}.`);
       setTimeout(() => { setSendState("idle"); setSendMsg(""); }, 6000);
     } catch (e) {
@@ -19951,7 +20267,7 @@ function TotalSalesScreen({ invoices, clients, onBack, T }) {
   const totalRevenue  = paid.reduce((s,iv) => s + invoiceTotals(iv).total, 0);
   const totalInvoices = all.length;
   const totalPaid     = paid.length;
-  const totalOutstanding = all.filter(iv => effectiveStatus(iv) !== "Paid" && iv.status !== "Draft").reduce((s,iv) => s + invoiceTotals(iv).total, 0);
+  const totalOutstanding = all.filter(iv => effectiveStatus(iv) !== "Paid" && iv.status !== "Draft").reduce((s,iv) => s + invoiceTotals(iv).balance, 0);
 
   const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
@@ -20212,8 +20528,12 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
   );
 
   const qbPayload = (iv, c) => ({
+    spsInvoiceId: iv.id,
     number: iv.number, date: toISO(iv.date) || toISO(todayMDY()), dueDate: toISO(iv.dueDate),
-    clientName: c.name || "", clientEmail: c.email || "", clientPhone: c.phone || "", qbCustomerId: c.qbCustomerId || null, qbId: null,
+    clientName: c.name || "", clientEmail: c.email || "", clientPhone: c.phone || "",
+    clientAddress: c.address || "", clientStreet: c.street || "", clientCity: c.city || "",
+    clientState: c.state || "", clientZip: c.zip || "",
+    qbCustomerId: c.qbId || c.qbCustomerId || null, qbId: null,
     taxRate: parseFloat(iv.taxRate) || 0, allowCard: cfg.qbManagePayments === false ? (cfg.qbAllowCard !== false) : undefined, allowACH: cfg.qbManagePayments === false ? (cfg.qbAllowACH !== false) : undefined,
     lineItems: (iv.lineItems || []).map(l => { const qty = parseFloat(l.qty) || 1; const up = parseFloat(l.unitPrice) || 0; return { description: l.desc || "Service", qty: String(qty), unitPrice: up.toFixed(2), kind: l.kind || "custom", taxable: !!l.taxable, isLateFee: false }; }),
     invoiceDiscountType: "", invoiceDiscount: "",
@@ -20239,7 +20559,7 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
           const r = await fetch(`${QB_API}/create-invoice`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ invoice: qbPayload(inv, c) }) });
           const d = await r.json().catch(() => ({}));
           if (d && d.error) { onSave(inv); results.push({ id: c.id, name: c.name, ok: false, error: d.error, invoice: inv }); setProgress([...results]); continue; }
-          inv = { ...inv, qbId: d.qbId, paymentLink: d.paymentLink, status: "Sent", qbPushed: true };
+          inv = applyQuickBooksInvoiceSaveResult(inv, d);
         } catch (_) { onSave(inv); results.push({ id: c.id, name: c.name, ok: false, error: "couldn't reach QuickBooks", invoice: inv }); setProgress([...results]); continue; }
       }
       onSave(inv);
@@ -20280,9 +20600,15 @@ function BatchInvoiceModal({ clients, invoices, invoicing, onSave, onClose }) {
       const inv = p.invoice;
       const phone = String(c.phone || "").replace(/[^\d+]/g, "");
       const cEmail = (c.email || "").trim();
-      if (doSms && phone && commPref(c, "text")) { try { const r = await sendSms(phone, fillSms(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv), { clientId: c.id, type: "Invoice" }); if (!r.ok) fails++; else if (!r.acceptedForClient) protectedChannels++; } catch (_) { fails++; } }
-      if (doChat && c.id && commPref(c, "app")) { try { const posted = await postToPortalSafe({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) + invCardMarker(inv, "$" + ((invoiceTotals(inv).total) || 0).toFixed(2), branding.companyName) }); if (posted?.error) fails++; else if (posted?.held) protectedChannels++; } catch (_) { fails++; } }
-      if (doEmail && cEmail && commPref(c, "email")) { try { const tt = invoiceTotals(inv); const rE = await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ ...senderEmailFields(c.id), emailSubject: fill(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, c, inv), emailIntro: fill(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, c, inv), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); logComm({ clientId: c.id, type: "Invoice", channel: "email", body: `Invoice ${inv.number || ""} emailed (batch)`, ok: rE.ok, origin: ACTOR ? `${ACTOR} — batch invoice` : "batch invoice", recipient: cEmail }); if (!rE.ok) fails++; } catch (_) { fails++; } }
+      let deliveredToClient = false;
+      if (doSms && phone && commPref(c, "text")) { try { const r = await sendSms(phone, fillSms(email?.smsInvoice || DEFAULT_EMAIL.smsInvoice, c, inv), { clientId: c.id, type: "Invoice" }); if (!r.ok) fails++; else if (!r.acceptedForClient) protectedChannels++; else deliveredToClient = true; } catch (_) { fails++; } }
+      if (doChat && c.id && commPref(c, "app")) { try { const posted = await postToPortalSafe({ client_id: String(c.id), sender: "staff", sender_name: branding.companyName || "", body: fill(email?.chatInvoice || DEFAULT_EMAIL.chatInvoice, c, inv) + invCardMarker(inv, "$" + ((invoiceTotals(inv).total) || 0).toFixed(2), branding.companyName) }); if (posted?.error) fails++; else if (posted?.held) protectedChannels++; else deliveredToClient = true; } catch (_) { fails++; } }
+      if (doEmail && cEmail && commPref(c, "email")) { try { const tt = invoiceTotals(inv); const rE = await fetch(`${PROD_URL}/api/send-invoice`, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ ...senderEmailFields(c.id), emailSubject: fill(email?.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, c, inv), emailIntro: fill(email?.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, c, inv), to: cEmail, clientName: c.name || "", branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary }, invoice: { number: inv.number, date: inv.date, dueDate: inv.dueDate, terms: inv.notes || "", taxRate: inv.taxRate || 0, lineItems: (inv.lineItems || []).map(l => ({ desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable })), subtotal: tt.subtotal, tax: tt.tax, total: tt.total, discountTotal: tt.discountTotal }, payLink: inv.paymentLink || PROD_URL }) }); const dE = await rE.json().catch(() => ({})); logComm({ clientId: c.id, type: "Invoice", channel: "email", body: `Invoice ${inv.number || ""} emailed (batch)`, ok: rE.ok, origin: ACTOR ? `${ACTOR} — batch invoice` : "batch invoice", recipient: cEmail }); if (!rE.ok) fails++; else if (dE.held) protectedChannels++; else deliveredToClient = true; } catch (_) { fails++; } }
+      if (deliveredToClient) {
+        const sentInvoice = { ...inv, status: "Sent", sentDate: todayMDY() };
+        onSave(sentInvoice);
+        setProgress(current => current.map(entry => entry.id === p.id ? { ...entry, invoice: sentInvoice } : entry));
+      }
     }
     setMsgBusy(false);
     if (fails > 0 || protectedChannels > 0) {
@@ -20465,13 +20791,14 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
     ...iv,
     _client: clients.find(c => invoiceMatchesClient(iv, c)),
     _total:  invoiceTotals(iv).total,
+    _balance: invoiceTotals(iv).balance,
     _status: effectiveStatus(iv),
     _date:   parseAnyDate(iv.date) || parseAnyDate(iv.paidDate) || new Date(iv.createdAt || 0),
     _num:    parseInt((String(iv.number || "0")).replace(/[^0-9]/g, "")) || 0,
   }));
 
   // ── Summary stats ──
-  const outstanding   = all.filter(iv => iv._status !== "Paid" && iv.status !== "Draft").reduce((s, iv) => s + iv._total, 0);
+  const outstanding   = all.filter(iv => iv._status !== "Paid" && iv.status !== "Draft").reduce((s, iv) => s + iv._balance, 0);
   const paidThisMonth = all.filter(iv => iv._status === "Paid").filter(iv => { const d = iv._date; return d && d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); }).reduce((s, iv) => s + iv._total, 0);
   const overdueCount  = all.filter(iv => iv._status === "Overdue").length;
   const totalAll      = all.filter(iv => iv.status !== "Draft").reduce((s, iv) => s + iv._total, 0);
@@ -32438,7 +32765,7 @@ function CPHome({ client, schedule, invoices, branding, team, onNav, onRateVisit
   const next = clientNextVisit(schedule, client.id, client.name);
   const myInvoices = sortInvoices((invoices || []).filter(iv => invoiceMatchesClient(iv, client)));
   const outstanding = myInvoices.filter(iv => !["Paid","paid"].includes(effectiveStatus(iv)) && iv.status !== "Draft");
-  const totalOwed = outstanding.reduce((s, iv) => s + invoiceTotals(iv).total, 0);
+  const totalOwed = outstanding.reduce((s, iv) => s + invoiceTotals(iv).balance, 0);
   const recentHistory = (client.history || []).slice(0, 3);
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
@@ -33892,7 +34219,7 @@ function CPInvoices({ client, invoices, branding, T, vp = {}, initialSel = null,
   );
 
   const outstanding = myInvoices.filter(iv => normStatus(iv) !== "paid" && normStatus(iv) !== "draft");
-  const total = outstanding.reduce((s,iv) => s + invoiceTotals(iv).total, 0);
+  const total = outstanding.reduce((s,iv) => s + invoiceTotals(iv).balance, 0);
   const selInv = sel != null ? myInvoices.find(iv => String(iv.id) === String(sel)) : null;
 
   // ── Full invoice detail — CLIENT-SAFE ONLY: number, dates, status, line items
@@ -33919,7 +34246,7 @@ function CPInvoices({ client, invoices, branding, T, vp = {}, initialSel = null,
             <button type="button" onClick={() => payInvoice(iv)} disabled={paying}
               style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:9, background:"#2CA01C", color:"#fff", border:"none", borderRadius:14, padding:"16px 18px", fontWeight:800, fontSize:16, fontFamily:"inherit", width:"100%", cursor: paying ? "default" : "pointer", opacity: paying ? 0.85 : 1, boxShadow:"0 6px 18px rgba(44,160,28,0.3)" }}>
               <svg viewBox="0 0 24 24" width={19} height={19} fill="none" stroke="#fff" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>
-              {paying ? "Loading QuickBooks…" : `Pay $${(tot.total||0).toFixed(2)} Now`}
+              {paying ? "Loading QuickBooks…" : `Pay $${(tot.balance||0).toFixed(2)} Now`}
             </button>
             <div style={{ fontSize:11.5, color:T.textMuted, textAlign:"center", marginTop:-4 }}>Secure payment via QuickBooks · opens right in the app</div>
             {payErr && <div style={{ fontSize:11.5, color:"#C0392B", textAlign:"center", fontWeight:600 }}>{payErr}</div>}
@@ -35954,7 +36281,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       // Invoice aggregates.
       const live = invoices || [];
       const open = live.filter((iv) => effectiveStatus(iv) !== "Paid" && iv.status !== "Draft");
-      const outstanding = open.reduce((s, iv) => s + invoiceTotals(iv).total, 0);
+      const outstanding = open.reduce((s, iv) => s + invoiceTotals(iv).balance, 0);
       const overdue = live.filter((iv) => effectiveStatus(iv) === "Overdue").length;
       const collected = live
         .filter((iv) => effectiveStatus(iv) === "Paid")
@@ -36659,26 +36986,6 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     return () => clearInterval(interval);
   }, []);
 
-  // ── QB status refresh + auto-sync on app open ──
-  // Refreshes the server-side connection flag every open (so the whole app knows
-  // whether QB is connected), and auto-syncs once per session when connected.
-  useEffect(() => {
-    if (!hydrated) return; // wait for stored data to load first
-    const run = async () => {
-      const ok = await qbCheckStatus();
-      if (!ok) return;
-      if (sessionStorage.getItem("qb_auto_synced")) return; // sync once per session
-      sessionStorage.setItem("qb_auto_synced", "1");
-      try {
-        const res = await fetch(`${QB_API}/sync`, { headers: await authHeaders() }); // tokens handled server-side
-        if (!res.ok) { if (res.status === 401) qbSetConnected(false); return; }
-        const data = await res.json();
-        if (data.invoices) handleQBSync(data.invoices, data.customers);
-      } catch (e) { /* network error — silently ignore */ }
-    };
-    run();
-  }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
-
   // ── Recurring maintenance invoicing: once per month (per session), create any missing DRAFT
   // invoices for the current month — clients with Auto-Invoice on + a monthly rate. Drafts only;
   // the owner reviews + sends them from Invoices. Never auto-sent. Gated on a confirmed DB read so
@@ -36711,33 +37018,81 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     });
   }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // QuickBooks sync handler — merges QB invoices into app state and matches customers to clients
-  // Auto-sync QuickBooks once on app open — invoices/payments refresh on launch like everything else,
-  // no manual "Sync" tap needed. Only when QB is connected; silent + non-blocking; throttled across
-  // quick reopens so we don't hammer QuickBooks' API. On an expired session it quietly marks QB
-  // disconnected (the manual Sync button then surfaces the reconnect prompt).
-  const _qbAutoSyncRef = useRef(false);
+  // Keep QuickBooks invoices/payments current without forcing a reload or losing the user's place.
+  // App open, foreground/focus, and a bounded visible-only interval all share one throttled request.
+  // This is what pulls a service line added directly in QuickBooks back into SPS. The in-flight guard
+  // prevents duplicate writes when iOS fires focus + visibility + appStateChange together.
   useEffect(() => {
-    if (!hydrated || _qbAutoSyncRef.current) return;
-    _qbAutoSyncRef.current = true;
-    try { if (Date.now() - (+(localStorage.getItem("qb_autosync_at") || 0)) < 120000) return; } catch (_) {}
-    (async () => {
+    if (!hydrated) return undefined;
+    let disposed = false;
+    let inFlight = null;
+    let nativeHandle = null;
+
+    const runQuickBooksRefresh = () => {
+      if (disposed || inFlight) return inFlight || Promise.resolve(null);
       try {
-        // Ask the SERVER whether QB is connected (the token store is the source of truth) rather than
-        // trusting the cached qb_connected flag, which may not be set yet on a fresh open — that timing
-        // gap is what silently skipped the auto-sync before. qbCheckStatus() refreshes the flag too.
-        const connected = await qbCheckStatus();
-        if (!connected) return;
-        const res = await fetch(`${QB_API}/sync`, { headers: await authHeaders() });
-        if (res.status === 401) { qbSetConnected(false); return; }
-        if (!res.ok) return;
-        const data = await res.json().catch(() => ({}));
-        if (data && !data.error && data.invoices) {
-          handleQBSync(data.invoices, data.customers);
-          try { localStorage.setItem("qb_autosync_at", String(Date.now())); } catch (_) {}
+        if (Date.now() - (+(localStorage.getItem("qb_autosync_at") || 0)) < 120000) {
+          return Promise.resolve(null);
         }
-      } catch (_) { /* best-effort — the manual Sync button remains for the rare failure */ }
-    })();
+      } catch (_) {}
+
+      inFlight = (async () => {
+        try {
+          // Ask the server whether QB is connected; cached browser flags are not authoritative.
+          const connected = await qbCheckStatus();
+          if (!connected || disposed) return null;
+          const res = await fetch(`${QB_API}/sync`, {
+            headers: await authHeaders(),
+            cache: "no-store",
+          });
+          if (res.status === 401) {
+            if (!disposed) qbSetConnected(false);
+            return null;
+          }
+          if (!res.ok) return null;
+          const data = await res.json().catch(() => ({}));
+          if (disposed || !data || data.error || !Array.isArray(data.invoices)) return null;
+          handleQBSync(data.invoices, data.customers);
+          // Record only a confirmed, applied refresh. Failed requests remain immediately retryable.
+          try { localStorage.setItem("qb_autosync_at", String(Date.now())); } catch (_) {}
+          return data;
+        } catch (_) {
+          return null; // best effort; the manual Sync control remains available
+        }
+      })().finally(() => { inFlight = null; });
+      return inFlight;
+    };
+
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") runQuickBooksRefresh();
+    };
+    runQuickBooksRefresh();
+    const interval = window.setInterval(refreshWhenVisible, 5 * 60 * 1000);
+    window.addEventListener("focus", refreshWhenVisible);
+    window.addEventListener("online", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    import("@capacitor/app")
+      .then(({ App }) => {
+        if (disposed || !App?.addListener) return null;
+        return App.addListener("appStateChange", (state) => {
+          if (state?.isActive) runQuickBooksRefresh();
+        });
+      })
+      .then((handle) => {
+        if (!handle) return;
+        if (disposed) { try { handle.remove?.(); } catch (_) {} }
+        else nativeHandle = handle;
+      })
+      .catch(() => {});
+
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshWhenVisible);
+      window.removeEventListener("online", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      try { nativeHandle?.remove?.(); } catch (_) {}
+    };
   }, [hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Bank (Plaid) auto-sync on app open — mirrors the QB auto-sync above: once per open, silent,
@@ -37035,6 +37390,12 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       return {
         id:         `qb_${qi.qbId}`,
         qbId:       qi.qbId,
+        qbSyncToken: qi.qbSyncToken || null,
+        qbLastUpdatedTime: qi.qbLastUpdatedTime || null,
+        qbContentFingerprint: qi.qbContentFingerprint || "",
+        qbBaseContentFingerprint: qi.qbContentFingerprint || "",
+        qbTaxCodeRef: qi.qbTaxCodeRef || null,
+        qbCustomerId: qi.qbCustomerId || "",
         number:     qi.number,
         clientId,
         clientName: qi.clientName,
@@ -37051,6 +37412,10 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
         // edited, and pushed back to QuickBooks without losing its lines.
         lineItems:  qi.lineItems || [],
         taxRate:    qi.taxRate || 0,
+        discountType: qi.discountType || "",
+        discount: qi.discount || "",
+        qbHasUnsupportedLines: !!qi.qbHasUnsupportedLines,
+        qbUnsupportedLineTypes: qi.qbUnsupportedLineTypes || [],
         // If QB already carries a late-fee line, flag it so auto-apply won't add a second.
         ...(qi.lateFeeAppliedAt ? { lateFeeAppliedAt: qi.lateFeeAppliedAt } : {}),
         total:      String(qi.total),
@@ -37059,12 +37424,15 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
         subTotal:   qi.subTotal,
         // Build 15, Item 3 — richer QB reporting fields (sent/paid dates, email state, partial).
         qbEmailStatus:  qi.qbEmailStatus || "NotSet",
-        sentDate:       qi.sentDate || null,
+        ...(qi.sentDate ? { sentDate: qi.sentDate } : {}),
         qbDeliveryType: qi.qbDeliveryType || null,
         ...(qi.paidDate ? { paidDate: qi.paidDate } : {}),
         partial:        !!qi.partial,
         ...(qi.paymentLink ? { paymentLink: qi.paymentLink } : {}),
         source:     "quickbooks",
+        qbAuthoritative: true,
+        qbSyncStatus: "synced",
+        locallyEdited: false,
         createdAt:  Date.now(),
       };
     });
@@ -37087,31 +37455,34 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     setInvoices(prev => {
       const prevList = prev || [];
       const usedQbIds = new Set();
-      const kept = prevList.filter(iv => iv.source !== "quickbooks"); // drop prior QB-only copies
+      // Keep one local record per QB id. Prefer the app-created record when an
+      // old duplicate pair exists, but never discard the only QB-created record:
+      // it may contain pending SPS edits that must reach the conflict fence.
+      const preferredByQbId = new Map();
+      prevList.forEach(iv => {
+        if (!iv.qbId) return;
+        const key = String(iv.qbId);
+        const existing = preferredByQbId.get(key);
+        if (!existing || (existing.source === "quickbooks" && iv.source !== "quickbooks")) {
+          preferredByQbId.set(key, iv);
+        }
+      });
+      const kept = prevList.filter(iv => !iv.qbId || preferredByQbId.get(String(iv.qbId)) === iv);
       const merged = kept.map(iv => {
         if (!iv.qbId) return iv;
         const qi = newInvoices.find(n => String(n.qbId) === String(iv.qbId));
         if (!qi) return iv;
         usedQbIds.add(String(iv.qbId));
-        // Refresh QB-owned fields but preserve the local id, the payment link, and the
-        // manual source so the client keeps a single, payable invoice.
-        return {
-          ...iv,
-          number:   qi.number  || iv.number,
-          status:   qi.status  || iv.status,
-          total:    qi.total   != null ? qi.total   : iv.total,
-          balance:  qi.balance != null ? qi.balance : iv.balance,
-          taxAmount: qi.taxAmount != null ? qi.taxAmount : iv.taxAmount,
-          subTotal:  qi.subTotal  != null ? qi.subTotal  : iv.subTotal,
-          dueDate:  qi.dueDate || iv.dueDate,
-          paymentLink: iv.paymentLink || qi.paymentLink,
-          // Build 15, Item 3 — refresh QB reporting; keep a manually-recorded paidDate if set.
-          qbEmailStatus:  qi.qbEmailStatus || iv.qbEmailStatus || "NotSet",
-          sentDate:       qi.sentDate || iv.sentDate || null,
-          qbDeliveryType: qi.qbDeliveryType || iv.qbDeliveryType || null,
-          paidDate:       iv.paidDate || qi.paidDate || null,
-          partial:        !!qi.partial,
-        };
+        // QuickBooks is authoritative for customer-facing accounting fields after
+        // a clean pull. Preserve SPS-only costs, estimate/visit links, notes and
+        // the local id while adopting every current QB line. Explicit pending
+        // SPS edits are fenced for review rather than overwritten.
+        try {
+          return reconcileQuickBooksInvoice(iv, qi);
+        } catch (error) {
+          console.error("QB invoice reconciliation failed:", error);
+          return { ...iv, qbNeedsReview: true, qbSyncStatus: "conflict" };
+        }
       });
       const fresh = newInvoices.filter(n => !usedQbIds.has(String(n.qbId)));
       return [...merged, ...fresh];

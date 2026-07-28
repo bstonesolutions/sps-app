@@ -3,6 +3,12 @@
 // Key principle: once the invoice is created in QB, that is a SUCCESS even if
 // fetching the payment link later fails. We never report failure after creation.
 import { makeItemResolver, lineTaxCodeRef } from "./qb-helpers.js";
+import {
+  fingerprintQuickBooksInvoiceContent,
+  quickBooksInvoiceCreateRequestId,
+} from "./invoice-revision.js";
+import { mapQuickBooksInvoice } from "./invoice-mapper.js";
+import { buildUsTxnTaxDetail } from "./qb-tax.js";
 import { getValidAccessToken, QB_API_BASE, setCors } from "./qb-store.js";
 import { requireUser } from "../_auth.js";
 
@@ -49,10 +55,32 @@ export default async function handler(req, res) {
   };
 
   let qbId = null;
+  let qbRequestId = null;
+  let createWriteStarted = false;
 
   try {
     // ── Step 1: Find or create the customer ──
     let qbCustomerId = invoice.qbCustomerId;
+    let qbCustomer = null;
+    const clientAddress = {
+      Line1: String(invoice.clientStreet || invoice.clientAddress || "").trim() || undefined,
+      City: String(invoice.clientCity || "").trim() || undefined,
+      CountrySubDivisionCode: String(invoice.clientState || "").trim() || undefined,
+      PostalCode: String(invoice.clientZip || "").trim() || undefined,
+    };
+    const hasClientAddress = Object.values(clientAddress).some(Boolean);
+
+    if (qbCustomerId) {
+      try {
+        const customerRes = await fetch(`${base}/customer/${encodeURIComponent(qbCustomerId)}?minorversion=65`, { headers });
+        if (customerRes.ok) {
+          const customerData = await customerRes.json();
+          qbCustomer = customerData?.Customer || null;
+        }
+      } catch (_) {
+        // A missing customer snapshot is only blocking when this invoice needs tax.
+      }
+    }
 
     if (!qbCustomerId && invoice.clientName) {
       const query = encodeURIComponent(`SELECT * FROM Customer WHERE DisplayName = '${invoice.clientName.replace(/'/g, "\\'")}'`);
@@ -62,6 +90,7 @@ export default async function handler(req, res) {
 
       if (existing) {
         qbCustomerId = existing.Id;
+        qbCustomer = existing;
       } else {
         const createCustRes = await fetch(`${base}/customer?minorversion=65`, {
           method: "POST",
@@ -70,6 +99,8 @@ export default async function handler(req, res) {
             DisplayName: invoice.clientName,
             PrimaryEmailAddr: invoice.clientEmail ? { Address: invoice.clientEmail } : undefined,
             PrimaryPhone: invoice.clientPhone ? { FreeFormNumber: invoice.clientPhone } : undefined,
+            BillAddr: hasClientAddress ? clientAddress : undefined,
+            ShipAddr: hasClientAddress ? clientAddress : undefined,
           }),
         });
         if (!createCustRes.ok) {
@@ -80,7 +111,8 @@ export default async function handler(req, res) {
           if (/duplicate/i.test(custErr)) {
             const reqRes = await fetch(`${base}/query?query=${query}&minorversion=65`, { headers });
             const reqData = await reqRes.json().catch(() => null);
-            qbCustomerId = reqData?.QueryResponse?.Customer?.[0]?.Id;
+            qbCustomer = reqData?.QueryResponse?.Customer?.[0] || null;
+            qbCustomerId = qbCustomer?.Id;
           }
           if (!qbCustomerId) {
             return res.status(400).json({
@@ -90,7 +122,8 @@ export default async function handler(req, res) {
           }
         } else {
           const custData = await createCustRes.json();
-          qbCustomerId = custData?.Customer?.Id;
+          qbCustomer = custData?.Customer || null;
+          qbCustomerId = qbCustomer?.Id;
         }
       }
     }
@@ -100,9 +133,24 @@ export default async function handler(req, res) {
     }
 
     // ── Step 2: Build the invoice payload ──
-    const resolveItemRef = makeItemResolver(base, headers);
-    const taxRate = parseFloat(invoice.taxRate) || 0;
     const srcLines = invoice.lineItems || invoice.items || [];
+    let taxPlan = buildUsTxnTaxDetail({
+      sourceLines: srcLines,
+      taxRate: invoice.taxRate,
+      invoiceDiscountType: invoice.invoiceDiscountType,
+      invoiceDiscount: invoice.invoiceDiscount,
+      customer: qbCustomer,
+      storedTaxCodeRef: invoice.qbTaxCodeRef,
+    });
+    if (taxPlan.status === "blocked") {
+      return res.status(422).json({
+        error: taxPlan.message,
+        code: taxPlan.code,
+        reviewRequired: true,
+        expectedTax: taxPlan.totalTax,
+      });
+    }
+    const resolveItemRef = makeItemResolver(base, headers);
     const lineItems = [];
     for (let i = 0; i < srcLines.length; i++) {
       const li = srcLines[i];
@@ -110,10 +158,14 @@ export default async function handler(req, res) {
       const unitPrice = parseFloat(li.unitPrice || li.rate) || 0;
       const amount = parseFloat(li.amount) || (qty * unitPrice);
       // Map each line to its real QuickBooks item based on the app's "kind".
-      const itemRef = await resolveItemRef(li.kind);
+      const suppliedItemRef = li.qbItemRef && String(li.qbItemRef.value || "").trim()
+        ? { value: String(li.qbItemRef.value), ...(li.qbItemRef.name ? { name: li.qbItemRef.name } : {}) }
+        : null;
+      const itemRef = suppliedItemRef || await resolveItemRef(li.kind);
       const detail = { ItemRef: itemRef, Qty: qty, UnitPrice: unitPrice };
-      // Mark taxability so QuickBooks applies sales tax to the right lines.
-      if (taxRate > 0) detail.TaxCodeRef = lineTaxCodeRef(!!li.taxable);
+      // Always state line taxability. Explicit NON is required when tax is
+      // disabled so an item's QuickBooks default cannot silently reapply tax.
+      detail.TaxCodeRef = lineTaxCodeRef(taxPlan.taxRate > 0 && !!li.taxable);
       lineItems.push({
         LineNum:     i + 1,
         Amount:      amount,
@@ -130,6 +182,7 @@ export default async function handler(req, res) {
       DueDate:      invoice.dueDate || undefined,
       Line:         lineItems,
       BillEmail:    invoice.clientEmail ? { Address: invoice.clientEmail } : undefined,
+      ShipAddr:     hasClientAddress ? clientAddress : undefined,
       // Online payment methods: ONLY override QuickBooks' account-level settings when the app
       // explicitly passes a boolean. Otherwise leave these undefined (dropped from the JSON request)
       // so QuickBooks shows every method enabled on the account — Card, ACH, PayPal, Venmo, Affirm.
@@ -137,6 +190,8 @@ export default async function handler(req, res) {
       AllowOnlineCreditCardPayment: typeof invoice.allowCard === "boolean" ? invoice.allowCard : undefined,
       AllowOnlineACHPayment: typeof invoice.allowACH === "boolean" ? invoice.allowACH : undefined,
     };
+
+    if (taxPlan.txnTaxDetail) qbInvoice.TxnTaxDetail = taxPlan.txnTaxDetail;
 
     // Invoice-level discount
     if (invoice.invoiceDiscount && parseFloat(invoice.invoiceDiscount) > 0) {
@@ -151,11 +206,28 @@ export default async function handler(req, res) {
     }
 
     // ── Step 3: Create the invoice ──
-    const createRes = await fetch(`${base}/invoice?minorversion=65`, {
+    // Intuit strongly recommends a stable requestid for every write. If the
+    // connection drops after QuickBooks stores the invoice, a retry with this
+    // same id returns the original response instead of creating a duplicate.
+    const requestKey = String(
+      invoice.qbCreateRequestKey
+      || invoice.spsInvoiceId
+      || invoice.id
+      || `${qbCustomerId}:${invoice.number || "auto"}`,
+    );
+    qbRequestId = quickBooksInvoiceCreateRequestId(realm_id, requestKey);
+    // From this point forward, a thrown network/response error is ambiguous:
+    // QuickBooks may have committed the invoice before the connection failed.
+    // The stable request id lets a later retry recover that same create safely.
+    createWriteStarted = true;
+    const createRes = await fetch(
+      `${base}/invoice?minorversion=65&requestid=${encodeURIComponent(qbRequestId)}`,
+      {
       method: "POST",
       headers,
       body: JSON.stringify(qbInvoice),
-    });
+      },
+    );
 
     if (!createRes.ok) {
       const err = await createRes.text();
@@ -167,17 +239,20 @@ export default async function handler(req, res) {
     const created = await createRes.json();
     qbId = created?.Invoice?.Id;
     let paymentLink = created?.Invoice?.InvoiceLink || null;
+    let canonicalInvoice = created?.Invoice || null;
 
     // ── Step 4 (best-effort): get the shareable payment link ──
     // From here on, the invoice EXISTS. Any failure below still returns success
     // with the QBO web link so the app stays in sync with QuickBooks.
-    if (!paymentLink && qbId) {
+    if (qbId) {
       try {
-        // Re-fetch the invoice asking for the sharable link
+        // Re-fetch the canonical stored invoice. Besides the share link, this
+        // gives SPS a revision fingerprint for safe future full updates.
         const getRes = await fetch(`${base}/invoice/${qbId}?minorversion=65`, { headers });
         if (getRes.ok) {
           const got = await getRes.json();
-          paymentLink = got?.Invoice?.InvoiceLink || null;
+          canonicalInvoice = got?.Invoice || canonicalInvoice;
+          paymentLink = canonicalInvoice?.InvoiceLink || paymentLink;
         }
       } catch (linkErr) {
         console.error("QB payment link fetch failed (invoice still created):", linkErr.message);
@@ -187,6 +262,11 @@ export default async function handler(req, res) {
     return res.status(200).json({
       qbId,
       paymentLink: paymentLink || webLink(qbId),
+      qbContentFingerprint: canonicalInvoice?.Line
+        ? fingerprintQuickBooksInvoiceContent(canonicalInvoice)
+        : null,
+      invoice: canonicalInvoice?.Line ? mapQuickBooksInvoice(canonicalInvoice) : null,
+      qbRequestId,
       hasOnlineLink: !!paymentLink,
       success: true,
     });
@@ -202,6 +282,13 @@ export default async function handler(req, res) {
         hasOnlineLink: false,
         success: true,
         warning: "Invoice created, but the payment link could not be confirmed.",
+      });
+    }
+    if (createWriteStarted) {
+      return res.status(502).json({
+        error: "QuickBooks may have created this invoice, but the response could not be confirmed. Retry the same invoice to recover it safely.",
+        createOutcomeUnknown: true,
+        qbRequestId,
       });
     }
     return res.status(500).json({ error: err.message });
