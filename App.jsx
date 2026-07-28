@@ -17028,12 +17028,43 @@ function InvoiceRow({ iv, onClick }) {
   );
 }
 
+function InvoiceSendToggle({ T, on, onClick, disabled }) {
+  return (
+    <button type="button" onClick={disabled ? undefined : onClick} style={{ background: "none", border: "none", padding: 0, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.4 : 1, flexShrink: 0 }}>
+      <div style={{ width: 38, height: 22, borderRadius: 100, background: on ? T.primary : T.border, position: "relative", transition: "background 0.2s" }}>
+        <div style={{ width: 18, height: 18, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: on ? 18 : 2, transition: "left 0.2s" }} />
+      </div>
+    </button>
+  );
+}
+
+// Keep this component at module scope. If it is declared inside InvoiceSendStep, every draft
+// keystroke creates a new component type and React remounts the textarea, dropping its focus.
+function InvoiceSendChannelRow({ T, icon, title, sub, on, setOn, disabled, optedOut, children }) {
+  return (
+    <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: 14, opacity: disabled ? 0.6 : 1 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ width: 34, height: 34, borderRadius: 10, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name={icon} size={16} /></div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{title}</div>
+          <div style={{ fontSize: 11.5, color: (optedOut && !disabled) ? T.warning : T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {(optedOut && !disabled) ? (on ? "Overriding — they prefer not to be reached here" : "Client opted out — tap to override") : sub}
+          </div>
+        </div>
+        <InvoiceSendToggle T={T} on={on && !disabled} onClick={() => setOn(current => !current)} disabled={disabled} />
+      </div>
+      {on && !disabled && children}
+    </div>
+  );
+}
+
 // B9-2: shown right after an invoice is created/synced (without leaving the flow).
 // Lets the owner notify the client via text, in-app message, and/or the branded
 // email — prefilled from Settings defaults, editable per-send, with skip. Nothing
 // sends silently. Defaults live in Settings; edits here don't change them.
 function InvoiceSendStep({ invoice, client, onClose }) {
   const { T, branding, email } = useApp();
+  const { isPhone } = useViewport();
   const e = email || {};
   const money = (n) => `$${(Number(n) || 0).toFixed(2)}`;
   const totals = invoiceTotals(invoice);
@@ -17068,6 +17099,8 @@ function InvoiceSendStep({ invoice, client, onClose }) {
   const emailOptedOut = !!clientEmail && !commPref(client, "email");
   const [smsMsg, setSmsMsg]   = useState(fillSms(e.smsInvoice || DEFAULT_EMAIL.smsInvoice));
   const [chatMsg, setChatMsg] = useState(fill(e.chatInvoice || DEFAULT_EMAIL.chatInvoice));
+  const [emailSubject, setEmailSubject] = useState(fill(e.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject));
+  const [emailIntro, setEmailIntro] = useState(fill(e.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro));
   const [sending, setSending] = useState(false);
   const [err, setErr] = useState("");
   const [finished, setFinished] = useState(false);
@@ -17098,8 +17131,8 @@ function InvoiceSendStep({ invoice, client, onClose }) {
           method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({
             ...senderEmailFields(client?.id),
-            emailSubject: fill(e.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject),
-            emailIntro: fill(e.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro),
+            emailSubject: emailSubject,
+            emailIntro: emailIntro,
             to: clientEmail,
             clientName: invoice.clientName || client?.name || "",
             branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary },
@@ -17122,29 +17155,9 @@ function InvoiceSendStep({ invoice, client, onClose }) {
   };
 
   const lblS = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted };
-  const taS = { width: "100%", padding: "10px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13.5, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical", marginTop: 8 };
-  const Toggle = ({ on, onClick, disabled }) => (
-    <button type="button" onClick={disabled ? undefined : onClick} style={{ background: "none", border: "none", padding: 0, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.4 : 1, flexShrink: 0 }}>
-      <div style={{ width: 38, height: 22, borderRadius: 100, background: on ? T.primary : T.border, position: "relative", transition: "background 0.2s" }}>
-        <div style={{ width: 18, height: 18, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: on ? 18 : 2, transition: "left 0.2s" }} />
-      </div>
-    </button>
-  );
-  const Row = ({ icon, title, sub, on, setOn, disabled, optedOut, children }) => (
-    <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: 14, opacity: disabled ? 0.6 : 1 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <div style={{ width: 34, height: 34, borderRadius: 10, background: hexA(T.primary, 0.1), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name={icon} size={16} /></div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{title}</div>
-          <div style={{ fontSize: 11.5, color: (optedOut && !disabled) ? T.warning : T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {(optedOut && !disabled) ? (on ? "Overriding — they prefer not to be reached here" : "Client opted out — tap to override") : sub}
-          </div>
-        </div>
-        <Toggle on={on && !disabled} onClick={() => setOn(v => !v)} disabled={disabled} />
-      </div>
-      {on && !disabled && children}
-    </div>
-  );
+  // iOS zooms controls below 16px when focused. Keep phone editors at 16px so opening the
+  // keyboard does not resize and jump the send sheet while a message is being edited.
+  const taS = { width: "100%", padding: "10px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: isPhone ? 16 : 13.5, lineHeight: 1.45, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", resize: "vertical", marginTop: 8 };
 
   return (
     <Modal title={`Notify ${first}`} onClose={onClose}>
@@ -17153,17 +17166,25 @@ function InvoiceSendStep({ invoice, client, onClose }) {
           Invoice <b style={{ color: T.text }}>{invoice.number}</b> · <b style={{ color: T.text }}>{amount}</b> saved{invoice.qbPushed ? " & synced to QuickBooks" : ""}. Choose how to let {first} know — or skip.
         </div>
 
-        <Row icon="message" title="Text message" sub={phone ? phone : "No phone on file"} on={doSms} setOn={setDoSms} disabled={!phone} optedOut={smsOptedOut}>
-          <textarea rows={3} value={smsMsg} onChange={ev => setSmsMsg(ev.target.value)} style={taS} />
-        </Row>
+        <InvoiceSendChannelRow T={T} icon="message" title="Text message" sub={phone ? phone : "No phone on file"} on={doSms} setOn={setDoSms} disabled={!phone} optedOut={smsOptedOut}>
+          <textarea data-invoice-send-editor aria-label="Invoice text message" rows={3} value={smsMsg} onChange={ev => setSmsMsg(ev.target.value)} onFocus={keepFocusedControlVisible} style={taS} />
+        </InvoiceSendChannelRow>
 
-        <Row icon="clients" title="In-app message" sub="Shows in their client portal" on={doChat} setOn={setDoChat} disabled={!client?.id} optedOut={chatOptedOut}>
-          <textarea rows={2} value={chatMsg} onChange={ev => setChatMsg(ev.target.value)} style={taS} />
-        </Row>
+        <InvoiceSendChannelRow T={T} icon="clients" title="In-app message" sub="Shows in their client portal" on={doChat} setOn={setDoChat} disabled={!client?.id} optedOut={chatOptedOut}>
+          <textarea data-invoice-send-editor aria-label="Invoice in-app message" rows={2} value={chatMsg} onChange={ev => setChatMsg(ev.target.value)} onFocus={keepFocusedControlVisible} style={taS} />
+        </InvoiceSendChannelRow>
 
-        <Row icon="mail" title="Email invoice" sub={clientEmail ? clientEmail : "No email on file"} on={doEmail} setOn={setDoEmail} disabled={!clientEmail} optedOut={emailOptedOut}>
-          <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 8, lineHeight: 1.5 }}>Sends the branded invoice{payLink ? " with a Pay-online button" : ""} to {clientEmail}.</div>
-        </Row>
+        <InvoiceSendChannelRow T={T} icon="mail" title="Email invoice" sub={clientEmail ? clientEmail : "No email on file"} on={doEmail} setOn={setDoEmail} disabled={!clientEmail} optedOut={emailOptedOut}>
+          <label style={{ ...lblS, display: "block", marginTop: 10 }}>
+            Subject
+            <input data-invoice-send-editor aria-label="Invoice email subject" type="text" value={emailSubject} onChange={ev => setEmailSubject(ev.target.value)} onFocus={keepFocusedControlVisible} style={{ ...taS, resize: "none" }} />
+          </label>
+          <label style={{ ...lblS, display: "block", marginTop: 10 }}>
+            Message
+            <textarea data-invoice-send-editor aria-label="Invoice email message" rows={3} value={emailIntro} onChange={ev => setEmailIntro(ev.target.value)} onFocus={keepFocusedControlVisible} style={taS} />
+          </label>
+          <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 7, lineHeight: 1.45 }}>The branded invoice{payLink ? " and Pay-online button are" : " is"} included automatically.</div>
+        </InvoiceSendChannelRow>
 
         {err && <div style={{ fontSize: 12.5, fontWeight: 600, color: finished ? T.warning : T.accent }}>{err}</div>}
 
