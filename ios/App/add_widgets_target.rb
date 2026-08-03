@@ -11,7 +11,7 @@ APP_BUNDLE = 'com.stonepropertysolutions.app'
 WIDGET_BUNDLE = 'com.stonepropertysolutions.app.SPSWidgets'
 TEAM      = 'JASPHFVN38'
 DEPLOY    = '15.0'
-BUILD_NO  = '40'
+BUILD_NO  = '38'
 
 proj = Xcodeproj::Project.open(PROJECT)
 app  = proj.targets.find { |t| t.name == APP_NAME } or abort("App target not found")
