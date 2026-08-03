@@ -2,10 +2,59 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  catalogCategoryGroups,
   catalogItemFinancials,
   estimateLineFromCatalog,
   estimateLineFromPartsBundle,
 } from "../estimateCatalog.js";
+
+test("catalog categories retain inventory organization and keep uncategorized items last", () => {
+  const pump = { id: "pump", name: "Pump", category: "Pumps" };
+  const valve = { id: "valve", name: "Valve", category: "  plumbing  " };
+  const union = { id: "union", name: "Union", category: "PLUMBING" };
+  const labor = { id: "labor", name: "General labor" };
+  const explicit = { id: "misc", name: "Miscellaneous", category: "uncategorized" };
+
+  const groups = catalogCategoryGroups([pump, valve, union, labor, explicit]);
+
+  assert.deepEqual(groups.map((group) => group.category), ["plumbing", "Pumps", "Uncategorized"]);
+  assert.deepEqual(groups[0].items, [valve, union], "equivalent category casing and whitespace should merge without reordering its items");
+  assert.deepEqual(groups[2].items, [labor, explicit], "blank and explicitly uncategorized items should share the reserved group");
+});
+
+test("searching an inventory category returns every item assigned to it", () => {
+  const groups = catalogCategoryGroups([
+    { id: "a", name: "Beneficial Bacteria", category: "Water Treatments" },
+    { id: "b", name: "Clarifier", category: "Water Treatments" },
+    { id: "c", name: "Filter Pad", category: "Filtration" },
+  ], "water treat");
+
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].category, "Water Treatments");
+  assert.deepEqual(groups[0].items.map((item) => item.id), ["a", "b"]);
+});
+
+test("searching uncategorized includes blank and explicitly named uncategorized items", () => {
+  const groups = catalogCategoryGroups([
+    { id: "blank", name: "Loose item", category: "" },
+    { id: "named", name: "Miscellaneous", category: "Uncategorized" },
+    { id: "other", name: "Pump", category: "Equipment" },
+  ], "uncategorized");
+
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].key, "__uncategorized__");
+  assert.deepEqual(groups[0].items.map((item) => item.id), ["blank", "named"]);
+});
+
+test("category grouping keeps source order within each category", () => {
+  const groups = catalogCategoryGroups([
+    { id: "z", name: "Z", category: "Parts" },
+    { id: "a", name: "A", category: "Parts" },
+    { id: "m", name: "M", category: "Parts" },
+  ]);
+
+  assert.deepEqual(groups[0].items.map((item) => item.id), ["z", "a", "m"]);
+});
 
 test("every catalog kind snapshots the correct retail, cost, unit, and reference", () => {
   const service = estimateLineFromCatalog("service", { id: "svc", name: "Repair", price: "200", cost: "80", price_type: "flat" }, "line-svc");

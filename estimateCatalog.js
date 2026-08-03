@@ -2,6 +2,46 @@ import { defaultEstimateLineTaxable, estimateNumberIsValid, estimateNumberValue 
 
 const hasValue = (value) => value != null && String(value).trim() !== "";
 const roundMoney = (value) => Math.round((estimateNumberValue(value) + Number.EPSILON) * 100) / 100;
+const UNCATEGORIZED = "Uncategorized";
+
+const cleanCategory = (value) => String(value ?? "").trim().replace(/\s+/g, " ");
+
+// Inventory categories are user-entered labels. Fold equivalent casing/spacing into the same
+// group while retaining the first saved display label and the original item order. Blank labels
+// and a literal "Uncategorized" category intentionally share one reserved group.
+export function catalogCategoryGroups(items = [], query = "") {
+  const list = Array.isArray(items) ? items.filter(Boolean) : [];
+  const needle = String(query ?? "").trim().toLocaleLowerCase();
+  const matching = needle
+    ? list.filter((item) => {
+        const category = cleanCategory(item?.category);
+        const searchableCategory = !category || category.toLocaleLowerCase() === UNCATEGORIZED.toLocaleLowerCase()
+          ? UNCATEGORIZED
+          : category;
+        return [item?.name, searchableCategory, item?.sku]
+          .some((value) => String(value ?? "").toLocaleLowerCase().includes(needle));
+      })
+    : list;
+
+  const groups = new Map();
+  matching.forEach((item) => {
+    const savedCategory = cleanCategory(item?.category);
+    const isUncategorized = !savedCategory || savedCategory.toLocaleLowerCase() === UNCATEGORIZED.toLocaleLowerCase();
+    const category = isUncategorized ? UNCATEGORIZED : savedCategory;
+    const key = isUncategorized ? "__uncategorized__" : savedCategory.toLocaleLowerCase();
+    const current = groups.get(key) || { key, category, items: [] };
+    current.items.push(item);
+    groups.set(key, current);
+  });
+
+  return [...groups.values()].sort((left, right) => {
+    const leftUncategorized = left.key === "__uncategorized__";
+    const rightUncategorized = right.key === "__uncategorized__";
+    if (leftUncategorized !== rightUncategorized) return leftUncategorized ? 1 : -1;
+    if (leftUncategorized) return 0;
+    return left.category.localeCompare(right.category, undefined, { numeric: true, sensitivity: "base" });
+  });
+}
 
 export function catalogItemFinancials(kind, item = {}) {
   const normalizedKind = ["service", "product", "treatment", "part"].includes(kind) ? kind : "custom";

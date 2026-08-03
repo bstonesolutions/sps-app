@@ -10,7 +10,7 @@ import { foregroundFenceTransition, selectActiveEnRouteStop, selectArrivalWatchS
 import { assessInboundLead, findMisfiledImportedLead } from "./leadQualification";
 import { brandLogoSource } from "./brandAssets";
 import { ESTIMATE_LINE_TAX_MODEL, defaultEstimateLineTaxable, estimateHasValidDays, estimateHasValidTaxRate, estimateLineAmount, estimateLineCost, estimateLineHasKnownCost, estimateLineIsTaxable, estimateLineQuantity, estimateLineUnitPrice, estimateNumberIsValid, estimateNumberValue, estimateProfitTotals, estimateTotals, formatEstimateMoney, withEstimateRevision, withEstimateTotals } from "./estimateMath";
-import { catalogItemFinancials, estimateLineFromCatalog, estimateLineFromPartsBundle } from "./estimateCatalog";
+import { catalogCategoryGroups, catalogItemFinancials, estimateLineFromCatalog, estimateLineFromPartsBundle } from "./estimateCatalog";
 import { completeEstimateWithInvoice, estimateTaxMigrationImpact, estimateToDraftInvoice, findInvoiceForEstimate, normalizeEstimateTaxForInvoice } from "./estimateInvoiceConversion";
 import { findScheduledStopForEstimate, scheduleApprovedEstimate } from "./estimateScheduleLink";
 import { findInvoiceDeletionReferences, invoiceDeletionBlockedMessage } from "./invoiceDeletionGuard";
@@ -15805,6 +15805,8 @@ function CatalogManager({ catalog, setCatalog }) {
   const products = catalog.products || [];
   const services = catalog.services || [];
   const treatments = catalog.treatments || [];
+  const serviceCategories = [...new Set(services.map((service) => String(service?.category || "").trim()).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" }));
   const num = (v) => parseFloat(v) || 0;
 
   // ---- chip lists (stop types, tests): add / rename / delete ----
@@ -15862,10 +15864,10 @@ function CatalogManager({ catalog, setCatalog }) {
   const addInvAmount = () => setTxModal(m => ({ ...m, data: { ...m.data, inventoryOz: String(Math.max(0, num(m.data.inventoryOz) + num(m.addOz))) }, addOz: "" }));
 
   // ---- services: add / edit / delete ----
-  const openAddSvc = () => setSvcModal({ mode: "add", data: { id: `s${Date.now()}`, name: "", price: "", cost: "", price_type: "flat", target_hourly_rate: "", products: [], treatments: [], tests: [], division: catDiv } });
+  const openAddSvc = () => setSvcModal({ mode: "add", data: { id: `s${Date.now()}`, name: "", category: "", price: "", cost: "", price_type: "flat", target_hourly_rate: "", products: [], treatments: [], tests: [], division: catDiv } });
   const openEditSvc = (s) => setSvcModal({ mode: "edit", data: { ...s, products: s.products || [], tests: s.tests || [] } });
   const saveSvc = () => {
-    const d = svcModal.data;
+    const d = { ...svcModal.data, category: String(svcModal.data.category || "").trim() };
     if (!d.name.trim()) return;
     setCatalog(c => {
       const exists = (c.services || []).some(s => s.id === d.id);
@@ -16143,6 +16145,19 @@ function CatalogManager({ catalog, setCatalog }) {
                 style={chipInput}
                 autoFocus
               />
+            </div>
+
+            <div>
+              <label style={labelStyle}>Category <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
+              <input
+                type="text"
+                list="sps-service-categories"
+                value={svcModal.data.category || ""}
+                onChange={e => setSvc("category", e.target.value)}
+                placeholder={serviceCategories[0] ? `e.g. ${serviceCategories[0]}` : "e.g. Maintenance, Repair, Installation"}
+                style={chipInput}
+              />
+              <datalist id="sps-service-categories">{serviceCategories.map(category => <option key={category} value={category} />)}</datalist>
             </div>
 
             <DivisionPicker value={svcModal.data.division} onChange={v => setSvc("division", v)} />
@@ -17510,14 +17525,15 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const onCreateCatalogItem = (type, data) => {
     if (!setCatalog) {
       // No catalog setter available — return an ephemeral item so it still adds to this invoice
-      return { id: `tmp${Date.now()}`, name: data.name, price: data.price, cost: data.cost, retailPerOz: data.price, costPerOz: data.cost, retailPer: data.price, costPer: data.cost };
+      return { id: `tmp${Date.now()}`, name: data.name, category: String(data.category || "").trim(), price: data.price, cost: data.cost, retailPerOz: data.price, costPerOz: data.cost, retailPer: data.price, costPer: data.cost };
     }
     const id = `${type[0]}${Date.now()}`;
+    const category = String(data.category || "").trim();
     let item;
-    if (type === "service")      item = { id, name: data.name, price: data.price || "", cost: data.cost || "0", products: [], tests: [] };
-    else if (type === "product") item = { id, name: data.name, price: data.price || "", cost: data.cost || "0" };
-    else if (type === "treatment") item = { id, name: data.name, retailPerOz: data.price || "", costPerOz: data.cost || "0", unit: "oz", stockByLoc: {} };
-    else if (type === "part")    item = { id, name: data.name, retailPer: data.price || "", costPer: data.cost || "0", unit: "pieces", stockByLoc: {} };
+    if (type === "service")      item = { id, name: data.name, category, price: data.price || "", cost: data.cost || "0", products: [], tests: [] };
+    else if (type === "product") item = { id, name: data.name, category, price: data.price || "", cost: data.cost || "0" };
+    else if (type === "treatment") item = { id, name: data.name, category, retailPerOz: data.price || "", costPerOz: data.cost || "0", unit: "oz", stockByLoc: {} };
+    else if (type === "part")    item = { id, name: data.name, category, retailPer: data.price || "", costPer: data.cost || "0", unit: "pieces", stockByLoc: {} };
     const key = type === "service" ? "services" : type === "product" ? "products" : type === "treatment" ? "treatments" : "parts";
     setCatalog(c => ({ ...c, [key]: [...(c[key] || []), item] }));
     return item;
@@ -18205,8 +18221,9 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
   const [tab, setTab] = useState("services");
   const [search, setSearch] = useState("");
   const [bundle, setBundle] = useState({});   // partId -> qty (for bundling)
+  const [collapsedCategories, setCollapsedCategories] = useState({});
   const [creating, setCreating] = useState(null); // {type} when creating a new item
-  const [newItem, setNewItem] = useState({ name: "", price: "", cost: "" });
+  const [newItem, setNewItem] = useState({ name: "", category: "", price: "", cost: "" });
   const n = (v) => parseFloat(v) || 0;
   const money = (v) => `$${(n(v)).toFixed(2)}`;
   const newItemPriceValid = estimateNumberIsValid(newItem.price);
@@ -18220,14 +18237,32 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
     treatments: catalog?.treatments || [],
     parts: catalog?.parts || [],
   };
-  const filtered = (lists[tab] || []).filter(it => !search || (it.name || "").toLowerCase().includes(search.toLowerCase()));
+  const pickerItems = (lists[tab] || []).filter((item, index, items) => (
+    items.findIndex((candidate) => String(candidate?.id) === String(item?.id)) === index
+  ));
+  const categoryGroups = catalogCategoryGroups(pickerItems, search);
+  const allCategoryGroups = catalogCategoryGroups(pickerItems);
+  const existingCategories = allCategoryGroups.map((group) => group.category);
+  const matchedCategory = allCategoryGroups.find((group) => (
+    group.category.toLocaleLowerCase() === search.trim().toLocaleLowerCase()
+  ));
+  const pickerRows = categoryGroups.flatMap((group) => {
+    const categoryKey = `${tab}:${group.key}`;
+    const showHeader = categoryGroups.length > 1 || group.category !== "Uncategorized";
+    if (!showHeader) return group.items;
+    const selectedCount = tab === "parts" ? group.items.filter((item) => bundle[item.id]).length : 0;
+    return [
+      { __category: true, key: categoryKey, category: group.category, count: group.items.length, selectedCount },
+      ...(!collapsedCategories[categoryKey] || search.trim() ? group.items : []),
+    ];
+  });
 
   const kindOf  = () => tab === "services" ? "service" : tab === "products" ? "product" : tab === "treatments" ? "treatment" : "part";
 
   const toggleBundle = (id) => setBundle(b => { const c = { ...b }; if (c[id]) delete c[id]; else c[id] = "1"; return c; });
   const bundleCount = Object.keys(bundle).length;
   const selectedBundleParts = Object.entries(bundle)
-    .map(([id, qty]) => ({ part: (catalog.parts || []).find(p => p.id === id), qty }))
+    .map(([id, qty]) => ({ part: (catalog.parts || []).find(p => String(p.id) === String(id)), qty }))
     .filter(entry => entry.part);
   const bundleMissingRetail = selectedBundleParts.some(({ part }) => !catalogItemFinancials("part", part).priceKnown);
   const bundleInvalidQuantity = selectedBundleParts.some(({ qty }) => !estimateNumberIsValid(qty) || !(estimateNumberValue(qty) > 0));
@@ -18241,7 +18276,7 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
     const created = onCreateItem(creating.type, newItem);
     if (created) onAddCatalog(creating.type, created);
     setCreating(null);
-    setNewItem({ name: "", price: "", cost: "" });
+    setNewItem({ name: "", category: "", price: "", cost: "" });
   };
 
   const cell = { width: "100%", padding: "10px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
@@ -18259,7 +18294,7 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
           </div>
           <div style={{ display: "flex", gap: 4, background: T.surfaceAlt, borderRadius: 10, padding: 3, overflowX: "auto", scrollbarWidth: "none" }}>
             {tabs.map(([id, lab]) => (
-              <button key={id} onClick={() => { setTab(id); setBundle({}); setCreating(null); }} style={{ flex: "1 0 auto", minWidth: id === "treatments" ? 94 : 76, minHeight: 40, padding: "8px 8px", border: "none", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: tab === id ? T.surface : "transparent", color: tab === id ? T.primary : T.textMuted }}>{lab}</button>
+              <button key={id} onClick={() => { setTab(id); setSearch(""); setBundle({}); setCreating(null); }} style={{ flex: "1 0 auto", minWidth: id === "treatments" ? 94 : 76, minHeight: 40, padding: "8px 8px", border: "none", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", background: tab === id ? T.surface : "transparent", color: tab === id ? T.primary : T.textMuted }}>{lab}</button>
             ))}
           </div>
         </div>
@@ -18272,6 +18307,17 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
               <div>
                 <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 5, fontWeight: 700, textTransform: "uppercase" }}>Name</div>
                 <input style={cell} value={newItem.name} onChange={e => setNewItem(s => ({ ...s, name: e.target.value }))} placeholder="e.g. Pond Liner Repair" autoFocus />
+              </div>
+              <div>
+                <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 5, fontWeight: 700, textTransform: "uppercase" }}>Category <span style={{ textTransform: "none", fontWeight: 500 }}>(optional)</span></div>
+                <input
+                  style={cell}
+                  list={`estimate-catalog-categories-${tab}`}
+                  value={newItem.category}
+                  onChange={e => setNewItem(s => ({ ...s, category: e.target.value }))}
+                  placeholder={existingCategories[0] ? `e.g. ${existingCategories[0]}` : "e.g. Pumps, Plumbing, Maintenance"}
+                />
+                <datalist id={`estimate-catalog-categories-${tab}`}>{existingCategories.map(category => <option key={category} value={category} />)}</datalist>
               </div>
               <div style={{ display: "flex", flexDirection: pickerVp.width <= 360 ? "column" : "row", gap: 10 }}>
                 <div style={{ flex: 1 }}>
@@ -18292,9 +18338,24 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
             </div>
           ) : (
             <>
-              <input style={{ ...cell, marginBottom: 12 }} value={search} onChange={e => setSearch(e.target.value)} placeholder={`Search ${tab}...`} />
+              <input style={{ ...cell, marginBottom: 12 }} value={search} onChange={e => setSearch(e.target.value)} placeholder={`Search ${tab} or categories...`} />
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {filtered.map(it => {
+                {pickerRows.map(it => {
+                  if (it.__category) {
+                    const collapsed = !!collapsedCategories[it.key] && !search.trim();
+                    return (
+                      <button
+                        key={it.key}
+                        type="button"
+                        aria-expanded={!collapsed}
+                        onClick={() => setCollapsedCategories((current) => ({ ...current, [it.key]: !current[it.key] }))}
+                        style={{ width: "100%", minHeight: 36, marginTop: 3, padding: "8px 11px", border: "none", borderRadius: 9, background: T.surfaceAlt, color: T.textMuted, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontFamily: "inherit", cursor: "pointer" }}
+                      >
+                        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", fontSize: 11, fontWeight: 850, letterSpacing: "0.045em", textTransform: "uppercase", textAlign: "left" }}>{it.category} · {it.count}{it.selectedCount ? ` · ${it.selectedCount} selected` : ""}</span>
+                        <span aria-hidden="true" style={{ fontSize: 15, lineHeight: 1, transform: collapsed ? "none" : "rotate(90deg)", transition: "transform 0.15s", flexShrink: 0 }}>›</span>
+                      </button>
+                    );
+                  }
                   const isBundling = tab === "parts";
                   const selected = !!bundle[it.id];
                   const financials = catalogItemFinancials(kindOf(), it);
@@ -18339,10 +18400,10 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
                     </div>
                   );
                 })}
-                {filtered.length === 0 && <div style={{ textAlign: "center", padding: "24px", color: T.textMuted, fontSize: 13 }}>No {tab} found</div>}
+                {categoryGroups.length === 0 && <div style={{ textAlign: "center", padding: "24px", color: T.textMuted, fontSize: 13 }}>No {tab} found</div>}
               </div>
               {/* Create new */}
-              {allowCreate && <Btn variant="outline" block onClick={() => { setCreating({ type: tab === "services" ? "service" : tab === "products" ? "product" : tab === "treatments" ? "treatment" : "part" }); setNewItem({ name: search, price: "", cost: "" }); }}
+              {allowCreate && <Btn variant="outline" block onClick={() => { setCreating({ type: tab === "services" ? "service" : tab === "products" ? "product" : tab === "treatments" ? "treatment" : "part" }); setNewItem({ name: matchedCategory ? "" : search, category: matchedCategory ? matchedCategory.category : "", price: "", cost: "" }); }}
                 style={{ marginTop: 12, borderStyle: "dashed" }}>
                 + Create new {tab === "services" ? "service" : tab === "products" ? "product" : tab === "treatments" ? "treatment" : "part"}
               </Btn>}
@@ -20134,7 +20195,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   const createCatalogItem = (type, data) => {
     if (!canManage || shareBusyRef.current || !setCatalog) return null;
     const id = `${type[0]}${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    const base = { id, name: data.name.trim(), division: "All" };
+    const base = { id, name: data.name.trim(), category: String(data.category || "").trim(), division: "All" };
     let item;
     if (type === "service") item = { ...base, price: data.price || "", cost: data.cost || "", price_type: "flat", target_hourly_rate: "", products: [], treatments: [], tests: [] };
     else if (type === "product") item = { ...base, price: data.price || "", cost: data.cost || "" };
