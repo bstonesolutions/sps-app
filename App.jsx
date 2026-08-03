@@ -24369,10 +24369,10 @@ function CommsSearchField({ value, onChange, onClear, placeholder, T, ariaLabel,
 
 function CommsMobileHeader({ title, description, action, T }) {
   return (
-    <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, minWidth: 0 }}>
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, minWidth: 0 }}>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <h1 style={{ margin: 0, fontSize: 27, lineHeight: 1.04, fontWeight: 880, color: T.text, letterSpacing: "-0.045em" }}>{title}</h1>
-        {description && <div style={{ marginTop: 4, fontSize: 12, lineHeight: 1.35, color: T.textMuted }}>{description}</div>}
+        <h1 style={{ margin: 0, fontSize: 23, lineHeight: 1.08, fontWeight: 760, color: T.text, letterSpacing: "-0.025em" }}>{title}</h1>
+        {description && <div style={{ marginTop: 3, fontSize: 12.5, lineHeight: 1.35, color: T.textMuted }}>{description}</div>}
       </div>
       {action && <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>{action}</div>}
     </div>
@@ -24382,9 +24382,74 @@ function CommsMobileHeader({ title, description, action, T }) {
 function CommsIconAction({ icon, label, onClick, T, active = false }) {
   return (
     <button type="button" onClick={onClick} title={label} aria-label={label}
-      style={{ width: 44, height: 44, border: "none", borderRadius: 22, background: active ? hexA(T.primary, 0.1) : "transparent", color: T.primary, display: "grid", placeItems: "center", cursor: "pointer", fontFamily: "inherit", flexShrink: 0, WebkitTapHighlightColor: "transparent" }}>
-      <Icon name={icon} size={19} />
+      style={{ width: 42, height: 42, border: `1px solid ${active ? hexA(T.primary, 0.18) : hexA(T.border, 0.7)}`, borderRadius: 21, background: active ? hexA(T.primary, 0.09) : hexA(T.surface, 0.82), color: T.primary, display: "grid", placeItems: "center", cursor: "pointer", fontFamily: "inherit", flexShrink: 0, WebkitTapHighlightColor: "transparent" }}>
+      <Icon name={icon} size={18} />
     </button>
+  );
+}
+
+function CommsFloatingSearchDock({ value, onChange, placeholder, actionIcon, actionLabel, onAction, T }) {
+  if (typeof document === "undefined") return null;
+  return createPortal(
+    <div role="search" aria-label={placeholder} style={{ position: "fixed", left: "max(12px, env(safe-area-inset-left))", right: "max(12px, env(safe-area-inset-right))", bottom: "var(--sps-floating-action-bottom, calc(env(safe-area-inset-bottom) + 76px))", zIndex: 98, maxWidth: 560, height: 52, margin: "0 auto", display: "flex", alignItems: "center", gap: 8, pointerEvents: "none" }}>
+      <div style={{ flex: 1, minWidth: 0, height: 52, padding: 3, boxSizing: "border-box", pointerEvents: "auto", border: `1px solid ${hexA(T.border, 0.7)}`, borderRadius: 26, background: hexA(T.surface, 0.965), boxShadow: "0 5px 18px rgba(0,0,0,0.11)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}>
+        <CommsSearchField value={value} onChange={onChange} placeholder={placeholder} T={T} ariaLabel={placeholder} touch pill />
+      </div>
+      {onAction && <div style={{ pointerEvents: "auto", width: 52, height: 52, borderRadius: 26, display: "grid", placeItems: "center", background: hexA(T.surface, 0.97), border: `1px solid ${hexA(T.border, 0.7)}`, boxShadow: "0 5px 18px rgba(0,0,0,0.11)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}><CommsIconAction icon={actionIcon || "edit"} label={actionLabel || "Create"} onClick={onAction} T={T} active /></div>}
+    </div>,
+    document.body
+  );
+}
+
+// Mobile Comms is a workspace, not a seven-tab control panel. Keep the three daily
+// destinations visible and place administrative tools behind one predictable menu.
+function CommsSectionNavigator({ sections, activeId, onChange, T, phone = false, navRef }) {
+  const [moreOpen, setMoreOpen] = useState(false);
+  const primaryOrder = ["email", "messages", "inbox"];
+  const primary = primaryOrder.map(id => sections.find(section => section.id === id)).filter(Boolean);
+  const secondary = sections.filter(section => !primaryOrder.includes(section.id));
+  const secondaryActive = secondary.some(section => section.id === activeId);
+  useEffect(() => { setMoreOpen(false); }, [activeId]);
+  const shortLabel = (section) => section.id === "email" ? (section.label === "Texts" ? "Texts" : "Inbox") : section.id === "messages" ? "Chats" : "Leads";
+  return (
+    <div style={{ position: "relative", minWidth: 0 }}>
+      {moreOpen && <button type="button" aria-label="Close communications menu" onClick={() => setMoreOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 1, border: "none", background: "transparent", padding: 0 }} />}
+      <div style={{ position: "relative", zIndex: 2, display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+        <nav ref={navRef} aria-label="Primary communications sections" style={{ flex: 1, minWidth: 0, height: 44, display: "flex", alignItems: "stretch", gap: 3, padding: 3, boxSizing: "border-box", background: hexA(T.textMuted, 0.085), border: `1px solid ${hexA(T.border, 0.72)}`, borderRadius: 15 }}>
+          {primary.map(section => {
+            const on = section.id === activeId;
+            return (
+              <button key={section.id} type="button" data-comms-section={section.id} onClick={() => onChange(section.id)} aria-current={on ? "page" : undefined}
+                style={{ flex: 1, minWidth: 0, border: "none", borderRadius: 11, background: on ? T.surface : "transparent", color: on ? T.primary : T.textMuted, boxShadow: on ? "0 1px 4px rgba(0,0,0,0.11)" : "none", fontFamily: "inherit", fontSize: phone ? 11.5 : 12.5, fontWeight: on ? 760 : 620, letterSpacing: "-0.01em", cursor: "pointer", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", WebkitTapHighlightColor: "transparent" }}>
+                {shortLabel(section)}
+              </button>
+            );
+          })}
+        </nav>
+        {secondary.length > 0 && (
+          <button type="button" aria-label="More communications sections" aria-haspopup="menu" aria-expanded={moreOpen} onClick={() => setMoreOpen(open => !open)}
+            style={{ width: 44, height: 44, flexShrink: 0, border: `1px solid ${secondaryActive || moreOpen ? hexA(T.primary, 0.28) : hexA(T.border, 0.72)}`, borderRadius: 15, background: secondaryActive || moreOpen ? hexA(T.primary, 0.09) : T.surface, color: secondaryActive || moreOpen ? T.primary : T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", boxShadow: "0 1px 3px rgba(0,0,0,0.045)", WebkitTapHighlightColor: "transparent" }}>
+            <Icon name="sliders" size={17} />
+          </button>
+        )}
+      </div>
+      {moreOpen && secondary.length > 0 && (
+        <div role="menu" aria-label="More communications sections" style={{ position: "absolute", zIndex: 3, top: 51, right: 0, width: `min(268px, calc(100vw - ${phone ? 24 : 48}px))`, padding: 7, border: `1px solid ${hexA(T.border, 0.9)}`, borderRadius: 17, background: hexA(T.surface, 0.985), boxShadow: "0 18px 46px rgba(0,0,0,0.2)", backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)" }}>
+          <div style={{ padding: "7px 10px 5px", color: T.textMuted, fontSize: 10, fontWeight: 760, letterSpacing: "0.08em", textTransform: "uppercase" }}>More tools</div>
+          {secondary.map(section => {
+            const on = section.id === activeId;
+            return (
+              <button key={section.id} type="button" role="menuitem" onClick={() => onChange(section.id)}
+                style={{ width: "100%", minHeight: 46, padding: "7px 9px", border: "none", borderRadius: 12, background: on ? hexA(T.primary, 0.085) : "transparent", color: on ? T.primary : T.text, display: "flex", alignItems: "center", gap: 11, fontFamily: "inherit", fontSize: 13.5, fontWeight: on ? 760 : 650, textAlign: "left", cursor: "pointer" }}>
+                <span style={{ width: 30, height: 30, borderRadius: 9, background: on ? hexA(T.primary, 0.12) : T.surfaceAlt, color: on ? T.primary : T.textMuted, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name={section.icon} size={15} /></span>
+                <span style={{ flex: 1 }}>{section.label}</span>
+                {on && <Icon name="check" size={15} />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -24561,7 +24626,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
   const openAddLead = () => setAdding(true);
   const ago = (iso) => { const t = Date.parse(iso || ""); if (!t) return ""; const d = (Date.now() - t) / 86400000; if (d < 1) return "today"; if (d < 2) return "yesterday"; return `${Math.floor(d)}d ago`; };
 
-  const STATUS_COLOR = { new: T.primary, contacted: "#2563EB", qualified: "#7c3aed", won: "#16a34a", lost: T.textMuted };
+  const STATUS_COLOR = { new: T.primary, contacted: "#2563EB", qualified: "#B45309", won: "#16a34a", lost: T.textMuted };
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
   const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
   const chip = (on, label, onClick, color, flat = false) => (
@@ -24571,7 +24636,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
   const headerBar = (
     <div style={{ padding: phone ? "7px 12px 8px" : (dense ? "10px 12px 8px" : "16px 16px 12px") }}>
       {phone ? (
-        <CommsMobileHeader T={T} title="Leads" description={`${activeCount} active · ${sorted.length} total`}
+        <CommsMobileHeader T={T} title="Lead inbox" description={`${activeCount} active · ${sorted.length} total`}
           action={<CommsIconAction T={T} icon="plus" label="Add lead" onClick={openAddLead} />} />
       ) : (
         <CommsPageHeader T={T} compact={twoPane} icon="funnel" title="Leads" description={`${activeCount} active · ${sorted.length} total`}
@@ -24591,7 +24656,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
       </div>
     </div>
   ) : null;
-  const searchBar = <div style={{ padding: phone ? "0 12px 7px" : (dense ? "0 12px 8px" : "0 16px 10px") }}><CommsSearchField value={search} onChange={setSearch} T={T} placeholder={phone ? "Search leads" : "Search leads, services, phone or email"} quiet={phone} /></div>;
+  const searchBar = phone ? null : <div style={{ padding: dense ? "0 12px 8px" : "0 16px 10px" }}><CommsSearchField value={search} onChange={setSearch} T={T} placeholder="Search leads, services, phone or email" /></div>;
   const filterBar = (
     <div aria-label="Lead stage filters" style={{ display: "flex", gap: dense ? 6 : 7, overflowX: "auto", padding: phone ? "0 12px 8px" : (dense ? "0 12px 8px" : "0 16px 12px"), WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
       {chip(filter === "active", "Active", () => setFilter("active"), undefined, phone)}
@@ -24600,7 +24665,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
     </div>
   );
   const listCards = (
-    <div style={{ display: "flex", flexDirection: "column", gap: phone ? 0 : (dense ? 7 : 10), padding: phone ? 0 : (dense ? "0 12px 12px" : "0 16px 16px"), margin: phone ? "0 12px 16px" : 0, background: phone && shown.length ? T.surface : "transparent", borderTop: phone && shown.length ? `1px solid ${T.border}` : "none", borderBottom: phone && shown.length ? `1px solid ${T.border}` : "none" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: phone ? 0 : (dense ? 7 : 10), padding: phone ? 0 : (dense ? "0 12px 12px" : "0 16px 16px"), margin: phone ? "0 12px 84px" : 0, background: phone && shown.length ? T.surface : "transparent", borderTop: phone && shown.length ? `1px solid ${T.border}` : "none", borderBottom: phone && shown.length ? `1px solid ${T.border}` : "none" }}>
       {shown.length === 0 && <CommsEmptyState T={T} icon="funnel" title={searchTerm ? "No matching leads" : "No leads in this stage"} copy={searchTerm ? "Try another name, service, phone number, or email." : "Website leads appear here automatically, or you can add one manually."} action={!searchTerm && <Btn sm onClick={openAddLead}>Add a lead</Btn>} />}
       {shown.map((l, rowIndex) => {
         const initials = (l.name || "?").trim().split(/\s+/).map(w => w[0]).slice(0, 2).join("").toUpperCase() || "?";
@@ -24612,24 +24677,27 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
         return (
         <button type="button" key={l.id} onClick={() => setSelId(l.id)} aria-label={`Open lead ${l.name || l.phone || l.email || "New lead"}`}
           style={phone
-            ? { position: "relative", width: "100%", background: T.surface, border: "none", padding: dense ? "10px 2px" : "12px 3px", cursor: "pointer", display: "flex", alignItems: "flex-start", gap: dense ? 9 : 11, fontFamily: "inherit", textAlign: "left", color: T.text, WebkitTapHighlightColor: "transparent" }
+            ? { position: "relative", width: "100%", minHeight: dense ? 70 : 76, background: T.surface, border: "none", padding: dense ? "10px 3px" : "12px 4px", cursor: "pointer", display: "flex", alignItems: "center", gap: dense ? 10 : 12, fontFamily: "inherit", textAlign: "left", color: T.text, WebkitTapHighlightColor: "transparent" }
             : { background: active ? hexA(T.primary, 0.06) : T.surface, border: `1px solid ${active ? hexA(T.primary, 0.4) : T.border}`, borderLeft: `3px solid ${STATUS_COLOR[l.status] || T.border}`, borderRadius: dense ? 14 : 16, padding: dense ? "9px 11px" : "13px 15px", cursor: "pointer", display: "flex", alignItems: "flex-start", gap: dense ? 8 : 12, boxShadow: "0 2px 10px rgba(0,0,0,0.04)", fontFamily: "inherit", textAlign: "left", width: "100%" }}>
-          {phone && rowIndex > 0 && <span aria-hidden="true" style={{ position: "absolute", left: dense ? 45 : 52, right: 0, top: 0, height: 1, background: T.border }} />}
-          <div style={{ width: dense ? 34 : 40, height: dense ? 34 : 40, borderRadius: "50%", flexShrink: 0, background: isNew ? T.primary : hexA(T.primary, 0.12), color: isNew ? "#fff" : T.primary, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: dense ? 12 : 13.5 }}>{initials}</div>
+          {phone && rowIndex > 0 && <span aria-hidden="true" style={{ position: "absolute", left: dense ? 58 : 63, right: 0, top: 0, height: 1, background: hexA(T.border, 0.62) }} />}
+          {phone && isNew && <span aria-label="New lead" style={{ position: "absolute", left: -3, top: "50%", width: 7, height: 7, marginTop: -3.5, borderRadius: "50%", background: T.primary }} />}
+          <div style={{ width: dense ? 44 : 48, height: dense ? 44 : 48, borderRadius: "50%", flexShrink: 0, background: isNew ? hexA(T.primary, 0.14) : T.surfaceAlt, color: isNew ? T.primary : T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 750, fontSize: dense ? 14 : 15 }}>{initials}</div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <div style={{ fontSize: dense ? 14 : 15, fontWeight: 800, color: T.text, letterSpacing: "-0.01em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{l.name || l.phone || l.email || "New lead"}</div>
-              <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: 10, fontWeight: 800, color: STATUS_COLOR[l.status] || T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{LEAD_STAGES.find(s => s.id === l.status)?.label || l.status}</span>
+              <div style={{ fontSize: dense ? 15 : 16, fontWeight: isNew ? 740 : 620, color: T.text, letterSpacing: "-0.015em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{l.name || l.phone || l.email || "New lead"}</div>
+              <span style={{ marginLeft: "auto", flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 5, fontSize: dense ? 10.5 : 11, fontWeight: 650, color: STATUS_COLOR[l.status] || T.textMuted }}><span style={{ width: 6, height: 6, borderRadius: "50%", background: STATUS_COLOR[l.status] || T.textMuted }} />{LEAD_STAGES.find(s => s.id === l.status)?.label || l.status}</span>
+              {phone && <span aria-hidden="true" style={{ display: "inline-flex", color: hexA(T.textMuted, 0.5), flexShrink: 0 }}><Icon name="chevronR" size={13} /></span>}
             </div>
             {l.message
-              ? <div style={{ fontSize: dense ? 12.5 : 13, color: T.text, marginTop: dense ? 2 : 4, lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: dense ? 1 : 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{l.message}</div>
-              : <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 4, fontStyle: "italic" }}>No message left</div>}
-            <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: dense ? 5 : 7, minWidth: 0 }}>
-              <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", textTransform: "uppercase", color: T.textMuted, background: T.surfaceAlt, padding: "2px 7px", borderRadius: 100, flexShrink: 0 }}>{LEAD_SOURCE_LABEL[l.source] || l.source}</span>
-              <span style={{ fontSize: 11, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{meta}</span>
+              ? <div style={{ fontSize: dense ? 13 : 13.5, color: isNew ? T.text : T.textMuted, fontWeight: isNew ? 560 : 420, marginTop: 3, lineHeight: 1.35, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{l.message}</div>
+              : <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 3, fontStyle: "italic" }}>No message left</div>}
+            <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: dense ? 3 : 5, minWidth: 0, color: T.textMuted }}>
+              <span style={{ fontSize: dense ? 10 : 10.5, fontWeight: 650, flexShrink: 0 }}>{LEAD_SOURCE_LABEL[l.source] || l.source}</span>
+              {meta && <span aria-hidden="true" style={{ color: T.border }}>·</span>}
+              <span style={{ fontSize: dense ? 10.5 : 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{meta}</span>
             </div>
           </div>
-          {firstImg && <ProtectedImage src={firstImg} alt="" loading="lazy" onError={e => { e.target.style.display = "none"; }} style={{ width: dense ? 42 : 52, height: dense ? 42 : 52, borderRadius: dense ? 10 : 12, objectFit: "cover", border: `1px solid ${T.border}`, flexShrink: 0, background: T.surfaceAlt }} />}
+          {firstImg && <ProtectedImage src={firstImg} alt="" loading="lazy" onError={e => { e.target.style.display = "none"; }} style={{ width: dense ? 42 : 46, height: dense ? 42 : 46, borderRadius: 10, objectFit: "cover", border: `1px solid ${T.border}`, flexShrink: 0, background: T.surfaceAlt }} />}
         </button>
         );
       })}
@@ -24719,7 +24787,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
         <CommsMobileDetailShell
           title={sel.name || sel.phone || "Lead"}
           subtitle={`${LEAD_SOURCE_LABEL[sel.source] || sel.source || "Lead"} · ${LEAD_STAGES.find(stage => stage.id === sel.status)?.label || sel.status || "New"}`}
-          avatar={<span style={{ width: 34, height: 34, borderRadius: "50%", background: sel.status === "new" ? T.primary : hexA(T.primary, 0.12), color: sel.status === "new" ? "#fff" : T.primary, display: "grid", placeItems: "center", fontSize: 11.5, fontWeight: 820 }}>{((sel.name || "?").trim().split(/\s+/).map(word => word[0]).slice(0, 2).join("") || "?").toUpperCase()}</span>}
+          avatar={<span style={{ width: 36, height: 36, borderRadius: "50%", background: hexA(STATUS_COLOR[sel.status] || T.primary, 0.13), color: STATUS_COLOR[sel.status] || T.primary, display: "grid", placeItems: "center", fontSize: 12, fontWeight: 760 }}>{((sel.name || "?").trim().split(/\s+/).map(word => word[0]).slice(0, 2).join("") || "?").toUpperCase()}</span>}
           backLabel="Leads"
           onBack={() => setSelId(null)}
           kind="lead"
@@ -24768,6 +24836,18 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
             <Btn block variant="ghost" onClick={() => setDupModal(null)}>Cancel</Btn>
           </div>
         </Modal>
+      )}
+
+      {phone && !sel && !adding && !dupModal && (
+        <CommsFloatingSearchDock
+          value={search}
+          onChange={setSearch}
+          placeholder="Search leads"
+          actionIcon="plus"
+          actionLabel="Add lead"
+          onAction={openAddLead}
+          T={T}
+        />
       )}
 
       {/* In-app photo lightbox — full-screen overlay, tap anywhere (or ✕) to close. No browser hop. */}
@@ -25802,18 +25882,19 @@ function MessagesScreen({ clients, currentUser, T, workspaceScope = "" }) {
   const listHeader = (
     <div style={{ padding: twoPane ? (dense ? "10px 12px 8px" : "14px 16px 12px") : (phone ? "7px 0 2px" : "0 0 2px"), borderBottom: twoPane ? `1px solid ${T.border}` : "none", flexShrink: 0 }}>
       {phone ? (
-        <CommsMobileHeader T={T} title="Client chats" description={`${threads.length} conversation${threads.length === 1 ? "" : "s"}${totalUnread ? ` · ${totalUnread} unread` : " · all caught up"}`}
+        <CommsMobileHeader T={T} title="Client conversations" description={`${threads.length} conversation${threads.length === 1 ? "" : "s"}${totalUnread ? ` · ${totalUnread} unread` : " · all caught up"}`}
           action={<CommsIconAction T={T} icon="edit" label="New message" onClick={() => setShowNewMsg(true)} />} />
       ) : (
         <CommsPageHeader T={T} compact={twoPane} icon="message" title="Client chats" description={`${threads.length} conversation${threads.length === 1 ? "" : "s"}${totalUnread ? ` · ${totalUnread} unread` : " · all caught up"}`}
           action={<Btn sm onClick={() => setShowNewMsg(true)} style={{ gap: 6 }}><Icon name="plus" size={13} />New</Btn>} />
       )}
-      {threads.length > 0 && <div style={{ marginTop: phone ? 8 : (dense ? 8 : 12) }}><CommsSearchField value={threadSearch} onChange={setThreadSearch} T={T} placeholder={phone ? "Search chats" : "Search conversations"} quiet={phone} /></div>}
+      {threads.length > 0 && !phone && <div style={{ marginTop: dense ? 8 : 12 }}><CommsSearchField value={threadSearch} onChange={setThreadSearch} T={T} placeholder="Search conversations" /></div>}
     </div>
   );
   // Circular, deterministic-hue avatar (matches the Email inbox look) instead of the old red squares.
-  const MSG_AV = ["#B81D24", "#0E9488", "#2563eb", "#b45309", "#64748b", "#c2410c", "#0891b2", "#be185d"];
+  const MSG_AV = ["#B81D24", "#8F2730", "#0F766E", "#1D4ED8", "#9A3412", "#475569"];
   const msgAvColor = (seed) => { let h = 0; const s = String(seed || "?"); for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return MSG_AV[h % MSG_AV.length]; };
+  const msgPhoto = (client) => client?.avatarUrl || client?.photoUrl || client?.profilePhoto || client?.contactPhoto || "";
   const convBtn = (t, card, rowIndex = 0) => {
     const c = t.client, hasUnread = t.unread > 0, col = msgAvColor(c.name || c.id);
     const active = twoPane && String(selectedClientId) === String(c.id);
@@ -25821,21 +25902,24 @@ function MessagesScreen({ clients, currentUser, T, workspaceScope = "" }) {
     return (
       <button key={c.id} onClick={() => setSelectedClientId(c.id)}
         style={flat
-          ? { position: "relative", display: "flex", alignItems: "center", gap: dense ? 9 : 12, padding: dense ? "10px 2px" : "12px 3px", minHeight: 62, width: "100%", background: T.surface, border: "none", cursor: "pointer", fontFamily: "inherit", textAlign: "left", WebkitTapHighlightColor: "transparent" }
+          ? { position: "relative", display: "flex", alignItems: "center", gap: dense ? 10 : 12, padding: dense ? "9px 3px" : "11px 4px", minHeight: dense ? 68 : 74, width: "100%", background: T.surface, border: "none", cursor: "pointer", fontFamily: "inherit", textAlign: "left", WebkitTapHighlightColor: "transparent" }
           : card
           ? { position: "relative", display: "flex", alignItems: "center", gap: dense ? 8 : 12, padding: dense ? "9px 11px" : "13px 14px", minHeight: 58, width: "100%", background: hasUnread ? hexA(T.primary, 0.03) : T.surface, border: `1px solid ${hasUnread ? hexA(T.primary, 0.28) : T.border}`, borderRadius: dense ? 14 : 16, boxShadow: "0 1px 3px rgba(0,0,0,0.035)", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }
           : { position: "relative", display: "flex", alignItems: "center", gap: dense ? 8 : 12, padding: dense ? "10px 12px" : "13px 16px", width: "100%", background: active ? hexA(T.primary, 0.08) : (hasUnread ? hexA(T.primary, 0.04) : "none"), border: "none", borderBottom: `1px solid ${T.border}`, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-        {flat && rowIndex > 0 && <span aria-hidden="true" style={{ position: "absolute", left: dense ? 45 : 55, right: 0, top: 0, height: 1, background: T.border }} />}
+        {flat && rowIndex > 0 && <span aria-hidden="true" style={{ position: "absolute", left: dense ? 57 : 62, right: 0, top: 0, height: 1, background: hexA(T.border, 0.62) }} />}
+        {flat && hasUnread && <span aria-label="Unread" style={{ position: "absolute", left: -3, top: "50%", width: 7, height: 7, marginTop: -3.5, borderRadius: "50%", background: T.primary }} />}
         {card && !flat && hasUnread && <span style={{ position: "absolute", left: -1, top: 14, bottom: 14, width: 3, borderRadius: 3, background: T.primary }} />}
-        <div style={{ width: dense ? 36 : 44, height: dense ? 36 : 44, borderRadius: "50%", flexShrink: 0, display: "grid", placeItems: "center", background: hexA(col, 0.15), color: col, fontSize: dense ? 14 : 17, fontWeight: 800 }}>{(c.name || "?")[0].toUpperCase()}</div>
+        {msgPhoto(c)
+          ? <img src={msgPhoto(c)} alt="" loading="lazy" style={{ width: dense ? 44 : 48, height: dense ? 44 : 48, borderRadius: "50%", flexShrink: 0, objectFit: "cover", background: T.surfaceAlt }} />
+          : <div style={{ width: dense ? 44 : 48, height: dense ? 44 : 48, borderRadius: "50%", flexShrink: 0, display: "grid", placeItems: "center", background: hexA(col, 0.14), color: col, fontSize: dense ? 15 : 17, fontWeight: 760 }}>{(c.name || "?")[0].toUpperCase()}</div>}
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-            <span style={{ flex: 1, minWidth: 0, fontSize: dense ? 14 : 14.5, fontWeight: hasUnread ? 820 : 650, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.name}</span>
-            <span style={{ fontSize: 11, color: hasUnread ? T.primary : T.textMuted, fontWeight: hasUnread ? 700 : 500, flexShrink: 0 }}>{fmtMsgTime(t.lastAt)}</span>
+            <span style={{ flex: 1, minWidth: 0, fontSize: dense ? 15 : 16, fontWeight: hasUnread ? 740 : 620, color: T.text, letterSpacing: "-0.015em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.name}</span>
+            <span style={{ fontSize: dense ? 11 : 11.5, color: hasUnread ? T.primary : T.textMuted, fontWeight: hasUnread ? 680 : 500, flexShrink: 0 }}>{fmtMsgTime(t.lastAt)}</span>
+            {flat && <span aria-hidden="true" style={{ display: "inline-flex", color: hexA(T.textMuted, 0.5), flexShrink: 0 }}><Icon name="chevronR" size={13} /></span>}
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: dense ? 1 : 3 }}>
-            <span style={{ flex: 1, minWidth: 0, fontSize: dense ? 12.5 : 13, color: hasUnread ? T.text : T.textMuted, fontWeight: hasUnread ? 650 : 400, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.lastMsg || "No messages yet"}</span>
-            {hasUnread && <span style={{ minWidth: 18, height: 18, borderRadius: 9, background: T.primary, color: "#fff", fontSize: 10.5, fontWeight: 800, display: "grid", placeItems: "center", padding: "0 5px", flexShrink: 0 }}>{t.unread}</span>}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: dense ? 2 : 4 }}>
+            <span style={{ flex: 1, minWidth: 0, fontSize: dense ? 13 : 13.5, color: hasUnread ? T.text : T.textMuted, fontWeight: hasUnread ? 580 : 420, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.lastMsg || "No messages yet"}</span>
           </div>
         </div>
       </button>
@@ -25848,7 +25932,7 @@ function MessagesScreen({ clients, currentUser, T, workspaceScope = "" }) {
   ) : twoPane ? (
     <div>{visibleThreads.map(t => convBtn(t, false))}</div>
   ) : phone ? (
-    <div style={{ display: "flex", flexDirection: "column", gap: 0, marginBottom: 16, background: T.surface, borderTop: `1px solid ${T.border}`, borderBottom: `1px solid ${T.border}` }}>{visibleThreads.map((t, i) => convBtn(t, true, i))}</div>
+    <div style={{ display: "flex", flexDirection: "column", gap: 0, marginBottom: 16, background: T.surface, borderTop: `1px solid ${hexA(T.border, 0.72)}`, borderBottom: `1px solid ${hexA(T.border, 0.72)}` }}>{visibleThreads.map((t, i) => convBtn(t, true, i))}</div>
   ) : (
     <div style={{ display: "flex", flexDirection: "column", gap: dense ? 7 : 10, paddingBottom: 20 }}>{visibleThreads.map(t => convBtn(t, true))}</div>
   );
@@ -25858,7 +25942,7 @@ function MessagesScreen({ clients, currentUser, T, workspaceScope = "" }) {
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>{listBody}</div>
     </div>
   ) : (
-    <div style={{ display: "flex", flexDirection: "column", gap: dense ? 9 : 16 }}>{listHeader}{listBody}</div>
+    <div style={{ display: "flex", flexDirection: "column", gap: dense ? 9 : 16, paddingBottom: phone ? 74 : 0 }}>{listHeader}{listBody}</div>
   );
 
   const chatPane = selectedClient
@@ -25881,13 +25965,16 @@ function MessagesScreen({ clients, currentUser, T, workspaceScope = "" }) {
   }
   // Narrow: single column — the list, or a full-screen chat / new-message view.
   const selectedInitials = (selectedClient?.name || "?").trim().split(/\s+/).map(word => word[0]).slice(0, 2).join("").toUpperCase() || "?";
+  const selectedPhoto = msgPhoto(selectedClient);
   return (
     <div ref={wrapRef}>
       {selectedClient
         ? <CommsMobileDetailShell
             title={selectedClient.name || "Client"}
             subtitle={[selectedClient.division ? `${selectedClient.division} client` : "Client", selectedClient.phone || selectedClient.email].filter(Boolean).join(" · ")}
-            avatar={<span style={{ width: 34, height: 34, borderRadius: "50%", background: hexA(T.primary, 0.11), color: T.primary, display: "grid", placeItems: "center", fontSize: 11.5, fontWeight: 820 }}>{selectedInitials}</span>}
+            avatar={selectedPhoto
+              ? <img src={selectedPhoto} alt="" style={{ width: 36, height: 36, borderRadius: "50%", objectFit: "cover", background: T.surfaceAlt }} />
+              : <span style={{ width: 36, height: 36, borderRadius: "50%", background: hexA(T.primary, 0.11), color: T.primary, display: "grid", placeItems: "center", fontSize: 12, fontWeight: 760 }}>{selectedInitials}</span>}
             backLabel="Chats"
             onBack={() => setSelectedClientId(null)}
             kind="chat"
@@ -25910,6 +25997,17 @@ function MessagesScreen({ clients, currentUser, T, workspaceScope = "" }) {
               </CommsMobileDetailShell>
             : newMsgPane
           : listPane}
+      {phone && !selectedClient && !showNewMsg && (
+        <CommsFloatingSearchDock
+          value={threadSearch}
+          onChange={setThreadSearch}
+          placeholder="Search conversations"
+          actionIcon="edit"
+          actionLabel="New message"
+          onAction={() => setShowNewMsg(true)}
+          T={T}
+        />
+      )}
     </div>
   );
 }
@@ -27488,9 +27586,9 @@ function InboxPinnedConversation({ label, unread = 0, onOpen, onPreview, T, chil
       onPointerDown={begin} onPointerMove={move} onPointerUp={end} onPointerCancel={end}
       onContextMenu={(event) => { event.preventDefault(); suppressRef.current = Date.now() + 500; onPreview(); }}
       onClick={(event) => { if (Date.now() < suppressRef.current) { event.preventDefault(); return; } onOpen(); }}
-      style={{ width: "clamp(88px, 25vw, 104px)", minHeight: 91, padding: "5px 4px 6px", border: "none", background: "transparent", color: T.text, display: "flex", flexDirection: "column", alignItems: "center", gap: 6, fontFamily: "inherit", cursor: "pointer", flexShrink: 0, WebkitTouchCallout: "none", WebkitTapHighlightColor: "transparent" }}>
+      style={{ width: "clamp(76px, 22vw, 88px)", minHeight: 78, padding: "3px 3px 5px", border: "none", background: "transparent", color: T.text, display: "flex", flexDirection: "column", alignItems: "center", gap: 5, fontFamily: "inherit", cursor: "pointer", flexShrink: 0, WebkitTouchCallout: "none", WebkitTapHighlightColor: "transparent" }}>
       {children}
-      <span style={{ width: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, lineHeight: 1.2, fontWeight: 620, textAlign: "center" }}>{label}</span>
+      <span style={{ width: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10.5, lineHeight: 1.2, fontWeight: 620, textAlign: "center" }}>{label}</span>
     </button>
   );
 }
@@ -27581,34 +27679,36 @@ function CommsMobileDetailShell({
 }) {
   const shellRef = useRef(null);
   const previousFocusRef = useRef(null);
+  const onBackRef = useRef(onBack);
   const keyboardInset = useKeyboardInset();
   useBackgroundScrollLock(shellRef);
+  useEffect(() => { onBackRef.current = onBack; }, [onBack]);
   useEffect(() => {
     previousFocusRef.current = document.activeElement;
     const frame = requestAnimationFrame(() => shellRef.current?.focus({ preventScroll: true }));
-    const onKey = (event) => { if (event.key === "Escape") onBack(); };
+    const onKey = (event) => { if (event.key === "Escape") onBackRef.current?.(); };
     window.addEventListener("keydown", onKey);
     return () => {
       cancelAnimationFrame(frame);
       window.removeEventListener("keydown", onKey);
       try { previousFocusRef.current?.focus?.({ preventScroll: true }); } catch (_) {}
     };
-  }, [onBack]);
+  }, []);
   return createPortal(
     <section ref={shellRef} role="dialog" aria-modal="true" aria-label={title || "Communication details"} tabIndex={-1}
       data-sps-comms-detail-shell data-comms-kind={kind}
       style={{ position: "fixed", inset: 0, zIndex: 220, display: "flex", flexDirection: "column", minHeight: 0, background: T.surface, color: T.text, overflow: "hidden", overscrollBehavior: "none" }}>
       <header data-sps-comms-detail-header style={{ flexShrink: 0, paddingTop: "env(safe-area-inset-top)", background: hexA(T.surface, 0.975), borderBottom: `1px solid ${hexA(T.border, 0.5)}`, backdropFilter: "saturate(180%) blur(24px)", WebkitBackdropFilter: "saturate(180%) blur(24px)" }}>
-        <div style={{ minHeight: 70, padding: "3px max(8px, env(safe-area-inset-right)) 4px max(8px, env(safe-area-inset-left))", boxSizing: "border-box", display: "grid", gridTemplateColumns: "minmax(80px, 1fr) minmax(0, 1.35fr) minmax(80px, 1fr)", alignItems: "center", gap: 3 }}>
+        <div style={{ minHeight: 66, padding: "3px max(8px, env(safe-area-inset-right)) 4px max(8px, env(safe-area-inset-left))", boxSizing: "border-box", display: "grid", gridTemplateColumns: "minmax(60px, auto) minmax(0, 1fr) minmax(60px, auto)", alignItems: "center", gap: 5 }}>
           <button type="button" onClick={onBack} aria-label={`Back to ${backLabel}`}
             style={{ minHeight: 44, justifySelf: "start", padding: "0 5px 0 0", border: "none", background: "transparent", color: T.primary, display: "inline-flex", alignItems: "center", gap: 1, fontFamily: "inherit", fontSize: 14.5, fontWeight: 660, cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
             <Icon name="back" size={22} /><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{backLabel}</span>
           </button>
           <button type="button" onClick={onHeaderPress} disabled={!onHeaderPress} aria-label={onHeaderPress ? `Open details for ${title}` : undefined}
-            style={{ minWidth: 0, minHeight: 62, padding: "2px 3px", border: "none", background: "transparent", color: T.text, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 1, fontFamily: "inherit", cursor: onHeaderPress ? "pointer" : "default", WebkitTapHighlightColor: "transparent" }}>
+            style={{ minWidth: 0, minHeight: 58, padding: "2px 3px", border: "none", background: "transparent", color: T.text, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 1, fontFamily: "inherit", cursor: onHeaderPress ? "pointer" : "default", WebkitTapHighlightColor: "transparent" }}>
             {avatar}
-            <span style={{ maxWidth: "100%", display: "flex", alignItems: "center", gap: 2, fontSize: avatar ? 12 : 16, lineHeight: 1.12, fontWeight: 780, letterSpacing: avatar ? 0 : "-0.02em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}{onHeaderPress && <Icon name="chevronR" size={9} />}</span>
-            {subtitle && <span style={{ maxWidth: "125%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.textMuted, fontSize: 9.5, lineHeight: 1.15, fontWeight: 650 }}>{subtitle}</span>}
+            <span style={{ maxWidth: "100%", display: "flex", alignItems: "center", gap: 2, fontSize: avatar ? 13.5 : 16.5, lineHeight: 1.12, fontWeight: 720, letterSpacing: "-0.015em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}{onHeaderPress && <Icon name="chevronR" size={9} />}</span>
+            {subtitle && <span style={{ maxWidth: "120%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.textMuted, fontSize: 10.5, lineHeight: 1.15, fontWeight: 560 }}>{subtitle}</span>}
           </button>
           <div style={{ justifySelf: "end", display: "flex", alignItems: "center", gap: 5 }}>{actions}</div>
         </div>
@@ -29166,14 +29266,15 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     );
   });
   const pinnedRail = pinnedRows.length > 0 ? (
-    <section aria-label="Pinned conversations" style={{ padding: dense ? "4px 1px 9px" : "6px 1px 11px" }}>
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 2, overflowX: "auto", padding: "1px 2px 4px", WebkitOverflowScrolling: "touch", scrollbarWidth: "none", msOverflowStyle: "none", scrollSnapType: "x mandatory" }}>
+    <section aria-label="Pinned conversations" style={{ padding: dense ? "2px 1px 7px" : "4px 1px 9px" }}>
+      <div style={{ padding: "0 5px 3px", color: T.textMuted, fontSize: 9.5, fontWeight: 720, letterSpacing: "0.075em", textTransform: "uppercase" }}>Pinned</div>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 1, overflowX: "auto", padding: "0 2px 3px", WebkitOverflowScrolling: "touch", scrollbarWidth: "none", msOverflowStyle: "none", scrollSnapType: "x mandatory" }}>
         {pinnedRows.map((row) => {
           const unreadCount = row._smsConversation ? Number(row._unreadCount || 0) : (row.read ? 0 : 1);
           return (
             <div key={`pin-${row._smsConversationKey || row.id}`} style={{ scrollSnapAlign: "start" }}>
               <InboxPinnedConversation label={senderLabel(row)} unread={unreadCount} onOpen={() => openMessage(row)} onPreview={() => setPreviewRow(row)} T={T}>
-                <Avatar name={row.from_name} email={row.from_email} channel={row.channel} photo={row._contactPhoto} size={dense ? 62 : 66} unreadCount={unreadCount} />
+                <Avatar name={row.from_name} email={row.from_email} channel={row.channel} photo={row._contactPhoto} size={dense ? 52 : 56} unreadCount={unreadCount} />
               </InboxPinnedConversation>
             </div>
           );
@@ -30286,31 +30387,17 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
     </CommsDensityContext.Provider>
   );
 
-  // Phone + tablet (incl. portrait iPad) / single-section: big title + sleek underline top-nav, then
-  // content. The left-sidebar shell only kicks in on a genuinely wide desktop so it never stacks with
-  // the app's global sidebar and crushes the content column.
+  // Phone + tablet: three daily workspaces stay visible; administrative destinations live in More.
+  // The desktop sidebar only kicks in when there is enough room beside the app's global navigation.
   if (vpx.width < 1080 || single) {
     return (
       <div ref={commsRootRef} style={{ maxWidth: 780, marginTop: 0, marginLeft: vpx.isPhone ? -16 : "auto", marginRight: vpx.isPhone ? -16 : "auto" }}>
         {!single && (
-          // Pinned section switcher — sticks flush under the app header instead of scrolling away and
-          // resting half-hidden (which read as janky). The opaque background hides content passing under it.
-          <div style={{ position: "sticky", top: 0, zIndex: 30, background: hexA(T.bg, 0.97), backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)", padding: vpx.isPhone ? "0 10px" : "8px 12px 6px" }}>
-            <div style={{ display: "flex", alignItems: "stretch", gap: 6, minWidth: 0 }}>
-            <nav ref={mobileNavRef} aria-label="Communications sections" style={{ minWidth: 0, flex: 1, display: "flex", gap: vpx.isPhone ? 10 : 4, overflowX: "auto", WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none", scrollPadding: 4, background: vpx.isPhone ? "transparent" : T.surfaceAlt, border: vpx.isPhone ? "none" : `1px solid ${T.border}`, borderRadius: vpx.isPhone ? 0 : (compactComms ? 12 : 14), padding: vpx.isPhone ? 0 : (compactComms ? 3 : 4) }}>
-              {SECTIONS.map(s => {
-                const on = section === s.id;
-                return (
-                  <button key={s.id} data-comms-section={s.id} onClick={() => setSection(s.id)} aria-current={on ? "page" : undefined} style={{ minHeight: vpx.isPhone ? 42 : (compactComms ? 40 : 42), flexShrink: 0, scrollSnapAlign: "start", display: "flex", alignItems: "center", gap: compactComms ? 5 : 7, padding: vpx.isPhone ? "6px 2px 5px" : (compactComms ? "6px 9px" : "9px 12px"), background: vpx.isPhone ? "transparent" : (on ? T.surface : "transparent"), border: "none", borderBottom: vpx.isPhone ? `2px solid ${on ? T.primary : "transparent"}` : "none", borderRadius: vpx.isPhone ? 0 : 10, boxShadow: vpx.isPhone ? "none" : (on ? "0 1px 3px rgba(0,0,0,0.07)" : "none"), fontSize: vpx.isPhone ? 12 : (compactComms ? 12.5 : 13.5), fontWeight: on ? 800 : 700, cursor: "pointer", fontFamily: "inherit", color: on ? T.primary : T.textMuted, whiteSpace: "nowrap" }}>
-                    <Icon name={s.icon} size={vpx.isPhone ? 14 : 15} />{s.label}
-                  </button>
-                );
-              })}
-            </nav>
-            </div>
+          <div style={{ position: "sticky", top: 0, zIndex: 30, background: hexA(T.bg, 0.965), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", padding: vpx.isPhone ? "6px 10px 7px" : "9px 12px 7px", borderBottom: `1px solid ${hexA(T.border, 0.38)}` }}>
+            <CommsSectionNavigator sections={SECTIONS} activeId={section} onChange={setSection} T={T} phone={vpx.isPhone} navRef={mobileNavRef} />
           </div>
         )}
-        <div style={{ paddingTop: vpx.isPhone ? 3 : (compactComms ? 8 : 16) }}>{content}</div>
+        <div style={{ paddingTop: vpx.isPhone ? 4 : (compactComms ? 8 : 16) }}>{content}</div>
       </div>
     );
   }
