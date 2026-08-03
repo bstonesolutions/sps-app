@@ -164,6 +164,12 @@ export function classifyCompletionFailure(error) {
   const status = Number(error?.status) || 0;
   const code = cleanPart(error?.code);
   const message = cleanPart(error?.message) || "The completed stop could not be synced.";
+  // A contention response means the server committed nothing and another
+  // versioned write merely won this attempt. Replaying the exact idempotent
+  // request is safe; business conflicts still stop for human review.
+  if (status === 409 && code === "contention") {
+    return { retryable: true, needsReview: false, status, code, message };
+  }
   if (status === 409) return { retryable: false, needsReview: true, status, code, message };
   if (!status || status === 408 || status === 425 || status === 429 || status >= 500) {
     return { retryable: true, needsReview: false, status, code, message };

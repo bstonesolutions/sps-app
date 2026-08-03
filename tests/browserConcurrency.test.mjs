@@ -429,6 +429,44 @@ test("a transient CAS failure keeps the optimistic write durable and defers imme
   assert.deepEqual(JSON.parse((await store.get(key)).value), local);
 });
 
+test("a keyed flush fences invoices without draining unrelated pending sections", async () => {
+  const clientKey = "sps_clients";
+  const invoiceKey = "sps_invoices";
+  const baseClients = [{ id: "c1", note: "saved" }];
+  const localClients = [{ id: "c1", note: "waiting for network" }];
+  const baseInvoices = [{ id: "i1", total: 100 }];
+  const localInvoices = [{ id: "i1", total: 125 }];
+  const db = installDatabase(
+    {
+      [clientKey]: { value: json(baseClients), version: 1, updated_at: null },
+      [invoiceKey]: { value: json(baseInvoices), version: 1, updated_at: null },
+    },
+    {
+      casError: ({ args }) => args.p_key === clientKey
+        ? { status: 522, message: "Client save is temporarily offline" }
+        : null,
+    }
+  );
+  await loadAs("invoice-keyed-flush", invoiceKey);
+
+  const clientSave = await store.set(clientKey, json(localClients), { baseValue: json(baseClients) });
+  assert.equal(clientSave.ok, false);
+  assert.equal(clientSave.transient, true);
+
+  const invoiceSave = await store.set(invoiceKey, json(localInvoices), { baseValue: json(baseInvoices) });
+  assert.equal(invoiceSave.ok, true);
+
+  const invoiceFence = await store.flushKey(invoiceKey);
+  assert.equal(invoiceFence.ok, true);
+  assert.equal(invoiceFence.key, invoiceKey);
+  assert.deepEqual(JSON.parse(db.rows.get(invoiceKey).value), localInvoices);
+  assert.deepEqual(JSON.parse(db.rows.get(clientKey).value), baseClients);
+
+  const globalDrain = await store.flush();
+  assert.equal(globalDrain.ok, false);
+  assert.equal(globalDrain.deferred, true, "the unrelated client retry remains queued and protected");
+});
+
 test("a refresh started by a prior signed-in identity cannot land after an account switch", async () => {
   const base = [{ date: "07/13/2026", stops: [{ sid: "base" }] }];
   let releaseRead;

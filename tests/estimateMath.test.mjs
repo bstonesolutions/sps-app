@@ -11,12 +11,81 @@ import {
   estimateLineUnitPrice,
   estimateNumberIsValid,
   estimateNumberValue,
+  estimatePipelineStatus,
+  estimatePipelineSummary,
   estimateProfitTotals,
   estimateTotals,
   formatEstimateMoney,
   withEstimateRevision,
   withEstimateTotals,
 } from "../estimateMath.js";
+
+test("estimate pipeline summary reports counts and tax-aware dollars for active, approved, and all estimates", () => {
+  const estimates = [
+    { id: "missing-status", items: [{ price: "10" }] },
+    { id: "draft", status: " DRAFT ", items: [{ price: "15" }] },
+    { id: "sent", status: "sent", taxEnabled: true, taxRate: "6", items: [{ price: "100" }] },
+    { id: "approved", status: "approved", items: [{ price: "50" }] },
+    { id: "legacy-approved", status: "accepted", taxEnabled: true, items: [{ price: "100" }] },
+    { id: "declined", status: "declined", items: [{ price: "25" }] },
+    { id: "complete", status: "complete", items: [{ price: "40" }] },
+    { id: "future-status", status: "archived", items: [{ price: "7" }] },
+    null,
+    "not-an-estimate",
+  ];
+
+  const summary = estimatePipelineSummary(estimates, 8);
+
+  assert.deepEqual(summary.active, { count: 3, amount: 131 });
+  assert.deepEqual(summary.approved, { count: 2, amount: 158 });
+  assert.deepEqual(summary.total, { count: 8, amount: 361 });
+  assert.deepEqual(summary.byStatus, {
+    draft: { count: 2, amount: 25 },
+    sent: { count: 1, amount: 106 },
+    approved: { count: 2, amount: 158 },
+    declined: { count: 1, amount: 25 },
+    complete: { count: 1, amount: 40 },
+    other: { count: 1, amount: 7 },
+  });
+});
+
+test("estimate pipeline summary uses canonical line rounding instead of stale saved totals", () => {
+  const summary = estimatePipelineSummary([
+    { status: "draft", total: "$999.00", items: [{ qty: "1", price: "0.105" }] },
+    { status: "sent", total: "$999.00", items: [{ qty: "1", price: "0.105" }] },
+  ]);
+
+  assert.deepEqual(summary.active, { count: 2, amount: 0.22 });
+  assert.deepEqual(summary.total, { count: 2, amount: 0.22 });
+});
+
+test("estimate status normalization keeps legacy accepted records visibly approved", () => {
+  assert.equal(estimatePipelineStatus({ status: " accepted " }), "approved");
+  assert.equal(estimatePipelineStatus({ status: "SENT" }), "sent");
+  assert.equal(estimatePipelineStatus({ status: "archived" }), "other");
+  assert.equal(estimatePipelineStatus({}), "draft");
+});
+
+test("estimate pipeline summary handles empty input without mutating estimate records", () => {
+  assert.deepEqual(estimatePipelineSummary(), {
+    active: { count: 0, amount: 0 },
+    approved: { count: 0, amount: 0 },
+    total: { count: 0, amount: 0 },
+    byStatus: {
+      draft: { count: 0, amount: 0 },
+      sent: { count: 0, amount: 0 },
+      approved: { count: 0, amount: 0 },
+      declined: { count: 0, amount: 0 },
+      complete: { count: 0, amount: 0 },
+      other: { count: 0, amount: 0 },
+    },
+  });
+
+  const estimates = [{ id: "immutable", status: "approved", taxEnabled: true, items: [{ price: "12.34" }] }];
+  const before = structuredClone(estimates);
+  estimatePipelineSummary(estimates, 6);
+  assert.deepEqual(estimates, before);
+});
 
 test("taxable estimates calculate and round line amounts, tax, and total to cents", () => {
   const totals = estimateTotals({
@@ -38,6 +107,17 @@ test("taxable estimates calculate and round line amounts, tax, and total to cent
     total: 27.62,
   });
   assert.equal(formatEstimateMoney(totals.total), "$27.62");
+});
+
+test("estimate money uses professional grouped currency without duplicate dollar signs", () => {
+  assert.equal(formatEstimateMoney(0), "$0.00");
+  assert.equal(formatEstimateMoney(1234.5), "$1,234.50");
+  assert.equal(formatEstimateMoney("$1,234.50"), "$1,234.50");
+  assert.equal(formatEstimateMoney(-12.34), "-$12.34");
+  assert.equal(formatEstimateMoney(-0), "$0.00");
+  assert.equal(formatEstimateMoney(0.105), "$0.11");
+  assert.equal(formatEstimateMoney(null), "$0.00");
+  assert.equal(formatEstimateMoney(Number.NaN), "$0.00");
 });
 
 test("line-item tax excludes services while taxing products and supports explicit overrides", () => {
@@ -132,7 +212,7 @@ test("line quantities accept decimals and numeric strings, with an omitted quant
 test("formatted legacy unit prices render from the same normalized value used by totals", () => {
   assert.equal(estimateLineUnitPrice({ price: "$20.00" }), 20);
   assert.equal(estimateLineUnitPrice({ unitPrice: "1,200.00" }), 1200);
-  assert.equal(formatEstimateMoney(estimateLineUnitPrice({ unitPrice: "1,200.00" })), "$1200.00");
+  assert.equal(formatEstimateMoney(estimateLineUnitPrice({ unitPrice: "1,200.00" })), "$1,200.00");
   assert.equal(estimateLineAmount({ qty: "2", unitPrice: "1,200.00" }), 2400);
 });
 

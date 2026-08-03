@@ -131,22 +131,20 @@ export function resolveInvoiceReconciliationReview(localInvoice, options = {}) {
     }
 
     const previousQbId = text(localInvoice.qbId);
-    let prepared = clearReviewFields({
+    const prepared = clearReviewFields({
       ...localInvoice,
       qbId: remote.qbId,
+      // Reaching this branch requires an explicit owner choice to adopt the
+      // confirmed QuickBooks snapshot. Clear every local accounting-edit fence
+      // before reconciling; otherwise a failed pending push immediately turns
+      // back into a conflict and the "Use QuickBooks" action appears to do
+      // nothing. The reconciler still preserves SPS-only line metadata such as
+      // costs, catalog references, and estimate/visit provenance.
+      locallyEdited: false,
+      qbPendingLocalEdits: false,
+      qbLocalChangesPending: false,
+      qbSyncStatus: "synced",
     });
-    // A missing/duplicate link is a bookkeeping problem, not an SPS content
-    // edit. Clear only those link-review markers so the canonical QB snapshot
-    // can be adopted. Real pending edits remain fenced by the reconciler.
-    if (["missing-remote", "duplicate-local-qb-id"].includes(text(localInvoice.qbSyncStatus))) {
-      prepared = {
-        ...prepared,
-        locallyEdited: false,
-        qbPendingLocalEdits: false,
-        qbLocalChangesPending: false,
-        qbSyncStatus: "synced",
-      };
-    }
     const reconciled = reconcileQuickBooksInvoice(prepared, remote);
     const next = {
       ...reconciled,

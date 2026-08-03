@@ -121,7 +121,10 @@ test("malformed catalog prices and costs stay unknown instead of being coerced",
 });
 
 test("catalog lines are immutable snapshots after the source item changes", () => {
-  const source = { id: "p1", name: "Pump", price: "400", cost: "250" };
+  const source = {
+    id: "p1", name: "Pump", price: "400", cost: "250",
+    vendor: "Internal Supplier", sourceUrl: "https://supplier.example/private-item",
+  };
   const line = estimateLineFromCatalog("product", source, "line-1");
   source.name = "Renamed pump";
   source.price = "500";
@@ -129,6 +132,8 @@ test("catalog lines are immutable snapshots after the source item changes", () =
   assert.equal(line.desc, "Pump");
   assert.equal(line.price, "400");
   assert.equal(line.unitCost, "250");
+  assert.equal("vendor" in line, false);
+  assert.equal("sourceUrl" in line, false);
 });
 
 test("parts bundles snapshot child quantities plus aggregate retail and cost", () => {

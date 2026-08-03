@@ -1,12 +1,14 @@
 // Narrow, staff-authorized transaction for completing and reopening scheduled stops.
 // Browsers never receive service-role access and field staff never receive the generic owner-only
 // batch primitive. The server derives every changed app_state value from the latest shared rows,
-// then commits clients/catalog/completed together with version checks.
+// then commits clients/catalog/completed/schedule and any generated invoice together with version
+// checks.
 
 import { randomUUID } from "node:crypto";
 import { requireCapability } from "./_staff-auth.js";
 import { compareAndSetAppStateBatch, readAppStateVersioned } from "./_app-state.js";
 import { applyStopCompletion, hasPositiveTrackedUsage, isNonnegativeMoneyString, reverseStopCompletion } from "../stopCompletion.js";
+import { planCompletionInvoice } from "../completionInvoice.js";
 import {
   assertScheduledEstimateInventoryApplied,
   claimScheduledEstimateCompletion,
@@ -106,18 +108,21 @@ function mutationMessage(code, itemName) {
 }
 
 async function readBaseline() {
-  const [clients, catalog, completed, schedule, invoices] = await Promise.all([
+  const [clients, catalog, completed, schedule, invoices, invoicing] = await Promise.all([
     readAppStateVersioned("sps_clients"),
     readAppStateVersioned("sps_catalog"),
     readAppStateVersioned("sps_completed"),
     readAppStateVersioned("sps_schedule"),
     readAppStateVersioned("sps_invoices"),
+    readAppStateVersioned("sps_invoicing"),
   ]);
   if (!clients.exists || !Array.isArray(clients.value)) throw new Error("shared_clients_invalid");
   if (!catalog.exists || !isRecord(catalog.value)) throw new Error("shared_catalog_invalid");
   if (completed.exists && !isRecord(completed.value)) throw new Error("shared_completions_invalid");
   if (!schedule.exists || !Array.isArray(schedule.value)) throw new Error("shared_schedule_invalid");
-  return { clients, catalog, completed, schedule, invoices };
+  if (invoices.exists && !Array.isArray(invoices.value)) throw new Error("shared_invoices_invalid");
+  if (invoicing.exists && !isRecord(invoicing.value)) throw new Error("shared_invoicing_invalid");
+  return { clients, catalog, completed, schedule, invoices, invoicing };
 }
 
 function validateEstimateInvoiceLink(stop, invoicesState, clientId) {
@@ -293,7 +298,29 @@ export default async function handler(req, res) {
         }
       }
       const client = mutation.clients.find((item) => item && sameId(item.id, clientId));
-      if (mutation.alreadyCompleted || mutation.alreadyReversed) {
+      const receiptEntryId = cleanId(mutation.receipt?.history?.entryReceiptId || mutation.receipt?.id);
+      const durableCompletionEntry = mode === "complete"
+        ? (
+          (receiptEntryId && Array.isArray(client?.history)
+            ? client.history.find((item) => item && sameId(item.completionReceiptId, receiptEntryId))
+            : null)
+          || completionEntry
+        )
+        : null;
+      const invoicePlan = planCompletionInvoice({
+        mode,
+        invoices: baseline.invoices.exists ? baseline.invoices.value : [],
+        invoicing: baseline.invoicing.exists ? baseline.invoicing.value : {},
+        schedule: baseline.schedule.value,
+        completed: mutation.completed,
+        stop,
+        entry: durableCompletionEntry,
+        client,
+        receiptId: mutation.receipt?.id || receiptId,
+        completedAt: mutation.receipt?.completedAt || completedAt,
+        now: completedAt,
+      });
+      if ((mutation.alreadyCompleted || mutation.alreadyReversed) && !invoicePlan.changed) {
         return res.status(200).json({
           ok: true,
           applied: false,
@@ -301,6 +328,7 @@ export default async function handler(req, res) {
           alreadyReversed: !!mutation.alreadyReversed,
           sameRequest: !!mutation.sameRequest,
           clientName: client && client.name ? String(client.name).slice(0, 160) : "",
+          invoiceOutcome: invoicePlan.outcome,
         });
       }
 
@@ -342,7 +370,12 @@ export default async function handler(req, res) {
         // stops keep the same value as a version fence, so a concurrent edit still conflicts.
         { key: "sps_schedule", expectedVersion: baseline.schedule.version, value: nextSchedule },
       ];
-      if (estimateInvoiceFenceRequired) operations.push({
+      if (invoicePlan.changed) operations.push({
+        key: "sps_invoices",
+        expectedVersion: baseline.invoices.exists ? baseline.invoices.version : 0,
+        value: invoicePlan.invoices,
+      });
+      else if (estimateInvoiceFenceRequired) operations.push({
         key: "sps_invoices",
         expectedVersion: baseline.invoices.version,
         value: baseline.invoices.value,
@@ -366,6 +399,7 @@ export default async function handler(req, res) {
           clientName: client && client.name ? String(client.name).slice(0, 160) : "",
           inventoryDeducted: mode === "complete" ? mutation.inventoryDeducted : [],
           inventoryRestored: mode === "reverse" ? mutation.inventoryRestored : [],
+          invoiceOutcome: invoicePlan.outcome,
           estimateFulfillment: estimateFulfillment ? {
             sourceEstimateId: estimateFulfillment.stop.sourceEstimateId,
             state: estimateFulfillment.stop.estimateFulfillment?.state || "",

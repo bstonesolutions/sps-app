@@ -81,7 +81,7 @@ test("invoice conflicts, failed links, and QuickBooks-only cost gaps are visible
   assert.match(source, /editorReviewIssue\?\.title/);
   assert.match(source, /editorReviewIssue\?\.reason/);
   assert.match(source, /Use QuickBooks version/);
-  assert.match(source, /Keep SPS version/);
+  assert.match(source, /Keep SPS and replace QuickBooks/);
   assert.match(source, /Added in QuickBooks · add its cost for accurate profit reporting/);
 });
 

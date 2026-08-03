@@ -34,6 +34,17 @@ test("targeted refresh is serialized with writes and uses the dirty-aware reconc
   assert.doesNotMatch(client, /refreshKey[\s\S]*?notifyReconciled\(key, true/);
 });
 
+test("completion refresh adopts the atomic invoice without overwriting pending device work", async () => {
+  const app = await read("App.jsx");
+
+  assert.match(app, /const STOP_MUTATION_KEYS = \["sps_clients", "sps_catalog", "sps_completed", "sps_schedule", "sps_invoices"\]/);
+  assert.match(app, /store\.refreshChanged\(STOP_MUTATION_KEYS, \{ reconcileUnchanged: true \}\)/);
+  assert.match(app, /const row = await store\.get\(key\)/);
+  assert.match(app, /setInvoices\(values\.sps_invoices\)/);
+  assert.doesNotMatch(app, /from\("app_state"\)\.select\("key, value, version"\)\.in\("key", STOP_MUTATION_KEYS\)/);
+  assert.doesNotMatch(app, /sps_autodraft_/);
+});
+
 test("rescheduling resolves the live stop and cannot resurrect a deleted modal snapshot", async () => {
   const app = await read("App.jsx");
 

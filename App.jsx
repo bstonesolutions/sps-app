@@ -11,8 +11,9 @@ import { createPortalDataFence, portalVisitMatchesReference, portalVisitReferenc
 import { foregroundFenceTransition, selectActiveEnRouteStop, selectArrivalWatchStop } from "./geofenceSafety";
 import { assessInboundLead, findMisfiledImportedLead } from "./leadQualification";
 import { brandLogoSource } from "./brandAssets";
-import { ESTIMATE_LINE_TAX_MODEL, defaultEstimateLineTaxable, estimateHasValidDays, estimateHasValidTaxRate, estimateLineAmount, estimateLineCost, estimateLineHasKnownCost, estimateLineIsTaxable, estimateLineQuantity, estimateLineUnitPrice, estimateNumberIsValid, estimateNumberValue, estimateProfitTotals, estimateTotals, formatEstimateMoney, withEstimateRevision, withEstimateTotals } from "./estimateMath";
+import { ESTIMATE_LINE_TAX_MODEL, defaultEstimateLineTaxable, estimateHasValidDays, estimateHasValidTaxRate, estimateLineAmount, estimateLineCost, estimateLineHasKnownCost, estimateLineIsTaxable, estimateLineQuantity, estimateLineUnitPrice, estimateNumberIsValid, estimateNumberValue, estimatePipelineStatus, estimatePipelineSummary, estimateProfitTotals, estimateTotals, formatEstimateMoney, withEstimateRevision, withEstimateTotals } from "./estimateMath";
 import { catalogCategoryGroups, catalogItemFinancials, estimateLineFromCatalog, estimateLineFromPartsBundle } from "./estimateCatalog";
+import { inventorySourceMetadata } from "./inventorySource";
 import { ESTIMATE_CHARGE_TYPES, estimateChargeBreakdown, estimateLineChargeLabel, estimateLineChargeType } from "./estimateBreakdown";
 import { completeEstimateWithInvoice, estimateTaxMigrationImpact, estimateToDraftInvoice, findInvoiceForEstimate, normalizeEstimateTaxForInvoice } from "./estimateInvoiceConversion";
 import { findScheduledStopForEstimate, scheduleApprovedEstimate } from "./estimateScheduleLink";
@@ -3901,7 +3902,7 @@ async function prepareReportEmailPhotos(photos, { maxPhotos = 8, charBudget = 2_
 // One report-email path is shared by live completion and saved-report resend. It
 // returns only after the Vercel endpoint has accepted, held, or rejected the email,
 // so the UI can never claim success before the server answers.
-async function sendServiceReportEmail({ client, email, branding, accent, ctx, readings, treatmentsUsed, partsUsed, photos, origin = "service report" }) {
+async function sendServiceReportEmail({ client, email, branding, accent, ctx, readings, treatmentsUsed, partsUsed, productsPurchased, photos, origin = "service report" }) {
   const to = String(client?.email || "").trim();
   if (!to) return { ok: false, sent: false, held: false, text: "No email on file for this client." };
 
@@ -3912,6 +3913,7 @@ async function sendServiceReportEmail({ client, email, branding, accent, ctx, re
     .forEach(([key, value]) => reportRows.push([key, String(value)]));
   if ((treatmentsUsed || []).length) reportRows.push(["Treatments", treatmentsUsed.map(item => `${item.name} (${item.oz}${item.unit || "oz"})`).join(", ")]);
   if ((partsUsed || []).length) reportRows.push(["Parts used", partsUsed.map(item => `${item.name} ×${item.qty}`).join(", ")]);
+  if ((productsPurchased || []).length) reportRows.push(["Products purchased", productsPurchased.map(item => `${item.name} ×${item.qty || 1}`).join(", ")]);
 
   const live = clientIsLive(client?.id);
   const controller = typeof AbortController === "function" ? new AbortController() : null;
@@ -4430,42 +4432,6 @@ const nextInvoiceNumber = (invoices, cfg) => {
   const max = nums.length ? Math.max(...nums) : start - 1;
   return Math.max(max + 1, start);
 };
-// Recurring maintenance billing: build the DRAFT invoices missing for the current calendar month —
-// one per client who has Auto-Invoice on (any non-Off setting) and a monthly rate, at that monthly
-// rate. Deduped by client+period (autoPeriod) AND by a stable id so re-runs never duplicate. Drafts
-// only — the owner reviews + sends. Never invents an amount (skips clients with no monthly rate).
-function buildRecurringDrafts(clients, invoices, invoicing, when) {
-  const cfg = { ...DEFAULT_INVOICING, ...(invoicing || {}) };
-  const prefix = (cfg.numberPrefix != null) ? cfg.numberPrefix : "INV-";
-  const now = when || new Date();
-  const period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`; // e.g. "2026-06"
-  const periodLabel = now.toLocaleDateString("en-US", { month: "long", year: "numeric" });
-  const existing = new Set(
-    (invoices || []).filter(iv => iv.autoPeriod && iv.clientId != null).map(iv => `${iv.clientId}|${iv.autoPeriod}`)
-  );
-  let num = nextInvoiceNumber(invoices, cfg);
-  const drafts = [];
-  (clients || []).forEach(c => {
-    const auto = String(c.autoInvoice || "").trim().toLowerCase();
-    if (!auto || auto === "off") return;                       // not opted in
-    if ((c.status || "Active") === "Inactive") return;          // skip inactive
-    const rate = parseFloat(String(c.monthlyRate || "").replace(/[^\d.]/g, "")) || 0;
-    if (rate <= 0) return;                                      // never invent an amount
-    if (existing.has(`${c.id}|${period}`)) return;              // already drafted this month
-    drafts.push({
-      id: `auto_${period}_${c.id}`,                             // stable → id-upsert also prevents dupes
-      number: `${prefix}${num++}`,
-      clientId: c.id, clientName: c.name || "", clientEmail: c.email || "", clientAddress: c.address || "",
-      date: todayMDY(), dueDate: addDaysMDY(todayMDY(), cfg.dueDays), status: "Draft",
-      autoPeriod: period, autoGenerated: true,                  // markers: dedup + "this was auto-made"
-      lineItems: [{ id: `l_${c.id}_${period}`, desc: `Monthly service — ${periodLabel}`, qty: "1", unitPrice: rate.toFixed(2), taxable: false, kind: "service" }],
-      taxRate: parseFloat(cfg.taxRate) || 0,
-      notes: cfg.terms || "",
-      createdAt: when ? when.getTime() : Date.now(),
-    });
-  });
-  return drafts;
-}
 // Sort invoices: highest invoice number first, fall back to most recent date
 const sortInvoices = (arr) => [...arr].sort((a, b) => {
   const na = parseInt((String(a.number || "0")).replace(/[^0-9]/g, "")) || 0;
@@ -7620,7 +7586,7 @@ function ClientDocuments({ client, onChange }) {
   );
 }
 
-function ClientDetail({ client: init, invoices, invoicing, branding, catalog, setCatalog, team, schedule, email, onBack, onUpdate, onSaveInvoice, onDeleteInvoice, onDelete, onPreviewClient, initialTab, onTabChange }) {
+function ClientDetail({ client: init, invoices, invoicing, branding, catalog, setCatalog, team, schedule, email, onBack, onUpdate, onSaveInvoice, onResolveInvoiceReview, onDeleteInvoice, onDelete, onPreviewClient, initialTab, onTabChange }) {
   const { T, perms, tiers } = useApp();
   const clientVp = useViewport();
   const [client, setClient] = useState(init);
@@ -7790,7 +7756,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
       {tab === "overview" && <ClientOverview client={client} invoices={invoices} schedule={schedule} onUpdate={onUpdate} />}
       {tab === "equipment" && <ClientEquipment client={client} invoices={invoices} onChange={eq => update({ equipment: eq })} />}
       {tab === "history" && <ClientHistory client={client} catalog={catalog} team={team} onChange={hist => update({ history: hist })} />}
-      {tab === "invoices" && (perms.canInvoice || perms.viewInvoices) && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={onSaveInvoice} onDelete={onDeleteInvoice} />}
+      {tab === "invoices" && (perms.canInvoice || perms.viewInvoices) && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={onSaveInvoice} onResolveReview={onResolveInvoiceReview} onDelete={onDeleteInvoice} />}
       {tab === "docs"    && <ClientDocuments client={client} onChange={docs => update({ documents: docs })} />}
       {tab === "portal" && <ClientPortal client={client} invoices={invoices} invoicing={invoicing} schedule={schedule} branding={branding} email={email} onPreviewClient={onPreviewClient} />}
 
@@ -8878,6 +8844,7 @@ function FinishedReportModal({ entry, client, catalog, onEdit, onClose }) {
       readings: entry.readings || {},
       treatmentsUsed: treatments,
       partsUsed: parts,
+      productsPurchased: purchasedProducts,
       photos,
       origin: `visit:${entry.sid || ""} · saved report resend`,
     });
@@ -9122,6 +9089,10 @@ function ClientHistory({ client, catalog, team, onChange }) {
 
               {h.partsUsed && h.partsUsed.length > 0 && (
                 <div style={{ marginTop: 8, fontSize: 12, color: T.textMuted, display:"flex", alignItems:"center", gap:5 }}><Icon name="wrench" size={12} /> {h.partsUsed.map(p => `${p.name} (${p.qty} ${p.unit || "pieces"})`).join(", ")}</div>
+              )}
+
+              {h.productsPurchased && h.productsPurchased.length > 0 && (
+                <div style={{ marginTop: 8, fontSize: 12, color: T.textMuted, display:"flex", alignItems:"center", gap:5 }}><Icon name="box" size={12} /> {h.productsPurchased.map(p => `${p.name} (×${p.qty || 1})`).join(", ")}</div>
               )}
 
               {h.photos && h.photos.length > 0 && (
@@ -10404,6 +10375,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
       readings,
       treatmentsUsed,
       partsUsed: partsUsedArr,
+      productsPurchased: productsPurchasedArr,
       photos,
       origin: `visit:${stop?.sid || ""} · report email`,
     });
@@ -10497,7 +10469,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
         <div style={{ textAlign: "center", padding: "4px 0" }}>
           <div style={{ width: 60, height: 60, borderRadius: 18, background: hexA(completionNeedsReview ? "#d97706" : completionPending ? T.primary : "#16a34a", 0.1), color: completionNeedsReview ? "#d97706" : completionPending ? T.primary : "#16a34a", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name={completionNeedsReview ? "warning" : completionPending ? "refresh" : "check"} size={28} /></div>
           <div style={{ fontWeight: 800, fontSize: 17, color: T.text, marginBottom: 6 }}>
-            {completionNeedsReview ? "Saved on this iPhone — needs review" : completionPending ? "Saved on this iPhone" : `Saved to ${firstName}'s history`}
+            {completionNeedsReview ? "Saved on this device — needs review" : completionPending ? "Saved on this device" : `Saved to ${firstName}'s history`}
           </div>
           {completionPending && (
             <div style={{ maxWidth: 420, margin: "0 auto 12px", padding: "10px 12px", borderRadius: 11, background: hexA(T.primary, 0.08), color: T.primary, fontSize: 12, fontWeight: 750, lineHeight: 1.45 }}>
@@ -16069,6 +16041,47 @@ function CatChipPicker({ items, selectedIds, onToggle, accent, emptyHint, search
   );
 }
 
+function SupplierSourceFields({ data, onChange, T, field, labelStyle, itemLabel = "item" }) {
+  const source = inventorySourceMetadata(data);
+  const safeSourceUrl = source.valid ? source.sourceUrl : "";
+  return (
+    <div data-inventory-source-fields style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div>
+        <label style={labelStyle}>Supplier / Purchased From <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(internal)</span></label>
+        <input
+          type="text"
+          style={{ ...field, borderColor: source.errors.vendor ? T.warning : field.borderColor }}
+          value={data?.vendor || ""}
+          onChange={(event) => onChange("vendor", event.target.value)}
+          aria-invalid={!!source.errors.vendor}
+          placeholder="e.g. Practical Garden Ponds"
+        />
+        {source.errors.vendor && <div role="alert" style={{ fontSize: 10.5, color: T.warning, fontWeight: 700, marginTop: 4 }}>{source.errors.vendor}</div>}
+      </div>
+      <div>
+        <label style={labelStyle}>Supplier {itemLabel} Link <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(internal)</span></label>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            type="url"
+            inputMode="url"
+            style={{ ...field, flex: 1, minWidth: 0, borderColor: source.errors.sourceUrl ? T.warning : field.borderColor }}
+            value={data?.sourceUrl || ""}
+            onChange={(event) => onChange("sourceUrl", event.target.value)}
+            aria-invalid={!!source.errors.sourceUrl}
+            placeholder="https://supplier.example/item"
+          />
+          {safeSourceUrl && (
+            <button type="button" onClick={() => openExternalBrowser(safeSourceUrl)} style={{ flexShrink: 0, background: hexA(T.primary, 0.1), color: T.primary, border: "none", borderRadius: 11, padding: "0 14px", fontWeight: 800, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Open ↗</button>
+          )}
+        </div>
+        {source.errors.sourceUrl
+          ? <div role="alert" style={{ fontSize: 10.5, color: T.warning, fontWeight: 700, marginTop: 4 }}>{source.errors.sourceUrl}</div>
+          : <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 4, lineHeight: 1.4 }}>Use the public supplier page. Never paste a signed-in checkout, account, or private session link.</div>}
+      </div>
+    </div>
+  );
+}
+
 function CatalogManager({ catalog, setCatalog }) {
   const { T } = useApp();
   const [svcModal, setSvcModal] = useState(null);   // service editor
@@ -16115,10 +16128,12 @@ function CatalogManager({ catalog, setCatalog }) {
   };
 
   // ---- products: add / edit / delete ----
-  const openAddProd = () => setProdModal({ mode: "add", data: { id: `p${Date.now()}`, name: "", price: "", cost: "", sku: "", vendor: "", purchaseDate: "", division: catDiv } });
+  const openAddProd = () => setProdModal({ mode: "add", data: { id: `p${Date.now()}`, name: "", price: "", cost: "", sku: "", vendor: "", sourceUrl: "", purchaseDate: "", division: catDiv } });
   const openEditProd = (p) => setProdModal({ mode: "edit", data: { ...p } });
   const saveProd = () => {
-    const d = prodModal.data; if (!d.name.trim()) return;
+    const source = inventorySourceMetadata(prodModal.data);
+    if (!source.valid) return;
+    const d = { ...prodModal.data, vendor: source.vendor, sourceUrl: source.sourceUrl }; if (!d.name.trim()) return;
     setCatalog(c => {
       const exists = (c.products || []).some(p => p.id === d.id);
       return { ...c, products: exists ? c.products.map(p => p.id === d.id ? d : p) : [...(c.products || []), d] };
@@ -16128,10 +16143,12 @@ function CatalogManager({ catalog, setCatalog }) {
   const deleteProd = () => { setCatalog(c => ({ ...c, products: (c.products || []).filter(p => p.id !== prodModal.data.id) })); setProdModal(null); };
 
   // ---- treatments: add / edit / delete + inventory ----
-  const openAddTx = () => setTxModal({ mode: "add", data: { id: `t${Date.now()}`, name: "", costPerOz: "", inventoryOz: "0", division: catDiv }, addOz: "" });
+  const openAddTx = () => setTxModal({ mode: "add", data: { id: `t${Date.now()}`, name: "", costPerOz: "", inventoryOz: "0", vendor: "", sourceUrl: "", division: catDiv }, addOz: "" });
   const openEditTx = (t) => setTxModal({ mode: "edit", data: { ...t, inventoryOz: t.inventoryOz ?? "0" }, addOz: "" });
   const saveTx = () => {
-    const d = txModal.data; if (!d.name.trim()) return;
+    const source = inventorySourceMetadata(txModal.data);
+    if (!source.valid) return;
+    const d = { ...txModal.data, vendor: source.vendor, sourceUrl: source.sourceUrl }; if (!d.name.trim()) return;
     setCatalog(c => {
       const exists = (c.treatments || []).some(t => t.id === d.id);
       return { ...c, treatments: exists ? c.treatments.map(t => t.id === d.id ? d : t) : [...(c.treatments || []), d] };
@@ -16143,10 +16160,12 @@ function CatalogManager({ catalog, setCatalog }) {
   const addInvAmount = () => setTxModal(m => ({ ...m, data: { ...m.data, inventoryOz: String(Math.max(0, num(m.data.inventoryOz) + num(m.addOz))) }, addOz: "" }));
 
   // ---- services: add / edit / delete ----
-  const openAddSvc = () => setSvcModal({ mode: "add", data: { id: `s${Date.now()}`, name: "", category: "", price: "", cost: "", price_type: "flat", target_hourly_rate: "", products: [], treatments: [], tests: [], division: catDiv } });
+  const openAddSvc = () => setSvcModal({ mode: "add", data: { id: `s${Date.now()}`, name: "", category: "", price: "", cost: "", price_type: "flat", target_hourly_rate: "", products: [], treatments: [], tests: [], vendor: "", sourceUrl: "", division: catDiv } });
   const openEditSvc = (s) => setSvcModal({ mode: "edit", data: { ...s, products: s.products || [], tests: s.tests || [] } });
   const saveSvc = () => {
-    const d = { ...svcModal.data, category: String(svcModal.data.category || "").trim() };
+    const source = inventorySourceMetadata(svcModal.data);
+    if (!source.valid) return;
+    const d = { ...svcModal.data, category: String(svcModal.data.category || "").trim(), vendor: source.vendor, sourceUrl: source.sourceUrl };
     if (!d.name.trim()) return;
     setCatalog(c => {
       const exists = (c.services || []).some(s => s.id === d.id);
@@ -16329,17 +16348,19 @@ function CatalogManager({ catalog, setCatalog }) {
               <label style={labelStyle}>SKU <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(to reuse + match inventory)</span></label>
               <input style={field} value={prodModal.data.sku || ""} onChange={e => setProdModal(m => ({ ...m, data: { ...m.data, sku: e.target.value } }))} placeholder="e.g. BB-32OZ" />
             </div>
-            <div style={{ display: "flex", gap: 12 }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <label style={labelStyle}>Received From <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(vendor)</span></label>
-                <input style={field} value={prodModal.data.vendor || ""} onChange={e => setProdModal(m => ({ ...m, data: { ...m.data, vendor: e.target.value } }))} placeholder="e.g. Pond Supplies Co." />
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <label style={labelStyle}>Purchase Date</label>
-                <input type="date" style={field} value={prodModal.data.purchaseDate || ""} onChange={e => setProdModal(m => ({ ...m, data: { ...m.data, purchaseDate: e.target.value } }))} />
-              </div>
+            <SupplierSourceFields
+              data={prodModal.data}
+              onChange={(key, value) => setProdModal(m => ({ ...m, data: { ...m.data, [key]: value } }))}
+              T={T}
+              field={field}
+              labelStyle={labelStyle}
+              itemLabel="product"
+            />
+            <div>
+              <label style={labelStyle}>Purchase Date</label>
+              <input type="date" style={field} value={prodModal.data.purchaseDate || ""} onChange={e => setProdModal(m => ({ ...m, data: { ...m.data, purchaseDate: e.target.value } }))} />
             </div>
-            <Btn onClick={saveProd} style={{ width: "100%", padding: "12px", borderRadius: 12 }}>{prodModal.mode === "add" ? "Add Product" : "Save Changes"}</Btn>
+            <Btn onClick={saveProd} disabled={!inventorySourceMetadata(prodModal.data).valid} style={{ width: "100%", padding: "12px", borderRadius: 12 }}>{prodModal.mode === "add" ? "Add Product" : "Save Changes"}</Btn>
             {prodModal.mode === "edit" && <button onClick={deleteProd} style={{ background: "none", border: "none", color: "#C0392B", fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 6, fontFamily: "inherit" }}>Delete this product</button>}
           </div>
         </Modal>
@@ -16371,6 +16392,14 @@ function CatalogManager({ catalog, setCatalog }) {
                 style={field}
               />
             </div>
+            <SupplierSourceFields
+              data={txModal.data}
+              onChange={(key, value) => setTxModal(m => ({ ...m, data: { ...m.data, [key]: value } }))}
+              T={T}
+              field={field}
+              labelStyle={labelStyle}
+              itemLabel="treatment"
+            />
             <div><label style={labelStyle}>Cost per Ounce</label>
               <div style={{ position: "relative" }}>
                 <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: T.textMuted }}>$</span>
@@ -16404,7 +16433,7 @@ function CatalogManager({ catalog, setCatalog }) {
               </div>
             </div>
 
-            <Btn onClick={saveTx} style={{ width: "100%", padding: "12px", borderRadius: 12 }}>{txModal.mode === "add" ? "Add Treatment" : "Save Changes"}</Btn>
+            <Btn onClick={saveTx} disabled={!inventorySourceMetadata(txModal.data).valid} style={{ width: "100%", padding: "12px", borderRadius: 12 }}>{txModal.mode === "add" ? "Add Treatment" : "Save Changes"}</Btn>
             {txModal.mode === "edit" && <button onClick={deleteTx} style={{ background: "none", border: "none", color: "#C0392B", fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 6, fontFamily: "inherit" }}>Delete this treatment</button>}
           </div>
         </Modal>
@@ -16493,6 +16522,15 @@ function CatalogManager({ catalog, setCatalog }) {
                 style={{ ...chipInput, resize: "vertical" }} />
             </div>
 
+            <SupplierSourceFields
+              data={svcModal.data}
+              onChange={(key, value) => setSvc(key, value)}
+              T={T}
+              field={chipInput}
+              labelStyle={labelStyle}
+              itemLabel="service"
+            />
+
             <div>
               <label style={labelStyle}>Water Tests Required</label>
               {tests.length === 0 ? (
@@ -16530,7 +16568,7 @@ function CatalogManager({ catalog, setCatalog }) {
               <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>These tasks auto-load on every stop using this service, ready to check off.</div>
             </div>
 
-            <Btn onClick={saveSvc} style={{ width: "100%", padding: "12px", borderRadius: 12, marginTop: 2 }}>
+            <Btn onClick={saveSvc} disabled={!inventorySourceMetadata(svcModal.data).valid} style={{ width: "100%", padding: "12px", borderRadius: 12, marginTop: 2 }}>
               {svcModal.mode === "add" ? "Add Service" : "Save Changes"}
             </Btn>
             {svcModal.mode === "edit" && (
@@ -17702,7 +17740,7 @@ function InvoiceSendStep({ invoice, client, onClose, onSent }) {
   );
 }
 
-function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCatalog, presetClientId, onSave, onClose, onDelete }) {
+function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCatalog, presetClientId, onSave, onResolveReview, onClose, onDelete }) {
   const { T, perms } = useApp();
   const canSeeLineCost = !!(perms.isAdmin || perms.seeProfit || perms.seeInventoryCost);
   const invoiceVp = useViewport();
@@ -17728,16 +17766,22 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const [sendStep, setSendStep] = useState(null); // B9-2: client-notification step after a successful save
   const [qbReviewLoading, setQbReviewLoading] = useState(false);
   const [qbReviewError, setQbReviewError] = useState("");
-  const withLocalInvoiceEdit = (current, patch) => ({
-    ...current,
-    ...patch,
-    ...(current.qbId ? {
-      locallyEdited: true,
-      qbAuthoritative: false,
-      qbSyncStatus: "pending-push",
-      qbPendingLocalEdits: true,
-    } : {}),
-  });
+  const withLocalInvoiceEdit = (current, patch) => {
+    // A reconciliation choice is applied to the latest confirmed SPS record. Do not let
+    // an editable-looking draft collect changes that would be discarded by that choice.
+    // Choosing the SPS version below clears this lock and makes the form editable again.
+    if (current.qbSyncStatus === "conflict" || current.qbPendingRemoteInvoice) return current;
+    return {
+      ...current,
+      ...patch,
+      ...(current.qbId ? {
+        locallyEdited: true,
+        qbAuthoritative: false,
+        qbSyncStatus: "pending-push",
+        qbPendingLocalEdits: true,
+      } : {}),
+    };
+  };
   const set = (k, v) => setInv(s => withLocalInvoiceEdit(s, { [k]: v }));
   const setLine = (id, k, v) => setInv(s => withLocalInvoiceEdit(s, { lineItems: s.lineItems.map(l => l.id === id ? { ...l, [k]: v } : l) }));
   const setLineCost = (id, rawValue) => {
@@ -17828,7 +17872,11 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     // Only pull in parts the tech marked to bill the client, priced at retail.
     (h.partsUsed || []).forEach((p, i) => {
       if (p.bill === false) return;
-      items.push({ id: `lp${Date.now()}${i}`, desc: `${p.name} (${p.qty} ${p.unit || "pieces"})`, qty: String(p.qty || 1), unitPrice: String(p.retailPer || p.costPer || ""), taxable: true });
+      items.push({ id: `lp${Date.now()}${i}`, desc: p.name, qty: String(p.qty || 1), unitPrice: String(p.retailPer || p.costPer || ""), unitCost: String(p.costPer || 0), taxable: true, kind: "part", refId: p.id || "", unit: p.unit || "pieces" });
+    });
+    (h.productsPurchased || []).forEach((p, i) => {
+      if (p.bill === false) return;
+      items.push({ id: `lpr${Date.now()}${i}`, desc: p.name, qty: String(p.qty || 1), unitPrice: String(p.price || p.retail || ""), unitCost: String(p.cost || 0), taxable: true, kind: "product", refId: p.id || "" });
     });
     if (items.length) setInv(s => withLocalInvoiceEdit(s, { lineItems: items }));
     setVisitPick(false);
@@ -17849,23 +17897,42 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     })
     : null;
   const canCompareQuickBooksVersions = inv.qbSyncStatus === "conflict" || !!inv.qbPendingRemoteInvoice;
+  const editorQuickBooksVersion = inv.qbPendingRemoteInvoice || null;
 
   const loadQuickBooksReview = async () => {
     if (!inv.qbId || qbReviewLoading) return;
     setQbReviewLoading(true);
     setQbReviewError("");
     try {
-      const response = await fetch(`${QB_API}/sync`, { headers: await authHeaders() });
+      const response = await fetch(`${QB_API}/sync`, {
+        method: "POST",
+        headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          mode: "invoice-review",
+          reviewInvoiceId: String(inv.qbId),
+          reviewInvoiceNumber: String(inv.number || ""),
+          reviewCustomerId: String(inv.qbCustomerId || ""),
+          reviewClientName: client?.name || inv.clientName || "",
+          reviewTotal: String(editorInvoiceTotals.total || 0),
+        }),
+      });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok || data.error) throw new Error(data.error || "QuickBooks could not be refreshed.");
-      const remote = (data.invoices || []).find(entry => String(entry.qbId) === String(inv.qbId));
-      if (!remote) throw new Error("This invoice was not found in the latest QuickBooks data.");
-      setInv(current => reconcileQuickBooksInvoice({
+      if (!response.ok || data.error) throw new Error(data.error || "QuickBooks could not inspect this invoice.");
+      const remote = data.invoice || data.safeCandidate || null;
+      if (!remote || String(remote.qbId || "") !== String(inv.qbId)) {
+        throw new Error("This exact linked invoice was not found in QuickBooks. SPS was left unchanged.");
+      }
+      if (!Array.isArray(remote.lineItems)) {
+        throw new Error("QuickBooks returned an incomplete invoice. SPS was left unchanged.");
+      }
+      // Inspection is read-only. Keep the current SPS record intact until the owner explicitly
+      // chooses which accounting version to keep; do not manufacture another pending-push conflict.
+      setInv(current => ({
         ...current,
-        locallyEdited: true,
-        qbPendingLocalEdits: true,
-        qbSyncStatus: "pending-push",
-      }, remote));
+        qbPendingRemoteInvoice: remote,
+        qbNeedsReview: true,
+        qbRemoteChangesPending: true,
+      }));
     } catch (error) {
       setQbReviewError(error?.message || "QuickBooks could not be refreshed.");
     } finally {
@@ -17873,18 +17940,28 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     }
   };
 
-  const useQuickBooksReview = () => {
-    setInv(current => {
-      if (!current.qbPendingRemoteInvoice) return current;
-      return reconcileQuickBooksInvoice({
-        ...current,
-        locallyEdited: false,
-        qbPendingLocalEdits: false,
-        qbLocalChangesPending: false,
-        qbSyncStatus: "synced",
-      }, current.qbPendingRemoteInvoice);
-    });
+  const useQuickBooksReview = async () => {
+    if (!inv.qbPendingRemoteInvoice || qbReviewLoading) return;
+    setQbReviewLoading(true);
     setQbReviewError("");
+    try {
+      const options = {
+        action: "retry-linked",
+        quickBooksInvoice: inv.qbPendingRemoteInvoice,
+        eligibleCandidateCount: 1,
+      };
+      const resolved = onResolveReview
+        ? await onResolveReview(inv.id, options)
+        : resolveInvoiceReconciliationReview(inv, options);
+      if (!resolved) throw new Error("The QuickBooks version was not confirmed in SPS.");
+      setInv(resolved);
+      if (!onResolveReview) await Promise.resolve(onSave(resolved));
+      onClose();
+    } catch (error) {
+      setQbReviewError(error?.message || "The QuickBooks version could not be applied safely.");
+    } finally {
+      setQbReviewLoading(false);
+    }
   };
 
   const keepSpsReview = () => {
@@ -18199,6 +18276,28 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
               </div>
             )}
             {qbReviewError && <div style={{ color: "#B91C1C", fontSize: 12, fontWeight: 650, marginTop: 8 }}>{qbReviewError}</div>}
+            {canCompareQuickBooksVersions && (
+              <div style={{ color: T.text, fontSize: 11.5, lineHeight: 1.45, marginTop: 8, fontWeight: 650 }}>
+                Choose a version before editing. Invoice fields are temporarily locked so unsaved draft changes cannot be discarded during reconciliation.
+              </div>
+            )}
+            {editorQuickBooksVersion && (
+              <div data-invoice-reconciliation-comparison style={{ display: "grid", gridTemplateColumns: narrowInvoice ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 8, marginTop: 10 }}>
+                {[
+                  ["SPS now", inv.status || "—", editorInvoiceTotals.total, editorInvoiceTotals.balance, (inv.lineItems || []).length],
+                  ["QuickBooks", editorQuickBooksVersion.status || "—", editorQuickBooksVersion.total, editorQuickBooksVersion.balance, (editorQuickBooksVersion.lineItems || []).length],
+                ].map(([heading, status, total, balance, lineCount]) => (
+                  <div key={heading} style={{ minWidth: 0, padding: "9px 10px", borderRadius: 10, background: heading === "QuickBooks" ? hexA("#2CA01C", 0.07) : T.surface, border: `1px solid ${heading === "QuickBooks" ? hexA("#2CA01C", 0.2) : T.border}` }}>
+                    <div style={{ fontSize: 10, fontWeight: 850, color: heading === "QuickBooks" ? "#237A18" : T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{heading}</div>
+                    <div style={{ marginTop: 4, fontSize: 11.5, color: T.textMuted }}>{status} · {lineCount} line{lineCount === 1 ? "" : "s"}</div>
+                    <div style={{ marginTop: 4, fontSize: 12, color: T.text }}><b>${(Number(total) || 0).toFixed(2)}</b> total · ${(Number(balance) || 0).toFixed(2)} open</div>
+                  </div>
+                ))}
+                <div style={{ gridColumn: "1 / -1", color: T.textMuted, fontSize: 11, lineHeight: 1.45 }}>
+                  Using QuickBooks saves the accounting values shown here immediately. SPS visit links, estimate links, internal costs, and source details stay attached.
+                </div>
+              </div>
+            )}
             {canCompareQuickBooksVersions && <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
               {!inv.qbPendingRemoteInvoice ? (
                 <button type="button" onClick={loadQuickBooksReview} disabled={qbReviewLoading}
@@ -18207,19 +18306,24 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
                 </button>
               ) : (
                 <>
-                  <button type="button" onClick={useQuickBooksReview}
-                    style={{ border: "none", borderRadius: 10, padding: "9px 12px", background: T.primary, color: "#fff", fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}>
-                    Use QuickBooks version
+                  <button type="button" onClick={useQuickBooksReview} disabled={qbReviewLoading}
+                    style={{ border: "none", borderRadius: 10, padding: "9px 12px", background: "#2CA01C", color: "#fff", fontSize: 12, fontWeight: 800, cursor: qbReviewLoading ? "default" : "pointer", fontFamily: "inherit", opacity: qbReviewLoading ? 0.65 : 1 }}>
+                    {qbReviewLoading ? "Saving choice…" : "Use QuickBooks version"}
                   </button>
                   <button type="button" onClick={keepSpsReview}
                     style={{ border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 12px", background: T.surface, color: T.text, fontSize: 12, fontWeight: 750, cursor: "pointer", fontFamily: "inherit" }}>
-                    Keep SPS version
+                    Keep SPS and replace QuickBooks…
                   </button>
                 </>
               )}
             </div>}
           </div>
         )}
+        <div
+          aria-disabled={canCompareQuickBooksVersions || undefined}
+          inert={canCompareQuickBooksVersions ? "" : undefined}
+          style={{ display: "flex", flexDirection: "column", gap: 18, opacity: canCompareQuickBooksVersions ? 0.58 : 1 }}
+        >
         <div style={{ display: "flex", flexDirection: narrowInvoice ? "column" : "row", gap: 10 }}>
           <div style={{ flex: 2 }}>
             <label style={label}>Client</label>
@@ -18272,11 +18376,13 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
               <div style={{ fontSize: 11, color: T.textMuted, padding: "2px 4px" }}>Pull line items from a completed visit:</div>
               {completedHistory.slice(0, 8).map((h, i) => {
                 const billCount = (h.partsUsed || []).filter(p => p.bill !== false).length;
+                const productCount = (h.productsPurchased || []).filter(p => p.bill !== false).length;
+                const addOnCount = billCount + productCount;
                 return (
                   <button key={i} onClick={() => importVisit(h)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 9, padding: "9px 11px", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
                     <span style={{ fontSize: 13, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {h.date} · {(h.services || []).map(s => typeof s === "string" ? s : s.name).join(", ") || h.type}
-                      {billCount > 0 && <span style={{ color: T.primary, fontWeight: 700 }}> · +{billCount} part{billCount !== 1 ? "s" : ""}</span>}
+                      {addOnCount > 0 && <span style={{ color: T.primary, fontWeight: 700 }}> · +{addOnCount} billed item{addOnCount !== 1 ? "s" : ""}</span>}
                     </span>
                     <span style={{ fontSize: 13, fontWeight: 700, color: T.text, flexShrink: 0 }}>{h.invoice}</span>
                   </button>
@@ -18447,6 +18553,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         {qbState === "error" && (
           <div style={{ background: hexA("#E5484D", 0.06), border: `1px solid ${hexA("#E5484D", 0.25)}`, borderRadius: 12, padding: "11px 14px", fontSize: 13, fontWeight: 600, color: "#E5484D" }}>{qbMsg}</div>
         )}
+        </div>
 
         {invoice && onDelete && perms.invoiceDelete && (
           <button
@@ -18638,6 +18745,8 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
                   const isBundling = tab === "parts";
                   const selected = !!bundle[it.id];
                   const financials = catalogItemFinancials(kindOf(), it);
+                  const supplier = inventorySourceMetadata(it);
+                  const supplierLabel = supplier.valid ? (supplier.vendor || supplier.hostname) : "";
                   const profit = n(financials.price) - n(financials.cost);
                   const requestedQty = selected && estimateNumberIsValid(bundle[it.id]) ? estimateNumberValue(bundle[it.id]) : 1;
                   const shortOnStock = showInventory && financials.inventoryTracked && financials.onHand < requestedQty;
@@ -18662,6 +18771,20 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
                             : <span style={{ color: T.warning, fontWeight: 700 }}> · cost not set</span>)}
                         </div>
                         {showInventory && financials.inventoryTracked && <div style={{ fontSize: 10.5, color: shortOnStock ? T.warning : T.textMuted, marginTop: 3, fontWeight: shortOnStock ? 750 : 500 }}>{financials.onHand} {financials.unit} on hand{shortOnStock ? " · below selected quantity" : ""}</div>}
+                        {showInventory && supplier.valid && (supplierLabel || supplier.sourceUrl) && (
+                          <div data-catalog-supplier style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, marginTop: 4, fontSize: 10.5, color: T.textMuted }}>
+                            {supplierLabel && <span>Supplier: {supplierLabel}</span>}
+                            {supplier.sourceUrl && (
+                              <button
+                                type="button"
+                                aria-label={`Open supplier for ${it.name}`}
+                                onClick={(event) => { event.preventDefault(); event.stopPropagation(); openExternalBrowser(supplier.sourceUrl); }}
+                                onKeyDown={(event) => event.stopPropagation()}
+                                style={{ border: "none", background: "none", padding: 0, color: T.primary, fontFamily: "inherit", fontSize: 10.5, fontWeight: 800, cursor: "pointer" }}
+                              >Open supplier ↗</button>
+                            )}
+                          </div>
+                        )}
                       </div>
                       {isBundling && selected && (
                         <label onClick={(event) => event.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 5, color: T.textMuted, fontSize: 10.5, fontWeight: 700, flexShrink: 0 }}>
@@ -20116,9 +20239,10 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
 
   const est = [...(estimates || [])].sort((a, b) => String(b.createdAt || b.date || b.id || "").localeCompare(String(a.createdAt || a.date || a.id || "")));
   const term = search.trim().toLowerCase();
-  const counts = ESTIMATE_STATUSES.reduce((out, item) => ({ ...out, [item.id]: est.filter((estimate) => (estimate.status || "draft") === item.id).length }), {});
+  const pipeline = estimatePipelineSummary(est, invoicing?.taxRate);
+  const counts = ESTIMATE_STATUSES.reduce((out, item) => ({ ...out, [item.id]: pipeline.byStatus[item.id]?.count || 0 }), {});
   const filtered = est.filter((estimate) => {
-    const status = estimate.status || "draft";
+    const status = estimatePipelineStatus(estimate);
     const matchesFilter = filter === "all" || (filter === "active" ? ["draft", "sent"].includes(status) : status === filter);
     const haystack = [estimate.number, estimate.clientName, estimate.title].filter(Boolean).join(" ").toLowerCase();
     return matchesFilter && (!term || haystack.includes(term));
@@ -20128,8 +20252,12 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
     draft: T.textMuted, sent: T.primary, approved: T.accent, declined: T.warning, complete: T.accent
   }[s] || T.textMuted);
 
-  const activeCount = (counts.draft || 0) + (counts.sent || 0);
-  const approvedValue = est.filter((estimate) => estimate.status === "approved").reduce((sum, estimate) => sum + estimateTotals(estimate, invoicing?.taxRate).total, 0);
+  const activeCount = pipeline.active.count;
+  const pipelineCards = [
+    { label: "In progress", bucket: pipeline.active, sub: "Draft + sent", filterId: "active", tone: T.primary },
+    { label: "Approved", bucket: pipeline.approved, sub: "Client accepted", filterId: "approved", tone: T.accent },
+    { label: "All estimates", bucket: pipeline.total, sub: "Every status", filterId: "all", tone: T.text },
+  ];
 
   return (
     <div ref={screenRef} data-estimates-list style={{ display: "flex", flexDirection: "column", gap: vp.isPhone ? 14 : 18, paddingTop: vp.isPhone ? 22 : 0 }}>
@@ -20138,7 +20266,7 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
           <div style={{ width: 40, height: 40, borderRadius: 12, background: hexA(T.primary, 0.09), color: T.primary, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name="clipboard" size={19} /></div>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: vp.isPhone ? 21 : 24, fontWeight: 850, color: T.text, letterSpacing: "-0.035em" }}>Estimates</div>
-            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>{activeCount} active · {counts.approved || 0} approved · {counts.complete || 0} complete</div>
+            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>Quote pipeline and total value</div>
           </div>
         </div>
         {canManage
@@ -20157,18 +20285,38 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
 
       {est.length > 0 && (
         <>
-          <div style={{ display: "grid", gridTemplateColumns: vp.isPhone ? "repeat(2, minmax(0, 1fr))" : "repeat(3, minmax(0, 1fr))", gap: 8 }}>
-            {[
-              ["Active", activeCount, "Waiting or being prepared"],
-              ["Approved", counts.approved || 0, approvedValue > 0 ? formatEstimateMoney(approvedValue) : "Client accepted"],
-              ["Total", est.length, "All estimates"],
-            ].map(([label, value, sub], index) => (
-              <div key={label} style={{ display: vp.isPhone && index === 2 ? "none" : "block", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: "11px 13px" }}>
-                <div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 750, textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</div>
-                <div style={{ fontSize: 19, fontWeight: 850, color: T.text, marginTop: 2 }}>{value}</div>
-                <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{sub}</div>
-              </div>
-            ))}
+          <div data-estimate-pipeline-summary style={{ display: "grid", gridTemplateColumns: vp.isPhone ? "repeat(2, minmax(0, 1fr))" : "repeat(3, minmax(0, 1fr))", gap: 8 }}>
+            {pipelineCards.map(({ label, bucket, sub, filterId, tone }, index) => {
+              const selected = filter === filterId;
+              return (
+                <button
+                  type="button"
+                  key={filterId}
+                  onClick={() => setFilter(filterId)}
+                  aria-pressed={selected}
+                  aria-label={`${label}: ${formatEstimateMoney(bucket.amount)} across ${bucket.count} estimate${bucket.count === 1 ? "" : "s"}`}
+                  style={{
+                    gridColumn: vp.isPhone && index === pipelineCards.length - 1 ? "1 / -1" : undefined,
+                    minWidth: 0,
+                    background: selected ? hexA(tone, 0.065) : T.surface,
+                    border: `1.5px solid ${selected ? hexA(tone, 0.55) : T.border}`,
+                    borderRadius: 15,
+                    padding: vp.isPhone ? "12px 13px" : "14px 16px",
+                    textAlign: "left",
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                    boxShadow: selected ? `0 5px 18px ${hexA(tone, 0.09)}` : "0 1px 3px rgba(0,0,0,0.025)",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                    <span style={{ minWidth: 0, fontSize: 10.5, color: selected ? tone : T.textMuted, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.055em", whiteSpace: "nowrap" }}>{label}</span>
+                    <span style={{ flexShrink: 0, borderRadius: 100, padding: "3px 7px", background: selected ? hexA(tone, 0.12) : T.surfaceAlt, color: selected ? tone : T.textMuted, fontSize: 10.5, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>{bucket.count}</span>
+                  </div>
+                  <div style={{ marginTop: 8, color: tone, fontSize: vp.isPhone ? "clamp(19px, 5.5vw, 24px)" : 24, lineHeight: 1.08, fontWeight: 900, letterSpacing: "-0.035em", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{formatEstimateMoney(bucket.amount)}</div>
+                  <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 5 }}>{bucket.count} estimate{bucket.count === 1 ? "" : "s"} · {sub}</div>
+                </button>
+              );
+            })}
           </div>
 
           <div style={{ position: "relative" }}>
@@ -20188,7 +20336,7 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
             {filtered.map((estimate) => {
               const totals = estimateTotals(estimate, invoicing?.taxRate);
               const financials = estimateProfitTotals(estimate);
-              const status = estimate.status || "draft";
+              const status = estimatePipelineStatus(estimate);
               return (
                 <button key={estimate.id} onClick={() => { setSelected(estimate); setView("detail"); }} style={{ width: "100%", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 15, padding: vp.isPhone ? "13px 14px" : "14px 16px", display: "flex", gap: 12, alignItems: "center", cursor: "pointer", fontFamily: "inherit", textAlign: "left", boxShadow: "0 1px 3px rgba(0,0,0,0.035)" }}>
                   <div style={{ width: 38, height: 38, borderRadius: 12, background: hexA(statusColor(status), 0.1), color: statusColor(status), display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name="clipboard" size={17} /></div>
@@ -21594,12 +21742,14 @@ function InvoiceReconciliationReviewQueue({
 }) {
   const [spsOnlyConfirmationId, setSpsOnlyConfirmationId] = useState("");
   const [resolutionErrors, setResolutionErrors] = useState({});
+  const [resolvingIds, setResolvingIds] = useState({});
   useEffect(() => {
     if (invoices.length === 0) onClose();
   }, [invoices.length, onClose]);
   const resolveInvoice = async (invoice, options) => {
     const key = String(invoice?.id || "");
     setResolutionErrors((current) => ({ ...current, [key]: "" }));
+    setResolvingIds((current) => ({ ...current, [key]: true }));
     try {
       await onResolve(invoice, options);
       setSpsOnlyConfirmationId("");
@@ -21608,6 +21758,8 @@ function InvoiceReconciliationReviewQueue({
         ...current,
         [key]: error?.message || "This invoice could not be resolved safely.",
       }));
+    } finally {
+      setResolvingIds((current) => ({ ...current, [key]: false }));
     }
   };
 
@@ -21647,13 +21799,15 @@ function InvoiceReconciliationReviewQueue({
               : null;
             const inspection = inspections?.[String(invoice.id || "")] || null;
             const isInspecting = !!inspecting?.[String(invoice.id || "")];
-            const inspectionInvoice = inspection?.invoice || inspection?.safeCandidate || null;
+            const inspectionInvoice = inspection?.linkedStatus === "found"
+              ? (inspection?.invoice || null)
+              : (inspection?.safeCandidate || null);
+            const inspectionInvoiceComplete = Array.isArray(inspectionInvoice?.lineItems);
             const candidateCount = Array.isArray(inspection?.candidates) ? inspection.candidates.length : 0;
             const canUseConfirmedMatch = !!(
               canManage
-              && issue.code !== "conflict"
               && issue.code !== "duplicate-local-qb-id"
-              && inspectionInvoice
+              && inspectionInvoiceComplete
               && (
                 inspection?.linkedStatus === "found"
                 || !!inspection?.safeCandidate
@@ -21674,6 +21828,7 @@ function InvoiceReconciliationReviewQueue({
             );
             const confirmingSpsOnly = spsOnlyConfirmationId === String(invoice.id || "");
             const resolutionError = resolutionErrors[String(invoice.id || "")] || "";
+            const isResolving = !!resolvingIds[String(invoice.id || "")];
             return (
               <div key={invoice.id || `${invoice.number}-${issue.code}`} role="listitem" style={{ border: `1px solid ${T.border}`, borderRadius: 15, padding: "13px 14px", background: T.surface }}>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 14, alignItems: "flex-start" }}>
@@ -21712,6 +21867,25 @@ function InvoiceReconciliationReviewQueue({
                     )}
                   </div>
                 )}
+                {inspectionInvoiceComplete && !inspection?.error && (
+                  <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
+                    {[
+                      ["SPS now", invoice.number || "—", invoice._status || invoice.status || "—", invoice._total, invoice._balance, (invoice.lineItems || []).length],
+                      ["QuickBooks", inspectionInvoice.number || "—", inspectionInvoice.status || "—", inspectionInvoice.total, inspectionInvoice.balance, (inspectionInvoice.lineItems || []).length],
+                    ].map(([heading, number, status, total, balance, lineCount]) => (
+                      <div key={heading} style={{ minWidth: 0, padding: "10px 11px", borderRadius: 11, background: heading === "QuickBooks" ? hexA("#2CA01C", 0.07) : T.surfaceAlt, border: `1px solid ${heading === "QuickBooks" ? hexA("#2CA01C", 0.18) : T.border}` }}>
+                        <div style={{ fontSize: 10, fontWeight: 850, color: heading === "QuickBooks" ? "#237A18" : T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{heading}</div>
+                        <div style={{ marginTop: 5, fontSize: 12.5, fontWeight: 800, color: T.text }}>Invoice {number}</div>
+                        <div style={{ marginTop: 3, fontSize: 11.5, color: T.textMuted, lineHeight: 1.45 }}>{status} · {lineCount} line{lineCount === 1 ? "" : "s"}</div>
+                        <div style={{ marginTop: 5, fontSize: 12, color: T.text }}><b>{moneyFmt(total)}</b> total · {moneyFmt(balance)} open</div>
+                      </div>
+                    ))}
+                    <div style={{ gridColumn: "1 / -1", fontSize: 11.5, lineHeight: 1.45, color: T.textMuted }}>
+                      Choosing QuickBooks replaces the SPS accounting values shown above, while keeping SPS visit links, estimate links, internal costs, and source details.
+                      {inspectionInvoice.qbHasUnsupportedLines ? " This QuickBooks invoice contains complex lines; edit its accounting lines in QuickBooks after adoption." : ""}
+                    </div>
+                  </div>
+                )}
                 {resolutionError && <div role="alert" style={{ marginTop: 8, color: "#B42318", fontSize: 11.5, fontWeight: 650 }}>{resolutionError}</div>}
 
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
@@ -21732,7 +21906,7 @@ function InvoiceReconciliationReviewQueue({
                   <button
                     type="button"
                     onClick={() => onInspect(invoice)}
-                    disabled={isInspecting}
+                    disabled={isInspecting || isResolving}
                     style={{ border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 12px", background: T.surface, color: T.text, fontSize: 12, fontWeight: 750, cursor: isInspecting ? "default" : "pointer", fontFamily: "inherit", opacity: isInspecting ? 0.65 : 1 }}
                   >
                     {isInspecting ? "Checking…" : inspection ? "Check again" : "Check QuickBooks"}
@@ -21745,9 +21919,10 @@ function InvoiceReconciliationReviewQueue({
                         quickBooksInvoice: inspectionInvoice,
                         eligibleCandidateCount: 1,
                       })}
-                      style={{ border: "none", borderRadius: 10, padding: "9px 12px", background: "#2CA01C", color: "#fff", fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}
+                      disabled={isResolving}
+                      style={{ border: "none", borderRadius: 10, padding: "9px 12px", background: "#2CA01C", color: "#fff", fontSize: 12, fontWeight: 800, cursor: isResolving ? "default" : "pointer", fontFamily: "inherit", opacity: isResolving ? 0.65 : 1 }}
                     >
-                      {inspection.linkedStatus === "found" ? "Use confirmed QuickBooks record" : "Link exact QuickBooks match"}
+                      {isResolving ? "Saving choice…" : inspection.linkedStatus === "found" ? "Use QuickBooks version" : "Link exact QuickBooks match"}
                     </button>
                   )}
                   <button
@@ -21802,7 +21977,7 @@ function InvoiceReconciliationReviewQueue({
   );
 }
 
-function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCatalog, qbAccounting = null, onSave, onDelete, onSyncData, initialFilter = "All", vp = {} }) {
+function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCatalog, qbAccounting = null, onSave, onResolveReview, onDelete, onSyncData, initialFilter = "All", vp = {} }) {
   const { T, perms } = useApp();
   const moneyFmt = (n) => Number(n || 0).toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const moneyExact = (n) => `$${parseFloat(n||0).toFixed(2)}`;
@@ -21897,6 +22072,16 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
     }
   };
 
+  const resolveReviewWithFeedback = async (invoiceId, options) => {
+    if (!onResolveReview) return null;
+    const resolved = await onResolveReview(invoiceId, options);
+    setQbSyncMsg(options?.action === "keep-sps-only"
+      ? `Invoice ${resolved?.number || ""} is now intentionally SPS-only.`
+      : `Invoice ${resolved?.number || ""} now matches the confirmed QuickBooks version.`);
+    setQbSynced(options?.action !== "keep-sps-only");
+    return resolved;
+  };
+
   const now = new Date();
 
   // Parse date in either MM/DD/YYYY or YYYY-MM-DD (QB) format
@@ -21926,6 +22111,16 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
     balance: iv._balance,
   }));
   const localReviewBalance = localReviewInvoices.reduce((sum, invoice) => sum + invoice._balance, 0);
+  const reviewQueueSignature = localReviewInvoices.map((invoice) => String(invoice.id || "")).join("|");
+  useEffect(() => {
+    if (!reviewingReconciliation || !localReviewInvoices.length) return;
+    // The review sheet should answer "what is different?" immediately. Inspect a bounded first
+    // page with the targeted QB endpoint; never download the entire ledger just to render a row.
+    localReviewInvoices.slice(0, 8).forEach((invoice) => {
+      const key = String(invoice.id || "");
+      if (!reviewInspections[key] && !reviewInspecting[key]) void inspectReviewInvoice(invoice);
+    });
+  }, [reviewingReconciliation, reviewQueueSignature]); // eslint-disable-line react-hooks/exhaustive-deps
   const fallbackOpen = all.filter(iv => iv._status !== "Paid" && iv.status !== "Draft" && iv.status !== "Void");
   const outstanding = qbAccountingComplete
     ? Number(qbAccounting.openInvoiceBalance || 0)
@@ -22060,12 +22255,12 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
           style={{ width: "100%", marginBottom: 12, padding: "11px 14px", borderRadius: 12, background: hexA(T.warning, 0.08), border: `1px solid ${hexA(T.warning, 0.28)}`, color: T.text, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}
         >
           <div>
-            <div style={{ fontSize: 12.5, fontWeight: 800 }}>{localReviewInvoices.length} SPS invoice record{localReviewInvoices.length === 1 ? " needs" : "s need"} review</div>
-            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>Tap to see the exact invoice, reason, IDs, and safe next step.</div>
+            <div style={{ fontSize: 12.5, fontWeight: 800 }}>{localReviewInvoices.length} invoice{localReviewInvoices.length === 1 ? " needs a" : "s need"} QuickBooks choice</div>
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>Compare SPS with the confirmed QuickBooks record, then apply either version in one step.</div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 7, flexShrink: 0 }}>
             <span style={{ fontSize: 13, fontWeight: 850, color: T.warning }}>{moneyFmt(localReviewBalance)}</span>
-            <span style={{ fontSize: 11.5, fontWeight: 800, color: T.warning }}>Review now</span>
+            <span style={{ fontSize: 11.5, fontWeight: 800, color: T.warning }}>Review & sync</span>
             <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke={T.warning} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6"/></svg>
           </div>
         </button>
@@ -22278,16 +22473,16 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
             syncQuickBooks();
           }}
           onInspect={inspectReviewInvoice}
-          onResolve={(invoice, options) => {
-            const rawInvoice = (invoices || []).find((entry) => String(entry.id || "") === String(invoice.id || "")) || invoice;
-            const resolutionInvoice = {
-              ...rawInvoice,
-              total: invoice._total,
-              clientName: invoice._client?.name || rawInvoice.clientName || "",
-              qbCustomerId: invoice.qbCustomerId || rawInvoice.qbCustomerId || "",
-            };
-            const resolved = resolveInvoiceReconciliationReview(resolutionInvoice, options);
-            onSave(resolved);
+          onResolve={async (invoice, options) => {
+            const resolved = onResolveReview
+              ? await resolveReviewWithFeedback(invoice.id, options)
+              : resolveInvoiceReconciliationReview(invoice, options);
+            if (!onResolveReview) {
+              setQbSyncMsg(options?.action === "keep-sps-only"
+                ? `Invoice ${resolved?.number || invoice.number || ""} is now intentionally SPS-only.`
+                : `Invoice ${resolved?.number || invoice.number || ""} now matches the confirmed QuickBooks version.`);
+              setQbSynced(options?.action !== "keep-sps-only");
+            }
             setReviewInspections((current) => {
               const next = { ...current };
               delete next[String(invoice.id || "")];
@@ -22307,15 +22502,15 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
           T={T}
         />
       )}
-      {creating && <InvoiceEditor clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onClose={() => setCreating(false)} />}
+      {creating && <InvoiceEditor clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onResolveReview={onResolveReview ? resolveReviewWithFeedback : undefined} onClose={() => setCreating(false)} />}
       {batching && <BatchInvoiceModal clients={clients} invoices={invoices} invoicing={invoicing} onSave={onSave} onClose={() => setBatching(false)} />}
-      {editing  && <InvoiceEditor invoice={editing} clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onDelete={onDelete} onClose={() => setEditing(null)} />}
+      {editing  && <InvoiceEditor invoice={editing} clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onResolveReview={onResolveReview ? resolveReviewWithFeedback : undefined} onDelete={onDelete} onClose={() => setEditing(null)} />}
       {(!vp.isDesktop || view === "table") && livePreview && <InvoicePreview invoice={livePreview} client={clients.find(c => invoiceMatchesClient(livePreview, c))} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
     </div>
   );
 }
 
-function ClientInvoices({ client, invoices, invoicing, branding, catalog, setCatalog, onSave, onDelete }) {
+function ClientInvoices({ client, invoices, invoicing, branding, catalog, setCatalog, onSave, onResolveReview, onDelete }) {
   const { T, perms } = useApp();
   const list = sortInvoices(clientInvoicesOf(invoices, client.id, client)).map(iv => ({ ...iv, _client: client }));
   const [creating, setCreating] = useState(false);
@@ -22349,7 +22544,7 @@ function ClientInvoices({ client, invoices, invoicing, branding, catalog, setCat
         {list.map(iv => <InvoiceRow key={iv.id} iv={iv} onClick={() => setPreview(iv)} />)}
       </div>
       {creating && <InvoiceEditor clients={[client]} presetClientId={client.id} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onClose={() => setCreating(false)} />}
-      {editing && <InvoiceEditor invoice={editing} clients={[client]} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onDelete={onDelete} onClose={() => setEditing(null)} />}
+      {editing && <InvoiceEditor invoice={editing} clients={[client]} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onResolveReview={onResolveReview} onDelete={onDelete} onClose={() => setEditing(null)} />}
       {livePreview && <InvoicePreview invoice={livePreview} client={client} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
     </Card>
   );
@@ -30171,6 +30366,7 @@ function InventoryItemModal({ mode, kind, initial, locations = [], categories = 
   const unitWord = data.unit || unitFallback;
   // A price must be set on purpose. Blank = not allowed; "0" is fine (free/internal items).
   const retailMissing = String(data[retailField] ?? "").trim() === "";
+  const source = inventorySourceMetadata(data);
   return (
     <Modal title={mode === "add" ? `Add ${kind === "part" ? "Part" : kind === "product" ? "Product" : "Treatment"}` : (data.name || "Edit")} onClose={onClose}>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -30220,22 +30416,14 @@ function InventoryItemModal({ mode, kind, initial, locations = [], categories = 
             );
           })()}
         </>)}
-        {kind === "product" && (<>
-          <div>
-            <label style={lbl}>Purchased From <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(vendor / source)</span></label>
-            <input type="text" style={field} value={data.vendor || ""} onChange={e => set({ vendor: e.target.value })} placeholder="e.g. Practical Garden Ponds" />
-          </div>
-          <div>
-            <label style={lbl}>Product Link <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(vendor product page)</span></label>
-            <div style={{ display: "flex", gap: 8 }}>
-              <input type="url" inputMode="url" style={{ ...field, flex: 1, minWidth: 0 }} value={data.sourceUrl || ""} onChange={e => set({ sourceUrl: e.target.value })} placeholder="https://…" />
-              {/^https?:\/\//i.test((data.sourceUrl || "").trim()) && (
-                <button type="button" onClick={() => openExternalBrowser(data.sourceUrl.trim())} style={{ flexShrink: 0, background: hexA(T.primary, 0.1), color: T.primary, border: "none", borderRadius: 11, padding: "0 16px", fontWeight: 800, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Open ↗</button>
-              )}
-            </div>
-            <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 4 }}>Opens in your browser (where you're signed in for contractor pricing) so you can check current pricing, then update Cost / Retail above.</div>
-          </div>
-        </>)}
+        <SupplierSourceFields
+          data={data}
+          onChange={(key, value) => set({ [key]: value })}
+          T={T}
+          field={field}
+          labelStyle={lbl}
+          itemLabel={kind}
+        />
         <div>
           <label style={lbl}>Stock by location</label>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -30248,7 +30436,7 @@ function InventoryItemModal({ mode, kind, initial, locations = [], categories = 
             ))}
           </div>
         </div>
-        <Btn onClick={() => onSave(data)} block lg disabled={!(data.name || "").trim() || (canSeeCost && retailMissing)}>
+        <Btn onClick={() => onSave({ ...data, vendor: source.vendor, sourceUrl: source.sourceUrl })} block lg disabled={!(data.name || "").trim() || (canSeeCost && retailMissing) || !source.valid}>
           {mode === "add" ? "Add Item" : "Save Changes"}
         </Btn>
         {canSeeCost && retailMissing && (
@@ -30417,21 +30605,23 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
   // ── Item add / edit / delete ──
   const newId = (p) => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); // collision-proof (Date.now() alone could repeat on rapid adds → silent overwrite)
   const blankItem = () => kind === "part"
-    ? { id: newId("pt"), name: "", category: "", unit: "pieces", costPer: "", lowAt: "", stockByLoc: {} }
+    ? { id: newId("pt"), name: "", category: "", unit: "pieces", costPer: "", vendor: "", sourceUrl: "", lowAt: "", stockByLoc: {} }
     : kind === "product"
     ? { id: newId("p"), name: "", category: "", unit: "each", cost: "", price: "", sku: "", vendor: "", sourceUrl: "", purchaseDate: "", lowAt: "", stockByLoc: {} }
-    : { id: newId("t"), name: "", category: "", unit: "oz", costPerOz: "", inventoryOz: "0", stockByLoc: {} };
+    : { id: newId("t"), name: "", category: "", unit: "oz", costPerOz: "", vendor: "", sourceUrl: "", inventoryOz: "0", stockByLoc: {} };
   const openAddItem = () => { if (!canEdit) return; setItemModal({ mode: "add", kind, data: blankItem() }); };
   const openEditItem = (item) => { if (!canEdit) return; setItemModal({ mode: "edit", kind, data: { ...item, stockByLoc: { ...(item.stockByLoc || {}) } } }); };
   const saveItem = (d) => {
     if (!d || !(d.name || "").trim()) return;
+    const source = inventorySourceMetadata(d);
+    if (!source.valid) return;
     const isNew = !((catalog[catKey] || []).some(x => x.id === d.id));
     setCatalog(cat => {
       const list = cat[catKey] || [];
       const exists = list.some(x => x.id === d.id);
       // keep inventoryOz mirror in sync
       const total = Object.values(d.stockByLoc || {}).reduce((s, v) => s + (parseFloat(v) || 0), 0);
-      const clean = { ...d, inventoryOz: String(total) };
+      const clean = { ...d, vendor: source.vendor, sourceUrl: source.sourceUrl, inventoryOz: String(total) };
       return { ...cat, [catKey]: exists ? list.map(x => x.id === d.id ? clean : x) : [...list, clean] };
     });
     if (isNew) logInvChange({ action: "Added", item: d.name, kind });
@@ -36492,7 +36682,7 @@ function DataConflictBanner({ conflict, busy, T, onResolve }) {
   );
 }
 
-const STOP_MUTATION_KEYS = ["sps_clients", "sps_catalog", "sps_completed", "sps_schedule"];
+const STOP_MUTATION_KEYS = ["sps_clients", "sps_catalog", "sps_completed", "sps_schedule", "sps_invoices"];
 const SCHEDULE_SYNC_KEYS = ["sps_schedule", "sps_completed", "sps_arrivals", "sps_enroute", "sps_route_assignments", "sps_schedule_cfg"];
 const SCHEDULE_REFRESH_KEYS = Array.from(new Set([...SCHEDULE_SYNC_KEYS, ...STOP_MUTATION_KEYS]));
 
@@ -36507,13 +36697,15 @@ function decodeStopStateValue(raw) {
 }
 
 async function readStopMutationBaseline(fallbacks) {
-  const { data, error } = await supabase.from("app_state").select("key, value, version").in("key", STOP_MUTATION_KEYS);
-  if (error) throw new Error(error.message || "Couldn't read the latest stop data.");
-  const rows = new Map((data || []).map((row) => [row.key, row]));
+  // Refresh through the shared-state store instead of reading Supabase directly. The store keeps
+  // optimistic, durable local edits in place while adopting the server-confirmed completion, so a
+  // completed stop can never erase unrelated work that is still waiting to sync from this device.
+  const refreshed = await store.refreshChanged(STOP_MUTATION_KEYS, { reconcileUnchanged: true });
+  if (!refreshed?.ok) throw new Error(refreshed?.error?.message || "Couldn't read the latest stop data.");
   const values = {}, versions = {};
   for (const key of STOP_MUTATION_KEYS) {
-    const row = rows.get(key);
-    if (!row) {
+    const row = await store.get(key);
+    if (!row || row.value == null) {
       values[key] = fallbacks[key];
       versions[key] = 0;
       continue;
@@ -36527,6 +36719,7 @@ async function readStopMutationBaseline(fallbacks) {
   if (!values.sps_catalog || typeof values.sps_catalog !== "object" || Array.isArray(values.sps_catalog)) throw new Error("Shared inventory data is malformed; the stop was not changed.");
   if (!values.sps_completed || typeof values.sps_completed !== "object" || Array.isArray(values.sps_completed)) throw new Error("Shared completion data is malformed; the stop was not changed.");
   if (!Array.isArray(values.sps_schedule)) throw new Error("Shared schedule data is malformed; the stop was not changed.");
+  if (!Array.isArray(values.sps_invoices)) throw new Error("Shared invoice data is malformed; the stop was saved but its invoice refresh needs review.");
   return { values, versions };
 }
 
@@ -38291,26 +38484,6 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     return () => clearInterval(interval);
   }, []);
 
-  // ── Recurring maintenance invoicing: once per month (per session), create any missing DRAFT
-  // invoices for the current month — clients with Auto-Invoice on + a monthly rate. Drafts only;
-  // the owner reviews + sends them from Invoices. Never auto-sent. Gated on a confirmed DB read so
-  // it can't generate off seeded defaults (dbOk is reactive — the flag alone misses warm boots). ──
-  useEffect(() => {
-    if (!hydrated || !dbOk) return;
-    const now = new Date();
-    const period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-    const flag = `sps_autodraft_${period}`;
-    try { if (sessionStorage.getItem(flag)) return; } catch (_) {}
-    try { sessionStorage.setItem(flag, "1"); } catch (_) {}
-    const drafts = buildRecurringDrafts(clients, invoices, invoicing, now);
-    if (!drafts.length) return;
-    setInvoices(list => {
-      const have = new Set((list || []).map(iv => iv.id));
-      const add = drafts.filter(d => !have.has(d.id));
-      return add.length ? [...add, ...(list || [])] : list;
-    });
-  }, [hydrated, dbOk]); // eslint-disable-line react-hooks/exhaustive-deps
-
   // ── Late fees: auto-apply once after data is ready (silent, never blocks load) ──
   const lateFeeRan = useRef(false);
   useEffect(() => {
@@ -39425,6 +39598,85 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     return { ok: true };
   };
 
+  const handleResolveInvoiceReview = async (invoiceId, options) => {
+    const targetId = String(invoiceId || "").trim();
+    if (!targetId) throw new Error("Choose an invoice to reconcile.");
+    const pendingConflict = store.listConflicts().find(({ key }) => key === "sps_invoices");
+    if (pendingConflict) {
+      throw new Error("Resolve the existing invoice sync conflict before choosing an accounting version.");
+    }
+
+    // A review choice replaces accounting fields in the shared invoice ledger. Finish any local
+    // invoice save first so the atomic replacement cannot be blocked by this device's own queued
+    // write or make the user re-enter a just-saved invoice. Unrelated pending work stays protected
+    // by the store's normal conflict fences.
+    const pendingWriteReceipt = await store.flushKey("sps_invoices");
+    const pendingWriteIssue = storeReceiptIssue(pendingWriteReceipt, "Saving your latest invoice changes");
+    if (pendingWriteIssue) {
+      throw new Error(`${pendingWriteIssue} The QuickBooks choice was not applied; your SPS invoice is unchanged.`);
+    }
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const invoiceRead = await store.refresh("sps_invoices");
+      if (!invoiceRead?.ok) {
+        throw new Error(invoiceRead?.error?.message || "The latest SPS invoices could not be loaded.");
+      }
+      let latestInvoices;
+      try {
+        latestInvoices = invoiceRead.exists ? JSON.parse(invoiceRead.value || "[]") : [];
+      } catch (_) {
+        throw new Error("The shared invoice list is invalid. Nothing was changed.");
+      }
+      if (!Array.isArray(latestInvoices)) throw new Error("The shared invoice list is invalid. Nothing was changed.");
+      const index = latestInvoices.findIndex((entry) => String(entry?.id || "") === targetId);
+      if (index < 0) throw new Error("This SPS invoice no longer exists. Refresh before reviewing it.");
+      const current = latestInvoices[index];
+      const matchedClient = (clients || []).find((candidate) => invoiceMatchesClient(current, candidate));
+      const resolutionInvoice = {
+        ...current,
+        total: invoiceTotals(current).total,
+        clientName: matchedClient?.name || current.clientName || "",
+        qbCustomerId: current.qbCustomerId || matchedClient?.qbId || matchedClient?.qbCustomerId || "",
+      };
+      const resolved = resolveInvoiceReconciliationReview(resolutionInvoice, options);
+      const nextInvoices = latestInvoices.map((entry, itemIndex) => itemIndex === index ? resolved : entry);
+      const saved = await store.replaceMany([{
+        key: "sps_invoices",
+        value: JSON.stringify(nextInvoices),
+        expectedVersion: Number(invoiceRead.version) || 0,
+      }]);
+      if (!saved?.ok) {
+        if (saved?.conflict && attempt < 2) continue;
+        const blockedByThisDevice = saved?.error?.message === "A local edit is still pending";
+        throw new Error(blockedByThisDevice
+          ? "This device is still saving an invoice change. Nothing was replaced; wait for Saved, then choose the QuickBooks version once more."
+          : saved?.conflict
+            ? "Another employee changed invoices at the same time. Refresh and try once more."
+          : (saved?.error?.message || "SPS did not confirm the reconciliation choice."));
+      }
+
+      const confirmedRead = await store.get("sps_invoices");
+      let confirmedInvoices;
+      try {
+        confirmedInvoices = confirmedRead?.value ? JSON.parse(confirmedRead.value) : nextInvoices;
+      } catch (_) {
+        confirmedInvoices = [];
+      }
+      const confirmed = Array.isArray(confirmedInvoices)
+        ? confirmedInvoices.find((entry) => String(entry?.id || "") === targetId)
+        : null;
+      if (!confirmed || invoiceNeedsReconciliationReview(confirmed, {
+        effectiveStatus: effectiveStatus(confirmed),
+        balance: invoiceTotals(confirmed).balance,
+      })) {
+        throw new Error("SPS saved the choice but could not verify that the review cleared. Refresh before trying again.");
+      }
+      setInvoices(confirmedInvoices);
+      return confirmed;
+    }
+    throw new Error("Invoices changed repeatedly on another device. Refresh and try again.");
+  };
+
   const handleSaveInvoice = (inv) => {
     // QuickBooks sync is handled inside the invoice editor's Save (create or update),
     // so here we only persist locally. This avoids double-pushing / duplicates.
@@ -39878,15 +40130,17 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     setEnRoute(a => (a[sid] ? a : { ...a, [sid]: new Date().toISOString() }));
   };
 
-  // Completing/reopening spans three shared sections. Field staff cannot call the generic
+  // Completing/reopening spans the shared stop, inventory, client-history, and invoice sections.
+  // Field staff cannot call the generic
   // owner-only batch primitive, so a narrow staff-authorized endpoint validates the scheduled stop,
   // derives the exact mutation server-side, and commits it with the service-role batch CAS.
-  const stopMutationFallbacks = () => ({ sps_clients: clients, sps_catalog: catalog, sps_completed: completedSids, sps_schedule: schedule });
+  const stopMutationFallbacks = () => ({ sps_clients: clients, sps_catalog: catalog, sps_completed: completedSids, sps_schedule: schedule, sps_invoices: invoices });
   const adoptStopBaseline = (values) => {
     setClients(values.sps_clients);
     setCatalog(values.sps_catalog);
     setCompletedSids(values.sps_completed);
     setSchedule(values.sps_schedule);
+    setInvoices(values.sps_invoices);
   };
   const refreshStopBaseline = async () => {
     try {
@@ -39978,6 +40232,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
             readings: entry.readings || {},
             treatmentsUsed: entry.treatmentsUsed || [],
             partsUsed: entry.partsUsed || [],
+            productsPurchased: entry.productsPurchased || [],
             photos: entry.photos || [],
             origin: `${delivery.origin || `visit:${item.sid}`} · report email`,
           });
@@ -40081,12 +40336,9 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
         if (!["queued", "syncing"].includes(candidate.state) || Number(candidate.retryAt || 0) > Date.now()) continue;
         let item = await patchCompletionOutboxItem(candidate.id, { state: "syncing", lastError: "", syncStartedAt: Date.now() }) || candidate;
         try {
-          // Drain older shared edits in the background, not on the Finish button's critical path.
-          const flushReceipt = await store.flush();
-          const flushIssue = storeReceiptIssue(flushReceipt, "Preparing the completed stop");
-          if (flushIssue) {
-            const error = new Error(flushIssue); error.status = 503; throw error;
-          }
+          // Completion is its own atomic server transaction. Do not make it wait behind unrelated
+          // pending edits elsewhere in the app; the store's dirty-aware refresh below preserves
+          // those edits and merges them on their normal queue.
           const blocked = store.listConflicts().find(conflict => STOP_MUTATION_KEYS.includes(conflict.key));
           if (blocked) {
             const error = new Error("Resolve the shared data conflict before this completed stop can sync."); error.status = 409; error.code = "app-state-conflict"; throw error;
@@ -40165,7 +40417,6 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
 
   const handleUncompleteStop = async (clientId, sid) => {
     try {
-      await store.flush();
       const blocked = store.listConflicts().find(conflict => STOP_MUTATION_KEYS.includes(conflict.key));
       if (blocked) throw new Error("Resolve the shared data conflict at the top of the app before reopening this stop.");
       let saved;
@@ -40424,7 +40675,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           </div>
           <div style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: vp.isTablet ? "20px 16px" : "24px 30px" }}>
             {selectedClient
-              ? <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} initialTab={clientOpenTab} onTabChange={setClientOpenTab} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>
+              ? <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} initialTab={clientOpenTab} onTabChange={setClientOpenTab} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onResolveInvoiceReview={handleResolveInvoiceReview} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>
               : (
                 <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: T.textMuted, gap: 12, padding: 40, textAlign: "center" }}>
                   <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.06), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="clients" size={30} /></div>
@@ -40438,7 +40689,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       ) : (
         <>
           {!selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => { setConvertLead(null); setAdding(true); }} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
-          {selectedClient && <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} initialTab={clientOpenTab} onTabChange={setClientOpenTab} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>}
+          {selectedClient && <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} initialTab={clientOpenTab} onTabChange={setClientOpenTab} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onResolveInvoiceReview={handleResolveInvoiceReview} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>}
         </>
       ))}
       {page === "schedule" && <SectionErrorBoundary key={"schedule-" + schedNonce}><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} estimates={estimatesRaw} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} seedEstimate={scheduleEstimateSeed} clearEstimateSeed={() => setScheduleEstimateSeed(null)} onScheduleEstimate={handleScheduleApprovedEstimate} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} stopDraftsReady={lstopDrafts} draftScope={authUserId} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} onValidateArrival={validateArrivalStop} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
@@ -40446,7 +40697,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} branding={branding} T={T} budget={budget} />}
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} isAdmin={perms.isAdmin} />}
       {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} setCatalog={setCatalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} invoices={invoices} schedule={schedule} onSaveInvoice={handleSaveInvoice} onConvertEstimate={handleConvertEstimateToInvoice} onCompleteEstimate={handleCompleteEstimate} onScheduleEstimate={handleOpenEstimateSchedule} />}
-      {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} qbAccounting={qbAccounting} onSave={handleSaveInvoice} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
+      {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} qbAccounting={qbAccounting} onSave={handleSaveInvoice} onResolveReview={handleResolveInvoiceReview} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
       {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : commsSection || undefined} initialSectionNonce={commsSectionNonce} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} setBranding={setBranding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} onLinkLead={handleLinkLead} openLeadId={openLeadId} onLeadOpened={() => setOpenLeadId(null)} vp={vp} workspaceScope={authUserId} />}
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}

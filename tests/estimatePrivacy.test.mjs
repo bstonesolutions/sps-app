@@ -8,6 +8,7 @@ const forbidden = [
   "cost", "unitCost", "knownUnitCost", "costAmount", "costKnown", "refId", "bundleItems",
   "estimatedCost", "estimatedProfit", "estimatedMargin", "costComplete", "missingCostLines",
   "missingCostLineIds", "catalogSnapshot", "stockByLoc", "onHand", "inventoryOz",
+  "vendor", "sourceUrl", "sourceHostname", "supplierUrl", "purchaseUrl",
 ];
 
 test("the client portal estimate allowlist keeps units but excludes internal catalog and profit fields", async () => {

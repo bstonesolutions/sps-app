@@ -12,6 +12,13 @@ test("media migration makes client-media private and guards legacy broad policie
   assert.match(sql, /cmd\)\s+in\s+\('ALL', 'SELECT', 'DELETE'\)[\s\S]*qual[\s\S]*not ilike '%bucket_id%'/i);
   assert.match(sql, /cmd\)\s*=\s*'INSERT'[\s\S]*with_check[\s\S]*not ilike '%bucket_id%'/i);
   assert.match(sql, /raise exception 'Remove or narrow these extra client-media Storage policies/i);
+  assert.match(sql, /coalesce\(qual::text, ''::text\)/i);
+  assert.match(sql, /coalesce\(with_check::text, qual::text, ''::text\)/i);
+  assert.doesNotMatch(sql, /pg_catalog\.coalesce/i);
+  assert.match(sql, /drop policy if exists "client-media read" on storage\.objects/i);
+  assert.match(sql, /drop policy if exists "client-media upload" on storage\.objects/i);
+  assert.match(sql, /drop policy if exists "client-media update" on storage\.objects/i);
+  assert.match(sql, /drop policy if exists "client-media delete" on storage\.objects/i);
 });
 
 test("media policies grant staff signed access and owner-only deletion", () => {

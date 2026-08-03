@@ -70,9 +70,12 @@ test("enqueueing the exact same completion is idempotent on-device", async () =>
   assert.equal(rows[0].createdAt, 1000);
 });
 
-test("network and 5xx failures retry while 409 is held for review", () => {
+test("network, 5xx, and safe CAS contention retry while business conflicts are held for review", () => {
   assert.equal(classifyCompletionFailure(new TypeError("Failed to fetch")).retryable, true);
   assert.equal(classifyCompletionFailure(Object.assign(new Error("upstream unavailable"), { status: 502 })).retryable, true);
+  const contention = classifyCompletionFailure(Object.assign(new Error("another write won"), { status: 409, code: "contention" }));
+  assert.equal(contention.retryable, true);
+  assert.equal(contention.needsReview, false);
   const conflict = classifyCompletionFailure(Object.assign(new Error("another employee completed it"), { status: 409, code: "completion-already-owned" }));
   assert.equal(conflict.retryable, false);
   assert.equal(conflict.needsReview, true);

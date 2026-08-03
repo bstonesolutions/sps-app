@@ -88,6 +88,7 @@ test("completion waits for one automatic delivery and the success screen cannot 
 
   assert.match(completion, /await Promise\.allSettled\(sends\)/);
   assert.match(completion, /const result = await sendServiceReportEmail/);
+  assert.match(completion, /productsPurchased: productsPurchasedArr/);
   assert.match(completion, /setReportPlan\(plan\)/);
   assert.match(completion, /appendClientLinks\(short, \{ target: "reports"/);
   assert.match(completion, /app: !!\(client\?\.id != null && commPref\(client, "app"\)/);
@@ -99,5 +100,12 @@ test("completion waits for one automatic delivery and the success screen cannot 
   assert.match(completion, /Internal only — nothing here is sent to the client/);
   assert.match(completion, /const runWaterCheck = async/);
   assert.match(finished, /saved report resend/);
+  assert.match(finished, /productsPurchased: purchasedProducts/);
   assert.match(finished, /Email report/);
+});
+
+test("service report email rows include client-purchased products", async () => {
+  const app = await readFile(new URL("../App.jsx", import.meta.url), "utf8");
+  assert.match(app, /Products purchased", productsPurchased\.map\(item => `\$\{item\.name\} ×\$\{item\.qty \|\| 1\}`/);
+  assert.match(app, /entry\.productsPurchased \|\| \[\]/);
 });

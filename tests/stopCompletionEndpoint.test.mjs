@@ -154,14 +154,188 @@ test("field completion is validated server-side and committed through one servic
   assert.equal(res.headers["Cache-Control"], "no-store");
   assert.equal(res.body.ok, true);
   assert.equal(res.body.applied, true);
+  assert.equal(res.body.invoiceOutcome.status, "created");
+  assert.equal(res.body.invoiceOutcome.kind, "one-off");
   assert.deepEqual(res.body.inventoryDeducted[0].deductions, [{ locationId: "truck", amount: 4 }]);
-  assert.deepEqual(batchBody.p_operations.map((operation) => operation.key).sort(), ["sps_catalog", "sps_clients", "sps_completed", "sps_schedule"]);
+  assert.deepEqual(batchBody.p_operations.map((operation) => operation.key).sort(), ["sps_catalog", "sps_clients", "sps_completed", "sps_invoices", "sps_schedule"]);
   assert.equal(batchBody.p_operations.find((operation) => operation.key === "sps_clients").expected_version, 2);
   assert.equal(batchBody.p_operations.find((operation) => operation.key === "sps_schedule").expected_version, 7);
   assert.deepEqual(JSON.parse(batchBody.p_operations.find((operation) => operation.key === "sps_schedule").value), state.sps_schedule.value);
   const writtenClients = JSON.parse(batchBody.p_operations.find((operation) => operation.key === "sps_clients").value);
   assert.equal(writtenClients[0].balance, "$75");
   assert.equal(writtenClients[0].history.length, 1);
+  const writtenInvoices = JSON.parse(batchBody.p_operations.find((operation) => operation.key === "sps_invoices").value);
+  assert.equal(writtenInvoices.length, 1);
+  assert.equal(writtenInvoices[0].id, "iv_stop_s1");
+  assert.equal(writtenInvoices[0].status, "Draft");
+  assert.equal(writtenInvoices[0].lineItems[0].unitPrice, "75");
+});
+
+test("the final weekly maintenance visit atomically creates one monthly draft", async () => {
+  const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
+  const firstEntry = {
+    sid: "weekly-1",
+    completionReceiptId: "receipt-weekly-1",
+    productsPurchased: [{ id: "p1", name: "Bacteria", qty: 1, price: 15, cost: 5, bill: true }],
+  };
+  const state = {
+    sps_clients: {
+      value: [{
+        id: "c1",
+        name: "Maintenance Client",
+        planFreq: "Weekly",
+        monthlyRate: "400",
+        balance: "$0",
+        history: [firstEntry],
+      }],
+      version: 1,
+    },
+    sps_catalog: {
+      value: { locations: [], treatments: [], parts: [], products: [{ id: "p1", name: "Bacteria", stockByLoc: {} }] },
+      version: 1,
+    },
+    sps_completed: {
+      value: { "weekly-1": { v: 2, receiptId: firstEntry.completionReceiptId, completedAt: "2026-08-03T12:00:00.000Z" } },
+      version: 1,
+    },
+    sps_schedule: {
+      value: [{ date: "08/03/2026", stops: [{ sid: "weekly-1", clientId: "c1", type: "Weekly Service" }] }, {
+        date: "08/10/2026",
+        stops: [{ sid: "weekly-2", clientId: "c1", type: "Weekly Service" }],
+      }],
+      version: 1,
+    },
+    sps_invoices: { value: [], version: 1 },
+    sps_invoicing: { value: { numberPrefix: "INV-", nextNumber: 3000, dueDays: 15, taxRate: "6" }, version: 1 },
+  };
+  let writtenOperations = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
+    if (href.includes("/rest/v1/app_state?")) {
+      const match = href.match(/key=eq\.([^&]+)/);
+      const key = match ? decodeURIComponent(match[1]) : "";
+      const row = state[key];
+      return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+    }
+    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+      writtenOperations = JSON.parse(options.body).p_operations;
+      for (const operation of writtenOperations) {
+        assert.equal(operation.expected_version, state[operation.key].version);
+        state[operation.key] = { value: JSON.parse(operation.value), version: state[operation.key].version + 1 };
+      }
+      return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
+    }
+    throw new Error(`Unexpected fetch: ${href}`);
+  };
+
+  const res = mockResponse();
+  await stopCompletionHandler({
+    method: "POST",
+    headers: { authorization: "Bearer field-token" },
+    body: {
+      mode: "complete",
+      clientId: "c1",
+      sid: "weekly-2",
+      idempotencyKey: "weekly-final-device-attempt",
+      entry: {
+        invoice: "$0",
+        productsPurchased: [{ id: "p1", name: "Bacteria", qty: 2, price: 15, cost: 5, bill: true }],
+      },
+    },
+  }, res);
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.deepEqual(res.body.invoiceOutcome, {
+    status: "created",
+    kind: "monthly",
+    period: "2026-08",
+    invoiceId: "iv_maint_c1_2026-08",
+    invoiceNumber: "INV-3000",
+    visitCount: 2,
+  });
+  assert.deepEqual(writtenOperations.map((operation) => operation.key).sort(), ["sps_catalog", "sps_clients", "sps_completed", "sps_invoices", "sps_schedule"]);
+  assert.equal(state.sps_invoices.value.length, 1);
+  assert.equal(state.sps_invoices.value[0].lineItems[0].unitPrice, "400");
+  assert.equal(state.sps_invoices.value[0].lineItems[1].qty, "3");
+  assert.deepEqual(state.sps_invoices.value[0].sourceStopIds, ["weekly-1", "weekly-2"]);
+});
+
+test("reopening removes an untouched auto-draft but preserves a sent draft for office review", async () => {
+  const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
+
+  for (const scenario of [
+    { name: "untouched", editInvoice: (invoice) => invoice, expectedStatus: "removed", invoiceWriteOnReverse: true },
+    { name: "sent", editInvoice: (invoice) => ({ ...invoice, status: "Sent", sentDate: "08/11/2026" }), expectedStatus: "review_required", invoiceWriteOnReverse: false },
+  ]) {
+    const state = {
+      sps_clients: { value: [{ id: "c1", name: "Client", balance: "$0", history: [] }], version: 1 },
+      sps_catalog: { value: { locations: [], treatments: [], parts: [], products: [] }, version: 1 },
+      sps_completed: { value: {}, version: 1 },
+      sps_schedule: { value: [{ date: "08/11/2026", stops: [{ sid: "repair-reopen", clientId: "c1", type: "Repair Visit" }] }], version: 1 },
+      sps_invoices: { value: [], version: 1 },
+      sps_invoicing: { value: { numberPrefix: "INV-", nextNumber: 3100 }, version: 1 },
+    };
+    const batches = [];
+    globalThis.fetch = async (url, options = {}) => {
+      const href = String(url);
+      if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+      if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
+      if (href.includes("/rest/v1/app_state?")) {
+        const match = href.match(/key=eq\.([^&]+)/);
+        const key = match ? decodeURIComponent(match[1]) : "";
+        const row = state[key];
+        return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+      }
+      if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+        const operations = JSON.parse(options.body).p_operations;
+        batches.push(operations);
+        for (const operation of operations) {
+          assert.equal(operation.expected_version, state[operation.key].version);
+          state[operation.key] = { value: JSON.parse(operation.value), version: state[operation.key].version + 1 };
+        }
+        return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
+      }
+      throw new Error(`Unexpected fetch: ${href}`);
+    };
+
+    const completedResponse = mockResponse();
+    await stopCompletionHandler({
+      method: "POST",
+      headers: { authorization: "Bearer field-token" },
+      body: {
+        mode: "complete",
+        clientId: "c1",
+        sid: "repair-reopen",
+        idempotencyKey: `repair-reopen-${scenario.name}`,
+        entry: { invoice: "$125" },
+      },
+    }, completedResponse);
+    assert.equal(completedResponse.statusCode, 200);
+    assert.equal(state.sps_invoices.value.length, 1);
+
+    state.sps_invoices = {
+      value: [scenario.editInvoice(state.sps_invoices.value[0])],
+      version: state.sps_invoices.version + 1,
+    };
+    const reopenedResponse = mockResponse();
+    await stopCompletionHandler({
+      method: "POST",
+      headers: { authorization: "Bearer field-token" },
+      body: { mode: "reverse", clientId: "c1", sid: "repair-reopen" },
+    }, reopenedResponse);
+
+    assert.equal(reopenedResponse.statusCode, 200, scenario.name);
+    assert.equal(reopenedResponse.body.invoiceOutcome.status, scenario.expectedStatus, scenario.name);
+    assert.equal(reopenedResponse.body.invoiceOutcome.safeToRemove, scenario.name === "untouched", scenario.name);
+    assert.equal(state.sps_invoices.value.length, scenario.name === "untouched" ? 0 : 1, scenario.name);
+    assert.equal(
+      batches[1].some((operation) => operation.key === "sps_invoices"),
+      scenario.invoiceWriteOnReverse,
+      scenario.name,
+    );
+  }
 });
 
 test("estimate-linked completion and reopening advance the same fulfillment receipt without double posting sales", async () => {
@@ -610,6 +784,8 @@ test("same completion key is idempotent, a competing key conflicts, and requeste
     sps_catalog: { value: { locations: [{ id: "truck", name: "Truck" }], treatments: [{ id: "t1", name: "Empty", stockByLoc: { truck: 0 }, inventoryOz: "0" }], parts: [], products: [] }, version: 1 },
     sps_completed: { value: {}, version: 1 },
     sps_schedule: { value: [{ date: "07/12/2026", stops: [{ sid: "s1", clientId: "c1" }] }], version: 1 },
+    sps_invoices: { value: [], version: 1 },
+    sps_invoicing: { value: { numberPrefix: "INV-", nextNumber: 2000, dueDays: 15, taxRate: "6" }, version: 1 },
   };
   let batchWrites = 0;
   let firstBatchKeys = [];
@@ -655,12 +831,15 @@ test("same completion key is idempotent, a competing key conflicts, and requeste
   const first = await invoke("attempt-device-one");
   assert.equal(first.statusCode, 200);
   assert.equal(first.body.applied, true);
-  assert.deepEqual(firstBatchKeys, ["sps_catalog", "sps_clients", "sps_completed", "sps_schedule"], "positive requested usage fences catalog even when actual deduction is zero");
+  assert.equal(first.body.invoiceOutcome.status, "created");
+  assert.deepEqual(firstBatchKeys, ["sps_catalog", "sps_clients", "sps_completed", "sps_invoices", "sps_schedule"], "the draft invoice and requested inventory fence commit with the stop");
 
   const retry = await invoke("attempt-device-one");
   assert.equal(retry.statusCode, 200);
   assert.equal(retry.body.applied, false);
   assert.equal(retry.body.sameRequest, true);
+  assert.equal(retry.body.invoiceOutcome.status, "existing");
+  assert.equal(retry.body.invoiceOutcome.invoiceId, "iv_stop_s1");
   assert.equal(batchWrites, 1);
 
   const competitor = await invoke("attempt-device-two");

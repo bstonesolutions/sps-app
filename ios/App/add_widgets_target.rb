@@ -11,7 +11,7 @@ APP_BUNDLE = 'com.stonepropertysolutions.app'
 WIDGET_BUNDLE = 'com.stonepropertysolutions.app.SPSWidgets'
 TEAM      = 'JASPHFVN38'
 DEPLOY    = '15.0'
-BUILD_NO  = '7'
+BUILD_NO  = '40'
 
 proj = Xcodeproj::Project.open(PROJECT)
 app  = proj.targets.find { |t| t.name == APP_NAME } or abort("App target not found")
@@ -42,7 +42,7 @@ widget.build_configurations.each do |c|
   bs['DEVELOPMENT_TEAM']           = TEAM
   bs['IPHONEOS_DEPLOYMENT_TARGET'] = DEPLOY
   bs['SWIFT_VERSION']              = '5.0'
-  bs['MARKETING_VERSION']          = '1.0'
+  bs['MARKETING_VERSION']          = '1.2.1'
   bs['CURRENT_PROJECT_VERSION']    = BUILD_NO
   bs['TARGETED_DEVICE_FAMILY']     = '1,2'
   bs['SKIP_INSTALL']               = 'YES'

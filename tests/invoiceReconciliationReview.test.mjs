@@ -96,16 +96,28 @@ test("a persisted create failure is not mislabeled as a two-version conflict", (
 
 test("invoice review UI is actionable and its QuickBooks inspection is read-only", () => {
   assert.match(appSource, /function InvoiceReconciliationReviewQueue/);
-  assert.match(appSource, /Review now/);
-  assert.match(appSource, /Tap to see the exact invoice, reason, IDs, and safe next step/);
+  assert.match(appSource, /Review & sync/);
+  assert.match(appSource, /Compare SPS with the confirmed QuickBooks record, then apply either version in one step/);
   assert.match(appSource, /SPS ID:/);
   assert.match(appSource, /QB ID:/);
   assert.match(appSource, /Check QuickBooks/);
   assert.match(appSource, /reviewInvoiceId/);
   assert.match(appSource, /reviewInvoiceNumber/);
-  assert.match(appSource, /Use confirmed QuickBooks record/);
+  assert.match(appSource, /Use QuickBooks version/);
   assert.match(appSource, /Link exact QuickBooks match/);
-  assert.match(appSource, /issue\.code !== "conflict"/);
+  assert.match(appSource, /inspectionInvoiceComplete = Array\.isArray\(inspectionInvoice\?\.lineItems\)/);
+  assert.match(appSource, /QuickBooks returned an incomplete invoice\. SPS was left unchanged\./);
+  assert.match(appSource, /data-invoice-reconciliation-comparison/);
+  assert.match(appSource, /Choose a version before editing/);
+  assert.match(appSource, /inert=\{canCompareQuickBooksVersions \? "" : undefined\}/);
+  assert.match(appSource, /current\.qbSyncStatus === "conflict" \|\| current\.qbPendingRemoteInvoice\) return current/);
+  assert.match(appSource, /onResolveInvoiceReview=\{handleResolveInvoiceReview\}/);
+  assert.doesNotMatch(appSource, /canUseConfirmedMatch[\s\S]{0,300}issue\.code !== "conflict"/);
+  assert.match(appSource, /now matches the confirmed QuickBooks version/);
+  assert.match(appSource, /Saving choice/);
+  assert.match(appSource, /const pendingWriteReceipt = await store\.flushKey\("sps_invoices"\)/);
+  assert.doesNotMatch(appSource, /handleResolveInvoiceReview[\s\S]{0,1200}store\.flush\(\)/);
+  assert.match(appSource, /The QuickBooks choice was not applied; your SPS invoice is unchanged\./);
   assert.match(appSource, /Confirm SPS-only/);
   assert.match(appSource, /method:\s*"POST"[\s\S]*?mode:\s*"invoice-review"/);
   assert.doesNotMatch(appSource, /sync\?\$\{params\.toString\(\)\}/);

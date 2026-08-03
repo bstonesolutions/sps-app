@@ -1091,6 +1091,37 @@ async function flush() {
   }
 }
 
+// Finish one shared section without draining unrelated queued work. This is for actions that must
+// establish a narrow write fence (for example, reconciling one invoice against QuickBooks) but
+// should not be blocked by an offline photo, schedule, or client edit elsewhere in the app.
+// The normal per-key chain still serializes an in-flight save ahead of this call, and commitKey
+// keeps the same conflict, identity, initialization, and durable-retry protections as store.set().
+async function flushKey(key) {
+  if (!key || typeof key !== "string") {
+    return { ok: false, error: new Error("A storage key is required") };
+  }
+  const identityVersion = _identityVersion;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
+    const pending = _pending[key];
+    const retryAt = Number(pending && pending.retryAt) || 0;
+    if (pending && pending.status === "pending" && retryAt > Date.now()) {
+      return { ok: false, deferred: true, queued: true, key, retryAt };
+    }
+
+    const result = await enqueueCommit(key, identityVersion);
+    if (result && result.superseded) continue;
+    if (!result || result.ok !== true) return { ...(result || { ok: false }), key };
+    if (!_pending[key]) return { ...result, ok: true, key };
+
+    const remaining = _pending[key];
+    if (remaining.status === "conflict" || remaining.status === "legacy") {
+      return { ok: false, conflict: true, conflictKey: key, key, conflicts: remaining.conflicts || [] };
+    }
+  }
+  return { ok: false, busy: true, key };
+}
+
 async function resolveConflict(key, strategy, identityVersion = _identityVersion) {
   if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
   const envelope = _pending[key];
@@ -1310,6 +1341,8 @@ export const store = {
   },
 
   async flush() { return flush(); },
+
+  async flushKey(key) { return flushKey(key); },
 
   listConflicts() {
     return Object.keys(_conflicts).map((key) => ({ key, conflicts: _conflicts[key].conflicts || [] }));

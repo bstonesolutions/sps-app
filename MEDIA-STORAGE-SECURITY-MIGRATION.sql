@@ -45,27 +45,33 @@ begin
       'client media anonymous read boundary',
       'client media anonymous upload boundary',
       'client media anonymous update boundary',
-      'client media anonymous delete boundary'
+      'client media anonymous delete boundary',
+      -- Exact policy names from the original public-bucket rollout. They are removed below and
+      -- replaced by the staff/owner-scoped rules in this transaction.
+      'client-media read',
+      'client-media upload',
+      'client-media update',
+      'client-media delete'
     )
     and (
-      pg_catalog.coalesce(qual, '') ilike '%client-media%'
-      or pg_catalog.coalesce(with_check, '') ilike '%client-media%'
-      or pg_catalog.btrim(pg_catalog.coalesce(qual, '')) in ('true', '(true)')
-      or pg_catalog.btrim(pg_catalog.coalesce(with_check, '')) in ('true', '(true)')
+      coalesce(qual::text, ''::text) ilike '%client-media%'
+      or coalesce(with_check::text, ''::text) ilike '%client-media%'
+      or pg_catalog.btrim(coalesce(qual::text, ''::text)) in ('true', '(true)')
+      or pg_catalog.btrim(coalesce(with_check::text, ''::text)) in ('true', '(true)')
       -- A role-only/global rule such as auth.role() = 'authenticated' does not name a
       -- bucket but still applies to client-media. Treat an absent bucket fence as broad.
       or (
         pg_catalog.upper(cmd) in ('ALL', 'SELECT', 'DELETE')
-        and pg_catalog.coalesce(qual, '') not ilike '%bucket_id%'
+        and coalesce(qual::text, ''::text) not ilike '%bucket_id%'
       )
       or (
         pg_catalog.upper(cmd) = 'INSERT'
-        and pg_catalog.coalesce(with_check, '') not ilike '%bucket_id%'
+        and coalesce(with_check::text, ''::text) not ilike '%bucket_id%'
       )
       or (
         pg_catalog.upper(cmd) in ('ALL', 'UPDATE')
         -- PostgreSQL uses USING as the implicit WITH CHECK when WITH CHECK is omitted.
-        and pg_catalog.coalesce(with_check, qual, '') not ilike '%bucket_id%'
+        and coalesce(with_check::text, qual::text, ''::text) not ilike '%bucket_id%'
       )
     );
 
@@ -92,6 +98,10 @@ drop policy if exists "client media anonymous read boundary" on storage.objects;
 drop policy if exists "client media anonymous upload boundary" on storage.objects;
 drop policy if exists "client media anonymous update boundary" on storage.objects;
 drop policy if exists "client media anonymous delete boundary" on storage.objects;
+drop policy if exists "client-media read" on storage.objects;
+drop policy if exists "client-media upload" on storage.objects;
+drop policy if exists "client-media update" on storage.objects;
+drop policy if exists "client-media delete" on storage.objects;
 
 -- Staff can create signed URLs and download existing customer media. Portal clients receive
 -- signed URLs only after api/portal-data verifies that the media belongs to their client record.

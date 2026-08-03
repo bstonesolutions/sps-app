@@ -114,6 +114,96 @@ test("an explicit unique strict match rebinds the missing id and adopts QuickBoo
   });
 });
 
+test("explicitly using a confirmed QuickBooks record resolves a failed-push conflict", () => {
+  const quickBooksVersion = remoteInvoice({
+    total: 225,
+    balance: 125,
+    qbHasUnsupportedLines: true,
+    qbUnsupportedLineTypes: ["DescriptionOnly"],
+    lineItems: [{
+      id: "qbl_qb-1963_1",
+      qbLineId: "1",
+      desc: "Service visit",
+      qty: "1",
+      unitPrice: "225",
+      taxable: false,
+      kind: "service",
+    }],
+  });
+  const result = resolveInvoiceReconciliationReview(localInvoice({
+    qbId: "qb-1963",
+    qbSyncStatus: "conflict",
+    locallyEdited: true,
+    qbPendingLocalEdits: true,
+    qbLocalChangesPending: true,
+    qbRemoteChangesPending: true,
+    qbPendingRemoteInvoice: quickBooksVersion,
+    qbSyncConflict: {
+      type: "quickbooks-remote-update",
+      reason: "pending-local-edits",
+      qbId: "qb-1963",
+    },
+    qbSyncError: "The previous update could not reach QuickBooks.",
+    qbSyncErrorCode: "QB_NETWORK_ERROR",
+    qbSyncAttemptedAt: "2026-07-28T16:00:00.000Z",
+    lineItems: [{
+      id: "local-line",
+      desc: "Service visit",
+      qty: "1",
+      unitPrice: "206.55",
+      taxable: false,
+      unitCost: "35",
+      costKnown: true,
+      refId: "service-7",
+      chargeType: "labor",
+      chargeLabel: "Labor & services",
+      sourceEstimateLineId: "estimate-line-4",
+      sourceVisitLineId: "visit-line-9",
+    }],
+  }), {
+    action: "retry-linked",
+    quickBooksInvoice: quickBooksVersion,
+    resolvedAt: "2026-07-28T16:05:00.000Z",
+  });
+
+  assert.equal(result.qbSyncStatus, "synced");
+  assert.equal(result.qbAuthoritative, true);
+  assert.equal(result.qbNeedsReview, undefined);
+  assert.equal(result.qbRemoteChangesPending, undefined);
+  assert.equal(result.qbPendingRemoteInvoice, undefined);
+  assert.equal(result.qbSyncConflict, undefined);
+  assert.equal(result.locallyEdited, false);
+  assert.equal(result.qbPendingLocalEdits, undefined);
+  assert.equal(result.qbLocalChangesPending, undefined);
+  assert.equal(result.qbSyncError, undefined);
+  assert.equal(result.total, 225);
+  assert.equal(result.balance, 125);
+  assert.equal(result.qbHasUnsupportedLines, true);
+  assert.deepEqual(result.qbUnsupportedLineTypes, ["DescriptionOnly"]);
+  assert.deepEqual(result.lineItems[0], {
+    id: "local-line",
+    qbLineId: "1",
+    desc: "Service visit",
+    qty: "1",
+    unitPrice: "225",
+    taxable: false,
+    kind: "service",
+    unitCost: "35",
+    costKnown: true,
+    refId: "service-7",
+    chargeType: "labor",
+    chargeLabel: "Labor & services",
+    sourceEstimateLineId: "estimate-line-4",
+    sourceVisitLineId: "visit-line-9",
+  });
+  assert.deepEqual(result.qbReviewResolution, {
+    action: "retry-linked",
+    resolvedAt: "2026-07-28T16:05:00.000Z",
+    qbId: "qb-1963",
+    evidence: ["quickbooks-id", "document-number", "customer"],
+  });
+});
+
 test("matching rejects mismatched or ambiguous candidates without changing local data", () => {
   assert.throws(() => resolveInvoiceReconciliationReview(localInvoice(), {
     action: "match-remote",

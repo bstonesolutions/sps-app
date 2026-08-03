@@ -128,8 +128,67 @@ export function estimateTotals(estimate, fallbackRate = 0) {
   return { subtotal, taxableSubtotal, taxRate, taxEnabled, tax, total: roundMoney(subtotal + tax) };
 }
 
+const ESTIMATE_PIPELINE_STATUSES = ["draft", "sent", "approved", "declined", "complete"];
+
+export const estimatePipelineStatus = (estimate) => {
+  const status = String(estimate?.status || "draft").trim().toLowerCase();
+  // Some early estimates used "accepted" before the client-facing state was renamed to
+  // "approved". Keep those records in the approved pipeline instead of hiding their value.
+  if (status === "accepted") return "approved";
+  return ESTIMATE_PIPELINE_STATUSES.includes(status) ? status : "other";
+};
+
+const publicEstimateBucket = (bucket) => ({
+  count: bucket.count,
+  amount: roundMoney(bucket.amountCents / 100),
+});
+
+export function estimatePipelineSummary(estimates, fallbackRate = 0) {
+  const records = Array.isArray(estimates)
+    ? estimates.filter((estimate) => estimate && typeof estimate === "object" && !Array.isArray(estimate))
+    : [];
+  const internalByStatus = Object.fromEntries(
+    [...ESTIMATE_PIPELINE_STATUSES, "other"].map((status) => [status, { count: 0, amountCents: 0 }]),
+  );
+  const internalTotal = { count: 0, amountCents: 0 };
+
+  records.forEach((estimate) => {
+    const status = estimatePipelineStatus(estimate);
+    // estimateTotals is the canonical legacy/tax-aware calculation. Never trust a stale saved
+    // aggregate here: the dashboard should agree with the estimate a user opens.
+    const amountCents = Math.round(estimateTotals(estimate, fallbackRate).total * 100);
+    internalByStatus[status].count += 1;
+    internalByStatus[status].amountCents += amountCents;
+    internalTotal.count += 1;
+    internalTotal.amountCents += amountCents;
+  });
+
+  const byStatus = Object.fromEntries(
+    Object.entries(internalByStatus).map(([status, bucket]) => [status, publicEstimateBucket(bucket)]),
+  );
+  const active = {
+    count: byStatus.draft.count + byStatus.sent.count,
+    amount: roundMoney(byStatus.draft.amount + byStatus.sent.amount),
+  };
+
+  return {
+    active,
+    approved: { ...byStatus.approved },
+    total: publicEstimateBucket(internalTotal),
+    byStatus,
+  };
+}
+
+const estimateMoneyFormatter = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
 export function formatEstimateMoney(value) {
-  return `$${roundMoney(value).toFixed(2)}`;
+  const rounded = roundMoney(value);
+  return estimateMoneyFormatter.format(Object.is(rounded, -0) ? 0 : rounded);
 }
 
 export function withEstimateTotals(estimate, fallbackRate = 0) {
