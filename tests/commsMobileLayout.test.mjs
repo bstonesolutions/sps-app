@@ -48,3 +48,13 @@ test("pointer taps do not leave boxed focus rings on the Comms navigator", async
   assert.match(source, /box-shadow: inset 0 -3px 0 \$\{T\.primary\}/);
   assert.match(source, /outline: 2px solid \$\{T\.primary\}/);
 });
+
+test("the programmatically focused full-screen Comms shell has no viewport outline", async () => {
+  const app = await readFile(new URL("../App.jsx", import.meta.url), "utf8");
+  const start = app.indexOf("function CommsMobileDetailShell");
+  const end = app.indexOf("function CommsResponsiveDetail", start);
+  const source = app.slice(start, end);
+
+  assert.match(source, /data-sps-comms-detail-shell/);
+  assert.match(source, /overscrollBehavior: "none", outline: "none"/);
+});

@@ -27725,7 +27725,7 @@ function CommsMobileDetailShell({
   return createPortal(
     <section ref={shellRef} role="dialog" aria-modal="true" aria-label={title || "Communication details"} tabIndex={-1}
       data-sps-comms-detail-shell data-comms-kind={kind}
-      style={{ position: "fixed", inset: 0, zIndex: 220, display: "flex", flexDirection: "column", minHeight: 0, background: T.surface, color: T.text, overflow: "hidden", overscrollBehavior: "none" }}>
+      style={{ position: "fixed", inset: 0, zIndex: 220, display: "flex", flexDirection: "column", minHeight: 0, background: T.surface, color: T.text, overflow: "hidden", overscrollBehavior: "none", outline: "none" }}>
       <header data-sps-comms-detail-header style={{ flexShrink: 0, paddingTop: "env(safe-area-inset-top)", background: hexA(T.surface, 0.985), borderBottom: `1px solid ${commsHairline(T, 0.12)}`, backdropFilter: "saturate(180%) blur(24px)", WebkitBackdropFilter: "saturate(180%) blur(24px)" }}>
         <div style={{ minHeight: 66, padding: "3px max(8px, env(safe-area-inset-right)) 4px max(8px, env(safe-area-inset-left))", boxSizing: "border-box", display: "grid", gridTemplateColumns: "minmax(60px, auto) minmax(0, 1fr) minmax(60px, auto)", alignItems: "center", gap: 5 }}>
           <button type="button" onClick={onBack} aria-label={`Back to ${backLabel}`}
