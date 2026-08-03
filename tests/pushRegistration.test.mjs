@@ -10,7 +10,61 @@ test("native push waits for APNs and server registration before reporting succes
   assert.match(app, /await P\.addListener\("registrationError"/);
   assert.match(app, /if \(!response\.ok \|\| data\.ok === false\)/);
   assert.match(app, /Notification registration timed out/);
+  assert.match(app, /notification server took too long to link this iPhone/);
   assert.match(app, /return registerAndBindDevicePush\(P\)/);
+});
+
+test("TestFlight push detection retains native bridge and capacitor-origin fallbacks", async () => {
+  const app = await read("App.jsx");
+  assert.match(app, /import \{ PushNotifications \} from "@capacitor\/push-notifications"/);
+  assert.match(app, /function pushIsNativeRuntime\(\)/);
+  assert.match(app, /window\.webkit\?\.messageHandlers\?\.bridge/);
+  assert.match(app, /protocol === "capacitor:" \|\| protocol === "ionic:"/);
+  assert.match(app, /window\.Capacitor\?\.PluginHeaders\?\.some/);
+  const pluginStart = app.indexOf("function pushPlugin()");
+  const pluginEnd = app.indexOf("async function pushIsNative()", pluginStart);
+  assert.ok(pluginStart >= 0 && pluginEnd > pluginStart);
+  assert.doesNotMatch(app, /async function pushPlugin\(\)/);
+  assert.doesNotMatch(app, /await pushPlugin\(\)/);
+  assert.match(app.slice(pluginStart, pluginEnd), /return PushNotifications/);
+  assert.doesNotMatch(app.slice(pluginStart, pluginEnd), /if \(!pushIsNativeRuntime\(\)\) return null/);
+  assert.doesNotMatch(app.slice(pluginStart, pluginEnd), /await import\("@capacitor\/push-notifications"\)/);
+  assert.match(app, /async function pushIsNative\(\) \{\s*return pushIsNativeRuntime\(\);/);
+  assert.match(app, /e\?\.code === "UNIMPLEMENTED"/);
+});
+
+test("Capacitor push proxy never crosses an async or await boundary", async () => {
+  const { PushNotifications } = await import("@capacitor/push-notifications");
+  // Capacitor proxies every property, including `then`; Promise resolution therefore treats this
+  // plugin as a thenable. Returning it from async code prevents the real method call from running.
+  assert.equal(typeof PushNotifications.then, "function");
+  const app = await read("App.jsx");
+  assert.match(app, /function pushPlugin\(\)/);
+  assert.doesNotMatch(app, /async function pushPlugin\(\)/);
+  assert.doesNotMatch(app, /await pushPlugin\(\)/);
+});
+
+test("native notification checks cannot hang or hide the retry control", async () => {
+  const app = await read("App.jsx");
+  assert.match(app, /function pushCallWithin\(task, timeoutMs, message\)/);
+  assert.match(app, /P\.checkPermissions\(\),\s*6000/);
+  assert.match(app, /P\.requestPermissions\(\),\s*20000/);
+  assert.match(app, /pushPermissionState\(\),\s*8000/);
+  assert.match(app, /fetch\(`\$\{PROD_URL\}\/api\/push\/register`\),\s*5000/);
+  assert.match(app, /Checking this iPhone in the background/);
+  assert.match(app, /ps\.perm === "granted" \? "Re-register this device" : "Enable on this device"/);
+  assert.match(app, /The iOS notification bridge did not answer/);
+});
+
+test("notification permission prompt is not blocked by listener setup", async () => {
+  const app = await read("App.jsx");
+  const start = app.indexOf("async function enableDevicePushOnce()");
+  const end = app.indexOf("async function enableDevicePush()", start);
+  assert.ok(start >= 0 && end > start);
+  const body = app.slice(start, end);
+  assert.ok(body.indexOf("P.requestPermissions()") < body.indexOf("wirePushListeners(P)"));
+  assert.match(body, /wirePushListeners\(P\),\s*6000/);
+  assert.match(body, /notification event bridge timed out/);
 });
 
 test("notification registration and diagnostics are scoped to this physical app install", async () => {
@@ -84,6 +138,7 @@ test("Xcode target explicitly enables the Push Notifications capability", async 
   const entitlements = await read("ios/App/App/App.entitlements");
   assert.match(project, /com\.apple\.Push = \{\s*enabled = 1;/);
   assert.match(entitlements, /<key>aps-environment<\/key>/);
+  assert.match(entitlements, /<key>aps-environment<\/key>\s*<string>production<\/string>/);
 });
 
 test("every staff install has a permanent notification binding check and self-test", async () => {
@@ -181,8 +236,8 @@ test("detected-arrival delivery feedback stays mounted until its send settles", 
   assert.match(app, /onClose=\{\(\) => setDetectedArrival\(null\)\}/);
 });
 
-test("iOS release metadata is version 1.2.1 build 31 for the app and widgets", async () => {
+test("iOS release metadata is version 1.2.1 build 38 for the app and widgets", async () => {
   const project = await read("ios/App/App.xcodeproj/project.pbxproj");
   assert.equal((project.match(/MARKETING_VERSION = 1\.2\.1;/g) || []).length, 4);
-  assert.equal((project.match(/CURRENT_PROJECT_VERSION = 31;/g) || []).length, 4);
+  assert.equal((project.match(/CURRENT_PROJECT_VERSION = 38;/g) || []).length, 4);
 });

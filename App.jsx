@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect, useContext, createContext, useMemo, useCallback, Component, Fragment } from "react";
 import { createPortal } from "react-dom";
+import { Capacitor } from "@capacitor/core";
+import { PushNotifications } from "@capacitor/push-notifications";
 import { store, supabase } from "./supabaseClient";
 import { PROD_URL } from "./config";
 import { sendWidgetPayload, clearWidgetPayload } from "./widgetBridge";
@@ -44,6 +46,17 @@ import { smsMediaKind, smsMediaLabel, smsMediaSizeLabel, smsMediaSource, smsVisi
 import { shouldWriteLiveLocation } from "./liveLocationThrottle";
 import { clearWorkspaceState, patchWorkspaceState, readWorkspaceState } from "./workspaceState";
 import { reminderSystemEnabled } from "./reminderSystem";
+import {
+  classifyCompletionFailure,
+  completionOutboxSummary,
+  completionRetryDelay,
+  enqueueCompletionIntent,
+  persistStopDraft,
+  readCompletionOutbox,
+  readStopDraft,
+  removeStopDraft,
+  updateCompletionIntent,
+} from "./completionOutbox";
 
 // Manual/foreground refreshes compare these small version counters first and download only the
 // shared slices that changed. Keeping this list explicit prevents a Sync tap from tearing down the
@@ -780,19 +793,51 @@ function pushInstallId() {
     return "";
   }
 }
-async function pushPlugin() {
+// Capacitor plugins are Proxies whose `then` property is also proxied as a native method.
+// NEVER return this Proxy from an async function or await it: Promise assimilation would call
+// PushNotifications.then(), leaving the real permission call pending forever.
+function pushPlugin() {
   try {
-    const { Capacitor } = await import("@capacitor/core");
-    if (!Capacitor.isNativePlatform()) return null;
-    const mod = await import("@capacitor/push-notifications").catch((e) => { try { console.warn("[push] plugin import failed", e); } catch (_) {} return null; });
-    if (!(mod && mod.PushNotifications)) { try { console.warn("[push] PushNotifications missing from module"); } catch (_) {} return null; }
-    return mod.PushNotifications;
+    if (!PushNotifications) { try { console.warn("[push] PushNotifications missing from module"); } catch (_) {} return null; }
+    return PushNotifications;
   } catch (e) { try { console.warn("[push] pushPlugin threw", e); } catch (_) {} return null; }
 }
 // Are we on a native platform at all? Used to tell a NATIVE plugin failure ("error") apart from a
 // genuine web runtime ("unsupported") — see pushPermissionState.
 async function pushIsNative() {
-  try { const { Capacitor } = await import("@capacitor/core"); return !!Capacitor.isNativePlatform(); } catch (_) { return false; }
+  return pushIsNativeRuntime();
+}
+
+// Capacitor normally reports the native platform through isNativePlatform(). A real iOS
+// WKWebView also exposes the Capacitor bridge and uses the capacitor: origin, so retain those
+// native-owned signals as a fallback. This prevents a delayed/overwritten Capacitor global from
+// making a signed TestFlight build masquerade as Safari and hiding the notification controls.
+function pushIsNativeRuntime() {
+  try {
+    if (Capacitor?.isNativePlatform?.()) return true;
+    if (Capacitor?.getPlatform?.() === "ios" || Capacitor?.getPlatform?.() === "android") return true;
+  } catch (_) {}
+  if (typeof window === "undefined") return false;
+  try {
+    if (typeof window.Capacitor?.nativePromise === "function") return true;
+    if (window.Capacitor?.PluginHeaders?.some?.((header) => header?.name === "PushNotifications")) return true;
+    if (window.webkit?.messageHandlers?.bridge) return true;
+    if (window.androidBridge) return true;
+    const protocol = String(window.location?.protocol || "").toLowerCase();
+    return protocol === "capacitor:" || protocol === "ionic:";
+  } catch (_) {
+    return false;
+  }
+}
+
+function pushCallWithin(task, timeoutMs, message) {
+  let timeoutId = null;
+  return Promise.race([
+    Promise.resolve(task).finally(() => { if (timeoutId) clearTimeout(timeoutId); }),
+    new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+    }),
+  ]);
 }
 async function wirePushListeners(P) {
   if (_pushListenersOn) return;
@@ -847,6 +892,10 @@ async function registerAndBindDevicePush(P) {
       Promise.allSettled(removals).finally(() => resolve(result));
     };
 
+    // Arm the deadline before touching the bridge. addListener() can itself stall, and the old
+    // placement left registration permanently pending before its timeout even existed.
+    timeoutId = setTimeout(() => finish({ ok: false, error: "Notification registration timed out. Check your connection and try again." }), 20000);
+
     (async () => {
       try {
         registrationHandle = await P.addListener("registration", (tokenInfo) => {
@@ -859,11 +908,11 @@ async function registerAndBindDevicePush(P) {
             if (!installId) return finish({ ok: false, error: "This iPhone couldn't create a stable notification identity. Reopen SPS Way and try again." });
             _pushToken = token;
             try {
-              const response = await fetch(`${PROD_URL}/api/push/register`, {
+              const response = await pushCallWithin((async () => fetch(`${PROD_URL}/api/push/register`, {
                 method: "POST",
                 headers: await authHeaders({ "Content-Type": "application/json" }),
                 body: JSON.stringify({ action: "register", token, installId }),
-              });
+              }))(), 10000, "The notification server took too long to link this iPhone.");
               const data = await response.json().catch(() => ({}));
               if (!response.ok || data.ok === false) {
                 return finish({ ok: false, error: data.error || `The server couldn't register this device (${response.status}).` });
@@ -878,7 +927,7 @@ async function registerAndBindDevicePush(P) {
           const message = event && (event.error || event.message);
           finish({ ok: false, error: message || "Apple couldn't register this device for notifications." });
         });
-        timeoutId = setTimeout(() => finish({ ok: false, error: "Notification registration timed out. Check your connection and try again." }), 20000);
+        if (settled) return;
         await P.register();
       } catch (error) {
         finish({ ok: false, error: (error && error.message) || "Couldn't register with Apple." });
@@ -891,26 +940,62 @@ async function registerAndBindDevicePush(P) {
 // unsupported split is the whole fix: collapsing a native failure into "unsupported" is what silently
 // hid BOTH the permission primer AND the settings Enable button (both treat "unsupported" as "web").
 async function pushPermissionState() {
-  const P = await pushPlugin();
+  const P = pushPlugin();
   if (!P) return (await pushIsNative()) ? "error" : "unsupported";
-  try { return (await P.checkPermissions()).receive || "prompt"; }
-  catch (e) { try { console.warn("[push] checkPermissions threw", e); } catch (_) {} return "error"; }
+  try {
+    const permission = await pushCallWithin(
+      P.checkPermissions(),
+      6000,
+      "Apple's notification permission check timed out.",
+    );
+    return permission?.receive || "prompt";
+  }
+  catch (e) {
+    try { console.warn("[push] checkPermissions threw", e); } catch (_) {}
+    const message = String(e?.message || e || "");
+    const unimplemented = e?.code === "UNIMPLEMENTED" || /not implemented on web/i.test(message);
+    return unimplemented && !pushIsNativeRuntime() ? "unsupported" : "error";
+  }
 }
 // Prompts if needed (iOS system dialog), registers with APNs, and the registration listener
 // binds the token to this account. Called by the primer, the settings card, and — silently,
 // when permission is already granted — on every app open (tokens rotate).
 async function enableDevicePushOnce() {
-  const P = await pushPlugin();
+  const P = pushPlugin();
   if (!P) return { ok: false, error: (await pushIsNative()) ? "Couldn't load the notifications plugin — reopen the app and try again." : "Notifications are delivered through the iOS app." };
   try { localStorage.removeItem("sps_push_disabled"); } catch (_) {}
-  await wirePushListeners(P);
-  let perm = await P.checkPermissions().catch(() => ({ receive: "prompt" }));
+  let perm = await pushCallWithin(
+    P.checkPermissions(),
+    6000,
+    "Apple's notification permission check timed out.",
+  ).catch(() => ({ receive: "prompt" }));
   // Don't fabricate a "denied": a THROW here (transient bridge/timing) used to be turned into a fake
   // hard-denial that skipped register() forever. Surface the real error instead so the iOS prompt
   // actually gets a chance to show.
-  try { if (perm.receive !== "granted") perm = await P.requestPermissions(); }
+  try {
+    if (perm.receive !== "granted") {
+      perm = await pushCallWithin(
+        P.requestPermissions(),
+        20000,
+        "Apple's notification permission prompt timed out. Close and reopen SPS Way, then try again.",
+      );
+    }
+  }
   catch (e) { try { console.warn("[push] requestPermissions threw", e); } catch (_) {} return { ok: false, error: (e && e.message) || "Couldn't ask for notification permission." }; }
   if (perm.receive !== "granted") return { ok: false, denied: true, error: "Notifications are turned off for SPS Way in iOS Settings." };
+  // Asking iOS for permission must never be blocked by listener setup. Some WKWebView bridge
+  // failures leave addListener() pending forever; set the permission first, then fail with a
+  // useful retry message if the event bridge itself cannot be wired.
+  try {
+    await pushCallWithin(
+      wirePushListeners(P),
+      6000,
+      "The iPhone notification event bridge timed out. Close and reopen SPS Way, then try again.",
+    );
+  } catch (e) {
+    try { console.warn("[push] listener setup threw", e); } catch (_) {}
+    return { ok: false, error: (e && e.message) || "Couldn't connect the iPhone notification event bridge." };
+  }
   return registerAndBindDevicePush(P);
 }
 async function enableDevicePush() {
@@ -946,7 +1031,7 @@ async function unbindDevicePushToken() {
 async function unregisterNativeDevicePush() {
   const task = (async () => {
     if (!(await pushIsNative())) return { ok: true, unsupported: true };
-    const P = await pushPlugin();
+    const P = pushPlugin();
     if (!P) return { ok: false, error: "Couldn't load the iPhone notification bridge." };
     try {
       await P.unregister();
@@ -9726,7 +9811,7 @@ function newCompletionAttemptKey(sid) {
   return `complete-${sid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
-function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, team, clients, dayDate, arrivedAt, enRouteAt, draft, onSaveDraft, onClearDraft, onComplete, onUpdateStop, onClose, onViewClient, onOfficeAlert, me }) {
+function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, team, clients, dayDate, arrivedAt, enRouteAt, draft, draftReady = true, draftScope = "", onSaveDraft, onClearDraft, onComplete, onUpdateStop, onClose, onViewClient, onOfficeAlert, me }) {
   const { T, branding, perms } = useApp();
   const completeVp = useViewport();
   const [directTextOpen, setDirectTextOpen] = useState(false);
@@ -9797,8 +9882,11 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
   const [done, setDone] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const [invoiceOutcome, setInvoiceOutcome] = useState(null);
+  const [completionSync, setCompletionSync] = useState(null);
   const finishInFlight = useRef(false);
   const completionAttempt = useRef({ key: "", fingerprint: "" });
+  const completionFinished = useRef(false);
 
   // The client's maintenance price (their plan rate) so the tech doesn't retype it every
   // stop. Per-client monthlyRate wins; otherwise fall back to their service-tier price.
@@ -9871,41 +9959,88 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
   const removeTask = (id) => setChecklist(cl => cl.filter(t => t.id !== id));
   const tasksDone = checklist.filter(t => t.done).length;
 
-  // Build 15, 7A — persist in-progress work so a lock / rotate / background / remount never
-  // loses it. Restore this stop's saved draft once on mount, then debounce-save changes.
+  // A stop draft has two copies: the shared copy (useful across devices) and a stop-scoped
+  // IndexedDB copy (the durable field fallback when the network/app_state write is unavailable).
+  // Wait for the shared draft to hydrate, then restore the newer copy exactly once.
   const draftRestored = useRef(false);
   useEffect(() => {
-    const d = draft;
-    if (d && typeof d === "object") {
-      if (Array.isArray(d.checklist)) setChecklist(d.checklist);
-      if (d.readings) setReadings(d.readings);
-      if (d.readingStatus) setReadingStatus(d.readingStatus);
-      if (d.tx) setTx(d.tx);
-      if (d.partsUsed) setPartsUsedState(d.partsUsed);
-      if (d.partBill) setPartBill(d.partBill);
-      if (d.productsQty) setProductsQty(d.productsQty);
-      if (d.productBill) setProductBill(d.productBill);
-      if (d.notesClient != null) setNotesClient(d.notesClient);
-      if (d.notesOffice != null) setNotesOffice(d.notesOffice);
-      if (typeof d.officeFlag === "boolean") setOfficeFlag(d.officeFlag);
-      if (d.officeFlagMsg != null) setOfficeFlagMsg(d.officeFlagMsg);
-      if (Array.isArray(d.photos)) setPhotos(d.photos);
-      if (d.usageLoc) setUsageLoc(d.usageLoc);
-      if (Array.isArray(d.svcList)) setSvcList(d.svcList);
-      if (d.actualHours != null) setActualHours(d.actualHours);
-    }
-    draftRestored.current = true;
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!draftReady || draftRestored.current) return;
+    let alive = true;
+    (async () => {
+      let local = null;
+      try { if (draftScope && stop.sid) local = await readStopDraft(draftScope, stop.sid); } catch (_) {}
+      if (!alive || draftRestored.current) return;
+      const shared = draft && typeof draft === "object" ? draft : null;
+      const sharedAt = Number(shared?.__draftSavedAt || 0);
+      const d = local && Number(local.updatedAt || 0) >= sharedAt ? local.payload : shared;
+      if (d && typeof d === "object") {
+        if (Array.isArray(d.checklist)) setChecklist(d.checklist);
+        if (d.readings) setReadings(d.readings);
+        if (d.readingStatus) setReadingStatus(d.readingStatus);
+        if (d.tx) setTx(d.tx);
+        if (d.partsUsed) setPartsUsedState(d.partsUsed);
+        if (d.partBill) setPartBill(d.partBill);
+        if (d.productsQty) setProductsQty(d.productsQty);
+        if (d.productBill) setProductBill(d.productBill);
+        if (d.notesClient != null) setNotesClient(d.notesClient);
+        if (d.notesOffice != null) setNotesOffice(d.notesOffice);
+        if (typeof d.officeFlag === "boolean") setOfficeFlag(d.officeFlag);
+        if (d.officeFlagMsg != null) setOfficeFlagMsg(d.officeFlagMsg);
+        if (Array.isArray(d.photos)) setPhotos(d.photos);
+        if (d.usageLoc) setUsageLoc(d.usageLoc);
+        if (Array.isArray(d.svcList)) setSvcList(d.svcList);
+        if (d.actualHours != null) setActualHours(d.actualHours);
+        if (d.assigneeId != null) setAssigneeId(d.assigneeId);
+        if (d.revenue != null) setRevenue(d.revenue);
+        if (d.hourlyRate != null) setHourlyRate(d.hourlyRate);
+        if (d.gas != null) setGas(d.gas);
+        if (d.insurance != null) setInsurance(d.insurance);
+        if (d.equipment != null) setEquipment(d.equipment);
+        if (d.overhead != null) setOverhead(d.overhead);
+      }
+      draftRestored.current = true;
+    })();
+    return () => { alive = false; };
+  }, [draftReady, draftScope, stop.sid]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const draftSnapshot = {
+    checklist, readings, readingStatus, tx, partsUsed, partBill, productsQty, productBill,
+    notesClient, notesOffice, officeFlag, officeFlagMsg, photos, usageLoc, svcList, actualHours,
+    assigneeId, revenue, hourlyRate, gas, insurance, equipment, overhead,
+  };
+  const draftSnapshotRef = useRef(draftSnapshot);
+  draftSnapshotRef.current = draftSnapshot;
+  const writeDraftRef = useRef(null);
+  writeDraftRef.current = () => {
+    if (!draftRestored.current || completionFinished.current || !stop.sid) return Promise.resolve(null);
+    const payload = { ...draftSnapshotRef.current, __draftSavedAt: Date.now() };
+    if (typeof onSaveDraft === "function") onSaveDraft(stop.sid, payload);
+    return draftScope
+      ? persistStopDraft(draftScope, stop.sid, payload).catch(error => {
+        console.warn("stop draft local save failed:", error?.message || error);
+        return null;
+      })
+      : Promise.resolve(null);
+  };
   useEffect(() => {
-    if (!draftRestored.current || !stop.sid || typeof onSaveDraft !== "function") return;
-    // Only persist once there's real work to lose — never write an empty draft for every stop opened.
-    const hasContent = (checklist || []).some(t => t.done) || Object.keys(readings).length || Object.keys(tx).length
-      || Object.keys(partsUsed).length || Object.keys(productsQty).length || (notesClient || "").trim()
-      || (notesOffice || "").trim() || officeFlag || (photos || []).length;
-    if (!hasContent) return;
-    const t = setTimeout(() => onSaveDraft(stop.sid, { checklist, readings, readingStatus, tx, partsUsed, partBill, productsQty, productBill, notesClient, notesOffice, officeFlag, officeFlagMsg, photos, usageLoc, svcList, actualHours }), 700);
+    if (!draftRestored.current || !stop.sid) return;
+    const t = setTimeout(() => { void writeDraftRef.current?.(); }, 700);
     return () => clearTimeout(t);
-  }, [checklist, readings, tx, partsUsed, partBill, productsQty, productBill, notesClient, notesOffice, officeFlag, officeFlagMsg, photos, usageLoc, svcList, actualHours]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [checklist, readings, readingStatus, tx, partsUsed, partBill, productsQty, productBill, notesClient, notesOffice, officeFlag, officeFlagMsg, photos, usageLoc, svcList, actualHours, assigneeId, revenue, hourlyRate, gas, insurance, equipment, overhead]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // iOS can suspend a WKWebView immediately after backgrounding it. Start the IndexedDB write from
+  // the visibility/pagehide callback instead of relying on React's next render/effect cycle.
+  useEffect(() => {
+    const flush = () => { if (!completionFinished.current) void writeDraftRef.current?.(); };
+    const onVisibility = () => { if (document.visibilityState === "hidden") flush(); };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
+  }, [draftScope, stop.sid]); // eslint-disable-line react-hooks/exhaustive-deps
 
 
   const num = (v) => parseFloat(v) || 0;
@@ -10037,6 +10172,68 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     },
   });
 
+  const buildDeliveryIntent = () => {
+    const acfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
+    const reportOptOut = client && client.notifyPrefs && client.notifyPrefs.reportSummary === false;
+    const channels = automaticReportChannels({
+      scheduleCfg: acfg,
+      hasPhone: !!phone,
+      hasEmail: !!String(client?.email || "").trim(),
+      textAllowed: commPref(client, "text"),
+      emailAllowed: commPref(client, "email"),
+      reportOptOut,
+    });
+    const plan = {
+      ...channels,
+      app: !!(client?.id != null && commPref(client, "app") && !reportOptOut),
+    };
+    const tpl = (email && email.smsReport) || DEFAULT_EMAIL.smsReport;
+    let textMessage = tpl
+      .replace(/\{first\}/g, firstName)
+      .replace(/\{service\}/g, stop.type || "service")
+      .replace(/\{company\}/g, branding.companyName)
+      .replace(/\{sender\}/g, (email && email.senderName) || branding.companyName)
+      .replace(/\{link\}/g, clientLinkFooter("reports", { origin: PROD_URL, heading: "View your full report and photos" }));
+    textMessage = appendClientLinks(textMessage, { target: "reports", origin: PROD_URL, heading: "View your full report and photos" });
+    // Do not duplicate a client's full history/documents into each durable queue item. Delivery needs
+    // only identity plus the exact template and brand snapshot active at completion time.
+    return {
+      plan,
+      client: {
+        id: client?.id ?? stop?.clientId ?? stop?.id ?? "",
+        name: client?.name || "",
+        email: client?.email || "",
+        phone: client?.phone || "",
+      },
+      email: {
+        subject: email?.subject ?? DEFAULT_EMAIL.subject,
+        intro: email?.intro ?? DEFAULT_EMAIL.intro,
+        signoff: email?.signoff ?? DEFAULT_EMAIL.signoff,
+        footer: email?.footer ?? DEFAULT_EMAIL.footer,
+        showReadings: email?.showReadings !== false,
+        showPhotosNote: email?.showPhotosNote !== false,
+      },
+      branding: {
+        companyName: branding?.companyName || "",
+        companyEmail: branding?.companyEmail || "",
+        companyPhone: branding?.companyPhone || "",
+        companyWebsite: branding?.companyWebsite || "",
+        companyAddress: branding?.companyAddress || "",
+        portalTagline: branding?.portalTagline || "",
+        logoType: branding?.logoType || "",
+        logoImage: branding?.logoImage || "",
+      },
+      accent: T.primary,
+      ctx,
+      textMessage,
+      portalBody: reportText + svcCardMarker(stop?.type || "Service visit", todayStr, branding.companyName),
+      origin: `visit:${stop?.sid || ""}`,
+      officeAlert: officeFlag && officeFlagMsg.trim()
+        ? { client: client?.name || "Client", clientId: client?.id, sid: stop?.sid, message: officeFlagMsg.trim(), date: todayStr }
+        : null,
+    };
+  };
+
   const finish = async () => {
     if (finishInFlight.current || busy) return;
     finishInFlight.current = true;
@@ -10055,11 +10252,18 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
       if (!completionAttempt.current.key || completionAttempt.current.fingerprint !== fingerprint) {
         completionAttempt.current = { key: newCompletionAttemptKey(stop.sid), fingerprint };
       }
-      const result = await onComplete(client?.id ?? stop.clientId ?? stop.id, completionEntry, stop.sid, completionAttempt.current.key);
+      // onComplete verifies this exact request in IndexedDB before starting network work. The tech can
+      // close this sheet immediately while the same idempotency key is retried in the background.
+      const result = await onComplete(client?.id ?? stop.clientId ?? stop.id, completionEntry, stop.sid, completionAttempt.current.key, buildDeliveryIntent());
       if (result && result.ok === false) throw new Error(result.error || "The completed stop was not saved.");
+      setInvoiceOutcome(result?.invoiceOutcome || null);
       if (result?.receiptId) ctx.reportId = result.receiptId;
-      if (typeof onClearDraft === "function") onClearDraft(stop.sid); // clear only after the shared save confirms
-      const newlyApplied = !result || result.applied !== false;
+      if (result?.confirmed) {
+        completionFinished.current = true;
+        if (typeof onClearDraft === "function") onClearDraft(stop.sid);
+        try { if (draftScope) await removeStopDraft(draftScope, stop.sid); } catch (_) {}
+      }
+      const newlyApplied = !!result?.confirmed && (!result || result.applied !== false);
       if (newlyApplied && officeFlag && officeFlagMsg.trim() && onOfficeAlert) {
         onOfficeAlert({ client: client?.name || "Client", clientId: client?.id, sid: stop?.sid, message: officeFlagMsg.trim(), date: todayStr });
       }
@@ -10091,6 +10295,9 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
         // saved, but the success screen must also show the real email/text outcomes.
         if (sends.length) await Promise.allSettled(sends);
       }
+      if (result?.queued) {
+        setCompletionSync({ id: result.outboxId, state: result.state || "queued", error: "" });
+      }
       setDone(true);
     } catch (error) {
       setSaveError((error && error.message) || "Couldn't save the completed stop. Nothing was changed.");
@@ -10107,6 +10314,31 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
   // null means this was an idempotent replay of an already-completed stop, so no duplicate
   // delivery was attempted. An object records the exact automatic plan shown on the receipt.
   const [reportPlan, setReportPlan] = useState(null);
+  useEffect(() => {
+    const onOutbox = (event) => {
+      const item = event?.detail?.item;
+      if (!item || String(item.sid) !== String(stop.sid)) return;
+      const activeKey = completionAttempt.current.key;
+      if (activeKey && String(item.idempotencyKey) !== String(activeKey)) return;
+      setCompletionSync({ id: item.id, state: item.state, error: item.lastError || "", retryAt: item.retryAt || 0 });
+      if (item.invoiceOutcome) setInvoiceOutcome(item.invoiceOutcome);
+      if (item.state === "saved") {
+        completionFinished.current = true;
+        const delivery = item.delivery || {};
+        setReportPlan(delivery.plan || {});
+        const msgs = {};
+        const busy = {};
+        Object.entries(delivery.channels || {}).forEach(([key, channel]) => {
+          busy[key] = channel?.status === "sending" || channel?.status === "pending";
+          if (channel?.result) msgs[key] = channel.result;
+          else if (channel?.status === "needs_review") msgs[key] = { ok: false, text: channel.error || "Delivery needs office review before another attempt." };
+        });
+        setReportSend({ busy, msgs });
+      }
+    };
+    window.addEventListener("sps-completion-outbox", onOutbox);
+    return () => window.removeEventListener("sps-completion-outbox", onOutbox);
+  }, [stop.sid]); // eslint-disable-line react-hooks/exhaustive-deps
   const rsStart = (ch) => setReportSend(s => ({ busy: { ...s.busy, [ch]: true }, msgs: { ...s.msgs, [ch]: null } }));
   const rsDone = (ch, msg) => setReportSend(s => ({ busy: { ...s.busy, [ch]: false }, msgs: { ...s.msgs, [ch]: msg } }));
   // Drop the same report into the client's in-app portal thread as an independent channel.
@@ -10236,11 +10468,31 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
   const sectionGap = { marginBottom: 18 };
 
   if (done) {
+    const completionNeedsReview = completionSync?.state === "needs_review";
+    const completionPending = completionSync && completionSync.state !== "saved" && !completionNeedsReview;
+    const completionConfirmed = !completionSync || completionSync.state === "saved";
     return (
       <Modal title="Service Complete" onClose={onClose}>
         <div style={{ textAlign: "center", padding: "4px 0" }}>
-          <div style={{ width: 60, height: 60, borderRadius: 18, background: hexA("#16a34a", 0.1), color: "#16a34a", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name="check" size={28} /></div>
-          <div style={{ fontWeight: 800, fontSize: 17, color: T.text, marginBottom: 6 }}>Saved to {firstName}'s history</div>
+          <div style={{ width: 60, height: 60, borderRadius: 18, background: hexA(completionNeedsReview ? "#d97706" : completionPending ? T.primary : "#16a34a", 0.1), color: completionNeedsReview ? "#d97706" : completionPending ? T.primary : "#16a34a", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px" }}><Icon name={completionNeedsReview ? "warning" : completionPending ? "refresh" : "check"} size={28} /></div>
+          <div style={{ fontWeight: 800, fontSize: 17, color: T.text, marginBottom: 6 }}>
+            {completionNeedsReview ? "Saved on this iPhone — needs review" : completionPending ? "Saved on this iPhone" : `Saved to ${firstName}'s history`}
+          </div>
+          {completionPending && (
+            <div style={{ maxWidth: 420, margin: "0 auto 12px", padding: "10px 12px", borderRadius: 11, background: hexA(T.primary, 0.08), color: T.primary, fontSize: 12, fontWeight: 750, lineHeight: 1.45 }}>
+              Syncing this completed report in the background. You can close this sheet and continue working.
+            </div>
+          )}
+          {completionNeedsReview && (
+            <div role="alert" style={{ maxWidth: 420, margin: "0 auto 12px", padding: "10px 12px", borderRadius: 11, background: hexA("#d97706", 0.1), color: "#b45309", fontSize: 12, fontWeight: 750, lineHeight: 1.45 }}>
+              {completionSync?.error || "The shared stop changed while this report was syncing. Your full draft remains on this device for office review."}
+            </div>
+          )}
+          {completionConfirmed && invoiceOutcome?.status === "created" && (
+            <div style={{ maxWidth: 420, margin: "0 auto 12px", padding: "10px 12px", borderRadius: 11, background: hexA("#16a34a", 0.08), color: "#15803d", fontSize: 12, fontWeight: 750, lineHeight: 1.4 }}>
+              {invoiceOutcome.kind === "monthly" ? `Monthly draft created from ${invoiceOutcome.visitCount || "the completed"} visits.` : "Draft invoice created for office review."}
+            </div>
+          )}
           {/* profit chip */}
           <div style={{ display: "inline-block", background: profit >= 0 ? `${T.accent}18` : "#C0392B18", color: profit >= 0 ? T.accent : "#C0392B", borderRadius: 20, padding: "6px 16px", fontSize: 14, fontWeight: 800, marginBottom: 16 }}>
             {profit >= 0 ? "Profit" : "Loss"}: {money(Math.abs(profit))} · {margin.toFixed(0)}% margin
@@ -10295,7 +10547,11 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
           })()}
           <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 4, paddingTop: 14, marginBottom: 14, textAlign: "left" }}>
             <div style={{ fontSize: 11, fontWeight: 850, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, marginBottom: 9 }}>Client report delivery</div>
-            {reportPlan === null ? (
+            {completionPending ? (
+              <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: "11px 12px", fontSize: 12.5, color: T.textMuted, lineHeight: 1.45 }}>
+                Client delivery will begin only after the server confirms the completed stop.
+              </div>
+            ) : reportPlan === null ? (
               <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: "11px 12px", fontSize: 12.5, color: T.textMuted, lineHeight: 1.45 }}>
                 This completion was already saved on another attempt. This screen did not send another report.
               </div>
@@ -13041,7 +13297,7 @@ function StopChangeModal({ stop, client, dayDate, email, onReschedule, onCancelS
 // reload / resync / close (the module re-initializes then). Cleared on a Schedule re-tap.
 let SCHED_VIEW = { date: null, tech: null };
 
-function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, me, onClientSelect, estimates = [], seedClientIds, clearSeed, seedEstimate, clearEstimateSeed, onScheduleEstimate, focusStop, clearFocus, stopDrafts = {}, setStopDrafts, email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {}, arrivals = {}, onArrived, onValidateArrival, enRoute = {}, onEnRoute }) {
+function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, scheduleCfg, team, me, onClientSelect, estimates = [], seedClientIds, clearSeed, seedEstimate, clearEstimateSeed, onScheduleEstimate, focusStop, clearFocus, stopDrafts = {}, setStopDrafts, stopDraftsReady = true, draftScope = "", email, onComplete, onUncomplete, completedSids, onOfficeAlert, routeAssignments, setRouteAssignments, vp = {}, arrivals = {}, onArrived, onValidateArrival, enRoute = {}, onEnRoute }) {
   const { T, perms, branding } = useApp();
   const wx = useAreaWeather((branding && branding.companyAddress) || "");  // service-area forecast for weather flags
   const cfg = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
@@ -14318,6 +14574,8 @@ function Schedule({ clients, setClients, catalog, costs, schedule, setSchedule, 
           arrivedAt={arrivals[completeModal.stop.sid]}
           enRouteAt={enRoute[completeModal.stop.sid]}
           draft={stopDrafts[completeModal.stop.sid]}
+          draftReady={stopDraftsReady}
+          draftScope={draftScope}
           onSaveDraft={setStopDrafts ? (sid, d) => setStopDrafts(prev => ({ ...(prev || {}), [sid]: d })) : null}
           onClearDraft={setStopDrafts ? (sid) => setStopDrafts(prev => { const n = { ...(prev || {}) }; delete n[sid]; return n; }) : null}
           onComplete={onComplete}
@@ -23355,14 +23613,29 @@ function PushSettingsCard() {
   const { T } = useApp();
   const [ps, setPs] = useState({ perm: "checking", apns: null, busy: false, msg: "" });
   const refresh = async () => {
-    const perm = await pushPermissionState();
-    let apns = null;
+    // Set permission state independently from the server health check. Previously a slow
+    // /api/push/register request kept this entire card on "Checking…" even after iOS had
+    // answered. The outer deadline also covers a module/bridge import that never settles.
+    const perm = await pushCallWithin(
+      pushPermissionState(),
+      8000,
+      "The iPhone notification connection check timed out.",
+    ).catch((error) => {
+      try { console.warn("[push] settings refresh timed out", error); } catch (_) {}
+      return pushIsNativeRuntime() ? "error" : "unsupported";
+    });
+    setPs(s => ({ ...s, perm }));
+
     try {
-      const r = await fetch(`${PROD_URL}/api/push/register`);
+      const r = await pushCallWithin(
+        fetch(`${PROD_URL}/api/push/register`),
+        5000,
+        "Notification server status timed out.",
+      );
       const d = await r.json().catch(() => ({}));
-      apns = !!(d.configured && d.configured.apns);
+      const apns = !!(d.configured && d.configured.apns);
+      setPs(s => ({ ...s, apns }));
     } catch (_) {}
-    setPs(s => ({ ...s, perm, apns }));
   };
   useEffect(() => { refresh(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const enable = async () => {
@@ -23383,7 +23656,8 @@ function PushSettingsCard() {
     }));
     await refresh();
   };
-  const native = ps.perm !== "unsupported" && ps.perm !== "checking";
+  const nativeShell = pushIsNativeRuntime();
+  const native = nativeShell || (ps.perm !== "unsupported" && ps.perm !== "checking");
   return (
     <div style={{ border: `1px solid ${T.border}`, borderRadius: 16, background: T.surface, padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
       <div>
@@ -23403,7 +23677,9 @@ function PushSettingsCard() {
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
           <Btn variant="primary" sm onClick={ps.busy ? undefined : enable}>{ps.perm === "granted" ? "Re-register this device" : "Enable on this device"}</Btn>
           <Btn variant="ghost" sm onClick={ps.busy ? undefined : disable}>Turn off</Btn>
+          {ps.perm === "checking" && <span style={{ fontSize: 12, color: T.textMuted }}>Checking this iPhone in the background…</span>}
           {ps.perm === "denied" && <span style={{ fontSize: 12, color: T.warning }}>Blocked in iOS Settings → Notifications → SPS Way.</span>}
+          {ps.perm === "error" && <span style={{ fontSize: 12, color: T.warning }}>The iOS notification bridge did not answer. Tap Enable to retry it directly.</span>}
         </div>
       )}
       {ps.msg && <div style={{ fontSize: 12.5, color: T.textMuted }}>{ps.msg}</div>}
@@ -36385,7 +36661,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   const [enRoute, setEnRoute, lenr] = useStoredState("sps_enroute", {});
   // Build 15, 7A — per-stop in-progress draft of the CompleteStopModal inputs, so a lock /
   // rotate / background / remount never loses the tech's work. Keyed by sid; cleared on finish.
-  const [stopDrafts, setStopDrafts] = useStoredState("sps_stop_drafts", {});
+  const [stopDrafts, setStopDrafts, lstopDrafts] = useStoredState("sps_stop_drafts", {});
   const vp = useViewport();
   const keyboardInset = useKeyboardInset();
   const keyboardOpen = keyboardInset > 120;
@@ -36408,7 +36684,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   // normally-sized Mac window reflows to the desktop shell instead of a narrow column.
   const isDesktopWeb = vp.width >= (isMacApp ? 1024 : 1200) && isWebDesktopEnv;
   const [reminderLog, setReminderLog, lrem] = useStoredState("sps_reminders", {}); // { [sid]: { sentAt, method } }
-  const hydrated = lc && lb && ls && lcat && lem && lco && lh && lbud && loa && lld && lscfg && lrol && ltm && lsesh && linv && linvc && lcomp && lrem && larr;
+  const hydrated = lc && lb && ls && lcat && lem && lco && lh && lbud && loa && lld && lscfg && lrol && ltm && lsesh && linv && linvc && lcomp && lrem && larr && lstopDrafts;
 
   // Restore each top-level workspace exactly where it was scrolled. Cleanup records the outgoing
   // page before React swaps its contents; the next effect restores the incoming page after paint.
@@ -37394,6 +37670,16 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   }, []);
 
   const [dbError, setDbError] = useState(null);
+  const [completionOutboxItems, setCompletionOutboxItems] = useState([]);
+  const completionOutboxDrainRef = useRef(null);
+  const completionOutboxBusyRef = useRef(false);
+  const publishCompletionOutbox = (items, changedItem = null) => {
+    const next = Array.isArray(items) ? items : [];
+    setCompletionOutboxItems(next);
+    if (changedItem) {
+      try { window.dispatchEvent(new CustomEvent("sps-completion-outbox", { detail: { item: changedItem } })); } catch (_) {}
+    }
+  };
   useEffect(() => {
     let pending = null;
     const onStatus = (e) => {
@@ -39572,44 +39858,257 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     if (!response.ok || data.ok !== true) {
       const error = new Error(data.error || "The stop could not be saved. Nothing was changed.");
       error.code = data.code || "";
+      error.status = response.status;
       error.legacy = !!data.legacy;
       throw error;
     }
     return data;
   };
 
-  const handleCompleteStop = async (clientId, entry, sid, idempotencyKey) => {
-    await store.flush();
-    const blocked = store.listConflicts().find(conflict => STOP_MUTATION_KEYS.includes(conflict.key));
-    if (blocked) throw new Error("Resolve the shared data conflict at the top of the app before completing this stop.");
-    const saved = await requestStopMutation({ mode: "complete", clientId, sid, entry, idempotencyKey });
+  const refreshCompletionOutboxView = async (changedItem = null) => {
+    if (!authUserId) return [];
+    const items = await readCompletionOutbox(authUserId).catch(() => []);
+    publishCompletionOutbox(items, changedItem);
+    return items;
+  };
+  const patchCompletionOutboxItem = async (id, updater) => {
+    const item = await updateCompletionIntent(authUserId, id, updater);
+    await refreshCompletionOutboxView(item);
+    return item;
+  };
+
+  const initializeCompletionDelivery = (delivery) => {
+    const plan = delivery?.plan || {};
+    const existing = delivery?.channels || {};
+    const channels = {};
+    for (const key of ["text", "email", "app"]) {
+      channels[key] = existing[key] || { status: plan[key] ? "pending" : "skipped", result: plan[key] ? null : { ok: false, text: "Not configured for automatic delivery." } };
+    }
+    return { ...(delivery || {}), channels };
+  };
+
+  const deliverConfirmedCompletion = async (startingItem) => {
+    let item = startingItem;
+    let delivery = initializeCompletionDelivery(item.delivery);
+    if (JSON.stringify(delivery) !== JSON.stringify(item.delivery || {})) {
+      item = await patchCompletionOutboxItem(item.id, { delivery }) || item;
+      delivery = item.delivery || delivery;
+    }
+
+    // An interrupted delivery attempt is intentionally never replayed automatically. Texts carry a
+    // server receipt too, but an uncertain provider handoff still belongs in Comms review rather
+    // than an invisible retry that could surprise the client.
+    for (const key of ["text", "email", "app"]) {
+      if (delivery.channels?.[key]?.status !== "sending") continue;
+      const channel = { ...delivery.channels[key], status: "needs_review", error: "The app closed before this delivery response was confirmed. Check Comms before sending again." };
+      delivery = { ...delivery, channels: { ...delivery.channels, [key]: channel } };
+      item = await patchCompletionOutboxItem(item.id, { delivery, deliveryNeedsReview: true }) || item;
+    }
+
+    const runChannel = async (key) => {
+      let channel = delivery.channels?.[key];
+      if (!channel || channel.status !== "pending") return;
+      channel = { ...channel, status: "sending", startedAt: Date.now(), error: "" };
+      delivery = { ...delivery, channels: { ...delivery.channels, [key]: channel } };
+      item = await patchCompletionOutboxItem(item.id, { delivery }) || item;
+
+      let result;
+      let terminal = "needs_review";
+      try {
+        if (key === "email") {
+          const entry = item.request?.entry || {};
+          result = await sendServiceReportEmail({
+            client: delivery.client,
+            email: delivery.email,
+            branding: delivery.branding,
+            accent: delivery.accent,
+            ctx: { ...(delivery.ctx || {}), reportId: item.receiptId || "" },
+            readings: entry.readings || {},
+            treatmentsUsed: entry.treatmentsUsed || [],
+            partsUsed: entry.partsUsed || [],
+            photos: entry.photos || [],
+            origin: `${delivery.origin || `visit:${item.sid}`} · report email`,
+          });
+          terminal = result?.ok || result?.held ? (result?.held ? "held" : "delivered") : "needs_review";
+        } else if (key === "text") {
+          const recipient = delivery.client?.phone || "";
+          const sms = recipient
+            ? await sendSms(recipient, delivery.textMessage || "", {
+              clientId: delivery.client?.id ?? item.clientId,
+              type: "Service report",
+              origin: `${delivery.origin || `visit:${item.sid}`} · report text`,
+              idempotencyKey: `${item.idempotencyKey}-report-text`,
+            })
+            : { ok: false, error: "No phone number on file for this client." };
+          result = sms?.ok
+            ? { ok: !!sms.acceptedForClient, text: sms.held ? "Test Mode held the report text." : sms.redirected ? "Test Mode sent the report text only to your test phone." : "Report text accepted for the client." }
+            : { ok: false, text: sms?.error || "The report text was not confirmed." };
+          terminal = sms?.ok ? (sms.held ? "held" : "delivered") : "needs_review";
+        } else if (key === "app") {
+          const posted = await postToPortalSafe({
+            client_id: String(delivery.client?.id ?? item.clientId),
+            sender: "staff",
+            sender_name: delivery.branding?.companyName || "",
+            body: delivery.portalBody || "",
+          });
+          result = posted?.held
+            ? { ok: false, text: "Test Mode held the in-app report." }
+            : posted?.error
+              ? { ok: false, text: posted.error.message || "The in-app report was not confirmed." }
+              : { ok: true, text: "Report posted in the client app." };
+          terminal = posted?.held ? "held" : posted?.error ? "needs_review" : "delivered";
+        }
+      } catch (error) {
+        result = { ok: false, text: error?.message || "Delivery could not be confirmed." };
+        terminal = "needs_review";
+      }
+      channel = {
+        ...channel,
+        status: terminal,
+        completedAt: Date.now(),
+        result,
+        error: terminal === "needs_review" ? (result?.text || "Delivery could not be confirmed.") : "",
+      };
+      delivery = { ...delivery, channels: { ...delivery.channels, [key]: channel } };
+      item = await patchCompletionOutboxItem(item.id, {
+        delivery,
+        deliveryNeedsReview: Object.values(delivery.channels).some(value => value?.status === "needs_review"),
+      }) || item;
+    };
+
+    // Text delivery has a server-side idempotency receipt, but an uncertain response is still
+    // surfaced for review instead of silently hammering the client's phone.
+    await runChannel("text");
+    await runChannel("email");
+    await runChannel("app");
+    return item;
+  };
+
+  const applyConfirmedCompletion = async (saved, item) => {
     const refreshed = await refreshStopBaseline();
+    setStopDrafts(prev => { const next = { ...(prev || {}) }; delete next[item.sid]; return next; });
+    try { await removeStopDraft(authUserId, item.sid); } catch (_) {}
     if (saved.applied) {
-      // External effects happen only after the endpoint confirms the completion, history, balance,
-      // and exact stock deductions were durably committed together.
-      const trackedStop = (schedule || []).flatMap(day => day.stops || []).find(stop => String(stop.sid) === String(sid));
+      const trackedStop = (schedule || []).flatMap(day => day.stops || []).find(stop => String(stop.sid) === String(item.sid));
       try { if (trackedStop?.trackToken) geoTrackWrite(trackedStop, "complete"); } catch (_) {}
-      const savedClient = refreshed?.sps_clients?.find(item => item && String(item.id) === String(clientId));
-      const clientName = saved.clientName || savedClient?.name || "A client";
+      const savedClient = refreshed?.sps_clients?.find(candidate => candidate && String(candidate.id) === String(item.clientId));
+      const clientName = saved.clientName || savedClient?.name || item.delivery?.client?.name || "A client";
       if (!(perms && perms.isAdmin)) {
-        try { sendPushEvent("stop_completed", { body: `${clientName} — visit completed`, collapseId: `stop-${sid || clientId}` }); } catch (_) {}
+        try { sendPushEvent("stop_completed", { body: `${clientName} — visit completed`, collapseId: `stop-${item.sid || item.clientId}` }); } catch (_) {}
       }
       const locationSource = refreshed?.sps_catalog || catalog;
       const locName = (locationId) => ((locationSource.locations || []).find(location => String(location.id) === String(locationId)) || {}).name || "";
       const kindBySection = { treatments: "treatment", parts: "part", products: "product" };
       try {
         (saved.inventoryDeducted || []).forEach(line => (line.deductions || []).forEach(delta => logInvChange({
-          action: "Used (job)",
-          item: line.itemName,
-          kind: kindBySection[line.section] || line.section,
-          qty: delta.amount,
-          unit: line.unit || "",
-          loc: locName(delta.locationId),
-          note: clientName,
+          action: "Used (job)", item: line.itemName, kind: kindBySection[line.section] || line.section,
+          qty: delta.amount, unit: line.unit || "", loc: locName(delta.locationId), note: clientName,
         })));
       } catch (_) {}
+      if (item.delivery?.officeAlert) {
+        try { handleOfficeAlert(item.delivery.officeAlert); } catch (_) {}
+      }
     }
-    return { ok: true, applied: !!saved.applied, alreadyCompleted: !!saved.alreadyCompleted, receiptId: saved.receiptId || null };
+    return refreshed;
+  };
+
+  completionOutboxDrainRef.current = async () => {
+    if (!authUserId || completionOutboxBusyRef.current) return;
+    completionOutboxBusyRef.current = true;
+    try {
+      let items = await readCompletionOutbox(authUserId);
+      publishCompletionOutbox(items);
+      for (const candidate of items) {
+        if (candidate.uid !== String(authUserId)) continue;
+        if (candidate.state === "needs_review") continue;
+        if (candidate.state === "saved") {
+          const hasPendingDelivery = Object.values(candidate.delivery?.channels || {}).some(channel => ["pending", "sending"].includes(channel?.status));
+          if (hasPendingDelivery) await deliverConfirmedCompletion(candidate);
+          continue;
+        }
+        if (!["queued", "syncing"].includes(candidate.state) || Number(candidate.retryAt || 0) > Date.now()) continue;
+        let item = await patchCompletionOutboxItem(candidate.id, { state: "syncing", lastError: "", syncStartedAt: Date.now() }) || candidate;
+        try {
+          // Drain older shared edits in the background, not on the Finish button's critical path.
+          const flushReceipt = await store.flush();
+          const flushIssue = storeReceiptIssue(flushReceipt, "Preparing the completed stop");
+          if (flushIssue) {
+            const error = new Error(flushIssue); error.status = 503; throw error;
+          }
+          const blocked = store.listConflicts().find(conflict => STOP_MUTATION_KEYS.includes(conflict.key));
+          if (blocked) {
+            const error = new Error("Resolve the shared data conflict before this completed stop can sync."); error.status = 409; error.code = "app-state-conflict"; throw error;
+          }
+          const saved = await requestStopMutation(item.request);
+          await applyConfirmedCompletion(saved, item);
+          const delivery = initializeCompletionDelivery(item.delivery);
+          item = await patchCompletionOutboxItem(item.id, {
+            state: "saved",
+            savedAt: Date.now(),
+            retryAt: 0,
+            lastError: "",
+            receiptId: saved.receiptId || item.receiptId || null,
+            invoiceOutcome: saved.invoiceOutcome || null,
+            applied: !!saved.applied,
+            alreadyCompleted: !!saved.alreadyCompleted,
+            delivery,
+          }) || item;
+          await deliverConfirmedCompletion(item);
+        } catch (error) {
+          const failure = classifyCompletionFailure(error);
+          if (failure.retryable) {
+            const retryCount = Math.max(0, Number(item.retryCount) || 0) + 1;
+            item = await patchCompletionOutboxItem(item.id, {
+              state: "queued",
+              retryCount,
+              retryAt: Date.now() + completionRetryDelay(retryCount),
+              lastError: failure.message,
+            }) || item;
+          } else {
+            item = await patchCompletionOutboxItem(item.id, {
+              state: "needs_review",
+              retryAt: 0,
+              lastError: failure.message,
+              errorCode: failure.code || "",
+              errorStatus: failure.status || 0,
+            }) || item;
+          }
+        }
+      }
+    } catch (error) {
+      console.warn("completion outbox drain failed:", error?.message || error);
+    } finally {
+      completionOutboxBusyRef.current = false;
+      await refreshCompletionOutboxView();
+    }
+  };
+
+  useEffect(() => {
+    if (!authUserId) { setCompletionOutboxItems([]); return undefined; }
+    let active = true;
+    const drain = () => { if (active) void completionOutboxDrainRef.current?.(); };
+    readCompletionOutbox(authUserId).then(items => {
+      if (!active) return;
+      publishCompletionOutbox(items);
+      drain();
+    }).catch(() => {});
+    const onVisible = () => { if (!document.hidden) drain(); };
+    window.addEventListener("online", drain);
+    document.addEventListener("visibilitychange", onVisible);
+    const timer = setInterval(drain, 15000);
+    return () => {
+      active = false;
+      window.removeEventListener("online", drain);
+      document.removeEventListener("visibilitychange", onVisible);
+      clearInterval(timer);
+    };
+  }, [authUserId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleCompleteStop = async (clientId, entry, sid, idempotencyKey, delivery) => {
+    const queued = await enqueueCompletionIntent({ uid: authUserId, clientId, sid, entry, idempotencyKey, delivery });
+    await refreshCompletionOutboxView(queued);
+    setTimeout(() => { void completionOutboxDrainRef.current?.(); }, 0);
+    return { ok: true, queued: true, confirmed: false, applied: false, outboxId: queued.id, state: queued.state };
   };
 
   const handleUncompleteStop = async (clientId, sid) => {
@@ -39890,7 +40389,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           {selectedClient && <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} initialTab={clientOpenTab} onTabChange={setClientOpenTab} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>}
         </>
       ))}
-      {page === "schedule" && <SectionErrorBoundary key={"schedule-" + schedNonce}><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} estimates={estimatesRaw} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} seedEstimate={scheduleEstimateSeed} clearEstimateSeed={() => setScheduleEstimateSeed(null)} onScheduleEstimate={handleScheduleApprovedEstimate} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} onValidateArrival={validateArrivalStop} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
+      {page === "schedule" && <SectionErrorBoundary key={"schedule-" + schedNonce}><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} estimates={estimatesRaw} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} seedEstimate={scheduleEstimateSeed} clearEstimateSeed={() => setScheduleEstimateSeed(null)} onScheduleEstimate={handleScheduleApprovedEstimate} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} stopDraftsReady={lstopDrafts} draftScope={authUserId} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} onValidateArrival={validateArrivalStop} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <SectionErrorBoundary key="inventory"><InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} /></SectionErrorBoundary>}
       {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} branding={branding} T={T} budget={budget} />}
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} isAdmin={perms.isAdmin} />}
@@ -39952,6 +40451,20 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       onArrived={() => handleArrived(detectedArrival.stop.sid, detectedArrival.stop)}
     />
   ) : null;
+  const completionQueueSummary = completionOutboxSummary(completionOutboxItems);
+  const completionOutboxBanner = (completionQueueSummary.queued || completionQueueSummary.waiting || completionQueueSummary.needsReview) ? (
+    <div role="status" style={{ background: hexA(completionQueueSummary.needsReview ? "#d97706" : T.primary, 0.1), borderBottom: `1px solid ${hexA(completionQueueSummary.needsReview ? "#d97706" : T.primary, 0.28)}`, padding: vp.isDesktop ? "10px 20px" : "9px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: T.text, flexShrink: 0 }}>
+      <span style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0, lineHeight: 1.4 }}>
+        <Icon name={completionQueueSummary.needsReview ? "warning" : "refresh"} size={15} />
+        {completionQueueSummary.needsReview
+          ? `${completionQueueSummary.needsReview} completed report${completionQueueSummary.needsReview === 1 ? "" : "s"} need review. The full draft is safe on this device.`
+          : `${completionQueueSummary.queued + completionQueueSummary.waiting} completed report${completionQueueSummary.queued + completionQueueSummary.waiting === 1 ? "" : "s"} saved on this device and syncing in the background.`}
+      </span>
+      <button onClick={completionQueueSummary.needsReview ? () => handleNav("schedule") : () => { void completionOutboxDrainRef.current?.(); }} style={{ background: completionQueueSummary.needsReview ? "#d97706" : T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "6px 12px", fontSize: 11.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>
+        {completionQueueSummary.needsReview ? "Open Schedule" : "Sync now"}
+      </button>
+    </div>
+  ) : null;
 
   // ── Desktop (>=700px): left sidebar + content. Mobile (below) is unchanged. ──
   if (vp.isDesktop) {
@@ -39966,6 +40479,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
             <div style={{ height: 2, flexShrink: 0, zIndex: 99, background: syncState === "syncing" ? T.primary : syncState === "saved" ? "#16a34a" : "transparent", transition: "background 0.3s", animation: syncState === "syncing" ? "syncPulse 0.8s ease-in-out" : "none" }} />
             <DataConflictBanner conflict={dataConflict} busy={conflictBusy} T={T} onResolve={resolveDataConflict} />
+            {completionOutboxBanner}
             {dbError && (
               <div style={{ background: hexA("#F59E0B", 0.1), borderBottom: `1px solid ${hexA("#F59E0B", 0.3)}`, padding: "10px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: T.text }}>
                 <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Icon name="warning" size={15} />{dbError}</span>
@@ -40093,6 +40607,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
         <div style={{ height: 2, flexShrink: 0, zIndex: 99, background: syncState === "syncing" ? T.primary : syncState === "saved" ? "#16a34a" : "transparent", transition: "background 0.3s", animation: syncState === "syncing" ? "syncPulse 0.8s ease-in-out" : "none" }} />
 
         <DataConflictBanner conflict={dataConflict} busy={conflictBusy} T={T} onResolve={resolveDataConflict} />
+        {completionOutboxBanner}
         {dbError && (
           <div style={{ background: hexA("#F59E0B", 0.1), borderBottom: `1px solid ${hexA("#F59E0B", 0.3)}`, padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: T.text }}>
             <span style={{ display:"flex", alignItems:"center", gap:6 }}><Icon name="warning" size={15} />{dbError}</span>

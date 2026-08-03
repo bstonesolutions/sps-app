@@ -349,6 +349,7 @@ test("QuickBooks sync returns credit memos and exact net receivables metadata", 
 });
 
 test("QuickBooks sync subtracts unapplied payments from net receivables", async () => {
+  const currentDate = new Date().toISOString().slice(0, 10);
   const invoice = {
     ...existingInvoice(),
     TotalAmt: 500,
@@ -359,7 +360,7 @@ test("QuickBooks sync subtracts unapplied payments from net receivables", async 
     SyncToken: "2",
     MetaData: { LastUpdatedTime: "2026-07-28T13:00:00-04:00" },
     PaymentRefNum: "ACH-9",
-    TxnDate: "2026-07-28",
+    TxnDate: currentDate,
     TotalAmt: 143.05,
     UnappliedAmt: 143.05,
     CustomerRef: { value: "42", name: "Generic Client" },
