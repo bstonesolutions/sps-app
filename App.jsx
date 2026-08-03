@@ -1986,12 +1986,25 @@ function AutocompleteInput({ value, onChange, historyKey, placeholder, style, au
 // ─────────────────────────────────────────────
 // THEME SYSTEM
 // ─────────────────────────────────────────────
-// hex -> rgba (for translucent chrome)
-const hexA = (hex, a) => {
-  const h = (hex || "#000000").replace("#", "");
-  const f = h.length === 3 ? h.split("").map(c => c + c).join("") : h;
-  const n = parseInt(f, 16);
-  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+// Color -> rgba (for translucent chrome). Theme borders are already rgba(), so preserve
+// their base alpha instead of trying to parse them as hex (which used to create black edges).
+const hexA = (color, a) => {
+  const source = String(color || "#000000").trim();
+  const requestedAlpha = Number(a);
+  const alpha = Number.isFinite(requestedAlpha) ? Math.max(0, Math.min(1, requestedAlpha)) : 1;
+  const rgbMatch = source.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)$/i);
+  if (rgbMatch) {
+    const channel = (value) => Math.max(0, Math.min(255, Math.round(Number(value) || 0)));
+    const parsedBaseAlpha = rgbMatch[4] == null ? 1 : Number(rgbMatch[4]);
+    const baseAlpha = Number.isFinite(parsedBaseAlpha) ? Math.max(0, Math.min(1, parsedBaseAlpha)) : 1;
+    return `rgba(${channel(rgbMatch[1])}, ${channel(rgbMatch[2])}, ${channel(rgbMatch[3])}, ${baseAlpha * alpha})`;
+  }
+  const raw = source.replace(/^#/, "");
+  const expanded = (raw.length === 3 || raw.length === 4) ? raw.split("").map(c => c + c).join("") : raw;
+  if (!/^[0-9a-f]{6}([0-9a-f]{2})?$/i.test(expanded)) return "rgba(0, 0, 0, 0)";
+  const n = Number.parseInt(expanded.slice(0, 6), 16);
+  const hexAlpha = expanded.length === 8 ? Number.parseInt(expanded.slice(6, 8), 16) / 255 : 1;
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${hexAlpha * alpha})`;
 };
 const _rgb = (hex) => { const h = (hex || "#000000").replace("#", ""); const f = h.length === 3 ? h.split("").map(c => c + c).join("") : h; const n = parseInt(f, 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
 const _toHex = (arr) => "#" + arr.map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0")).join("");
@@ -5638,7 +5651,7 @@ function HomeCommsWidget({ leads = [], clients = [], onNav, T, perms = {} }) {
         {top.map((r, i) => {
           const c = col(r.seed); const badge = kindBadge[r.kind];
           return (
-            <div key={i} onClick={r.onClick} style={{ display: "flex", alignItems: "center", gap: 11, padding: "10px 0", borderTop: `1px solid ${hexA(T.border, 0.6)}`, cursor: "pointer" }}>
+            <div key={i} onClick={r.onClick} style={{ display: "flex", alignItems: "center", gap: 11, padding: "10px 0", borderTop: `1px solid ${T.border}`, cursor: "pointer" }}>
               <div style={{ width: 36, height: 36, borderRadius: "50%", flexShrink: 0, display: "grid", placeItems: "center", background: hexA(c, 0.15), color: c, fontSize: 14, fontWeight: 800 }}>{r.kind === "sms" ? <Icon name="message" size={17} /> : (r.name || "?").trim()[0].toUpperCase()}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -24334,6 +24347,10 @@ function SyncStatus({ T, branding, team, currentUserId, email = {} }) {
 // presentation-only: the individual screens continue to own their data and actions.
 const CommsDensityContext = createContext(false);
 const useCompactComms = () => useContext(CommsDensityContext);
+// Brand themes can intentionally use a strong border color elsewhere in the app. Comms is a
+// high-density reading surface, so it needs its own iOS-like hairlines instead of dark framing.
+const commsHairline = (T, opacity = 0.15) => hexA(T.textMuted, opacity);
+const commsInsetRing = (T, opacity = 0.11) => `inset 0 0 0 1px ${commsHairline(T, opacity)}`;
 
 function CommsPageHeader({ title, description, icon = "inbox", meta, action, T, compact = false }) {
   const contextDense = useCompactComms();
@@ -24358,7 +24375,7 @@ function CommsPageHeader({ title, description, icon = "inbox", meta, action, T, 
 function CommsSearchField({ value, onChange, onClear, placeholder, T, ariaLabel, quiet = false, touch = false, pill = false }) {
   const dense = useCompactComms();
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: dense ? 8 : 10, height: touch ? 44 : (dense ? 42 : 46), boxSizing: "border-box", background: quiet ? T.surfaceAlt : T.surface, border: `1px solid ${quiet ? "transparent" : T.border}`, borderRadius: pill ? 999 : (dense ? 12 : 14), padding: dense ? "0 10px" : "0 13px", boxShadow: quiet ? "none" : "0 1px 2px rgba(0,0,0,0.035)", minWidth: 0 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: dense ? 8 : 10, height: touch ? 44 : (dense ? 42 : 46), boxSizing: "border-box", background: quiet ? T.surfaceAlt : T.surface, border: "none", borderRadius: pill ? 999 : (dense ? 12 : 14), padding: dense ? "0 10px" : "0 13px", boxShadow: quiet ? "none" : commsInsetRing(T, 0.13), minWidth: 0 }}>
       <span style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="search" size={17} /></span>
       <input value={value} onChange={e => onChange(e.target.value)} aria-label={ariaLabel || placeholder} placeholder={placeholder}
         style={{ flex: 1, minWidth: 0, minHeight: 0, height: "100%", padding: 0, border: "none", background: "transparent", outline: "none", fontFamily: "inherit", fontSize: 16, color: T.text }} />
@@ -24382,7 +24399,7 @@ function CommsMobileHeader({ title, description, action, T }) {
 function CommsIconAction({ icon, label, onClick, T, active = false }) {
   return (
     <button type="button" onClick={onClick} title={label} aria-label={label}
-      style={{ width: 42, height: 42, border: `1px solid ${active ? hexA(T.primary, 0.18) : hexA(T.border, 0.7)}`, borderRadius: 21, background: active ? hexA(T.primary, 0.09) : hexA(T.surface, 0.82), color: T.primary, display: "grid", placeItems: "center", cursor: "pointer", fontFamily: "inherit", flexShrink: 0, WebkitTapHighlightColor: "transparent" }}>
+      style={{ width: 42, height: 42, border: "none", borderRadius: 21, background: active ? hexA(T.primary, 0.09) : T.surfaceAlt, color: T.primary, boxShadow: commsInsetRing(T, active ? 0.08 : 0.1), display: "grid", placeItems: "center", cursor: "pointer", fontFamily: "inherit", flexShrink: 0, WebkitTapHighlightColor: "transparent" }}>
       <Icon name={icon} size={18} />
     </button>
   );
@@ -24392,10 +24409,10 @@ function CommsFloatingSearchDock({ value, onChange, placeholder, actionIcon, act
   if (typeof document === "undefined") return null;
   return createPortal(
     <div role="search" aria-label={placeholder} style={{ position: "fixed", left: "max(12px, env(safe-area-inset-left))", right: "max(12px, env(safe-area-inset-right))", bottom: "var(--sps-floating-action-bottom, calc(env(safe-area-inset-bottom) + 76px))", zIndex: 98, maxWidth: 560, height: 52, margin: "0 auto", display: "flex", alignItems: "center", gap: 8, pointerEvents: "none" }}>
-      <div style={{ flex: 1, minWidth: 0, height: 52, padding: 3, boxSizing: "border-box", pointerEvents: "auto", border: `1px solid ${hexA(T.border, 0.7)}`, borderRadius: 26, background: hexA(T.surface, 0.965), boxShadow: "0 5px 18px rgba(0,0,0,0.11)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}>
+      <div style={{ flex: 1, minWidth: 0, height: 52, padding: 3, boxSizing: "border-box", pointerEvents: "auto", border: "none", borderRadius: 26, background: hexA(T.surface, 0.975), boxShadow: "0 6px 22px rgba(15,23,42,0.10)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}>
         <CommsSearchField value={value} onChange={onChange} placeholder={placeholder} T={T} ariaLabel={placeholder} touch pill />
       </div>
-      {onAction && <div style={{ pointerEvents: "auto", width: 52, height: 52, borderRadius: 26, display: "grid", placeItems: "center", background: hexA(T.surface, 0.97), border: `1px solid ${hexA(T.border, 0.7)}`, boxShadow: "0 5px 18px rgba(0,0,0,0.11)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}><CommsIconAction icon={actionIcon || "edit"} label={actionLabel || "Create"} onClick={onAction} T={T} active /></div>}
+      {onAction && <div style={{ pointerEvents: "auto", width: 52, height: 52, borderRadius: 26, display: "grid", placeItems: "center", background: hexA(T.surface, 0.975), border: "none", boxShadow: "0 6px 22px rgba(15,23,42,0.10)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}><CommsIconAction icon={actionIcon || "edit"} label={actionLabel || "Create"} onClick={onAction} T={T} active /></div>}
     </div>,
     document.body
   );
@@ -24415,12 +24432,12 @@ function CommsSectionNavigator({ sections, activeId, onChange, T, phone = false,
     <div style={{ position: "relative", minWidth: 0 }}>
       {moreOpen && <button type="button" aria-label="Close communications menu" onClick={() => setMoreOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 1, border: "none", background: "transparent", padding: 0 }} />}
       <div style={{ position: "relative", zIndex: 2, display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
-        <nav ref={navRef} aria-label="Primary communications sections" style={{ flex: 1, minWidth: 0, height: 44, display: "flex", alignItems: "stretch", gap: 3, padding: 3, boxSizing: "border-box", background: hexA(T.textMuted, 0.085), border: `1px solid ${hexA(T.border, 0.72)}`, borderRadius: 15 }}>
+        <nav ref={navRef} aria-label="Primary communications sections" style={{ flex: 1, minWidth: 0, height: 44, display: "flex", alignItems: "stretch", gap: 3, padding: 3, boxSizing: "border-box", background: hexA(T.textMuted, 0.065), border: "none", boxShadow: commsInsetRing(T, 0.09), borderRadius: 15 }}>
           {primary.map(section => {
             const on = section.id === activeId;
             return (
               <button key={section.id} type="button" data-comms-section={section.id} onClick={() => onChange(section.id)} aria-current={on ? "page" : undefined}
-                style={{ flex: 1, minWidth: 0, border: "none", borderRadius: 11, background: on ? T.surface : "transparent", color: on ? T.primary : T.textMuted, boxShadow: on ? "0 1px 4px rgba(0,0,0,0.11)" : "none", fontFamily: "inherit", fontSize: phone ? 11.5 : 12.5, fontWeight: on ? 760 : 620, letterSpacing: "-0.01em", cursor: "pointer", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", WebkitTapHighlightColor: "transparent" }}>
+                style={{ flex: 1, minWidth: 0, border: "none", borderRadius: 11, background: on ? T.surface : "transparent", color: on ? T.primary : T.textMuted, boxShadow: on ? "0 1px 3px rgba(15,23,42,0.08)" : "none", fontFamily: "inherit", fontSize: phone ? 11.5 : 12.5, fontWeight: on ? 760 : 620, letterSpacing: "-0.01em", cursor: "pointer", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", WebkitTapHighlightColor: "transparent" }}>
                 {shortLabel(section)}
               </button>
             );
@@ -24428,13 +24445,13 @@ function CommsSectionNavigator({ sections, activeId, onChange, T, phone = false,
         </nav>
         {secondary.length > 0 && (
           <button type="button" aria-label="More communications sections" aria-haspopup="menu" aria-expanded={moreOpen} onClick={() => setMoreOpen(open => !open)}
-            style={{ width: 44, height: 44, flexShrink: 0, border: `1px solid ${secondaryActive || moreOpen ? hexA(T.primary, 0.28) : hexA(T.border, 0.72)}`, borderRadius: 15, background: secondaryActive || moreOpen ? hexA(T.primary, 0.09) : T.surface, color: secondaryActive || moreOpen ? T.primary : T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", boxShadow: "0 1px 3px rgba(0,0,0,0.045)", WebkitTapHighlightColor: "transparent" }}>
+            style={{ width: 44, height: 44, flexShrink: 0, border: "none", borderRadius: 15, background: secondaryActive || moreOpen ? hexA(T.primary, 0.09) : T.surfaceAlt, color: secondaryActive || moreOpen ? T.primary : T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", boxShadow: commsInsetRing(T, secondaryActive || moreOpen ? 0.06 : 0.1), WebkitTapHighlightColor: "transparent" }}>
             <Icon name="sliders" size={17} />
           </button>
         )}
       </div>
       {moreOpen && secondary.length > 0 && (
-        <div role="menu" aria-label="More communications sections" style={{ position: "absolute", zIndex: 3, top: 51, right: 0, width: `min(268px, calc(100vw - ${phone ? 24 : 48}px))`, padding: 7, border: `1px solid ${hexA(T.border, 0.9)}`, borderRadius: 17, background: hexA(T.surface, 0.985), boxShadow: "0 18px 46px rgba(0,0,0,0.2)", backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)" }}>
+        <div role="menu" aria-label="More communications sections" style={{ position: "absolute", zIndex: 3, top: 51, right: 0, width: `min(268px, calc(100vw - ${phone ? 24 : 48}px))`, padding: 7, border: "none", borderRadius: 17, background: hexA(T.surface, 0.99), boxShadow: `0 18px 46px rgba(15,23,42,0.14), ${commsInsetRing(T, 0.09)}`, backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)" }}>
           <div style={{ padding: "7px 10px 5px", color: T.textMuted, fontSize: 10, fontWeight: 760, letterSpacing: "0.08em", textTransform: "uppercase" }}>More tools</div>
           {secondary.map(section => {
             const on = section.id === activeId;
@@ -24471,7 +24488,7 @@ function CommsGroupHeader({ title, count, tone, T }) {
       {tone && <span style={{ width: 8, height: 8, borderRadius: "50%", background: tone, flexShrink: 0 }} />}
       <span style={{ fontSize: 12.5, fontWeight: 820, color: T.text, letterSpacing: "-0.01em" }}>{title}</span>
       {count != null && <span style={{ minWidth: 21, height: 21, padding: "0 6px", borderRadius: 100, background: T.surfaceAlt, color: T.textMuted, fontSize: 10.5, fontWeight: 800, display: "grid", placeItems: "center" }}>{count}</span>}
-      <div style={{ flex: 1, height: 1, background: hexA(T.border, 0.75) }} />
+      <div style={{ flex: 1, height: 1, background: commsHairline(T) }} />
     </div>
   );
 }
@@ -24665,7 +24682,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
     </div>
   );
   const listCards = (
-    <div style={{ display: "flex", flexDirection: "column", gap: phone ? 0 : (dense ? 7 : 10), padding: phone ? 0 : (dense ? "0 12px 12px" : "0 16px 16px"), margin: phone ? "0 12px 84px" : 0, background: phone && shown.length ? T.surface : "transparent", borderTop: phone && shown.length ? `1px solid ${T.border}` : "none", borderBottom: phone && shown.length ? `1px solid ${T.border}` : "none" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: phone ? 0 : (dense ? 7 : 10), padding: phone ? 0 : (dense ? "0 12px 12px" : "0 16px 16px"), margin: phone ? "0 12px 84px" : 0, background: phone && shown.length ? T.surface : "transparent", border: "none" }}>
       {shown.length === 0 && <CommsEmptyState T={T} icon="funnel" title={searchTerm ? "No matching leads" : "No leads in this stage"} copy={searchTerm ? "Try another name, service, phone number, or email." : "Website leads appear here automatically, or you can add one manually."} action={!searchTerm && <Btn sm onClick={openAddLead}>Add a lead</Btn>} />}
       {shown.map((l, rowIndex) => {
         const initials = (l.name || "?").trim().split(/\s+/).map(w => w[0]).slice(0, 2).join("").toUpperCase() || "?";
@@ -24679,7 +24696,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
           style={phone
             ? { position: "relative", width: "100%", minHeight: dense ? 70 : 76, background: T.surface, border: "none", padding: dense ? "10px 3px" : "12px 4px", cursor: "pointer", display: "flex", alignItems: "center", gap: dense ? 10 : 12, fontFamily: "inherit", textAlign: "left", color: T.text, WebkitTapHighlightColor: "transparent" }
             : { background: active ? hexA(T.primary, 0.06) : T.surface, border: `1px solid ${active ? hexA(T.primary, 0.4) : T.border}`, borderLeft: `3px solid ${STATUS_COLOR[l.status] || T.border}`, borderRadius: dense ? 14 : 16, padding: dense ? "9px 11px" : "13px 15px", cursor: "pointer", display: "flex", alignItems: "flex-start", gap: dense ? 8 : 12, boxShadow: "0 2px 10px rgba(0,0,0,0.04)", fontFamily: "inherit", textAlign: "left", width: "100%" }}>
-          {phone && rowIndex > 0 && <span aria-hidden="true" style={{ position: "absolute", left: dense ? 58 : 63, right: 0, top: 0, height: 1, background: hexA(T.border, 0.62) }} />}
+          {phone && rowIndex > 0 && <span aria-hidden="true" style={{ position: "absolute", left: dense ? 58 : 63, right: 0, top: 0, height: 1, background: commsHairline(T) }} />}
           {phone && isNew && <span aria-label="New lead" style={{ position: "absolute", left: -3, top: "50%", width: 7, height: 7, marginTop: -3.5, borderRadius: "50%", background: T.primary }} />}
           <div style={{ width: dense ? 44 : 48, height: dense ? 44 : 48, borderRadius: "50%", flexShrink: 0, background: isNew ? hexA(T.primary, 0.14) : T.surfaceAlt, color: isNew ? T.primary : T.textMuted, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 750, fontSize: dense ? 14 : 15 }}>{initials}</div>
           <div style={{ flex: 1, minWidth: 0 }}>
@@ -24697,7 +24714,7 @@ function LeadsScreen({ leads, setLeads, clients, onConvert, onLink, openLeadId, 
               <span style={{ fontSize: dense ? 10.5 : 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{meta}</span>
             </div>
           </div>
-          {firstImg && <ProtectedImage src={firstImg} alt="" loading="lazy" onError={e => { e.target.style.display = "none"; }} style={{ width: dense ? 42 : 46, height: dense ? 42 : 46, borderRadius: 10, objectFit: "cover", border: `1px solid ${T.border}`, flexShrink: 0, background: T.surfaceAlt }} />}
+          {firstImg && <ProtectedImage src={firstImg} alt="" loading="lazy" onError={e => { e.target.style.display = "none"; }} style={{ width: dense ? 42 : 46, height: dense ? 42 : 46, borderRadius: 10, objectFit: "cover", border: `1px solid ${commsHairline(T, 0.12)}`, flexShrink: 0, background: T.surfaceAlt }} />}
         </button>
         );
       })}
@@ -25906,7 +25923,7 @@ function MessagesScreen({ clients, currentUser, T, workspaceScope = "" }) {
           : card
           ? { position: "relative", display: "flex", alignItems: "center", gap: dense ? 8 : 12, padding: dense ? "9px 11px" : "13px 14px", minHeight: 58, width: "100%", background: hasUnread ? hexA(T.primary, 0.03) : T.surface, border: `1px solid ${hasUnread ? hexA(T.primary, 0.28) : T.border}`, borderRadius: dense ? 14 : 16, boxShadow: "0 1px 3px rgba(0,0,0,0.035)", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }
           : { position: "relative", display: "flex", alignItems: "center", gap: dense ? 8 : 12, padding: dense ? "10px 12px" : "13px 16px", width: "100%", background: active ? hexA(T.primary, 0.08) : (hasUnread ? hexA(T.primary, 0.04) : "none"), border: "none", borderBottom: `1px solid ${T.border}`, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-        {flat && rowIndex > 0 && <span aria-hidden="true" style={{ position: "absolute", left: dense ? 57 : 62, right: 0, top: 0, height: 1, background: hexA(T.border, 0.62) }} />}
+        {flat && rowIndex > 0 && <span aria-hidden="true" style={{ position: "absolute", left: dense ? 57 : 62, right: 0, top: 0, height: 1, background: commsHairline(T) }} />}
         {flat && hasUnread && <span aria-label="Unread" style={{ position: "absolute", left: -3, top: "50%", width: 7, height: 7, marginTop: -3.5, borderRadius: "50%", background: T.primary }} />}
         {card && !flat && hasUnread && <span style={{ position: "absolute", left: -1, top: 14, bottom: 14, width: 3, borderRadius: 3, background: T.primary }} />}
         {msgPhoto(c)
@@ -25932,7 +25949,7 @@ function MessagesScreen({ clients, currentUser, T, workspaceScope = "" }) {
   ) : twoPane ? (
     <div>{visibleThreads.map(t => convBtn(t, false))}</div>
   ) : phone ? (
-    <div style={{ display: "flex", flexDirection: "column", gap: 0, marginBottom: 16, background: T.surface, borderTop: `1px solid ${hexA(T.border, 0.72)}`, borderBottom: `1px solid ${hexA(T.border, 0.72)}` }}>{visibleThreads.map((t, i) => convBtn(t, true, i))}</div>
+    <div style={{ display: "flex", flexDirection: "column", gap: 0, marginBottom: 16, background: T.surface, border: "none" }}>{visibleThreads.map((t, i) => convBtn(t, true, i))}</div>
   ) : (
     <div style={{ display: "flex", flexDirection: "column", gap: dense ? 7 : 10, paddingBottom: 20 }}>{visibleThreads.map(t => convBtn(t, true))}</div>
   );
@@ -26135,7 +26152,7 @@ function ClientCommsLog({ clientId, T }) {
   entries.sort((a, b) => String(b.at).localeCompare(String(a.at)));
 
   const line = (r, label) => (
-    <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 12px", borderTop: `1px solid ${hexA(T.border, 0.55)}` }}>
+    <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 12px", borderTop: `1px solid ${commsHairline(T)}` }}>
       <span style={{ fontSize: 12, fontWeight: 700, color: T.text, flexShrink: 0, maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label || r.type || "Text"}</span>
       <span style={{ fontSize: 11.5, color: T.textMuted, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.body}</span>
       <span style={{ fontSize: 10.5, fontWeight: 600, color: r.ok === false ? "#E5484D" : T.textMuted, flexShrink: 0 }}>{r.ok === false ? "failed" : fmt(r.created_at)}</span>
@@ -26165,7 +26182,7 @@ function VisitCommsGroup({ group, T, fmt, fmtDay, stepOf, line }) {
   const anyFailed = ordered.some(r => r.ok === false);
   return (
     <div>
-      <button onClick={() => setOpen(o => !o)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 9, padding: "9px 12px", background: hexA(T.primary, 0.04), border: "none", borderTop: `1px solid ${hexA(T.border, 0.55)}`, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+      <button onClick={() => setOpen(o => !o)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 9, padding: "9px 12px", background: hexA(T.primary, 0.04), border: "none", borderTop: `1px solid ${commsHairline(T)}`, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
         <span style={{ fontSize: 12, fontWeight: 800, color: T.primary, flexShrink: 0 }}>Service visit</span>
         <span style={{ fontSize: 11.5, color: T.textMuted, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {fmtDay(group.at)} · {ordered.length} message{ordered.length === 1 ? "" : "s"}{anyFailed ? " · 1+ failed" : ""}
@@ -26278,7 +26295,7 @@ function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onS
       )}
 
       {/* Input */}
-      <div style={{ position: "sticky", bottom: 0, zIndex: 2, borderTop: `1px solid ${hexA(T.border, 0.45)}`, padding: `8px max(10px, env(safe-area-inset-right)) ${composerInset || 8}px max(10px, env(safe-area-inset-left))`, display: "flex", gap: 8, alignItems: "flex-end", transition: "padding-bottom 0.18s ease", background: hexA(T.surface, 0.975) }}>
+      <div style={{ position: "sticky", bottom: 0, zIndex: 2, borderTop: `1px solid ${commsHairline(T, 0.12)}`, padding: `8px max(10px, env(safe-area-inset-right)) ${composerInset || 8}px max(10px, env(safe-area-inset-left))`, display: "flex", gap: 8, alignItems: "flex-end", transition: "padding-bottom 0.18s ease", background: hexA(T.surface, 0.975) }}>
         <textarea
           value={draft}
           onChange={e => setDraft(e.target.value)}
@@ -27637,7 +27654,7 @@ function InboxPressPreview({ title, subtitle, pinned = false, canPin = false, re
     <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 330, display: "grid", placeItems: "center", padding: "max(14px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(14px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left))", background: "rgba(20,20,22,0.46)", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)" }}>
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={`Preview ${title}`} tabIndex={-1} onClick={(event) => event.stopPropagation()}
         style={{ width: "min(420px, 100%)", maxHeight: "min(78dvh, 700px)", display: "flex", flexDirection: "column", gap: 9, outline: "none" }}>
-        <div style={{ minHeight: 0, overflow: "hidden", background: T.surface, border: `1px solid ${hexA(T.border, 0.85)}`, borderRadius: 22, boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }}>
+        <div style={{ minHeight: 0, overflow: "hidden", background: T.surface, border: "none", borderRadius: 22, boxShadow: `0 20px 60px rgba(15,23,42,0.22), ${commsInsetRing(T, 0.09)}` }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, minHeight: 58, padding: "8px 8px 8px 16px", borderBottom: `1px solid ${T.border}` }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ color: T.text, fontSize: 16, fontWeight: 830, letterSpacing: "-0.02em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</div>
@@ -27649,7 +27666,7 @@ function InboxPressPreview({ title, subtitle, pinned = false, canPin = false, re
             {children}
           </div>
         </div>
-        <div aria-label="Preview actions" style={{ display: "grid", gridTemplateColumns: `repeat(${Math.max(1, actions.length)}, minmax(0, 1fr))`, overflow: "hidden", background: hexA(T.surface, 0.97), border: `1px solid ${hexA(T.border, 0.9)}`, borderRadius: 18, boxShadow: "0 10px 32px rgba(0,0,0,0.22)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}>
+        <div aria-label="Preview actions" style={{ display: "grid", gridTemplateColumns: `repeat(${Math.max(1, actions.length)}, minmax(0, 1fr))`, overflow: "hidden", background: hexA(T.surface, 0.97), border: "none", borderRadius: 18, boxShadow: `0 10px 32px rgba(15,23,42,0.16), ${commsInsetRing(T, 0.09)}`, backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}>
           {actions}
         </div>
       </div>
@@ -27698,7 +27715,7 @@ function CommsMobileDetailShell({
     <section ref={shellRef} role="dialog" aria-modal="true" aria-label={title || "Communication details"} tabIndex={-1}
       data-sps-comms-detail-shell data-comms-kind={kind}
       style={{ position: "fixed", inset: 0, zIndex: 220, display: "flex", flexDirection: "column", minHeight: 0, background: T.surface, color: T.text, overflow: "hidden", overscrollBehavior: "none" }}>
-      <header data-sps-comms-detail-header style={{ flexShrink: 0, paddingTop: "env(safe-area-inset-top)", background: hexA(T.surface, 0.975), borderBottom: `1px solid ${hexA(T.border, 0.5)}`, backdropFilter: "saturate(180%) blur(24px)", WebkitBackdropFilter: "saturate(180%) blur(24px)" }}>
+      <header data-sps-comms-detail-header style={{ flexShrink: 0, paddingTop: "env(safe-area-inset-top)", background: hexA(T.surface, 0.985), borderBottom: `1px solid ${commsHairline(T, 0.12)}`, backdropFilter: "saturate(180%) blur(24px)", WebkitBackdropFilter: "saturate(180%) blur(24px)" }}>
         <div style={{ minHeight: 66, padding: "3px max(8px, env(safe-area-inset-right)) 4px max(8px, env(safe-area-inset-left))", boxSizing: "border-box", display: "grid", gridTemplateColumns: "minmax(60px, auto) minmax(0, 1fr) minmax(60px, auto)", alignItems: "center", gap: 5 }}>
           <button type="button" onClick={onBack} aria-label={`Back to ${backLabel}`}
             style={{ minHeight: 44, justifySelf: "start", padding: "0 5px 0 0", border: "none", background: "transparent", color: T.primary, display: "inline-flex", alignItems: "center", gap: 1, fontFamily: "inherit", fontSize: 14.5, fontWeight: 660, cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
@@ -27717,7 +27734,7 @@ function CommsMobileDetailShell({
         {children}
       </div>
       {(footer || status) && (
-        <footer data-sps-comms-detail-footer style={{ flexShrink: 0, padding: `6px max(10px, env(safe-area-inset-right)) ${keyboardInset > 0 ? `${keyboardInset + 6}px` : "max(8px, env(safe-area-inset-bottom))"} max(10px, env(safe-area-inset-left))`, borderTop: `1px solid ${hexA(T.border, 0.42)}`, background: hexA(T.surface, 0.975), backdropFilter: "saturate(180%) blur(22px)", WebkitBackdropFilter: "saturate(180%) blur(22px)", transition: "padding-bottom 0.18s ease" }}>
+        <footer data-sps-comms-detail-footer style={{ flexShrink: 0, padding: `6px max(10px, env(safe-area-inset-right)) ${keyboardInset > 0 ? `${keyboardInset + 6}px` : "max(8px, env(safe-area-inset-bottom))"} max(10px, env(safe-area-inset-left))`, borderTop: `1px solid ${commsHairline(T, 0.12)}`, background: hexA(T.surface, 0.985), backdropFilter: "saturate(180%) blur(22px)", WebkitBackdropFilter: "saturate(180%) blur(22px)", transition: "padding-bottom 0.18s ease" }}>
           {status}
           {footer}
         </footer>
@@ -29191,7 +29208,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     const active = openRow && openRow.id === r.id && wide;
     return (
       <div key={r.id} onClick={() => { if (selMode) { toggleSel(r.id); return; } openMessage(r); }}
-        style={{ display: "flex", alignItems: "flex-start", gap: dense ? 9 : 13, padding: dense ? "11px 12px" : "15px 16px", cursor: "pointer", borderTop: i === 0 ? "none" : `1px solid ${hexA(T.border, 0.5)}`, background: (sel[r.id] || active) ? hexA(T.primary, 0.08) : (r.read ? "transparent" : hexA(T.primary, 0.03)), position: "relative" }}>
+        style={{ display: "flex", alignItems: "flex-start", gap: dense ? 9 : 13, padding: dense ? "11px 12px" : "15px 16px", cursor: "pointer", borderTop: i === 0 ? "none" : `1px solid ${commsHairline(T)}`, background: (sel[r.id] || active) ? hexA(T.primary, 0.08) : (r.read ? "transparent" : hexA(T.primary, 0.03)), position: "relative" }}>
         {!r.read && <span style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: T.primary }} />}
         {selMode && <div style={{ alignSelf: "center", flexShrink: 0 }}><Checkbox checked={!!sel[r.id]} onChange={() => toggleSel(r.id)} /></div>}
         <Avatar name={r.from_name} email={r.from_email} channel={r.channel} photo={r._contactPhoto} size={dense ? 36 : 42} />
@@ -29239,7 +29256,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
         onMore={smsOnly ? undefined : () => setManageRow(r)}
         onDelete={smsOnly ? undefined : () => { deleteEmails(inboxRowMessageIds(r), { ask: false }); }}>
         <div data-sps-conversation-row data-channel={sms ? "sms" : "email"} style={{ position: "relative", display: "flex", alignItems: "center", gap: dense ? 10 : 12, minHeight: dense ? 66 : 74, boxSizing: "border-box", padding: dense ? "8px 10px 8px 15px" : "10px 11px 10px 17px", background: selected ? hexA(T.primary, 0.07) : T.surface }}>
-          {i > 0 && <span aria-hidden="true" style={{ position: "absolute", left: dividerLeft, right: 0, top: 0, height: 1, background: hexA(T.border, phone ? 0.5 : 0.7) }} />}
+          {i > 0 && <span aria-hidden="true" style={{ position: "absolute", left: dividerLeft, right: 0, top: 0, height: 1, background: commsHairline(T) }} />}
           {!r.read && !selMode && <span aria-label="Unread" style={{ position: "absolute", left: 6, top: "50%", width: 6, height: 6, marginTop: -3, borderRadius: "50%", background: T.primary }} />}
           {selMode ? (
             <span aria-hidden="true" style={{ width: dense ? 42 : 46, height: dense ? 42 : 46, borderRadius: "50%", border: `2px solid ${selected ? T.primary : T.border}`, background: selected ? T.primary : T.surface, color: "#fff", display: "grid", placeItems: "center", flexShrink: 0 }}>
@@ -29544,7 +29561,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
         <CommsEmptyState icon="send" title={sentQ ? "Nothing matches" : "No sent email yet"} copy={sentQ ? "Try a different search." : "Emails you compose or reply to from here show up in Sent, newest first."} action={!sentQ ? <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }}>New email</Btn> : null} T={T} />
       )}
       {!sentErr && sentList.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: phone ? 0 : (dense ? 7 : 10), paddingBottom: wide ? 8 : (phone ? 0 : 12), background: phone ? T.surface : "transparent", borderTop: phone ? `1px solid ${T.border}` : "none", borderBottom: phone ? `1px solid ${T.border}` : "none" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: phone ? 0 : (dense ? 7 : 10), paddingBottom: wide ? 8 : (phone ? 0 : 12), background: phone ? T.surface : "transparent", border: "none" }}>
           {sentList.map((r, rowIndex) => {
             const to = r.recipient || nameForSent(r) || "—";
             const { subject: subj, preview: prev } = sentPartsFor(r);
@@ -29552,7 +29569,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
             const isReply = /reply/i.test(r.type || "");
             return (
               <div key={r.id} onClick={() => setOpenSent(phone ? r.id : (open ? null : r.id))}
-                style={{ display: "flex", gap: 12, padding: phone ? "11px 3px" : "13px 14px", background: T.surface, border: phone ? "none" : `1px solid ${T.border}`, borderTop: phone && rowIndex > 0 ? `1px solid ${T.border}` : (phone ? "none" : undefined), borderRadius: phone ? 0 : 16, boxShadow: phone ? "none" : "0 2px 8px rgba(0,0,0,0.045)", cursor: "pointer" }}>
+                style={{ display: "flex", gap: 12, padding: phone ? "11px 3px" : "13px 14px", background: T.surface, border: phone ? "none" : `1px solid ${T.border}`, borderTop: phone && rowIndex > 0 ? `1px solid ${commsHairline(T)}` : (phone ? "none" : undefined), borderRadius: phone ? 0 : 16, boxShadow: phone ? "none" : "0 2px 8px rgba(15,23,42,0.045)", cursor: "pointer" }}>
                 <Avatar name={nameForSent(r) || to} email={r.recipient} size={40} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -29595,7 +29612,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
             : <span />}
           {phoneMailDropdown}
           <button type="button" data-phone-mail-menu-trigger aria-label="Filter messages" aria-haspopup="menu" aria-expanded={phoneMailMenuOpen} onClick={() => setPhoneMailMenuOpen(open => !open)}
-            style={{ width: 38, height: 38, justifySelf: "end", border: `1px solid ${phoneMailMenuOpen ? hexA(T.primary, 0.35) : hexA(T.border, 0.8)}`, borderRadius: 19, background: phoneMailMenuOpen ? hexA(T.primary, 0.09) : T.surface, color: phoneMailMenuOpen ? T.primary : T.text, display: "grid", placeItems: "center", cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
+            style={{ width: 38, height: 38, justifySelf: "end", border: "none", borderRadius: 19, background: phoneMailMenuOpen ? hexA(T.primary, 0.09) : T.surfaceAlt, color: phoneMailMenuOpen ? T.primary : T.text, boxShadow: commsInsetRing(T, phoneMailMenuOpen ? 0.07 : 0.1), display: "grid", placeItems: "center", cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
             <Icon name="sliders" size={16} />
           </button>
         </div>
@@ -29721,22 +29738,22 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       ) : (
         <>
           {pinnedRail}
-          {mobileRows.length > 0 && <div style={{ border: phone ? "none" : `1px solid ${hexA(T.border, 1)}`, borderRadius: phone ? 0 : (dense ? 14 : 17), overflow: "hidden", background: T.surface, boxShadow: phone ? "none" : "0 2px 10px rgba(0,0,0,0.035)", marginBottom: phone ? 8 : 12 }}>{mobileRows}</div>}
+          {mobileRows.length > 0 && <div style={{ border: phone ? "none" : `1px solid ${commsHairline(T, 0.18)}`, borderRadius: phone ? 0 : (dense ? 14 : 17), overflow: "hidden", background: T.surface, boxShadow: phone ? "none" : "0 2px 10px rgba(15,23,42,0.035)", marginBottom: phone ? 8 : 12 }}>{mobileRows}</div>}
         </>
       ))}
         </>
       ) : sentView}
       {phone && !selMode && createPortal(
         <div role="search" aria-label="Search messages and compose" style={{ position: "fixed", left: "max(12px, env(safe-area-inset-left))", right: "max(12px, env(safe-area-inset-right))", bottom: "var(--sps-floating-action-bottom, calc(env(safe-area-inset-bottom) + 76px))", zIndex: 98, maxWidth: 560, height: 52, margin: "0 auto", display: "flex", alignItems: "center", gap: 8, pointerEvents: "none" }}>
-          <div style={{ flex: 1, minWidth: 0, height: 52, padding: 3, boxSizing: "border-box", pointerEvents: "auto", border: `1px solid ${hexA(T.border, 0.7)}`, borderRadius: 26, background: hexA(T.surface, 0.965), boxShadow: "0 5px 18px rgba(0,0,0,0.11)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}>
+          <div style={{ flex: 1, minWidth: 0, height: 52, padding: 3, boxSizing: "border-box", pointerEvents: "auto", border: "none", borderRadius: 26, background: hexA(T.surface, 0.975), boxShadow: "0 6px 22px rgba(15,23,42,0.10)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}>
             <CommsSearchField value={folder === "inbox" ? q : sentQ} onChange={folder === "inbox" ? setQ : setSentQ} placeholder={folder === "inbox" ? "Search messages" : "Search sent"} T={T} ariaLabel={folder === "inbox" ? "Search messages" : "Search sent email"} touch pill />
           </div>
-          {showMobileCompose && <div style={{ pointerEvents: "auto", width: 52, height: 52, borderRadius: 26, display: "grid", placeItems: "center", background: hexA(T.surface, 0.97), border: `1px solid ${hexA(T.border, 0.7)}`, boxShadow: "0 5px 18px rgba(0,0,0,0.11)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}><CommsIconAction icon="edit" label="Compose a new email" onClick={() => { setComposeMsg(""); setComposeOpen(true); }} T={T} active /></div>}
+          {showMobileCompose && <div style={{ pointerEvents: "auto", width: 52, height: 52, borderRadius: 26, display: "grid", placeItems: "center", background: hexA(T.surface, 0.975), border: "none", boxShadow: "0 6px 22px rgba(15,23,42,0.10)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}><CommsIconAction icon="edit" label="Compose a new email" onClick={() => { setComposeMsg(""); setComposeOpen(true); }} T={T} active /></div>}
         </div>,
         document.body
       )}
       {phone && selMode && folder === "inbox" && createPortal(
-        <div style={{ position: "fixed", left: "max(12px, env(safe-area-inset-left))", right: "max(12px, env(safe-area-inset-right))", bottom: "var(--sps-floating-action-bottom, calc(env(safe-area-inset-bottom) + 76px))", zIndex: 98, maxWidth: 560, height: 58, margin: "0 auto", padding: "0 8px", boxSizing: "border-box", display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", alignItems: "stretch", background: hexA(T.surface, 0.97), border: `1px solid ${T.border}`, borderRadius: 18, boxShadow: "0 8px 28px rgba(0,0,0,0.18)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}>
+        <div style={{ position: "fixed", left: "max(12px, env(safe-area-inset-left))", right: "max(12px, env(safe-area-inset-right))", bottom: "var(--sps-floating-action-bottom, calc(env(safe-area-inset-bottom) + 76px))", zIndex: 98, maxWidth: 560, height: 58, margin: "0 auto", padding: "0 8px", boxSizing: "border-box", display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", alignItems: "stretch", background: hexA(T.surface, 0.97), border: "none", borderRadius: 18, boxShadow: `0 8px 28px rgba(15,23,42,0.14), ${commsInsetRing(T, 0.08)}`, backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}>
           {[
             ["check", "Read", () => { markRead(selIds, true); exitSelect(); }],
             ["mail", "Unread", () => { markRead(selIds, false); exitSelect(); }],
@@ -29772,7 +29789,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
             bodyStyle={{ padding: "18px max(16px, env(safe-area-inset-right)) 30px max(16px, env(safe-area-inset-left))", boxSizing: "border-box" }}
             T={T}
           >
-            <article style={{ background: T.surface, color: T.text, border: `1px solid ${T.border}`, borderRadius: 16, padding: "18px 17px", boxShadow: "0 1px 3px rgba(0,0,0,0.035)" }}>
+            <article style={{ background: T.surface, color: T.text, border: "none", borderRadius: 0, padding: "8px 2px 18px", boxShadow: "none" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", paddingBottom: 14, borderBottom: `1px solid ${T.border}` }}>
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10.5, fontWeight: 820, color: T.primary, background: hexA(T.primary, 0.09), padding: "4px 9px", borderRadius: 100 }}>
                   <Icon name={isReply ? "reply" : "send"} size={12} />{isReply ? "Reply sent" : "Sent"}
@@ -29965,7 +29982,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
                       <div style={{ position: "absolute", left: 0, right: 0, top: "100%", marginTop: 4, zIndex: 50, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, boxShadow: "0 8px 24px rgba(0,0,0,0.14)", overflow: "hidden", maxHeight: 244, overflowY: "auto" }}>
                         {clientMatches.map((c, i) => (
                           <button key={c.id ?? i} type="button" onMouseDown={e => e.preventDefault()} onClick={() => pickClient(c)}
-                            style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "10px 12px", background: "none", border: "none", borderTop: i === 0 ? "none" : `1px solid ${hexA(T.border, 0.5)}`, cursor: "pointer", fontFamily: "inherit" }}>
+                            style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "10px 12px", background: "none", border: "none", borderTop: i === 0 ? "none" : `1px solid ${commsHairline(T)}`, cursor: "pointer", fontFamily: "inherit" }}>
                             <Avatar name={c.name} email={c.email} size={30} />
                             <div style={{ minWidth: 0, flex: 1 }}>
                               <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.name || c.email}</div>
@@ -30163,7 +30180,7 @@ function LogsScreen({ clients, showOwnerRows = false, workspaceScope = "" }) {
             return (
               <div key={r.id} role="button" tabIndex={0} onClick={() => setOpenId(logsVp.isPhone ? r.id : (open ? null : r.id))}
                 onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setOpenId(logsVp.isPhone ? r.id : (open ? null : r.id)); } }}
-                style={{ display: "flex", gap: logsVp.isPhone ? 10 : 12, padding: logsVp.isPhone ? "11px 2px" : "12px 14px", background: T.surface, border: logsVp.isPhone ? "none" : `1px solid ${T.border}`, borderBottom: logsVp.isPhone ? `1px solid ${hexA(T.border, 0.7)}` : undefined, borderRadius: logsVp.isPhone ? 0 : 14, boxShadow: logsVp.isPhone ? "none" : "0 2px 8px rgba(0,0,0,0.035)", cursor: "pointer", outline: "none" }}>
+                style={{ display: "flex", gap: logsVp.isPhone ? 10 : 12, padding: logsVp.isPhone ? "11px 2px" : "12px 14px", background: T.surface, border: logsVp.isPhone ? "none" : `1px solid ${T.border}`, borderBottom: logsVp.isPhone ? `1px solid ${commsHairline(T)}` : undefined, borderRadius: logsVp.isPhone ? 0 : 14, boxShadow: logsVp.isPhone ? "none" : "0 2px 8px rgba(15,23,42,0.035)", cursor: "pointer", outline: "none" }}>
                 <div style={{ width: 38, height: 38, borderRadius: logsVp.isPhone ? "50%" : 11, background: hexA(chColor(r), 0.12), color: chColor(r), display: "grid", placeItems: "center", flexShrink: 0 }}>
                   <Icon name={r.channel === "email" ? "mail" : "message"} size={16} />
                 </div>
@@ -30393,7 +30410,7 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
     return (
       <div ref={commsRootRef} style={{ maxWidth: 780, marginTop: 0, marginLeft: vpx.isPhone ? -16 : "auto", marginRight: vpx.isPhone ? -16 : "auto" }}>
         {!single && (
-          <div style={{ position: "sticky", top: 0, zIndex: 30, background: hexA(T.bg, 0.965), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", padding: vpx.isPhone ? "6px 10px 7px" : "9px 12px 7px", borderBottom: `1px solid ${hexA(T.border, 0.38)}` }}>
+          <div style={{ position: "sticky", top: 0, zIndex: 30, background: hexA(T.bg, 0.965), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", padding: vpx.isPhone ? "6px 10px 7px" : "9px 12px 7px", borderBottom: `1px solid ${commsHairline(T, 0.1)}` }}>
             <CommsSectionNavigator sections={SECTIONS} activeId={section} onChange={setSection} T={T} phone={vpx.isPhone} navRef={mobileNavRef} />
           </div>
         )}
@@ -30810,7 +30827,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
           {showActivity && (
             <div style={{ borderTop: `1px solid ${T.border}`, maxHeight: 280, overflowY: "auto" }}>
               {invLog.slice(0, 80).map((e, i) => (
-                <div key={i} style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, padding: "9px 14px", borderBottom: i < Math.min(invLog.length, 80) - 1 ? `1px solid ${hexA(T.border, 0.6)}` : "none" }}>
+                <div key={i} style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, padding: "9px 14px", borderBottom: i < Math.min(invLog.length, 80) - 1 ? `1px solid ${T.border}` : "none" }}>
                   <span style={{ fontSize: 12.5, color: T.text }}><b style={{ fontWeight: 700 }}>{e.action}</b> {e.qty != null ? `${e.qty}${e.unit ? " " + e.unit : ""} ` : ""}{e.item}{e.loc ? ` · ${e.loc}` : ""}{e.note ? ` · ${e.note}` : ""}</span>
                   <span style={{ fontSize: 11, color: T.textMuted, flexShrink: 0 }}>{new Date(e.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
                 </div>

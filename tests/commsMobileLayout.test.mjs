@@ -20,3 +20,19 @@ test("mobile inbox uses a compact mailbox dropdown with inline search and compos
   assert.doesNotMatch(app, /function CommsMailBottomBar/);
   assert.doesNotMatch(source, /<CommsMailBottomBar/);
 });
+
+test("theme rgba borders retain their base transparency instead of becoming black", async () => {
+  const app = await readFile(new URL("../App.jsx", import.meta.url), "utf8");
+  const helperSource = app.match(/const hexA = \(color, a\) => \{[\s\S]*?\n\};/)?.[0];
+  assert.ok(helperSource, "the shared translucent-color helper must remain available");
+  const colorWithAlpha = Function(`"use strict"; ${helperSource}; return hexA;`)();
+
+  assert.equal(colorWithAlpha("rgba(0,0,0,0.08)", 0.8), "rgba(0, 0, 0, 0.064)");
+  assert.equal(colorWithAlpha("#c51f2d", 0.1), "rgba(197, 31, 45, 0.1)");
+  assert.equal(colorWithAlpha("not-a-color", 0.8), "rgba(0, 0, 0, 0)");
+
+  const commsStart = app.indexOf("// ── Shared Comms presentation");
+  const commsEnd = app.indexOf("function InventoryScreen", commsStart);
+  assert.ok(commsStart >= 0 && commsEnd > commsStart, "the Comms source range must be locatable");
+  assert.doesNotMatch(app.slice(commsStart, commsEnd), /hexA\(T\.border/);
+});
