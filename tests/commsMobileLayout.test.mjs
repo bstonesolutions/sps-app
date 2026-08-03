@@ -36,3 +36,15 @@ test("theme rgba borders retain their base transparency instead of becoming blac
   assert.ok(commsStart >= 0 && commsEnd > commsStart, "the Comms source range must be locatable");
   assert.doesNotMatch(app.slice(commsStart, commsEnd), /hexA\(T\.border/);
 });
+
+test("pointer taps do not leave boxed focus rings on the Comms navigator", async () => {
+  const app = await readFile(new URL("../App.jsx", import.meta.url), "utf8");
+  const start = app.indexOf("function CommsSectionNavigator");
+  const end = app.indexOf("function CommsEmptyState", start);
+  const source = app.slice(start, end);
+
+  assert.match(source, /event\.detail > 0\) event\.currentTarget\.blur\(\)/);
+  assert.match(source, /\[data-comms-section\]:focus-visible/);
+  assert.match(source, /box-shadow: inset 0 -3px 0 \$\{T\.primary\}/);
+  assert.match(source, /outline: 2px solid \$\{T\.primary\}/);
+});

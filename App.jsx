@@ -24398,7 +24398,7 @@ function CommsMobileHeader({ title, description, action, T }) {
 
 function CommsIconAction({ icon, label, onClick, T, active = false }) {
   return (
-    <button type="button" data-comms-control onClick={onClick} title={label} aria-label={label}
+    <button type="button" data-comms-control onClick={(event) => { onClick?.(event); if (event.detail > 0) event.currentTarget.blur(); }} title={label} aria-label={label}
       style={{ width: 42, height: 42, border: "none", borderRadius: 21, background: active ? hexA(T.primary, 0.09) : T.surfaceAlt, color: T.primary, boxShadow: commsInsetRing(T, active ? 0.08 : 0.1), display: "grid", placeItems: "center", cursor: "pointer", fontFamily: "inherit", flexShrink: 0, WebkitTapHighlightColor: "transparent" }}>
       <Icon name={icon} size={18} />
     </button>
@@ -24431,11 +24431,14 @@ function CommsSectionNavigator({ sections, activeId, onChange, T, phone = false,
   return (
     <div style={{ position: "relative", minWidth: 0 }}>
       <style>{`
-        [data-comms-section]:focus-visible,
+        [data-comms-section]:focus-visible {
+          outline: none !important;
+          box-shadow: inset 0 -3px 0 ${T.primary}, 0 1px 3px rgba(15,23,42,0.08) !important;
+        }
         [data-comms-control]:focus-visible,
         [data-phone-mail-menu-trigger]:focus-visible {
-          outline: none !important;
-          box-shadow: 0 0 0 2px ${hexA(T.primary, 0.13)}, 0 1px 3px rgba(15,23,42,0.08) !important;
+          outline: 2px solid ${T.primary} !important;
+          outline-offset: 1px !important;
         }
       `}</style>
       {moreOpen && <button type="button" aria-label="Close communications menu" onClick={() => setMoreOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 1, border: "none", background: "transparent", padding: 0 }} />}
@@ -24444,7 +24447,7 @@ function CommsSectionNavigator({ sections, activeId, onChange, T, phone = false,
           {primary.map(section => {
             const on = section.id === activeId;
             return (
-              <button key={section.id} type="button" data-comms-section={section.id} onClick={() => onChange(section.id)} aria-current={on ? "page" : undefined}
+              <button key={section.id} type="button" data-comms-section={section.id} onClick={(event) => { onChange(section.id); if (event.detail > 0) event.currentTarget.blur(); }} aria-current={on ? "page" : undefined}
                 style={{ flex: 1, minWidth: 0, border: "none", borderRadius: 11, background: on ? T.surface : "transparent", color: on ? T.primary : T.textMuted, boxShadow: on ? "0 1px 3px rgba(15,23,42,0.08)" : "none", fontFamily: "inherit", fontSize: phone ? 11.5 : 12.5, fontWeight: on ? 760 : 620, letterSpacing: "-0.01em", cursor: "pointer", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", WebkitTapHighlightColor: "transparent" }}>
                 {shortLabel(section)}
               </button>
@@ -24452,7 +24455,7 @@ function CommsSectionNavigator({ sections, activeId, onChange, T, phone = false,
           })}
         </nav>
         {secondary.length > 0 && (
-          <button type="button" data-comms-control aria-label="More communications sections" aria-haspopup="menu" aria-expanded={moreOpen} onClick={() => setMoreOpen(open => !open)}
+          <button type="button" data-comms-control aria-label="More communications sections" aria-haspopup="menu" aria-expanded={moreOpen} onClick={(event) => { setMoreOpen(open => !open); if (event.detail > 0) event.currentTarget.blur(); }}
             style={{ width: 44, height: 44, flexShrink: 0, border: "none", borderRadius: 15, background: secondaryActive || moreOpen ? hexA(T.primary, 0.09) : T.surfaceAlt, color: secondaryActive || moreOpen ? T.primary : T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", boxShadow: commsInsetRing(T, secondaryActive || moreOpen ? 0.06 : 0.1), WebkitTapHighlightColor: "transparent" }}>
             <Icon name="sliders" size={17} />
           </button>
@@ -24464,7 +24467,7 @@ function CommsSectionNavigator({ sections, activeId, onChange, T, phone = false,
           {secondary.map(section => {
             const on = section.id === activeId;
             return (
-              <button key={section.id} type="button" data-comms-control role="menuitem" onClick={() => onChange(section.id)}
+              <button key={section.id} type="button" data-comms-control role="menuitem" onClick={(event) => { onChange(section.id); if (event.detail > 0) event.currentTarget.blur(); }}
                 style={{ width: "100%", minHeight: 46, padding: "7px 9px", border: "none", borderRadius: 12, background: on ? hexA(T.primary, 0.085) : "transparent", color: on ? T.primary : T.text, display: "flex", alignItems: "center", gap: 11, fontFamily: "inherit", fontSize: 13.5, fontWeight: on ? 760 : 650, textAlign: "left", cursor: "pointer" }}>
                 <span style={{ width: 30, height: 30, borderRadius: 9, background: on ? hexA(T.primary, 0.12) : T.surfaceAlt, color: on ? T.primary : T.textMuted, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name={section.icon} size={15} /></span>
                 <span style={{ flex: 1 }}>{section.label}</span>
@@ -29619,7 +29622,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
             ? <button type="button" onClick={() => setSelMode(true)} style={{ minHeight: 42, justifySelf: "start", padding: "6px 3px", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13, fontWeight: 760, cursor: "pointer" }}>Edit</button>
             : <span />}
           {phoneMailDropdown}
-          <button type="button" data-phone-mail-menu-trigger aria-label="Filter messages" aria-haspopup="menu" aria-expanded={phoneMailMenuOpen} onClick={() => setPhoneMailMenuOpen(open => !open)}
+          <button type="button" data-phone-mail-menu-trigger aria-label="Filter messages" aria-haspopup="menu" aria-expanded={phoneMailMenuOpen} onClick={(event) => { setPhoneMailMenuOpen(open => !open); if (event.detail > 0) event.currentTarget.blur(); }}
             style={{ width: 38, height: 38, justifySelf: "end", border: "none", borderRadius: 19, background: phoneMailMenuOpen ? hexA(T.primary, 0.09) : T.surfaceAlt, color: phoneMailMenuOpen ? T.primary : T.text, boxShadow: commsInsetRing(T, phoneMailMenuOpen ? 0.07 : 0.1), display: "grid", placeItems: "center", cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
             <Icon name="sliders" size={16} />
           </button>
