@@ -13,6 +13,7 @@ import { assessInboundLead, findMisfiledImportedLead } from "./leadQualification
 import { brandLogoSource } from "./brandAssets";
 import { ESTIMATE_LINE_TAX_MODEL, defaultEstimateLineTaxable, estimateHasValidDays, estimateHasValidTaxRate, estimateLineAmount, estimateLineCost, estimateLineHasKnownCost, estimateLineIsTaxable, estimateLineQuantity, estimateLineUnitPrice, estimateNumberIsValid, estimateNumberValue, estimateProfitTotals, estimateTotals, formatEstimateMoney, withEstimateRevision, withEstimateTotals } from "./estimateMath";
 import { catalogCategoryGroups, catalogItemFinancials, estimateLineFromCatalog, estimateLineFromPartsBundle } from "./estimateCatalog";
+import { ESTIMATE_CHARGE_TYPES, estimateChargeBreakdown, estimateLineChargeLabel, estimateLineChargeType } from "./estimateBreakdown";
 import { completeEstimateWithInvoice, estimateTaxMigrationImpact, estimateToDraftInvoice, findInvoiceForEstimate, normalizeEstimateTaxForInvoice } from "./estimateInvoiceConversion";
 import { findScheduledStopForEstimate, scheduleApprovedEstimate } from "./estimateScheduleLink";
 import { findInvoiceDeletionReferences, invoiceDeletionBlockedMessage } from "./invoiceDeletionGuard";
@@ -1280,31 +1281,51 @@ async function buildEstimatePDFDoc(estimate, branding, invoicing, client = null)
   drawTableHeader();
 
   // Wrapped, dynamically sized line items with safe continuation pages.
-  const lineItems = (estimate.items || []).filter((item) => String(item.desc || "").trim());
-  lineItems.forEach((item) => {
-    const qty = estimateLineQuantity(item);
-    const price = estimateLineUnitPrice(item);
-    const amount = estimateLineAmount(item);
-    const unit = String(item.unit || "").trim();
-    const shortUnit = ({ pieces: "pc", piece: "pc" })[unit] || unit;
-    const unitLabel = shortUnit && !["service", "each", "bundle"].includes(shortUnit) ? ` ${shortUnit}` : "";
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(10);
-    const description = item.bundleNote && !String(item.desc).includes(String(item.bundleNote)) ? `${item.desc}\nIncludes: ${item.bundleNote}` : String(item.desc);
-    const descriptionLines = doc.splitTextToSize(description, descriptionWidth);
-    const rowHeight = Math.max(34, descriptionLines.length * 13 + 17);
-    ensureSpace(rowHeight, true);
-    doc.setTextColor("#111827");
-    doc.text(descriptionLines, M + 12, y);
-    doc.setTextColor("#374151");
-    doc.text(`${qty}${unitLabel}`, qtyX, y, { align: "right" });
-    doc.text(money(price), priceX, y, { align: "right" });
+  const chargeGroups = estimateChargeBreakdown(estimate);
+  chargeGroups.forEach((group) => {
+    const firstItem = group.items[0] || {};
+    const firstItemDescription = String(firstItem.desc ?? firstItem.description ?? "Estimate item");
+    const firstDescription = firstItem.bundleNote && !firstItemDescription.includes(String(firstItem.bundleNote))
+      ? `${firstItemDescription}\nIncludes: ${firstItem.bundleNote}`
+      : firstItemDescription;
+    const firstRowHeight = Math.max(34, doc.splitTextToSize(firstDescription, descriptionWidth).length * 13 + 17);
+    // Keep each section heading with at least its first line item.
+    ensureSpace(35 + firstRowHeight, true);
+    doc.setFillColor("#FFF5F5");
+    doc.roundedRect(M, y - 3, W - M * 2, 25, 5, 5, "F");
+    doc.setTextColor(primary);
     doc.setFont("helvetica", "bold");
-    doc.text(money(amount), amountX - 2, y, { align: "right" });
-    y += rowHeight;
-    doc.setDrawColor("#E5E7EB");
-    doc.setLineWidth(0.7);
-    doc.line(M, y - 8, W - M, y - 8);
+    doc.setFontSize(9);
+    doc.text(String(group.label).toUpperCase(), M + 12, y + 13);
+    doc.text(`SECTION SUBTOTAL  ${money(group.subtotal)}`, amountX - 2, y + 13, { align: "right" });
+    y += 35;
+
+    group.items.forEach((item) => {
+      const qty = estimateLineQuantity(item);
+      const price = estimateLineUnitPrice(item);
+      const amount = estimateLineAmount(item);
+      const unit = String(item.unit || "").trim();
+      const shortUnit = ({ pieces: "pc", piece: "pc" })[unit] || unit;
+      const unitLabel = shortUnit && !["service", "each", "bundle"].includes(shortUnit) ? ` ${shortUnit}` : "";
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(10);
+      const itemDescription = String(item.desc ?? item.description ?? "Estimate item");
+      const description = item.bundleNote && !itemDescription.includes(String(item.bundleNote)) ? `${itemDescription}\nIncludes: ${item.bundleNote}` : itemDescription;
+      const descriptionLines = doc.splitTextToSize(description, descriptionWidth);
+      const rowHeight = Math.max(34, descriptionLines.length * 13 + 17);
+      ensureSpace(rowHeight, true);
+      doc.setTextColor("#111827");
+      doc.text(descriptionLines, M + 12, y);
+      doc.setTextColor("#374151");
+      doc.text(`${qty}${unitLabel}`, qtyX, y, { align: "right" });
+      doc.text(money(price), priceX, y, { align: "right" });
+      doc.setFont("helvetica", "bold");
+      doc.text(money(amount), amountX - 2, y, { align: "right" });
+      y += rowHeight;
+      doc.setDrawColor("#E5E7EB");
+      doc.setLineWidth(0.7);
+      doc.line(M, y - 8, W - M, y - 8);
+    });
   });
 
   // A single, visually connected totals panel.
@@ -20211,7 +20232,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   const configuredTaxRate = String(invoicing?.taxRate ?? "").trim();
   const defaultTaxRate = configuredTaxRate || String(DEFAULT_INVOICING.taxRate);
   const newLineId = () => `eli_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const emptyEstimateLine = () => ({ id: newLineId(), desc: "", qty: "1", price: "", unitCost: "", costKnown: false, kind: "custom", taxable: false });
+  const emptyEstimateLine = () => ({ id: newLineId(), desc: "", qty: "1", price: "", unitCost: "", costKnown: false, kind: "custom", chargeType: "custom", chargeLabel: "Custom", taxable: false });
   const [form, setForm] = useState(() => {
     const savedTaxModel = estimate?.taxModel || "";
     const base = estimate ? {
@@ -20284,6 +20305,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   const shareBusy = sending || smsSending || pdfBusy || conversionBusy || completionBusy;
   const totals = estimateTotals(form, defaultTaxRate);
   const financials = estimateProfitTotals(form);
+  const chargeBreakdown = estimateChargeBreakdown(form);
   const canEmailEstimate = canManage && perms.invoiceSend !== false;
   // Estimate texts still use the shared Quo endpoint, whose server permission is sendTexts.
   // Keep the UI aligned so a staff member never sees an action that the server must reject.
@@ -20486,18 +20508,22 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
   // Build the estimate text for SMS
   const buildSmsText = (estimateForSend) => {
     const sentTotals = estimateTotals(estimateForSend, defaultTaxRate);
+    const groups = estimateChargeBreakdown(estimateForSend);
     const lines = [
       `Estimate from ${branding.companyName}`,
       estimateForSend.number ? `Estimate: ${estimateForSend.number}` : "",
       estimateForSend.title ? `Service: ${estimateForSend.title}` : "",
       "",
-      ...estimateForSend.items.filter(it => it.desc).map(it => {
-        const qty = estimateLineQuantity(it);
-        const unit = String(it.unit || "").trim();
-        const showUnit = unit && !["service", "each", "bundle"].includes(unit);
-        const quantity = qty !== 1 || showUnit ? ` (${qty}${showUnit ? ` ${unit}` : ""} × ${formatEstimateMoney(it.price)})` : "";
-        return `• ${it.desc}${quantity}: ${formatEstimateMoney(estimateLineAmount(it))}`;
-      }),
+      ...groups.flatMap(group => [
+        `${group.label} — ${formatEstimateMoney(group.subtotal)}`,
+        ...group.items.filter(it => it.desc).map(it => {
+          const qty = estimateLineQuantity(it);
+          const unit = String(it.unit || "").trim();
+          const showUnit = unit && !["service", "each", "bundle"].includes(unit);
+          const quantity = qty !== 1 || showUnit ? ` (${qty}${showUnit ? ` ${unit}` : ""} × ${formatEstimateMoney(it.price)})` : "";
+          return `• ${it.desc}${quantity}: ${formatEstimateMoney(estimateLineAmount(it))}`;
+        }),
+      ]),
       "",
       `Subtotal: ${formatEstimateMoney(sentTotals.subtotal)}`,
       sentTotals.taxEnabled ? `Sales tax (${sentTotals.taxRate}%): ${formatEstimateMoney(sentTotals.tax)}` : "",
@@ -20570,7 +20596,7 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
             number: current.number || "",
             date: current.date || "",
             service: current.title || "",
-            items: (current.items || []).map(it => ({ desc: it.desc, qty: it.qty, price: it.price, kind: it.kind, unit: it.unit, bundleNote: it.bundleNote, taxable: estimateLineIsTaxable(it, current) })),
+            items: (current.items || []).map(it => ({ desc: it.desc, qty: it.qty, price: it.price, kind: it.kind, unit: it.unit, bundleNote: it.bundleNote, chargeType: estimateLineChargeType(it), chargeLabel: it.chargeLabel || "", taxable: estimateLineIsTaxable(it, current) })),
             taxEnabled: sentTotals.taxEnabled,
             taxRate: sentTotals.taxRate,
             taxModel: current.taxModel || "",
@@ -20814,6 +20840,8 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
                   const lineProfit = lineRevenue - lineCost;
                   const lineMargin = lineRevenue > 0 ? (lineProfit / lineRevenue) * 100 : 0;
                   const kindLabel = ({ service: "Service", product: "Product", treatment: "Treatment", part: "Part", bundle: "Parts bundle", custom: "Custom" })[item.kind] || "Custom";
+                  const chargeType = estimateLineChargeType(item);
+                  const chargeLabel = estimateLineChargeLabel(item);
                   const compactFields = vp.width <= 520 || (wideEstimateLayout && vp.width < 980);
                   const lineQty = String(item.qty ?? "").trim() === "" ? 1 : (Number.parseFloat(item.qty) || 0);
                   const inventoryStatus = (() => {
@@ -20846,13 +20874,25 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
                   return (
                     <div key={item.id} data-estimate-line-id={item.id} style={{ padding: vp.isPhone ? "12px 14px" : "13px 16px", borderBottom: idx < form.items.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", flexDirection: "column", gap: 8 }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 6, minHeight: 18 }}>
-                        <span style={{ display: "inline-flex", alignItems: "center", borderRadius: 100, padding: "3px 7px", background: item.refId || item.kind === "bundle" ? hexA(T.primary, 0.08) : T.surfaceAlt, color: item.refId || item.kind === "bundle" ? T.primary : T.textMuted, fontSize: 9.5, fontWeight: 850, textTransform: "uppercase", letterSpacing: "0.04em" }}>{kindLabel}</span>
-                        {(item.refId || item.kind === "bundle") && <span style={{ color: T.textMuted, fontSize: 10.5 }}>Catalog pricing saved to this estimate</span>}
+                        <span style={{ display: "inline-flex", alignItems: "center", borderRadius: 100, padding: "3px 7px", background: hexA(T.primary, 0.08), color: T.primary, fontSize: 9.5, fontWeight: 850, textTransform: "uppercase", letterSpacing: "0.04em" }}>{chargeLabel}</span>
+                        <span style={{ color: T.textMuted, fontSize: 10.5 }}>Source: {kindLabel}{(item.refId || item.kind === "bundle") ? " · catalog linked" : ""}</span>
                         {form.taxEnabled && <button type="button" onClick={() => setItem(idx, "taxable", !estimateLineIsTaxable(item, form))} aria-pressed={estimateLineIsTaxable(item, form)} style={{ marginLeft: "auto", border: `1px solid ${estimateLineIsTaxable(item, form) ? hexA(T.primary, 0.35) : T.border}`, borderRadius: 100, padding: "4px 8px", background: estimateLineIsTaxable(item, form) ? hexA(T.primary, 0.08) : T.surface, color: estimateLineIsTaxable(item, form) ? T.primary : T.textMuted, fontFamily: "inherit", fontSize: 9.5, fontWeight: 850, cursor: "pointer" }}>{estimateLineIsTaxable(item, form) ? "Taxable" : "No tax"}</button>}
                       </div>
                       <div style={{ display: "flex", alignItems: "flex-end", gap: 7 }}>
                         <div style={{ flex: 1, minWidth: 0 }}><label style={label}>Description</label><input style={field} value={item.desc} onChange={e => setItem(idx, "desc", e.target.value)} placeholder="Service or item description" /></div>
                         {canManage && <IconButton icon="close" label="Remove line item" onClick={() => removeItem(idx)} disabled={form.items.length === 1} />}
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: chargeType === "custom" && vp.width > 420 ? "minmax(150px, 0.7fr) minmax(180px, 1.3fr)" : "minmax(0, 1fr)", gap: 7 }}>
+                        <div>
+                          <label htmlFor={`estimate-charge-type-${item.id}`} style={label}>Customer section</label>
+                          <select id={`estimate-charge-type-${item.id}`} style={field} value={chargeType} onChange={e => setItem(idx, "chargeType", e.target.value)}>
+                            {ESTIMATE_CHARGE_TYPES.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
+                          </select>
+                        </div>
+                        {chargeType === "custom" && <div>
+                          <label htmlFor={`estimate-charge-label-${item.id}`} style={label}>Custom section name</label>
+                          <input id={`estimate-charge-label-${item.id}`} maxLength={40} style={field} value={item.chargeLabel ?? chargeLabel} onChange={e => setItem(idx, "chargeLabel", e.target.value)} placeholder="Travel, subcontractor, disposal…" />
+                        </div>}
                       </div>
                       <div style={{ display: "grid", gridTemplateColumns: showProfit ? (compactFields ? "minmax(58px, 0.55fr) repeat(2, minmax(86px, 1fr))" : "minmax(70px, 0.6fr) repeat(2, minmax(105px, 1fr)) minmax(90px, 0.75fr)") : (compactFields ? "minmax(68px, 0.65fr) minmax(110px, 1.35fr)" : "minmax(72px, 0.7fr) minmax(110px, 1.2fr) minmax(90px, 0.8fr)"), gap: 7, alignItems: "end" }}>
                         <div><label style={label}>{item.kind === "bundle" ? "Bundle" : `Qty${item.unit && item.unit !== "service" && item.unit !== "each" ? ` (${item.unit})` : ""}`}</label><input inputMode="decimal" disabled={item.kind === "bundle"} title={item.kind === "bundle" ? "Part quantities are saved inside this bundle" : undefined} style={{ ...field, textAlign: "center", background: item.kind === "bundle" ? T.surfaceAlt : T.surface, color: item.kind === "bundle" ? T.textMuted : T.text }} value={item.kind === "bundle" ? (String(item.qty ?? "").trim() || "1") : item.qty} onChange={e => setItem(idx, "qty", e.target.value.replace(/[^\d.]/g, ""))} /></div>
@@ -20904,6 +20944,11 @@ function EstimateForm({ estimate, clients, catalog, setCatalog, branding, email,
                 </div>
                 {totals.taxEnabled && <div style={{ marginTop: 12 }}><label style={label}>Tax rate</label><div style={{ position: "relative", maxWidth: 120 }}><input inputMode="decimal" style={{ ...field, paddingRight: 28 }} value={form.taxRate} onChange={e => set("taxRate", e.target.value.replace(/[^\d.]/g, ""))} /><span style={{ position: "absolute", right: 11, top: "50%", transform: "translateY(-50%)", color: T.textMuted, fontSize: 13 }}>%</span></div></div>}
                 <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${T.border}`, display: "flex", flexDirection: "column", gap: 7 }}>
+                  {chargeBreakdown.length > 0 && <>
+                    <div style={{ ...label, marginBottom: 1 }}>Charge breakdown</div>
+                    {chargeBreakdown.map(group => <div key={`${group.type}-${group.label}`} style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 12.5, color: T.text }}><span>{group.label}<span style={{ color: T.textMuted }}> · {group.lineCount} line{group.lineCount === 1 ? "" : "s"}</span></span><span style={{ fontWeight: 750 }}>{formatEstimateMoney(group.subtotal)}</span></div>)}
+                    <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 2, paddingTop: 7 }} />
+                  </>}
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: T.textMuted }}><span>Subtotal</span><span>{formatEstimateMoney(totals.subtotal)}</span></div>
                   {totals.taxEnabled && totals.taxableSubtotal !== totals.subtotal && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.textMuted }}><span>Taxable items</span><span>{formatEstimateMoney(totals.taxableSubtotal)}</span></div>}
                   {totals.taxEnabled && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: T.textMuted }}><span>Sales tax ({totals.taxRate}%)</span><span>{formatEstimateMoney(totals.tax)}</span></div>}
@@ -35619,7 +35664,7 @@ function CPEstimates({ client, estimates, branding, onApprove, T }) {
         const subtotal = hasLines ? computed.subtotal : (numeric(e.subtotal) || Math.max(0, numeric(e.total) - numeric(e.taxAmount ?? e.tax)));
         const tax = taxEnabled ? (hasLines ? computed.tax : numeric(e.taxAmount ?? e.tax)) : 0;
         const total = hasLines ? computed.total : (numeric(e.total) || subtotal + tax);
-        const lines = (e.items || []).filter(item => item && (item.desc || item.description || estimateLineAmount(item)));
+        const breakdown = estimateChargeBreakdown(e);
         const statusColor = portalStatus === "approved" ? "#16803A" : portalStatus === "declined" ? "#B42318" : T.primary;
         return <div key={e.id} style={{ background:T.surface, borderRadius:20, border:`1px solid ${portalStatus === "sent" ? hexA(T.primary,0.28) : T.border}`, overflow:"hidden", boxShadow:"0 5px 22px rgba(15,23,42,0.055)" }}>
           <div style={{ padding:vp.isPhone ? "16px" : "18px 20px", display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12, background:portalStatus === "sent" ? hexA(T.primary,0.035) : T.surface }}>
@@ -35638,17 +35683,24 @@ function CPEstimates({ client, estimates, branding, onApprove, T }) {
           </div>
 
           <div style={{ borderTop:`1px solid ${T.border}`, padding:vp.isPhone ? "14px 16px 16px" : "16px 20px 18px" }}>
-            {lines.length > 0 && <div style={{ display:"flex", flexDirection:"column", gap:0, marginBottom:14 }}>
-              {lines.map((item, lineIndex) => (
-                <div key={item.id || lineIndex} style={{ display:"grid", gridTemplateColumns:"minmax(0,1fr) auto", gap:12, padding:"9px 0", borderBottom:`1px solid ${T.border}` }}>
-                  <div style={{ minWidth:0 }}>
-                    <div style={{ fontSize:13, fontWeight:700, color:T.text, lineHeight:1.35 }}>{item.desc || item.description || "Estimate item"}</div>
-                    {item.bundleNote && !String(item.desc || item.description || "").includes(String(item.bundleNote)) && <div style={{ fontSize:10.5, color:T.textMuted, marginTop:2 }}>Includes: {item.bundleNote}</div>}
-                    <div style={{ fontSize:10.5, color:T.textMuted, marginTop:2 }}>{estimateLineQuantity(item)}{item.unit && !["service", "each", "bundle"].includes(item.unit) ? ` ${item.unit}` : ""} × {formatEstimateMoney(numeric(item.price ?? item.unitPrice))}</div>
-                  </div>
-                  <div style={{ fontSize:13, fontWeight:800, color:T.text, whiteSpace:"nowrap" }}>{formatEstimateMoney(estimateLineAmount(item))}</div>
+            {breakdown.length > 0 && <div style={{ display:"flex", flexDirection:"column", gap:10, marginBottom:14 }}>
+              {breakdown.map((group) => <div key={`${group.type}-${group.label}`} style={{ border:`1px solid ${T.border}`, borderRadius:12, overflow:"hidden" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", gap:12, padding:"9px 11px", background:hexA(T.primary,0.055), color:T.primary, fontSize:10.5, fontWeight:850, textTransform:"uppercase", letterSpacing:"0.045em" }}>
+                  <span>{group.label}</span><span>{formatEstimateMoney(group.subtotal)}</span>
                 </div>
-              ))}
+                <div style={{ padding:"0 11px" }}>
+                  {group.items.map((item, lineIndex) => (
+                    <div key={item.id || lineIndex} style={{ display:"grid", gridTemplateColumns:"minmax(0,1fr) auto", gap:12, padding:"9px 0", borderBottom:lineIndex < group.items.length - 1 ? `1px solid ${T.border}` : "none" }}>
+                      <div style={{ minWidth:0 }}>
+                        <div style={{ fontSize:13, fontWeight:700, color:T.text, lineHeight:1.35 }}>{item.desc || item.description || "Estimate item"}</div>
+                        {item.bundleNote && !String(item.desc || item.description || "").includes(String(item.bundleNote)) && <div style={{ fontSize:10.5, color:T.textMuted, marginTop:2 }}>Includes: {item.bundleNote}</div>}
+                        <div style={{ fontSize:10.5, color:T.textMuted, marginTop:2 }}>{estimateLineQuantity(item)}{item.unit && !["service", "each", "bundle"].includes(item.unit) ? ` ${item.unit}` : ""} × {formatEstimateMoney(numeric(item.price ?? item.unitPrice))}</div>
+                      </div>
+                      <div style={{ fontSize:13, fontWeight:800, color:T.text, whiteSpace:"nowrap" }}>{formatEstimateMoney(estimateLineAmount(item))}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>)}
             </div>}
 
             <div style={{ marginLeft:"auto", maxWidth:300, display:"flex", flexDirection:"column", gap:7 }}>

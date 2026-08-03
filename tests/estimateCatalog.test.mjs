@@ -60,7 +60,7 @@ test("every catalog kind snapshots the correct retail, cost, unit, and reference
   const service = estimateLineFromCatalog("service", { id: "svc", name: "Repair", price: "200", cost: "80", price_type: "flat" }, "line-svc");
   assert.deepEqual(service, {
     id: "line-svc", desc: "Repair", qty: "1", price: "200", unitCost: "80", costKnown: true,
-    kind: "service", refId: "svc", unit: "service", taxable: false,
+    kind: "service", chargeType: "labor", refId: "svc", unit: "service", taxable: false,
   });
 
   const treatment = estimateLineFromCatalog("treatment", { id: "tx", name: "Algaecide", retailPerOz: "7.5", costPerOz: "2.25", unit: "oz" }, "line-tx");
@@ -68,16 +68,19 @@ test("every catalog kind snapshots the correct retail, cost, unit, and reference
   assert.equal(treatment.unitCost, "2.25");
   assert.equal(treatment.unit, "oz");
   assert.equal(treatment.taxable, true);
+  assert.equal(treatment.chargeType, "materials");
 
   const part = estimateLineFromCatalog("part", { id: "part", name: "Valve", retailPer: "30", costPer: "12", unit: "piece" }, "line-part");
   assert.equal(part.refId, "part");
   assert.equal(part.price, "30");
   assert.equal(part.unitCost, "12");
+  assert.equal(part.chargeType, "parts");
 
   const product = estimateLineFromCatalog("product", { id: "prod", name: "Filter", price: "90", cost: "50" }, "line-prod");
   assert.equal(product.kind, "product");
   assert.equal(product.unit, "each");
   assert.equal(product.taxable, true);
+  assert.equal(product.chargeType, "materials");
 });
 
 test("an explicit catalog tax override wins over the kind default", () => {
@@ -140,6 +143,7 @@ test("parts bundles snapshot child quantities plus aggregate retail and cost", (
   assert.equal(bundle.costKnown, true);
   assert.equal(bundle.taxable, true);
   assert.equal(bundle.taxabilityMixed, false);
+  assert.equal(bundle.chargeType, "parts");
   assert.equal(bundle.bundleItems.length, 2);
   assert.equal(bundle.bundleItems[0].qty, "2");
   assert.match(bundle.desc, /Valve ×2/);

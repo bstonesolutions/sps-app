@@ -66,6 +66,8 @@ const ESTIMATE_LINE_CUSTOMER_FIELDS = [
   "unit",
   "bundleNote",
   "kind",
+  "chargeType",
+  "chargeLabel",
   "order",
 ];
 

@@ -42,6 +42,8 @@ const localInvoice = () => ({
     knownUnitCost: "35",
     refId: "service-pump",
     bundleItems: [{ refId: "part-valve", qty: "1" }],
+    chargeType: "custom",
+    chargeLabel: "Site labor",
     sourceEstimateLineId: "estimate-line-1",
   }],
 });
@@ -287,6 +289,8 @@ test("adopts the authoritative QuickBooks snapshot and preserves SPS-only metada
     knownUnitCost: "35",
     refId: "service-pump",
     bundleItems: [{ refId: "part-valve", qty: "1" }],
+    chargeType: "custom",
+    chargeLabel: "Site labor",
     sourceEstimateLineId: "estimate-line-1",
   });
   assert.equal(result.lineItems[1].qbLineId, "11");

@@ -270,6 +270,31 @@ test("returns to draft when the status transition is local and the quote revisio
   assert.equal(Object.hasOwn(estimate, "sentAt"), false);
 });
 
+test("returns a concurrently relabeled customer charge section to draft before preserving approval", () => {
+  const base = [withEstimateTotals({
+    id: "estimate-charge-label",
+    status: "draft",
+    items: [{ id: "line-1", desc: "Site work", kind: "service", chargeType: "labor", qty: "1", price: "100" }],
+  })];
+  const local = [withEstimateTotals({
+    ...base[0],
+    items: [{ ...base[0].items[0], chargeType: "custom", chargeLabel: "Mobilization" }],
+  })];
+  const remote = [{
+    ...base[0],
+    status: "approved",
+    sentAt: "2026-08-03T14:00:00.000Z",
+    approvedAt: "2026-08-03T14:05:00.000Z",
+  }];
+
+  const result = runMerge("sps_estimates", base, local, remote);
+  assert.deepEqual(result.conflicts, []);
+  assert.equal(result.data[0].items[0].chargeType, "custom");
+  assert.equal(result.data[0].items[0].chargeLabel, "Mobilization");
+  assert.equal(result.data[0].status, "draft");
+  assert.equal(Object.hasOwn(result.data[0], "approvedAt"), false);
+});
+
 test("preserves approval when the concurrent estimate edit changes internal cost only", () => {
   const base = [withEstimateTotals({
     id: "estimate-1",

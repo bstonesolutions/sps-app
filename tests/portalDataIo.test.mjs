@@ -55,7 +55,13 @@ test("portal data reuses its authorized clients snapshot and still filters other
           { id: "invoice-other", clientId: "client-2", status: "sent", number: "1002", lineItems: [] },
         ]) },
         { key: "sps_schedule", value: JSON.stringify([]) },
-        { key: "sps_estimates", value: JSON.stringify([]) },
+        { key: "sps_estimates", value: JSON.stringify([
+          {
+            id: "estimate-own", clientId: "client-1", status: "sent", taxEnabled: false,
+            items: [{ id: "line-1", desc: "Mobilization", qty: "1", price: "75", kind: "custom", chargeType: "custom", chargeLabel: "Site preparation", unitCost: "10", refId: "secret-catalog-id" }],
+          },
+          { id: "estimate-other", clientId: "client-2", status: "sent", items: [] },
+        ]) },
         { key: "sps_branding", value: JSON.stringify({ companyName: "SPS" }) },
         { key: "sps_invoicing", value: JSON.stringify({}) },
         { key: "sps_team", value: JSON.stringify([]) },
@@ -77,6 +83,11 @@ test("portal data reuses its authorized clients snapshot and still filters other
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.client.id, "client-1");
   assert.deepEqual(res.body.invoices.map((invoice) => invoice.id), ["invoice-own"]);
+  assert.deepEqual(res.body.estimates.map((estimate) => estimate.id), ["estimate-own"]);
+  assert.equal(res.body.estimates[0].items[0].chargeType, "custom");
+  assert.equal(res.body.estimates[0].items[0].chargeLabel, "Site preparation");
+  assert.equal("unitCost" in res.body.estimates[0].items[0], false);
+  assert.equal("refId" in res.body.estimates[0].items[0], false);
   assert.equal(appStateRequests.filter((url) => new URL(url).searchParams.get("key") === "eq.sps_clients").length, 1);
   assert.equal(appStateRequests.length, 2);
 });

@@ -10,6 +10,7 @@ import { resolveFrom } from "./_sender.js";
 import { requireEstimateSender } from "./_estimate-auth.js";
 import { brandLogoSource } from "../brandAssets.js";
 import { estimateLineAmount, estimateLineQuantity, estimateLineUnitPrice, estimateTotals, formatEstimateMoney } from "../estimateMath.js";
+import { estimateChargeBreakdown } from "../estimateBreakdown.js";
 
 const escapeHtml = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -27,7 +28,7 @@ function buildEstimateHtml({ clientName, branding, estimate, logoHtml }) {
   const company = escapeHtml(branding.companyName || "");
   const items = Array.isArray(estimate.items) ? estimate.items : [];
   const totals = estimateTotals(estimate);
-  const rows = items.filter((it) => (it.desc || "").trim()).map((it) => {
+  const itemRow = (it) => {
     const qty = estimateLineQuantity(it);
     const price = estimateLineUnitPrice(it);
     const amount = estimateLineAmount(it);
@@ -41,7 +42,13 @@ function buildEstimateHtml({ clientName, branding, estimate, logoHtml }) {
       </td>
       <td style="padding:9px 0;border-bottom:1px solid #eef0f2;text-align:right;font-size:14px;color:#111827;white-space:nowrap;vertical-align:top">${money(amount)}</td>
     </tr>`;
-  }).join("");
+  };
+  const rows = estimateChargeBreakdown({ ...estimate, items }).map((group) => `<tr>
+      <td colspan="2" style="padding:11px 10px 8px;background:#fff5f5;border-top:1px solid #f7d9db;color:${accent};font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.05em">
+        <span>${escapeHtml(group.label)}</span>
+        <span style="float:right">Section subtotal&nbsp;&nbsp;${money(group.subtotal)}</span>
+      </td>
+    </tr>${group.items.map(itemRow).join("")}`).join("");
 
   const totalRow = (label, value, opts = {}) => `<tr>
     <td style="padding:${opts.big ? "10px 0 0" : "3px 0"};font-size:${opts.big ? 17 : 13}px;${opts.big ? "font-weight:800;color:#111827" : "color:#6b7280"}">${escapeHtml(label)}</td>
@@ -91,13 +98,16 @@ function buildEstimateText({ clientName, branding, estimate }) {
   lines.push(`Estimate from ${branding.companyName || ""}`.trim());
   if (estimate.service) lines.push(`Service: ${estimate.service}`);
   lines.push("");
-  (Array.isArray(estimate.items) ? estimate.items : []).filter((it) => (it.desc || "").trim()).forEach((it) => {
-    const qty = estimateLineQuantity(it), price = estimateLineUnitPrice(it);
-    const unit = String(it.unit || "").trim();
-    const showUnit = unit && !["service", "each", "bundle"].includes(unit);
-    const qtyBit = qty !== 1 || showUnit ? `  (${qty}${showUnit ? ` ${unit}` : ""} x ${money(price)}${showUnit ? `/${unit}` : ""})` : "";
-    const bundleBit = it.bundleNote && !String(it.desc || "").includes(String(it.bundleNote)) ? ` — Includes: ${it.bundleNote}` : "";
-    lines.push(`- ${it.desc}${bundleBit}${qtyBit}  ${money(estimateLineAmount(it))}`);
+  estimateChargeBreakdown(estimate).forEach((group) => {
+    lines.push(`${group.label} — ${money(group.subtotal)}`);
+    group.items.forEach((it) => {
+      const qty = estimateLineQuantity(it), price = estimateLineUnitPrice(it);
+      const unit = String(it.unit || "").trim();
+      const showUnit = unit && !["service", "each", "bundle"].includes(unit);
+      const qtyBit = qty !== 1 || showUnit ? `  (${qty}${showUnit ? ` ${unit}` : ""} x ${money(price)}${showUnit ? `/${unit}` : ""})` : "";
+      const bundleBit = it.bundleNote && !String(it.desc || "").includes(String(it.bundleNote)) ? ` — Includes: ${it.bundleNote}` : "";
+      lines.push(`- ${it.desc}${bundleBit}${qtyBit}  ${money(estimateLineAmount(it))}`);
+    });
   });
   lines.push("");
   lines.push(`Subtotal: ${money(totals.subtotal)}`);

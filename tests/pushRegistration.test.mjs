@@ -236,8 +236,8 @@ test("detected-arrival delivery feedback stays mounted until its send settles", 
   assert.match(app, /onClose=\{\(\) => setDetectedArrival\(null\)\}/);
 });
 
-test("iOS release metadata is version 1.2.1 build 38 for the app and widgets", async () => {
+test("iOS release metadata is version 1.2.1 build 39 for the app and widgets", async () => {
   const project = await read("ios/App/App.xcodeproj/project.pbxproj");
   assert.equal((project.match(/MARKETING_VERSION = 1\.2\.1;/g) || []).length, 4);
-  assert.equal((project.match(/CURRENT_PROJECT_VERSION = 38;/g) || []).length, 4);
+  assert.equal((project.match(/CURRENT_PROJECT_VERSION = 39;/g) || []).length, 4);
 });

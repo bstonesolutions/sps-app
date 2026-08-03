@@ -145,6 +145,8 @@ function invoiceLineFromEstimate(line, estimate, index) {
     ...(estimateNumberIsValid(line?.knownUnitCost) ? { knownUnitCost: String(line.knownUnitCost) } : {}),
     taxable: estimateLineIsTaxable(line, estimate),
     kind: line?.kind || "custom",
+    ...(line?.chargeType ? { chargeType: line.chargeType } : {}),
+    ...(line?.chargeLabel ? { chargeLabel: line.chargeLabel } : {}),
     ...(line?.refId != null ? { refId: line.refId } : {}),
     ...(line?.unit ? { unit: line.unit } : {}),
     ...(line?.bundleNote ? { bundleNote: line.bundleNote } : {}),

@@ -70,6 +70,8 @@ const SPS_LINE_METADATA_FIELDS = [
   "knownUnitCost",
   "refId",
   "bundleItems",
+  "chargeType",
+  "chargeLabel",
   "sourceEstimateLineId",
   "sourceVisitLineId",
 ];

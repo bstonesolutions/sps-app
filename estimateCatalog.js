@@ -90,6 +90,13 @@ export function catalogItemFinancials(kind, item = {}) {
 
 export function estimateLineFromCatalog(kind, item, id) {
   const financials = catalogItemFinancials(kind, item);
+  const chargeType = financials.kind === "service"
+    ? "labor"
+    : financials.kind === "part"
+      ? "parts"
+      : ["product", "treatment"].includes(financials.kind)
+        ? "materials"
+        : "custom";
   return {
     id,
     desc: item?.name || "",
@@ -98,6 +105,7 @@ export function estimateLineFromCatalog(kind, item, id) {
     unitCost: financials.costKnown ? String(financials.cost) : "",
     costKnown: financials.costKnown,
     kind: financials.kind,
+    chargeType,
     refId: item?.id ?? null,
     unit: financials.unit,
     taxable: financials.taxable,
@@ -155,6 +163,7 @@ export function estimateLineFromPartsBundle(selected, id) {
     knownUnitCost: knownUnitCost.toFixed(2),
     costKnown,
     kind: "bundle",
+    chargeType: "parts",
     unit: "bundle",
     taxable: taxability.size === 1 ? bundleItems[0].taxable : false,
     taxabilityMixed: taxability.size > 1,

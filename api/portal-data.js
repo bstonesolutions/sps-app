@@ -149,7 +149,7 @@ function publicClient(client) {
 function publicLineItem(line) {
   return pick(line, [
     "id", "desc", "description", "qty", "unitPrice", "taxable", "kind", "isLateFee",
-    "bundleNote", "discount", "discountType", "rate", "amount",
+    "bundleNote", "chargeType", "chargeLabel", "discount", "discountType", "rate", "amount",
   ]);
 }
 
@@ -170,7 +170,7 @@ function publicInvoice(invoice) {
 }
 
 function publicEstimateItem(line) {
-  return pick(line, ["id", "desc", "description", "qty", "price", "unitPrice", "kind", "unit", "bundleNote", "amount", "taxable"]);
+  return pick(line, ["id", "desc", "description", "qty", "price", "unitPrice", "kind", "unit", "bundleNote", "chargeType", "chargeLabel", "amount", "taxable"]);
 }
 
 function estimateMoneyNumber(value) {

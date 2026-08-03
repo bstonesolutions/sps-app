@@ -29,6 +29,7 @@ const estimate = () => ({
       unitCost: "70",
       costKnown: true,
       kind: "service",
+      chargeType: "labor",
       refId: "service-rebuild",
       unit: "service",
     },
@@ -40,6 +41,7 @@ const estimate = () => ({
       unitCost: "8",
       costKnown: true,
       kind: "product",
+      chargeType: "equipment",
       refId: "product-bacteria",
       unit: "bottle",
     },
@@ -49,6 +51,8 @@ const estimate = () => ({
       qty: "2",
       price: "45",
       kind: "bundle",
+      chargeType: "custom",
+      chargeLabel: "Special installation parts",
       bundleItems: [
         { kind: "part", refId: "part-valve", name: "Valve", qty: "2", unit: "pieces" },
         { kind: "part", refId: "part-clamp", name: "Clamp", qty: "1", unit: "pieces" },
@@ -107,6 +111,22 @@ test("an approved estimate becomes one linked stop with quote and material snaps
       { sourceEstimateLineId: "service-line", taxable: false },
       { sourceEstimateLineId: "product-line", taxable: true },
       { sourceEstimateLineId: "bundle-line", taxable: true },
+    ],
+  );
+  assert.deepEqual(
+    result.stop.estimateItems.map(({ chargeType, chargeLabel }) => ({ chargeType, chargeLabel })),
+    [
+      { chargeType: "labor", chargeLabel: undefined },
+      { chargeType: "equipment", chargeLabel: undefined },
+      { chargeType: "custom", chargeLabel: "Special installation parts" },
+    ],
+  );
+  assert.deepEqual(
+    result.stop.services.map(({ chargeType, chargeLabel }) => ({ chargeType, chargeLabel })),
+    [
+      { chargeType: "labor", chargeLabel: undefined },
+      { chargeType: "equipment", chargeLabel: undefined },
+      { chargeType: "custom", chargeLabel: "Special installation parts" },
     ],
   );
   assert.deepEqual(

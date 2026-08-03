@@ -30,6 +30,7 @@ test("approved estimate becomes one local draft with client, catalog, cost, note
         unitCost: "70",
         costKnown: true,
         kind: "service",
+        chargeType: "labor",
         refId: "svc-pump",
         unit: "service",
       },
@@ -42,6 +43,8 @@ test("approved estimate becomes one local draft with client, catalog, cost, note
         costKnown: false,
         knownUnitCost: "12",
         kind: "bundle",
+        chargeType: "custom",
+        chargeLabel: "Specialty equipment",
         bundleNote: "valve ×2",
         bundleItems: [{ refId: "part-valve", name: "Valve", qty: "2" }],
       },
@@ -69,9 +72,12 @@ test("approved estimate becomes one local draft with client, catalog, cost, note
   assert.equal(invoice.lineItems[0].unitCost, "70");
   assert.equal(invoice.lineItems[0].taxable, false);
   assert.equal(invoice.lineItems[0].refId, "svc-pump");
+  assert.equal(invoice.lineItems[0].chargeType, "labor");
   assert.equal(invoice.lineItems[1].costKnown, false);
   assert.equal(invoice.lineItems[1].unitCost, "");
   assert.equal(invoice.lineItems[1].taxable, true);
+  assert.equal(invoice.lineItems[1].chargeType, "custom");
+  assert.equal(invoice.lineItems[1].chargeLabel, "Specialty equipment");
   assert.deepEqual(invoice.lineItems[1].bundleItems, [{ refId: "part-valve", name: "Valve", qty: "2" }]);
   assert.notEqual(invoice.lineItems[1].bundleItems, estimate.items[1].bundleItems);
   assert.match(invoice.notes, /Replace the failed pump/);
