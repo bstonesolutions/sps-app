@@ -24398,7 +24398,7 @@ function CommsMobileHeader({ title, description, action, T }) {
 
 function CommsIconAction({ icon, label, onClick, T, active = false }) {
   return (
-    <button type="button" onClick={onClick} title={label} aria-label={label}
+    <button type="button" data-comms-control onClick={onClick} title={label} aria-label={label}
       style={{ width: 42, height: 42, border: "none", borderRadius: 21, background: active ? hexA(T.primary, 0.09) : T.surfaceAlt, color: T.primary, boxShadow: commsInsetRing(T, active ? 0.08 : 0.1), display: "grid", placeItems: "center", cursor: "pointer", fontFamily: "inherit", flexShrink: 0, WebkitTapHighlightColor: "transparent" }}>
       <Icon name={icon} size={18} />
     </button>
@@ -24430,6 +24430,14 @@ function CommsSectionNavigator({ sections, activeId, onChange, T, phone = false,
   const shortLabel = (section) => section.id === "email" ? (section.label === "Texts" ? "Texts" : "Inbox") : section.id === "messages" ? "Chats" : "Leads";
   return (
     <div style={{ position: "relative", minWidth: 0 }}>
+      <style>{`
+        [data-comms-section]:focus-visible,
+        [data-comms-control]:focus-visible,
+        [data-phone-mail-menu-trigger]:focus-visible {
+          outline: none !important;
+          box-shadow: 0 0 0 2px ${hexA(T.primary, 0.13)}, 0 1px 3px rgba(15,23,42,0.08) !important;
+        }
+      `}</style>
       {moreOpen && <button type="button" aria-label="Close communications menu" onClick={() => setMoreOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 1, border: "none", background: "transparent", padding: 0 }} />}
       <div style={{ position: "relative", zIndex: 2, display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
         <nav ref={navRef} aria-label="Primary communications sections" style={{ flex: 1, minWidth: 0, height: 44, display: "flex", alignItems: "stretch", gap: 3, padding: 3, boxSizing: "border-box", background: hexA(T.textMuted, 0.065), border: "none", boxShadow: commsInsetRing(T, 0.09), borderRadius: 15 }}>
@@ -24444,7 +24452,7 @@ function CommsSectionNavigator({ sections, activeId, onChange, T, phone = false,
           })}
         </nav>
         {secondary.length > 0 && (
-          <button type="button" aria-label="More communications sections" aria-haspopup="menu" aria-expanded={moreOpen} onClick={() => setMoreOpen(open => !open)}
+          <button type="button" data-comms-control aria-label="More communications sections" aria-haspopup="menu" aria-expanded={moreOpen} onClick={() => setMoreOpen(open => !open)}
             style={{ width: 44, height: 44, flexShrink: 0, border: "none", borderRadius: 15, background: secondaryActive || moreOpen ? hexA(T.primary, 0.09) : T.surfaceAlt, color: secondaryActive || moreOpen ? T.primary : T.textMuted, display: "grid", placeItems: "center", cursor: "pointer", boxShadow: commsInsetRing(T, secondaryActive || moreOpen ? 0.06 : 0.1), WebkitTapHighlightColor: "transparent" }}>
             <Icon name="sliders" size={17} />
           </button>
@@ -24456,7 +24464,7 @@ function CommsSectionNavigator({ sections, activeId, onChange, T, phone = false,
           {secondary.map(section => {
             const on = section.id === activeId;
             return (
-              <button key={section.id} type="button" role="menuitem" onClick={() => onChange(section.id)}
+              <button key={section.id} type="button" data-comms-control role="menuitem" onClick={() => onChange(section.id)}
                 style={{ width: "100%", minHeight: 46, padding: "7px 9px", border: "none", borderRadius: 12, background: on ? hexA(T.primary, 0.085) : "transparent", color: on ? T.primary : T.text, display: "flex", alignItems: "center", gap: 11, fontFamily: "inherit", fontSize: 13.5, fontWeight: on ? 760 : 650, textAlign: "left", cursor: "pointer" }}>
                 <span style={{ width: 30, height: 30, borderRadius: 9, background: on ? hexA(T.primary, 0.12) : T.surfaceAlt, color: on ? T.primary : T.textMuted, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name={section.icon} size={15} /></span>
                 <span style={{ flex: 1 }}>{section.label}</span>
