@@ -14,6 +14,7 @@ import { brandLogoSource } from "./brandAssets";
 import { ESTIMATE_LINE_TAX_MODEL, defaultEstimateLineTaxable, estimateHasValidDays, estimateHasValidTaxRate, estimateLineAmount, estimateLineCost, estimateLineHasKnownCost, estimateLineIsTaxable, estimateLineQuantity, estimateLineUnitPrice, estimateNumberIsValid, estimateNumberValue, estimatePipelineStatus, estimatePipelineSummary, estimateProfitTotals, estimateTotals, formatEstimateMoney, withEstimateRevision, withEstimateTotals } from "./estimateMath";
 import { catalogCategoryGroups, catalogItemFinancials, estimateLineFromCatalog, estimateLineFromPartsBundle } from "./estimateCatalog";
 import { inventorySourceMetadata } from "./inventorySource";
+import { inventoryAdjustmentDelta, inventoryAdjustmentMagnitude, inventoryStockAfterAdjustment, sanitizeInventoryAdjustmentInput } from "./inventoryAdjustment";
 import { ESTIMATE_CHARGE_TYPES, estimateChargeBreakdown, estimateLineChargeLabel, estimateLineChargeType } from "./estimateBreakdown";
 import { completeEstimateWithInvoice, estimateTaxMigrationImpact, estimateToDraftInvoice, findInvoiceForEstimate, normalizeEstimateTaxForInvoice } from "./estimateInvoiceConversion";
 import { findScheduledStopForEstimate, scheduleApprovedEstimate } from "./estimateScheduleLink";
@@ -28605,7 +28606,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       const detail = fresh.channel !== "sms" ? emailDetailCacheRef.current.get(String(fresh.id)) : null;
       setOpenRow(detail ? { ...fresh, ...detail } : fresh);
     }
-  }, [rows, clients, smsThreadMeta, smsThreadPrefs]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [rows, clients, smsThreadMeta, smsThreadPrefs, smsMediaById]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     setOpenSwipeId(null);
   }, [channelFilter, filter, q, folder, selMode]);
@@ -30616,6 +30617,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
   const [locFilter, setLocFilter] = useState("all"); // "all" | locId
   const [adjustModal, setAdjustModal] = useState(null); // { item, kind, mode, locId }
   const [adjustAmt, setAdjustAmt] = useState("");
+  const [adjustDirection, setAdjustDirection] = useState("remove");
   const [adjustNote, setAdjustNote] = useState("");
   const [adjustLoc, setAdjustLoc] = useState("");
   const [historyModal, setHistoryModal] = useState(null); // { item, kind }
@@ -30704,20 +30706,22 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
     if (!canEdit) return;
     setAdjustModal({ item, kind, mode });
     setAdjustAmt("");
+    setAdjustDirection(mode === "restock" ? "add" : "remove");
     setAdjustNote("");
     setAdjustLoc(locId || (locations[0]?.id ?? ""));
   };
   const applyAdjust = () => {
-    const amt = parseFloat(adjustAmt) || 0;
-    if (amt === 0 || !adjustLoc) { setAdjustModal(null); return; }
+    const amt = inventoryAdjustmentDelta({ amount: adjustAmt, mode: adjustModal.mode, direction: adjustDirection });
+    if (amt === 0 || !adjustLoc) return;
     const cur = invAtLoc(adjustModal.item, adjustLoc);
-    const newAmt = adjustModal.mode === "restock" ? cur + amt : Math.max(0, cur + amt);
+    const newAmt = inventoryStockAfterAdjustment(cur, amt);
     setCatalog(cat => ({
       ...cat,
       [catKey]: (cat[catKey] || []).map(it => it.id === adjustModal.item.id ? setStockAtLoc(it, adjustLoc, newAmt) : it),
     }));
-    logInvChange({ action: adjustModal.mode === "restock" ? "Restocked" : "Used", item: adjustModal.item.name, kind, qty: Math.abs(amt), unit: adjustModal.item.unit || "", loc: (locations.find(l => l.id === adjustLoc) || {}).name || "" });
-    setAdjustModal(null); setAdjustAmt(""); setAdjustNote(""); setAdjustLoc("");
+    const action = adjustModal.mode === "restock" ? "Restocked" : amt < 0 ? "Removed" : "Added";
+    logInvChange({ action, item: adjustModal.item.name, kind, qty: Math.abs(amt), unit: adjustModal.item.unit || "", loc: (locations.find(l => l.id === adjustLoc) || {}).name || "" });
+    setAdjustModal(null); setAdjustAmt(""); setAdjustDirection("remove"); setAdjustNote(""); setAdjustLoc("");
   };
 
   // ── Transfer between locations ──
@@ -31238,15 +31242,36 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
               </div>
             </div>
             <div>
-              <label style={lbl}>{adjustModal.mode === "restock" ? `Add (${unitOf(adjustModal.item)})` : `Adjustment (use – to remove)`}</label>
+              {adjustModal.mode !== "restock" && (
+                <div style={{ marginBottom: 14 }}>
+                  <label style={lbl}>Inventory change</label>
+                  <div role="group" aria-label="Inventory adjustment direction" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, padding: 5, borderRadius: 13, background: T.surfaceAlt }}>
+                    {[{ id: "remove", label: "− Remove" }, { id: "add", label: "+ Add" }].map(option => {
+                      const selected = adjustDirection === option.id;
+                      return (
+                        <button key={option.id} type="button" aria-pressed={selected} onClick={() => setAdjustDirection(option.id)}
+                          style={{ minHeight: 42, borderRadius: 9, border: selected ? `1.5px solid ${T.primary}` : "1.5px solid transparent", background: selected ? T.surface : "transparent", color: selected ? T.primary : T.textMuted, boxShadow: selected ? "0 1px 3px rgba(15,23,42,0.08)" : "none", fontSize: 14, fontWeight: 750, fontFamily: "inherit", cursor: "pointer" }}>
+                          {option.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              <label style={lbl}>
+                {adjustModal.mode === "restock" || adjustDirection === "add" ? "Amount to add" : "Amount to remove"} ({unitOf(adjustModal.item)})
+              </label>
               <input type="text" inputMode="decimal" style={field} value={adjustAmt}
-                onChange={e => setAdjustAmt(e.target.value.replace(/[^0-9.\-]/g, ""))}
-                placeholder={adjustModal.mode === "restock" ? "e.g. 128" : "e.g. -16"} autoFocus />
-              {adjustAmt && adjustLoc && (
+                onChange={e => setAdjustAmt(sanitizeInventoryAdjustmentInput(e.target.value))}
+                placeholder="e.g. 16" autoFocus />
+              {inventoryAdjustmentMagnitude(adjustAmt) > 0 && adjustLoc && (
                 <div style={{ fontSize: 13, color: T.textMuted, marginTop: 6 }}>
                   New at {locName(adjustLoc)}: <strong style={{ color: T.text }}>
-                    {Math.max(0, invAtLoc(adjustModal.item, adjustLoc) + (parseFloat(adjustAmt) || 0))} {unitOf(adjustModal.item)}
+                    {inventoryStockAfterAdjustment(invAtLoc(adjustModal.item, adjustLoc), inventoryAdjustmentDelta({ amount: adjustAmt, mode: adjustModal.mode, direction: adjustDirection }))} {unitOf(adjustModal.item)}
                   </strong>
+                  {adjustDirection === "remove" && inventoryAdjustmentMagnitude(adjustAmt) > invAtLoc(adjustModal.item, adjustLoc) && (
+                    <span style={{ display: "block", marginTop: 3, color: "#B45309", fontWeight: 650 }}>Removal is capped at the stock currently here.</span>
+                  )}
                 </div>
               )}
             </div>
@@ -31254,8 +31279,8 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
               <label style={lbl}>Note <span style={{ textTransform: "none", fontWeight: 400 }}>(optional)</span></label>
               <input type="text" style={field} value={adjustNote} onChange={e => setAdjustNote(e.target.value)} placeholder="e.g. Received shipment, Manual count" />
             </div>
-            <Btn onClick={applyAdjust} block lg disabled={!adjustAmt || !adjustLoc}>
-              {adjustModal.mode === "restock" ? "Add to Inventory" : "Apply Adjustment"}
+            <Btn onClick={applyAdjust} block lg disabled={inventoryAdjustmentMagnitude(adjustAmt) <= 0 || !adjustLoc}>
+              {adjustModal.mode === "restock" || adjustDirection === "add" ? `Add to ${locName(adjustLoc) || "Inventory"}` : `Remove from ${locName(adjustLoc) || "Inventory"}`}
             </Btn>
           </div>
         </Modal>

@@ -20,7 +20,7 @@ delete process.env.APNS_TEAM_ID;
 delete process.env.APNS_PRIVATE_KEY;
 
 const { default: sendSmsHandler } = await import("../api/send-sms.js");
-const { default: smsIntakeHandler, inboundTextStaffKeys, pushLegNeedsRetry } = await import("../api/sms-intake.js");
+const { default: smsIntakeHandler, inboundTextNotificationCopy, inboundTextStaffKeys, pushLegNeedsRetry } = await import("../api/sms-intake.js");
 const { memberHasCapability, requireOwner } = await import("../api/_staff-auth.js");
 
 const originalFetch = globalThis.fetch;
@@ -234,6 +234,7 @@ function installInboxFetch({
   clientReadFailure = false,
   patchFailure = false,
   quoContacts = {},
+  cachedContacts = [],
 } = {}) {
   let storedRow = duplicate ? { ai: duplicateAi || { quoLine: "automation" }, kind: "other" } : null;
   const calls = {
@@ -255,7 +256,7 @@ function installInboxFetch({
         ? response({ data: contact })
         : response({ error: "not found" }, { ok: false, status: 404 });
     }
-    if (target.includes("/rest/v1/sps_sms_contacts?select=")) return response([]);
+    if (target.includes("/rest/v1/sps_sms_contacts?select=")) return response(cachedContacts);
     if (target.includes("/rest/v1/sps_sms_contacts?on_conflict=phone")) {
       calls.contactRows.push(...JSON.parse(options.body));
       return response([]);
@@ -333,6 +334,27 @@ test("inbound text push audiences honor the exact receiving line and active rost
   assert.deepEqual(inboundTextStaffKeys(team, "automation"), ["automation-only", "both-lines"]);
   assert.deepEqual(inboundTextStaffKeys(team, "main"), ["main-only", "both-lines"]);
   assert.deepEqual(inboundTextStaffKeys(team, "unknown"), []);
+});
+
+test("inbound push copy prefers SPS clients, then Quo names, then the formatted phone", () => {
+  assert.equal(inboundTextNotificationCopy({
+    client: { name: "SPS Client" },
+    contact: { name: "Quo Contact" },
+    matches: [{ id: "client-1" }],
+    fromPhone: "+15552345678",
+    text: "Hello",
+  }).title, "Text from SPS Client");
+  assert.equal(inboundTextNotificationCopy({
+    contact: { name: "Quo Contact" },
+    matches: [],
+    fromPhone: "+15552345678",
+    text: "Hello",
+  }).title, "Text from Quo Contact");
+  assert.equal(inboundTextNotificationCopy({
+    matches: [],
+    fromPhone: "+15552345678",
+    text: "Hello",
+  }).title, "New text from (555) 234-5678");
 });
 
 test("notification retries distinguish transient APNs failures from permanently pruned tokens", () => {
@@ -1379,6 +1401,24 @@ test("modern Quo contactIds resolve one exact phone match into the private conta
   assert.equal(calls.contactRows[0].contact_name, "Jonathan Lauchner");
   assert.equal(calls.rows[0].quo_contact_id, "CT-modern-1");
   assert.equal(calls.rows[0].sms_contact_name, "Jonathan Lauchner");
+});
+
+test("an inbound webhook uses the exact phone-keyed Quo cache when contactIds are absent", async () => {
+  const calls = installInboxFetch({
+    cachedContacts: [{
+      phone: "+15552345678",
+      quo_contact_id: "CT-cached",
+      contact_name: "Jonathan Lauchner",
+      avatar_path: "contacts/private-avatar.jpg",
+    }],
+  });
+  const { res } = await invokeWebhook(webhookPayload("cached-contact-no-ids"));
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(calls.contactLookups, []);
+  assert.equal(calls.rows[0].quo_contact_id, "CT-cached");
+  assert.equal(calls.rows[0].sms_contact_name, "Jonathan Lauchner");
+  assert.equal(calls.rows[0].sms_contact_avatar_path, "contacts/private-avatar.jpg");
 });
 
 test("modern Quo contactIds are not attached when the exact contact phone does not match the sender", async () => {

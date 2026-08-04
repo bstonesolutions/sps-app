@@ -7,6 +7,7 @@ process.env.QUO_API_KEY = "test-quo-api-key";
 
 const {
   QUO_CONTACT_SYNC_LIMITS,
+  lookupCachedQuoContactForPhone,
   lookupAndCacheQuoContactForPhone,
   quoContactIdsFromMessage,
   syncQuoContacts,
@@ -51,6 +52,33 @@ test("message contactIds are deduplicated, validated, and hard-bounded", () => {
     contactId: "CT-legacy",
   }), ["CT-one", "CT-two", "CT-three"]);
   assert.equal(QUO_CONTACT_SYNC_LIMITS.maxMessageLookups, 3);
+});
+
+test("an exact E.164 cache lookup returns the private Quo identity without calling Quo", async () => {
+  let requested = "";
+  const result = await lookupCachedQuoContactForPhone({
+    phone: "(555) 234-5678",
+    supabaseUrl: "https://supabase.test",
+    serviceKey: "secret-service-key",
+    fetchImpl: async (url) => {
+      requested = String(url);
+      return response([{
+        phone: "+15552345678",
+        quo_contact_id: "CT-cached",
+        contact_name: "Jordan Hale",
+        avatar_path: "contacts/private-avatar.jpg",
+      }]);
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.matched, true);
+  assert.equal(result.metadata.name, "Jordan Hale");
+  assert.equal(result.metadata.id, "CT-cached");
+  assert.equal(result.avatarPath, "contacts/private-avatar.jpg");
+  assert.match(requested, /sps_sms_contacts/);
+  assert.match(requested, /phone=in\./);
+  assert.doesNotMatch(JSON.stringify(result), /secret-service-key/);
 });
 
 test("exact contact lookup caches only the contact whose E.164 phone matches the message peer", async () => {

@@ -98,6 +98,11 @@ test("visible SMS identities are privately hydrated in one bounded request", () 
   assert.match(inbox, /\.slice\(0, 50\)/);
 });
 
+test("an open SMS thread refreshes when its private signed media finishes loading", () => {
+  assert.match(inbox, /\[rows, clients, smsThreadMeta, smsThreadPrefs, smsMediaById\]/);
+  assert.match(inbox, /sms_media: media\?\.sms_media \|\| row\.sms_media \|\| \[\]/);
+});
+
 test("owner inbox advances a bounded Quo contact backfill and refreshes only on changes", () => {
   assert.match(inbox, /const quoContactSyncStartedRef = useRef\(false\)/);
   assert.match(inbox, /fetch\(`\$\{PROD_URL\}\/api\/quo-contact-sync`/);

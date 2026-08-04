@@ -171,6 +171,49 @@ async function readExistingCache(phones, {
   return { ok: true, byPhone };
 }
 
+// Message webhooks do not reliably include Quo contactIds. The durable phone-keyed cache is
+// therefore the fastest authoritative identity source for an inbound notification. Keep this
+// server-only and exact-E.164: a partial/last-four match could expose the wrong customer's name.
+export async function lookupCachedQuoContactForPhone({
+  phone,
+  supabaseUrl,
+  serviceKey,
+  fetchImpl = fetch,
+  timeoutMs = 600,
+} = {}) {
+  const peer = toSmsE164(phone);
+  if (!isSmsE164(peer)) return { ok: true, matched: false, skipped: "invalid phone" };
+  if (!supabaseUrl || !serviceKey) return { ok: false, matched: false, error: "Contact cache is not configured" };
+
+  const existing = await readExistingCache([peer], {
+    supabaseUrl,
+    serviceKey,
+    fetchImpl,
+    timeoutMs,
+  });
+  if (!existing.ok || existing.skipped) {
+    return {
+      ok: existing.ok,
+      matched: false,
+      error: existing.error,
+      skipped: existing.skipped || "",
+    };
+  }
+  const row = existing.byPhone.get(peer);
+  if (!row) return { ok: true, matched: false };
+  return {
+    ok: true,
+    matched: true,
+    metadata: {
+      id: cleanSmsValue(row.quo_contact_id, 100),
+      name: cleanSmsValue(row.contact_name, 180),
+      phones: [peer],
+      pictureUrl: "",
+    },
+    avatarPath: cleanSmsValue(row.avatar_path, 500),
+  };
+}
+
 async function writeChangedCache(rows, {
   supabaseUrl,
   serviceKey,

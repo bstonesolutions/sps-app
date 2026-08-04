@@ -32,6 +32,7 @@ import {
   toSmsE164,
 } from "./_sms-history.js";
 import {
+  lookupCachedQuoContactForPhone,
   lookupAndCacheQuoContactForPhone,
   quoContactIdsFromMessage,
 } from "./_quo-contacts.js";
@@ -123,14 +124,22 @@ export function inboundTextStaffKeys(team, quoLine) {
     .filter(Boolean))];
 }
 
-async function notifyInboundText({ client, matches, fromPhone, text, quoLine, eventId, remaining, targets = { owner: true, staff: true } }) {
-  const sender = client?.name || fmtPhone(fromPhone) || "Unknown number";
+export function inboundTextNotificationCopy({ client, contact, matches = [], fromPhone, text }) {
+  const contactName = cleanSmsValue(contact?.name, 180);
+  const sender = cleanSmsValue(client?.name, 180) || contactName || fmtPhone(fromPhone) || "Unknown number";
   const title = client
-    ? `Text from ${client.name}`
+    ? `Text from ${sender}`
     : matches.length > 1
       ? `Text needs review: ${sender}`
-      : `New text from ${sender}`;
-  const body = text.slice(0, 180) || "Open Comms → Inbox to review this text.";
+      : contactName
+        ? `Text from ${sender}`
+        : `New text from ${sender}`;
+  const body = String(text || "").slice(0, 180) || "Open Comms → Inbox to review this text.";
+  return { sender, title, body };
+}
+
+async function notifyInboundText({ client, contact, matches, fromPhone, text, quoLine, eventId, remaining, targets = { owner: true, staff: true } }) {
+  const { title, body } = inboundTextNotificationCopy({ client, contact, matches, fromPhone, text });
   const sendWindow = () => Math.max(250, Math.min(1400, remaining(500)));
   const opts = { collapseId: `sms-${eventId}`, timeoutMs: sendWindow() };
   const staffCapability = quoLine === "main" ? "commsMainLine" : quoLine === "automation" ? "commsTextInbox" : "";
@@ -318,20 +327,44 @@ async function upsertContactMetadata(metadata, avatarPath, remaining) {
 
 async function resolveMessageContact(msg, peerPhone, remaining, reserveMs) {
   const peer = toSmsE164(peerPhone);
-  const embedded = quoContactMetadata(msg?.contact);
-  const embeddedMatchesPeer = !embedded.phones.length || embedded.phones.includes(peer);
-  let id = embeddedMatchesPeer ? (embedded.id || cleanSmsValue(msg?.contactId, 100)) : "";
-  let name = embeddedMatchesPeer ? (embedded.name || cleanSmsValue(msg?.contactName, 180)) : "";
+  let id = "";
+  let name = "";
   let avatarPath = "";
 
-  if (id && embeddedMatchesPeer) {
+  // Quo message webhooks often omit contactIds even when Quo's own UI knows the person. Resolve
+  // the exact phone from our private cache before APNs is composed so the lock-screen alert does
+  // not regress to a number until somebody opens Comms.
+  const cacheWindow = Math.min(700, Math.max(0, remaining(reserveMs)));
+  if (SERVICE_KEY && E164.test(peer) && cacheWindow >= 150) {
+    const cached = await settleWithin(lookupCachedQuoContactForPhone({
+      phone: peer,
+      supabaseUrl: SUPABASE_URL,
+      serviceKey: SERVICE_KEY,
+      timeoutMs: Math.min(550, cacheWindow),
+    }), cacheWindow);
+    if (cached.completed && !cached.error && cached.value?.matched) {
+      id = cached.value.metadata?.id || "";
+      name = cached.value.metadata?.name || "";
+      avatarPath = cached.value.avatarPath || "";
+    }
+  }
+
+  const embedded = quoContactMetadata(msg?.contact);
+  const embeddedMatchesPeer = !embedded.phones.length || embedded.phones.includes(peer);
+  const embeddedId = embeddedMatchesPeer ? (embedded.id || cleanSmsValue(msg?.contactId, 100)) : "";
+  if (embeddedMatchesPeer) {
+    id = embeddedId || id;
+    name = embedded.name || cleanSmsValue(msg?.contactName, 180) || name;
+  }
+
+  if (embeddedId && embeddedMatchesPeer) {
     const avatar = embedded.pictureUrl
       ? await copyWebhookMedia([{ url: embedded.pictureUrl, type: "image/jpeg" }], id, remaining, "contacts")
       : [];
     avatarPath = avatar[0]?.path || "";
     await upsertContactMetadata({
       ...embedded,
-      id,
+      id: embeddedId,
       name,
       phones: embedded.phones.length ? embedded.phones : [peer],
     }, avatarPath, remaining).catch(() => {});
@@ -729,7 +762,7 @@ export default async function handler(req, res) {
 
     const row = {
       id, channel: "sms", from_phone: fromPhone,
-      from_name: client ? client.name : fmtPhone(fromPhone),
+      from_name: client ? client.name : (contact.name || fmtPhone(fromPhone)),
       from_email: fmtPhone(fromPhone), // display fallback for the inbox row
       subject: text.slice(0, 80) || "(text message)",
       body_text: text, body_html: "", message_id: providerId || eventId, kind, ai, lead_id: "", read: false, replied: false,
@@ -830,7 +863,7 @@ export default async function handler(req, res) {
     // matches, bills, and ordinary non-leads. Staff are derived from the protected team state and
     // only receive the line they were explicitly granted; pushStaff preserves the Test Mode hold.
     const pushRun = await settleWithin(
-      notifyInboundText({ client, matches, fromPhone, text, quoLine, eventId, remaining, targets: pushTargets }),
+      notifyInboundText({ client, contact, matches, fromPhone, text, quoLine, eventId, remaining, targets: pushTargets }),
       Math.min(3100, remaining(1000)),
     );
     const pushResult = pushRun.completed && !pushRun.error
