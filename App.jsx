@@ -28573,7 +28573,6 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   }, [openSwipeId]);
   const unread = displayInboxRows.reduce((total, row) => total + (row._smsConversation ? Number(row._unreadCount || 0) : (row.read ? 0 : 1)), 0);
   const channelUnread = channelRows.reduce((total, row) => total + (row._smsConversation ? Number(row._unreadCount || 0) : (row.read ? 0 : 1)), 0);
-  const visibleLineSummary = [inboxAccess.automation ? "staff number" : "", inboxAccess.main ? (ownerView ? "my number" : "owner number") : ""].filter(Boolean).join(" and ") || "permitted lines";
   const markRead = (rawIds, read = true) => {
     const requested = new Set((rawIds || []).map(String));
     // Do not show the new state until the remote systems confirm it. This also removes no-op rows
@@ -29627,23 +29626,9 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
             <Icon name="sliders" size={16} />
           </button>
         </div>
-      )) : (
-        <CommsPageHeader
-          title={folder === "inbox" ? (smsOnly ? "Business texts" : "Unified inbox") : "Sent email"}
-          description={folder === "inbox" ? (smsOnly ? `${unread} unread · ${visibleLineSummary}` : `${unread} unread · business texts and work email, clearly separated`) : "Email you compose and reply to from SPS Way."}
-          icon={folder === "inbox" ? "inbox" : "send"}
-          meta={folder === "inbox" && !smsOnly ? <>
-            <span style={{ color: smsTone, background: hexA(smsTone, 0.1), borderRadius: 100, padding: "3px 9px", fontSize: 10.5, fontWeight: 800 }}>{textCount} text{textCount === 1 ? "" : "s"}</span>
-            <span style={{ color: "#2563eb", background: hexA("#2563eb", 0.1), borderRadius: 100, padding: "3px 9px", fontSize: 10.5, fontWeight: 800 }}>{emailCount} email{emailCount === 1 ? "" : "s"}</span>
-          </> : null}
-          action={!smsOnly && wide
-            ? <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="edit" size={14} />New email</Btn>
-            : !smsOnly && showMobileCompose ? iconBtn("edit", "Compose a new email", () => { setComposeMsg(""); setComposeOpen(true); }, true) : null}
-          T={T}
-        />
-      )}
+      )) : null}
       {/* Tablet/desktop folder switch. Phones use the compact mailbox dropdown above. */}
-      {!phone && <div style={{ display: "flex", alignItems: "center", gap: dense ? 6 : 10, flexWrap: wide ? "wrap" : "nowrap", minWidth: 0 }}>
+      {!phone && <div data-sps-mailbox-toolbar style={{ display: "flex", alignItems: "center", gap: dense ? 6 : 10, flexWrap: wide ? "wrap" : "nowrap", minWidth: 0 }}>
         {!smsOnly && folderBar}
         {wide && <div style={{ flex: 1 }} />}
         {folder === "inbox" && (wide ? (
@@ -29658,6 +29643,9 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
             {!smsOnly && (list.length > 0 || selMode) && iconBtn("check", selMode ? "Finish selecting" : "Select messages", () => { if (selMode) exitSelect(); else setSelMode(true); }, selMode)}
           </>
         ))}
+        {!smsOnly && (wide
+          ? <Btn variant="primary" sm onClick={() => { setComposeMsg(""); setComposeOpen(true); }} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="edit" size={14} />New email</Btn>
+          : showMobileCompose ? iconBtn("edit", "Compose a new email", () => { setComposeMsg(""); setComposeOpen(true); }, true) : null)}
       </div>}
       {folder === "inbox" ? (
         <>
@@ -29667,9 +29655,9 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
         {!phone && !smsOnly && channelSwitcher}
       </div>
       {!phone && !wide && (
-        <button type="button" onClick={() => setFiltersOpen(v => !v)} aria-expanded={filtersOpen}
-          style={{ minHeight: dense ? 40 : 44, width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: dense ? "7px 10px" : "9px 12px", background: T.surface, border: `1px solid ${filter !== "all" ? T.primary : T.border}`, borderRadius: 12, color: filter !== "all" ? T.primary : T.textMuted, fontFamily: "inherit", fontSize: 12.5, fontWeight: 750, cursor: "pointer" }}>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}><Icon name="funnel" size={15} />{filter === "all" ? "Category filters" : `Filtered by ${KIND[filter]?.label || "Unread"}`}</span>
+        <button type="button" aria-label="Filter message categories" onClick={() => setFiltersOpen(v => !v)} aria-expanded={filtersOpen}
+          style={{ minHeight: dense ? 38 : 40, width: "fit-content", maxWidth: "100%", alignSelf: "flex-start", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 9, padding: dense ? "6px 11px" : "7px 13px", background: filter !== "all" ? hexA(T.primary, 0.08) : T.surface, border: `1px solid ${filter !== "all" ? hexA(T.primary, 0.3) : T.border}`, borderRadius: 999, color: filter !== "all" ? T.primary : T.textMuted, fontFamily: "inherit", fontSize: 12.5, fontWeight: 750, cursor: "pointer" }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}><Icon name="funnel" size={14} />{filter === "all" ? "Filters" : (KIND[filter]?.label || "Unread")}</span>
           <span style={{ display: "inline-flex", transform: filtersOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}><Icon name="chevronD" size={15} /></span>
         </button>
       )}

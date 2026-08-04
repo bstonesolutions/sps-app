@@ -15,6 +15,9 @@ test("mobile inbox uses a compact mailbox dropdown with inline search and compos
   assert.match(source, /label: "All channels"/);
   assert.match(source, /<CommsIconAction icon="edit" label="Compose a new email"[\s\S]*?active/);
   assert.match(source, /!phone && <div[\s\S]*?\{!smsOnly && folderBar\}/);
+  assert.match(source, /data-sps-mailbox-toolbar/);
+  assert.match(source, /aria-label="Filter message categories"/);
+  assert.doesNotMatch(source, /"Unified inbox"/);
   assert.match(source, /const inboxEndpoint = smsOnly \? "\/api\/sms-inbox" : "\/api\/inbox"/);
   assert.match(source, /!smsOnly && phoneMenuOption\(\{ key: "mailbox-sent"/);
   assert.doesNotMatch(app, /function CommsMailBottomBar/);
