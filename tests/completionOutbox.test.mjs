@@ -4,11 +4,14 @@ import assert from "node:assert/strict";
 import {
   classifyCompletionFailure,
   completionOutboxSummary,
+  completionReviewItems,
+  dismissCompletionIntent,
   enqueueCompletionIntent,
   persistStopDraft,
   readCompletionOutbox,
   readStopDraft,
   removeStopDraft,
+  retryCompletionIntent,
   updateCompletionIntent,
 } from "../completionOutbox.js";
 
@@ -91,6 +94,60 @@ test("summary separates background work from review items", () => {
     { state: "saved", deliveryNeedsReview: true },
   ], 1000);
   assert.deepEqual(summary, { queued: 2, waiting: 1, needsReview: 2, saved: 1 });
+});
+
+test("review items preserve exact report identity and separate save from delivery problems", () => {
+  const rows = completionReviewItems([
+    {
+      id: "delivery-1", sid: "stop-2", clientId: "client-2", state: "saved", createdAt: 200,
+      deliveryNeedsReview: true,
+      delivery: { channels: { email: { status: "needs_review", error: "Email provider timed out." }, text: { status: "delivered" } } },
+      request: { entry: { date: "08/03/2026", notes: "Safe delivery report" } },
+    },
+    {
+      id: "save-1", sid: "stop-1", clientId: "client-1", state: "needs_review", createdAt: 100,
+      lastError: "Another device changed this stop.", errorCode: "completion-already-owned",
+      request: { entry: { date: "08/02/2026", notes: "Safe completion report" } },
+    },
+    { id: "queued", sid: "stop-3", state: "queued", createdAt: 50 },
+  ]);
+  assert.deepEqual(rows.map(row => [row.id, row.reviewKind]), [["save-1", "report"], ["delivery-1", "delivery"]]);
+  assert.equal(rows[0].request.entry.notes, "Safe completion report");
+  assert.equal(rows[0].reviewError, "Another device changed this stop.");
+  assert.deepEqual(rows[1].reviewChannels, [{ key: "email", error: "Email provider timed out." }]);
+});
+
+test("explicit retry preserves the original report request and idempotency key", async () => {
+  const storage = new MemoryStorage();
+  const saved = await enqueueCompletionIntent(intent(), { storage, now: 1000 });
+  await updateCompletionIntent("user-1", saved.id, {
+    state: "needs_review",
+    lastError: "Shared stop changed.",
+    errorCode: "app-state-conflict",
+    errorStatus: 409,
+  }, { storage });
+  const retried = await retryCompletionIntent("user-1", saved.id, { storage, now: 2500 });
+  assert.equal(retried.state, "queued");
+  assert.equal(retried.retryAt, 0);
+  assert.equal(retried.lastError, "");
+  assert.equal(retried.idempotencyKey, "complete-stop-42-key");
+  assert.deepEqual(retried.request, saved.request);
+});
+
+test("dismiss review hides the alert while retaining the exact saved report", async () => {
+  const storage = new MemoryStorage();
+  const saved = await enqueueCompletionIntent(intent(), { storage, now: 1000 });
+  await updateCompletionIntent("user-1", saved.id, {
+    state: "needs_review",
+    lastError: "This stop was already completed elsewhere.",
+  }, { storage });
+  const dismissed = await dismissCompletionIntent("user-1", saved.id, { storage, now: 3000 });
+  assert.equal(dismissed.state, "dismissed");
+  assert.equal(dismissed.dismissedAt, 3000);
+  assert.equal(dismissed.idempotencyKey, "complete-stop-42-key");
+  assert.deepEqual(dismissed.request, saved.request);
+  assert.equal(completionOutboxSummary([dismissed]).needsReview, 0);
+  assert.equal((await readCompletionOutbox("user-1", { storage, now: 4000 })).length, 1);
 });
 
 test("expired saved completions are removed from the persisted outbox", async () => {

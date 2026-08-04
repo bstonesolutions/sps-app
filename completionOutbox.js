@@ -3,6 +3,7 @@ import { idb } from "./idbStore.js";
 const OUTBOX_PREFIX = "sps-completion-outbox:v1:";
 const DRAFT_PREFIX = "sps-stop-draft:v1:";
 const SAVED_RETENTION_MS = 24 * 60 * 60 * 1000;
+const DISMISSED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_RETRY_MS = 5 * 60 * 1000;
 
 const writeTails = new Map();
@@ -40,7 +41,11 @@ function normalizeItems(value) {
 }
 
 function retainItems(items, now = Date.now()) {
-  return items.filter(item => item.state !== "saved" || now - Number(item.savedAt || item.updatedAt || 0) < SAVED_RETENTION_MS);
+  return items.filter(item => {
+    if (item.state === "saved") return now - Number(item.savedAt || item.updatedAt || 0) < SAVED_RETENTION_MS;
+    if (item.state === "dismissed") return now - Number(item.dismissedAt || item.updatedAt || 0) < DISMISSED_RETENTION_MS;
+    return true;
+  });
 }
 
 async function readItems(uid, storage) {
@@ -185,6 +190,57 @@ export function completionOutboxSummary(items, now = Date.now()) {
     needsReview: rows.filter(item => item.state === "needs_review" || item.deliveryNeedsReview).length,
     saved: rows.filter(item => item.state === "saved").length,
   };
+}
+
+export function completionReviewItems(items) {
+  const rows = Array.isArray(items) ? items : [];
+  return rows
+    .filter(item => item && (item.state === "needs_review" || item.deliveryNeedsReview))
+    .map(item => {
+      const deliveryChannels = Object.entries(item.delivery?.channels || {})
+        .filter(([, channel]) => channel?.status === "needs_review")
+        .map(([key, channel]) => ({
+          key,
+          error: cleanPart(channel?.error || channel?.result?.text),
+        }));
+      const reportNeedsReview = item.state === "needs_review";
+      return {
+        ...item,
+        reviewKind: reportNeedsReview ? "report" : "delivery",
+        reviewChannels: reportNeedsReview ? [] : deliveryChannels,
+        reviewError: reportNeedsReview
+          ? (cleanPart(item.lastError) || "The completed report was not accepted by the shared workspace.")
+          : (deliveryChannels.map(channel => channel.error).filter(Boolean).join(" ") || "A client delivery response could not be confirmed."),
+      };
+    })
+    .sort((a, b) => Number(a.createdAt || a.updatedAt || 0) - Number(b.createdAt || b.updatedAt || 0));
+}
+
+export async function retryCompletionIntent(uid, id, { storage = idb, now = Date.now() } = {}) {
+  return updateCompletionIntent(uid, id, current => {
+    if (!current || current.state !== "needs_review") return current;
+    return {
+      state: "queued",
+      retryAt: 0,
+      retryRequestedAt: now,
+      lastError: "",
+      errorCode: "",
+      errorStatus: 0,
+      updatedAt: now,
+    };
+  }, { storage });
+}
+
+export async function dismissCompletionIntent(uid, id, { storage = idb, now = Date.now() } = {}) {
+  return updateCompletionIntent(uid, id, current => {
+    if (!current || current.state !== "needs_review") return current;
+    return {
+      state: "dismissed",
+      retryAt: 0,
+      dismissedAt: now,
+      updatedAt: now,
+    };
+  }, { storage });
 }
 
 export async function persistStopDraft(uid, sid, payload, { storage = idb, now = Date.now() } = {}) {

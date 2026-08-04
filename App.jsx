@@ -51,12 +51,15 @@ import { reminderSystemEnabled } from "./reminderSystem";
 import {
   classifyCompletionFailure,
   completionOutboxSummary,
+  completionReviewItems,
   completionRetryDelay,
+  dismissCompletionIntent,
   enqueueCompletionIntent,
   persistStopDraft,
   readCompletionOutbox,
   readStopDraft,
   removeStopDraft,
+  retryCompletionIntent,
   updateCompletionIntent,
 } from "./completionOutbox";
 
@@ -38077,6 +38080,9 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
 
   const [dbError, setDbError] = useState(null);
   const [completionOutboxItems, setCompletionOutboxItems] = useState([]);
+  const [completionReviewOpen, setCompletionReviewOpen] = useState(false);
+  const [completionReviewBusyId, setCompletionReviewBusyId] = useState("");
+  const [completionReviewMessage, setCompletionReviewMessage] = useState("");
   const completionOutboxDrainRef = useRef(null);
   const completionOutboxBusyRef = useRef(false);
   const publishCompletionOutbox = (items, changedItem = null) => {
@@ -40915,17 +40921,133 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       onArrived={() => handleArrived(detectedArrival.stop.sid, detectedArrival.stop)}
     />
   ) : null;
+  const completionReviews = completionReviewItems(completionOutboxItems);
+  const completionReviewContext = (item) => {
+    const day = (schedule || []).find(entry => (entry.stops || []).some(stop => String(stop.sid) === String(item?.sid)));
+    const stop = day && (day.stops || []).find(entry => String(entry.sid) === String(item?.sid));
+    const client = (clients || []).find(entry => String(entry.id) === String(item?.clientId)) || null;
+    return {
+      day,
+      stop,
+      client,
+      clientName: item?.delivery?.client?.name || client?.name || stop?.client || "Client",
+      date: item?.request?.entry?.date || day?.date || "Saved visit",
+      service: item?.request?.entry?.type || stop?.type || "Service visit",
+    };
+  };
+  const openCompletionReviewStop = (item) => {
+    const context = completionReviewContext(item);
+    if (!context.stop || !context.day) {
+      setCompletionReviewMessage("This visit is no longer on the active schedule. The saved report is still safe here; use Retry saved report or keep it for office review.");
+      return;
+    }
+    setCompletionReviewOpen(false);
+    setScheduleFocus({ sid: item.sid, date: context.day.date });
+    handleNav("schedule");
+  };
+  const retryCompletionReview = async (item) => {
+    if (!item?.id || completionReviewBusyId) return;
+    setCompletionReviewBusyId(item.id);
+    setCompletionReviewMessage("");
+    try {
+      const retried = await retryCompletionIntent(authUserId, item.id);
+      if (!retried || retried.state !== "queued") throw new Error("This saved report is no longer waiting for a retry.");
+      await refreshCompletionOutboxView(retried);
+      setCompletionReviewOpen(false);
+      setTimeout(() => { void completionOutboxDrainRef.current?.(); }, 0);
+    } catch (error) {
+      setCompletionReviewMessage(error?.message || "The saved report could not be queued for retry.");
+    } finally {
+      setCompletionReviewBusyId("");
+    }
+  };
+  const acknowledgeCompletionDeliveryReview = async (item) => {
+    if (!item?.id || completionReviewBusyId) return;
+    setCompletionReviewBusyId(item.id);
+    setCompletionReviewMessage("");
+    try {
+      await patchCompletionOutboxItem(item.id, { deliveryNeedsReview: false, deliveryReviewedAt: Date.now() });
+      setCompletionReviewOpen(false);
+    } catch (error) {
+      setCompletionReviewMessage(error?.message || "The delivery review could not be cleared.");
+    } finally {
+      setCompletionReviewBusyId("");
+    }
+  };
+  const dismissCompletionReportReview = async (item) => {
+    if (!item?.id || completionReviewBusyId) return;
+    const confirmed = window.confirm("Hide this alert without retrying? The completed report and stop draft will remain saved on this device, and nothing will be sent to the client.");
+    if (!confirmed) return;
+    setCompletionReviewBusyId(item.id);
+    setCompletionReviewMessage("");
+    try {
+      const dismissed = await dismissCompletionIntent(authUserId, item.id);
+      if (!dismissed || dismissed.state !== "dismissed") throw new Error("This report is no longer waiting for review.");
+      await refreshCompletionOutboxView(dismissed);
+      setCompletionReviewOpen(false);
+    } catch (error) {
+      setCompletionReviewMessage(error?.message || "The report alert could not be dismissed.");
+    } finally {
+      setCompletionReviewBusyId("");
+    }
+  };
+  const completionReviewModal = completionReviewOpen && completionReviews.length ? (
+    <Modal title={completionReviews.length === 1 ? "Completed report needs review" : `${completionReviews.length} completed reports need review`} onClose={() => { if (!completionReviewBusyId) { setCompletionReviewOpen(false); setCompletionReviewMessage(""); } }} maxWidth={620}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.5 }}>
+          The full report is safe on this device. Review the exact issue below—nothing will be resent or overwritten unless you choose an action.
+        </div>
+        {completionReviewMessage && <div role="alert" style={{ padding: "10px 12px", borderRadius: 11, background: hexA("#d97706", 0.1), color: "#b45309", fontSize: 12.5, fontWeight: 700, lineHeight: 1.45 }}>{completionReviewMessage}</div>}
+        {completionReviews.map(item => {
+          const context = completionReviewContext(item);
+          const deliveryLabels = (item.reviewChannels || []).map(channel => ({ text: "Text", email: "Email", app: "Client app" }[channel.key] || channel.key));
+          const isReport = item.reviewKind === "report";
+          return (
+            <div key={item.id} style={{ border: `1px solid ${hexA("#d97706", 0.28)}`, borderRadius: 14, padding: 14, background: hexA("#d97706", 0.055), display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 15, fontWeight: 850, color: T.text }}>{context.clientName}</div>
+                  <div style={{ marginTop: 2, fontSize: 12, color: T.textMuted }}>{context.service} · {context.date}</div>
+                </div>
+                <span style={{ flexShrink: 0, borderRadius: 999, padding: "4px 8px", background: isReport ? hexA("#d97706", 0.14) : hexA(T.primary, 0.1), color: isReport ? "#b45309" : T.primary, fontSize: 10.5, fontWeight: 850, textTransform: "uppercase", letterSpacing: ".06em" }}>{isReport ? "Save issue" : `${deliveryLabels.join(" + ") || "Delivery"} issue`}</span>
+              </div>
+              <div role="alert" style={{ fontSize: 12.5, color: T.text, lineHeight: 1.5, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 11, padding: "10px 11px" }}>{item.reviewError}</div>
+              {item.errorCode && <div style={{ fontSize: 10.5, color: T.textMuted }}>Reference: {item.errorCode}</div>}
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" }}>
+                {isReport ? (
+                  <>
+                    <Btn sm variant="ghost" onClick={() => openCompletionReviewStop(item)}>View scheduled stop</Btn>
+                    <Btn sm variant="ghost" disabled={!!completionReviewBusyId} onClick={() => { void dismissCompletionReportReview(item); }}>Keep draft & dismiss</Btn>
+                    <Btn sm disabled={!!completionReviewBusyId} onClick={() => { void retryCompletionReview(item); }}>{completionReviewBusyId === item.id ? "Retrying…" : "Retry saved report"}</Btn>
+                  </>
+                ) : (
+                  <>
+                    <Btn sm variant="ghost" onClick={() => { setCompletionReviewOpen(false); handleNav("comms"); }}>Open Comms</Btn>
+                    <Btn sm disabled={!!completionReviewBusyId} onClick={() => { void acknowledgeCompletionDeliveryReview(item); }}>{completionReviewBusyId === item.id ? "Saving…" : "Mark checked"}</Btn>
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Modal>
+  ) : null;
   const completionQueueSummary = completionOutboxSummary(completionOutboxItems);
+  const firstCompletionReview = completionReviews[0] || null;
+  const firstCompletionReviewContext = firstCompletionReview ? completionReviewContext(firstCompletionReview) : null;
   const completionOutboxBanner = (completionQueueSummary.queued || completionQueueSummary.waiting || completionQueueSummary.needsReview) ? (
     <div role="status" style={{ background: hexA(completionQueueSummary.needsReview ? "#d97706" : T.primary, 0.1), borderBottom: `1px solid ${hexA(completionQueueSummary.needsReview ? "#d97706" : T.primary, 0.28)}`, padding: vp.isDesktop ? "10px 20px" : "9px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: T.text, flexShrink: 0 }}>
       <span style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0, lineHeight: 1.4 }}>
         <Icon name={completionQueueSummary.needsReview ? "warning" : "refresh"} size={15} />
         {completionQueueSummary.needsReview
-          ? `${completionQueueSummary.needsReview} completed report${completionQueueSummary.needsReview === 1 ? "" : "s"} need review. The full draft is safe on this device.`
+          ? (completionQueueSummary.needsReview === 1 && firstCompletionReviewContext
+            ? `${firstCompletionReviewContext.clientName}'s completed report needs ${firstCompletionReview?.reviewKind === "delivery" ? "delivery " : ""}review. The full draft is safe on this device.`
+            : `${completionQueueSummary.needsReview} completed reports need review. The full drafts are safe on this device.`)
           : `${completionQueueSummary.queued + completionQueueSummary.waiting} completed report${completionQueueSummary.queued + completionQueueSummary.waiting === 1 ? "" : "s"} saved on this device and syncing in the background.`}
       </span>
-      <button onClick={completionQueueSummary.needsReview ? () => handleNav("schedule") : () => { void completionOutboxDrainRef.current?.(); }} style={{ background: completionQueueSummary.needsReview ? "#d97706" : T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "6px 12px", fontSize: 11.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>
-        {completionQueueSummary.needsReview ? "Open Schedule" : "Sync now"}
+      <button onClick={completionQueueSummary.needsReview ? () => { setCompletionReviewMessage(""); setCompletionReviewOpen(true); } : () => { void completionOutboxDrainRef.current?.(); }} style={{ background: completionQueueSummary.needsReview ? "#d97706" : T.primary, color: "#fff", border: "none", borderRadius: 10, padding: "6px 12px", fontSize: 11.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>
+        {completionQueueSummary.needsReview ? (completionQueueSummary.needsReview === 1 ? "Review report" : "Review reports") : "Sync now"}
       </button>
     </div>
   ) : null;
@@ -40964,6 +41086,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
         {pushPrimerModal}
         {fieldSetupModal}
         {detectedArrivalModal}
+        {completionReviewModal}
       </AppCtx.Provider>
     );
   }
@@ -41032,6 +41155,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
         {pushPrimerModal}
         {fieldSetupModal}
         {detectedArrivalModal}
+        {completionReviewModal}
 
         {/* Header — a non-scrolling flex child, frozen at the top */}
         <header style={{ background: hexA(T.surface, 0.94), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", color: T.text, position: "relative", zIndex: 100, flexShrink: 0, borderBottom: `1px solid ${T.border}`, boxShadow: "0 1px 0 rgba(0,0,0,0.02)" }}>
