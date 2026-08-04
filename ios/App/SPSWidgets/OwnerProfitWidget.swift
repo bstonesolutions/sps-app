@@ -24,7 +24,7 @@ struct OwnerProfitView: View {
     private var p: WidgetPayload? { entry.payload }
     private var fontDesign: Font.Design { sps_design(p?.appFont) }
     private var hasData: Bool {
-        p?.profitWeek != nil || p?.profitMonth != nil || p?.avgEffectiveRate != nil
+        p?.role == "owner" && (p?.profitWeek != nil || p?.profitMonth != nil || p?.avgEffectiveRate != nil)
     }
 
     var body: some View {

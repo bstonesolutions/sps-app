@@ -23,7 +23,7 @@ struct OwnerInvoiceView: View {
 
     private var p: WidgetPayload? { entry.payload }
     private var fontDesign: Font.Design { sps_design(p?.appFont) }
-    private var hasData: Bool { p?.outstandingTotal != nil || p?.unpaidCount != nil }
+    private var hasData: Bool { p?.role == "owner" && (p?.outstandingTotal != nil || p?.unpaidCount != nil) }
 
     var body: some View {
         Group {

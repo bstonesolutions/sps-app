@@ -116,7 +116,7 @@ struct OwnerStopsView: View {
     private var pct: String { "\(Int((fraction * 100).rounded()))%" }
     // We have real data if the app pushed a stop count (even 0 → "No stops today")
     // or any tech rows. nil means "open the app to sync".
-    private var synced: Bool { p?.stopsTotal != nil || !techs.isEmpty }
+    private var synced: Bool { p?.role == "owner" && (p?.stopsTotal != nil || !techs.isEmpty) }
     private var hasStops: Bool { total > 0 || !techs.isEmpty }
 
     private var statusLine: String {

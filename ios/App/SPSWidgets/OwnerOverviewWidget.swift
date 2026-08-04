@@ -30,7 +30,7 @@ struct OwnerOverviewView: View {
     private var stopFrac: Double { stopsTotal > 0 ? Double(stopsDone) / Double(stopsTotal) : 0 }
     private var overdue: Int { p?.overdueCount ?? 0 }
     private var hasData: Bool {
-        p?.profitWeek != nil || p?.outstandingTotal != nil || p?.stopsTotal != nil || p?.activeClients != nil
+        p?.role == "owner" && (p?.profitWeek != nil || p?.outstandingTotal != nil || p?.stopsTotal != nil || p?.activeClients != nil)
     }
 
     private func money(_ v: Double?) -> String { v.map(sps_money) ?? "—" }

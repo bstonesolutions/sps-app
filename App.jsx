@@ -3011,7 +3011,9 @@ const preserveDuringBulkRestore = (key) => key === "sps_team" || key === "sps_se
 // ─────────────────────────────────────────────
 const PERMISSION_TABS = [
   { id: "dashboard", label: "Home",      editable: false, view: [],            edit: [] },
-  { id: "clients",   label: "Clients",   editable: true,  view: ["seeBalances"], edit: ["seeBalances", "editClients", "editHistory", "canImport"] },
+  // Client access and financial access are deliberately separate. A technician needs names,
+  // addresses, equipment, and service history without inheriting balances or Home money cards.
+  { id: "clients",   label: "Clients",   editable: true,  view: [],              edit: ["editClients", "editHistory", "canImport"] },
   { id: "schedule",  label: "Schedule",  editable: true,  view: [],            edit: ["editSchedule", "completeStops", "sendTexts"] },
   { id: "invoices",  label: "Invoices",  editable: true,  view: ["viewInvoices"], edit: ["viewInvoices", "canInvoice"] },
   { id: "inventory", label: "Inventory", editable: true,  view: ["seeInventory"], edit: ["seeInventory", "editInventory"] },
@@ -3020,7 +3022,7 @@ const PERMISSION_TABS = [
   // Log). The tab toggle is the master (Hidden/Visible); which sections show is fine-tuned in the
   // staff editor's Advanced permissions → Comms sections. Visible grants sendTexts for the composer.
   { id: "comms",     label: "Comms",     editable: false, view: [],            edit: ["sendTexts"] },
-  { id: "reports",   label: "Reports",   editable: false, view: ["seeReportsPnl", "seeProfit", "seeTotalSales"], edit: ["seeReportsPnl", "seeProfit", "seeTotalSales"] },
+  { id: "reports",   label: "Reports",   editable: false, view: ["seeReportsPnl", "seeProfit", "seeTotalSales", "seeBalances"], edit: ["seeReportsPnl", "seeProfit", "seeTotalSales", "seeBalances"] },
   { id: "budget",    label: "Budget",    editable: false, view: ["seeCostsBudget"], edit: ["seeCostsBudget"] },
   { id: "settings",  label: "Customize", editable: true,  view: [],            edit: ["editSettings", "editCatalog"] },
 ];
@@ -3112,7 +3114,8 @@ function memberPerms(member) {
     seeReportsPnl: P("canSeeReportsPnl", false),
     seeTotalSales: P("canSeeTotalSales", false),
     seeCostsBudget: P("canSeeCostsBudget", false),
-    seeBalances: P("canSeeBalances", true),
+    // Financial permissions fail closed. Client access alone must never imply balance access.
+    seeBalances: P("canSeeBalances", false),
     seeInventory: P("canSeeInventory", false),
     viewInvoices: P("canViewInvoices", false),
     editClients: P("canEditClients", false),
@@ -3137,6 +3140,8 @@ function applyFinePerms(out, member) {
   const fine = (member && member.fine) || {};
   const adm = !!out.isAdmin;
   const g = (key, base) => adm ? true : (fine[key] !== undefined ? !!fine[key] : !!base);
+  // Explicit sensitive-data grant. This is intentionally independent from the Clients tab.
+  out.seeBalances       = g("seeBalances",       out.seeBalances);
   // Inventory cost/pricing — sensitive, so OFF by default for staff (opt-in).
   out.seeInventoryCost  = g("seeInventoryCost", false);
   // Invoice actions — default to the coarse "Manage Invoices" capability.
@@ -3179,6 +3184,10 @@ function applyFinePerms(out, member) {
 // The Comms hub is visible when the viewer can see at least one of its sections (owner sees all).
 const COMMS_SECTION_FLAGS = ["commsMessages", "commsInbox", "commsTextInbox", "commsMainLine", "commsReminders", "commsBroadcast", "commsSettings"];
 const canSeeComms = (perms) => !!perms && (perms.isAdmin || perms.editNotifications || COMMS_SECTION_FLAGS.some(f => perms[f]));
+const canSeeBalanceMoney = (perms) => !!perms && (perms.isAdmin || perms.seeBalances);
+const canSeeInvoiceMoney = (perms) => !!perms && (perms.isAdmin || perms.seeBalances || perms.viewInvoices || perms.canInvoice);
+const canSeeProfitMoney = (perms) => !!perms && (perms.isAdmin || perms.seeProfit);
+const canManageInvoiceAccounting = (perms) => !!perms && (perms.isAdmin || perms.canInvoice);
 const badgeLabel = (count) => Number(count) > 99 ? "99+" : Number(count) || 0;
 
 // Is a nav tab visible to this permission set?
@@ -4174,7 +4183,7 @@ function deriveAlerts(clients, invoices, catalog) {
       if (w && w.active && w.monthsLeft <= 2) alerts.push({ icon: "warning", title: `${c.name} — ${e.name}`, sub: `Warranty expires ${w.label}`, type: "equipment" });
     });
     const owed = clientOutstanding(c, invoices);
-    if (owed > 0) alerts.push({ icon: "dollar", title: `${c.name} — $${owed.toFixed(2)} outstanding`, sub: "Open balance" });
+    if (owed > 0) alerts.push({ icon: "dollar", title: `${c.name} — $${owed.toFixed(2)} outstanding`, sub: "Open balance", financial: true });
   });
   // Low inventory alerts — treatments (below 32) and parts (below their lowAt)
   ((catalog && catalog.treatments) || []).forEach(t => {
@@ -5685,7 +5694,7 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
   const routeProgress = todayStops.length ? Math.round((doneToday / todayStops.length) * 100) : 0;
   const [upgradeModal, setUpgradeModal] = useState(null); // alert object being confirmed
   const ma = monthActuals(clients, new Date(), invoices);
-  const derived = deriveAlerts(clients, invoices, catalog).filter(a => perms.seeBalances || !/outstanding/i.test(a.title || ""));
+  const derived = deriveAlerts(clients, invoices, catalog).filter(a => canSeeBalanceMoney(perms) || !a.financial);
   const flags = (officeAlerts || []).filter(a => !a.resolved);
   // Outstanding mirrors the Invoices page: open invoices only, using each invoice's remaining
   // balance. This matters after a partial payment because the original face total is no longer AR.
@@ -6510,7 +6519,7 @@ const clientPlanTotal = (c) => {
 };
 
 // Dense, sortable, full-width clients table — desktop "Table" view (Phase 3).
-function ClientsTable({ items, clientSpend, tiers, onSelect, T }) {
+function ClientsTable({ items, clientSpend, showSpend, tiers, onSelect, T }) {
   const [sort, setSort] = useState({ key: "name", dir: "asc" });
   const money = (n) => `$${Math.round(n || 0).toLocaleString()}`;
   const divOf = (c) => c.division || (clientServices(c, tiers)[0]?.div) || "—";
@@ -6520,7 +6529,7 @@ function ClientsTable({ items, clientSpend, tiers, onSelect, T }) {
     { key: "division", label: "Division", align: "left",  w: "14%" },
     { key: "tier",     label: "Tier",     align: "left",  w: "13%" },
     { key: "status",   label: "Status",   align: "left",  w: "10%" },
-    { key: "spend",    label: "Spend",    align: "right", w: "11%" },
+    ...(showSpend ? [{ key: "spend", label: "Spend", align: "right", w: "11%" }] : []),
   ];
   const sorted = [...items].sort((a, b) => {
     const dir = sort.dir === "asc" ? 1 : -1;
@@ -6565,7 +6574,7 @@ function ClientsTable({ items, clientSpend, tiers, onSelect, T }) {
                 <td style={{ padding: "9px 12px", color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{divOf(c)}</td>
                 <td style={{ padding: "9px 12px", whiteSpace: "nowrap" }}>{tier ? <span style={{ fontSize: 10.5, fontWeight: 700, padding: "2px 8px", borderRadius: 100, background: pm.bg, color: pm.color || pm.text }}>{tier}</span> : <span style={{ fontSize: 10.5, color: T.textMuted }}>No tier</span>}</td>
                 <td style={{ padding: "9px 12px", whiteSpace: "nowrap", color: inactive ? T.textMuted : "#16a34a", fontWeight: 600, fontSize: 12 }}>{c.status || "Active"}</td>
-                <td style={{ padding: "9px 12px", textAlign: "right", fontWeight: 700, color: T.text, whiteSpace: "nowrap" }}>{money(clientSpend(c))}</td>
+                {showSpend && <td style={{ padding: "9px 12px", textAlign: "right", fontWeight: 700, color: T.text, whiteSpace: "nowrap" }}>{money(clientSpend(c))}</td>}
               </tr>
             );
           })}
@@ -6577,6 +6586,7 @@ function ClientsTable({ items, clientSpend, tiers, onSelect, T }) {
 
 function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSetView, selectedId, onSelect, onAdd, onImport, onImportHistory, onFindDuplicates, onBatchUpdate, onBatchDelete, onBatchSchedule }) {
   const { T, perms, tiers } = useApp();
+  const showClientSpend = !!(perms.isAdmin || perms.seeBalances || perms.seeTotalSales || perms.seeProfit);
   const [search,       setSearch]       = useState("");
   const [showInactive, setShowInactive] = useState(false);
   const [showFilters,  setShowFilters]  = useState(false);
@@ -6586,6 +6596,9 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
   const [selectMode,   setSelectMode]   = useState(false);
   const [selected,     setSelected]     = useState({});
   const [modal,        setModal]        = useState(null);
+  useEffect(() => {
+    if (!showClientSpend && (sortBy === "spent_desc" || sortBy === "spent_asc")) setSortBy("alpha");
+  }, [showClientSpend, sortBy]);
 
   // Total paid invoices per client
   const clientSpend = (c) => {
@@ -6704,7 +6717,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
         )}
         {/* Quick sort pills */}
         <div style={{ display: "flex", gap: 5, overflowX: "auto", WebkitOverflowScrolling: "touch", flex: 1, minWidth: 0, scrollbarWidth: "none" }}>
-          {[["alpha","A–Z"],["alpha_desc","Z–A"],["spent_desc","Most Spent"],["spent_asc","Least Spent"]].map(([val, lbl]) => (
+          {[["alpha","A–Z"],["alpha_desc","Z–A"], ...(showClientSpend ? [["spent_desc","Most Spent"],["spent_asc","Least Spent"]] : [])].map(([val, lbl]) => (
             <button key={val} onClick={() => setSortBy(val)}
               style={{ flexShrink: 0, height: vp.isPhone ? 38 : 30, padding: "0 10px", borderRadius: 100, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 650, background: sortBy === val ? T.primary : T.surfaceAlt, color: sortBy === val ? "#fff" : T.textMuted, transition: "all 0.15s" }}>
               {lbl}
@@ -6799,7 +6812,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
             <div style={{ fontSize: 13 }}>{search ? `Nothing matches "${search}"` : "Add your first client to get started"}</div>
           </div>
         ) : (
-          <ClientsTable items={filtered} clientSpend={clientSpend} tiers={tiers} onSelect={onSelect} T={T} />
+          <ClientsTable items={filtered} clientSpend={clientSpend} showSpend={showClientSpend} tiers={tiers} onSelect={onSelect} T={T} />
         )
       ) : (
       <div style={{ display: "grid", gridTemplateColumns: compactList ? "minmax(0, 1fr)" : "repeat(auto-fit, minmax(min(100%, 300px), 1fr))", alignItems: "start", gap: compactList ? 7 : 9, width: "100%" }}>
@@ -7005,6 +7018,10 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
 // ─────────────────────────────────────────────
 function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Client" }) {
   const { T, tiers, perms } = useApp();
+  // Client contact/service access is operational. Plan rates and invoice automation are
+  // accounting controls, so they stay owner/accounting-only even for staff who can edit clients.
+  const showClientPlanMoney = canSeeInvoiceMoney(perms) || canSeeProfitMoney(perms);
+  const manageClientAutoInvoice = canManageInvoiceAccounting(perms);
   const clientFormVp = useViewport();
   const compact = clientFormVp.width <= 420;
   const [form, setForm] = useState(() => {
@@ -7213,8 +7230,8 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
                               </div>
                               {/* Frequency + this division's monthly rate */}
                               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-                                <span style={{ fontSize: 12, color: T.textMuted }}>{curTier ? `${TIER_FREQ[curTier] || "—"} service` : "Pick a plan to set a rate"}</span>
-                                {curTier && (
+                                <span style={{ fontSize: 12, color: T.textMuted }}>{curTier ? `${TIER_FREQ[curTier] || "—"} service` : (showClientPlanMoney ? "Pick a plan to set a rate" : "Pick a service plan")}</span>
+                                {curTier && showClientPlanMoney && (
                                   <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
                                     <div style={{ position: "relative", width: 110 }}>
                                       <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: T.textMuted }}>$</span>
@@ -7248,7 +7265,7 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
                       );
                     })}
                   </div>
-                  {(() => {
+                  {showClientPlanMoney && (() => {
                     const active = activeRateDivs();
                     if (active.length < 2) return null;
                     const total = active.reduce((s, d) => s + (parseFloat((form.planRates || {})[d]) || 0), 0);
@@ -7259,7 +7276,11 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
                       </div>
                     );
                   })()}
-                  <div style={{ fontSize: 11, color: T.textMuted, marginTop: 8 }}>Turn on every service this client receives, then set each one's plan and rate. The primary sets their portal name.</div>
+                  <div style={{ fontSize: 11, color: T.textMuted, marginTop: 8 }}>
+                    {showClientPlanMoney
+                      ? "Turn on every service this client receives, then set each one's plan and rate. The primary sets their portal name."
+                      : "Turn on every service this client receives and choose its plan. The primary sets their portal name."}
+                  </div>
                 </div>
               </>}
               {si === 2 && <>
@@ -7289,7 +7310,7 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
                 </div>
                 {/* Flat monthly rate — only when no division carries a tiered plan. Each tiered service
                     now sets its own rate in the Services & Plans card above, which auto-sums monthlyRate. */}
-                {activeRateDivs().length === 0 && (
+                {showClientPlanMoney && activeRateDivs().length === 0 && (
                   <FieldRow label="Monthly Rate">
                     <div style={{ position: "relative" }}>
                       <span style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: "#9ca3af" }}>$</span>
@@ -7297,7 +7318,7 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
                     </div>
                   </FieldRow>
                 )}
-                <div>
+                {manageClientAutoInvoice && <div>
                   <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "#6b7280", display: "block", marginBottom: 5 }}>Auto-Invoice</label>
                   <div style={{ display: "flex", gap: 8 }}>
                     {["Off", "Monthly", "Bi-Weekly", "Weekly"].map(opt => {
@@ -7311,7 +7332,7 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
                     })}
                   </div>
                   <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 6 }}>When enabled, invoices generate automatically on that schedule using the monthly rate above.</div>
-                </div>
+                </div>}
               </>}
             </div>
           </Card>
@@ -8180,10 +8201,12 @@ function ClientOverview({ client, invoices = [], schedule = [], onUpdate }) {
 
 function ClientEquipment({ client, invoices, onChange }) {
   const { T, perms } = useApp();
+  const showEquipmentCost = !!(perms.isAdmin || perms.seeInventoryCost || perms.seeProfit);
+  const showEquipmentInvoices = canSeeInvoiceMoney(perms);
   const [modal, setModal] = useState(null);
   const [expanded, setExpanded] = useState({});
   const equipment = client.equipment || [];
-  const clientInvoices = sortInvoices((invoices || []).filter(iv => invoiceMatchesClient(iv, client)));
+  const clientInvoices = showEquipmentInvoices ? sortInvoices((invoices || []).filter(iv => invoiceMatchesClient(iv, client))) : [];
   const STATUSES = ["Good", "Monitor", "Replace Soon"];
   const ORIGINS  = ["Installed by SPS", "Pre-existing (before SPS)", "Client-supplied"];
 
@@ -8309,10 +8332,10 @@ function ClientEquipment({ client, invoices, onChange }) {
                     {[
                       eq.origin && ["Origin", eq.origin],
                       eq.purchaseDate && ["Purchase Date", eq.purchaseDate],
-                      eq.purchasePrice && ["Purchase Price", `$${eq.purchasePrice}`],
+                      showEquipmentCost && eq.purchasePrice && ["Purchase Price", `$${eq.purchasePrice}`],
                       eq.serialNumber && ["Serial Number", eq.serialNumber],
                       (() => { const w = warrantyInfo(eq); return w ? ["Warranty", `${w.label}${w.active ? ` · ${w.monthsLeft} mo left` : " · expired"}`] : null; })(),
-                      linkedInv && ["Linked Invoice", `${linkedInv.number || linkedInv.id} — ${linkedInv.total || ""}`],
+                      showEquipmentInvoices && linkedInv && ["Linked Invoice", `${linkedInv.number || linkedInv.id} — ${linkedInv.total || ""}`],
                     ].filter(Boolean).map(([k, v]) => (
                       <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
                         <div style={{ fontSize: 12, color: T.textMuted }}>{k}</div>
@@ -8384,15 +8407,15 @@ function ClientEquipment({ client, invoices, onChange }) {
               </div>
             </div>
 
-            {/* Price + Serial */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-              <div>
+            {/* Price is financial; serial number remains operational for field staff. */}
+            <div style={{ display: "grid", gridTemplateColumns: showEquipmentCost ? "1fr 1fr" : "1fr", gap: 12 }}>
+              {showEquipmentCost && <div>
                 <label style={lbl}>Purchase Price</label>
                 <div style={{ position: "relative" }}>
                   <span style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: T.textMuted }}>$</span>
                   <input type="text" inputMode="decimal" style={{ ...field, paddingLeft: 26 }} value={modal.data.purchasePrice || ""} onChange={e => setD("purchasePrice", e.target.value.replace(/[^0-9.]/g, ""))} placeholder="0.00" />
                 </div>
-              </div>
+              </div>}
               <div>
                 <label style={lbl}>Serial Number</label>
                 <input type="text" style={field} value={modal.data.serialNumber || ""} onChange={e => setD("serialNumber", e.target.value)} placeholder="SN-XXXXXX" />
@@ -8448,8 +8471,8 @@ function ClientEquipment({ client, invoices, onChange }) {
               <textarea style={{ ...field, minHeight: 72, resize: "vertical", lineHeight: 1.5 }} value={modal.data.notes || ""} onChange={e => setD("notes", e.target.value)} placeholder="Any notes about this equipment, history, or pre-existing condition..." />
             </div>
 
-            {/* Linked Invoice */}
-            <div>
+            {/* Linked invoices are accounting data and stay out of field-only client access. */}
+            {showEquipmentInvoices && <div>
               <label style={lbl}>Linked Invoice <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
               <select style={field} value={modal.data.linkedInvoiceId || ""} onChange={e => setD("linkedInvoiceId", e.target.value)}>
                 <option value="">None</option>
@@ -8458,7 +8481,7 @@ function ClientEquipment({ client, invoices, onChange }) {
                 ))}
               </select>
               {clientInvoices.length === 0 && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>No invoices on file for this client yet.</div>}
-            </div>
+            </div>}
 
             <Btn onClick={save} block lg>{modal.mode === "add" ? "Add Equipment" : "Save Changes"}</Btn>
             {modal.mode === "edit" && (
@@ -9334,7 +9357,7 @@ function ClientPortal({ client, invoices, schedule, branding, email, invoicing, 
 // Renders the real client portal inside a fixed overlay
 // with a staff-only banner so you can exit back instantly.
 // ─────────────────────────────────────────────
-function StaffClientPreview({ client, invoices, invoicing, schedule, branding, onClose }) {
+function StaffClientPreview({ client, invoices, invoicing, schedule, branding, canSeeFinancials = false, onClose }) {
   const { T } = useApp();
   const fontStack = '-apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif';
 
@@ -9376,6 +9399,7 @@ function StaffClientPreview({ client, invoices, invoicing, schedule, branding, o
           onApproveEstimate={rejectPortalPreviewAction}
           onUpgradeRequest={rejectPortalPreviewAction}
           isStaffPreview={true}
+          showFinancials={canSeeFinancials}
         />
       </div>
     </div>
@@ -9818,6 +9842,10 @@ function newCompletionAttemptKey(sid) {
 
 function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, team, clients, dayDate, arrivedAt, enRouteAt, draft, draftReady = true, draftScope = "", onSaveDraft, onClearDraft, onComplete, onUpdateStop, onClose, onViewClient, onOfficeAlert, me }) {
   const { T, branding, perms } = useApp();
+  const showStopBilling = canSeeInvoiceMoney(perms);
+  const editStopBilling = canManageInvoiceAccounting(perms);
+  const showStopProfit = canSeeProfitMoney(perms);
+  const showInventoryPricing = !!(perms?.isAdmin || perms?.seeInventoryCost || perms?.seeProfit);
   const completeVp = useViewport();
   const [directTextOpen, setDirectTextOpen] = useState(false);
   const quoDefaultLine = useDefaultQuoIdentity(branding?.companyPhone);
@@ -10494,15 +10522,17 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
               {completionSync?.error || "The shared stop changed while this report was syncing. Your full draft remains on this device for office review."}
             </div>
           )}
-          {completionConfirmed && invoiceOutcome?.status === "created" && (
+          {completionConfirmed && canManageInvoiceAccounting(perms) && invoiceOutcome?.status === "created" && (
             <div style={{ maxWidth: 420, margin: "0 auto 12px", padding: "10px 12px", borderRadius: 11, background: hexA("#16a34a", 0.08), color: "#15803d", fontSize: 12, fontWeight: 750, lineHeight: 1.4 }}>
               {invoiceOutcome.kind === "monthly" ? `Monthly draft created from ${invoiceOutcome.visitCount || "the completed"} visits.` : "Draft invoice created for office review."}
             </div>
           )}
-          {/* profit chip */}
-          <div style={{ display: "inline-block", background: profit >= 0 ? `${T.accent}18` : "#C0392B18", color: profit >= 0 ? T.accent : "#C0392B", borderRadius: 20, padding: "6px 16px", fontSize: 14, fontWeight: 800, marginBottom: 16 }}>
-            {profit >= 0 ? "Profit" : "Loss"}: {money(Math.abs(profit))} · {margin.toFixed(0)}% margin
-          </div>
+          {/* Profit is owner/finance data; completion itself remains visible to field staff. */}
+          {showStopProfit && (
+            <div style={{ display: "inline-block", background: profit >= 0 ? `${T.accent}18` : "#C0392B18", color: profit >= 0 ? T.accent : "#C0392B", borderRadius: 20, padding: "6px 16px", fontSize: 14, fontWeight: 800, marginBottom: 16 }}>
+              {profit >= 0 ? "Profit" : "Loss"}: {money(Math.abs(profit))} · {margin.toFixed(0)}% margin
+            </div>
+          )}
           {/* Full service report — what was tested + used today (in-app, mirrors what the
               client sees + what's saved to history). Water tests + treatments up top. */}
           {(() => {
@@ -10733,16 +10763,20 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
             {svcList.map((s, i) => (
               <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, background: T.surfaceAlt, borderRadius: 10, padding: "9px 12px" }}>
                 <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: T.text }}>{s.name}</span>
-                <div style={{ position: "relative", width: 92 }}>
-                  <span style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
-                  <input type="text" inputMode="decimal" value={s.price} onChange={e => setSvcPrice(i, e.target.value)} placeholder="0"
-                    style={{ width: "100%", padding: "7px 8px 7px 20px", border: `1px solid ${T.border}`, borderRadius: 7, fontSize: 13, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
-                </div>
+                {showStopBilling && (editStopBilling ? (
+                  <div style={{ position: "relative", width: 92 }}>
+                    <span style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>$</span>
+                    <input type="text" inputMode="decimal" value={s.price} onChange={e => setSvcPrice(i, e.target.value)} placeholder="0"
+                      style={{ width: "100%", padding: "7px 8px 7px 20px", border: `1px solid ${T.border}`, borderRadius: 7, fontSize: 13, fontWeight: 700, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box", textAlign: "right" }} />
+                  </div>
+                ) : <span style={{ fontSize: 13, fontWeight: 750, color: T.text }}>{money(s.price)}</span>)}
               </div>
             ))}
           </div>
           <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>
-            {isProrated ? `Per-visit share of the $${monthlyMaint.toLocaleString()}/mo plan — about ${visitsPerMonth.toFixed(1)} visits/mo. ` : ""}Prices feed the amount charged below. Edit any line for this stop.
+            {showStopBilling
+              ? <>{isProrated ? `Per-visit share of the $${monthlyMaint.toLocaleString()}/mo plan — about ${visitsPerMonth.toFixed(1)} visits/mo. ` : ""}{editStopBilling ? "Prices feed the amount charged below. Edit any line for this stop." : "Office-managed service pricing."}</>
+              : "Service pricing is handled by the office."}
           </div>
         </div>
       )}
@@ -10853,7 +10887,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
             <input type="text" inputMode="decimal" value={actualHours} onChange={e => setActualHours(e.target.value.replace(/[^\d.]/g, ""))} placeholder="0" style={{ ...smallInput, textAlign: "left", paddingRight: 40 }} />
             <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textMuted }}>hrs</span>
           </div>
-          <div style={{ flex: 1.5, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, background: T.surfaceAlt, borderRadius: 10, padding: "8px 14px" }}>
+          {showStopProfit && <div style={{ flex: 1.5, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, background: T.surfaceAlt, borderRadius: 10, padding: "8px 14px" }}>
             {effRate == null ? (
               <span style={{ fontSize: 12, color: T.textMuted }}>Enter hours for $/hr</span>
             ) : (
@@ -10869,10 +10903,10 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
                 )}
               </>
             )}
-          </div>
+          </div>}
         </div>
         <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>
-          {startAt ? "Auto-timed from your “On My Way” start — adjust if needed." : "No start clock for this stop — enter hours worked. Revenue ÷ hours = your effective rate."}
+          {startAt ? "Auto-timed from your “On My Way” start — adjust if needed." : showStopProfit ? "No start clock for this stop — enter hours worked. Revenue ÷ hours = your effective rate." : "No start clock for this stop — enter hours worked."}
         </div>
       </div>
 
@@ -10991,12 +11025,12 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
                   <div style={{ flex: "1 1 140px", minWidth: 0 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{t.name}</div>
                     <div style={{ fontSize: 11, color: over ? T.warning : T.textMuted }}>
-                      ${num(t.costPerOz).toFixed(2)}/{unit} · {here} {unit} {usageLoc ? "here" : "on hand"}{over ? " · over!" : ""}
+                      {showInventoryPricing ? `$${num(t.costPerOz).toFixed(2)}/${unit} · ` : ""}{here} {unit} {usageLoc ? "here" : "on hand"}{over ? " · over!" : ""}
                     </div>
                   </div>
                   <input type="text" inputMode="decimal" value={tx[t.id] || ""} onChange={e => setTx(x => ({ ...x, [t.id]: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0" style={{ width: 60, padding: "8px", border: `1px solid ${over ? T.warning : T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
                   <span style={{ fontSize: 12, color: T.textMuted, width: 32 }}>{unit}</span>
-                  <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: num(tx[t.id]) > 0 ? T.text : T.textMuted }}>{money(num(tx[t.id]) * num(t.costPerOz))}</div>
+                  {showInventoryPricing && <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: num(tx[t.id]) > 0 ? T.text : T.textMuted }}>{money(num(tx[t.id]) * num(t.costPerOz))}</div>}
                 </div>
               );
             }, !!txSearch.trim())}
@@ -11028,12 +11062,12 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
                     <div style={{ flex: "1 1 140px", minWidth: 0 }}>
                       <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{p.name}</div>
                       <div style={{ fontSize: 11, color: over ? T.warning : T.textMuted }}>
-                        ${num(p.costPer).toFixed(2)} cost · ${num(p.retailPer).toFixed(2)} retail · {here} {unit} {usageLoc ? "here" : "on hand"}{over ? " · over!" : ""}
+                        {showInventoryPricing ? `$${num(p.costPer).toFixed(2)} cost · $${num(p.retailPer).toFixed(2)} retail · ` : ""}{here} {unit} {usageLoc ? "here" : "on hand"}{over ? " · over!" : ""}
                       </div>
                     </div>
                     <input type="text" inputMode="decimal" value={partsUsed[p.id] || ""} onChange={e => setPartsUsedState(x => ({ ...x, [p.id]: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0" style={{ width: 60, padding: "8px", border: `1px solid ${over ? T.warning : T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
                     <span style={{ fontSize: 12, color: T.textMuted, width: 32 }}>{unit}</span>
-                    <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: qty > 0 ? T.text : T.textMuted }}>{money(qty * shownPrice)}</div>
+                    {showStopBilling && <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: qty > 0 ? T.text : T.textMuted }}>{money(qty * shownPrice)}</div>}
                   </div>
                   {qty > 0 && (
                     <button onClick={() => { if (!includedInEstimate) setPartBill(b => ({ ...b, [p.id]: !willBill })); }}
@@ -11043,7 +11077,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
                         <div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: willBill ? 16 : 2, transition: "left 0.2s" }} />
                       </div>
                       <span style={{ fontSize: 11.5, color: willBill ? T.primary : T.textMuted, fontWeight: 700 }}>
-                        {includedInEstimate ? "Included in approved estimate — inventory only" : willBill ? `Bill client at retail (${money(qty * num(p.retailPer))})` : "Internal cost only — not billed"}
+                        {includedInEstimate ? "Included in approved estimate — inventory only" : willBill ? (showStopBilling ? `Bill client at retail (${money(qty * num(p.retailPer))})` : "Add to client invoice") : "Internal use — not invoiced"}
                       </span>
                     </button>
                   )}
@@ -11074,13 +11108,13 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
                   <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: completeVp.isPhone ? "wrap" : "nowrap" }}>
                     <div style={{ flex: "1 1 140px", minWidth: 0 }}>
                       <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{p.name}</div>
-                      <div style={{ fontSize: 11, color: T.textMuted }}>
+                      {showInventoryPricing && <div style={{ fontSize: 11, color: T.textMuted }}>
                         ${num(p.cost).toFixed(2)} cost · ${num(p.price).toFixed(2)} sale
-                      </div>
+                      </div>}
                     </div>
                     <input type="text" inputMode="decimal" value={productsQty[p.id] || ""} onChange={e => setProductsQty(x => ({ ...x, [p.id]: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0" style={{ width: 60, padding: "8px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
                     <span style={{ fontSize: 12, color: T.textMuted, width: 32 }}>qty</span>
-                    <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: qty > 0 ? T.text : T.textMuted }}>{money(qty * (willBill ? num(p.price) : num(p.cost)))}</div>
+                    {showStopBilling && <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: qty > 0 ? T.text : T.textMuted }}>{money(qty * (willBill ? num(p.price) : num(p.cost)))}</div>}
                   </div>
                   {qty > 0 && (
                     <button onClick={() => { if (!includedInEstimate) setProductBill(b => ({ ...b, [p.id]: !willBill })); }}
@@ -11090,7 +11124,7 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
                         <div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: willBill ? 16 : 2, transition: "left 0.2s" }} />
                       </div>
                       <span style={{ fontSize: 11.5, color: willBill ? T.primary : T.textMuted, fontWeight: 700 }}>
-                        {includedInEstimate ? "Included in approved estimate — inventory only" : willBill ? `Bill client (${money(qty * num(p.price))})` : "Not billed — internal"}
+                        {includedInEstimate ? "Included in approved estimate — inventory only" : willBill ? (showStopBilling ? `Bill client (${money(qty * num(p.price))})` : "Add to client invoice") : "Internal use — not invoiced"}
                       </span>
                     </button>
                   )}
@@ -11249,7 +11283,8 @@ const dayLabel = (dateStr) => {
 };
 
 function AddStopForm({ clients, catalog, team, estimates = [], seedClientIds, seedEstimate, onSave, onScheduleEstimate, onClose }) {
-  const { T } = useApp();
+  const { T, perms } = useApp();
+  const showSchedulePricing = canSeeInvoiceMoney(perms) || canSeeProfitMoney(perms);
   const addStopVp = useViewport();
   const compact = addStopVp.width <= 360;
   const [clientSearch, setClientSearch] = useState("");
@@ -11508,7 +11543,7 @@ function AddStopForm({ clients, catalog, team, estimates = [], seedClientIds, se
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
                     {filtered.map(s => (
                       <button key={s.id} type="button" onClick={() => toggleService(s.id)} style={pickChip(!!selServices[s.id])}>
-                        {s.name}{s.price ? ` · $${s.price}` : ""}
+                        {s.name}{showSchedulePricing && s.price ? ` · $${s.price}` : ""}
                       </button>
                     ))}
                     {filtered.length === 0 && <div style={{ fontSize: 12, color: T.textMuted }}>No services match "{serviceSearch}".</div>}
@@ -11516,7 +11551,7 @@ function AddStopForm({ clients, catalog, team, estimates = [], seedClientIds, se
                 </div>
               )}
               {/* editable prices for the chosen services — always visible so you can adjust per stop */}
-              {selected.length > 0 && (
+              {selected.length > 0 && showSchedulePricing && (
                 <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
                   {selected.map(s => (
                     <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 8, background: T.surfaceAlt, borderRadius: 9, padding: "7px 10px" }}>
@@ -11562,7 +11597,7 @@ function AddStopForm({ clients, catalog, team, estimates = [], seedClientIds, se
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
                         {g.items.map(p => (
                           <button key={p.id} type="button" onClick={() => toggleProduct(p.id)} style={pickChip(!!selProducts[p.id])}>
-                            {p.name}{p.price ? ` · $${p.price}` : ""}
+                            {p.name}{showSchedulePricing && p.price ? ` · $${p.price}` : ""}
                           </button>
                         ))}
                       </div>
@@ -17187,7 +17222,8 @@ function AdvancedPermsEditor({ member, onChange }) {
     </div>
   );
   const commsGranted = eff.isAdmin || (eff.tabAccess ? eff.tabAccess.comms !== "hidden" : true);
-  const anyParent = eff.seeInventory || eff.canInvoice || eff.editClients || eff.editSettings || eff.seeCostsBudget || eff.editSchedule || commsGranted;
+  const clientsGranted = eff.isAdmin || (eff.tabAccess ? eff.tabAccess.clients !== "hidden" : true);
+  const anyParent = clientsGranted || eff.seeInventory || eff.canInvoice || eff.editClients || eff.editSettings || eff.seeCostsBudget || eff.editSchedule || commsGranted;
   return (
     <div style={{ border: `1px solid ${T.border}`, borderRadius: 12, overflow: "hidden", marginTop: 10 }}>
       <button onClick={() => setOpen(o => !o)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", background: T.surfaceAlt, border: "none", cursor: "pointer", fontFamily: "inherit" }}>
@@ -17198,6 +17234,9 @@ function AdvancedPermsEditor({ member, onChange }) {
         <div style={{ padding: 14, display: "flex", flexDirection: "column", gap: 14 }}>
           <div style={{ fontSize: 12, color: T.textMuted, lineHeight: 1.5 }}>Fine-tune individual actions. Each starts matching the tab access above — turn one off to restrict just that action.</div>
           {!anyParent && <div style={{ fontSize: 12, color: T.textMuted }}>Grant View/Edit on a tab above to fine-tune its actions.</div>}
+          {clientsGranted && group("Financial visibility", <>
+            {row("seeBalances", "Client balances & Home money", "Outstanding balances, collected revenue, invoice notices, and client financial summaries")}
+          </>)}
           {eff.seeInventory && group("Inventory", <>{row("seeInventoryCost", "See cost & unit pricing", "Otherwise stock levels only — cost/pricing stays hidden")}</>)}
           {eff.canInvoice && group("Invoices", <>
             {row("invoiceCreate", "Create & edit", "Build and change invoices")}
@@ -21992,6 +22031,7 @@ function InvoiceReconciliationReviewQueue({
 
 function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCatalog, qbAccounting = null, onSave, onResolveReview, onDelete, onSyncData, initialFilter = "All", vp = {} }) {
   const { T, perms } = useApp();
+  const canReviewAccounting = canManageInvoiceAccounting(perms);
   const moneyFmt = (n) => Number(n || 0).toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const moneyExact = (n) => `$${parseFloat(n||0).toFixed(2)}`;
 
@@ -22017,6 +22057,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
   const [qbSyncMsg, setQbSyncMsg] = useState("");
   const qbConnected = qbIsConnected();
   const syncQuickBooks = async () => {
+    if (!canReviewAccounting) return;
     if (!qbIsConnected()) { setQbSyncMsg("Connect QuickBooks under Customize first."); setTimeout(() => setQbSyncMsg(""), 4000); return; }
     setQbSyncing(true); setQbSynced(false); setQbSyncMsg("");
 
@@ -22126,7 +22167,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
   const localReviewBalance = localReviewInvoices.reduce((sum, invoice) => sum + invoice._balance, 0);
   const reviewQueueSignature = localReviewInvoices.map((invoice) => String(invoice.id || "")).join("|");
   useEffect(() => {
-    if (!reviewingReconciliation || !localReviewInvoices.length) return;
+    if (!canReviewAccounting || !reviewingReconciliation || !localReviewInvoices.length) return;
     // The review sheet should answer "what is different?" immediately. Inspect a bounded first
     // page with the targeted QB endpoint; never download the entire ledger just to render a row.
     localReviewInvoices.slice(0, 8).forEach((invoice) => {
@@ -22221,7 +22262,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", width: vp.isPhone ? "100%" : "auto" }}>
           {/* Always visible so a manual sync is available "either way" — when QB is disconnected the
               handler shows a "Connect QuickBooks under Customize first" hint (idle button stays neutral). */}
-          {(() => {
+          {canReviewAccounting && (() => {
             const QB_GREEN = "#2CA01C";
             const active = qbSyncing || qbSynced;
             return (
@@ -22260,7 +22301,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
           {qbSyncMsg}
         </div>
       )}
-      {localReviewInvoices.length > 0 && (
+      {canReviewAccounting && localReviewInvoices.length > 0 && (
         <button
           type="button"
           aria-label={`Review ${localReviewInvoices.length} SPS invoice record${localReviewInvoices.length === 1 ? "" : "s"}`}
@@ -22471,7 +22512,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
         );
       })()}
 
-      {reviewingReconciliation && (
+      {canReviewAccounting && reviewingReconciliation && (
         <InvoiceReconciliationReviewQueue
           invoices={localReviewInvoices}
           allInvoices={all}
@@ -34330,7 +34371,7 @@ function CPRatingPrompt({ client, branding, onRateVisit, T }) {
   );
 }
 
-function CPHome({ client, schedule, invoices, branding, team, onNav, onRateVisit, T, vp = {}, desktopShell = false }) {
+function CPHome({ client, schedule, invoices, branding, team, onNav, onRateVisit, T, vp = {}, desktopShell = false, showFinancials = true }) {
   const wide = vp.isTablet || vp.isDesktop;
   const next = clientNextVisit(schedule, client.id, client.name);
   const myInvoices = sortInvoices((invoices || []).filter(iv => invoiceMatchesClient(iv, client)));
@@ -34402,7 +34443,7 @@ function CPHome({ client, schedule, invoices, branding, team, onNav, onRateVisit
     </div>
   );
 
-  const balanceBlock = totalOwed > 0 ? (
+  const balanceBlock = showFinancials && totalOwed > 0 ? (
     <button onClick={() => onNav("cp_invoices")}
       style={{ background: T.surface, border: `1.5px solid ${hexA("#E5484D", 0.3)}`, borderRadius: 20, padding: "18px 20px", display: "flex", alignItems: "center", gap: 16, cursor: "pointer", fontFamily: "inherit", width: "100%", boxSizing: "border-box", boxShadow: `0 4px 20px ${hexA("#E5484D", 0.1)}`, textAlign: "left" }}>
       <div style={{ width: 44, height: 44, borderRadius: 14, background: hexA("#E5484D", 0.1), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
@@ -34417,10 +34458,10 @@ function CPHome({ client, schedule, invoices, branding, team, onNav, onRateVisit
   ) : null;
 
   const statsBlock = (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+    <div style={{ display: "grid", gridTemplateColumns: showFinancials ? "1fr 1fr 1fr" : "1fr 1fr", gap: 10 }}>
       {[
         { label: (client.history||[]).length === 1 ? "Visit" : "Visits", value: (client.history||[]).length, page: "cp_pond" },
-        { label: myInvoices.length === 1 ? "Invoice" : "Invoices", value: myInvoices.length, page: "cp_invoices" },
+        ...(showFinancials ? [{ label: myInvoices.length === 1 ? "Invoice" : "Invoices", value: myInvoices.length, page: "cp_invoices" }] : []),
         { label: (client.equipment||[]).length === 1 ? "Item" : "Items", value: (client.equipment||[]).length, page: "cp_property" },
       ].map(s => (
         <button key={s.label} onClick={() => s.page && onNav(s.page)}
@@ -34471,7 +34512,7 @@ function CPHome({ client, schedule, invoices, branding, team, onNav, onRateVisit
           { label: "My Service Plan", sub: eTier ? `${eTier} — tap to manage` : "No tier assigned", icon: "clients", page: "cp_service", accent: !!eTier },
           { label: "Messages", sub: "Chat with our team", icon: "message", page: "cp_messages", accent: false },
           { label: "My Property", sub: `${pondLabel(client)} · ${(client.history||[]).length} visits`, icon: "history", page: "cp_property", accent: false },
-          { label: "My Invoices", sub: outstanding.length ? `${outstanding.length} outstanding` : "All paid up", icon: "invoice", page: "cp_invoices", accent: false },
+          ...(showFinancials ? [{ label: "My Invoices", sub: outstanding.length ? `${outstanding.length} outstanding` : "All paid up", icon: "invoice", page: "cp_invoices", accent: false }] : []),
         ].map(q => (
           <button key={q.page} onClick={() => onNav(q.page)}
             style={{ background: q.accent ? hexA(T.primary, 0.06) : T.surface, border: `1.5px solid ${q.accent ? hexA(T.primary, 0.2) : T.border}`, borderRadius: 20, padding: "18px 16px", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
@@ -36144,7 +36185,7 @@ function CommPrefBadges({ client, compact }) {
   );
 }
 
-function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignOut, isStaffPreview }) {
+function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignOut, isStaffPreview, showFinancials = true }) {
   const set = (k, v) => setPrefs(p => ({ ...p, [k]: v }));
   const pondLbl = pondLabel(client);
   const vp = useViewport();
@@ -36238,7 +36279,7 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
           options={[["light","Light"],["dark","Dark"],["system","Auto"]]}
           onChange={v => set("appearance", v)} />
         <OptionRow label="Default Screen" value={prefs.defaultPage || branding.portalDefaultPage || "cp_home"}
-          options={[["cp_home","Home"],["cp_property","My Property"],["cp_invoices","Invoices"]]}
+          options={[["cp_home","Home"],["cp_property","My Property"], ...(showFinancials ? [["cp_invoices","Invoices"]] : [])]}
           onChange={v => set("defaultPage", v)} />
         <div style={{ padding: "14px 0" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
@@ -36339,7 +36380,7 @@ function CPSettings({ client, branding, prefs, setPrefs, onSavePrefs, T, onSignO
 
 // Desktop-only left sidebar for the client portal — mirrors the staff DesktopSidebar
 // so a client on a computer gets the same upgraded navigation experience.
-function CPDesktopSidebar({ page, settingsOpen, portalUnread, branding, client, isStaffPreview, T, vp = {}, onNav, onOpenSettings, onRefresh, onSignOut }) {
+function CPDesktopSidebar({ page, settingsOpen, portalUnread, branding, client, isStaffPreview, T, vp = {}, navItems = CLIENT_NAV, onNav, onOpenSettings, onRefresh, onSignOut }) {
   return (
     <aside style={{ width: vp?.isTablet ? 208 : 244, flexShrink: 0, height: isStaffPreview ? "auto" : "100%", alignSelf: "stretch", background: T.surface, borderRight: `1px solid ${T.border}`, display: "flex", flexDirection: "column" }}>
       {/* Logo + portal name */}
@@ -36354,7 +36395,7 @@ function CPDesktopSidebar({ page, settingsOpen, portalUnread, branding, client, 
       </div>
       {/* Nav items */}
       <nav style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 3 }}>
-        {CLIENT_NAV.map(n => {
+        {navItems.map(n => {
           const active = (page === n.id || (n.id === "cp_property" && (page === "cp_pond" || page === "cp_service" || page === "cp_history"))) && !settingsOpen;
           return (
             <button key={n.id} onClick={() => onNav(n.id)}
@@ -36388,7 +36429,9 @@ function CPDesktopSidebar({ page, settingsOpen, portalUnread, branding, client, 
   );
 }
 
-function SPSClientPortal({ client, schedule, invoices, estimates, branding, invoicing = {}, mediaStatus, deepLink, onDeepLinkHandled, team = [], T: globalT, fontStack, onSignOut, onServiceRequest, onApproveEstimate, onUpgradeRequest, onRateVisit, onClientMessage, onSavePrefs, isStaffPreview = false }) {
+function SPSClientPortal({ client, schedule, invoices, estimates, branding, invoicing = {}, mediaStatus, deepLink, onDeepLinkHandled, team = [], T: globalT, fontStack, onSignOut, onServiceRequest, onApproveEstimate, onUpgradeRequest, onRateVisit, onClientMessage, onSavePrefs, isStaffPreview = false, showFinancials = true }) {
+  const portalNav = showFinancials ? CLIENT_NAV : CLIENT_NAV.filter((item) => item.id !== "cp_invoices");
+  const portalInvoices = showFinancials ? (invoices || []) : [];
   // Client prefs stored in localStorage — personal per-device settings
   const prefsKey = `sps_client_prefs_${client.id}`;
   const [prefs, setPrefs] = useState(() => {
@@ -36398,12 +36441,15 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
   // Deep-link target: tapping the "here" link in an invoice message jumps to Invoices
   // with that invoice pre-opened. (setPage is defined below; only called on tap.)
   const [cpInvoiceSel, setCpInvoiceSel] = useState(null);
-  const openInvoice = (id) => { setCpInvoiceSel(String(id)); setSettingsOpen(false); setPage("cp_invoices"); };
+  const openInvoice = (id) => {
+    if (!showFinancials) return;
+    setCpInvoiceSel(String(id)); setSettingsOpen(false); setPage("cp_invoices");
+  };
   // Deep link ("Pay in the app" from an invoice email/text) → route the portal to invoices.
   useEffect(() => {
     if (!deepLink) return;
     const t = String(deepLink).toLowerCase();
-    if (t === "invoices" || t.indexOf("invoice") === 0) setPage("cp_invoices");
+    if (t === "invoices" || t.indexOf("invoice") === 0) setPage(showFinancials ? "cp_invoices" : "cp_home");
     else if (t === "messages" || t === "comms") setPage("cp_messages"); // push taps on new-message notifications
     else if (t === "track" || t === "home") setPage("cp_home"); // live tracking lives on Home
     else if (t === "reports" || t === "property" || t === "history") setPage("cp_property");
@@ -36435,13 +36481,20 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
       // Older builds stored the removed cp_request route after a client tapped Contact. Send those
       // existing sessions to Messages, where the Request Service flow now lives, instead of leaving
       // them on a blank portal screen after this deployment.
-      if (p) return p === "cp_request" ? "cp_messages" : p;
+      if (p) {
+        const restored = p === "cp_request" ? "cp_messages" : p;
+        return !showFinancials && restored === "cp_invoices" ? "cp_home" : restored;
+      }
     } catch (_) {}
     const initial = prefs.defaultPage || branding.portalDefaultPage || "cp_home";
-    return initial === "cp_request" ? "cp_messages" : initial;
+    const restored = initial === "cp_request" ? "cp_messages" : initial;
+    return !showFinancials && restored === "cp_invoices" ? "cp_home" : restored;
   });
   const portalMainRef = useRef(null);
   useEffect(() => { try { sessionStorage.setItem(cpPageKey, page); } catch (_) {} }, [page, cpPageKey]);
+  useEffect(() => {
+    if (!showFinancials && page === "cp_invoices") setPage("cp_home");
+  }, [showFinancials, page]);
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
       if (portalMainRef.current) portalMainRef.current.scrollTop = 0;
@@ -36506,13 +36559,13 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
         </div>
       )}
       {settingsOpen && (
-        <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} onSavePrefs={isStaffPreview ? undefined : onSavePrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} />
+        <CPSettings client={client} branding={branding} prefs={prefs} setPrefs={setPrefs} onSavePrefs={isStaffPreview ? undefined : onSavePrefs} T={T} onSignOut={onSignOut} isStaffPreview={isStaffPreview} showFinancials={showFinancials} />
       )}
-      {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={invoices} branding={branding} team={team} onNav={setPage} onRateVisit={onRateVisit} T={T} vp={vp} desktopShell={isDesktopShell} />}
+      {!settingsOpen && page === "cp_home"     && <CPHome client={client} schedule={schedule} invoices={portalInvoices} branding={branding} team={team} onNav={setPage} onRateVisit={onRateVisit} T={T} vp={vp} desktopShell={isDesktopShell} showFinancials={showFinancials} />}
       {!settingsOpen && page === "cp_property" && <CPProperty client={client} schedule={schedule} branding={branding} team={team} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
       {!settingsOpen && (page === "cp_pond" || page === "cp_service" || page === "cp_history") && <CPProperty client={client} schedule={schedule} branding={branding} team={team} onNav={setPage} onUpgradeRequest={onUpgradeRequest || (() => {})} T={T} vp={vp} />}
-      {!settingsOpen && page === "cp_invoices" && <CPInvoices client={client} invoices={invoices} branding={branding} invoicing={invoicing} T={T} vp={vp} initialSel={cpInvoiceSel} desktopShell={isDesktopShell} />}
-      {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} onSubmit={onServiceRequest} onClientMessage={isStaffPreview ? undefined : onClientMessage} onOpenInvoice={openInvoice} onOpenService={() => setPage("cp_property")} T={T} vp={vp} portalMode={!isStaffPreview} />}
+      {!settingsOpen && showFinancials && page === "cp_invoices" && <CPInvoices client={client} invoices={portalInvoices} branding={branding} invoicing={invoicing} T={T} vp={vp} initialSel={cpInvoiceSel} desktopShell={isDesktopShell} />}
+      {!settingsOpen && page === "cp_messages" && <CPMessages client={client} branding={branding} onSubmit={onServiceRequest} onClientMessage={isStaffPreview ? undefined : onClientMessage} onOpenInvoice={showFinancials ? openInvoice : undefined} onOpenService={() => setPage("cp_property")} T={T} vp={vp} portalMode={!isStaffPreview} />}
       {!settingsOpen && page === "cp_estimates" && <CPEstimates client={client} estimates={estimates} branding={branding} onApprove={onApproveEstimate || (() => {})} T={T} />}
     </SectionErrorBoundary>
   );
@@ -36551,7 +36604,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
 
       {isDesktopShell && (
         <CPDesktopSidebar page={page} settingsOpen={settingsOpen} portalUnread={portalUnread} branding={branding} client={client} isStaffPreview={isStaffPreview} T={T} vp={vp}
-          onNav={(id) => { setPage(id); setSettingsOpen(false); }} onOpenSettings={() => setSettingsOpen(s => !s)} onRefresh={() => window.location.reload()} onSignOut={onSignOut} />
+          navItems={portalNav} onNav={(id) => { setPage(id); setSettingsOpen(false); }} onOpenSettings={() => setSettingsOpen(s => !s)} onRefresh={() => window.location.reload()} onSignOut={onSignOut} />
       )}
 
       {/* Header (mobile only — desktop uses the sidebar) */}
@@ -36605,7 +36658,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
       {/* Floating capsule bottom nav (mobile only) — matches the staff floating pill. */}
       {!isDesktopShell && !portalKeyboardOpen && (
       <nav style={{ position: "fixed", left: "max(14px, env(safe-area-inset-left))", right: "max(14px, env(safe-area-inset-right))", bottom: "calc(env(safe-area-inset-bottom) + 4px)", zIndex: 90, height: 64, borderRadius: 32, background: hexA(T.surface, 0.94), backdropFilter: "saturate(180%) blur(22px)", WebkitBackdropFilter: "saturate(180%) blur(22px)", border: `1px solid ${T.border}`, boxShadow: "0 12px 32px rgba(0,0,0,0.20), 0 3px 10px rgba(0,0,0,0.08)", display: "flex", alignItems: "stretch", padding: "0 8px", WebkitTapHighlightColor: "transparent" }}>
-        {CLIENT_NAV.map(n => {
+        {portalNav.map(n => {
           const active = (page === n.id || (n.id === "cp_property" && (page === "cp_pond" || page === "cp_service"))) && !settingsOpen;
           const badge = n.id === "cp_messages" ? portalUnread : 0;
           return (
@@ -37818,8 +37871,13 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   // No-op off-native.
   useEffect(() => {
     if (!hydrated || !currentUser || effRole(currentUser) !== "owner") {
-      // Limited staff / non-owner: nothing to push, but let the Sync tab explain why.
-      if (currentUser && effRole(currentUser) !== "owner") setWidgetSync({ ok: false, skipped: true, reason: "Widgets show owner figures only." });
+      // Limited staff / non-owner: actively remove a prior owner's cached snapshot from this
+      // device. An early return alone leaves profit and invoice widgets visible after account or
+      // role switching until the user signs out or reconnects widgets manually.
+      if (currentUser && effRole(currentUser) !== "owner") {
+        void Promise.resolve(clearWidgetPayload()).catch(() => {});
+        setWidgetSync({ ok: false, skipped: true, reason: "Widgets show owner figures only." });
+      }
       return;
     }
     // Rebuild the owner snapshot + push it; also registered so the Sync tab can re-run it.
@@ -40901,7 +40959,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           </div>
         </div>
         {previewClient && (
-          <StaffClientPreview client={previewClient} invoices={invoices} invoicing={invoicing} schedule={schedule} branding={branding} onClose={() => setPreviewClient(null)} />
+          <StaffClientPreview client={previewClient} invoices={invoices} invoicing={invoicing} schedule={schedule} branding={branding} canSeeFinancials={canSeeInvoiceMoney(perms)} onClose={() => setPreviewClient(null)} />
         )}
         {pushPrimerModal}
         {fieldSetupModal}
@@ -40970,7 +41028,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           img { -webkit-user-drag: none; }
         `}</style>
 
-        <PaymentBanner banner={payBanner} T={T} onOpen={() => { setPayBanner(null); handleNav("invoices", { invoiceFilter: "Paid" }); }} onClose={() => setPayBanner(null)} />
+        {perms.isAdmin && <PaymentBanner banner={payBanner} T={T} onOpen={() => { setPayBanner(null); handleNav("invoices", { invoiceFilter: "Paid" }); }} onClose={() => setPayBanner(null)} />}
         {pushPrimerModal}
         {fieldSetupModal}
         {detectedArrivalModal}
@@ -41093,6 +41151,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           invoicing={invoicing}
           schedule={schedule}
           branding={branding}
+          canSeeFinancials={canSeeInvoiceMoney(perms)}
           onClose={() => setPreviewClient(null)}
         />
       )}
