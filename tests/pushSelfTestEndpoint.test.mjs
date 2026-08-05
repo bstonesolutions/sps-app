@@ -361,6 +361,37 @@ test("generic send-push rejects staff without the event's action permission", as
   });
 });
 
+test("legacy browser-generated invoice payment alerts are suppressed before delivery", async () => {
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    const target = String(url);
+    calls.push(target);
+    if (target.endsWith("/auth/v1/user")) return response({ id: "auth-owner", email: "owner@example.test" });
+    if (target.includes("key=eq.sps_team")) {
+      return response([{ value: JSON.stringify([{
+        id: "owner-1", email: "owner@example.test", role: "owner", active: true,
+      }]) }]);
+    }
+    throw new Error(`Unexpected fetch after legacy alert suppression: ${target}`);
+  };
+
+  const res = makeRes();
+  await sendPushHandler(post({
+    event: "invoice_paid",
+    body: "An old invoice was paid",
+    collapseId: "paid-old-invoice",
+  }), res);
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, {
+    ok: true,
+    sent: 0,
+    skipped: "legacy client payment alert suppressed",
+  });
+  assert.equal(calls.some((target) => target.includes("sps_push_tokens")), false);
+  assert.equal(calls.some((target) => target.includes("key=eq.sps_email")), false);
+});
+
 test("authorized schedule editors keep assignment pushes, with recipient capability revalidation", async () => {
   const team = [
     {

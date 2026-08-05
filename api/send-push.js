@@ -100,6 +100,16 @@ export default async function handler(req, res) {
     return res.status(403).json({ error: "Your team permissions do not allow this notification." });
   }
 
+  // Builds through 39 inferred QuickBooks payment transitions in the browser. Their five-minute
+  // refresh listener could retain an old unpaid snapshot and repeatedly POST the same historical
+  // payments (or cycle through several of them). Stop those legacy requests at the shared API so
+  // already-installed native builds are protected immediately. The only client-originated paid
+  // event we still accept is an explicit staff action; QuickBooks-originated alerts must come from
+  // a server-side observer with durable idempotency, never from a browser comparison.
+  if (String(b.event || "") === "invoice_paid" && clean(b.source, 40) !== "staff_mark_paid") {
+    return res.status(200).json({ ok: true, sent: 0, skipped: "legacy client payment alert suppressed" });
+  }
+
   // Client callers may select only a fixed, explicitly client-allowed event. Do not let portal
   // input replace the lock-screen heading with arbitrary text.
   const title = callerRole === "client" ? ev.title : (clean(b.title, 120) || ev.title);

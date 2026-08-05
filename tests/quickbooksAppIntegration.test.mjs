@@ -61,6 +61,16 @@ test("QuickBooks refresh is throttled and resumes without reloading the app", ()
   assert.match(source, /localStorage\.setItem\("qb_autosync_at"[\s\S]*?return data/);
 });
 
+test("QuickBooks refresh compares the latest invoice snapshot and never emits payment pushes", () => {
+  assert.match(source, /const invoicesRef = useRef\(invoices\);\s*invoicesRef\.current = invoices;/);
+  assert.match(source, /\(invoicesRef\.current \|\| \[\]\)\.forEach/);
+  const syncStart = source.indexOf("const handleQBSync =");
+  const syncEnd = source.indexOf("// Push a new invoice to QuickBooks", syncStart);
+  assert.ok(syncStart >= 0 && syncEnd > syncStart, "expected the QuickBooks sync handler block");
+  assert.doesNotMatch(source.slice(syncStart, syncEnd), /sendPushEvent\(["']invoice_paid["']/);
+  assert.match(source, /source:\s*"staff_mark_paid"/);
+});
+
 test("QuickBooks update payload carries the reconciliation and jurisdiction fields", () => {
   for (const field of [
     "qbBaseContentFingerprint",

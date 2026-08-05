@@ -37070,6 +37070,11 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   });
   const [session, setSession, lsesh] = useStoredState("sps_session", { userId: DEFAULT_OWNER_ID });
   const [invoices, setInvoices, linv] = useStoredState("sps_invoices", DEMO_INVOICES);
+  // QuickBooks refresh listeners are installed once after hydration. Keep the comparison
+  // snapshot in a stable ref so those long-lived listeners never compare a fresh QB response
+  // against the unpaid invoice array captured on the first render.
+  const invoicesRef = useRef(invoices);
+  invoicesRef.current = invoices;
   const [qbAccounting, setQbAccounting] = useState(() => {
     try {
       const cached = JSON.parse(localStorage.getItem("sps_qb_accounting") || "null");
@@ -39129,7 +39134,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     // Build 15, Item 6 — detect a payment that just landed (was unpaid, now Paid) for the
     // in-app banner the owner sees while using the app. (Out-of-app push is the Edge Function.)
     let _newlyPaid = null;
-    (invoices || []).forEach(iv => {
+    (invoicesRef.current || []).forEach(iv => {
       if (!iv.qbId) return;
       const qi = newInvoices.find(n => String(n.qbId) === String(iv.qbId));
       if (!qi) return;
@@ -39189,9 +39194,9 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
 
     // Build 15, Item 6 — surface a payment-received banner to the owner (in-app, while open).
     if (_newlyPaid && perms && perms.isAdmin) setPayBanner({ ..._newlyPaid, id: Date.now() });
-    // Build 27 — the out-of-app leg: push the owner's devices. Every device that syncs QB can
-    // detect the same payment, so the collapseId folds repeats into one notification.
-    if (_newlyPaid) sendPushEvent("invoice_paid", { body: `${_newlyPaid.clientName} — ${_newlyPaid.amount}${_newlyPaid.number ? ` (invoice ${_newlyPaid.number})` : ""}`, collapseId: `paid-${_newlyPaid.invoiceId}` });
+    // Do not emit lock-screen payment alerts from a client-side QB pull. Multiple browser/native
+    // sessions can observe the same historical transition, and APNs collapse IDs are not durable
+    // deduplication. A server-authoritative payment observer owns that notification path.
     // Log match stats
     const matched = newInvoices.filter(iv => iv.clientId).length;
     console.log(`QB Sync: ${newInvoices.length} invoices, ${matched} matched to clients`);
@@ -39896,7 +39901,11 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       postClientMessage(inv.clientId, "staff", branding.companyName || "", `Payment received for invoice ${inv.number || ""} — ${amount}. Thank you!`);
       // Owner phones too — skipped when the OWNER marked it paid themselves (no
       // self-notifications; staff-recorded and QB-detected payments still push).
-      if (!(perms && perms.isAdmin)) sendPushEvent("invoice_paid", { body: `${cl?.name || "A client"} — ${amount}${inv.number ? ` (invoice ${inv.number})` : ""}`, collapseId: `paid-${inv.id}` });
+      if (!(perms && perms.isAdmin)) sendPushEvent("invoice_paid", {
+        source: "staff_mark_paid",
+        body: `${cl?.name || "A client"} — ${amount}${inv.number ? ` (invoice ${inv.number})` : ""}`,
+        collapseId: `paid-${inv.id}`,
+      });
     }
   };
   const handleConvertEstimateToInvoice = async (estimate, options = {}) => {
