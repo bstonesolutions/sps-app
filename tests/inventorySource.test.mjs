@@ -8,6 +8,7 @@ import {
   safeInventorySourceUrl,
   validateInventorySourceUrl,
   validateInventoryVendor,
+  inventoryVendorSuggestions,
 } from "../inventorySource.js";
 
 test("supplier metadata is optional and normalizes human-readable names", () => {
@@ -24,6 +25,20 @@ test("supplier metadata is optional and normalizes human-readable names", () => 
     isSecure: false,
     errors: { vendor: "", sourceUrl: "" },
   });
+});
+
+test("collects unique normalized suppliers across every inventory type", () => {
+  assert.deepEqual(inventoryVendorSuggestions({
+    treatments: [{ vendor: " Practical Garden Ponds " }, { vendor: "Aquascape" }],
+    parts: [{ vendor: "practical garden ponds" }, { vendor: "  Atlantic  Water Gardens " }],
+    products: [{ vendor: "AQUASCAPE" }, { vendor: "" }, { vendor: 42 }],
+    services: [{ vendor: "Service-only supplier" }],
+  }), ["Aquascape", "Atlantic Water Gardens", "Practical Garden Ponds"]);
+});
+
+test("supplier suggestions tolerate missing and malformed catalog sections", () => {
+  assert.deepEqual(inventoryVendorSuggestions(), []);
+  assert.deepEqual(inventoryVendorSuggestions({ treatments: null, parts: {}, products: [] }), []);
 });
 
 test("supplier URLs accept only full web links and expose a safe canonical value", () => {

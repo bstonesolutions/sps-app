@@ -90,6 +90,25 @@ export function inventorySourceMetadata(item = {}) {
   };
 }
 
+// Build one reusable supplier list from the inventory catalog. Matching is case-insensitive so
+// spelling/casing variations do not create duplicate choices, while the first saved spelling is
+// retained for display and free-text entry remains available in the editor.
+export function inventoryVendorSuggestions(catalog = {}) {
+  const seen = new Set();
+  const vendors = [];
+  for (const section of ["treatments", "parts", "products"]) {
+    for (const item of Array.isArray(catalog?.[section]) ? catalog[section] : []) {
+      const result = validateInventoryVendor(item?.vendor);
+      if (!result.valid || !result.value) continue;
+      const key = result.value.toLocaleLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      vendors.push(result.value);
+    }
+  }
+  return vendors.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+}
+
 export function safeInventorySourceUrl(value) {
   const result = validateInventorySourceUrl(value);
   return result.valid ? result.value : "";

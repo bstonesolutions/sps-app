@@ -91,6 +91,7 @@ function mutationMessage(code, itemName) {
     "inventory-item-ambiguous": `${itemName || "An inventory item"} appears more than once in the catalog. Merge the duplicates before changing this stop.`,
     "inventory-usage-id-invalid": "A tracked inventory line is missing its item ID.",
     "inventory-usage-duplicate": `${itemName || "An inventory item"} appears more than once in this report. Combine the duplicate usage lines before saving.`,
+    "inventory-stock-insufficient": `${itemName || "An inventory item"} does not have enough tracked stock to save this completed report. Add or correct its inventory count, then try again.`,
     "inventory-location-missing": `A saved stock location for ${itemName || "an inventory item"} no longer exists. Restore it before reopening this stop.`,
     "history-receipt-count-invalid": "The completed report no longer has exactly one matching history record. Nothing was changed.",
     "balance-chain-unprovable": "The prior balance chain cannot be proven from the saved receipts. Nothing was changed.",
@@ -277,10 +278,13 @@ export default async function handler(req, res) {
         });
 
       if (!mutation.ok) {
+        const mutationCode = isNewCompletion && stop.sourceEstimateId && mutation.code === "inventory-stock-insufficient"
+          ? "estimate-inventory-not-applied"
+          : mutation.code;
         if (mutation.code === "legacy-completion") {
           return res.status(409).json({ ok: false, code: mutation.code, legacy: true, error: "This older completion has no exact reversal receipt." });
         }
-        return res.status(409).json({ ok: false, code: mutation.code, error: mutationMessage(mutation.code, mutation.itemName) });
+        return res.status(409).json({ ok: false, code: mutationCode, error: mutationMessage(mutationCode, mutation.itemName) });
       }
       if (isNewCompletion && stop.sourceEstimateId) {
         try {

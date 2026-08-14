@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useContext, createContext, useMemo, useCallback, Component, Fragment } from "react";
+import { useState, useRef, useEffect, useContext, createContext, useMemo, useCallback, useId, Component, Fragment } from "react";
 import { createPortal } from "react-dom";
 import { Capacitor } from "@capacitor/core";
 import { PushNotifications } from "@capacitor/push-notifications";
@@ -13,8 +13,10 @@ import { assessInboundLead, findMisfiledImportedLead } from "./leadQualification
 import { brandLogoSource } from "./brandAssets";
 import { ESTIMATE_LINE_TAX_MODEL, defaultEstimateLineTaxable, estimateHasValidDays, estimateHasValidTaxRate, estimateLineAmount, estimateLineCost, estimateLineHasKnownCost, estimateLineIsTaxable, estimateLineQuantity, estimateLineUnitPrice, estimateNumberIsValid, estimateNumberValue, estimatePipelineStatus, estimatePipelineSummary, estimateProfitTotals, estimateTotals, formatEstimateMoney, withEstimateRevision, withEstimateTotals } from "./estimateMath";
 import { catalogCategoryGroups, catalogItemFinancials, estimateLineFromCatalog, estimateLineFromPartsBundle } from "./estimateCatalog";
-import { inventorySourceMetadata } from "./inventorySource";
-import { inventoryAdjustmentDelta, inventoryAdjustmentMagnitude, inventoryStockAfterAdjustment, sanitizeInventoryAdjustmentInput } from "./inventoryAdjustment";
+import { inventorySourceMetadata, inventoryVendorSuggestions } from "./inventorySource";
+import { inventorySourcePreviewApplyPatch, normalizeInventorySourcePreview } from "./inventorySourcePreviewClient";
+import { inventoryAdjustmentInputIsValid, inventoryAdjustmentResult, inventoryTransferResult, sanitizeInventoryAdjustmentInput } from "./inventoryAdjustment";
+import { inventoryPackageCost } from "./inventoryPricing";
 import { ESTIMATE_CHARGE_TYPES, estimateChargeBreakdown, estimateLineChargeLabel, estimateLineChargeType } from "./estimateBreakdown";
 import { completeEstimateWithInvoice, estimateTaxMigrationImpact, estimateToDraftInvoice, findInvoiceForEstimate, normalizeEstimateTaxForInvoice } from "./estimateInvoiceConversion";
 import { findScheduledStopForEstimate, scheduleApprovedEstimate } from "./estimateScheduleLink";
@@ -2026,7 +2028,7 @@ const buildMapUrl = (address, app) => {
 
 // ── Inventory helpers ──────────────────────────────────────────
 // Available units for parts and treatments
-const INV_UNITS = ["oz", "gal", "lb", "pieces", "feet", "bags", "boxes", "rolls", "kits"];
+const INV_UNITS = ["oz", "pt", "qt", "gal", "lb", "each", "pieces", "feet", "bags", "boxes", "rolls", "kits"];
 
 // ── Geocoding (free, via OpenStreetMap Nominatim) with localStorage cache ──
 const GEO_CACHE_KEY = "sps_geocache";
@@ -9889,16 +9891,12 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
   // Unified photos: each entry is { src, label } — label is editable per photo
   const [photos, setPhotos] = useState([]); // [{ src, label }]
   const [customLabelIdx, setCustomLabelIdx] = useState(null); // which photo's custom-label field is open
-  // All three inventory sections (Treatments / Products / Parts) are collapsed by default and
-  // each has its own search box that shows whenever the section is open. Keeps the complete
-  // sheet short — tap a section to expand, search to find an item fast.
-  const [txOpen, setTxOpen] = useState(() => plannedMaterials.some((item) => item.kind === "treatment"));
-  const [partsOpen, setPartsOpen] = useState(() => plannedMaterials.some((item) => item.kind === "part"));
-  const [productsOpen, setProductsOpen] = useState(() => plannedMaterials.some((item) => item.kind === "product"));
-  const [txSearch, setTxSearch] = useState("");           // filter the treatments list
-  const [partSearch, setPartSearch] = useState("");       // filter the parts list (big catalogs)
-  const [productSearch, setProductSearch] = useState("");  // filter the products list
-  const [catCollapsed, setCatCollapsed] = useState({});    // `${kind}:${category}` -> collapsed (parts/treatments grouping)
+  // Field materials stay in one compact, collapsed workspace. The usage maps below remain the
+  // accounting source of truth; this state controls navigation only.
+  const [materialsOpen, setMaterialsOpen] = useState(false);
+  const [materialsTab, setMaterialsTab] = useState("all");
+  const [materialsSearch, setMaterialsSearch] = useState("");
+  const [catCollapsed, setCatCollapsed] = useState({});    // `${kind}:${category}` -> false only after the tech opens it
   // Combined editor: edit this stop's client + date right here (replaces the old Edit button).
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [edClientId, setEdClientId] = useState(() => String(stop.clientId ?? stop.id ?? ""));
@@ -10637,19 +10635,18 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     return Object.keys(map).sort((a, b) => a === "Uncategorized" ? 1 : b === "Uncategorized" ? -1 : a.localeCompare(b)).map(cat => ({ cat, items: map[cat] }));
   };
   const catHeaderStyle = { display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: T.surfaceAlt, border: "none", borderRadius: 8, padding: "7px 12px", cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em" };
-  // Shared look for the collapsible Treatments / Products / Parts section headers + their search boxes.
-  const invHeaderStyle = { display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit" };
   const invSearchStyle = { width: "100%", padding: "9px 12px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 13, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
-  // Render rows flat (one/no category, or while searching) or as collapsible category groups.
+  // Render search results flat. Browsing keeps categories closed until the tech asks for one,
+  // which prevents a large catalog from taking over the stop sheet.
   const renderByCategory = (items, kind, renderRow, flat) => {
     const groups = groupByCat(items);
-    if (flat || groups.length <= 1) return items.map(renderRow);
+    if (flat) return items.map(renderRow);
     return groups.map(g => {
       const key = `${kind}:${g.cat}`;
-      const collapsed = !!catCollapsed[key];
+      const collapsed = catCollapsed[key] !== false;
       return (
         <div key={key} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <button type="button" onClick={() => setCatCollapsed(s => ({ ...s, [key]: !s[key] }))} style={catHeaderStyle}>
+          <button type="button" aria-expanded={!collapsed} onClick={() => setCatCollapsed(s => ({ ...s, [key]: collapsed ? false : true }))} style={catHeaderStyle}>
             <span>{g.cat} · {g.items.length}</span>
             <span style={{ fontSize: 14, transform: collapsed ? "none" : "rotate(90deg)", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
           </button>
@@ -10658,6 +10655,29 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
       );
     });
   };
+  const selectedTreatmentCount = treatments.filter(item => num(tx[item.id]) > 0).length;
+  const selectedPartCount = parts.filter(item => num(partsUsed[item.id]) > 0).length;
+  const selectedProductCount = products.filter(item => num(productsQty[item.id]) > 0).length;
+  const selectedMaterialCount = selectedTreatmentCount + selectedPartCount + selectedProductCount;
+  const selectedMaterialNames = [
+    ...treatments.filter(item => num(tx[item.id]) > 0).map(item => item.name),
+    ...parts.filter(item => num(partsUsed[item.id]) > 0).map(item => item.name),
+    ...products.filter(item => num(productsQty[item.id]) > 0).map(item => item.name),
+  ];
+  const selectedLocationName = locations.find(location => String(location.id) === String(usageLoc))?.name || "Choose stock location";
+  const selectedLocationSummary = usageLoc ? `${selectedLocationName} first` : selectedLocationName;
+  const materialSearch = materialsSearch.trim().toLowerCase();
+  const materialMatches = (item) => !materialSearch || `${item.name || ""} ${item.category || ""}`.toLowerCase().includes(materialSearch);
+  const selectedFirst = (items, valueFor) => items
+    .filter(materialMatches)
+    .slice()
+    .sort((a, b) => Number(num(valueFor(b)) > 0) - Number(num(valueFor(a)) > 0) || String(a.name || "").localeCompare(String(b.name || "")));
+  const materialTabs = [
+    { id: "all", label: "All", count: selectedMaterialCount },
+    { id: "treatment", label: "Treatments", count: selectedTreatmentCount },
+    { id: "part", label: "Parts", count: selectedPartCount },
+    { id: "product", label: "Products", count: selectedProductCount },
+  ].filter(tab => tab.id === "all" || (tab.id === "treatment" ? treatments.length : tab.id === "part" ? parts.length : products.length));
 
   return (
     <Modal title={client?.name || "Service"} onClose={onClose}>
@@ -10883,6 +10903,156 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
         </div>
       </div>
 
+      {(treatments.length > 0 || parts.length > 0 || products.length > 0) && (
+        <div data-sps-stop-materials style={{ ...sectionGap, border: `1px solid ${selectedMaterialCount ? hexA(T.primary, 0.26) : T.border}`, borderRadius: 14, background: T.surface, overflow: "hidden" }}>
+          <button type="button" aria-expanded={materialsOpen} aria-controls="stop-materials-workspace" onClick={() => setMaterialsOpen(open => !open)}
+            style={{ width: "100%", minHeight: 62, display: "flex", alignItems: "center", gap: 11, padding: "11px 13px", border: "none", background: selectedMaterialCount ? hexA(T.primary, 0.035) : T.surface, color: T.text, cursor: "pointer", textAlign: "left", fontFamily: "inherit" }}>
+            <span style={{ width: 34, height: 34, borderRadius: 10, background: hexA(T.primary, 0.09), color: T.primary, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name="box" size={16} /></span>
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span style={{ display: "block", fontSize: 13.5, fontWeight: 800 }}>Materials &amp; stock</span>
+              <span style={{ display: "block", marginTop: 2, fontSize: 11.5, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {selectedMaterialCount
+                  ? `${selectedMaterialCount} selected · ${selectedLocationSummary}${showInventoryPricing ? ` · ${money(treatmentCost + partsCost + productCost)} cost` : ""}`
+                  : `Add treatments, parts, or products · ${selectedLocationSummary}`}
+              </span>
+            </span>
+            <span style={{ color: T.textMuted, transform: materialsOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s", flexShrink: 0, display: "inline-flex" }}><Icon name="chevronD" size={16} /></span>
+          </button>
+          {!materialsOpen && selectedMaterialNames.length > 0 && (
+            <div style={{ padding: "0 13px 11px 58px", fontSize: 11, lineHeight: 1.4, color: T.textMuted }}>
+              {selectedMaterialNames.slice(0, 2).join(" | ")}{selectedMaterialNames.length > 2 ? ` | +${selectedMaterialNames.length - 2} more` : ""}
+            </div>
+          )}
+          {materialsOpen && (
+            <div id="stop-materials-workspace" style={{ borderTop: `1px solid ${T.border}`, padding: 13, display: "flex", flexDirection: "column", gap: 12 }}>
+              {locations.length > 0 && (
+                <div>
+                  <label style={labelStyle}>Pull stock from</label>
+                  <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+                    {locations.map(loc => (
+                      <button key={loc.id} type="button" aria-pressed={usageLoc === loc.id} onClick={() => setUsageLoc(loc.id)}
+                        style={{ display: "flex", alignItems: "center", gap: 5, padding: "8px 11px", borderRadius: 10, border: `1px solid ${usageLoc === loc.id ? T.primary : T.border}`, background: usageLoc === loc.id ? T.navActiveBg : T.surface, color: usageLoc === loc.id ? T.primary : T.text, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                        <Icon name={loc.type === "vehicle" ? "truck" : "home"} size={13} />{loc.name}
+                      </button>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 5 }}>This location is used first. If it is short, completion uses other tracked stock.</div>
+                </div>
+              )}
+              <input value={materialsSearch} onChange={event => setMaterialsSearch(event.target.value)} placeholder="Search materials or categories" aria-label="Search stop materials" style={invSearchStyle} />
+              <div role="group" aria-label="Material type" style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 1 }}>
+                {materialTabs.map(tab => {
+                  const active = materialsTab === tab.id;
+                  return (
+                    <button key={tab.id} type="button" aria-pressed={active} onClick={() => setMaterialsTab(tab.id)}
+                      style={{ minHeight: 36, flexShrink: 0, padding: "7px 11px", borderRadius: 10, border: `1px solid ${active ? T.primary : T.border}`, background: active ? T.navActiveBg : T.surface, color: active ? T.primary : T.textMuted, fontFamily: "inherit", fontSize: 11.5, fontWeight: 800, cursor: "pointer" }}>
+                      {tab.label}{tab.count ? ` ${tab.count}` : ""}
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
+                {(materialsTab === "all" || materialsTab === "treatment") && treatments.length > 0 && (
+                  <div data-material-kind="treatment" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    <div style={{ fontSize: 10.5, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.055em" }}>Treatments{selectedTreatmentCount ? ` · ${selectedTreatmentCount} selected` : ""}</div>
+                    {renderByCategory(selectedFirst(treatments, item => tx[item.id]), "tx", (t) => {
+                      const here = usageLoc ? invAtLoc(t, usageLoc) : invTotal(t);
+                      const totalAvailable = invTotal(t);
+                      const requested = num(tx[t.id]);
+                      const insufficient = requested > totalAvailable;
+                      const usesOtherStock = !!usageLoc && requested > here && !insufficient;
+                      const unit = t.unit || "oz";
+                      return (
+                        <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: completeVp.isPhone ? "wrap" : "nowrap", background: num(tx[t.id]) > 0 ? hexA(T.primary, 0.045) : T.surfaceAlt, borderLeft: num(tx[t.id]) > 0 ? `3px solid ${T.primary}` : "3px solid transparent", borderRadius: 9, padding: "8px 10px" }}>
+                          <div style={{ flex: "1 1 140px", minWidth: 0 }}>
+                            <div style={{ fontSize: 13, fontWeight: 650, color: T.text }}>{t.name}</div>
+                            <div style={{ fontSize: 11, color: insufficient || usesOtherStock ? T.warning : T.textMuted }}>{showInventoryPricing ? `$${num(t.costPerOz).toFixed(2)}/${unit} · ` : ""}{here} {unit} {usageLoc ? "here" : "on hand"}{usageLoc ? ` · ${totalAvailable} total` : ""}{insufficient ? " · not enough stock" : usesOtherStock ? " · uses other stock" : ""}</div>
+                          </div>
+                          <input type="text" inputMode="decimal" aria-label={`${t.name} used`} value={tx[t.id] || ""} onChange={e => setTx(x => ({ ...x, [t.id]: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0" style={{ width: 60, padding: "8px", border: `1px solid ${insufficient ? T.warning : T.border}`, borderRadius: 9, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
+                          <span style={{ fontSize: 12, color: T.textMuted, width: 32 }}>{unit}</span>
+                          {showInventoryPricing && <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: num(tx[t.id]) > 0 ? T.text : T.textMuted }}>{money(num(tx[t.id]) * num(t.costPerOz))}</div>}
+                        </div>
+                      );
+                    }, !!materialSearch)}
+                  </div>
+                )}
+                {(materialsTab === "all" || materialsTab === "part") && parts.length > 0 && (
+                  <div data-material-kind="part" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    <div style={{ fontSize: 10.5, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.055em" }}>Parts{selectedPartCount ? ` · ${selectedPartCount} selected` : ""}</div>
+                    {renderByCategory(selectedFirst(parts, item => partsUsed[item.id]), "part", (p) => {
+                      const here = usageLoc ? invAtLoc(p, usageLoc) : invTotal(p);
+                      const qty = num(partsUsed[p.id]);
+                      const totalAvailable = invTotal(p);
+                      const insufficient = qty > totalAvailable;
+                      const usesOtherStock = !!usageLoc && qty > here && !insufficient;
+                      const unit = p.unit || "pieces";
+                      const willBill = partBill[p.id] !== false;
+                      const includedInEstimate = !!stop.sourceEstimateId && plannedMaterials.some(item => item.kind === "part" && String(item.refId) === String(p.id));
+                      const shownPrice = willBill ? num(p.retailPer) : num(p.costPer);
+                      return (
+                        <div key={p.id} style={{ background: qty > 0 ? hexA(T.primary, 0.045) : T.surfaceAlt, borderLeft: qty > 0 ? `3px solid ${T.primary}` : "3px solid transparent", borderRadius: 9, padding: "8px 10px" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: completeVp.isPhone ? "wrap" : "nowrap" }}>
+                            <div style={{ flex: "1 1 140px", minWidth: 0 }}>
+                              <div style={{ fontSize: 13, fontWeight: 650, color: T.text }}>{p.name}</div>
+                              <div style={{ fontSize: 11, color: insufficient || usesOtherStock ? T.warning : T.textMuted }}>{showInventoryPricing ? `$${num(p.costPer).toFixed(2)} cost · $${num(p.retailPer).toFixed(2)} retail · ` : ""}{here} {unit} {usageLoc ? "here" : "on hand"}{usageLoc ? ` · ${totalAvailable} total` : ""}{insufficient ? " · not enough stock" : usesOtherStock ? " · uses other stock" : ""}</div>
+                            </div>
+                            <input type="text" inputMode="decimal" aria-label={`${p.name} used`} value={partsUsed[p.id] || ""} onChange={e => setPartsUsedState(x => ({ ...x, [p.id]: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0" style={{ width: 60, padding: "8px", border: `1px solid ${insufficient ? T.warning : T.border}`, borderRadius: 9, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
+                            <span style={{ fontSize: 12, color: T.textMuted, width: 32 }}>{unit}</span>
+                            {showStopBilling && <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: qty > 0 ? T.text : T.textMuted }}>{money(qty * shownPrice)}</div>}
+                          </div>
+                          {qty > 0 && (
+                            <button type="button" onClick={() => { if (!includedInEstimate) setPartBill(b => ({ ...b, [p.id]: !willBill })); }} disabled={includedInEstimate}
+                              style={{ minHeight: 40, marginTop: 3, display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: includedInEstimate ? "default" : "pointer", fontFamily: "inherit", padding: "6px 0" }}>
+                              <div style={{ width: 34, height: 20, borderRadius: 100, background: willBill ? T.primary : T.border, position: "relative", flexShrink: 0 }}><div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: willBill ? 16 : 2 }} /></div>
+                              <span style={{ fontSize: 11.5, color: willBill ? T.primary : T.textMuted, fontWeight: 700 }}>{includedInEstimate ? "Included in approved estimate | inventory only" : willBill ? (showStopBilling ? `Bill client at retail (${money(qty * num(p.retailPer))})` : "Add to client invoice") : "Internal use | not invoiced"}</span>
+                            </button>
+                          )}
+                        </div>
+                      );
+                    }, !!materialSearch)}
+                  </div>
+                )}
+                {(materialsTab === "all" || materialsTab === "product") && products.length > 0 && (
+                  <div data-material-kind="product" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    <div style={{ fontSize: 10.5, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.055em" }}>Products{selectedProductCount ? ` · ${selectedProductCount} selected` : ""}</div>
+                    {renderByCategory(selectedFirst(products, item => productsQty[item.id]), "product", (p) => {
+                      const qty = num(productsQty[p.id]);
+                      const here = usageLoc ? invAtLoc(p, usageLoc) : invTotal(p);
+                      const totalAvailable = invTotal(p);
+                      const insufficient = qty > totalAvailable;
+                      const usesOtherStock = !!usageLoc && qty > here && !insufficient;
+                      const unit = p.unit || "each";
+                      const willBill = productBill[p.id] !== false;
+                      const includedInEstimate = !!stop.sourceEstimateId && plannedMaterials.some(item => item.kind === "product" && String(item.refId) === String(p.id));
+                      return (
+                        <div key={p.id} style={{ background: qty > 0 ? hexA(T.primary, 0.045) : T.surfaceAlt, borderLeft: qty > 0 ? `3px solid ${T.primary}` : "3px solid transparent", borderRadius: 9, padding: "8px 10px" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: completeVp.isPhone ? "wrap" : "nowrap" }}>
+                            <div style={{ flex: "1 1 140px", minWidth: 0 }}>
+                              <div style={{ fontSize: 13, fontWeight: 650, color: T.text }}>{p.name}</div>
+                              <div style={{ fontSize: 11, color: insufficient || usesOtherStock ? T.warning : T.textMuted }}>{showInventoryPricing ? `$${num(p.cost).toFixed(2)} cost · $${num(p.price).toFixed(2)} sale · ` : ""}{here} {unit} {usageLoc ? "here" : "on hand"}{usageLoc ? ` · ${totalAvailable} total` : ""}{insufficient ? " · not enough stock" : usesOtherStock ? " · uses other stock" : ""}</div>
+                            </div>
+                            <input type="text" inputMode="decimal" aria-label={`${p.name} purchased`} value={productsQty[p.id] || ""} onChange={e => setProductsQty(x => ({ ...x, [p.id]: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0" style={{ width: 60, padding: "8px", border: `1px solid ${insufficient ? T.warning : T.border}`, borderRadius: 9, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
+                            <span style={{ fontSize: 12, color: T.textMuted, width: 32 }}>{unit}</span>
+                            {showStopBilling && <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: qty > 0 ? T.text : T.textMuted }}>{money(qty * (willBill ? num(p.price) : num(p.cost)))}</div>}
+                          </div>
+                          {qty > 0 && (
+                            <button type="button" onClick={() => { if (!includedInEstimate) setProductBill(b => ({ ...b, [p.id]: !willBill })); }} disabled={includedInEstimate}
+                              style={{ minHeight: 40, marginTop: 3, display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: includedInEstimate ? "default" : "pointer", fontFamily: "inherit", padding: "6px 0" }}>
+                              <div style={{ width: 34, height: 20, borderRadius: 100, background: willBill ? T.primary : T.border, position: "relative", flexShrink: 0 }}><div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: willBill ? 16 : 2 }} /></div>
+                              <span style={{ fontSize: 11.5, color: willBill ? T.primary : T.textMuted, fontWeight: 700 }}>{includedInEstimate ? "Included in approved estimate | inventory only" : willBill ? (showStopBilling ? `Bill client (${money(qty * num(p.price))})` : "Add to client invoice") : "Internal use | not invoiced"}</span>
+                            </button>
+                          )}
+                        </div>
+                      );
+                    }, !!materialSearch)}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Feature 3B — actual hours worked (auto from On My Way → now) + live effective hourly rate */}
       <div style={sectionGap}>
         <label style={labelStyle}>Actual Hours Worked</label>
@@ -10991,150 +11161,6 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
                 </div>
               );
             })()}
-          </div>
-        </div>
-      )}
-
-      {/* Pull-from location — shown when treatments or parts exist */}
-      {(treatments.length > 0 || parts.length > 0) && locations.length > 0 && (
-        <div style={sectionGap}>
-          <label style={labelStyle}>Pull Stock From</label>
-          <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
-            {locations.map(loc => (
-              <button key={loc.id} onClick={() => setUsageLoc(loc.id)}
-                style={{ display: "flex", alignItems: "center", gap: 5, padding: "8px 13px", borderRadius: 11, border: `1.5px solid ${usageLoc === loc.id ? T.primary : T.border}`, background: usageLoc === loc.id ? T.navActiveBg : T.surface, color: usageLoc === loc.id ? T.primary : T.text, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>
-                <Icon name={loc.type === "vehicle" ? "truck" : "home"} size={13} />{loc.name}
-              </button>
-            ))}
-          </div>
-          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>Inventory used below will be subtracted from this location.</div>
-        </div>
-      )}
-
-      {/* Treatments — collapsible (collapsed by default), with its own search */}
-      {treatments.length > 0 && (
-        <div style={sectionGap}>
-          <button type="button" onClick={() => setTxOpen(o => !o)} style={invHeaderStyle}>
-            <label style={{ ...labelStyle, marginBottom: 0, cursor: "pointer" }}>Treatments Applied{treatments.filter(t => num(tx[t.id]) > 0).length ? ` · ${treatments.filter(t => num(tx[t.id]) > 0).length} selected` : ""}</label>
-            <span style={{ color: T.textMuted, fontSize: 16, transform: txOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
-          </button>
-          <div style={{ display: txOpen ? "flex" : "none", flexDirection: "column", gap: 8, marginTop: 8 }}>
-            <input value={txSearch} onChange={e => setTxSearch(e.target.value)} placeholder="Search treatments…" style={invSearchStyle} />
-            {renderByCategory(treatments.filter(t => { const s = txSearch.trim().toLowerCase(); return !s || (t.name || "").toLowerCase().includes(s); }), "tx", (t) => {
-              const here = usageLoc ? invAtLoc(t, usageLoc) : invTotal(t);
-              const over = num(tx[t.id]) > here;
-              const unit = t.unit || "oz";
-              return (
-                <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: completeVp.isPhone ? "wrap" : "nowrap", background: T.surfaceAlt, borderRadius: 10, padding: "8px 12px" }}>
-                  <div style={{ flex: "1 1 140px", minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{t.name}</div>
-                    <div style={{ fontSize: 11, color: over ? T.warning : T.textMuted }}>
-                      {showInventoryPricing ? `$${num(t.costPerOz).toFixed(2)}/${unit} · ` : ""}{here} {unit} {usageLoc ? "here" : "on hand"}{over ? " · over!" : ""}
-                    </div>
-                  </div>
-                  <input type="text" inputMode="decimal" value={tx[t.id] || ""} onChange={e => setTx(x => ({ ...x, [t.id]: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0" style={{ width: 60, padding: "8px", border: `1px solid ${over ? T.warning : T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
-                  <span style={{ fontSize: 12, color: T.textMuted, width: 32 }}>{unit}</span>
-                  {showInventoryPricing && <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: num(tx[t.id]) > 0 ? T.text : T.textMuted }}>{money(num(tx[t.id]) * num(t.costPerOz))}</div>}
-                </div>
-              );
-            }, !!txSearch.trim())}
-          </div>
-        </div>
-      )}
-
-      {/* Parts — collapsed by default (Build 9); treatments above stay expanded */}
-      {parts.length > 0 && (
-        <div style={sectionGap}>
-          <button type="button" onClick={() => setPartsOpen(o => !o)}
-            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit" }}>
-            <label style={{ ...labelStyle, marginBottom: 0, cursor: "pointer" }}>Parts Used{parts.filter(p => num(partsUsed[p.id]) > 0).length ? ` · ${parts.filter(p => num(partsUsed[p.id]) > 0).length} selected` : ""}</label>
-            <span style={{ color: T.textMuted, fontSize: 16, transform: partsOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
-          </button>
-          <div style={{ display: partsOpen ? "flex" : "none", flexDirection: "column", gap: 8, marginTop: 8 }}>
-            <input value={partSearch} onChange={e => setPartSearch(e.target.value)} placeholder="Search parts…" style={invSearchStyle} />
-            {renderByCategory(parts.filter(p => { const s = partSearch.trim().toLowerCase(); return !s || (p.name || "").toLowerCase().includes(s); }), "part", (p) => {
-              const here = usageLoc ? invAtLoc(p, usageLoc) : invTotal(p);
-              const qty = num(partsUsed[p.id]);
-              const over = qty > here;
-              const unit = p.unit || "pieces";
-              const willBill = partBill[p.id] !== false; // default true
-              const includedInEstimate = !!stop.sourceEstimateId && plannedMaterials.some((item) => item.kind === "part" && String(item.refId) === String(p.id));
-              const shownPrice = willBill ? num(p.retailPer) : num(p.costPer);
-              return (
-                <div key={p.id} style={{ background: T.surfaceAlt, borderRadius: 10, padding: "8px 12px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: completeVp.isPhone ? "wrap" : "nowrap" }}>
-                    <div style={{ flex: "1 1 140px", minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{p.name}</div>
-                      <div style={{ fontSize: 11, color: over ? T.warning : T.textMuted }}>
-                        {showInventoryPricing ? `$${num(p.costPer).toFixed(2)} cost · $${num(p.retailPer).toFixed(2)} retail · ` : ""}{here} {unit} {usageLoc ? "here" : "on hand"}{over ? " · over!" : ""}
-                      </div>
-                    </div>
-                    <input type="text" inputMode="decimal" value={partsUsed[p.id] || ""} onChange={e => setPartsUsedState(x => ({ ...x, [p.id]: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0" style={{ width: 60, padding: "8px", border: `1px solid ${over ? T.warning : T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
-                    <span style={{ fontSize: 12, color: T.textMuted, width: 32 }}>{unit}</span>
-                    {showStopBilling && <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: qty > 0 ? T.text : T.textMuted }}>{money(qty * shownPrice)}</div>}
-                  </div>
-                  {qty > 0 && (
-                    <button onClick={() => { if (!includedInEstimate) setPartBill(b => ({ ...b, [p.id]: !willBill })); }}
-                      disabled={includedInEstimate}
-                      style={{ minHeight: 44, marginTop: 4, display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", padding: "8px 0" }}>
-                      <div style={{ width: 34, height: 20, borderRadius: 100, background: willBill ? T.primary : T.border, position: "relative", transition: "background 0.2s", flexShrink: 0 }}>
-                        <div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: willBill ? 16 : 2, transition: "left 0.2s" }} />
-                      </div>
-                      <span style={{ fontSize: 11.5, color: willBill ? T.primary : T.textMuted, fontWeight: 700 }}>
-                        {includedInEstimate ? "Included in approved estimate — inventory only" : willBill ? (showStopBilling ? `Bill client at retail (${money(qty * num(p.retailPer))})` : "Add to client invoice") : "Internal use — not invoiced"}
-                      </span>
-                    </button>
-                  )}
-                </div>
-              );
-            }, !!partSearch.trim())}
-          </div>
-        </div>
-      )}
-
-      {/* Products */}
-      {/* Products Purchased — items the client buys from us; billed like parts, collapsed by default (Build 9) */}
-      {products.length > 0 && (
-        <div style={sectionGap}>
-          <button type="button" onClick={() => setProductsOpen(o => !o)}
-            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit" }}>
-            <label style={{ ...labelStyle, marginBottom: 0, cursor: "pointer" }}>Products Purchased{products.filter(p => num(productsQty[p.id]) > 0).length ? ` · ${products.filter(p => num(productsQty[p.id]) > 0).length} selected` : ""}</label>
-            <span style={{ color: T.textMuted, fontSize: 16, transform: productsOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
-          </button>
-          <div style={{ display: productsOpen ? "flex" : "none", flexDirection: "column", gap: 8, marginTop: 8 }}>
-            <input value={productSearch} onChange={e => setProductSearch(e.target.value)} placeholder="Search products…" style={invSearchStyle} />
-            {renderByCategory(products.filter(p => { const s = productSearch.trim().toLowerCase(); return !s || (p.name || "").toLowerCase().includes(s); }), "product", (p) => {
-              const qty = num(productsQty[p.id]);
-              const willBill = productBill[p.id] !== false; // default: billed to client
-              const includedInEstimate = !!stop.sourceEstimateId && plannedMaterials.some((item) => item.kind === "product" && String(item.refId) === String(p.id));
-              return (
-                <div key={p.id} style={{ background: T.surfaceAlt, borderRadius: 10, padding: "8px 12px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: completeVp.isPhone ? "wrap" : "nowrap" }}>
-                    <div style={{ flex: "1 1 140px", minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{p.name}</div>
-                      {showInventoryPricing && <div style={{ fontSize: 11, color: T.textMuted }}>
-                        ${num(p.cost).toFixed(2)} cost · ${num(p.price).toFixed(2)} sale
-                      </div>}
-                    </div>
-                    <input type="text" inputMode="decimal" value={productsQty[p.id] || ""} onChange={e => setProductsQty(x => ({ ...x, [p.id]: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0" style={{ width: 60, padding: "8px", border: `1px solid ${T.border}`, borderRadius: 10, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
-                    <span style={{ fontSize: 12, color: T.textMuted, width: 32 }}>qty</span>
-                    {showStopBilling && <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: qty > 0 ? T.text : T.textMuted }}>{money(qty * (willBill ? num(p.price) : num(p.cost)))}</div>}
-                  </div>
-                  {qty > 0 && (
-                    <button onClick={() => { if (!includedInEstimate) setProductBill(b => ({ ...b, [p.id]: !willBill })); }}
-                      disabled={includedInEstimate}
-                      style={{ minHeight: 44, marginTop: 4, display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", padding: "8px 0" }}>
-                      <div style={{ width: 34, height: 20, borderRadius: 100, background: willBill ? T.primary : T.border, position: "relative", transition: "background 0.2s", flexShrink: 0 }}>
-                        <div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: willBill ? 16 : 2, transition: "left 0.2s" }} />
-                      </div>
-                      <span style={{ fontSize: 11.5, color: willBill ? T.primary : T.textMuted, fontWeight: 700 }}>
-                        {includedInEstimate ? "Included in approved estimate — inventory only" : willBill ? (showStopBilling ? `Bill client (${money(qty * num(p.price))})` : "Add to client invoice") : "Internal use — not invoiced"}
-                      </span>
-                    </button>
-                  )}
-                </div>
-              );
-            }, !!productSearch.trim())}
           </div>
         </div>
       )}
@@ -16093,21 +16119,87 @@ function CatChipPicker({ items, selectedIds, onToggle, accent, emptyHint, search
   );
 }
 
-function SupplierSourceFields({ data, onChange, T, field, labelStyle, itemLabel = "item" }) {
+function SupplierSourceFields({ data, onChange, T, field, labelStyle, itemLabel = "item", vendorSuggestions = [] }) {
   const source = inventorySourceMetadata(data);
   const safeSourceUrl = source.valid ? source.sourceUrl : "";
+  const vendorListboxId = `${useId()}-inventory-vendors`;
+  const [vendorMenuOpen, setVendorMenuOpen] = useState(false);
+  const [activeVendorIndex, setActiveVendorIndex] = useState(-1);
+  const vendorQuery = String(data?.vendor || "").trim().toLocaleLowerCase();
+  const matchingVendors = vendorSuggestions
+    .filter((vendor) => {
+      const normalized = String(vendor || "").toLocaleLowerCase();
+      return normalized && normalized !== vendorQuery && (!vendorQuery || normalized.includes(vendorQuery));
+    })
+    .sort((a, b) => {
+      const aStarts = String(a).toLocaleLowerCase().startsWith(vendorQuery);
+      const bStarts = String(b).toLocaleLowerCase().startsWith(vendorQuery);
+      return Number(bStarts) - Number(aStarts) || String(a).localeCompare(String(b), undefined, { sensitivity: "base" });
+    })
+    .slice(0, 8);
+  const chooseVendor = (vendor) => {
+    onChange("vendor", vendor);
+    setVendorMenuOpen(false);
+    setActiveVendorIndex(-1);
+  };
+  const handleVendorKeyDown = (event) => {
+    if (event.key === "Escape" && vendorMenuOpen) {
+      event.preventDefault();
+      setVendorMenuOpen(false);
+      setActiveVendorIndex(-1);
+      return;
+    }
+    if ((event.key === "ArrowDown" || event.key === "ArrowUp") && matchingVendors.length > 0) {
+      event.preventDefault();
+      setVendorMenuOpen(true);
+      setActiveVendorIndex((current) => {
+        if (event.key === "ArrowDown") return current < 0 || current >= matchingVendors.length - 1 ? 0 : current + 1;
+        return current <= 0 ? matchingVendors.length - 1 : current - 1;
+      });
+      return;
+    }
+    if (event.key === "Enter" && vendorMenuOpen && matchingVendors[activeVendorIndex]) {
+      event.preventDefault();
+      chooseVendor(matchingVendors[activeVendorIndex]);
+    }
+  };
   return (
     <div data-inventory-source-fields style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <div>
         <label style={labelStyle}>Supplier / Purchased From <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(internal)</span></label>
-        <input
-          type="text"
-          style={{ ...field, borderColor: source.errors.vendor ? T.warning : field.borderColor }}
-          value={data?.vendor || ""}
-          onChange={(event) => onChange("vendor", event.target.value)}
-          aria-invalid={!!source.errors.vendor}
-          placeholder="e.g. Practical Garden Ponds"
-        />
+        <div style={{ position: "relative" }}>
+          <input
+            type="text"
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded={vendorMenuOpen && matchingVendors.length > 0}
+            aria-controls={vendorListboxId}
+            aria-activedescendant={vendorMenuOpen && activeVendorIndex >= 0 ? `${vendorListboxId}-option-${activeVendorIndex}` : undefined}
+            style={{ ...field, borderColor: source.errors.vendor ? T.warning : field.borderColor }}
+            value={data?.vendor || ""}
+            onChange={(event) => { onChange("vendor", event.target.value); setVendorMenuOpen(true); setActiveVendorIndex(-1); }}
+            onFocus={() => { setVendorMenuOpen(true); setActiveVendorIndex(-1); }}
+            onKeyDown={handleVendorKeyDown}
+            onBlur={() => window.setTimeout(() => { setVendorMenuOpen(false); setActiveVendorIndex(-1); }, 120)}
+            aria-invalid={!!source.errors.vendor}
+            placeholder="e.g. Practical Garden Ponds"
+          />
+          {vendorMenuOpen && matchingVendors.length > 0 && (
+            <div id={vendorListboxId} role="listbox" aria-label="Past suppliers" style={{ position: "absolute", zIndex: 220, left: 0, right: 0, top: "calc(100% + 5px)", overflow: "hidden", background: T.surface, border: `1px solid ${T.border}`, borderTop: `2px solid ${T.primary}`, borderRadius: 9, boxShadow: "0 8px 20px rgba(15, 23, 42, 0.09)" }}>
+              <div style={{ padding: "8px 11px 6px", color: T.textMuted, fontSize: 10, fontWeight: 800, letterSpacing: "0.055em", textTransform: "uppercase" }}>Previously used across inventory</div>
+              {matchingVendors.map((vendor, index) => (
+                <button key={vendor} id={`${vendorListboxId}-option-${index}`} type="button" role="option" aria-selected={index === activeVendorIndex}
+                  onPointerMove={() => setActiveVendorIndex(index)}
+                  onPointerDown={(event) => event.preventDefault()} onClick={() => chooseVendor(vendor)}
+                  style={{ width: "100%", minHeight: 40, display: "flex", alignItems: "center", gap: 9, padding: "9px 11px", border: "none", borderTop: `1px solid ${T.border}`, background: index === activeVendorIndex || (activeVendorIndex < 0 && index === 0 && vendorQuery) ? hexA(T.primary, 0.055) : T.surface, color: T.text, textAlign: "left", fontFamily: "inherit", fontSize: 13.5, fontWeight: 650, cursor: "pointer" }}>
+                  <span aria-hidden="true" style={{ width: 3, alignSelf: "stretch", minHeight: 18, borderRadius: 2, background: T.primary, flexShrink: 0 }} />
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{vendor}</span>
+                  <span aria-hidden="true" style={{ marginLeft: "auto", color: T.primary, fontSize: 10.5, fontWeight: 800 }}>Use</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         {source.errors.vendor && <div role="alert" style={{ fontSize: 10.5, color: T.warning, fontWeight: 700, marginTop: 4 }}>{source.errors.vendor}</div>}
       </div>
       <div>
@@ -16149,6 +16241,10 @@ function CatalogManager({ catalog, setCatalog }) {
   const products = catalog.products || [];
   const services = catalog.services || [];
   const treatments = catalog.treatments || [];
+  const supplierSuggestions = useMemo(
+    () => inventoryVendorSuggestions(catalog),
+    [catalog.treatments, catalog.parts, catalog.products],
+  );
   const serviceCategories = [...new Set(services.map((service) => String(service?.category || "").trim()).filter(Boolean))]
     .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" }));
   const num = (v) => parseFloat(v) || 0;
@@ -16407,6 +16503,7 @@ function CatalogManager({ catalog, setCatalog }) {
               field={field}
               labelStyle={labelStyle}
               itemLabel="product"
+              vendorSuggestions={supplierSuggestions}
             />
             <div>
               <label style={labelStyle}>Purchase Date</label>
@@ -16451,6 +16548,7 @@ function CatalogManager({ catalog, setCatalog }) {
               field={field}
               labelStyle={labelStyle}
               itemLabel="treatment"
+              vendorSuggestions={supplierSuggestions}
             />
             <div><label style={labelStyle}>Cost per Ounce</label>
               <div style={{ position: "relative" }}>
@@ -16581,6 +16679,7 @@ function CatalogManager({ catalog, setCatalog }) {
               field={chipInput}
               labelStyle={labelStyle}
               itemLabel="service"
+              vendorSuggestions={supplierSuggestions}
             />
 
             <div>
@@ -30504,17 +30603,115 @@ const readInvLog = () => { try { return JSON.parse(sessionStorage.getItem(INV_LO
 // Add/Edit inventory item modal — its OWN component with LOCAL draft state, so typing a name/price
 // never re-renders the (heavy, O(items×locations)) InventoryScreen. That render cliff is what made
 // the Add button feel dead once a tech had a few hundred items. It commits only on Save.
-function InventoryItemModal({ mode, kind, initial, locations = [], categories = [], canSeeCost, costField, retailField, onSave, onDelete, onClose }) {
+function InventoryItemModal({ mode, kind, initial, locations = [], categories = [], vendorSuggestions = [], canSeeCost, costField, retailField, onSave, onDelete, onClose }) {
   const { T } = useApp();
   const [data, setData] = useState(initial);
+  const [sourcePreview, setSourcePreview] = useState(null);
+  const [sourcePreviewLoading, setSourcePreviewLoading] = useState(false);
+  const [sourcePreviewError, setSourcePreviewError] = useState("");
+  const [sourcePreviewVariantId, setSourcePreviewVariantId] = useState("");
+  const [sourcePreviewChoices, setSourcePreviewChoices] = useState({});
   const set = (patch) => setData(d => ({ ...d, ...patch }));
   const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
   const unitFallback = kind === "treatment" ? "oz" : kind === "product" ? "each" : "pieces";
   const unitWord = data.unit || unitFallback;
+  const packageCost = inventoryPackageCost({ packagePrice: data.packagePrice, packageQuantity: data.packageQuantity });
+  const packageStarted = String(data.packagePrice ?? "").trim() !== "" || String(data.packageQuantity ?? "").trim() !== "";
+  const originalUnit = initial.unit || unitFallback;
+  const unitChanged = mode === "edit" && unitWord !== originalUnit;
+  const hasTrackedStock = Object.values(initial.stockByLoc || {}).some(value => (parseFloat(value) || 0) > 0);
+  const unitChangeBlocked = mode === "edit" && unitChanged;
+  const updatePackageCost = (patch) => setData(current => {
+    const next = { ...current, ...patch, packageUnit: current.unit || unitFallback };
+    const calculated = inventoryPackageCost({ packagePrice: next.packagePrice, packageQuantity: next.packageQuantity });
+    return calculated.valid ? { ...next, [costField]: calculated.unitCostText } : next;
+  });
+  const changeWorkingUnit = (nextUnit) => setData(current => {
+    const hadPackageQuantity = String(current.packageQuantity ?? "").trim() !== "";
+    return {
+      ...current,
+      unit: nextUnit,
+      packageUnit: nextUnit,
+      ...(hadPackageQuantity ? { packageQuantity: "" } : {}),
+    };
+  });
   // A price must be set on purpose. Blank = not allowed; "0" is fine (free/internal items).
   const retailMissing = String(data[retailField] ?? "").trim() === "";
   const source = inventorySourceMetadata(data);
+  const sourceUrlCheck = inventorySourceMetadata({ sourceUrl: data?.sourceUrl });
+  useEffect(() => {
+    setSourcePreview(null);
+    setSourcePreviewError("");
+    setSourcePreviewVariantId("");
+    setSourcePreviewChoices({});
+  }, [data?.sourceUrl]);
+  const selectedSourceVariant = sourcePreview?.variants?.find(variant => variant.id === sourcePreviewVariantId)
+    || sourcePreview?.variants?.[0]
+    || null;
+  const publicRetailAllowed = !!selectedSourceVariant?.price && (!sourcePreview?.currency || sourcePreview.currency === "USD");
+  const requestSourcePreview = async () => {
+    if (!sourceUrlCheck.valid || !sourceUrlCheck.sourceUrl) {
+      setSourcePreviewError("Enter a full public supplier product link first.");
+      return;
+    }
+    setSourcePreviewLoading(true);
+    setSourcePreviewError("");
+    setSourcePreview(null);
+    setSourcePreviewChoices({});
+    try {
+      const response = await fetch(`${PROD_URL}/api/inventory-source-preview`, {
+        method: "POST",
+        headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ url: sourceUrlCheck.sourceUrl }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.error || payload?.message || "The supplier page could not be previewed.");
+      const preview = normalizeInventorySourcePreview(payload);
+      if (!(preview.title || preview.vendor || preview.canonicalUrl || preview.imageUrl || preview.variants.length)) {
+        throw new Error("No public product details were found on that page.");
+      }
+      setSourcePreview(preview);
+      setSourcePreviewVariantId(preview.variants[0]?.id || "");
+    } catch (error) {
+      setSourcePreviewError(error?.message || "The supplier page could not be previewed.");
+    } finally {
+      setSourcePreviewLoading(false);
+    }
+  };
+  const toggleSourcePreviewChoice = (key) => setSourcePreviewChoices(current => ({ ...current, [key]: !current[key] }));
+  const applySourcePreview = () => {
+    const patch = inventorySourcePreviewApplyPatch({
+      preview: sourcePreview,
+      variantId: sourcePreviewVariantId,
+      selected: sourcePreviewChoices,
+      retailField,
+    });
+    if (!Object.keys(patch).length) {
+      setSourcePreviewError("Choose at least one available field to apply.");
+      return;
+    }
+    set(patch);
+    setSourcePreviewError("");
+    setSourcePreview(null);
+    setSourcePreviewChoices({});
+  };
+  const previewChoice = (key, label, value, currentValue) => {
+    if (!value) return null;
+    const protectedValue = String(currentValue ?? "").trim();
+    return (
+      <label key={key} style={{ minHeight: 44, display: "grid", gridTemplateColumns: "20px minmax(0, 1fr)", gap: 9, alignItems: "start", padding: "9px 0", borderTop: `1px solid ${T.border}`, cursor: "pointer" }}>
+        <input type="checkbox" checked={!!sourcePreviewChoices[key]} onChange={() => toggleSourcePreviewChoice(key)} style={{ margin: "2px 0 0", accentColor: T.primary }} />
+        <span style={{ minWidth: 0 }}>
+          <span style={{ display: "block", fontSize: 11, color: T.textMuted, fontWeight: 750, textTransform: "uppercase", letterSpacing: "0.045em" }}>{label}</span>
+          <span style={{ display: "block", marginTop: 2, fontSize: 13, color: T.text, fontWeight: 700, overflowWrap: "anywhere" }}>{value}</span>
+          {protectedValue && protectedValue !== String(value).trim() && (
+            <span style={{ display: "block", marginTop: 2, fontSize: 10.5, color: T.warning }}>Replaces current: {protectedValue}</span>
+          )}
+        </span>
+      </label>
+    );
+  };
   return (
     <Modal title={mode === "add" ? `Add ${kind === "part" ? "Part" : kind === "product" ? "Product" : "Treatment"}` : (data.name || "Edit")} onClose={onClose}>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -30530,9 +30727,10 @@ function InventoryItemModal({ mode, kind, initial, locations = [], categories = 
         <div style={{ display: "flex", gap: 10 }}>
           <div style={{ flex: 1 }}>
             <label style={lbl}>Unit</label>
-            <select value={data.unit || unitFallback} onChange={e => set({ unit: e.target.value })} style={field}>
+            <select value={data.unit || unitFallback} onChange={e => changeWorkingUnit(e.target.value)} style={field} disabled={mode === "edit"}>
               {INV_UNITS.map(u => <option key={u} value={u}>{u}</option>)}
             </select>
+            {mode === "edit" && <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 4 }}>Create a new item to use a different unit. Existing stock and costs keep their original unit.</div>}
           </div>
           <div style={{ flex: 1 }}>
             <label style={lbl}>Low stock at</label>
@@ -30540,11 +30738,47 @@ function InventoryItemModal({ mode, kind, initial, locations = [], categories = 
           </div>
         </div>
         {canSeeCost && (<>
+          <div style={{ borderLeft: `3px solid ${T.primary}`, background: T.surfaceAlt, padding: "14px 15px", borderRadius: 10 }}>
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 14, marginBottom: 12 }}>
+              <div>
+                <div style={{ fontSize: 13.5, fontWeight: 800, color: T.text, letterSpacing: "-0.01em" }}>Package cost calculator</div>
+                <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 3, lineHeight: 1.4 }}>Enter the full package price and how many {unitWord} it contains.</div>
+              </div>
+              {packageCost.valid && (
+                <div style={{ flexShrink: 0, textAlign: "right" }}>
+                  <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 750, textTransform: "uppercase", letterSpacing: "0.05em" }}>Your cost</div>
+                  <div style={{ fontSize: 18, color: T.primary, fontWeight: 850, letterSpacing: "-0.025em", marginTop: 1 }}>${packageCost.unitCostText}<span style={{ fontSize: 11, color: T.textMuted, fontWeight: 650 }}>/{unitWord}</span></div>
+                </div>
+              )}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 10 }}>
+              <div>
+                <label style={lbl}>Package price</label>
+                <div style={{ position: "relative" }}>
+                  <span aria-hidden="true" style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: T.textMuted, fontSize: 14 }}>$</span>
+                  <input type="text" inputMode="decimal" style={{ ...field, paddingLeft: 27 }} value={data.packagePrice ?? ""} onChange={e => updatePackageCost({ packagePrice: e.target.value.replace(/[^0-9.]/g, "") })} placeholder="160.00" />
+                </div>
+              </div>
+              <div>
+                <label style={lbl}>Package contains</label>
+                <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                  <input type="text" inputMode="decimal" style={{ ...field, minWidth: 0 }} value={data.packageQuantity ?? ""} onChange={e => updatePackageCost({ packageQuantity: e.target.value.replace(/[^0-9.]/g, "") })} placeholder="128" />
+                  <span style={{ flexShrink: 0, minWidth: 30, fontSize: 12.5, fontWeight: 750, color: T.text }}>{unitWord}</span>
+                </div>
+              </div>
+            </div>
+            {packageStarted && !packageCost.valid && (
+              <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 9 }}>{packageCost.error}</div>
+            )}
+            {packageCost.valid && (
+              <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 9 }}>${data.packagePrice} package ÷ {data.packageQuantity} {unitWord} = ${packageCost.unitCostText} per {unitWord}. You can override the result below.</div>
+            )}
+          </div>
           <div style={{ display: "flex", gap: 10 }}>
             <div style={{ flex: 1 }}>
               <label style={lbl}>Cost per {unitWord}</label>
               <input type="text" inputMode="decimal" style={field} value={data[costField] ?? ""} onChange={e => set({ [costField]: e.target.value.replace(/[^0-9.]/g, "") })} placeholder="0.00" />
-              <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 4 }}>What you pay</div>
+              <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 4 }}>{packageCost.valid ? "Calculated above, editable here" : "What you pay"}</div>
             </div>
             <div style={{ flex: 1 }}>
               <label style={lbl}>Retail per {unitWord} <span style={{ color: "#E5484D" }}>*</span></label>
@@ -30571,24 +30805,72 @@ function InventoryItemModal({ mode, kind, initial, locations = [], categories = 
           field={field}
           labelStyle={lbl}
           itemLabel={kind}
+          vendorSuggestions={vendorSuggestions}
         />
+        <div data-inventory-source-preview style={{ borderLeft: `3px solid ${T.primary}`, borderRadius: 10, background: T.surfaceAlt, padding: "12px 13px" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ color: T.text, fontSize: 13, fontWeight: 800 }}>Public product details</div>
+              <div style={{ marginTop: 2, color: T.textMuted, fontSize: 11.5, lineHeight: 1.4 }}>Inspect the supplier page, then choose what enters this unsaved draft.</div>
+            </div>
+            <button type="button" onClick={requestSourcePreview} disabled={sourcePreviewLoading || !sourceUrlCheck.valid || !sourceUrlCheck.sourceUrl}
+              style={{ minHeight: 40, flexShrink: 0, border: `1px solid ${T.primary}`, borderRadius: 10, background: T.surface, color: T.primary, padding: "8px 12px", fontFamily: "inherit", fontSize: 11.5, fontWeight: 800, cursor: sourcePreviewLoading || !sourceUrlCheck.valid || !sourceUrlCheck.sourceUrl ? "default" : "pointer", opacity: sourcePreviewLoading || !sourceUrlCheck.valid || !sourceUrlCheck.sourceUrl ? 0.55 : 1 }}>
+              {sourcePreviewLoading ? "Checking..." : "Preview public details"}
+            </button>
+          </div>
+          {sourcePreviewError && <div role="alert" style={{ marginTop: 9, color: T.warning, fontSize: 11.5, fontWeight: 700, lineHeight: 1.4 }}>{sourcePreviewError}</div>}
+          {sourcePreview && (
+            <div style={{ marginTop: 12 }}>
+              {sourcePreview.imageUrl && (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                  <img src={sourcePreview.imageUrl} alt="Supplier product preview" referrerPolicy="no-referrer" style={{ width: 58, height: 58, objectFit: "cover", borderRadius: 9, border: `1px solid ${T.border}`, background: T.surface }} />
+                  <div style={{ minWidth: 0, color: T.textMuted, fontSize: 10.5, lineHeight: 1.4 }}>Preview only. Supplier images are not copied into inventory.</div>
+                </div>
+              )}
+              {sourcePreview.variants.length > 1 && (
+                <div style={{ marginBottom: 10 }}>
+                  <label style={lbl}>Supplier option</label>
+                  <select value={sourcePreviewVariantId} onChange={event => setSourcePreviewVariantId(event.target.value)} style={field}>
+                    {sourcePreview.variants.map(variant => (
+                      <option key={variant.id} value={variant.id}>{variant.title || variant.sku || variant.id}{variant.price ? ` | ${sourcePreview.currency || "USD"} ${variant.price}` : ""}{variant.available === false ? " | unavailable" : ""}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <div style={{ color: T.textMuted, fontSize: 10.5, fontWeight: 700, lineHeight: 1.4, marginBottom: 5 }}>Nothing is applied until you check a field and press Apply. Cost is never imported.</div>
+              {previewChoice("name", "Name", sourcePreview.title, data.name)}
+              {previewChoice("vendor", "Supplier", sourcePreview.vendor, data.vendor)}
+              {previewChoice("sku", "SKU", kind === "product" ? selectedSourceVariant?.sku : "", data.sku)}
+              {publicRetailAllowed && previewChoice("retail", `Public retail (${sourcePreview.currency || "USD"})`, selectedSourceVariant.price, data[retailField])}
+              {previewChoice("sourceUrl", "Canonical supplier link", sourcePreview.canonicalUrl, data.sourceUrl)}
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, paddingTop: 10 }}>
+                <button type="button" onClick={() => { setSourcePreview(null); setSourcePreviewChoices({}); setSourcePreviewError(""); }} style={{ minHeight: 40, border: `1px solid ${T.border}`, borderRadius: 10, background: T.surface, color: T.textMuted, padding: "8px 13px", fontFamily: "inherit", fontSize: 12, fontWeight: 750, cursor: "pointer" }}>Dismiss</button>
+                <button type="button" onClick={applySourcePreview} disabled={!Object.values(sourcePreviewChoices).some(Boolean)} style={{ minHeight: 40, border: "none", borderRadius: 10, background: T.primary, color: "#fff", padding: "8px 14px", fontFamily: "inherit", fontSize: 12, fontWeight: 800, cursor: Object.values(sourcePreviewChoices).some(Boolean) ? "pointer" : "default", opacity: Object.values(sourcePreviewChoices).some(Boolean) ? 1 : 0.5 }}>Apply selected</button>
+              </div>
+            </div>
+          )}
+        </div>
         <div>
           <label style={lbl}>Stock by location</label>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {locations.map(loc => (
               <div key={loc.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <span style={{ flex: 1, fontSize: 13, color: T.text, fontWeight: 600 }}>{loc.name}</span>
-                <input type="text" inputMode="decimal" style={{ ...field, width: 90, flex: "none", textAlign: "center" }} value={data.stockByLoc?.[loc.id] ?? ""} onChange={e => { const v = e.target.value.replace(/[^0-9.]/g, ""); setData(d => ({ ...d, stockByLoc: { ...(d.stockByLoc || {}), [loc.id]: v } })); }} placeholder="0" />
+                <input type="text" inputMode="decimal" disabled={mode === "edit"} style={{ ...field, width: 90, flex: "none", textAlign: "center", ...(mode === "edit" ? { background: T.surfaceAlt, color: T.textMuted } : {}) }} value={data.stockByLoc?.[loc.id] ?? ""} onChange={e => { const v = e.target.value.replace(/[^0-9.]/g, ""); setData(d => ({ ...d, stockByLoc: { ...(d.stockByLoc || {}), [loc.id]: v } })); }} placeholder="0" />
                 <span style={{ fontSize: 12, color: T.textMuted, width: 44 }}>{unitWord}</span>
               </div>
             ))}
           </div>
+          {mode === "edit" && <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 6 }}>Use Add, Remove, Set count, or Move on the inventory card so newer stock changes are never overwritten.</div>}
         </div>
-        <Btn onClick={() => onSave({ ...data, vendor: source.vendor, sourceUrl: source.sourceUrl })} block lg disabled={!(data.name || "").trim() || (canSeeCost && retailMissing) || !source.valid}>
+        <Btn onClick={() => onSave({ ...data, packageUnit: data.unit || unitFallback, vendor: source.vendor, sourceUrl: source.sourceUrl })} block lg disabled={!(data.name || "").trim() || (canSeeCost && retailMissing) || (canSeeCost && packageStarted && !packageCost.valid) || unitChangeBlocked || !source.valid}>
           {mode === "add" ? "Add Item" : "Save Changes"}
         </Btn>
         {canSeeCost && retailMissing && (
           <div style={{ fontSize: 11.5, color: "#E5484D", fontWeight: 600, textAlign: "center", marginTop: -4 }}>Enter a retail price to save (use 0 if it's free or internal).</div>
+        )}
+        {canSeeCost && packageStarted && !packageCost.valid && (
+          <div style={{ fontSize: 11.5, color: "#E5484D", fontWeight: 600, textAlign: "center", marginTop: -4 }}>Finish or clear the package calculator before saving.</div>
         )}
         {mode === "edit" && (
           <button onClick={onDelete} style={{ background: "none", border: "none", color: "#E5484D", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "inherit", padding: "4px" }}>
@@ -30605,6 +30887,10 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
   const treatments = catalog.treatments || [];
   const parts = catalog.parts || [];
   const products = catalog.products || [];
+  const vendorSuggestions = useMemo(
+    () => inventoryVendorSuggestions({ treatments, parts, products }),
+    [treatments, parts, products],
+  );
 
   // Kind → which cost/retail field that item type stores (products use cost/price, parts
   // costPer/retailPer, treatments costPerOz/retailPerOz). Lets one code path handle all three.
@@ -30617,9 +30903,9 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
   const [locFilter, setLocFilter] = useState("all"); // "all" | locId
   const [adjustModal, setAdjustModal] = useState(null); // { item, kind, mode, locId }
   const [adjustAmt, setAdjustAmt] = useState("");
-  const [adjustDirection, setAdjustDirection] = useState("remove");
   const [adjustNote, setAdjustNote] = useState("");
   const [adjustLoc, setAdjustLoc] = useState("");
+  const [inventoryActionError, setInventoryActionError] = useState("");
   const [historyModal, setHistoryModal] = useState(null); // { item, kind }
   const [itemModal, setItemModal] = useState(null); // { mode, kind, data }
   const [priceReviewOpen, setPriceReviewOpen] = useState(false); // "needs a price" list collapsed by default
@@ -30629,7 +30915,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
   const [showReorder, setShowReorder] = useState(false);
   const [catCollapsed, setCatCollapsed] = useState({}); // `${tab}:${category}` -> collapsed in the list view
 
-  // Build usage history from client stop history (treatments + parts)
+  // Build usage history from completed client stops for every stocked material kind.
   const usageHistory = {};
   (clients || []).forEach(c => {
     (c.history || []).forEach(h => {
@@ -30644,9 +30930,14 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
         if (!usageHistory[key]) usageHistory[key] = [];
         usageHistory[key].push({ date: h.date, amt: u.qty, client: c.name, cost: u.cost, loc: u.locId, tech });
       });
+      (h.productsPurchased || []).forEach(u => {
+        const key = "pr_" + u.id;
+        if (!usageHistory[key]) usageHistory[key] = [];
+        usageHistory[key].push({ date: h.date, amt: u.qty, client: c.name, cost: u.cost, loc: u.locId, tech });
+      });
     });
   });
-  const histKey = (item, kind) => (kind === "part" ? "pt_" : "tx_") + item.id;
+  const histKey = (item, kind) => (kind === "part" ? "pt_" : kind === "product" ? "pr_" : "tx_") + item.id;
   const totalUsed = (item, kind) => (usageHistory[histKey(item, kind)] || []).reduce((s, e) => s + (e.amt || 0), 0);
   const lastUsed = (item, kind) => {
     const h = (usageHistory[histKey(item, kind)] || []).slice().sort((a, b) => {
@@ -30673,7 +30964,8 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
   const catKey = tab; // tab values match the catalog keys: treatments | parts | products
 
   // Group the visible list by category into collapsible sections (e.g. PVC under Parts).
-  // Uncategorized falls to the bottom; a single category renders flat (no header).
+  // Uncategorized falls to the bottom. Large single-category lists still get a disclosure so a
+  // catalog can never open as an unbroken wall of rows.
   const invGroupByCat = (list) => {
     const map = {};
     list.forEach(it => { const k = (it.category || "").trim() || "Uncategorized"; (map[k] = map[k] || []).push(it); });
@@ -30702,26 +30994,27 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
 
   // ── Adjust / restock at a location ──
-  const openAdjust = (item, mode, locId) => {
+  const openAdjust = (item, operation, locId) => {
     if (!canEdit) return;
-    setAdjustModal({ item, kind, mode });
+    setAdjustModal({ item, kind, operation });
     setAdjustAmt("");
-    setAdjustDirection(mode === "restock" ? "add" : "remove");
     setAdjustNote("");
     setAdjustLoc(locId || (locations[0]?.id ?? ""));
   };
   const applyAdjust = () => {
-    const amt = inventoryAdjustmentDelta({ amount: adjustAmt, mode: adjustModal.mode, direction: adjustDirection });
-    if (amt === 0 || !adjustLoc) return;
-    const cur = invAtLoc(adjustModal.item, adjustLoc);
-    const newAmt = inventoryStockAfterAdjustment(cur, amt);
-    setCatalog(cat => ({
-      ...cat,
-      [catKey]: (cat[catKey] || []).map(it => it.id === adjustModal.item.id ? setStockAtLoc(it, adjustLoc, newAmt) : it),
-    }));
-    const action = adjustModal.mode === "restock" ? "Restocked" : amt < 0 ? "Removed" : "Added";
-    logInvChange({ action, item: adjustModal.item.name, kind, qty: Math.abs(amt), unit: adjustModal.item.unit || "", loc: (locations.find(l => l.id === adjustLoc) || {}).name || "" });
-    setAdjustModal(null); setAdjustAmt(""); setAdjustDirection("remove"); setAdjustNote(""); setAdjustLoc("");
+    if (!adjustLoc) return;
+    const list = catalog[catKey] || [];
+    const appliedItem = list.find(it => it.id === adjustModal.item.id);
+    const appliedResult = appliedItem && inventoryAdjustmentResult({ current: invAtLoc(appliedItem, adjustLoc), amount: adjustAmt, operation: adjustModal.operation });
+    if (!appliedItem || !appliedResult?.valid) {
+      setInventoryActionError("This item changed while the adjustment was open. Review the latest count and try again.");
+      return;
+    }
+    setCatalog({ ...catalog, [catKey]: list.map(it => it.id === appliedItem.id ? setStockAtLoc(it, adjustLoc, appliedResult.next) : it) });
+    const action = adjustModal.operation === "set" ? "Count set" : adjustModal.operation === "remove" ? "Removed" : "Added";
+    logInvChange({ action, item: appliedItem.name, kind, qty: adjustModal.operation === "set" ? appliedResult.next : appliedResult.appliedAmount, unit: appliedItem.unit || "", loc: (locations.find(l => l.id === adjustLoc) || {}).name || "", note: adjustNote.trim() });
+    setInventoryActionError("");
+    setAdjustModal(null); setAdjustAmt(""); setAdjustNote(""); setAdjustLoc("");
   };
 
   // ── Transfer between locations ──
@@ -30737,29 +31030,39 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
     setTransferAmt("");
   };
   const applyTransfer = () => {
-    const amt = parseFloat(transferAmt) || 0;
-    if (amt <= 0 || !transferFrom || !transferTo || transferFrom === transferTo) { setTransferModal(null); return; }
-    setCatalog(cat => ({
-      ...cat,
-      [catKey]: (cat[catKey] || []).map(it => {
-        if (it.id !== transferModal.item.id) return it;
-        const fromAmt = Math.max(0, invAtLoc(it, transferFrom) - amt);
-        let next = setStockAtLoc(it, transferFrom, fromAmt);
-        next = setStockAtLoc(next, transferTo, invAtLoc(next, transferTo) + amt);
-        return next;
+    const currentItem = (catalog[catKey] || []).find(item => item.id === transferModal.item.id);
+    const result = inventoryTransferResult({
+      available: invAtLoc(currentItem, transferFrom),
+      destination: invAtLoc(currentItem, transferTo),
+      amount: transferAmt,
+    });
+    if (!result.valid || !transferFrom || !transferTo || transferFrom === transferTo) return;
+    const appliedItem = currentItem;
+    const appliedResult = result;
+    if (!appliedResult?.valid || !appliedItem) {
+      setInventoryActionError("Stock changed while this move was open. Nothing moved; review the latest count and try again.");
+      return;
+    }
+    setCatalog({
+      ...catalog,
+      [catKey]: (catalog[catKey] || []).map(it => {
+        if (it.id !== appliedItem.id) return it;
+        let next = setStockAtLoc(it, transferFrom, appliedResult.sourceNext);
+        return setStockAtLoc(next, transferTo, appliedResult.destinationNext);
       }),
-    }));
-    logInvChange({ action: "Moved", item: transferModal.item.name, kind, qty: amt, unit: transferModal.item.unit || "", loc: `${(locations.find(l => l.id === transferFrom) || {}).name || "?"} → ${(locations.find(l => l.id === transferTo) || {}).name || "?"}` });
+    });
+    logInvChange({ action: "Moved", item: appliedItem.name, kind, qty: appliedResult.movedAmount, unit: appliedItem.unit || "", loc: `${(locations.find(l => l.id === transferFrom) || {}).name || "?"} to ${(locations.find(l => l.id === transferTo) || {}).name || "?"}` });
+    setInventoryActionError("");
     setTransferModal(null); setTransferAmt("");
   };
 
   // ── Item add / edit / delete ──
   const newId = (p) => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); // collision-proof (Date.now() alone could repeat on rapid adds → silent overwrite)
   const blankItem = () => kind === "part"
-    ? { id: newId("pt"), name: "", category: "", unit: "pieces", costPer: "", vendor: "", sourceUrl: "", lowAt: "", stockByLoc: {} }
+    ? { id: newId("pt"), name: "", category: "", unit: "pieces", costPer: "", packagePrice: "", packageQuantity: "", packageUnit: "pieces", vendor: "", sourceUrl: "", lowAt: "", stockByLoc: {} }
     : kind === "product"
-    ? { id: newId("p"), name: "", category: "", unit: "each", cost: "", price: "", sku: "", vendor: "", sourceUrl: "", purchaseDate: "", lowAt: "", stockByLoc: {} }
-    : { id: newId("t"), name: "", category: "", unit: "oz", costPerOz: "", vendor: "", sourceUrl: "", inventoryOz: "0", stockByLoc: {} };
+    ? { id: newId("p"), name: "", category: "", unit: "each", cost: "", price: "", packagePrice: "", packageQuantity: "", packageUnit: "each", sku: "", vendor: "", sourceUrl: "", purchaseDate: "", lowAt: "", stockByLoc: {} }
+    : { id: newId("t"), name: "", category: "", unit: "oz", costPerOz: "", packagePrice: "", packageQuantity: "", packageUnit: "oz", vendor: "", sourceUrl: "", inventoryOz: "0", stockByLoc: {} };
   const openAddItem = () => { if (!canEdit) return; setItemModal({ mode: "add", kind, data: blankItem() }); };
   const openEditItem = (item) => { if (!canEdit) return; setItemModal({ mode: "edit", kind, data: { ...item, stockByLoc: { ...(item.stockByLoc || {}) } } }); };
   const saveItem = (d) => {
@@ -30771,9 +31074,15 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
       const list = cat[catKey] || [];
       const exists = list.some(x => x.id === d.id);
       // keep inventoryOz mirror in sync
-      const total = Object.values(d.stockByLoc || {}).reduce((s, v) => s + (parseFloat(v) || 0), 0);
-      const clean = { ...d, vendor: source.vendor, sourceUrl: source.sourceUrl, inventoryOz: String(total) };
-      return { ...cat, [catKey]: exists ? list.map(x => x.id === d.id ? clean : x) : [...list, clean] };
+      const cleanDraft = { ...d, vendor: source.vendor, sourceUrl: source.sourceUrl };
+      return { ...cat, [catKey]: exists ? list.map(x => {
+        if (x.id !== d.id) return x;
+        // Existing stock is adjusted only through the explicit stock actions. Editing metadata must
+        // never write the modal's older stock snapshot over another device's newer count.
+        const stockByLoc = x.stockByLoc || {};
+        const total = Object.values(stockByLoc).reduce((s, v) => s + (parseFloat(v) || 0), 0);
+        return { ...x, ...cleanDraft, stockByLoc, inventoryOz: String(total) };
+      }) : [...list, { ...cleanDraft, inventoryOz: String(Object.values(d.stockByLoc || {}).reduce((s, v) => s + (parseFloat(v) || 0), 0)) }] };
     });
     if (isNew) logInvChange({ action: "Added", item: d.name, kind });
     setItemModal(null);
@@ -30886,14 +31195,14 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
 
       {/* Quick action row — value/reorder visible only to those who can see cost */}
       {canSeeCost && (
-      <div style={{ display: "flex", gap: 8 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.35fr) minmax(0, 1fr)", gap: 8 }}>
         <button onClick={() => { setShowValue(s => !s); setShowReorder(false); }}
-          style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2, padding: "12px 14px", borderRadius: 14, border: `1.5px solid ${showValue ? T.primary : T.border}`, background: showValue ? hexA(T.primary, 0.06) : T.surface, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+          style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2, padding: "13px 14px", borderRadius: 12, border: `1px solid ${showValue ? T.primary : T.border}`, borderLeft: `3px solid ${T.primary}`, background: showValue ? hexA(T.primary, 0.06) : T.surface, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
           <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted }}>Total Value</span>
           <span style={{ fontSize: 20, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>${totalValue.toFixed(0)}</span>
         </button>
         <button onClick={() => { setShowReorder(s => !s); setShowValue(false); }}
-          style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2, padding: "12px 14px", borderRadius: 14, border: `1.5px solid ${showReorder ? T.primary : (reorderItems.length ? hexA("#F59E0B", 0.5) : T.border)}`, background: showReorder ? hexA(T.primary, 0.06) : (reorderItems.length ? hexA("#F59E0B", 0.06) : T.surface), cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+          style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2, padding: "13px 14px", borderRadius: 12, border: `1px solid ${showReorder ? T.primary : (reorderItems.length ? hexA("#F59E0B", 0.5) : T.border)}`, background: showReorder ? hexA(T.primary, 0.06) : (reorderItems.length ? hexA("#F59E0B", 0.06) : T.surface), cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
           <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: reorderItems.length ? "#B45309" : T.textMuted }}>Reorder List</span>
           <span style={{ fontSize: 20, fontWeight: 800, color: reorderItems.length ? "#B45309" : T.text, letterSpacing: "-0.02em" }}>{reorderItems.length} item{reorderItems.length !== 1 ? "s" : ""}</span>
         </button>
@@ -30970,7 +31279,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
                     </div>
                     <div style={{ textAlign: "right" }}>
                       <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>${it.estCost.toFixed(2)}</div>
-                      {canEdit && <button onClick={() => openAdjust(it, "restock", locFilter !== "all" ? locFilter : locations[0]?.id)}
+                      {canEdit && <button onClick={() => openAdjust(it, "add", locFilter !== "all" ? locFilter : locations[0]?.id)}
                         style={{ marginTop: 3, background: hexA(T.primary, 0.1), color: T.primary, border: "none", borderRadius: 7, padding: "4px 11px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Restock</button>}
                     </div>
                   </div>
@@ -31049,7 +31358,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
                     <span style={{ fontSize: 12, color: total <= 0 ? "#E5484D" : "#F59E0B", fontWeight: 700 }}>
                       {total <= 0 ? "OUT" : `${total} ${unitOf(it)} left`}
                     </span>
-                    {canEdit && <button onClick={() => openAdjust(it, "restock", locFilter !== "all" ? locFilter : locations[0]?.id)}
+                    {canEdit && <button onClick={() => openAdjust(it, "add", locFilter !== "all" ? locFilter : locations[0]?.id)}
                       style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 8, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
                       Restock
                     </button>}
@@ -31093,7 +31402,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
       {/* Add item button */}
       {canEdit && (
         <button onClick={openAddItem}
-          style={{ background: hexA(T.primary, 0.08), color: T.primary, border: `1.5px dashed ${hexA(T.primary, 0.3)}`, borderRadius: 14, padding: "12px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+          style={{ alignSelf: "flex-start", background: T.primary, color: "#fff", border: `1px solid ${T.primary}`, borderRadius: 9, padding: "10px 15px", fontSize: 13.5, fontWeight: 750, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
           + Add {tab === "treatments" ? "Treatment" : tab === "products" ? "Product" : "Part"}
         </button>
       )}
@@ -31108,8 +31417,8 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
         {(() => {
           const visible = items.filter(it => locFilter === "all" ? true : invAtLoc(it, locFilter) > 0 || (it.stockByLoc && locFilter in (it.stockByLoc || {})));
           const groups = invGroupByCat(visible);
-          const flat = groups.length <= 1; // one (or zero) category → render plain, no headers
-          const catHdr = { display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: T.surfaceAlt, border: "none", borderRadius: 10, padding: "9px 13px", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em" };
+          const flat = groups.length === 1 && groups[0].items.length <= 4;
+          const catHdr = { display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "transparent", border: "none", borderBottom: `1px solid ${T.border}`, borderRadius: 0, padding: "8px 4px", cursor: "pointer", fontFamily: "inherit", fontSize: 11.5, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.055em" };
           return groups.map(g => {
             const ck = `${tab}:${g.cat}`;
             const collapsed = !flat && !!catCollapsed[ck];
@@ -31135,7 +31444,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
             const barColor = total <= 0 ? "#E5484D" : total < low ? "#F59E0B" : T.primary;
 
             return (
-              <div key={it.id} style={{ background: T.surface, borderRadius: 20, border: `1px solid ${T.border}`, padding: "16px 18px", boxShadow: "0 1px 4px rgba(0,0,0,0.04)" }}>
+              <div key={it.id} style={{ background: T.surface, borderRadius: 13, border: `1px solid ${T.border}`, borderLeft: `3px solid ${barColor}`, padding: "14px 15px" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 15, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{it.name}</div>
@@ -31188,28 +31497,32 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
                 {/* Actions */}
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   {canEdit && (<>
-                  <button onClick={() => openAdjust(it, "restock", locFilter !== "all" ? locFilter : undefined)}
-                    style={{ flex: 1, minWidth: 80, background: hexA(T.primary, 0.08), color: T.primary, border: "none", borderRadius: 11, padding: "9px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-                    + Restock
+                  <button onClick={() => openAdjust(it, "add", locFilter !== "all" ? locFilter : undefined)}
+                    style={{ flex: 1, minWidth: 80, background: T.primary, color: "#fff", border: `1px solid ${T.primary}`, borderRadius: 9, padding: "9px", fontSize: 13, fontWeight: 750, cursor: "pointer", fontFamily: "inherit" }}>
+                    + Add
                   </button>
-                  <button onClick={() => openAdjust(it, "adjust", locFilter !== "all" ? locFilter : undefined)}
-                    style={{ flex: 1, minWidth: 80, background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 11, padding: "9px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
-                    Adjust
+                  <button onClick={() => openAdjust(it, "remove", locFilter !== "all" ? locFilter : undefined)}
+                    style={{ flex: 1, minWidth: 80, background: T.surface, color: T.primary, border: `1px solid ${hexA(T.primary, 0.42)}`, borderRadius: 9, padding: "9px", fontSize: 13, fontWeight: 750, cursor: "pointer", fontFamily: "inherit" }}>
+                    − Remove
+                  </button>
+                  <button onClick={() => openAdjust(it, "set", locFilter !== "all" ? locFilter : undefined)}
+                    style={{ background: "transparent", color: T.textMuted, border: `1px solid ${T.border}`, borderRadius: 9, padding: "9px 12px", fontSize: 13, fontWeight: 650, cursor: "pointer", fontFamily: "inherit" }}>
+                    Set count
                   </button>
                   {locations.length > 1 && (
                     <button onClick={() => openTransfer(it)}
-                      style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 11, padding: "9px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+                      style={{ background: "transparent", color: T.textMuted, border: "none", borderRadius: 7, padding: "9px 8px", fontSize: 13, fontWeight: 650, cursor: "pointer", fontFamily: "inherit" }}>
                       Move
                     </button>
                   )}
                   <button onClick={() => openEditItem(it)}
-                    style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 11, padding: "9px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+                    style={{ background: "transparent", color: T.textMuted, border: "none", borderRadius: 7, padding: "9px 8px", fontSize: 13, fontWeight: 650, cursor: "pointer", fontFamily: "inherit" }}>
                     Edit
                   </button>
                   </>)}
                   {(usageHistory[histKey(it, kind)] || []).length > 0 && (
                     <button onClick={() => setHistoryModal({ item: it, kind })}
-                      style={{ background: T.surfaceAlt, color: T.textMuted, border: "none", borderRadius: 11, padding: "9px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+                      style={{ background: "transparent", color: T.textMuted, border: "none", borderRadius: 7, padding: "9px 8px", fontSize: 12, fontWeight: 650, cursor: "pointer", fontFamily: "inherit" }}>
                       History
                     </button>
                   )}
@@ -31225,7 +31538,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
 
       {/* Adjust / Restock modal */}
       {adjustModal && (
-        <Modal title={adjustModal.mode === "restock" ? `Restock — ${adjustModal.item.name}` : `Adjust — ${adjustModal.item.name}`} onClose={() => setAdjustModal(null)}>
+        <Modal title={`${adjustModal.operation === "set" ? "Set count" : adjustModal.operation === "remove" ? "Remove stock" : "Add stock"} · ${adjustModal.item.name}`} onClose={() => setAdjustModal(null)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <div>
               <label style={lbl}>Location</label>
@@ -31235,52 +31548,38 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
                 ))}
               </select>
             </div>
-            <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: "14px 16px" }}>
-              <div style={{ fontSize: 13, color: T.textMuted }}>Current at this location</div>
-              <div style={{ fontSize: 28, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginTop: 2 }}>
-                {invAtLoc(adjustModal.item, adjustLoc)}<span style={{ fontSize: 14, color: T.textMuted }}> {unitOf(adjustModal.item)}</span>
-              </div>
-            </div>
             <div>
-              {adjustModal.mode !== "restock" && (
-                <div style={{ marginBottom: 14 }}>
-                  <label style={lbl}>Inventory change</label>
-                  <div role="group" aria-label="Inventory adjustment direction" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, padding: 5, borderRadius: 13, background: T.surfaceAlt }}>
-                    {[{ id: "remove", label: "− Remove" }, { id: "add", label: "+ Add" }].map(option => {
-                      const selected = adjustDirection === option.id;
-                      return (
-                        <button key={option.id} type="button" aria-pressed={selected} onClick={() => setAdjustDirection(option.id)}
-                          style={{ minHeight: 42, borderRadius: 9, border: selected ? `1.5px solid ${T.primary}` : "1.5px solid transparent", background: selected ? T.surface : "transparent", color: selected ? T.primary : T.textMuted, boxShadow: selected ? "0 1px 3px rgba(15,23,42,0.08)" : "none", fontSize: 14, fontWeight: 750, fontFamily: "inherit", cursor: "pointer" }}>
-                          {option.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
               <label style={lbl}>
-                {adjustModal.mode === "restock" || adjustDirection === "add" ? "Amount to add" : "Amount to remove"} ({unitOf(adjustModal.item)})
+                {adjustModal.operation === "set" ? "New physical count" : adjustModal.operation === "add" ? "Amount received" : "Amount used or removed"} ({unitOf(adjustModal.item)})
               </label>
               <input type="text" inputMode="decimal" style={field} value={adjustAmt}
                 onChange={e => setAdjustAmt(sanitizeInventoryAdjustmentInput(e.target.value))}
-                placeholder="e.g. 16" autoFocus />
-              {inventoryAdjustmentMagnitude(adjustAmt) > 0 && adjustLoc && (
-                <div style={{ fontSize: 13, color: T.textMuted, marginTop: 6 }}>
-                  New at {locName(adjustLoc)}: <strong style={{ color: T.text }}>
-                    {inventoryStockAfterAdjustment(invAtLoc(adjustModal.item, adjustLoc), inventoryAdjustmentDelta({ amount: adjustAmt, mode: adjustModal.mode, direction: adjustDirection }))} {unitOf(adjustModal.item)}
-                  </strong>
-                  {adjustDirection === "remove" && inventoryAdjustmentMagnitude(adjustAmt) > invAtLoc(adjustModal.item, adjustLoc) && (
-                    <span style={{ display: "block", marginTop: 3, color: "#B45309", fontWeight: 650 }}>Removal is capped at the stock currently here.</span>
-                  )}
-                </div>
-              )}
+                placeholder={adjustModal.operation === "set" ? "Enter the count you see" : "e.g. 16"} autoFocus />
             </div>
+            {(() => {
+              const current = invAtLoc(adjustModal.item, adjustLoc);
+              const result = inventoryAdjustmentResult({ current, amount: adjustAmt, operation: adjustModal.operation });
+              return (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", alignItems: "center", gap: 12, padding: "14px 15px", borderLeft: `3px solid ${T.primary}`, background: T.surfaceAlt, borderRadius: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 750, textTransform: "uppercase", letterSpacing: "0.05em" }}>Current</div>
+                    <div style={{ fontSize: 23, fontWeight: 820, color: T.text, letterSpacing: "-0.025em", marginTop: 2 }}>{current}</div>
+                  </div>
+                  <Icon name="chevronR" size={17} />
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontSize: 10, color: T.textMuted, fontWeight: 750, textTransform: "uppercase", letterSpacing: "0.05em" }}>After save</div>
+                    <div style={{ fontSize: 23, fontWeight: 850, color: result.valid ? T.primary : T.textMuted, letterSpacing: "-0.025em", marginTop: 2 }}>{result.valid ? result.next : current}<span style={{ fontSize: 12, color: T.textMuted, fontWeight: 650 }}> {unitOf(adjustModal.item)}</span></div>
+                  </div>
+                  {result.overdraw && <div style={{ gridColumn: "1 / -1", fontSize: 11.5, color: "#B45309", fontWeight: 650 }}>Only {current} {unitOf(adjustModal.item)} are available. Saving will set this location to zero.</div>}
+                </div>
+              );
+            })()}
             <div>
               <label style={lbl}>Note <span style={{ textTransform: "none", fontWeight: 400 }}>(optional)</span></label>
               <input type="text" style={field} value={adjustNote} onChange={e => setAdjustNote(e.target.value)} placeholder="e.g. Received shipment, Manual count" />
             </div>
-            <Btn onClick={applyAdjust} block lg disabled={inventoryAdjustmentMagnitude(adjustAmt) <= 0 || !adjustLoc}>
-              {adjustModal.mode === "restock" || adjustDirection === "add" ? `Add to ${locName(adjustLoc) || "Inventory"}` : `Remove from ${locName(adjustLoc) || "Inventory"}`}
+            <Btn onClick={applyAdjust} block lg disabled={!inventoryAdjustmentInputIsValid(adjustAmt, { allowZero: adjustModal.operation === "set" }) || !adjustLoc}>
+              {adjustModal.operation === "set" ? `Save ${locName(adjustLoc) || "Count"}` : adjustModal.operation === "add" ? `Add to ${locName(adjustLoc) || "Inventory"}` : `Remove from ${locName(adjustLoc) || "Inventory"}`}
             </Btn>
           </div>
         </Modal>
@@ -31288,7 +31587,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
 
       {/* Transfer modal */}
       {transferModal && (
-        <Modal title={`Move — ${transferModal.item.name}`} onClose={() => setTransferModal(null)}>
+        <Modal title={`Move ${transferModal.item.name}`} onClose={() => setTransferModal(null)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <div>
               <label style={lbl}>From</label>
@@ -31307,7 +31606,23 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
               <input type="text" inputMode="decimal" style={field} value={transferAmt}
                 onChange={e => setTransferAmt(e.target.value.replace(/[^0-9.]/g, ""))} placeholder="e.g. 16" autoFocus />
             </div>
-            <Btn onClick={applyTransfer} block lg disabled={!transferAmt || transferFrom === transferTo}>Move Stock</Btn>
+            {(() => {
+              const preview = inventoryTransferResult({
+                available: invAtLoc(transferModal.item, transferFrom),
+                destination: invAtLoc(transferModal.item, transferTo),
+                amount: transferAmt,
+              });
+              return (
+                <>
+                  {preview.overdraw && (
+                    <div role="alert" style={{ color: "#B45309", background: hexA("#F59E0B", 0.1), borderRadius: 10, padding: "9px 11px", fontSize: 12, fontWeight: 650 }}>
+                      Only {preview.available} {unitOf(transferModal.item)} are available at the source. Enter a smaller amount.
+                    </div>
+                  )}
+                  <Btn onClick={applyTransfer} block lg disabled={!preview.valid || transferFrom === transferTo}>Move Stock</Btn>
+                </>
+              );
+            })()}
           </div>
         </Modal>
       )}
@@ -31319,7 +31634,8 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
           kind={itemModal.kind}
           initial={itemModal.data}
           locations={locations}
-          categories={Array.from(new Set(allItems.map(it => (it.category || "").trim()).filter(Boolean))).sort()}
+          categories={Array.from(new Set(items.map(it => (it.category || "").trim()).filter(Boolean))).sort()}
+          vendorSuggestions={vendorSuggestions}
           canSeeCost={canSeeCost}
           costField={costFieldFor(itemModal.kind)}
           retailField={retailFieldFor(itemModal.kind)}

@@ -171,6 +171,106 @@ test("field completion is validated server-side and committed through one servic
   assert.equal(writtenInvoices[0].lineItems[0].unitPrice, "75");
 });
 
+test("ordinary completion rejects insufficient tracked stock before any shared state is written", async () => {
+  const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
+  const state = {
+    sps_clients: { value: [{ id: "c1", name: "Client", balance: "$10", history: [] }], version: 2 },
+    sps_catalog: { value: { locations: [{ id: "truck", name: "Truck" }], treatments: [{ id: "t1", name: "Treatment", stockByLoc: { truck: 3 }, inventoryOz: "3" }], parts: [], products: [] }, version: 5 },
+    sps_completed: { value: {}, version: 3 },
+    sps_schedule: { value: [{ date: "07/12/2026", stops: [{ sid: "s1", clientId: "c1", assigneeId: "e1" }] }], version: 7 },
+    sps_invoices: { value: [], version: 1 },
+  };
+  let batchWrites = 0;
+  globalThis.fetch = async (url) => {
+    const href = String(url);
+    if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
+    if (href.includes("/rest/v1/app_state?")) {
+      const match = href.match(/key=eq\.([^&]+)/);
+      const key = match ? decodeURIComponent(match[1]) : "";
+      const row = state[key];
+      return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+    }
+    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+      batchWrites += 1;
+      return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
+    }
+    throw new Error(`Unexpected fetch: ${href}`);
+  };
+
+  const res = mockResponse();
+  await stopCompletionHandler({
+    method: "POST",
+    headers: { authorization: "Bearer field-token" },
+    body: {
+      mode: "complete",
+      clientId: "c1",
+      sid: "s1",
+      idempotencyKey: "attempt-insufficient-stock",
+      entry: {
+        invoice: "$75",
+        treatmentsUsed: [{ id: "t1", name: "Treatment", unit: "oz", oz: 4, locId: "truck" }],
+      },
+    },
+  }, res);
+
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.code, "inventory-stock-insufficient");
+  assert.match(res.body.error, /Treatment does not have enough tracked stock/i);
+  assert.equal(batchWrites, 0, "a failed completion cannot persist history, balance, inventory, invoice, or schedule changes");
+});
+
+test("ordinary completion accepts a legacy untracked product without fabricating inventory movement", async () => {
+  const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
+  const state = {
+    sps_clients: { value: [{ id: "c1", name: "Client", balance: "$0", history: [] }], version: 2 },
+    sps_catalog: { value: { locations: [{ id: "truck", name: "Truck" }], treatments: [], parts: [], products: [{ id: "legacy-product", name: "Legacy sale item", price: "20", cost: "8" }] }, version: 5 },
+    sps_completed: { value: {}, version: 3 },
+    sps_schedule: { value: [{ date: "07/12/2026", stops: [{ sid: "s1", clientId: "c1", assigneeId: "e1" }] }], version: 7 },
+    sps_invoices: { value: [], version: 1 },
+  };
+  let writtenOperations = null;
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
+    if (href.includes("/rest/v1/app_state?")) {
+      const match = href.match(/key=eq\.([^&]+)/);
+      const key = match ? decodeURIComponent(match[1]) : "";
+      const row = state[key];
+      return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+    }
+    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+      writtenOperations = JSON.parse(options.body).p_operations;
+      return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
+    }
+    throw new Error(`Unexpected fetch: ${href}`);
+  };
+
+  const res = mockResponse();
+  await stopCompletionHandler({
+    method: "POST",
+    headers: { authorization: "Bearer field-token" },
+    body: {
+      mode: "complete",
+      clientId: "c1",
+      sid: "s1",
+      idempotencyKey: "attempt-legacy-product",
+      entry: {
+        invoice: "$20.00",
+        productsPurchased: [{ id: "legacy-product", name: "Legacy sale item", unit: "each", qty: 1, price: 20, cost: 8 }],
+      },
+    },
+  }, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.inventoryDeducted, []);
+  const catalogWrite = writtenOperations.find((operation) => operation.key === "sps_catalog");
+  assert.deepEqual(JSON.parse(catalogWrite.value).products, state.sps_catalog.value.products);
+  const clientWrite = writtenOperations.find((operation) => operation.key === "sps_clients");
+  assert.equal(JSON.parse(clientWrite.value)[0].history[0].productsPurchased[0].id, "legacy-product");
+});
+
 test("the final weekly maintenance visit atomically creates one monthly draft", async () => {
   const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
   const firstEntry = {
@@ -191,7 +291,7 @@ test("the final weekly maintenance visit atomically creates one monthly draft", 
       version: 1,
     },
     sps_catalog: {
-      value: { locations: [], treatments: [], parts: [], products: [{ id: "p1", name: "Bacteria", stockByLoc: {} }] },
+      value: { locations: [{ id: "truck", name: "Truck" }], treatments: [], parts: [], products: [{ id: "p1", name: "Bacteria", stockByLoc: { truck: 2 }, inventoryOz: "2" }] },
       version: 1,
     },
     sps_completed: {
@@ -781,7 +881,7 @@ test("same completion key is idempotent, a competing key conflicts, and requeste
   const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
   const state = {
     sps_clients: { value: [{ id: "c1", name: "Client", balance: "$0", history: [] }], version: 1 },
-    sps_catalog: { value: { locations: [{ id: "truck", name: "Truck" }], treatments: [{ id: "t1", name: "Empty", stockByLoc: { truck: 0 }, inventoryOz: "0" }], parts: [], products: [] }, version: 1 },
+    sps_catalog: { value: { locations: [{ id: "truck", name: "Truck" }], treatments: [{ id: "t1", name: "Treatment", stockByLoc: { truck: 2 }, inventoryOz: "2" }], parts: [], products: [] }, version: 1 },
     sps_completed: { value: {}, version: 1 },
     sps_schedule: { value: [{ date: "07/12/2026", stops: [{ sid: "s1", clientId: "c1" }] }], version: 1 },
     sps_invoices: { value: [], version: 1 },
@@ -822,7 +922,7 @@ test("same completion key is idempotent, a competing key conflicts, and requeste
         clientId: "c1",
         sid: "s1",
         idempotencyKey,
-        entry: { invoice: "$20.00", treatmentsUsed: [{ id: "t1", name: "Empty", oz: 2, locId: "truck" }] },
+        entry: { invoice: "$20.00", treatmentsUsed: [{ id: "t1", name: "Treatment", oz: 2, locId: "truck" }] },
       },
     }, res);
     return res;

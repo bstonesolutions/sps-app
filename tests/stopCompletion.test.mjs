@@ -27,14 +27,20 @@ const entry = (sid = "s1", invoice = "$80") => ({
   partsUsed: [{ id: "pt1", name: "Part", unit: "pieces", qty: 1, locId: "truck" }],
   productsPurchased: [{ id: "p1", name: "Product", unit: "bottles", qty: 2, locId: "truck" }],
 });
+const balanceOnlyEntry = (sid, invoice) => ({
+  ...entry(sid, invoice),
+  treatmentsUsed: [],
+  partsUsed: [],
+  productsPurchased: [],
+});
 
-function complete({ clients = baseClients(), catalog = baseCatalog(), completed = {}, sid = "s1", receiptId = "receipt-1", idempotencyKey = `attempt-${receiptId}`, invoice = "$80" } = {}) {
+function complete({ clients = baseClients(), catalog = baseCatalog(), completed = {}, sid = "s1", receiptId = "receipt-1", idempotencyKey = `attempt-${receiptId}`, invoice = "$80", completionEntry = null } = {}) {
   return applyStopCompletion({
     clients,
     catalog,
     completed,
     clientId: "c1",
-    entry: entry(sid, invoice),
+    entry: completionEntry || entry(sid, invoice),
     sid,
     receiptId,
     idempotencyKey,
@@ -74,6 +80,51 @@ test("completion records exact per-location deductions and reversal adds only th
     { locationId: "truck", amount: 3 },
     { locationId: "shed", amount: 5 },
   ]);
+});
+
+test("ordinary completion fails closed when tracked usage cannot be fully deducted", () => {
+  const clients = baseClients();
+  const catalog = baseCatalog();
+  const completed = {};
+  const before = structuredClone({ clients, catalog, completed });
+  const result = applyStopCompletion({
+    clients,
+    catalog,
+    completed,
+    clientId: "c1",
+    entry: {
+      ...entry(),
+      treatmentsUsed: [{ id: "t1", name: "Treatment", unit: "oz", oz: 14, locId: "truck" }],
+      partsUsed: [],
+      productsPurchased: [],
+    },
+    sid: "s1",
+    receiptId: "receipt-insufficient-stock",
+    idempotencyKey: "attempt-insufficient-stock",
+    completedAt: "2026-07-12T12:00:00.000Z",
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "inventory-stock-insufficient");
+  assert.equal(result.itemName, "Treatment");
+  assert.deepEqual({ clients, catalog, completed }, before, "a rejected completion cannot change history, balance, stock, or completion state");
+});
+
+test("ordinary completion keeps legacy untracked products reportable without inventing a deduction", () => {
+  const catalog = baseCatalog();
+  catalog.products = [{ id: "legacy-product", name: "Legacy sale item", unit: "each", price: "20", cost: "8" }];
+  const result = complete({
+    catalog,
+    completionEntry: {
+      ...balanceOnlyEntry("s1", "$20"),
+      productsPurchased: [{ id: "legacy-product", name: "Legacy sale item", unit: "each", qty: 1, price: 20, cost: 8 }],
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.inventoryDeducted, []);
+  assert.equal(result.clients[0].history[0].productsPurchased[0].id, "legacy-product");
+  assert.deepEqual(result.catalog.products, catalog.products);
 });
 
 test("receipt-based reversal removes only its history entry and restores the prior balance", () => {
@@ -189,7 +240,7 @@ test("completion fails closed when a client ID is duplicated", () => {
 });
 
 test("out-of-order reversals do not restore an inactive visit's balance", () => {
-  const first = complete({ sid: "s1", receiptId: "receipt-1", invoice: "$80" });
+  const first = complete({ sid: "s1", receiptId: "receipt-1", invoice: "$80", completionEntry: balanceOnlyEntry("s1", "$80") });
   const second = complete({
     clients: first.clients,
     catalog: first.catalog,
@@ -197,6 +248,7 @@ test("out-of-order reversals do not restore an inactive visit's balance", () => 
     sid: "s2",
     receiptId: "receipt-2",
     invoice: "$120",
+    completionEntry: balanceOnlyEntry("s2", "$120"),
   });
   assert.equal(second.clients[0].balance, "$120");
 
@@ -385,8 +437,8 @@ test("receipt schema and dollar values are strict", () => {
 });
 
 test("an unprovable balance predecessor chain fails closed", () => {
-  const first = complete({ sid: "s1", receiptId: "receipt-parent", idempotencyKey: "attempt-parent", invoice: "$80" });
-  const second = complete({ clients: first.clients, catalog: first.catalog, completed: first.completed, sid: "s2", receiptId: "receipt-child", idempotencyKey: "attempt-child", invoice: "$120" });
+  const first = complete({ sid: "s1", receiptId: "receipt-parent", idempotencyKey: "attempt-parent", invoice: "$80", completionEntry: balanceOnlyEntry("s1", "$80") });
+  const second = complete({ clients: first.clients, catalog: first.catalog, completed: first.completed, sid: "s2", receiptId: "receipt-child", idempotencyKey: "attempt-child", invoice: "$120", completionEntry: balanceOnlyEntry("s2", "$120") });
   const corrupt = structuredClone(second.completed);
   delete corrupt[STOP_REVERSAL_LEDGER_KEY]["receipt-parent"];
 
@@ -403,6 +455,7 @@ test("an unprovable balance predecessor chain fails closed", () => {
     receiptId: "receipt-third",
     idempotencyKey: "attempt-third",
     invoice: "$140",
+    completionEntry: balanceOnlyEntry("s3", "$140"),
   });
   assert.equal(thirdAttempt.ok, false);
   assert.equal(thirdAttempt.code, "balance-chain-unprovable");

@@ -166,9 +166,9 @@ function deductFromItem(item, requestedAmount, preferredLocation) {
     takeFrom(locationId);
   }
 
-  if (!deductions.length) return { item, deductions: [] };
+  if (!deductions.length) return { item, deductions: [], remaining };
   const total = quantity(Object.values(stock).reduce((sum, value) => sum + finiteNumber(value), 0));
-  return { item: { ...item, stockByLoc: stock, inventoryOz: String(total) }, deductions };
+  return { item: { ...item, stockByLoc: stock, inventoryOz: String(total) }, deductions, remaining };
 }
 
 function applyInventoryDeduction(catalog, entry) {
@@ -184,7 +184,18 @@ function applyInventoryDeduction(catalog, entry) {
       const used = uses.find((line) => line && sameId(line.id, item && item.id));
       const requested = used ? Math.max(0, quantity(used[config.amountKey])) : 0;
       if (!used || requested <= 0) return item;
+      // Older catalog products were sale-only records and have no per-location inventory map.
+      // Keep those lines billable/reportable without inventing a stock deduction. Once an item has
+      // a stockByLoc field, including an intentionally empty map, it is inventory-tracked and must
+      // have enough stock for the entire requested amount.
+      if (!hasOwn(item, "stockByLoc")) return item;
       const result = deductFromItem(item, requested, used.locId || entry.usageLoc || "");
+      if (result.remaining > 1e-8) {
+        throw Object.assign(new Error("tracked inventory is insufficient"), {
+          code: "inventory-stock-insufficient",
+          itemName: String((used && used.name) || item.name || "Inventory item"),
+        });
+      }
       if (!result.deductions.length) return item;
       changed = true;
       receiptLines.push({
@@ -398,7 +409,15 @@ export function applyStopCompletion({ clients, catalog, completed, clientId, ent
     nextClient[STOP_BALANCE_OWNER_KEY] = receiptId;
   }
 
-  const inventoryResult = applyInventoryDeduction(catalog, storedEntry);
+  let inventoryResult;
+  try {
+    inventoryResult = applyInventoryDeduction(catalog, storedEntry);
+  } catch (error) {
+    if (error?.code === "inventory-stock-insufficient") {
+      return { ok: false, code: error.code, itemName: error.itemName || "" };
+    }
+    throw error;
+  }
   const timestamp = completedAt || new Date().toISOString();
   const receipt = {
     v: RECEIPT_VERSION,
