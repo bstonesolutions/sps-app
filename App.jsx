@@ -15,6 +15,7 @@ import { ESTIMATE_LINE_TAX_MODEL, defaultEstimateLineTaxable, estimateHasValidDa
 import { catalogCategoryGroups, catalogItemFinancials, estimateLineFromCatalog, estimateLineFromPartsBundle } from "./estimateCatalog";
 import { inventorySourceMetadata, inventoryVendorSuggestions } from "./inventorySource";
 import { inventorySourcePreviewApplyPatch, normalizeInventorySourcePreview } from "./inventorySourcePreviewClient";
+import { groupInventoryProductFamilies, importSupplierProductVariants, inventoryProductDisplayName, inventoryProductFamilyName, inventoryProductVariantLabel } from "./inventoryProductVariants";
 import { inventoryAdjustmentInputIsValid, inventoryAdjustmentResult, inventoryTransferResult, sanitizeInventoryAdjustmentInput } from "./inventoryAdjustment";
 import { inventoryPackageCost } from "./inventoryPricing";
 import { ESTIMATE_CHARGE_TYPES, estimateChargeBreakdown, estimateLineChargeLabel, estimateLineChargeType } from "./estimateBreakdown";
@@ -10678,6 +10679,38 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
     { id: "part", label: "Parts", count: selectedPartCount },
     { id: "product", label: "Products", count: selectedProductCount },
   ].filter(tab => tab.id === "all" || (tab.id === "treatment" ? treatments.length : tab.id === "part" ? parts.length : products.length));
+  const scheduleProductCategoryGroups = groupByCat(selectedFirst(products, item => productsQty[item.id]));
+  const renderProductMaterialRow = (p) => {
+    const qty = num(productsQty[p.id]);
+    const here = usageLoc ? invAtLoc(p, usageLoc) : invTotal(p);
+    const totalAvailable = invTotal(p);
+    const insufficient = qty > totalAvailable;
+    const usesOtherStock = !!usageLoc && qty > here && !insufficient;
+    const unit = p.unit || "each";
+    const willBill = productBill[p.id] !== false;
+    const includedInEstimate = !!stop.sourceEstimateId && plannedMaterials.some(item => item.kind === "product" && String(item.refId) === String(p.id));
+    const variantLabel = inventoryProductVariantLabel(p);
+    return (
+      <div key={p.id} data-schedule-product-variant={variantLabel || undefined} style={{ background: qty > 0 ? hexA(T.primary, 0.045) : T.surfaceAlt, borderLeft: qty > 0 ? `3px solid ${T.primary}` : "3px solid transparent", borderRadius: 9, padding: "8px 10px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: completeVp.isPhone ? "wrap" : "nowrap" }}>
+          <div style={{ flex: "1 1 140px", minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 650, color: T.text }}>{variantLabel || p.name}</div>
+            <div style={{ fontSize: 11, color: insufficient || usesOtherStock ? T.warning : T.textMuted }}>{variantLabel && p.sku ? `${p.sku} | ` : ""}{showInventoryPricing ? `$${num(p.cost).toFixed(2)} cost | $${num(p.price).toFixed(2)} sale | ` : ""}{here} {unit} {usageLoc ? "here" : "on hand"}{usageLoc ? ` | ${totalAvailable} total` : ""}{insufficient ? " | not enough stock" : usesOtherStock ? " | uses other stock" : ""}</div>
+          </div>
+          <input type="text" inputMode="decimal" aria-label={`${inventoryProductDisplayName(p)} purchased`} value={productsQty[p.id] || ""} onChange={e => setProductsQty(x => ({ ...x, [p.id]: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0" style={{ width: 60, padding: "8px", border: `1px solid ${insufficient ? T.warning : T.border}`, borderRadius: 9, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
+          <span style={{ fontSize: 12, color: T.textMuted, width: 32 }}>{unit}</span>
+          {showStopBilling && <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: qty > 0 ? T.text : T.textMuted }}>{money(qty * (willBill ? num(p.price) : num(p.cost)))}</div>}
+        </div>
+        {qty > 0 && (
+          <button type="button" onClick={() => { if (!includedInEstimate) setProductBill(b => ({ ...b, [p.id]: !willBill })); }} disabled={includedInEstimate}
+            style={{ minHeight: 40, marginTop: 3, display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: includedInEstimate ? "default" : "pointer", fontFamily: "inherit", padding: "6px 0" }}>
+            <div style={{ width: 34, height: 20, borderRadius: 100, background: willBill ? T.primary : T.border, position: "relative", flexShrink: 0 }}><div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: willBill ? 16 : 2 }} /></div>
+            <span style={{ fontSize: 11.5, color: willBill ? T.primary : T.textMuted, fontWeight: 700 }}>{includedInEstimate ? "Included in approved estimate | inventory only" : willBill ? (showStopBilling ? `Bill client (${money(qty * num(p.price))})` : "Add to client invoice") : "Internal use | not invoiced"}</span>
+          </button>
+        )}
+      </div>
+    );
+  };
 
   return (
     <Modal title={client?.name || "Service"} onClose={onClose}>
@@ -11015,36 +11048,35 @@ function CompleteStopModal({ stop, client, email, scheduleCfg, catalog, costs, t
                 {(materialsTab === "all" || materialsTab === "product") && products.length > 0 && (
                   <div data-material-kind="product" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     <div style={{ fontSize: 10.5, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.055em" }}>Products{selectedProductCount ? ` · ${selectedProductCount} selected` : ""}</div>
-                    {renderByCategory(selectedFirst(products, item => productsQty[item.id]), "product", (p) => {
-                      const qty = num(productsQty[p.id]);
-                      const here = usageLoc ? invAtLoc(p, usageLoc) : invTotal(p);
-                      const totalAvailable = invTotal(p);
-                      const insufficient = qty > totalAvailable;
-                      const usesOtherStock = !!usageLoc && qty > here && !insufficient;
-                      const unit = p.unit || "each";
-                      const willBill = productBill[p.id] !== false;
-                      const includedInEstimate = !!stop.sourceEstimateId && plannedMaterials.some(item => item.kind === "product" && String(item.refId) === String(p.id));
+                    {scheduleProductCategoryGroups.map(group => {
+                      const categoryKey = `product-category:${group.cat}`;
+                      const categorySelected = group.items.filter(product => num(productsQty[product.id]) > 0).length;
+                      const categoryClosed = !materialSearch && catCollapsed[categoryKey] !== false;
+                      const families = groupInventoryProductFamilies(group.items, materialSearch);
                       return (
-                        <div key={p.id} style={{ background: qty > 0 ? hexA(T.primary, 0.045) : T.surfaceAlt, borderLeft: qty > 0 ? `3px solid ${T.primary}` : "3px solid transparent", borderRadius: 9, padding: "8px 10px" }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: completeVp.isPhone ? "wrap" : "nowrap" }}>
-                            <div style={{ flex: "1 1 140px", minWidth: 0 }}>
-                              <div style={{ fontSize: 13, fontWeight: 650, color: T.text }}>{p.name}</div>
-                              <div style={{ fontSize: 11, color: insufficient || usesOtherStock ? T.warning : T.textMuted }}>{showInventoryPricing ? `$${num(p.cost).toFixed(2)} cost · $${num(p.price).toFixed(2)} sale · ` : ""}{here} {unit} {usageLoc ? "here" : "on hand"}{usageLoc ? ` · ${totalAvailable} total` : ""}{insufficient ? " · not enough stock" : usesOtherStock ? " · uses other stock" : ""}</div>
-                            </div>
-                            <input type="text" inputMode="decimal" aria-label={`${p.name} purchased`} value={productsQty[p.id] || ""} onChange={e => setProductsQty(x => ({ ...x, [p.id]: e.target.value.replace(/[^\d.]/g, "") }))} placeholder="0" style={{ width: 60, padding: "8px", border: `1px solid ${insufficient ? T.warning : T.border}`, borderRadius: 9, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
-                            <span style={{ fontSize: 12, color: T.textMuted, width: 32 }}>{unit}</span>
-                            {showStopBilling && <div style={{ width: 56, textAlign: "right", fontSize: 12, fontWeight: 700, color: qty > 0 ? T.text : T.textMuted }}>{money(qty * (willBill ? num(p.price) : num(p.cost)))}</div>}
-                          </div>
-                          {qty > 0 && (
-                            <button type="button" onClick={() => { if (!includedInEstimate) setProductBill(b => ({ ...b, [p.id]: !willBill })); }} disabled={includedInEstimate}
-                              style={{ minHeight: 40, marginTop: 3, display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: includedInEstimate ? "default" : "pointer", fontFamily: "inherit", padding: "6px 0" }}>
-                              <div style={{ width: 34, height: 20, borderRadius: 100, background: willBill ? T.primary : T.border, position: "relative", flexShrink: 0 }}><div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 2, left: willBill ? 16 : 2 }} /></div>
-                              <span style={{ fontSize: 11.5, color: willBill ? T.primary : T.textMuted, fontWeight: 700 }}>{includedInEstimate ? "Included in approved estimate | inventory only" : willBill ? (showStopBilling ? `Bill client (${money(qty * num(p.price))})` : "Add to client invoice") : "Internal use | not invoiced"}</span>
-                            </button>
-                          )}
+                        <div key={categoryKey} data-schedule-product-category style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                          <button type="button" aria-expanded={!categoryClosed} onClick={() => setCatCollapsed(current => ({ ...current, [categoryKey]: categoryClosed ? false : true }))} style={{ ...catHeaderStyle, color: categorySelected ? T.primary : T.textMuted }}>
+                            <span>{group.cat} | {group.items.length}{categorySelected ? ` | ${categorySelected} selected` : ""}</span>
+                            <span style={{ fontSize: 14, transform: categoryClosed ? "none" : "rotate(90deg)", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
+                          </button>
+                          {!categoryClosed && families.map(family => {
+                            if (!family.isVariantFamily) return family.products.map(renderProductMaterialRow);
+                            const familyKey = `product-family:${family.familyId}`;
+                            const hasSelected = family.products.some(product => num(productsQty[product.id]) > 0);
+                            const familyClosed = !materialSearch && !hasSelected && catCollapsed[familyKey] !== false;
+                            return (
+                              <div key={familyKey} data-schedule-product-family style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                                <button type="button" aria-expanded={!familyClosed} onClick={() => setCatCollapsed(current => ({ ...current, [familyKey]: familyClosed ? false : true }))} style={{ ...catHeaderStyle, background: hasSelected ? hexA(T.primary, 0.055) : T.surfaceAlt, color: hasSelected ? T.primary : T.textMuted }}>
+                                  <span>{family.familyName} | {family.products.length} variants{hasSelected ? " | selected" : ""}</span>
+                                  <span style={{ fontSize: 14, transform: familyClosed ? "none" : "rotate(90deg)", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
+                                </button>
+                                {!familyClosed && family.products.map(renderProductMaterialRow)}
+                              </div>
+                            );
+                          })}
                         </div>
                       );
-                    }, !!materialSearch)}
+                    })}
                   </div>
                 )}
               </div>
@@ -16215,7 +16247,7 @@ function SupplierSourceFields({ data, onChange, T, field, labelStyle, itemLabel 
             placeholder="https://supplier.example/item"
           />
           {safeSourceUrl && (
-            <button type="button" onClick={() => openExternalBrowser(safeSourceUrl)} style={{ flexShrink: 0, background: hexA(T.primary, 0.1), color: T.primary, border: "none", borderRadius: 11, padding: "0 14px", fontWeight: 800, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Open ↗</button>
+            <button type="button" onClick={() => openInAppBrowser(safeSourceUrl)} style={{ flexShrink: 0, background: hexA(T.primary, 0.1), color: T.primary, border: "none", borderRadius: 11, padding: "0 14px", fontWeight: 800, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Open in app</button>
           )}
         </div>
         {source.errors.sourceUrl
@@ -18763,6 +18795,7 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
   const [search, setSearch] = useState("");
   const [bundle, setBundle] = useState({});   // partId -> qty (for bundling)
   const [collapsedCategories, setCollapsedCategories] = useState({});
+  const [collapsedFamilies, setCollapsedFamilies] = useState({});
   const [creating, setCreating] = useState(null); // {type} when creating a new item
   const [newItem, setNewItem] = useState({ name: "", category: "", price: "", cost: "" });
   const n = (v) => parseFloat(v) || 0;
@@ -18790,11 +18823,22 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
   const pickerRows = categoryGroups.flatMap((group) => {
     const categoryKey = `${tab}:${group.key}`;
     const showHeader = categoryGroups.length > 1 || group.category !== "Uncategorized";
-    if (!showHeader) return group.items;
+    const itemRows = tab === "products"
+      ? groupInventoryProductFamilies(group.items, search).flatMap((family) => {
+        if (!family.isVariantFamily) return family.products;
+        const familyKey = `${categoryKey}:family:${family.familyId}`;
+        const expanded = !!search.trim() || collapsedFamilies[familyKey] === false;
+        return [
+          { __productFamily: true, key: familyKey, family },
+          ...(expanded ? family.products : []),
+        ];
+      })
+      : group.items;
+    if (!showHeader) return itemRows;
     const selectedCount = tab === "parts" ? group.items.filter((item) => bundle[item.id]).length : 0;
     return [
       { __category: true, key: categoryKey, category: group.category, count: group.items.length, selectedCount },
-      ...(!collapsedCategories[categoryKey] || search.trim() ? group.items : []),
+      ...(!collapsedCategories[categoryKey] || search.trim() ? itemRows : []),
     ];
   });
 
@@ -18897,6 +18941,27 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
                       </button>
                     );
                   }
+                  if (it.__productFamily) {
+                    const family = it.family;
+                    const collapsed = !search.trim() && collapsedFamilies[it.key] !== false;
+                    const onHand = family.products.reduce((sum, product) => sum + invTotal(product), 0);
+                    return (
+                      <button
+                        key={it.key}
+                        type="button"
+                        data-catalog-product-family
+                        aria-expanded={!collapsed}
+                        onClick={() => setCollapsedFamilies((current) => ({ ...current, [it.key]: !collapsed }))}
+                        style={{ width: "100%", minHeight: 48, padding: "9px 11px", border: "none", borderLeft: `3px solid ${T.primary}`, borderRadius: 9, background: T.surfaceAlt, color: T.text, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontFamily: "inherit", cursor: "pointer", textAlign: "left" }}
+                      >
+                        <span style={{ minWidth: 0 }}>
+                          <span style={{ display: "block", fontSize: 13.5, fontWeight: 820, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{family.familyName}</span>
+                          <span style={{ display: "block", marginTop: 2, color: T.textMuted, fontSize: 10.5, fontWeight: 650 }}>{family.products.length} options | {onHand} total on hand</span>
+                        </span>
+                        <span aria-hidden="true" style={{ color: T.textMuted, fontSize: 16, lineHeight: 1, transform: collapsed ? "none" : "rotate(90deg)", transition: "transform 0.15s", flexShrink: 0 }}>›</span>
+                      </button>
+                    );
+                  }
                   const isBundling = tab === "parts";
                   const selected = !!bundle[it.id];
                   const financials = catalogItemFinancials(kindOf(), it);
@@ -18918,8 +18983,9 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
                         <div style={{ width: 22, height: 22, borderRadius: 6, flexShrink: 0, border: `1.5px solid ${selected ? T.primary : T.border}`, background: selected ? T.primary : "transparent", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 13, fontWeight: 800 }}>{selected ? "✓" : ""}</div>
                       )}
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{it.name}</div>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{tab === "products" && inventoryProductVariantLabel(it) ? inventoryProductVariantLabel(it) : it.name}</div>
                         <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>
+                          {tab === "products" && inventoryProductVariantLabel(it) && <span>{it.sku ? `${it.sku} | ` : ""}{inventoryProductFamilyName(it)} | </span>}
                           {financials.priceKnown ? `${money(financials.price)}/${financials.unit}` : <span style={{ color: T.warning, fontWeight: 700 }}>Retail price not set</span>}
                           {showCosts && (financials.costKnown
                             ? <span style={{ color: profit >= 0 ? T.accent : "#E5484D", fontWeight: 700 }}> · {profit >= 0 ? "+" : ""}{money(profit)} profit</span>
@@ -18933,10 +18999,10 @@ function CatalogPickerSheet({ catalog, onClose, onAddCatalog, onAddBundle, onCre
                               <button
                                 type="button"
                                 aria-label={`Open supplier for ${it.name}`}
-                                onClick={(event) => { event.preventDefault(); event.stopPropagation(); openExternalBrowser(supplier.sourceUrl); }}
+                                onClick={(event) => { event.preventDefault(); event.stopPropagation(); openInAppBrowser(supplier.sourceUrl); }}
                                 onKeyDown={(event) => event.stopPropagation()}
                                 style={{ border: "none", background: "none", padding: 0, color: T.primary, fontFamily: "inherit", fontSize: 10.5, fontWeight: 800, cursor: "pointer" }}
-                              >Open supplier ↗</button>
+                              >Open supplier</button>
                             )}
                           </div>
                         )}
@@ -30603,8 +30669,9 @@ const readInvLog = () => { try { return JSON.parse(sessionStorage.getItem(INV_LO
 // Add/Edit inventory item modal — its OWN component with LOCAL draft state, so typing a name/price
 // never re-renders the (heavy, O(items×locations)) InventoryScreen. That render cliff is what made
 // the Add button feel dead once a tech had a few hundred items. It commits only on Save.
-function InventoryItemModal({ mode, kind, initial, locations = [], categories = [], vendorSuggestions = [], canSeeCost, costField, retailField, onSave, onDelete, onClose }) {
+function InventoryItemModal({ mode, kind, initial, locations = [], categories = [], vendorSuggestions = [], canSeeCost, costField, retailField, requireVariant = false, onSave, onImportVariants, onDelete, onClose }) {
   const { T } = useApp();
+  const itemVp = useViewport();
   const [data, setData] = useState(initial);
   const [sourcePreview, setSourcePreview] = useState(null);
   const [sourcePreviewLoading, setSourcePreviewLoading] = useState(false);
@@ -30612,6 +30679,19 @@ function InventoryItemModal({ mode, kind, initial, locations = [], categories = 
   const [sourcePreviewVariantId, setSourcePreviewVariantId] = useState("");
   const [sourcePreviewChoices, setSourcePreviewChoices] = useState({});
   const set = (patch) => setData(d => ({ ...d, ...patch }));
+  const updateProductIdentity = (patch = {}) => setData(current => {
+    const next = { ...current, ...patch };
+    if (kind !== "product") return next;
+    const familyName = String(next.familyName || next.name || "").trim();
+    const variantLabel = String(next.variantLabel || "").trim();
+    return {
+      ...next,
+      productFamilyId: next.productFamilyId || next.id,
+      familyName,
+      variantLabel,
+      name: inventoryProductDisplayName({ ...next, familyName, variantLabel }),
+    };
+  });
   const field = { width: "100%", padding: "11px 13px", border: `1.5px solid ${T.border}`, borderRadius: 12, fontSize: 14, fontFamily: "inherit", color: T.text, background: T.surface, outline: "none", boxSizing: "border-box" };
   const lbl = { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, display: "block", marginBottom: 7 };
   const unitFallback = kind === "treatment" ? "oz" : kind === "product" ? "each" : "pieces";
@@ -30691,10 +30771,41 @@ function InventoryItemModal({ mode, kind, initial, locations = [], categories = 
       setSourcePreviewError("Choose at least one available field to apply.");
       return;
     }
-    set(patch);
+    if (kind === "product" && selectedSourceVariant) {
+      const productPatch = { ...patch };
+      if (sourcePreviewChoices.vendor && productPatch.vendor) productPatch.brand = productPatch.vendor;
+      delete productPatch.vendor;
+      if (sourcePreviewChoices.name) {
+        productPatch.productFamilyId = data.productFamilyId || data.id;
+        productPatch.familyName = sourcePreview?.title || data.familyName || data.name;
+        productPatch.variantLabel = selectedSourceVariant.title || selectedSourceVariant.sku || "Option";
+      } else {
+        delete productPatch.name;
+      }
+      if (sourcePreviewChoices.name || sourcePreviewChoices.sku || sourcePreviewChoices.retail) {
+        productPatch.sourceVariantId = selectedSourceVariant.id;
+      }
+      updateProductIdentity(productPatch);
+    } else {
+      set(patch);
+    }
     setSourcePreviewError("");
     setSourcePreview(null);
     setSourcePreviewChoices({});
+  };
+  const importAllSourceVariants = () => {
+    if (!source.valid) {
+      setSourcePreviewError(source.errors.vendor || source.errors.sourceUrl || "Review the supplier details before importing options.");
+      return;
+    }
+    const result = onImportVariants?.({
+      preview: sourcePreview,
+      draft: { ...data, vendor: source.vendor, sourceUrl: source.sourceUrl },
+      preferredVariantId: sourcePreviewVariantId,
+    });
+    if (result?.ok === false) {
+      setSourcePreviewError(result.error || "The supplier options could not be imported.");
+    }
   };
   const previewChoice = (key, label, value, currentValue) => {
     if (!value) return null;
@@ -30713,12 +30824,25 @@ function InventoryItemModal({ mode, kind, initial, locations = [], categories = 
     );
   };
   return (
-    <Modal title={mode === "add" ? `Add ${kind === "part" ? "Part" : kind === "product" ? "Product" : "Treatment"}` : (data.name || "Edit")} onClose={onClose}>
+    <Modal title={mode === "add" ? (kind === "product" && requireVariant ? "Add Product Variant" : `Add ${kind === "part" ? "Part" : kind === "product" ? "Product" : "Treatment"}`) : (data.name || "Edit")} onClose={onClose}>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        <div>
-          <label style={lbl}>Name</label>
-          <input type="text" style={field} value={data.name || ""} onChange={e => set({ name: e.target.value })} placeholder={kind === "part" ? "e.g. PVC Union (1.5in)" : "e.g. Beneficial Bacteria"} autoFocus={mode === "add"} />
-        </div>
+        {kind === "product" ? (
+          <div style={{ display: "grid", gridTemplateColumns: itemVp.isPhone ? "1fr" : "minmax(0, 1.3fr) minmax(120px, 0.7fr)", gap: 10 }}>
+            <div>
+              <label style={lbl}>Product family</label>
+              <input type="text" style={field} value={data.familyName || data.name || ""} onChange={e => updateProductIdentity({ familyName: e.target.value })} placeholder="e.g. 90 Degree Elbow" autoFocus={mode === "add"} />
+            </div>
+            <div>
+              <label style={lbl}>Variant or size <span style={{ textTransform: "none", fontWeight: 400 }}>({requireVariant ? "required" : "optional"})</span></label>
+              <input type="text" style={field} value={data.variantLabel || ""} onChange={e => updateProductIdentity({ variantLabel: e.target.value })} placeholder="e.g. 2 inch" />
+            </div>
+          </div>
+        ) : (
+          <div>
+            <label style={lbl}>Name</label>
+            <input type="text" style={field} value={data.name || ""} onChange={e => set({ name: e.target.value })} placeholder={kind === "part" ? "e.g. PVC Union (1.5in)" : "e.g. Beneficial Bacteria"} autoFocus={mode === "add"} />
+          </div>
+        )}
         <div>
           <label style={lbl}>Category <span style={{ textTransform: "none", fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
           <input type="text" style={field} list="inv-cats" value={data.category || ""} onChange={e => set({ category: e.target.value })} placeholder={kind === "part" ? "e.g. Pumps, Plumbing, Filtration" : "e.g. Bacteria, Algae, Clarifiers"} />
@@ -30808,13 +30932,13 @@ function InventoryItemModal({ mode, kind, initial, locations = [], categories = 
           vendorSuggestions={vendorSuggestions}
         />
         <div data-inventory-source-preview style={{ borderLeft: `3px solid ${T.primary}`, borderRadius: 10, background: T.surfaceAlt, padding: "12px 13px" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <div style={{ display: "flex", flexDirection: itemVp.isPhone ? "column" : "row", alignItems: itemVp.isPhone ? "stretch" : "center", justifyContent: "space-between", gap: 12 }}>
             <div style={{ minWidth: 0 }}>
               <div style={{ color: T.text, fontSize: 13, fontWeight: 800 }}>Public product details</div>
               <div style={{ marginTop: 2, color: T.textMuted, fontSize: 11.5, lineHeight: 1.4 }}>Inspect the supplier page, then choose what enters this unsaved draft.</div>
             </div>
             <button type="button" onClick={requestSourcePreview} disabled={sourcePreviewLoading || !sourceUrlCheck.valid || !sourceUrlCheck.sourceUrl}
-              style={{ minHeight: 40, flexShrink: 0, border: `1px solid ${T.primary}`, borderRadius: 10, background: T.surface, color: T.primary, padding: "8px 12px", fontFamily: "inherit", fontSize: 11.5, fontWeight: 800, cursor: sourcePreviewLoading || !sourceUrlCheck.valid || !sourceUrlCheck.sourceUrl ? "default" : "pointer", opacity: sourcePreviewLoading || !sourceUrlCheck.valid || !sourceUrlCheck.sourceUrl ? 0.55 : 1 }}>
+              style={{ minHeight: 40, width: itemVp.isPhone ? "100%" : "auto", flexShrink: 0, border: `1px solid ${T.primary}`, borderRadius: 10, background: T.surface, color: T.primary, padding: "8px 12px", fontFamily: "inherit", fontSize: 11.5, fontWeight: 800, cursor: sourcePreviewLoading || !sourceUrlCheck.valid || !sourceUrlCheck.sourceUrl ? "default" : "pointer", opacity: sourcePreviewLoading || !sourceUrlCheck.valid || !sourceUrlCheck.sourceUrl ? 0.55 : 1 }}>
               {sourcePreviewLoading ? "Checking..." : "Preview public details"}
             </button>
           </div>
@@ -30839,12 +30963,15 @@ function InventoryItemModal({ mode, kind, initial, locations = [], categories = 
               )}
               <div style={{ color: T.textMuted, fontSize: 10.5, fontWeight: 700, lineHeight: 1.4, marginBottom: 5 }}>Nothing is applied until you check a field and press Apply. Cost is never imported.</div>
               {previewChoice("name", "Name", sourcePreview.title, data.name)}
-              {previewChoice("vendor", "Supplier", sourcePreview.vendor, data.vendor)}
+              {previewChoice("vendor", "Brand or manufacturer", sourcePreview.vendor, data.brand)}
               {previewChoice("sku", "SKU", kind === "product" ? selectedSourceVariant?.sku : "", data.sku)}
               {publicRetailAllowed && previewChoice("retail", `Public retail (${sourcePreview.currency || "USD"})`, selectedSourceVariant.price, data[retailField])}
               {previewChoice("sourceUrl", "Canonical supplier link", sourcePreview.canonicalUrl, data.sourceUrl)}
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, paddingTop: 10 }}>
                 <button type="button" onClick={() => { setSourcePreview(null); setSourcePreviewChoices({}); setSourcePreviewError(""); }} style={{ minHeight: 40, border: `1px solid ${T.border}`, borderRadius: 10, background: T.surface, color: T.textMuted, padding: "8px 13px", fontFamily: "inherit", fontSize: 12, fontWeight: 750, cursor: "pointer" }}>Dismiss</button>
+                {kind === "product" && sourcePreview.variants.length > 1 && typeof onImportVariants === "function" && (
+                  <button type="button" onClick={importAllSourceVariants} disabled={!source.valid} style={{ minHeight: 40, border: `1px solid ${T.primary}`, borderRadius: 10, background: T.surface, color: T.primary, padding: "8px 14px", fontFamily: "inherit", fontSize: 12, fontWeight: 800, cursor: source.valid ? "pointer" : "default", opacity: source.valid ? 1 : 0.5 }}>Import all {sourcePreview.variants.length} options</button>
+                )}
                 <button type="button" onClick={applySourcePreview} disabled={!Object.values(sourcePreviewChoices).some(Boolean)} style={{ minHeight: 40, border: "none", borderRadius: 10, background: T.primary, color: "#fff", padding: "8px 14px", fontFamily: "inherit", fontSize: 12, fontWeight: 800, cursor: Object.values(sourcePreviewChoices).some(Boolean) ? "pointer" : "default", opacity: Object.values(sourcePreviewChoices).some(Boolean) ? 1 : 0.5 }}>Apply selected</button>
               </div>
             </div>
@@ -30863,9 +30990,12 @@ function InventoryItemModal({ mode, kind, initial, locations = [], categories = 
           </div>
           {mode === "edit" && <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 6 }}>Use Add, Remove, Set count, or Move on the inventory card so newer stock changes are never overwritten.</div>}
         </div>
-        <Btn onClick={() => onSave({ ...data, packageUnit: data.unit || unitFallback, vendor: source.vendor, sourceUrl: source.sourceUrl })} block lg disabled={!(data.name || "").trim() || (canSeeCost && retailMissing) || (canSeeCost && packageStarted && !packageCost.valid) || unitChangeBlocked || !source.valid}>
+        <Btn onClick={() => onSave({ ...data, packageUnit: data.unit || unitFallback, vendor: source.vendor, sourceUrl: source.sourceUrl })} block lg disabled={!(data.name || "").trim() || (kind === "product" && requireVariant && !(data.variantLabel || "").trim()) || (canSeeCost && retailMissing) || (canSeeCost && packageStarted && !packageCost.valid) || unitChangeBlocked || !source.valid}>
           {mode === "add" ? "Add Item" : "Save Changes"}
         </Btn>
+        {kind === "product" && requireVariant && !(data.variantLabel || "").trim() && (
+          <div style={{ fontSize: 11.5, color: T.warning, fontWeight: 650, textAlign: "center", marginTop: -4 }}>Name the size or option before adding this variant.</div>
+        )}
         {canSeeCost && retailMissing && (
           <div style={{ fontSize: 11.5, color: "#E5484D", fontWeight: 600, textAlign: "center", marginTop: -4 }}>Enter a retail price to save (use 0 if it's free or internal).</div>
         )}
@@ -30914,6 +31044,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
   const [showValue, setShowValue] = useState(false);
   const [showReorder, setShowReorder] = useState(false);
   const [catCollapsed, setCatCollapsed] = useState({}); // `${tab}:${category}` -> collapsed in the list view
+  const [familyCollapsed, setFamilyCollapsed] = useState({}); // product family -> closed unless explicitly opened
 
   // Build usage history from completed client stops for every stocked material kind.
   const usageHistory = {};
@@ -30971,7 +31102,19 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
     list.forEach(it => { const k = (it.category || "").trim() || "Uncategorized"; (map[k] = map[k] || []).push(it); });
     return Object.keys(map)
       .sort((a, b) => a === "Uncategorized" ? 1 : b === "Uncategorized" ? -1 : a.localeCompare(b))
-      .map(cat => ({ cat, items: map[cat] }));
+      .map(cat => {
+        const sourceItems = map[cat];
+        if (tab !== "products") return { cat, items: sourceItems, itemCount: sourceItems.length };
+        const familyRows = groupInventoryProductFamilies(sourceItems).flatMap(family => {
+          if (!family.isVariantFamily) return family.products;
+          const closed = familyCollapsed[family.familyId] !== false;
+          return [
+            { __productFamily: true, family },
+            ...(closed ? [] : family.products),
+          ];
+        });
+        return { cat, items: familyRows, itemCount: sourceItems.length };
+      });
   };
 
   // Low items for the current tab
@@ -31064,7 +31207,47 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
     ? { id: newId("p"), name: "", category: "", unit: "each", cost: "", price: "", packagePrice: "", packageQuantity: "", packageUnit: "each", sku: "", vendor: "", sourceUrl: "", purchaseDate: "", lowAt: "", stockByLoc: {} }
     : { id: newId("t"), name: "", category: "", unit: "oz", costPerOz: "", packagePrice: "", packageQuantity: "", packageUnit: "oz", vendor: "", sourceUrl: "", inventoryOz: "0", stockByLoc: {} };
   const openAddItem = () => { if (!canEdit) return; setItemModal({ mode: "add", kind, data: blankItem() }); };
+  const openAddVariant = (family) => {
+    if (!canEdit) return;
+    const draft = blankItem();
+    setItemModal({
+      mode: "add",
+      kind: "product",
+      requireVariant: true,
+      data: {
+        ...draft,
+        name: family.familyName,
+        productFamilyId: family.familyId,
+        familyName: family.familyName,
+        variantLabel: "",
+        category: family.products[0]?.category || "",
+        unit: family.products[0]?.unit || "each",
+        packageUnit: family.products[0]?.unit || "each",
+        vendor: family.products[0]?.vendor || "",
+        sourceUrl: family.products[0]?.sourceUrl || "",
+        brand: family.products[0]?.brand || "",
+      },
+    });
+    setFamilyCollapsed(current => ({ ...current, [family.familyId]: false }));
+  };
   const openEditItem = (item) => { if (!canEdit) return; setItemModal({ mode: "edit", kind, data: { ...item, stockByLoc: { ...(item.stockByLoc || {}) } } }); };
+  const importProductVariants = ({ preview, draft, preferredVariantId }) => {
+    if (!canEdit) return { ok: false, error: "You do not have permission to edit inventory." };
+    const source = inventorySourceMetadata(draft);
+    if (!source.valid) {
+      return { ok: false, error: source.errors.vendor || source.errors.sourceUrl || "Review the supplier details before importing options." };
+    }
+    const cleanDraft = { ...draft, vendor: source.vendor, sourceUrl: source.sourceUrl };
+    const initialResult = importSupplierProductVariants({ preview, draft: cleanDraft, products: catalog.products || [], preferredVariantId });
+    setCatalog(cat => {
+      const result = importSupplierProductVariants({ preview, draft: cleanDraft, products: cat.products || [], preferredVariantId });
+      return { ...cat, products: result.products };
+    });
+    if (initialResult.imported.length) logInvChange({ action: "Imported", item: `${initialResult.familyName} (${initialResult.imported.length} variants)`, kind: "product" });
+    if (initialResult.familyId) setFamilyCollapsed(current => ({ ...current, [initialResult.familyId]: false }));
+    setItemModal(null);
+    return { ok: true };
+  };
   const saveItem = (d) => {
     if (!d || !(d.name || "").trim()) return;
     const source = inventorySourceMetadata(d);
@@ -31076,6 +31259,10 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
       // keep inventoryOz mirror in sync
       const cleanDraft = { ...d, vendor: source.vendor, sourceUrl: source.sourceUrl };
       return { ...cat, [catKey]: exists ? list.map(x => {
+        if (kind === "product" && cleanDraft.productFamilyId && x.productFamilyId === cleanDraft.productFamilyId && x.id !== d.id) {
+          const familyName = cleanDraft.familyName || cleanDraft.name;
+          return { ...x, familyName, name: inventoryProductDisplayName({ ...x, familyName }) };
+        }
         if (x.id !== d.id) return x;
         // Existing stock is adjusted only through the explicit stock actions. Editing metadata must
         // never write the modal's older stock snapshot over another device's newer count.
@@ -31417,20 +31604,38 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
         {(() => {
           const visible = items.filter(it => locFilter === "all" ? true : invAtLoc(it, locFilter) > 0 || (it.stockByLoc && locFilter in (it.stockByLoc || {})));
           const groups = invGroupByCat(visible);
-          const flat = groups.length === 1 && groups[0].items.length <= 4;
+          const flat = groups.length === 1 && (groups[0].itemCount ?? groups[0].items.length) <= 4;
           const catHdr = { display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "transparent", border: "none", borderBottom: `1px solid ${T.border}`, borderRadius: 0, padding: "8px 4px", cursor: "pointer", fontFamily: "inherit", fontSize: 11.5, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.055em" };
           return groups.map(g => {
             const ck = `${tab}:${g.cat}`;
-            const collapsed = !flat && !!catCollapsed[ck];
+            const collapsed = !flat && catCollapsed[ck] !== false;
             return (
               <div key={ck} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 {!flat && (
                   <button type="button" onClick={() => setCatCollapsed(s => ({ ...s, [ck]: !s[ck] }))} style={catHdr}>
-                    <span>{g.cat} · {g.items.length}</span>
+                    <span>{g.cat} · {g.itemCount ?? g.items.length}</span>
                     <span style={{ fontSize: 15, transform: collapsed ? "none" : "rotate(90deg)", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
                   </button>
                 )}
                 {!collapsed && g.items.map(it => {
+            if (it.__productFamily) {
+              const family = it.family;
+              const closed = familyCollapsed[family.familyId] !== false;
+              const totalFamilyStock = family.products.reduce((sum, product) => sum + invTotal(product), 0);
+              return (
+                <div key={`family:${family.familyId}`} data-inventory-product-family style={{ borderLeft: `3px solid ${T.primary}`, background: T.surfaceAlt, borderRadius: 11, padding: "11px 12px", display: "flex", alignItems: "center", gap: 10 }}>
+                  <button type="button" aria-expanded={!closed} onClick={() => setFamilyCollapsed(current => ({ ...current, [family.familyId]: !closed }))} style={{ minWidth: 0, flex: 1, display: "flex", alignItems: "center", gap: 10, padding: 0, border: "none", background: "transparent", color: T.text, fontFamily: "inherit", cursor: "pointer", textAlign: "left" }}>
+                    <span style={{ width: 30, height: 30, borderRadius: 9, background: T.surface, color: T.primary, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name="box" size={14} /></span>
+                    <span style={{ minWidth: 0, flex: 1 }}>
+                      <span style={{ display: "block", fontSize: 14, fontWeight: 820, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{family.familyName}</span>
+                      <span style={{ display: "block", marginTop: 2, fontSize: 10.5, color: T.textMuted }}>{family.products.length} variants | {totalFamilyStock} total on hand</span>
+                    </span>
+                    <span aria-hidden="true" style={{ color: T.textMuted, transform: closed ? "none" : "rotate(90deg)", transition: "transform 0.15s", fontSize: 16 }}>›</span>
+                  </button>
+                  {canEdit && <button type="button" onClick={() => openAddVariant(family)} style={{ flexShrink: 0, minHeight: 34, border: `1px solid ${hexA(T.primary, 0.35)}`, borderRadius: 9, background: T.surface, color: T.primary, padding: "6px 9px", fontFamily: "inherit", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>+ Variant</button>}
+                </div>
+              );
+            }
             const unit = unitOf(it);
             const total = invTotal(it);
             const displayAmt = locFilter === "all" ? total : invAtLoc(it, locFilter);
@@ -31447,9 +31652,9 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
               <div key={it.id} style={{ background: T.surface, borderRadius: 13, border: `1px solid ${T.border}`, borderLeft: `3px solid ${barColor}`, padding: "14px 15px" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 15, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{it.name}</div>
+                    <div style={{ fontSize: 15, fontWeight: 700, color: T.text, letterSpacing: "-0.01em" }}>{kind === "product" && inventoryProductVariantLabel(it) ? inventoryProductVariantLabel(it) : it.name}</div>
                     <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3 }}>
-                      {canSeeCost ? <>${cost.toFixed(2)}/{unit}{last && <span> · Last used {last}</span>}</> : <>{last ? `Last used ${last}` : `Tracked in ${unit}`}</>}
+                      {kind === "product" && inventoryProductVariantLabel(it) && <span>{it.sku ? `${it.sku} | ` : ""}{inventoryProductFamilyName(it)} | </span>}{canSeeCost ? <>${cost.toFixed(2)}/{unit}{last && <span> | Last used {last}</span>}</> : <>{last ? `Last used ${last}` : `Tracked in ${unit}`}</>}
                     </div>
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5, flexShrink: 0, marginLeft: 10 }}>
@@ -31639,7 +31844,9 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
           canSeeCost={canSeeCost}
           costField={costFieldFor(itemModal.kind)}
           retailField={retailFieldFor(itemModal.kind)}
+          requireVariant={!!itemModal.requireVariant}
           onSave={saveItem}
+          onImportVariants={importProductVariants}
           onDelete={deleteItem}
           onClose={() => setItemModal(null)}
         />
