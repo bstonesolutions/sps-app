@@ -110,6 +110,17 @@ test("returns a bounded no-store preview without forwarding auth or cookies", as
   assert.equal(supplierOptions.credentials, "omit"); assert.deepEqual(supplierOptions.headers, { Accept: "application/json" });
 });
 
+test("accepts Shopify's text/javascript product JSON content type", async () => {
+  globalThis.fetch = ownerFetch(async () => new Response(JSON.stringify(productPayload), {
+    status: 200,
+    headers: { "content-type": "text/javascript; charset=utf-8" },
+  }));
+  const res = makeRes();
+  await handler(request({ url: "https://practicalgardenponds.com/products/liquid-algaecide" }), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.product.title, "Aquascape Liquid Algaecide");
+});
+
 test("rejects redirects without following them", async () => {
   globalThis.fetch = ownerFetch(async () => new Response(null, { status: 302, headers: { location: "https://internal.example/private" } }));
   const res = makeRes(); await handler(request({ url: "https://practicalgardenponds.com/products/a" }), res);

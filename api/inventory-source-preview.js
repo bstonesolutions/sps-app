@@ -117,7 +117,14 @@ export default async function handler(req, res) {
     }
 
     const contentType = String(response.headers?.get?.("content-type") || "").toLowerCase();
-    if (!(contentType.includes("application/json") || contentType.includes("+json"))) {
+    // Shopify's public product endpoint returns JSON bytes but currently labels
+    // them as text/javascript. Keep this narrow rather than accepting arbitrary
+    // text, then still require strict JSON parsing and product normalization.
+    const isShopifyJson = contentType.includes("application/json")
+      || contentType.includes("+json")
+      || contentType.includes("text/javascript")
+      || contentType.includes("application/javascript");
+    if (!isShopifyJson) {
       return errorResponse(res, 502, "source_invalid_type", "The supplier returned an unexpected response format.");
     }
 
