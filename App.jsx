@@ -31013,6 +31013,7 @@ function InventoryItemModal({ mode, kind, initial, locations = [], categories = 
 }
 
 function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canEdit = true, T }) {
+  const inventoryVp = useViewport();
   const locations = catalog.locations || [];
   const treatments = catalog.treatments || [];
   const parts = catalog.parts || [];
@@ -31038,6 +31039,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
   const [inventoryActionError, setInventoryActionError] = useState("");
   const [historyModal, setHistoryModal] = useState(null); // { item, kind }
   const [itemModal, setItemModal] = useState(null); // { mode, kind, data }
+  const [showLowStock, setShowLowStock] = useState(false);
   const [priceReviewOpen, setPriceReviewOpen] = useState(false); // "needs a price" list collapsed by default
   const [locModal, setLocModal] = useState(null); // { mode, data }
   const [showLocs, setShowLocs] = useState(false);
@@ -31045,6 +31047,12 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
   const [showReorder, setShowReorder] = useState(false);
   const [catCollapsed, setCatCollapsed] = useState({}); // `${tab}:${category}` -> collapsed in the list view
   const [familyCollapsed, setFamilyCollapsed] = useState({}); // product family -> closed unless explicitly opened
+  useEffect(() => {
+    if (canSeeCost) return;
+    setShowValue(false);
+    setShowReorder(false);
+    setPriceReviewOpen(false);
+  }, [canSeeCost]);
 
   // Build usage history from completed client stops for every stocked material kind.
   const usageHistory = {};
@@ -31104,8 +31112,17 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
       .sort((a, b) => a === "Uncategorized" ? 1 : b === "Uncategorized" ? -1 : a.localeCompare(b))
       .map(cat => {
         const sourceItems = map[cat];
-        if (tab !== "products") return { cat, items: sourceItems, itemCount: sourceItems.length };
-        const familyRows = groupInventoryProductFamilies(sourceItems).flatMap(family => {
+        const scopedAmount = item => locFilter === "all" ? invTotal(item) : invAtLoc(item, locFilter);
+        const stockedCount = sourceItems.filter(item => scopedAmount(item) > 0).length;
+        const attentionCount = sourceItems.filter(item => {
+          const amount = invTotal(item);
+          const threshold = lowThreshold(item, kind);
+          return amount <= 0 || (threshold > 0 && amount < threshold);
+        }).length;
+        const categorySummary = { cat, itemCount: sourceItems.length, stockedCount, attentionCount };
+        if (tab !== "products") return { ...categorySummary, items: sourceItems };
+        const productFamilies = groupInventoryProductFamilies(sourceItems);
+        const familyRows = productFamilies.flatMap(family => {
           if (!family.isVariantFamily) return family.products;
           const closed = familyCollapsed[family.familyId] !== false;
           return [
@@ -31113,12 +31130,16 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
             ...(closed ? [] : family.products),
           ];
         });
-        return { cat, items: familyRows, itemCount: sourceItems.length };
+        return { ...categorySummary, items: familyRows, familyCount: productFamilies.length };
       });
   };
 
   // Low items for the current tab
-  const lowItems = items.filter(it => invTotal(it) < lowThreshold(it, kind));
+  const lowItems = items.filter(it => {
+    const total = invTotal(it);
+    const threshold = lowThreshold(it, kind);
+    return total <= 0 || (threshold > 0 && total < threshold);
+  });
   // Items on this tab missing a price — surfaced in a review banner so none slip through.
   const pricelessItems = items.filter(it => needsPrice(it, kind));
 
@@ -31336,75 +31357,97 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
   const reorderTotal = reorderItems.reduce((s, it) => s + it.estCost, 0);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-      {!canEdit && (
-        <div style={{ background: hexA(T.textMuted, 0.08), border: `1px solid ${T.border}`, borderRadius: 12, padding: "9px 13px", fontSize: 12.5, color: T.textMuted, display: "flex", alignItems: "center", gap: 7 }}>
-          <Icon name="lock" size={14} /> View-only access — you can see stock levels but can't make changes.
-        </div>
-      )}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-        <div>
-          <div style={{ fontSize: 24, fontWeight: 800, color: T.text, letterSpacing: "-0.03em" }}>Inventory</div>
-          <div style={{ fontSize: 13, color: T.textMuted, marginTop: 4 }}>
-            {allItems.length} items · {locations.length} location{locations.length !== 1 ? "s" : ""}{canSeeCost ? ` · $${totalValue.toFixed(0)} on hand` : ""}
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <section data-inventory-control-deck style={{ background: T.surface, border: `1px solid ${T.border}`, borderLeft: `3px solid ${T.primary}`, borderRadius: 13, overflow: "hidden" }}>
+        <div data-inventory-control-group="heading" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: inventoryVp.isPhone ? "11px 11px 10px" : "13px 14px 11px" }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+              <h2 style={{ margin: 0, fontSize: inventoryVp.isPhone ? 21 : 24, lineHeight: 1.05, fontWeight: 850, color: T.text, letterSpacing: "-0.035em" }}>Inventory</h2>
+              {!canEdit && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 7px", borderRadius: 7, background: T.surfaceAlt, color: T.textMuted, fontSize: 9.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" }}><Icon name="lock" size={10} /> View only</span>}
+            </div>
+            <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 4, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {allItems.length} items · {locations.length} location{locations.length !== 1 ? "s" : ""}
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 7, flexShrink: 0 }}>
+            <button type="button" aria-expanded={showLocs} onClick={() => setShowLocs(s => !s)} style={{ minHeight: 38, padding: "0 10px", border: `1px solid ${showLocs ? T.primary : T.border}`, borderRadius: 9, background: showLocs ? hexA(T.primary, 0.06) : T.surface, color: showLocs ? T.primary : T.text, fontSize: 11.5, fontWeight: 760, fontFamily: "inherit", cursor: "pointer" }}>Locations</button>
+            {canEdit && <button type="button" onClick={openAddItem} aria-label={`Add ${kind}`} style={{ minHeight: 38, padding: "0 11px", border: `1px solid ${T.primary}`, borderRadius: 9, background: T.primary, color: "#fff", fontSize: 12, fontWeight: 800, fontFamily: "inherit", cursor: "pointer", whiteSpace: "nowrap" }}>+ {inventoryVp.isPhone ? "Add" : `Add ${tab === "treatments" ? "Treatment" : tab === "products" ? "Product" : "Part"}`}</button>}
           </div>
         </div>
-        <Btn sm variant="ghost" onClick={() => setShowLocs(s => !s)}>Locations</Btn>
-      </div>
 
-      {/* Per-session activity summary — one running rollup instead of a ping per change */}
-      {invLog.length > 0 && (
-        <div style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, overflow: "hidden" }}>
-          <button onClick={() => setShowActivity(s => !s)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "12px 14px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>Activity this session</div>
-              <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2 }}>
-                {(() => { const by = {}; invLog.forEach(e => { by[e.action] = (by[e.action] || 0) + 1; }); return Object.entries(by).map(([a, n]) => `${n} ${a.toLowerCase()}`).join(" · ") || "—"; })()}
-              </div>
-            </div>
-            <span style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-              <span style={{ fontSize: 11, fontWeight: 800, color: T.primary, background: hexA(T.primary, 0.1), borderRadius: 100, padding: "2px 9px" }}>{invLog.length}</span>
-              <span style={{ color: T.textMuted, transform: showActivity ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}><Icon name="chevronD" size={16} /></span>
-            </span>
-          </button>
-          {showActivity && (
-            <div style={{ borderTop: `1px solid ${T.border}`, maxHeight: 280, overflowY: "auto" }}>
-              {invLog.slice(0, 80).map((e, i) => (
-                <div key={i} style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, padding: "9px 14px", borderBottom: i < Math.min(invLog.length, 80) - 1 ? `1px solid ${T.border}` : "none" }}>
-                  <span style={{ fontSize: 12.5, color: T.text }}><b style={{ fontWeight: 700 }}>{e.action}</b> {e.qty != null ? `${e.qty}${e.unit ? " " + e.unit : ""} ` : ""}{e.item}{e.loc ? ` · ${e.loc}` : ""}{e.note ? ` · ${e.note}` : ""}</span>
-                  <span style={{ fontSize: 11, color: T.textMuted, flexShrink: 0 }}>{new Date(e.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
-                </div>
-              ))}
-            </div>
-          )}
+        {canSeeCost && (
+          <div data-inventory-control-group="financial" data-inventory-financial-summary style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", minHeight: 46, borderTop: `1px solid ${T.border}`, background: hexA(T.primary, 0.025) }}>
+            <button type="button" aria-expanded={showValue} onClick={() => { setShowValue(open => !open); setShowReorder(false); }} style={{ minWidth: 0, display: "flex", alignItems: "center", gap: 9, padding: "6px 12px", border: "none", background: showValue ? hexA(T.primary, 0.055) : "transparent", color: T.text, fontFamily: "inherit", cursor: "pointer", textAlign: "left" }}>
+              <span style={{ minWidth: 0 }}>
+                <span style={{ display: "block", color: T.textMuted, fontSize: 8.75, lineHeight: 1, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.065em" }}>Known cost basis</span>
+                <span style={{ display: "block", marginTop: 3, color: T.text, fontSize: 18, lineHeight: 1, fontWeight: 880, letterSpacing: "-0.025em" }}>${totalValue.toFixed(0)}</span>
+              </span>
+              <span aria-hidden="true" style={{ marginLeft: "auto", color: showValue ? T.primary : T.textMuted }}><Icon name="chevronD" size={13} /></span>
+            </button>
+            <button type="button" aria-expanded={showReorder} onClick={() => { setShowReorder(open => !open); setShowValue(false); }} style={{ minWidth: 86, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "6px 11px", border: "none", borderLeft: `1px solid ${T.border}`, background: showReorder ? hexA(T.primary, 0.055) : "transparent", color: T.primary, fontFamily: "inherit", cursor: "pointer", textAlign: "left" }}>
+              <span>
+                <span style={{ display: "block", color: T.textMuted, fontSize: 8.75, lineHeight: 1, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.065em" }}>Reorder</span>
+                <span style={{ display: "block", marginTop: 3, fontSize: 14, lineHeight: 1, fontWeight: 880 }}>{reorderItems.length} item{reorderItems.length !== 1 ? "s" : ""}</span>
+              </span>
+              <Icon name="chevronD" size={13} />
+            </button>
+          </div>
+        )}
+
+        <div data-inventory-control-group="type" role="tablist" aria-label="Inventory type" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", borderTop: `1px solid ${T.border}`, borderBottom: `1px solid ${T.border}`, padding: "0 8px" }}>
+          {[["treatments", "Treatments"], ["parts", "Parts"], ["products", "Products"]].map(([val, label]) => (
+            <button key={val} type="button" role="tab" aria-selected={tab === val} onClick={() => { setTab(val); setLocFilter("all"); setShowLowStock(false); setPriceReviewOpen(false); }}
+              style={{ position: "relative", minHeight: 40, padding: "0 5px", border: "none", background: "transparent", color: tab === val ? T.primary : T.textMuted, fontFamily: "inherit", fontSize: 12.5, fontWeight: tab === val ? 800 : 680, cursor: "pointer" }}>
+              {label}
+              {tab === val && <span aria-hidden="true" style={{ position: "absolute", left: "22%", right: "22%", bottom: -1, height: 2, background: T.primary, borderRadius: "2px 2px 0 0" }} />}
+            </button>
+          ))}
         </div>
-      )}
 
-      {/* Quick action row — value/reorder visible only to those who can see cost */}
-      {canSeeCost && (
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.35fr) minmax(0, 1fr)", gap: 8 }}>
-        <button onClick={() => { setShowValue(s => !s); setShowReorder(false); }}
-          style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2, padding: "13px 14px", borderRadius: 12, border: `1px solid ${showValue ? T.primary : T.border}`, borderLeft: `3px solid ${T.primary}`, background: showValue ? hexA(T.primary, 0.06) : T.surface, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-          <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted }}>Total Value</span>
-          <span style={{ fontSize: 20, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>${totalValue.toFixed(0)}</span>
-        </button>
-        <button onClick={() => { setShowReorder(s => !s); setShowValue(false); }}
-          style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2, padding: "13px 14px", borderRadius: 12, border: `1px solid ${showReorder ? T.primary : (reorderItems.length ? hexA("#F59E0B", 0.5) : T.border)}`, background: showReorder ? hexA(T.primary, 0.06) : (reorderItems.length ? hexA("#F59E0B", 0.06) : T.surface), cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-          <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: reorderItems.length ? "#B45309" : T.textMuted }}>Reorder List</span>
-          <span style={{ fontSize: 20, fontWeight: 800, color: reorderItems.length ? "#B45309" : T.text, letterSpacing: "-0.02em" }}>{reorderItems.length} item{reorderItems.length !== 1 ? "s" : ""}</span>
-        </button>
-      </div>
+        <div data-inventory-control-group="scope" style={{ display: "grid", gridTemplateColumns: inventoryVp.isPhone ? "minmax(104px, 1fr) auto" : "minmax(180px, 1fr) auto", gap: 7, alignItems: "center", padding: "8px 10px" }}>
+          <label style={{ minWidth: 0, display: "flex", alignItems: "center", gap: 7, height: 36, padding: "0 9px", border: `1px solid ${T.border}`, borderRadius: 9, background: T.surfaceAlt, color: T.textMuted }}>
+            <Icon name="location" size={13} />
+            <select aria-label="Filter inventory by location" value={locFilter} onChange={event => setLocFilter(event.target.value)} style={{ minWidth: 0, width: "100%", border: "none", outline: "none", background: "transparent", color: T.text, fontFamily: "inherit", fontSize: 11.5, fontWeight: 720 }}>
+              <option value="all">All Locations</option>
+              {locations.map(loc => <option key={loc.id} value={loc.id}>{loc.name}</option>)}
+            </select>
+          </label>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6, gridColumn: inventoryVp.isPhone ? "auto" : "auto" }}>
+            {invLog.length > 0 && <button type="button" aria-expanded={showActivity} onClick={() => setShowActivity(s => !s)} style={{ minHeight: 36, padding: "0 8px", border: `1px solid ${showActivity ? T.primary : T.border}`, borderRadius: 8, background: showActivity ? hexA(T.primary, 0.06) : T.surface, color: showActivity ? T.primary : T.textMuted, fontFamily: "inherit", fontSize: 10.5, fontWeight: 780, cursor: "pointer", whiteSpace: "nowrap" }}>Activity {invLog.length}</button>}
+          </div>
+        </div>
+
+        {(lowItems.length > 0 || (canSeeCost && pricelessItems.length > 0)) && (
+          <div data-inventory-control-group="alerts" style={{ display: "grid", gridTemplateColumns: lowItems.length > 0 && canSeeCost && pricelessItems.length > 0 ? "repeat(2, minmax(0, 1fr))" : "1fr", gap: 1, background: T.border, borderTop: `1px solid ${T.border}` }}>
+            {lowItems.length > 0 && <button type="button" data-inventory-alert="low-stock" aria-expanded={showLowStock} onClick={() => setShowLowStock(open => !open)} style={{ minHeight: 38, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "0 11px", border: "none", background: showLowStock ? hexA(T.primary, 0.07) : T.surface, color: T.primary, fontFamily: "inherit", fontSize: 11, fontWeight: 800, cursor: "pointer", textAlign: "left" }}><span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}><Icon name="warning" size={13} /><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{lowItems.length} stock alert{lowItems.length !== 1 ? "s" : ""}</span></span><Icon name="chevronD" size={13} /></button>}
+            {canSeeCost && pricelessItems.length > 0 && <button type="button" data-inventory-alert="missing-price" aria-expanded={priceReviewOpen} onClick={() => setPriceReviewOpen(open => !open)} style={{ minHeight: 38, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "0 11px", border: "none", background: priceReviewOpen ? hexA(T.primary, 0.07) : T.surface, color: T.primary, fontFamily: "inherit", fontSize: 11, fontWeight: 800, cursor: "pointer", textAlign: "left" }}><span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}><Icon name="tag" size={13} /><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pricelessItems.length} missing price{pricelessItems.length !== 1 ? "s" : ""}</span></span><Icon name="chevronD" size={13} /></button>}
+          </div>
+        )}
+      </section>
+
+      {showActivity && invLog.length > 0 && (
+        <Card>
+          <CardHeader title="Activity this session" />
+          <div style={{ maxHeight: 280, overflowY: "auto", padding: "0 14px 8px" }}>
+            {invLog.slice(0, 80).map((e, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, padding: "9px 0", borderBottom: i < Math.min(invLog.length, 80) - 1 ? `1px solid ${T.border}` : "none" }}>
+                <span style={{ fontSize: 12.5, color: T.text }}><b style={{ fontWeight: 750 }}>{e.action}</b> {e.qty != null ? `${e.qty}${e.unit ? " " + e.unit : ""} ` : ""}{e.item}{e.loc ? ` · ${e.loc}` : ""}{e.note ? ` · ${e.note}` : ""}</span>
+                <span style={{ fontSize: 11, color: T.textMuted, flexShrink: 0 }}>{new Date(e.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
       )}
 
       {/* Valuation panel */}
-      {showValue && (
+      {canSeeCost && showValue && (
         <Card>
-          <CardHeader title="Inventory Value by Location" />
+          <CardHeader title="Known Inventory Cost by Location" />
           <div style={{ padding: "8px 16px 16px" }}>
             {/* Cost vs retail summary */}
             <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
               <div style={{ flex: 1, background: T.surfaceAlt, borderRadius: 12, padding: "10px 12px" }}>
-                <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: T.textMuted }}>At Cost</div>
+                <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: T.textMuted }}>Known Cost</div>
                 <div style={{ fontSize: 17, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginTop: 2 }}>${totalValue.toFixed(0)}</div>
               </div>
               <div style={{ flex: 1, background: T.surfaceAlt, borderRadius: 12, padding: "10px 12px" }}>
@@ -31412,7 +31455,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
                 <div style={{ fontSize: 17, fontWeight: 800, color: T.text, letterSpacing: "-0.02em", marginTop: 2 }}>${totalRetail.toFixed(0)}</div>
               </div>
               <div style={{ flex: 1, background: hexA("#16a34a", 0.08), borderRadius: 12, padding: "10px 12px" }}>
-                <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: "#15803D" }}>Potential</div>
+                <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: "#15803D" }}>Retail Spread</div>
                 <div style={{ fontSize: 17, fontWeight: 800, color: "#15803D", letterSpacing: "-0.02em", marginTop: 2 }}>${(totalRetail - totalValue).toFixed(0)}</div>
               </div>
             </div>
@@ -31437,17 +31480,17 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
                 </div>
               );
             })}
-            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 10 }}>Value is your cost basis (cost per unit × quantity on hand).</div>
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 10 }}>Known cost basis uses the saved unit cost multiplied by quantity on hand.</div>
           </div>
         </Card>
       )}
 
       {/* Reorder panel */}
-      {showReorder && (
+      {canSeeCost && showReorder && (
         <Card>
           <CardHeader title="Suggested Reorder" action={reorderItems.length > 0 ? <button onClick={() => {
             const lines = reorderItems.map(it => `${it.name}: ${it.suggest} ${it.unit || (it._kind === "treatment" ? "oz" : it._kind === "product" ? "each" : "pieces")} (~$${it.estCost.toFixed(2)})`);
-            const text = `SPS Reorder List — ${new Date().toLocaleDateString()}\n\n${lines.join("\n")}\n\nEstimated total: $${reorderTotal.toFixed(2)}`;
+            const text = `SPS Reorder List | ${new Date().toLocaleDateString()}\n\n${lines.join("\n")}\n\nEstimated total: $${reorderTotal.toFixed(2)}`;
             if (navigator.share) navigator.share({ text }).catch(() => {});
             else { navigator.clipboard?.writeText(text); }
           }} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 9, padding: "6px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Share List</button> : null} />
@@ -31503,95 +31546,39 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
         </Card>
       )}
 
-      {/* Tab switch */}
-      <div style={{ display: "flex", gap: 8, background: T.surfaceAlt, padding: 4, borderRadius: 14 }}>
-        {[["treatments", "Treatments"], ["parts", "Parts"], ["products", "Products"]].map(([val, label]) => (
-          <button key={val} onClick={() => { setTab(val); setLocFilter("all"); }}
-            style={{ flex: 1, padding: "10px", borderRadius: 11, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 14, fontWeight: 700, background: tab === val ? T.surface : "transparent", color: tab === val ? T.primary : T.textMuted, boxShadow: tab === val ? "0 1px 4px rgba(0,0,0,0.08)" : "none", transition: "all 0.15s" }}>
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {/* Location filter chips */}
-      {locations.length > 0 && (
-        <div style={{ display: "flex", gap: 7, overflowX: "auto", WebkitOverflowScrolling: "touch", paddingBottom: 2 }}>
-          <button onClick={() => setLocFilter("all")}
-            style={{ flexShrink: 0, padding: "7px 14px", borderRadius: 100, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 600, background: locFilter === "all" ? T.primary : T.surfaceAlt, color: locFilter === "all" ? "#fff" : T.textMuted }}>
-            All Locations
-          </button>
-          {locations.map(loc => (
-            <button key={loc.id} onClick={() => setLocFilter(loc.id)}
-              style={{ flexShrink: 0, padding: "7px 14px", borderRadius: 100, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 600, background: locFilter === loc.id ? T.primary : T.surfaceAlt, color: locFilter === loc.id ? "#fff" : T.textMuted }}>
-              {loc.name}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Low stock alert */}
-      {lowItems.length > 0 && (
-        <div style={{ background: hexA("#F59E0B", 0.08), border: `1px solid ${hexA("#F59E0B", 0.25)}`, borderRadius: 16, padding: "14px 16px" }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: "#92400E", marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
-            <Icon name="warning" size={15} /> {lowItems.length} item{lowItems.length !== 1 ? "s" : ""} running low
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {lowItems.map(it => {
+      {showLowStock && lowItems.length > 0 && (
+        <Card>
+          <CardHeader title={`${lowItems.length} stock alert${lowItems.length !== 1 ? "s" : ""}`} />
+          <div style={{ padding: "0 14px 8px" }}>
+            {lowItems.map((it, index) => {
               const total = invTotal(it);
               return (
-                <div key={it.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontSize: 13, color: T.text, fontWeight: 600 }}>{it.name}</span>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ fontSize: 12, color: total <= 0 ? "#E5484D" : "#F59E0B", fontWeight: 700 }}>
-                      {total <= 0 ? "OUT" : `${total} ${unitOf(it)} left`}
-                    </span>
-                    {canEdit && <button onClick={() => openAdjust(it, "add", locFilter !== "all" ? locFilter : locations[0]?.id)}
-                      style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 8, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-                      Restock
-                    </button>}
+                <div key={it.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, minHeight: 46, padding: "7px 0", borderBottom: index < lowItems.length - 1 ? `1px solid ${T.border}` : "none" }}>
+                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13, color: T.text, fontWeight: 680 }}>{it.name}</span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                    <span style={{ fontSize: 11.5, color: T.primary, fontWeight: 820 }}>{total <= 0 ? "Out" : `${total} ${unitOf(it)} left`}</span>
+                    {canEdit && <button type="button" onClick={() => openAdjust(it, "add", locFilter !== "all" ? locFilter : locations[0]?.id)} style={{ minHeight: 32, background: T.primary, color: "#fff", border: "none", borderRadius: 8, padding: "0 11px", fontSize: 11, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}>Restock</button>}
                   </div>
                 </div>
               );
             })}
           </div>
-        </div>
+        </Card>
       )}
 
-      {/* Needs-a-price review — forces missing prices to be addressed so billing is never $0 by accident */}
-      {pricelessItems.length > 0 && (
-        <div style={{ background: hexA("#E5484D", 0.07), border: `1px solid ${hexA("#E5484D", 0.28)}`, borderRadius: 16, padding: "14px 16px" }}>
-          <button type="button" onClick={() => setPriceReviewOpen(o => !o)}
-            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit" }}>
-            <span style={{ fontSize: 13, fontWeight: 700, color: "#B42318", display: "flex", alignItems: "center", gap: 6 }}>
-              <Icon name="warning" size={15} /> {pricelessItems.length} item{pricelessItems.length !== 1 ? "s" : ""} need{pricelessItems.length === 1 ? "s" : ""} a price
-            </span>
-            <span style={{ color: "#B42318", fontSize: 16, transform: priceReviewOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
-          </button>
-          {priceReviewOpen && (
-            <div style={{ marginTop: 10 }}>
-              <div style={{ fontSize: 11.5, color: T.textMuted, marginBottom: 10, lineHeight: 1.4 }}>Set a price so these bill correctly. Use $0 if an item is free or internal — but it has to be set on purpose.</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {pricelessItems.map(it => (
-                  <div key={it.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                    <span style={{ fontSize: 13, color: T.text, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.name}</span>
-                    {canEdit && <button onClick={() => openEditItem(it)}
-                      style={{ flexShrink: 0, background: "#E5484D", color: "#fff", border: "none", borderRadius: 8, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-                      Set price
-                    </button>}
-                  </div>
-                ))}
+      {canSeeCost && priceReviewOpen && pricelessItems.length > 0 && (
+        <Card>
+          <CardHeader title={`${pricelessItems.length} missing price${pricelessItems.length !== 1 ? "s" : ""}`} />
+          <div style={{ padding: "0 14px 8px" }}>
+            <div style={{ fontSize: 11.5, color: T.textMuted, marginBottom: 4, lineHeight: 1.4 }}>Set a retail price so these items bill correctly. Use $0 only when that is intentional.</div>
+            {pricelessItems.map((it, index) => (
+              <div key={it.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, minHeight: 44, padding: "6px 0", borderBottom: index < pricelessItems.length - 1 ? `1px solid ${T.border}` : "none" }}>
+                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13, color: T.text, fontWeight: 680 }}>{it.name}</span>
+                {canEdit && <button type="button" onClick={() => openEditItem(it)} style={{ minHeight: 32, flexShrink: 0, background: T.primary, color: "#fff", border: "none", borderRadius: 8, padding: "0 11px", fontSize: 11, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}>Set price</button>}
               </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Add item button */}
-      {canEdit && (
-        <button onClick={openAddItem}
-          style={{ alignSelf: "flex-start", background: T.primary, color: "#fff", border: `1px solid ${T.primary}`, borderRadius: 9, padding: "10px 15px", fontSize: 13.5, fontWeight: 750, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
-          + Add {tab === "treatments" ? "Treatment" : tab === "products" ? "Product" : "Part"}
-        </button>
+            ))}
+          </div>
+        </Card>
       )}
 
       {/* Item cards */}
@@ -31605,30 +31592,46 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
           const visible = items.filter(it => locFilter === "all" ? true : invAtLoc(it, locFilter) > 0 || (it.stockByLoc && locFilter in (it.stockByLoc || {})));
           const groups = invGroupByCat(visible);
           const flat = groups.length === 1 && (groups[0].itemCount ?? groups[0].items.length) <= 4;
-          const catHdr = { display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "transparent", border: "none", borderBottom: `1px solid ${T.border}`, borderRadius: 0, padding: "8px 4px", cursor: "pointer", fontFamily: "inherit", fontSize: 11.5, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.055em" };
-          return groups.map(g => {
+          const categoryIcon = tab === "parts" ? "wrench" : tab === "products" ? "box" : "tag";
+          const scopedLocation = locations.find(location => String(location.id) === String(locFilter));
+          return groups.map((g, categoryIndex) => {
             const ck = `${tab}:${g.cat}`;
             const collapsed = !flat && catCollapsed[ck] !== false;
+            const categoryRegionId = `inventory-category-${tab}-${categoryIndex}`;
+            const itemLabel = tab === "parts" ? (g.itemCount === 1 ? "part" : "parts") : tab === "products" ? (g.itemCount === 1 ? "product" : "products") : (g.itemCount === 1 ? "treatment" : "treatments");
+            const stockLabel = locFilter === "all"
+              ? `${g.stockedCount} stocked`
+              : `${g.stockedCount} at ${scopedLocation?.name || "this location"}`;
             return (
-              <div key={ck} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div key={ck} data-inventory-category={g.cat} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {!flat && (
-                  <button type="button" onClick={() => setCatCollapsed(s => ({ ...s, [ck]: !s[ck] }))} style={catHdr}>
-                    <span>{g.cat} · {g.itemCount ?? g.items.length}</span>
-                    <span style={{ fontSize: 15, transform: collapsed ? "none" : "rotate(90deg)", transition: "transform 0.15s", lineHeight: 1 }}>›</span>
+                  <button type="button" aria-expanded={!collapsed} aria-controls={categoryRegionId} aria-label={`${g.cat}, ${g.itemCount} ${itemLabel}`} onClick={() => setCatCollapsed(s => ({ ...s, [ck]: collapsed ? false : true }))}
+                    style={{ display: "flex", alignItems: "center", gap: 11, width: "100%", minHeight: 54, background: "transparent", border: "none", borderBottom: `1px solid ${collapsed ? T.border : hexA(T.primary, 0.24)}`, padding: "9px 4px 9px 0", cursor: "pointer", fontFamily: "inherit", color: T.text, textAlign: "left" }}>
+                    <span aria-hidden="true" style={{ width: 3, height: 34, borderRadius: 999, background: collapsed ? hexA(T.primary, 0.3) : T.primary, flexShrink: 0 }} />
+                    <span style={{ width: 29, height: 34, color: T.primary, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name={categoryIcon} size={17} /></span>
+                    <span style={{ minWidth: 0, flex: 1 }}>
+                      <span style={{ display: "block", fontSize: 15.5, lineHeight: 1.15, fontWeight: 820, letterSpacing: "-0.018em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.cat}</span>
+                      <span style={{ display: "block", marginTop: 4, color: T.textMuted, fontSize: 10.75, lineHeight: 1.25, fontWeight: 620 }}>{g.itemCount} {itemLabel}{tab === "products" && g.familyCount && g.familyCount !== g.itemCount ? ` in ${g.familyCount} families` : ""} | {stockLabel}</span>
+                    </span>
+                    <span style={{ display: "flex", alignItems: "center", gap: 7, flexShrink: 0 }}>
+                      {g.attentionCount > 0 && <span style={{ color: T.primary, fontSize: 10.5, fontWeight: 800, whiteSpace: "nowrap" }}>{g.attentionCount} need attention</span>}
+                      <span aria-hidden="true" style={{ width: 28, height: 28, display: "grid", placeItems: "center", color: collapsed ? T.textMuted : T.primary, transform: collapsed ? "none" : "rotate(90deg)", transition: "transform 0.15s" }}><Icon name="chevronR" size={15} /></span>
+                    </span>
                   </button>
                 )}
+                <div id={categoryRegionId} hidden={collapsed} style={{ display: collapsed ? "none" : "flex", flexDirection: "column", gap: 10, paddingLeft: flat ? 0 : 14 }}>
                 {!collapsed && g.items.map(it => {
             if (it.__productFamily) {
               const family = it.family;
               const closed = familyCollapsed[family.familyId] !== false;
-              const totalFamilyStock = family.products.reduce((sum, product) => sum + invTotal(product), 0);
+              const totalFamilyStock = family.products.reduce((sum, product) => sum + (locFilter === "all" ? invTotal(product) : invAtLoc(product, locFilter)), 0);
               return (
-                <div key={`family:${family.familyId}`} data-inventory-product-family style={{ borderLeft: `3px solid ${T.primary}`, background: T.surfaceAlt, borderRadius: 11, padding: "11px 12px", display: "flex", alignItems: "center", gap: 10 }}>
+                <div key={`family:${family.familyId}`} data-inventory-product-family style={{ borderLeft: `2px solid ${T.primary}`, background: hexA(T.primary, 0.035), borderRadius: "0 9px 9px 0", padding: "10px 11px", display: "flex", alignItems: "center", gap: 10 }}>
                   <button type="button" aria-expanded={!closed} onClick={() => setFamilyCollapsed(current => ({ ...current, [family.familyId]: !closed }))} style={{ minWidth: 0, flex: 1, display: "flex", alignItems: "center", gap: 10, padding: 0, border: "none", background: "transparent", color: T.text, fontFamily: "inherit", cursor: "pointer", textAlign: "left" }}>
-                    <span style={{ width: 30, height: 30, borderRadius: 9, background: T.surface, color: T.primary, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name="box" size={14} /></span>
+                    <span style={{ width: 28, height: 30, color: T.primary, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon name="box" size={14} /></span>
                     <span style={{ minWidth: 0, flex: 1 }}>
                       <span style={{ display: "block", fontSize: 14, fontWeight: 820, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{family.familyName}</span>
-                      <span style={{ display: "block", marginTop: 2, fontSize: 10.5, color: T.textMuted }}>{family.products.length} variants | {totalFamilyStock} total on hand</span>
+                      <span style={{ display: "block", marginTop: 2, fontSize: 10.5, color: T.textMuted }}>{family.products.length} variants | {totalFamilyStock} {locFilter === "all" ? "company-wide" : "here"}</span>
                     </span>
                     <span aria-hidden="true" style={{ color: T.textMuted, transform: closed ? "none" : "rotate(90deg)", transition: "transform 0.15s", fontSize: 16 }}>›</span>
                   </button>
@@ -31661,7 +31664,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
                     <span style={{ fontSize: 11, fontWeight: 700, padding: "4px 12px", borderRadius: 100, background: status.bg, color: status.color }}>
                       {status.label}
                     </span>
-                    {needsPrice(it, kind) && (
+                    {canSeeCost && needsPrice(it, kind) && (
                       <span style={{ fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 100, background: hexA("#E5484D", 0.12), color: "#E5484D", display: "flex", alignItems: "center", gap: 3, whiteSpace: "nowrap" }}>
                         <Icon name="warning" size={10} /> No price
                       </span>
@@ -31735,6 +31738,7 @@ function InventoryScreen({ catalog, setCatalog, clients, canSeeCost = true, canE
               </div>
             );
                 })}
+                </div>
               </div>
             );
           });

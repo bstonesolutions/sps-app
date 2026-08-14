@@ -28,6 +28,28 @@ test("inventory presents variant children under one family and supports manual v
   assert.match(inventory, />\+ Variant<\/button>/);
 });
 
+test("inventory categories use accessible disclosures with useful stock context", async () => {
+  const app = await readApp();
+  const inventory = component(app, "function InventoryScreen", "function ReportsScreen");
+  const disclosureStart = inventory.indexOf("const visible =");
+  const disclosureEnd = inventory.indexOf("if (it.__productFamily)", disclosureStart);
+
+  assert.ok(disclosureStart >= 0 && disclosureEnd > disclosureStart, "the Inventory category disclosure flow must remain inspectable");
+  const disclosure = inventory.slice(disclosureStart, disclosureEnd);
+
+  assert.match(disclosure, /data-inventory-category=\{g\.cat\}/, "each category disclosure needs a stable UI marker");
+  assert.match(disclosure, /aria-expanded=\{!collapsed\}/, "category disclosures must expose their open state to assistive technology");
+  assert.match(disclosure, /g\.itemCount(?: \?\? g\.items\.length)?/, "the category summary must retain its item count");
+  assert.match(disclosure, /(?:on hand|in stock|stocked)/i, "the collapsed category must summarize stock without making the user open it");
+  assert.match(disclosure, /locFilter === "all"/, "the stock summary must honor the selected inventory location");
+
+  assert.doesNotMatch(
+    disclosure,
+    /background:\s*"transparent"[\s\S]*?borderBottom:[\s\S]*?borderRadius:\s*0[\s\S]*?textTransform:\s*"uppercase"/,
+    "category controls must not regress to the old bare uppercase divider",
+  );
+});
+
 test("inventory can import every supplier option as exact flat child records", async () => {
   const app = await readApp();
   const modal = component(app, "function InventoryItemModal", "function InventoryScreen");
