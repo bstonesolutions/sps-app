@@ -439,7 +439,8 @@ as $function$
     and (
       p_key not in (
         'sps_team', 'sps_email', 'sps_branding', 'sps_roles',
-        'sps_budget', 'sps_costs', 'sps_invoicing', 'sps_schedule_cfg'
+        'sps_budget', 'sps_costs', 'sps_invoicing', 'sps_schedule_cfg',
+        'sps_maintenance_billing'
       )
       or public.sps_rls_is_owner()
     ),

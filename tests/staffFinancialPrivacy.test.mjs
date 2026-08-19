@@ -24,7 +24,7 @@ test("staff workflows keep financial details behind explicit capabilities", asyn
   assert.match(app, /const canSeeBalanceMoney = \(perms\)/);
   assert.match(app, /const canSeeInvoiceMoney = \(perms\)/);
   assert.match(app, /const canSeeProfitMoney = \(perms\)/);
-  assert.match(app, /const canManageInvoiceAccounting = \(perms\)/);
+  assert.match(app, /const canManageInvoiceAccounting = \(perms\) => !!perms && \(perms\.isAdmin \|\| perms\.invoiceCreate\)/);
 
   const stop = app.slice(app.indexOf("function CompleteStopModal"), app.indexOf("function AddStopForm"));
   assert.match(stop, /const showStopBilling = canSeeInvoiceMoney\(perms\)/);
@@ -56,6 +56,9 @@ test("staff portal previews and accounting review do not expose invoice data wit
   assert.match(invoices, /const canReviewAccounting = canManageInvoiceAccounting\(perms\)/);
   assert.match(invoices, /if \(!canReviewAccounting\) return/);
   assert.match(invoices, /canReviewAccounting && localReviewInvoices\.length > 0/);
+  assert.match(invoices, /\{\(perms\.seeTotalSales \|\| perms\.isAdmin\) && \([\s\S]*?data-invoice-review-balance/);
+  assert.match(invoices, /\{\(perms\.seeTotalSales \|\| perms\.isAdmin\) && <button[\s\S]*?data-invoice-summary-rail/);
+  assert.doesNotMatch(invoices, /data-invoice-summary-rail[\s\S]{0,500}disabled=\{!\(perms\.seeTotalSales/);
 });
 
 test("native owner widgets reject and clear cached owner data after switching to staff", async () => {

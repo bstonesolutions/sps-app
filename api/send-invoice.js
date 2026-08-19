@@ -110,7 +110,7 @@ function buildInvoiceText({ clientName, branding, invoice, payLink, intro }) {
 }
 
 import { resolveFrom } from "./_sender.js";
-import { requireUser } from "./_auth.js";
+import { requireCapability } from "./_staff-auth.js";
 
 // CORS so the native app (capacitor://localhost) can POST cross-origin to the absolute
 // PROD_URL. Without this the native invoice send fails as "couldn't reach server".
@@ -128,7 +128,7 @@ export default async function handler(req, res) {
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const _u = await requireUser(req, res);
+  const _u = await requireCapability(req, res, "invoiceSend", "sending invoices");
   if (!_u) return;
 
   const { to, clientName, branding = {}, invoice = {}, payLink, emailSubject, emailIntro } = req.body || {};

@@ -22,6 +22,10 @@ import { ESTIMATE_CHARGE_TYPES, estimateChargeBreakdown, estimateLineChargeLabel
 import { completeEstimateWithInvoice, estimateTaxMigrationImpact, estimateToDraftInvoice, findInvoiceForEstimate, normalizeEstimateTaxForInvoice } from "./estimateInvoiceConversion";
 import { findScheduledStopForEstimate, scheduleApprovedEstimate } from "./estimateScheduleLink";
 import { findInvoiceDeletionReferences, invoiceDeletionBlockedMessage } from "./invoiceDeletionGuard";
+import { applySafeBulkInvoiceEdits, invoiceSelectionForVisible, pruneInvoiceSelection, summarizeSelectedInvoices } from "./invoiceBulkActions";
+import { deliverSelectedInvoices } from "./invoiceBulkDelivery";
+import { appendCompletedVisitsToInvoice, completedVisitBillableTotal, completedVisitInvoiceLink, completedVisitLineItems, completedVisitSource, invoiceCompletedVisitSources, removeInvoiceLineAndPruneCompletedVisitSources, reserveCompletedVisitInvoice } from "./invoiceVisitImport";
+import { normalizeMaintenanceBillingPolicy } from "./maintenanceBilling";
 import { automaticReportChannels, reportEmailUiResult } from "./reportDelivery";
 import { buildCompletedReportIndex, canRebuildCompletedReport, resolveCompletedReport } from "./completedReport";
 import { appendClientLinks, clientLinkFooter, withoutClientLinks } from "./clientMessageLinks";
@@ -3194,7 +3198,7 @@ const canSeeComms = (perms) => !!perms && (perms.isAdmin || perms.editNotificati
 const canSeeBalanceMoney = (perms) => !!perms && (perms.isAdmin || perms.seeBalances);
 const canSeeInvoiceMoney = (perms) => !!perms && (perms.isAdmin || perms.seeBalances || perms.viewInvoices || perms.canInvoice);
 const canSeeProfitMoney = (perms) => !!perms && (perms.isAdmin || perms.seeProfit);
-const canManageInvoiceAccounting = (perms) => !!perms && (perms.isAdmin || perms.canInvoice);
+const canManageInvoiceAccounting = (perms) => !!perms && (perms.isAdmin || perms.invoiceCreate);
 const badgeLabel = (count) => Number(count) > 99 ? "99+" : Number(count) || 0;
 
 // Is a nav tab visible to this permission set?
@@ -7023,7 +7027,7 @@ function ClientList({ clients, invoices, schedule, vp = {}, view = "split", onSe
 // ─────────────────────────────────────────────
 // CLIENT EDIT FORM
 // ─────────────────────────────────────────────
-function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Client" }) {
+function ClientEditForm({ client, invoices = [], onSave, onCancel, onDelete, title = "Edit Client" }) {
   const { T, tiers, perms } = useApp();
   // Client contact/service access is operational. Plan rates and invoice automation are
   // accounting controls, so they stay owner/accounting-only even for staff who can edit clients.
@@ -7031,6 +7035,8 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
   const manageClientAutoInvoice = canManageInvoiceAccounting(perms);
   const clientFormVp = useViewport();
   const compact = clientFormVp.width <= 420;
+  const [formError, setFormError] = useState("");
+  const [formSaving, setFormSaving] = useState(false);
   const [form, setForm] = useState(() => {
     const base = { ...client };
     // Make Edit match the card. Many records store the STREET LINE in `address`, leave the `street`
@@ -7065,6 +7071,85 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
     return next;
   });
   const combined = assembleAddress({ street: form.street, city: form.city, state: form.state, zip: form.zip });
+  const hasPersistedClient = client?.id != null && String(client.id).trim() !== "";
+  const prepaidMaintenance = String(form.maintenanceBilling?.mode || "").toLowerCase() === "prepaid";
+  const clientInvoiceChoices = (invoices || [])
+    .filter((invoice) => invoiceMatchesClient(invoice, form))
+    .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  const setMaintenanceBilling = (patch) => setForm((current) => ({
+    ...current,
+    maintenanceBilling: {
+      version: 1,
+      mode: "prepaid",
+      ...(current.maintenanceBilling || {}),
+      ...patch,
+    },
+  }));
+  const setMaintenanceBillingMode = (mode) => {
+    setFormError("");
+    setForm((current) => {
+      if (mode !== "prepaid") {
+        const next = { ...current };
+        delete next.maintenanceBilling;
+        return next;
+      }
+      const year = new Date().getFullYear();
+      return {
+        ...current,
+        maintenanceBilling: normalizeMaintenanceBillingPolicy(current.maintenanceBilling) || {
+          version: 1,
+          mode: "prepaid",
+          coveredFrom: `${year}-01-01`,
+          coveredThrough: `${year}-12-31`,
+        },
+      };
+    });
+  };
+  const saveClient = async () => {
+    if (formSaving) return;
+    setFormError("");
+    const next = { ...form };
+    if (!manageClientAutoInvoice) {
+      const existingPolicy = normalizeMaintenanceBillingPolicy(client?.maintenanceBilling);
+      if (existingPolicy) next.maintenanceBilling = existingPolicy;
+      else delete next.maintenanceBilling;
+    } else if (prepaidMaintenance) {
+      const policy = normalizeMaintenanceBillingPolicy(form.maintenanceBilling);
+      if (!policy) {
+        setFormError("Choose a valid prepaid coverage start and end date before saving.");
+        return;
+      }
+      next.maintenanceBilling = policy;
+    } else {
+      delete next.maintenanceBilling;
+    }
+    if (!manageClientAutoInvoice || !hasPersistedClient) {
+      onSave(next);
+      return;
+    }
+    setFormSaving(true);
+    try {
+      const response = await fetch(`${PROD_URL}/api/client-maintenance-billing`, {
+        method: "POST",
+        headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          clientId: client.id,
+          maintenanceBilling: next.maintenanceBilling || null,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || "Maintenance billing could not be confirmed by the server.");
+      }
+      if (payload.maintenanceBilling) next.maintenanceBilling = payload.maintenanceBilling;
+      else delete next.maintenanceBilling;
+      onSave(next);
+    } catch (error) {
+      setFormError(error?.message || "Maintenance billing could not be saved. Nothing was changed; please try again.");
+    } finally {
+      setFormSaving(false);
+    }
+  };
 
   // ── Per-division service plan helpers ──────────────────────────────────────
   // The plan a division currently carries ("" = None). Explicit form.plans[div] wins (so None
@@ -7132,8 +7217,13 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
       <button onClick={onCancel} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 13, cursor: "pointer", padding: "0 0 16px", display: "flex", alignItems: "center", gap: 4 }}>← Cancel</button>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
         <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, color: T.text }}>{title}</h2>
-        <Btn onClick={() => onSave(form)}>{title === "Add Client" ? "Create Client" : "Save Changes"}</Btn>
+        <Btn onClick={() => { void saveClient(); }} disabled={formSaving}>{formSaving ? "Saving…" : title === "Add Client" ? "Create Client" : "Save Changes"}</Btn>
       </div>
+      {formError && (
+        <div role="alert" style={{ marginBottom: 14, padding: "10px 13px", borderLeft: `3px solid ${T.primary}`, background: hexA(T.primary, 0.055), color: T.primary, fontSize: 12.5, fontWeight: 750, lineHeight: 1.45 }}>
+          {formError}
+        </div>
+      )}
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         {["Contact Info", "Service Details", "Service Plan"].map((sectionTitle, si) => (
           <Card key={si}>
@@ -7340,6 +7430,59 @@ function ClientEditForm({ client, onSave, onCancel, onDelete, title = "Edit Clie
                   </div>
                   <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 6 }}>When enabled, invoices generate automatically on that schedule using the monthly rate above.</div>
                 </div>}
+                {manageClientAutoInvoice && hasPersistedClient && (
+                  <div data-client-maintenance-billing style={{ borderTop: `1px solid ${T.border}`, paddingTop: 14 }}>
+                    <label style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.06em", color: T.textMuted, display: "block", marginBottom: 7 }}>Maintenance billing</label>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, padding: 4, background: T.surfaceAlt, borderRadius: 11 }}>
+                      {[["standard", "Standard billing"], ["prepaid", "Prepaid plan"]].map(([mode, label]) => {
+                        const active = mode === "prepaid" ? prepaidMaintenance : !prepaidMaintenance;
+                        return (
+                          <button key={mode} type="button" onClick={() => setMaintenanceBillingMode(mode)} aria-pressed={active}
+                            style={{ minHeight: 40, padding: "8px 10px", borderRadius: 8, border: active ? `1px solid ${hexA(T.primary, 0.38)}` : "1px solid transparent", background: active ? T.surface : "transparent", color: active ? T.primary : T.textMuted, fontWeight: 800, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {prepaidMaintenance && (
+                      <div style={{ marginTop: 12, padding: "13px 14px 14px 16px", borderLeft: `3px solid ${T.primary}`, background: hexA(T.primary, 0.035), display: "flex", flexDirection: "column", gap: 11 }}>
+                        <div>
+                          <div style={{ fontSize: 13, fontWeight: 850, color: T.text }}>Routine maintenance is covered</div>
+                          <div style={{ fontSize: 11.5, lineHeight: 1.5, color: T.textMuted, marginTop: 3 }}>Covered maintenance visits will not create a service invoice. Repairs, upgrades, and purchased parts or products remain billable.</div>
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: compact ? "1fr" : "1fr 1fr", gap: 9 }}>
+                          <div>
+                            <label style={{ fontSize: 10.5, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", display: "block", marginBottom: 5 }}>Coverage starts</label>
+                            <input type="date" value={form.maintenanceBilling?.coveredFrom || ""} onChange={(event) => setMaintenanceBilling({ coveredFrom: event.target.value })} style={halfInput} />
+                          </div>
+                          <div>
+                            <label style={{ fontSize: 10.5, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", display: "block", marginBottom: 5 }}>Coverage ends</label>
+                            <input type="date" value={form.maintenanceBilling?.coveredThrough || ""} onChange={(event) => setMaintenanceBilling({ coveredThrough: event.target.value })} style={halfInput} />
+                          </div>
+                        </div>
+                        <div>
+                          <label style={{ fontSize: 10.5, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", display: "block", marginBottom: 5 }}>Prepayment record</label>
+                          <select
+                            value={form.maintenanceBilling?.sourceInvoiceId || ""}
+                            onChange={(event) => {
+                              const invoice = clientInvoiceChoices.find((candidate) => String(candidate.id) === String(event.target.value));
+                              setMaintenanceBilling(invoice
+                                ? { sourceInvoiceId: String(invoice.id), sourceInvoiceNumber: String(invoice.number || "") }
+                                : { sourceInvoiceId: "", sourceInvoiceNumber: "" });
+                            }}
+                            style={{ ...halfInput, appearance: "auto" }}
+                          >
+                            <option value="">Not linked to an SPS invoice</option>
+                            {clientInvoiceChoices.map((invoice) => (
+                              <option key={invoice.id} value={invoice.id}>Invoice {invoice.number || "Unnumbered"} · {invoice.date || "No date"} · ${invoiceTotals(invoice).total.toFixed(2)}</option>
+                            ))}
+                          </select>
+                          <div style={{ fontSize: 11, lineHeight: 1.45, color: T.textMuted, marginTop: 5 }}>Optional. Link the invoice or payment record that covered this maintenance period.</div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </>}
             </div>
           </Card>
@@ -7641,6 +7784,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
   // non-primary division). Don't read the flat client.plan directly for display.
   const eTier = effectiveTier(client);
   const pm = planMeta(eTier, T, tiers);
+  const prepaidPolicy = normalizeMaintenanceBillingPolicy(client.maintenanceBilling);
   const tabs = ["overview", "equipment", "history", ...((perms.canInvoice || perms.viewInvoices) ? ["invoices"] : []), "docs", "portal"];
   useEffect(() => {
     if (initialTab && tabs.includes(initialTab) && initialTab !== tab) setTab(initialTab);
@@ -7676,7 +7820,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
     if (onUpdate) onUpdate(next);
   };
 
-  if (editing) return <ClientEditForm client={client} onSave={u => { update(u); setEditing(false); }} onCancel={() => setEditing(false)} onDelete={onDelete} />;
+  if (editing) return <ClientEditForm client={client} invoices={invoices} onSave={u => { update(u); setEditing(false); }} onCancel={() => setEditing(false)} onDelete={onDelete} />;
 
   return (
     <div ref={rootRef}>
@@ -7698,6 +7842,11 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
           {/* Tier badge + action buttons */}
           <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 10 }}>
             <Badge label={eTier || "No tier"} bg={pm.bg} color={pm.color || pm.text} />
+            {canManageInvoiceAccounting(perms) && prepaidPolicy && (
+              <span style={{ display: "inline-flex", alignItems: "center", minHeight: 24, padding: "2px 9px", borderLeft: `3px solid ${T.primary}`, background: hexA(T.primary, 0.055), color: T.primary, fontSize: 10.5, fontWeight: 850, letterSpacing: "0.02em" }}>
+                Prepaid through {new Date(`${prepaidPolicy.coveredThrough}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+              </span>
+            )}
             <div style={{ flex: 1 }} />
             <Btn variant="ghost" sm onClick={() => generateClientProfilePDF(client, sortInvoices((invoices||[]).filter(iv => invoiceMatchesClient(iv, client))), branding, tiers, { showFinancials: perms.seeBalances })} style={{ display:"flex", alignItems:"center", gap:5 }}>
               <Icon name="download" size={13} /> PDF
@@ -17708,7 +17857,7 @@ function TeamManager({ team, setTeam, currentUserId, email, branding, catalog })
 // ─────────────────────────────────────────────
 // INVOICING
 // ─────────────────────────────────────────────
-function InvoiceRow({ iv, onClick }) {
+function InvoiceRow({ iv, onClick, selected = false, selectionEnabled = false, onToggleSelected }) {
   const { T } = useApp();
   const rawEff = effectiveStatus(iv);
   // Normalize — QB returns "Paid", SPS uses "Paid", both should display same
@@ -17726,9 +17875,19 @@ function InvoiceRow({ iv, onClick }) {
   })();
   return (
     <div onClick={onClick}
-      style={{ background: T.surface, borderRadius: 16, border: `1px solid ${T.border}`, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, cursor: "pointer", transition: "box-shadow 0.15s" }}
+      style={{ background: selected ? hexA(T.primary, 0.045) : T.surface, borderRadius: 14, border: `1px solid ${selected ? hexA(T.primary, 0.42) : T.border}`, padding: "12px 14px", display: "flex", alignItems: "center", gap: 12, cursor: "pointer", transition: "border-color 0.15s, background 0.15s" }}
       onMouseEnter={e => e.currentTarget.style.boxShadow = "0 4px 16px rgba(0,0,0,0.08)"}
       onMouseLeave={e => e.currentTarget.style.boxShadow = "none"}>
+      {selectionEnabled && (
+        <input
+          type="checkbox"
+          aria-label={`Select invoice ${iv.number || ""}`}
+          checked={selected}
+          onChange={() => onToggleSelected?.(iv)}
+          onClick={(event) => event.stopPropagation()}
+          style={{ width: 18, height: 18, accentColor: T.primary, flexShrink: 0, cursor: "pointer" }}
+        />
+      )}
       {/* Status accent bar */}
       <div style={{ width: 3, alignSelf: "stretch", borderRadius: 3, background: invStatusColor(eff, T), flexShrink: 0, minHeight: 36 }} />
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -17927,6 +18086,159 @@ function InvoiceSendStep({ invoice, client, onClose, onSent }) {
   );
 }
 
+function InvoiceVisitPicker({ visits, invoices, currentInvoice, clientId, onAdd, onClose }) {
+  const { T } = useApp();
+  const { isPhone } = useViewport();
+  const [search, setSearch] = useState("");
+  const [selectedKeys, setSelectedKeys] = useState([]);
+  const currency = (value) => `$${(Number(value) || 0).toFixed(2)}`;
+  const availableInvoices = useMemo(() => {
+    const others = (invoices || []).filter(candidate => String(candidate?.id) !== String(currentInvoice?.id));
+    return currentInvoice ? [currentInvoice, ...others] : others;
+  }, [currentInvoice, invoices]);
+  const sortedVisits = useMemo(() => [...(visits || [])].sort((left, right) => {
+    const leftDate = parseMDY(left?.date)?.getTime() || 0;
+    const rightDate = parseMDY(right?.date)?.getTime() || 0;
+    return rightDate - leftDate;
+  }), [visits]);
+  const visitRows = useMemo(() => sortedVisits.map((visit) => {
+    const source = completedVisitSource(visit, { clientId });
+    const link = completedVisitInvoiceLink(visit, availableInvoices, {
+      clientId,
+      currentInvoiceId: currentInvoice?.id,
+      visits: sortedVisits,
+    });
+    const services = (visit?.services || []).map(service => typeof service === "string" ? service : service?.name).filter(Boolean);
+    const billedParts = (visit?.partsUsed || []).filter(item => item?.bill !== false);
+    const billedProducts = (visit?.productsPurchased || []).filter(item => item?.bill !== false);
+    const total = completedVisitBillableTotal(visit, { clientId });
+    const searchable = [
+      visit?.date, visit?.type, visit?.tech, visit?.notes, ...services,
+      ...billedParts.map(item => item?.name), ...billedProducts.map(item => item?.name),
+    ].filter(Boolean).join(" ").toLowerCase();
+    return {
+      visit,
+      source,
+      link,
+      services,
+      billedItemCount: billedParts.length + billedProducts.length,
+      lineCount: completedVisitLineItems(visit, { clientId }).length,
+      total,
+      searchable,
+    };
+  }), [availableInvoices, clientId, currentInvoice?.id, sortedVisits]);
+  const query = search.trim().toLowerCase();
+  const visibleRows = visitRows.filter(row => !query || row.searchable.includes(query));
+  const eligibleVisible = visibleRows.filter(row => !row.link && row.lineCount > 0);
+  const selectedSet = new Set(selectedKeys);
+  const selectedRows = visitRows.filter(row => selectedSet.has(row.source.key) && !row.link && row.lineCount > 0);
+  const selectedTotal = selectedRows.reduce((sum, row) => sum + row.total, 0);
+  const allVisibleSelected = eligibleVisible.length > 0 && eligibleVisible.every(row => selectedSet.has(row.source.key));
+
+  const toggle = (key) => setSelectedKeys(current => (
+    current.includes(key) ? current.filter(candidate => candidate !== key) : [...current, key]
+  ));
+  const toggleAllVisible = () => {
+    const visibleKeys = eligibleVisible.map(row => row.source.key);
+    setSelectedKeys(current => {
+      const currentSet = new Set(current);
+      if (visibleKeys.every(key => currentSet.has(key))) visibleKeys.forEach(key => currentSet.delete(key));
+      else visibleKeys.forEach(key => currentSet.add(key));
+      return [...currentSet];
+    });
+  };
+  const addSelected = () => {
+    if (!selectedRows.length) return;
+    onAdd(selectedRows.map(row => row.visit));
+  };
+
+  return (
+    <Modal title="Add completed visits" onClose={onClose} maxWidth={720}>
+      <div data-invoice-visit-picker style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: isPhone ? "1fr" : "minmax(0, 1fr) auto", gap: 12, alignItems: "end" }}>
+          <div>
+            <div style={{ fontSize: isPhone ? 23 : 27, lineHeight: 1.05, fontWeight: 850, letterSpacing: "-0.035em", color: T.text }}>Build one invoice from several visits</div>
+            <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.45, marginTop: 6 }}>Choose every completed visit this invoice should cover. Already linked visits stay protected.</div>
+          </div>
+          <div style={{ minWidth: isPhone ? 0 : 150, padding: "10px 12px", borderLeft: `3px solid ${T.primary}`, background: T.surfaceAlt, borderRadius: 10 }}>
+            <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.075em", textTransform: "uppercase", color: T.textMuted }}>Selected</div>
+            <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, marginTop: 3 }}>
+              <strong style={{ fontSize: 20, color: T.text }}>{selectedRows.length}</strong>
+              <span style={{ fontSize: 14, fontWeight: 800, color: T.primary }}>{currency(selectedTotal)}</span>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: isPhone ? "column" : "row", gap: 9 }}>
+          <label style={{ position: "relative", flex: 1 }}>
+            <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: T.textMuted, display: "flex", pointerEvents: "none" }}><Icon name="search" size={16} /></span>
+            <input
+              aria-label="Search completed visits"
+              value={search}
+              onChange={event => setSearch(event.target.value)}
+              placeholder="Search dates, services, or notes"
+              style={{ width: "100%", minHeight: 44, padding: "10px 12px 10px 38px", border: `1px solid ${T.border}`, borderRadius: 11, background: T.surface, color: T.text, fontSize: 14, fontFamily: "inherit", outline: "none", boxSizing: "border-box" }}
+            />
+          </label>
+          <button
+            type="button"
+            onClick={toggleAllVisible}
+            disabled={!eligibleVisible.length}
+            style={{ minHeight: 44, padding: "9px 14px", borderRadius: 11, border: `1px solid ${allVisibleSelected ? T.primary : T.border}`, background: allVisibleSelected ? hexA(T.primary, 0.08) : T.surface, color: allVisibleSelected ? T.primary : T.text, fontWeight: 750, fontSize: 13, fontFamily: "inherit", cursor: eligibleVisible.length ? "pointer" : "default", opacity: eligibleVisible.length ? 1 : 0.5 }}
+          >
+            {allVisibleSelected ? "Clear visible" : `Select visible (${eligibleVisible.length})`}
+          </button>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", borderTop: `1px solid ${T.border}` }}>
+          {visibleRows.map(row => {
+            const disabled = !!row.link || row.lineCount === 0;
+            const checked = selectedSet.has(row.source.key);
+            const title = row.services.join(", ") || row.visit?.type || "Completed visit";
+            const linkedLabel = row.link
+              ? row.link.legacy
+                ? `Possible legacy link to invoice ${row.link.invoiceNumber || row.link.invoiceId} · review before rebilling`
+                : row.link.current ? "Already on this invoice" : `Linked to invoice ${row.link.invoiceNumber || row.link.invoiceId}`
+              : row.lineCount === 0 ? "No billable items saved" : "";
+            return (
+              <button
+                type="button"
+                key={row.source.key}
+                onClick={() => !disabled && toggle(row.source.key)}
+                disabled={disabled}
+                aria-pressed={checked}
+                style={{ width: "100%", display: "grid", gridTemplateColumns: "26px minmax(0, 1fr) auto", gap: 11, alignItems: "center", padding: isPhone ? "12px 2px" : "13px 4px", border: "none", borderBottom: `1px solid ${T.border}`, background: checked ? hexA(T.primary, 0.045) : "transparent", color: T.text, fontFamily: "inherit", textAlign: "left", cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.58 : 1 }}
+              >
+                <span aria-hidden="true" style={{ width: 22, height: 22, borderRadius: 7, border: `1.5px solid ${checked ? T.primary : T.border}`, background: checked ? T.primary : T.surface, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}>{checked && <Icon name="check" size={13} />}</span>
+                <span style={{ minWidth: 0 }}>
+                  <span style={{ display: "flex", alignItems: "baseline", gap: 8, minWidth: 0 }}>
+                    <strong style={{ fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</strong>
+                    <span style={{ flexShrink: 0, fontSize: 11.5, color: T.textMuted }}>{row.visit?.date || "Date not saved"}</span>
+                  </span>
+                  <span style={{ display: "block", marginTop: 4, fontSize: 11.5, color: linkedLabel ? T.primary : T.textMuted, fontWeight: linkedLabel ? 750 : 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {linkedLabel || `${row.lineCount} line item${row.lineCount === 1 ? "" : "s"}${row.billedItemCount ? ` · ${row.billedItemCount} billed material${row.billedItemCount === 1 ? "" : "s"}` : ""}`}
+                  </span>
+                </span>
+                <strong style={{ fontSize: 14, color: row.total > 0 ? T.text : T.textMuted, whiteSpace: "nowrap" }}>{currency(row.total)}</strong>
+              </button>
+            );
+          })}
+          {!visibleRows.length && (
+            <div style={{ padding: "28px 10px", textAlign: "center", color: T.textMuted, fontSize: 13 }}>No completed visits match that search.</div>
+          )}
+        </div>
+
+        <div style={{ position: "sticky", bottom: -26, margin: "0 -22px -26px", padding: isPhone ? "12px 16px max(18px, env(safe-area-inset-bottom))" : "12px 22px 18px", background: T.surface, borderTop: `1px solid ${T.border}`, display: "flex", gap: 9, alignItems: "center" }}>
+          <button type="button" onClick={onClose} style={{ minHeight: 44, padding: "10px 16px", border: `1px solid ${T.border}`, borderRadius: 11, background: T.surface, color: T.text, fontSize: 13, fontWeight: 750, fontFamily: "inherit", cursor: "pointer" }}>Cancel</button>
+          <button type="button" onClick={addSelected} disabled={!selectedRows.length} style={{ minHeight: 44, flex: 1, padding: "10px 16px", border: "none", borderRadius: 11, background: T.primary, color: "#fff", fontSize: 14, fontWeight: 800, fontFamily: "inherit", cursor: selectedRows.length ? "pointer" : "default", opacity: selectedRows.length ? 1 : 0.52 }}>
+            {selectedRows.length ? `Add ${selectedRows.length} visit${selectedRows.length === 1 ? "" : "s"} · ${currency(selectedTotal)}` : "Select visits to add"}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCatalog, presetClientId, onSave, onResolveReview, onClose, onDelete }) {
   const { T, perms } = useApp();
   const canSeeLineCost = !!(perms.isAdmin || perms.seeProfit || perms.seeInventoryCost);
@@ -17984,7 +18296,10 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     }));
   };
   const addLine = () => setInv(s => withLocalInvoiceEdit(s, { lineItems: [...s.lineItems, { id: `l${Date.now()}`, desc: "", qty: "1", unitPrice: "", unitCost: "", taxable: false, kind: "custom" }] }));
-  const removeLine = (id) => setInv(s => withLocalInvoiceEdit(s, { lineItems: s.lineItems.filter(l => l.id !== id) }));
+  const removeLine = (id) => setInv(s => withLocalInvoiceEdit(
+    s,
+    removeInvoiceLineAndPruneCompletedVisitSources(s, id),
+  ));
 
   // ── Catalog item picker — add Services, Products, Treatments, Parts ──
   const [picker, setPicker] = useState(false);       // show the add-from-catalog sheet
@@ -18052,20 +18367,21 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const client = clients.find(c => String(c.id) === String(inv.clientId)); // type-tolerant (ids may be strings)
   const totals = invoiceTotals(inv);
   const completedHistory = client?.history || [];
+  const importedVisitSources = invoiceCompletedVisitSources(inv);
+  const clientLockedByImportedVisits = importedVisitSources.hasSources;
 
-  const importVisit = (h) => {
-    const items = (h.services || []).map((sv, i) => ({ id: `l${Date.now()}${i}`, desc: typeof sv === "string" ? sv : sv.name, qty: "1", unitPrice: String(typeof sv === "string" ? "" : (sv.price || "")), taxable: false }));
-    // Treatments are NOT billed as line items — they're folded into the service fee.
-    // Only pull in parts the tech marked to bill the client, priced at retail.
-    (h.partsUsed || []).forEach((p, i) => {
-      if (p.bill === false) return;
-      items.push({ id: `lp${Date.now()}${i}`, desc: p.name, qty: String(p.qty || 1), unitPrice: String(p.retailPer || p.costPer || ""), unitCost: String(p.costPer || 0), taxable: true, kind: "part", refId: p.id || "", unit: p.unit || "pieces" });
+  const importVisits = (selectedVisits) => {
+    setInv(current => {
+      const result = appendCompletedVisitsToInvoice(current, selectedVisits, { clientId: client?.id ?? current.clientId });
+      if (!result.addedLineCount) return current;
+      return withLocalInvoiceEdit(current, {
+        lineItems: result.lineItems,
+        sourceStopIds: result.sourceStopIds,
+        sourceCompletionReceiptIds: result.sourceCompletionReceiptIds,
+        sourceVisitClientIds: result.sourceVisitClientIds,
+        sourceVisitClientId: result.sourceVisitClientIds.length === 1 ? result.sourceVisitClientIds[0] : current.sourceVisitClientId,
+      });
     });
-    (h.productsPurchased || []).forEach((p, i) => {
-      if (p.bill === false) return;
-      items.push({ id: `lpr${Date.now()}${i}`, desc: p.name, qty: String(p.qty || 1), unitPrice: String(p.price || p.retail || ""), unitCost: String(p.cost || 0), taxable: true, kind: "product", refId: p.id || "" });
-    });
-    if (items.length) setInv(s => withLocalInvoiceEdit(s, { lineItems: items }));
     setVisitPick(false);
   };
   const [qbState, setQbState] = useState("idle"); // idle | sending | done | error
@@ -18229,10 +18545,90 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     else onClose();
   };
 
+  const reserveVisitSourcesBeforeAccounting = async (candidateInvoice) => {
+    const sources = invoiceCompletedVisitSources(candidateInvoice);
+    if (!sources.hasSources) return { ok: true, reservedInvoice: candidateInvoice };
+
+    const pendingConflict = store.listConflicts().find(({ key }) => key === "sps_invoices");
+    if (pendingConflict) {
+      return { ok: false, error: "Resolve the invoice sync conflict before saving completed visits." };
+    }
+    const pendingWriteReceipt = await store.flushKey("sps_invoices");
+    const pendingWriteIssue = storeReceiptIssue(pendingWriteReceipt, "Saving the latest invoices");
+    if (pendingWriteIssue) return { ok: false, error: pendingWriteIssue };
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const invoiceRead = await store.refresh("sps_invoices");
+      if (!invoiceRead?.ok) {
+        return { ok: false, error: invoiceRead?.error?.message || "The latest invoices could not be loaded." };
+      }
+      let latestInvoices;
+      try {
+        latestInvoices = invoiceRead.exists ? JSON.parse(invoiceRead.value || "[]") : [];
+      } catch (_) {
+        return { ok: false, error: "The shared invoice list could not be read. Nothing was sent to QuickBooks." };
+      }
+      if (!Array.isArray(latestInvoices)) {
+        return { ok: false, error: "The shared invoice list could not be read. Nothing was sent to QuickBooks." };
+      }
+
+      const reservation = reserveCompletedVisitInvoice(
+        candidateInvoice,
+        latestInvoices,
+        completedHistory,
+        { clientId: candidateInvoice.clientId },
+      );
+      if (!reservation.ok) return { ok: false, error: reservation.conflict?.message || "A completed visit is already linked to another invoice." };
+      if (!reservation.changed) return { ok: true, reservedInvoice: reservation.reservedInvoice };
+
+      const saved = await store.replaceMany([{
+        key: "sps_invoices",
+        value: JSON.stringify(reservation.invoices),
+        expectedVersion: Number(invoiceRead.version) || 0,
+      }]);
+      if (!saved?.ok) {
+        if (saved?.conflict && attempt < 2) continue;
+        return {
+          ok: false,
+          error: saved?.conflict
+            ? "Another employee linked a completed visit at the same time. Refresh the invoice and review it before saving."
+            : (saved?.error?.message || "SPS did not confirm the completed visits. Nothing was sent to QuickBooks."),
+        };
+      }
+      return { ok: true, reservedInvoice: reservation.reservedInvoice };
+    }
+    return { ok: false, error: "Invoices changed repeatedly on another device. Refresh and try again." };
+  };
+
   const save = async () => {
     // Persist the client link + a name snapshot on the record (Bug 1) — never rely on
     // a transient field. clientId resolves the live client; clientName is the fallback.
-    const baseInv = { ...inv, clientId: client?.id ?? inv.clientId ?? null, clientName: client?.name || "", clientAddress: client?.address || "", clientEmail: client?.email || "" };
+    let baseInv = { ...inv, clientId: client?.id ?? inv.clientId ?? null, clientName: client?.name || "", clientAddress: client?.address || "", clientEmail: client?.email || "" };
+
+    // Claim every completed-stop source in the latest shared invoice snapshot before
+    // QuickBooks sees this invoice. The CAS retry makes two devices race safely: only
+    // one can reserve a stop or receipt, and the loser never creates an accounting twin.
+    if (invoiceCompletedVisitSources(baseInv).hasSources) {
+      setQbState("sending");
+      setQbMsg("");
+      const reservation = await reserveVisitSourcesBeforeAccounting(baseInv);
+      if (!reservation.ok) {
+        setQbState("error");
+        setQbMsg(reservation.error || "The completed visits could not be confirmed. Nothing was sent to QuickBooks.");
+        return;
+      }
+      // A provenance-only invoice from an earlier build is upgraded during the
+      // authoritative reservation. Carry that verified client identity into the
+      // subsequent local save so the normal editor write cannot remove the upgrade.
+      const reservedSources = invoiceCompletedVisitSources(reservation.reservedInvoice);
+      baseInv = {
+        ...baseInv,
+        sourceVisitClientIds: reservedSources.sourceVisitClientIds,
+        ...(reservedSources.sourceVisitClientIds.length === 1
+          ? { sourceVisitClientId: reservedSources.sourceVisitClientIds[0] }
+          : {}),
+      };
+    }
 
     // Not connected to QB, no client selected, or no line items — just save locally.
     // (QuickBooks requires at least one line, so an empty invoice can't sync.)
@@ -18514,9 +18910,16 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         <div style={{ display: "flex", flexDirection: narrowInvoice ? "column" : "row", gap: 10 }}>
           <div style={{ flex: 2 }}>
             <label style={label}>Client</label>
-            <select value={inv.clientId == null ? "" : String(inv.clientId)} onChange={e => { const c = clients.find(x => String(x.id) === e.target.value); set("clientId", c ? c.id : e.target.value); }} style={field}>
+            <select
+              value={inv.clientId == null ? "" : String(inv.clientId)}
+              disabled={clientLockedByImportedVisits}
+              aria-describedby={clientLockedByImportedVisits ? "invoice-visit-client-lock" : undefined}
+              onChange={e => { const c = clients.find(x => String(x.id) === e.target.value); set("clientId", c ? c.id : e.target.value); }}
+              style={{ ...field, opacity: clientLockedByImportedVisits ? 0.72 : 1, cursor: clientLockedByImportedVisits ? "not-allowed" : "default" }}
+            >
               {selectableClients(clients).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
+            {clientLockedByImportedVisits && <div id="invoice-visit-client-lock" style={{ marginTop: 5, fontSize: 11, lineHeight: 1.4, color: T.textMuted }}>Client is locked because completed visits are attached. Remove those visit lines before changing the client.</div>}
           </div>
           <div style={{ flex: 1 }}>
             <label style={label}>Invoice #</label>
@@ -18556,27 +18959,8 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         <div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
             <label style={{ ...label, marginBottom: 0 }}>Line Items</label>
-            {completedHistory.length > 0 && <button onClick={() => setVisitPick(v => !v)} style={{ background: "none", border: "none", color: T.primary, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>＋ From a visit</button>}
+            {completedHistory.length > 0 && <button data-invoice-add-visits onClick={() => setVisitPick(true)} style={{ minHeight: 38, background: hexA(T.primary, 0.07), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 10, padding: "8px 11px", color: T.primary, fontWeight: 800, fontSize: 12, cursor: "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={13} /> Add completed visits</button>}
           </div>
-          {visitPick && (
-            <div style={{ background: T.surfaceAlt, borderRadius: 12, padding: 10, marginBottom: 10, display: "flex", flexDirection: "column", gap: 6 }}>
-              <div style={{ fontSize: 11, color: T.textMuted, padding: "2px 4px" }}>Pull line items from a completed visit:</div>
-              {completedHistory.slice(0, 8).map((h, i) => {
-                const billCount = (h.partsUsed || []).filter(p => p.bill !== false).length;
-                const productCount = (h.productsPurchased || []).filter(p => p.bill !== false).length;
-                const addOnCount = billCount + productCount;
-                return (
-                  <button key={i} onClick={() => importVisit(h)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 9, padding: "9px 11px", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-                    <span style={{ fontSize: 13, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {h.date} · {(h.services || []).map(s => typeof s === "string" ? s : s.name).join(", ") || h.type}
-                      {addOnCount > 0 && <span style={{ color: T.primary, fontWeight: 700 }}> · +{addOnCount} billed item{addOnCount !== 1 ? "s" : ""}</span>}
-                    </span>
-                    <span style={{ fontSize: 13, fontWeight: 700, color: T.text, flexShrink: 0 }}>{h.invoice}</span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {inv.lineItems.length === 0 && (
               <div style={{ textAlign: "center", padding: "18px 12px", border: `1.5px dashed ${T.border}`, borderRadius: 12, color: T.textMuted, fontSize: 13 }}>
@@ -18780,6 +19164,16 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           showCosts={canSeeLineCost}
           showInventory={!!(perms.isAdmin || perms.seeInventory)}
           T={T}
+        />
+      )}
+      {visitPick && (
+        <InvoiceVisitPicker
+          visits={completedHistory}
+          invoices={invoices}
+          currentInvoice={inv}
+          clientId={client?.id ?? inv.clientId}
+          onAdd={importVisits}
+          onClose={() => setVisitPick(false)}
         />
       )}
     </Modal>
@@ -21636,7 +22030,7 @@ function TotalSalesScreen({ invoices, clients, onBack, T }) {
 }
 
 // Dense, sortable, full-width invoices table — desktop "Table" view (Phase 3).
-function InvoicesTable({ items, onRowClick, T }) {
+function InvoicesTable({ items, onRowClick, selectedIds = [], onToggleSelected, onToggleAll, T }) {
   const [sort, setSort] = useState({ key: "number", dir: "desc" });
   const money = (n) => `$${parseFloat(n || 0).toFixed(2)}`;
   const fmtD = (d) => (d instanceof Date && !isNaN(d)) ? d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "—";
@@ -21662,6 +22056,8 @@ function InvoicesTable({ items, onRowClick, T }) {
       default: return 0;
     }
   });
+  const selectedSet = new Set((selectedIds || []).map(String));
+  const allVisibleSelected = sorted.length > 0 && sorted.every(iv => selectedSet.has(String(iv.id)));
   const click = (key) => setSort(s => s.key === key
     ? { key, dir: s.dir === "asc" ? "desc" : "asc" }
     : { key, dir: (key === "client" || key === "status") ? "asc" : "desc" });
@@ -21670,6 +22066,15 @@ function InvoicesTable({ items, onRowClick, T }) {
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}>
         <thead>
           <tr>
+            <th style={{ position: "sticky", top: 0, width: 44, background: T.bg, padding: "10px 8px 10px 12px", borderBottom: `1.5px solid ${T.border}`, zIndex: 1 }}>
+              <input
+                type="checkbox"
+                aria-label="Select all filtered invoices"
+                checked={allVisibleSelected}
+                onChange={(event) => onToggleAll?.(event.target.checked)}
+                style={{ width: 17, height: 17, accentColor: T.primary, cursor: "pointer" }}
+              />
+            </th>
             {cols.map(c => (
               <th key={c.key} onClick={() => click(c.key)}
                 style={{ position: "sticky", top: 0, background: T.bg, textAlign: c.align, padding: "10px 14px", borderBottom: `1.5px solid ${T.border}`, color: sort.key === c.key ? T.primary : T.textMuted, fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em", cursor: "pointer", whiteSpace: "nowrap", userSelect: "none", zIndex: 1 }}>
@@ -21681,9 +22086,19 @@ function InvoicesTable({ items, onRowClick, T }) {
         <tbody>
           {sorted.map(iv => (
             <tr key={iv.id} onClick={() => onRowClick(iv)}
-              style={{ cursor: "pointer", borderBottom: `1px solid ${T.border}` }}
+              style={{ cursor: "pointer", borderBottom: `1px solid ${T.border}`, background: selectedSet.has(String(iv.id)) ? hexA(T.primary, 0.045) : "transparent" }}
               onMouseEnter={e => e.currentTarget.style.background = hexA(T.primary, 0.04)}
-              onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+              onMouseLeave={e => e.currentTarget.style.background = selectedSet.has(String(iv.id)) ? hexA(T.primary, 0.045) : "transparent"}>
+              <td style={{ padding: "10px 8px 10px 12px" }}>
+                <input
+                  type="checkbox"
+                  aria-label={`Select invoice ${iv.number || ""}`}
+                  checked={selectedSet.has(String(iv.id))}
+                  onChange={() => onToggleSelected?.(iv)}
+                  onClick={(event) => event.stopPropagation()}
+                  style={{ width: 17, height: 17, accentColor: T.primary, cursor: "pointer" }}
+                />
+              </td>
               <td style={{ padding: "11px 14px", fontWeight: 700, color: T.text, whiteSpace: "nowrap" }}>{iv.number}</td>
               <td style={{ padding: "11px 14px", color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 0 }}>{iv._client?.name || iv.clientName || "—"}</td>
               <td style={{ padding: "11px 14px", color: T.textMuted, whiteSpace: "nowrap" }}>{fmtD(iv._date)}</td>
@@ -21695,6 +22110,218 @@ function InvoicesTable({ items, onRowClick, T }) {
         </tbody>
       </table>
     </div>
+  );
+}
+
+function InvoiceBulkEditModal({ invoices, selectedIds, onApply, onClose }) {
+  const { T } = useApp();
+  const [applyStatus, setApplyStatus] = useState(false);
+  const [status, setStatus] = useState("Draft");
+  const [applyTerms, setApplyTerms] = useState(false);
+  const [termsDays, setTermsDays] = useState("15");
+  const [applyDueDate, setApplyDueDate] = useState(false);
+  const [dueDate, setDueDate] = useState("");
+  const [applyNotes, setApplyNotes] = useState(false);
+  const [notes, setNotes] = useState("");
+  const [result, setResult] = useState(null);
+
+  const save = async () => {
+    const patch = {
+      ...(applyStatus ? { status } : {}),
+      ...(applyTerms ? { termsDays: Number(termsDays) } : {}),
+      ...(applyDueDate && dueDate ? { dueDate } : {}),
+      ...(applyNotes ? { notes } : {}),
+    };
+    const next = applySafeBulkInvoiceEdits(invoices, selectedIds, patch);
+    if (!next.updatedIds.length && !next.skipped.length) {
+      setResult({ error: "Choose at least one change before applying." });
+      return;
+    }
+    await onApply?.(next);
+    setResult(next);
+  };
+
+  const row = (checked, setChecked, title, body) => (
+    <div style={{ borderTop: `1px solid ${T.border}`, padding: "13px 0", display: "grid", gridTemplateColumns: "24px minmax(0, 1fr)", gap: 10, alignItems: "start" }}>
+      <input type="checkbox" checked={checked} onChange={(event) => setChecked(event.target.checked)} style={{ width: 18, height: 18, marginTop: 2, accentColor: T.primary }} />
+      <div>
+        <div style={{ fontSize: 13.5, fontWeight: 800, color: T.text, marginBottom: checked ? 8 : 0 }}>{title}</div>
+        {checked && body}
+      </div>
+    </div>
+  );
+
+  return (
+    <Modal title={`Edit ${selectedIds.length} invoice${selectedIds.length === 1 ? "" : "s"}`} onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column" }}>
+        <div style={{ fontSize: 12.5, lineHeight: 1.5, color: T.textMuted, marginBottom: 10 }}>
+          Only SPS-owned invoices are changed here. QuickBooks-linked, paid, void, and unresolved records stay untouched and are listed as skipped.
+        </div>
+        {row(applyStatus, setApplyStatus, "Status", (
+          <select value={status} onChange={(event) => setStatus(event.target.value)} style={{ width: "100%", padding: "10px 12px", border: `1px solid ${T.border}`, borderRadius: 9, color: T.text, background: T.surface, fontFamily: "inherit", fontSize: 13 }}>
+            <option value="Draft">Draft</option>
+            <option value="Sent">Sent</option>
+          </select>
+        ))}
+        {row(applyTerms, setApplyTerms, "Payment terms", (
+          <select value={termsDays} onChange={(event) => setTermsDays(event.target.value)} style={{ width: "100%", padding: "10px 12px", border: `1px solid ${T.border}`, borderRadius: 9, color: T.text, background: T.surface, fontFamily: "inherit", fontSize: 13 }}>
+            {[0, 7, 15, 30, 45, 60].map(days => <option key={days} value={days}>{days === 0 ? "Due on receipt" : `Net ${days}`}</option>)}
+          </select>
+        ))}
+        {row(applyDueDate, setApplyDueDate, "Exact due date", (
+          <input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} style={{ width: "100%", boxSizing: "border-box", padding: "10px 12px", border: `1px solid ${T.border}`, borderRadius: 9, color: T.text, background: T.surface, fontFamily: "inherit", fontSize: 13 }} />
+        ))}
+        {row(applyNotes, setApplyNotes, "Notes and terms", (
+          <textarea rows={4} value={notes} onChange={(event) => setNotes(event.target.value)} style={{ width: "100%", boxSizing: "border-box", resize: "vertical", padding: "10px 12px", border: `1px solid ${T.border}`, borderRadius: 9, color: T.text, background: T.surface, fontFamily: "inherit", fontSize: 13, lineHeight: 1.45 }} />
+        ))}
+
+        {result?.error && <div style={{ marginTop: 10, fontSize: 12.5, fontWeight: 700, color: T.warning }}>{result.error}</div>}
+        {result?.updatedIds && (
+          <div style={{ marginTop: 10, padding: "10px 12px", borderLeft: `3px solid ${T.primary}`, background: hexA(T.primary, 0.045), color: T.text, fontSize: 12.5, lineHeight: 1.5 }}>
+            Updated {result.updatedIds.length}. Skipped {result.skipped.length} protected record{result.skipped.length === 1 ? "" : "s"}.
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 9, justifyContent: "flex-end", marginTop: 16 }}>
+          <button type="button" onClick={onClose} style={{ border: `1px solid ${T.border}`, background: T.surface, color: T.text, borderRadius: 10, padding: "10px 15px", fontWeight: 750, fontFamily: "inherit", cursor: "pointer" }}>{result?.updatedIds ? "Close" : "Cancel"}</button>
+          {!result?.updatedIds && <Btn onClick={save}>Apply changes</Btn>}
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function InvoiceBulkSendModal({ invoices, clients, onSave, onClose }) {
+  const { T, branding, email } = useApp();
+  const [doSms, setDoSms] = useState(true);
+  const [doChat, setDoChat] = useState(true);
+  const [doEmail, setDoEmail] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [pendingIds, setPendingIds] = useState(() => invoices.map(invoice => String(invoice.id)));
+  const [results, setResults] = useState([]);
+  const cfg = email || {};
+  const money = (value) => `$${Number(value || 0).toFixed(2)}`;
+
+  const fill = (template, invoice, client, linkText) => String(template || "")
+    .replace(/\{first\}/g, String(client?.name || invoice.clientName || "there").trim().split(" ")[0] || "there")
+    .replace(/\{company\}/g, branding.companyName || "")
+    .replace(/\{number\}/g, invoice.number || "")
+    .replace(/\{amount\}|\{total\}/g, money(invoiceTotals(invoice).total))
+    .replace(/\{dueDate\}/g, invoice.dueDate || "soon")
+    .replace(/\{link\}/g, linkText);
+
+  const send = async () => {
+    setSending(true);
+    const target = invoices.filter(invoice => pendingIds.includes(String(invoice.id)));
+    const nextResults = await deliverSelectedInvoices({
+      invoices: target,
+      buildChannels: async (invoice) => {
+        const client = clients.find(candidate => invoiceMatchesClient(invoice, candidate));
+        const phone = String(client?.phone || "").replace(/[^\d+]/g, "");
+        const clientEmail = String(invoice.clientEmail || client?.email || "").trim();
+        const payLink = invoice.paymentLink || "";
+        const smsBody = appendClientLinks(
+          fill(cfg.smsInvoice || DEFAULT_EMAIL.smsInvoice, invoice, client, payLink ? "Payment options are below." : "Open it in SPS Way below."),
+          { target: "invoices", origin: PROD_URL, heading: "View and pay in SPS Way", protectedLines: payLink ? [`Pay online: ${payLink}`] : [] },
+        );
+        const chatBody = fill(cfg.chatInvoice || DEFAULT_EMAIL.chatInvoice, invoice, client, payLink || "View and pay it in your portal.");
+        const emailSubject = fill(cfg.invoiceEmailSubject || DEFAULT_EMAIL.invoiceEmailSubject, invoice, client, payLink || PROD_URL);
+        const emailIntro = fill(cfg.invoiceEmailIntro || DEFAULT_EMAIL.invoiceEmailIntro, invoice, client, payLink || PROD_URL);
+        const totals = invoiceTotals(invoice);
+        const channels = [
+          {
+            id: "sms",
+            enabled: doSms && !!phone && commPref(client, "text"),
+            send: async () => sendSms(phone, smsBody, { clientId: client?.id, type: "Invoice" }),
+          },
+          {
+            id: "app",
+            enabled: doChat && !!client?.id && commPref(client, "app"),
+            send: async () => {
+              const response = await postToPortalSafe({ client_id: String(client.id), sender: "staff", sender_name: branding.companyName || "", body: chatBody });
+              return response?.error ? { ok: false, error: response.error.message } : { ok: true, held: !!response?.held, acceptedForClient: !response?.held };
+            },
+          },
+          {
+            id: "email",
+            enabled: doEmail && !!clientEmail && commPref(client, "email"),
+            send: async () => {
+              const response = await fetch(`${PROD_URL}/api/send-invoice`, {
+                method: "POST",
+                headers: await authHeaders({ "Content-Type": "application/json" }),
+                body: JSON.stringify({
+                  ...senderEmailFields(client?.id),
+                  emailSubject,
+                  emailIntro,
+                  to: clientEmail,
+                  clientName: invoice.clientName || client?.name || "",
+                  branding: { companyName: branding.companyName || "", companyEmail: branding.companyEmail || "", companyPhone: branding.companyPhone || "", companyAddress: branding.companyAddress || "", logoType: branding.logoType || "", logoImage: branding.logoImage || "", accent: T.primary },
+                  invoice: { number: invoice.number, date: invoice.date, dueDate: invoice.dueDate, terms: invoice.notes || "", taxRate: invoice.taxRate || 0, lineItems: (invoice.lineItems || []).map(line => ({ desc: line.desc, qty: line.qty, unitPrice: line.unitPrice, bundleNote: line.bundleNote, taxable: line.taxable })), subtotal: totals.subtotal, tax: totals.tax, total: totals.total, discountTotal: totals.discountTotal },
+                  payLink: payLink || PROD_URL,
+                }),
+              });
+              const body = await response.json().catch(() => ({}));
+              logComm({ clientId: client?.id, type: "Invoice", channel: "email", body: `Invoice ${invoice.number || ""} emailed`, ok: response.ok, origin: ACTOR ? `${ACTOR} · invoice bulk send` : "invoice bulk send", recipient: clientEmail });
+              return { ok: response.ok, held: !!body.held, acceptedForClient: response.ok && !body.held, error: body.error };
+            },
+          },
+        ];
+        if (!channels.some(channel => channel.enabled)) {
+          channels.push({ id: "contact", enabled: true, send: async () => ({ ok: false, error: "No permitted delivery channel is available" }) });
+        }
+        return channels;
+      },
+      onAccepted: async (invoice) => onSave?.({ ...invoice, status: "Sent", sentDate: invoice.sentDate || todayMDY() }),
+    });
+    setResults(current => [...current.filter(row => !nextResults.some(next => next.invoiceId === row.invoiceId)), ...nextResults]);
+    setPendingIds(nextResults.filter(result => !result.accepted).map(result => result.invoiceId));
+    setSending(false);
+  };
+
+  const acceptedCount = results.filter(result => result.accepted).length;
+  const finished = results.length > 0 && pendingIds.length === 0;
+  return (
+    <Modal title={`Send ${invoices.length} invoice${invoices.length === 1 ? "" : "s"}`} onClose={() => { if (!sending) onClose(); }} maxWidth={760}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ fontSize: 12.5, color: T.textMuted, lineHeight: 1.5 }}>
+          Each client receives only the channels available and enabled in their communication preferences. QuickBooks numbers, totals, tax, and line items are not changed.
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", borderTop: `1px solid ${T.border}`, borderBottom: `1px solid ${T.border}` }}>
+          {[["Text", doSms, setDoSms], ["In app", doChat, setDoChat], ["Email", doEmail, setDoEmail]].map(([label, value, setter], index) => (
+            <label key={label} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "12px 8px", borderLeft: index ? `1px solid ${T.border}` : "none", fontSize: 12.5, fontWeight: 750, color: T.text }}>
+              <input type="checkbox" checked={value} onChange={(event) => setter(event.target.checked)} style={{ width: 17, height: 17, accentColor: T.primary }} />
+              {label}
+            </label>
+          ))}
+        </div>
+        <div style={{ maxHeight: 260, overflowY: "auto", borderBottom: `1px solid ${T.border}` }}>
+          {invoices.map(invoice => {
+            const client = clients.find(candidate => invoiceMatchesClient(invoice, candidate));
+            const outcome = results.find(result => result.invoiceId === String(invoice.id));
+            return (
+              <div key={invoice.id} style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 12, padding: "10px 2px", borderTop: `1px solid ${T.border}` }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{client?.name || invoice.clientName || "Client"}</div>
+                  <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2 }}>#{invoice.number} · {money(invoiceTotals(invoice).total)}</div>
+                </div>
+                <div style={{ fontSize: 11.5, fontWeight: 800, color: outcome?.accepted ? T.primary : outcome ? T.warning : T.textMuted, alignSelf: "center" }}>
+                  {outcome?.accepted ? "Delivered" : outcome ? "Needs attention" : "Ready"}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {results.length > 0 && (
+          <div style={{ borderLeft: `3px solid ${acceptedCount ? T.primary : T.warning}`, background: acceptedCount ? hexA(T.primary, 0.045) : hexA(T.warning, 0.06), padding: "10px 12px", fontSize: 12.5, color: T.text, lineHeight: 1.5 }}>
+            {acceptedCount} delivered. {pendingIds.length} still need attention. Successful invoices will not be sent again by Retry.
+          </div>
+        )}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 9 }}>
+          <button type="button" onClick={onClose} disabled={sending} style={{ border: `1px solid ${T.border}`, background: T.surface, color: T.text, borderRadius: 10, padding: "10px 15px", fontWeight: 750, fontFamily: "inherit", cursor: sending ? "default" : "pointer" }}>{finished ? "Done" : "Close"}</button>
+          {!finished && <Btn onClick={send} disabled={sending || (!doSms && !doChat && !doEmail)}>{sending ? "Sending" : results.length ? `Retry ${pendingIds.length} undelivered` : "Send selected"}</Btn>}
+        </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -22218,7 +22845,9 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
   // ── Editor state ──
   const [creating,   setCreating]   = useState(false);
   const [batching,   setBatching]   = useState(false); // B9-4 batch invoicing
-  const [view,       setView]       = useState("split"); // desktop only: "split" (master-detail) | "table"
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [bulkEditing, setBulkEditing] = useState(false);
+  const [bulkSending, setBulkSending] = useState(false);
 
   // ── QuickBooks sync from the Invoices tab ──
   const [qbSyncing, setQbSyncing] = useState(false);
@@ -22399,6 +23028,20 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
     if (sortBy === "client_asc")   return (a._client?.name||a.clientName||"").localeCompare(b._client?.name||b.clientName||"");
     return b._num - a._num;
   });
+  const visibleInvoiceSignature = sorted.map(invoice => String(invoice.id || "")).join("|");
+  useEffect(() => {
+    setSelectedIds((current) => {
+      const next = pruneInvoiceSelection(current, sorted);
+      return next.join("|") === current.join("|") ? current : next;
+    });
+  }, [visibleInvoiceSignature]); // eslint-disable-line react-hooks/exhaustive-deps
+  const selectedSummary = summarizeSelectedInvoices(sorted, selectedIds);
+  const selectedInvoices = sorted.filter(invoice => selectedSummary.ids.includes(String(invoice.id)));
+  const toggleSelectedInvoice = (invoice) => setSelectedIds((current) => {
+    const id = String(invoice?.id || "");
+    return current.includes(id) ? current.filter(value => value !== id) : [...current, id];
+  });
+  const toggleAllVisibleInvoices = (checked) => setSelectedIds((current) => invoiceSelectionForVisible(current, sorted, checked));
 
   // ── Group ──
   const grouped = (() => {
@@ -22446,20 +23089,12 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
             </button>
             );
           })()}
-          {vp.isDesktop && (
-            <div style={{ display: "flex", background: T.surfaceAlt, borderRadius: 11, padding: 3, gap: 2 }}>
-              {[["split", "Split"], ["table", "Table"]].map(([id, lbl]) => (
-                <button key={id} onClick={() => setView(id)}
-                  style={{ padding: "6px 13px", border: "none", borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer", background: view === id ? T.surface : "transparent", color: view === id ? T.primary : T.textMuted, fontFamily: "inherit", boxShadow: view === id ? "0 1px 3px rgba(0,0,0,0.12)" : "none" }}>{lbl}</button>
-              ))}
-            </div>
-          )}
           <button onClick={() => setShowFilters(f => !f)}
             style={{ minHeight: 40, display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 12, border: `1.5px solid ${activeFilterCount > 0 ? T.primary : T.border}`, background: activeFilterCount > 0 ? hexA(T.primary, 0.08) : T.surface, color: activeFilterCount > 0 ? T.primary : T.textMuted, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
             <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M3 6h18M7 12h10M11 18h2"/></svg>
             Filter{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
           </button>
-          {perms.invoiceCreate && <Btn sm variant="ghost" onClick={() => setBatching(true)} style={{ minHeight: 40 }}>Batch</Btn>}
+          {perms.invoiceCreate && <Btn sm variant="ghost" onClick={() => setBatching(true)} style={{ minHeight: 40 }}>Create batch</Btn>}
           {perms.invoiceCreate && <Btn sm onClick={() => setCreating(true)} style={{ minHeight: 40 }}>+ New</Btn>}
         </div>
       </div>
@@ -22482,42 +23117,47 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
             <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>Compare SPS with the confirmed QuickBooks record, then apply either version in one step.</div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 7, flexShrink: 0 }}>
-            <span style={{ fontSize: 13, fontWeight: 850, color: T.warning }}>{moneyFmt(localReviewBalance)}</span>
+            {(perms.seeTotalSales || perms.isAdmin) && (
+              <span data-invoice-review-balance style={{ fontSize: 13, fontWeight: 850, color: T.warning }}>{moneyFmt(localReviewBalance)}</span>
+            )}
             <span style={{ fontSize: 11.5, fontWeight: 800, color: T.warning }}>Review & sync</span>
             <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke={T.warning} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6"/></svg>
           </div>
         </button>
       )}
 
-      {/* Summary tiles — tap to see Total Sales */}
-      <div style={{ display: "grid", gridTemplateColumns: vp.isDesktop ? "repeat(2, minmax(0, 260px))" : "1fr 1fr", gap: 10, marginBottom: 16 }}>
-        <div onClick={() => (perms.seeTotalSales || perms.isAdmin) && setShowSales(true)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "14px 16px", cursor: (perms.seeTotalSales || perms.isAdmin) ? "pointer" : "default" }}
-          onMouseEnter={e => { if (perms.seeTotalSales || perms.isAdmin) e.currentTarget.style.boxShadow="0 4px 16px rgba(0,0,0,0.08)"; }}
-          onMouseLeave={e => e.currentTarget.style.boxShadow="none"}>
-          <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 6, display:"flex", justifyContent:"space-between" }}>
-            {qbAccountingComplete ? "QuickBooks outstanding · all dates" : "Outstanding"}
-            {(perms.seeTotalSales || perms.isAdmin) && <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{opacity:0.5}}><path d="m9 18 6-6-6-6"/></svg>}
-          </div>
-          <div style={{ fontSize: 24, fontWeight: 800, color: outstanding > 0 ? T.warning : T.accent, letterSpacing: "-0.02em" }}>{moneyFmt(outstanding)}</div>
-          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>
-            {qbAccountingComplete
-              ? `${outstandingCount} open invoice${outstandingCount === 1 ? "" : "s"}`
-              : `${outstandingCount} open invoice${outstandingCount === 1 ? "" : "s"}`}
-            {qbAccountingComplete && Number(qbAccounting.availableCreditBalance || 0) > 0 ? ` · ${moneyFmt(qbAccounting.availableCreditBalance)} available credits` : ""}
-            {(perms.seeTotalSales || perms.isAdmin) ? " · tap for sales" : ""}
-          </div>
+      {/* Aggregate sales are a separate financial capability from viewing an
+          individual invoice. Do not render the amounts at all for staff who
+          lack seeTotalSales; disabling a visible button still leaks them. */}
+      {(perms.seeTotalSales || perms.isAdmin) && <button
+        type="button"
+        data-invoice-summary-rail
+        onClick={() => setShowSales(true)}
+        style={{ width: "100%", display: "grid", gridTemplateColumns: vp.isPhone ? "1fr 1fr" : "minmax(180px, .9fr) minmax(180px, .9fr) minmax(180px, 1.2fr)", alignItems: "stretch", padding: 0, marginBottom: 14, border: `1px solid ${T.border}`, borderLeft: `4px solid ${T.primary}`, borderRadius: "0 12px 12px 0", overflow: "hidden", background: T.surface, color: T.text, textAlign: "left", fontFamily: "inherit", cursor: "pointer" }}
+      >
+        <div style={{ padding: "11px 14px", borderRight: `1px solid ${T.border}` }}>
+          <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.055em", textTransform: "uppercase", color: T.textMuted }}>{qbAccountingComplete ? "QuickBooks outstanding · all dates" : "Outstanding"}</div>
+          <div style={{ marginTop: 3, fontSize: vp.isPhone ? 19 : 21, lineHeight: 1.1, fontWeight: 850, letterSpacing: "-0.025em", color: outstanding > 0 ? T.warning : T.accent }}>{moneyFmt(outstanding)}</div>
+          <div style={{ marginTop: 3, fontSize: 11, color: T.textMuted }}>{outstandingCount} open</div>
         </div>
-        <div onClick={() => (perms.seeTotalSales || perms.isAdmin) && setShowSales(true)} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: "14px 16px", cursor: (perms.seeTotalSales || perms.isAdmin) ? "pointer" : "default" }}
-          onMouseEnter={e => { if (perms.seeTotalSales || perms.isAdmin) e.currentTarget.style.boxShadow="0 4px 16px rgba(0,0,0,0.08)"; }}
-          onMouseLeave={e => e.currentTarget.style.boxShadow="none"}>
-          <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: T.textMuted, marginBottom: 6, display:"flex", justifyContent:"space-between" }}>
-            Paid This Month
-            {(perms.seeTotalSales || perms.isAdmin) && <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke={T.textMuted} strokeWidth={2} strokeLinecap="round" style={{opacity:0.5}}><path d="m9 18 6-6-6-6"/></svg>}
-          </div>
-          <div style={{ fontSize: 24, fontWeight: 800, color: T.accent, letterSpacing: "-0.02em" }}>{moneyFmt(paidThisMonth)}</div>
-          <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>{overdueCount > 0 ? <span style={{ color: T.warning, fontWeight: 700 }}>{overdueCount} overdue</span> : "No overdue"}</div>
+        <div style={{ padding: "11px 14px", borderRight: vp.isPhone ? "none" : `1px solid ${T.border}` }}>
+          <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.055em", textTransform: "uppercase", color: T.textMuted }}>Paid this month</div>
+          <div style={{ marginTop: 3, fontSize: vp.isPhone ? 19 : 21, lineHeight: 1.1, fontWeight: 850, letterSpacing: "-0.025em", color: T.accent }}>{moneyFmt(paidThisMonth)}</div>
+          <div style={{ marginTop: 3, fontSize: 11, color: overdueCount ? T.warning : T.textMuted, fontWeight: overdueCount ? 750 : 500 }}>{overdueCount ? `${overdueCount} overdue` : "No overdue"}</div>
         </div>
-      </div>
+        {!vp.isPhone && (
+          <div style={{ padding: "11px 15px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>Accounting overview</div>
+              <div style={{ marginTop: 2, fontSize: 11, color: T.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {qbAccountingComplete ? "Confirmed from QuickBooks" : "Showing the SPS invoice ledger"}
+                {qbAccountingComplete && Number(qbAccounting.availableCreditBalance || 0) > 0 ? ` · ${moneyFmt(qbAccounting.availableCreditBalance)} available credits` : ""}
+              </div>
+            </div>
+            <Icon name="chevronR" size={15} />
+          </div>
+        )}
+      </button>}
 
       {/* Search */}
       <div style={{ position: "relative", marginBottom: 12 }}>
@@ -22622,6 +23262,23 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
         </div>
       )}
 
+      {vp.isDesktop && selectedSummary.count > 0 && (
+        <div
+          data-invoice-selection-bar
+          style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, marginBottom: 12, padding: "10px 12px 10px 15px", border: `1px solid ${hexA(T.primary, 0.35)}`, borderLeft: `4px solid ${T.primary}`, borderRadius: "0 11px 11px 0", background: T.surface, position: "sticky", top: 0, zIndex: 3 }}
+        >
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 850, color: T.text }}>{selectedSummary.count} selected</div>
+            <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 1 }}>{moneyExact(selectedSummary.total)} across the current filtered view</div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+            {perms.invoiceSend && <Btn sm onClick={() => setBulkSending(true)}>Send selected</Btn>}
+            {perms.invoiceCreate && <Btn sm variant="ghost" onClick={() => setBulkEditing(true)}>Edit selected</Btn>}
+            <button type="button" onClick={() => setSelectedIds([])} style={{ border: "none", background: "transparent", color: T.textMuted, fontSize: 12.5, fontWeight: 750, padding: "8px 9px", cursor: "pointer", fontFamily: "inherit" }}>Clear</button>
+          </div>
+        </div>
+      )}
+
       {/* Results summary */}
       {(() => {
         const listContent = (
@@ -22658,26 +23315,15 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
           </>
         );
         if (!vp.isDesktop) return listContent;
-        /* Desktop "Table" view: full-width dense sortable table (row → modal preview) */
-        if (view === "table") return <InvoicesTable items={sorted} onRowClick={(iv) => setPreview(iv)} T={T} />;
-        /* Desktop master-detail: invoice list (left) + selected invoice (right) */
         return (
-          <div style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden", marginTop: 4 }}>
-            <div style={{ width: vp.isTablet ? 286 : 440, flexShrink: 0, overflowY: "auto", borderRight: `1px solid ${T.border}`, paddingRight: vp.isTablet ? 14 : 18 }}>
-              {listContent}
-            </div>
-            <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden", paddingLeft: vp.isTablet ? 16 : 26 }}>
-              {livePreview
-                ? <InvoicePreview invoice={livePreview} client={clients.find(c => invoiceMatchesClient(livePreview, c))} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} embedded />
-                : (
-                  <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: T.textMuted, gap: 12, padding: 40, textAlign: "center" }}>
-                    <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.06), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="invoice" size={30} /></div>
-                    <div style={{ fontSize: 16, fontWeight: 700, color: T.text }}>Select an invoice</div>
-                    <div style={{ fontSize: 13.5, maxWidth: 260, lineHeight: 1.5 }}>Choose an invoice from the list to view it here.</div>
-                  </div>
-                )}
-            </div>
-          </div>
+          <InvoicesTable
+            items={sorted}
+            onRowClick={(invoice) => setPreview(invoice)}
+            selectedIds={selectedIds}
+            onToggleSelected={toggleSelectedInvoice}
+            onToggleAll={toggleAllVisibleInvoices}
+            T={T}
+          />
         );
       })()}
 
@@ -22727,8 +23373,29 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
       )}
       {creating && <InvoiceEditor clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onResolveReview={onResolveReview ? resolveReviewWithFeedback : undefined} onClose={() => setCreating(false)} />}
       {batching && <BatchInvoiceModal clients={clients} invoices={invoices} invoicing={invoicing} onSave={onSave} onClose={() => setBatching(false)} />}
+      {bulkEditing && (
+        <InvoiceBulkEditModal
+          invoices={invoices}
+          selectedIds={selectedSummary.ids}
+          onApply={async (result) => {
+            for (const id of result.updatedIds) {
+              const invoice = result.invoices.find(candidate => String(candidate.id) === String(id));
+              if (invoice) await onSave?.(invoice);
+            }
+          }}
+          onClose={() => setBulkEditing(false)}
+        />
+      )}
+      {bulkSending && (
+        <InvoiceBulkSendModal
+          invoices={selectedInvoices}
+          clients={clients}
+          onSave={onSave}
+          onClose={() => { setBulkSending(false); setSelectedIds([]); }}
+        />
+      )}
       {editing  && <InvoiceEditor invoice={editing} clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onResolveReview={onResolveReview ? resolveReviewWithFeedback : undefined} onDelete={onDelete} onClose={() => setEditing(null)} />}
-      {(!vp.isDesktop || view === "table") && livePreview && <InvoicePreview invoice={livePreview} client={clients.find(c => invoiceMatchesClient(livePreview, c))} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
+      {livePreview && <InvoicePreview invoice={livePreview} client={clients.find(c => invoiceMatchesClient(livePreview, c))} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
     </div>
   );
 }

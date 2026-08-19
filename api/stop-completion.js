@@ -10,6 +10,13 @@ import { compareAndSetAppStateBatch, readAppStateVersioned } from "./_app-state.
 import { applyStopCompletion, hasPositiveTrackedUsage, isNonnegativeMoneyString, reverseStopCompletion } from "../stopCompletion.js";
 import { planCompletionInvoice } from "../completionInvoice.js";
 import {
+  emptyMaintenanceBillingStore,
+  maintenanceBillingPolicyForClient,
+  normalizeMaintenanceBillingStore,
+  prepaidMaintenanceCoverage,
+  preparePrepaidMaintenanceEntry,
+} from "../maintenanceBilling.js";
+import {
   assertScheduledEstimateInventoryApplied,
   claimScheduledEstimateCompletion,
   prepareScheduledEstimateCompletionEntry,
@@ -60,7 +67,7 @@ function scheduledStops(schedule, sid) {
   const matches = [];
   for (const day of Array.isArray(schedule) ? schedule : []) {
     for (const stop of Array.isArray(day && day.stops) ? day.stops : []) {
-      if (stop && sameId(stop.sid, sid)) matches.push(stop);
+      if (stop && sameId(stop.sid, sid)) matches.push({ stop, date: day?.date });
     }
   }
   return matches;
@@ -109,13 +116,14 @@ function mutationMessage(code, itemName) {
 }
 
 async function readBaseline() {
-  const [clients, catalog, completed, schedule, invoices, invoicing] = await Promise.all([
+  const [clients, catalog, completed, schedule, invoices, invoicing, maintenanceBilling] = await Promise.all([
     readAppStateVersioned("sps_clients"),
     readAppStateVersioned("sps_catalog"),
     readAppStateVersioned("sps_completed"),
     readAppStateVersioned("sps_schedule"),
     readAppStateVersioned("sps_invoices"),
     readAppStateVersioned("sps_invoicing"),
+    readAppStateVersioned("sps_maintenance_billing"),
   ]);
   if (!clients.exists || !Array.isArray(clients.value)) throw new Error("shared_clients_invalid");
   if (!catalog.exists || !isRecord(catalog.value)) throw new Error("shared_catalog_invalid");
@@ -123,7 +131,19 @@ async function readBaseline() {
   if (!schedule.exists || !Array.isArray(schedule.value)) throw new Error("shared_schedule_invalid");
   if (invoices.exists && !Array.isArray(invoices.value)) throw new Error("shared_invoices_invalid");
   if (invoicing.exists && !isRecord(invoicing.value)) throw new Error("shared_invoicing_invalid");
-  return { clients, catalog, completed, schedule, invoices, invoicing };
+  const maintenanceBillingValue = maintenanceBilling.exists
+    ? normalizeMaintenanceBillingStore(maintenanceBilling.value)
+    : emptyMaintenanceBillingStore();
+  if (!maintenanceBillingValue) throw new Error("shared_maintenance_billing_invalid");
+  return {
+    clients,
+    catalog,
+    completed,
+    schedule,
+    invoices,
+    invoicing,
+    maintenanceBilling: { ...maintenanceBilling, value: maintenanceBillingValue },
+  };
 }
 
 function validateEstimateInvoiceLink(stop, invoicesState, clientId) {
@@ -209,7 +229,9 @@ export default async function handler(req, res) {
       const stopMatches = scheduledStops(baseline.schedule.value, sid);
       if (!stopMatches.length) return res.status(409).json({ ok: false, code: "stop-not-found", error: "This stop is no longer on the shared schedule." });
       if (stopMatches.length !== 1) return res.status(409).json({ ok: false, code: "stop-id-ambiguous", error: "This stop ID appears more than once on the shared schedule. Nothing was changed." });
-      const stop = stopMatches[0];
+      const scheduledMatch = stopMatches[0];
+      const stop = scheduledMatch.stop;
+      const scheduledDate = scheduledMatch.date;
       if (mode === "complete" && stop.cancelled) {
         return res.status(409).json({ ok: false, code: "stop-cancelled", error: "A cancelled stop cannot be completed." });
       }
@@ -221,6 +243,8 @@ export default async function handler(req, res) {
       const completedValue = baseline.completed.exists ? baseline.completed.value : {};
       const isNewCompletion = mode === "complete" && !completedValue[sid];
       let completionEntry = entry;
+      let maintenanceBillingDecision = null;
+      let maintenanceBillingFenceRequired = false;
       let estimateInventoryRequirements = [];
       let estimateInvoiceFenceRequired = false;
       if (isNewCompletion && stop.sourceEstimateId) {
@@ -254,6 +278,38 @@ export default async function handler(req, res) {
             code,
             error: mutationMessage(code, error?.itemName),
           });
+        }
+      }
+      if (isNewCompletion && !stop.sourceEstimateId) {
+        const clientMatches = baseline.clients.value.filter((item) => item && sameId(item.id, clientId));
+        if (clientMatches.length === 1) {
+          // The client row carries a display mirror that ordinary client-editing
+          // staff can update. Never let that operational row decide whether an
+          // invoice is suppressed. Only the protected server-maintained ledger
+          // is authoritative, and fence its version in the completion commit.
+          const clientForBilling = { ...clientMatches[0] };
+          const authoritativePolicy = maintenanceBillingPolicyForClient(
+            baseline.maintenanceBilling.value,
+            clientId,
+          );
+          if (authoritativePolicy) clientForBilling.maintenanceBilling = authoritativePolicy;
+          else delete clientForBilling.maintenanceBilling;
+          maintenanceBillingFenceRequired = true;
+          const prepared = preparePrepaidMaintenanceEntry({
+            client: clientForBilling,
+            stop,
+            entry: completionEntry,
+            scheduledDate,
+          });
+          completionEntry = prepared.entry;
+          maintenanceBillingDecision = prepared.decision;
+          if (maintenanceBillingDecision?.blocked) {
+            return res.status(409).json({
+              ok: false,
+              code: maintenanceBillingDecision.reason,
+              error: "Prepaid maintenance coverage must start on the first day of a month and end on the last day of a month. Update the client's billing coverage before completing this stop. Nothing was changed.",
+            });
+          }
         }
       }
       const mutation = mode === "complete"
@@ -311,6 +367,15 @@ export default async function handler(req, res) {
           || completionEntry
         )
         : null;
+      if (mode === "complete" && !isNewCompletion) {
+        maintenanceBillingDecision = prepaidMaintenanceCoverage({
+          client,
+          stop,
+          entry: durableCompletionEntry,
+          scheduledDate,
+          policySource: "entry",
+        });
+      }
       const invoicePlan = planCompletionInvoice({
         mode,
         invoices: baseline.invoices.exists ? baseline.invoices.value : [],
@@ -323,6 +388,7 @@ export default async function handler(req, res) {
         receiptId: mutation.receipt?.id || receiptId,
         completedAt: mutation.receipt?.completedAt || completedAt,
         now: completedAt,
+        maintenanceBillingDecision,
       });
       if ((mutation.alreadyCompleted || mutation.alreadyReversed) && !invoicePlan.changed) {
         return res.status(200).json({
@@ -391,6 +457,11 @@ export default async function handler(req, res) {
         key: "sps_catalog",
         expectedVersion: baseline.catalog.version,
         value: mutation.catalog,
+      });
+      if (maintenanceBillingFenceRequired) operations.push({
+        key: "sps_maintenance_billing",
+        expectedVersion: baseline.maintenanceBilling.exists ? baseline.maintenanceBilling.version : 0,
+        value: baseline.maintenanceBilling.value,
       });
       const saved = await compareAndSetAppStateBatch(operations);
       if (saved.applied) {

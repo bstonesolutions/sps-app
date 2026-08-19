@@ -1,3 +1,9 @@
+import {
+  isRecurringMaintenanceStop,
+  prepaidMaintenanceCoverage,
+  recurringMaintenanceCadence,
+} from "./maintenanceBilling.js";
+
 export const COMPLETION_INVOICE_VERSION = 1;
 
 const text = (value) => String(value == null ? "" : value).trim();
@@ -91,27 +97,6 @@ function findScheduledStop(schedule, sid) {
   return matches[0] || null;
 }
 
-function cadence(value) {
-  const normalized = text(value).toLowerCase().replace(/[^a-z]/g, "");
-  if (normalized.includes("biweekly") || normalized.includes("everytwoweeks")) return "biweekly";
-  if (normalized.includes("weekly")) return "weekly";
-  if (normalized.includes("monthly")) return "monthly";
-  return normalized;
-}
-
-function serviceCadence(stop, client) {
-  const explicit = cadence(
-    stop?.frequency
-    || stop?.routeFreq
-    || client?.routeFreq
-    || client?.preferredFreq
-    || client?.planFreq
-    || client?.autoInvoice,
-  );
-  if (explicit) return explicit;
-  return cadence(stop?.type);
-}
-
 function isEstimateStop(stop, entry) {
   return !!(
     text(stop?.source).toLowerCase() === "estimate"
@@ -121,16 +106,10 @@ function isEstimateStop(stop, entry) {
 }
 
 function isMonthlyAggregatedMaintenanceStop(stop, client) {
-  if (!stop || stop.cancelled || isEstimateStop(stop)) return false;
+  if (!isRecurringMaintenanceStop(stop, client)) return false;
   const billingMode = text(stop.billingMode || stop.billingDisposition).toLowerCase();
-  if (["one-off", "oneoff", "single"].includes(billingMode) || stop.recurring === false) return false;
   if (["monthly-maintenance", "monthly_maintenance"].includes(billingMode)) return true;
-
-  const frequency = serviceCadence(stop, client);
-  if (!new Set(["weekly", "biweekly"]).has(frequency)) return false;
-  const type = text(stop.type).toLowerCase();
-  if (/repair|install|startup|start-up|cleanout|clean-out|inspection|consult|emergency|seasonal/.test(type)) return false;
-  return !type || /service|maintenance/.test(type);
+  return new Set(["weekly", "biweekly"]).has(recurringMaintenanceCadence(stop, client));
 }
 
 function markerReceiptId(completed, sid) {
@@ -405,6 +384,7 @@ function completionInvoiceForStop(invoices, stop) {
   return list(invoices).filter((invoice) => (
     (!!deterministicId && text(invoice?.id) === deterministicId)
     || (!!sid && text(invoice?.sourceStopId) === sid)
+    || (!!sid && list(invoice?.sourceStopIds).some((sourceSid) => text(sourceSid) === sid))
   ));
 }
 
@@ -440,6 +420,103 @@ function existingOutcome(matches, kind, extra = {}) {
     };
   }
   return null;
+}
+
+function planPrepaidMaintenance({
+  invoices,
+  invoicing,
+  client,
+  stop,
+  entry,
+  sourceReceiptId,
+  issueDate,
+  createdAt,
+  coverage,
+}) {
+  const sourceStopId = text(stop.sid);
+  const existingMatches = completionInvoiceForStop(invoices, stop);
+  if (existingMatches.length > 1) {
+    return {
+      invoices,
+      changed: false,
+      outcome: {
+        status: "review_required",
+        kind: "prepaid-maintenance",
+        reason: "multiple-invoices-reference-covered-stop",
+        action: "preserve-invoices",
+        invoiceIds: existingMatches.map((invoice) => invoice.id),
+        sourceStopId,
+      },
+    };
+  }
+  if (existingMatches.length === 1) {
+    const existing = existingMatches[0];
+    if (text(existing.source) === "prepaid-maintenance-extras") {
+      return {
+        invoices,
+        changed: false,
+        outcome: existingOutcome(existingMatches, "prepaid-maintenance-extras", { sourceStopId }),
+      };
+    }
+    return {
+      invoices,
+      changed: false,
+      outcome: {
+        status: "review_required",
+        kind: "prepaid-maintenance",
+        reason: "invoice-already-references-covered-stop",
+        action: "preserve-invoice",
+        invoiceId: existing.id,
+        invoiceNumber: existing.number || "",
+        sourceStopId,
+      },
+    };
+  }
+
+  const lineItems = purchasedLines(entry, sourceStopId, sourceReceiptId);
+  if (!lineItems.length) {
+    return {
+      invoices,
+      changed: false,
+      outcome: {
+        status: "covered",
+        kind: "prepaid-maintenance",
+        action: "no-draft",
+        sourceStopId,
+        coverage: copy(coverage.snapshot),
+      },
+    };
+  }
+
+  const draft = finalizeAutoDraft(buildDraftBase({
+    invoices,
+    invoicing,
+    client,
+    lineItems,
+    issueDate,
+    createdAt,
+    source: {
+      id: `iv_stop_${safeIdPart(sourceStopId)}`,
+      fields: {
+        source: "prepaid-maintenance-extras",
+        sourceStopId,
+        ...(sourceReceiptId ? { sourceCompletionReceiptId: sourceReceiptId } : {}),
+        maintenanceBilling: copy(coverage.snapshot),
+      },
+    },
+  }));
+  return {
+    invoices: [draft, ...list(invoices)],
+    changed: true,
+    outcome: {
+      status: "created",
+      kind: "prepaid-maintenance-extras",
+      invoiceId: draft.id,
+      invoiceNumber: draft.number,
+      sourceStopId,
+      extraLineCount: lineItems.length,
+    },
+  };
 }
 
 function untouchedAutoDraft(invoice) {
@@ -489,7 +566,11 @@ function planReopen({ invoices, stop }) {
   }
 
   const invoice = matches[0];
-  const kind = text(invoice.source) === "monthly-maintenance" ? "monthly" : "one-off";
+  const kind = text(invoice.source) === "monthly-maintenance"
+    ? "monthly"
+    : text(invoice.source) === "prepaid-maintenance-extras"
+      ? "prepaid-maintenance-extras"
+      : "one-off";
   if (!untouchedAutoDraft(invoice)) {
     return {
       invoices,
@@ -539,6 +620,7 @@ export function planCompletionInvoice({
   receiptId = "",
   completedAt,
   now = completedAt || Date.now(),
+  maintenanceBillingDecision = null,
 } = {}) {
   if (!stop || !text(stop.sid)) throw new TypeError("A scheduled stop with an ID is required.");
   if (!client || client.id == null || text(client.id) === "") throw new TypeError("The stop client is required.");
@@ -570,6 +652,43 @@ export function planCompletionInvoice({
   const issueDate = formatMDY(completedAt || now) || formatMDY(scheduledDate);
   const createdAt = timestamp(now);
   const sourceReceiptId = text(receiptId || entry?.completionReceiptId || markerReceiptId(completed, stop.sid));
+  const coverage = maintenanceBillingDecision && typeof maintenanceBillingDecision.covered === "boolean"
+    ? maintenanceBillingDecision
+    : prepaidMaintenanceCoverage({ client, stop: authoritativeStop, entry, scheduledDate });
+
+  if (coverage.blocked) {
+    return {
+      invoices,
+      changed: false,
+      outcome: {
+        status: "review_required",
+        kind: "prepaid-maintenance",
+        reason: coverage.reason,
+        action: "fix-client-billing-policy",
+      },
+    };
+  }
+
+  if (coverage.covered) {
+    if (!isCompleted(completed, stop.sid)) {
+      return {
+        invoices,
+        changed: false,
+        outcome: { status: "pending", kind: "prepaid-maintenance", reason: "stop-not-confirmed" },
+      };
+    }
+    return planPrepaidMaintenance({
+      invoices,
+      invoicing,
+      client,
+      stop: authoritativeStop,
+      entry,
+      sourceReceiptId,
+      issueDate,
+      createdAt,
+      coverage,
+    });
+  }
 
   if (isMonthlyAggregatedMaintenanceStop(authoritativeStop, client)) {
     const period = periodForDate(scheduledDate);

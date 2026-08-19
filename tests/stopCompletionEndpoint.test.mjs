@@ -157,7 +157,7 @@ test("field completion is validated server-side and committed through one servic
   assert.equal(res.body.invoiceOutcome.status, "created");
   assert.equal(res.body.invoiceOutcome.kind, "one-off");
   assert.deepEqual(res.body.inventoryDeducted[0].deductions, [{ locationId: "truck", amount: 4 }]);
-  assert.deepEqual(batchBody.p_operations.map((operation) => operation.key).sort(), ["sps_catalog", "sps_clients", "sps_completed", "sps_invoices", "sps_schedule"]);
+  assert.deepEqual(batchBody.p_operations.map((operation) => operation.key).sort(), ["sps_catalog", "sps_clients", "sps_completed", "sps_invoices", "sps_maintenance_billing", "sps_schedule"]);
   assert.equal(batchBody.p_operations.find((operation) => operation.key === "sps_clients").expected_version, 2);
   assert.equal(batchBody.p_operations.find((operation) => operation.key === "sps_schedule").expected_version, 7);
   assert.deepEqual(JSON.parse(batchBody.p_operations.find((operation) => operation.key === "sps_schedule").value), state.sps_schedule.value);
@@ -169,6 +169,177 @@ test("field completion is validated server-side and committed through one servic
   assert.equal(writtenInvoices[0].id, "iv_stop_s1");
   assert.equal(writtenInvoices[0].status, "Draft");
   assert.equal(writtenInvoices[0].lineItems[0].unitPrice, "75");
+});
+
+test("server-enforced prepaid maintenance preserves quoted value without changing balance or creating a service draft", async () => {
+  const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
+  const state = {
+    sps_clients: {
+      value: [{
+        id: "c1",
+        name: "Prepaid Client",
+        balance: "$410",
+        history: [],
+      }],
+      version: 2,
+    },
+    sps_catalog: { value: { locations: [], treatments: [], parts: [], products: [] }, version: 5 },
+    sps_completed: { value: {}, version: 3 },
+    sps_schedule: {
+      value: [{ date: "08/31/2026", stops: [{ sid: "prepaid-weekly", clientId: "c1", type: "Weekly Service" }] }],
+      version: 7,
+    },
+    sps_invoices: { value: [], version: 4 },
+    sps_invoicing: { value: { numberPrefix: "INV-", nextNumber: 4000 }, version: 2 },
+    sps_maintenance_billing: {
+      value: {
+        version: 1,
+        policies: {
+          c1: {
+            version: 1,
+            mode: "prepaid",
+            coveredFrom: "2026-08-01",
+            coveredThrough: "2026-08-31",
+            sourceInvoiceId: "invoice-prepaid",
+          },
+        },
+      },
+      version: 1,
+    },
+  };
+  let writtenOperations = null;
+
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
+    if (href.includes("/rest/v1/app_state?")) {
+      const match = href.match(/key=eq\.([^&]+)/);
+      const key = match ? decodeURIComponent(match[1]) : "";
+      const row = state[key];
+      return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+    }
+    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+      writtenOperations = JSON.parse(options.body).p_operations;
+      return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
+    }
+    throw new Error(`Unexpected fetch: ${href}`);
+  };
+
+  const res = mockResponse();
+  await stopCompletionHandler({
+    method: "POST",
+    headers: { authorization: "Bearer field-token" },
+    body: {
+      mode: "complete",
+      clientId: "c1",
+      sid: "prepaid-weekly",
+      idempotencyKey: "prepaid-weekly-device-attempt",
+      entry: {
+        invoice: "$175.00",
+        services: [{ id: "weekly", name: "Weekly maintenance", price: 175, cost: 50 }],
+      },
+    },
+  }, res);
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.deepEqual(res.body.invoiceOutcome, {
+    status: "covered",
+    kind: "prepaid-maintenance",
+    action: "no-draft",
+    sourceStopId: "prepaid-weekly",
+    coverage: {
+      version: 1,
+      mode: "prepaid",
+      coveredFrom: "2026-08-01",
+      coveredThrough: "2026-08-31",
+      sourceInvoiceId: "invoice-prepaid",
+    },
+  });
+  assert.deepEqual(
+    writtenOperations.map((operation) => operation.key).sort(),
+    ["sps_clients", "sps_completed", "sps_maintenance_billing", "sps_schedule"],
+    "a covered service with no extras does not write invoices or unchanged catalog data",
+  );
+  const writtenClient = JSON.parse(writtenOperations.find((operation) => operation.key === "sps_clients").value)[0];
+  assert.equal(writtenClient.balance, "$410");
+  assert.equal(writtenClient.history[0].invoice, "$0");
+  assert.equal(writtenClient.history[0].quoted_price, 175);
+  assert.equal(writtenClient.history[0].billingDisposition, "prepaid-maintenance");
+  assert.deepEqual(writtenClient.history[0].maintenanceBillingSnapshot, {
+    version: 1,
+    mode: "prepaid",
+    coveredFrom: "2026-08-01",
+    coveredThrough: "2026-08-31",
+    sourceInvoiceId: "invoice-prepaid",
+  });
+  assert.equal(writtenClient.history[0].maintenanceBillingServiceDate, "2026-08-31");
+  const completedWrite = JSON.parse(writtenOperations.find((operation) => operation.key === "sps_completed").value);
+  const receipt = completedWrite.__stopReversalReceipts[completedWrite["prepaid-weekly"].receiptId];
+  assert.equal(receipt.balance.changed, false);
+});
+
+test("a prepaid mirror on the client cannot suppress billing without protected server policy", async () => {
+  const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
+  const state = {
+    sps_clients: {
+      value: [{
+        id: "c1",
+        name: "Prepaid Client",
+        balance: "$410",
+        history: [],
+        maintenanceBilling: {
+          version: 1,
+          mode: "prepaid",
+          coveredFrom: "2026-08-01",
+          coveredThrough: "2026-08-31",
+        },
+      }],
+      version: 2,
+    },
+    sps_catalog: { value: { locations: [], treatments: [], parts: [], products: [] }, version: 5 },
+    sps_completed: { value: {}, version: 3 },
+    sps_schedule: {
+      value: [{ date: "08/31/2026", stops: [{ sid: "prepaid-partial", clientId: "c1", type: "Weekly Service" }] }],
+      version: 7,
+    },
+    sps_invoices: { value: [], version: 4 },
+  };
+  let batchWrites = 0;
+
+  globalThis.fetch = async (url) => {
+    const href = String(url);
+    if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
+    if (href.includes("/rest/v1/app_state?")) {
+      const match = href.match(/key=eq\.([^&]+)/);
+      const key = match ? decodeURIComponent(match[1]) : "";
+      const row = state[key];
+      return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+    }
+    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+      batchWrites += 1;
+      return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
+    }
+    throw new Error(`Unexpected fetch: ${href}`);
+  };
+
+  const res = mockResponse();
+  await stopCompletionHandler({
+    method: "POST",
+    headers: { authorization: "Bearer field-token" },
+    body: {
+      mode: "complete",
+      clientId: "c1",
+      sid: "prepaid-partial",
+      idempotencyKey: "prepaid-partial-attempt",
+      entry: { invoice: "$175.00" },
+    },
+  }, res);
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.notEqual(res.body.invoiceOutcome.status, "covered");
+  assert.equal(batchWrites, 1);
 });
 
 test("ordinary completion rejects insufficient tracked stock before any shared state is written", async () => {
@@ -322,8 +493,9 @@ test("the final weekly maintenance visit atomically creates one monthly draft", 
     if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
       writtenOperations = JSON.parse(options.body).p_operations;
       for (const operation of writtenOperations) {
-        assert.equal(operation.expected_version, state[operation.key].version);
-        state[operation.key] = { value: JSON.parse(operation.value), version: state[operation.key].version + 1 };
+        const current = state[operation.key] || { version: 0 };
+        assert.equal(operation.expected_version, current.version);
+        state[operation.key] = { value: JSON.parse(operation.value), version: current.version + 1 };
       }
       return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
     }
@@ -355,7 +527,7 @@ test("the final weekly maintenance visit atomically creates one monthly draft", 
     invoiceNumber: "INV-3000",
     visitCount: 2,
   });
-  assert.deepEqual(writtenOperations.map((operation) => operation.key).sort(), ["sps_catalog", "sps_clients", "sps_completed", "sps_invoices", "sps_schedule"]);
+  assert.deepEqual(writtenOperations.map((operation) => operation.key).sort(), ["sps_catalog", "sps_clients", "sps_completed", "sps_invoices", "sps_maintenance_billing", "sps_schedule"]);
   assert.equal(state.sps_invoices.value.length, 1);
   assert.equal(state.sps_invoices.value[0].lineItems[0].unitPrice, "400");
   assert.equal(state.sps_invoices.value[0].lineItems[1].qty, "3");
@@ -392,8 +564,9 @@ test("reopening removes an untouched auto-draft but preserves a sent draft for o
         const operations = JSON.parse(options.body).p_operations;
         batches.push(operations);
         for (const operation of operations) {
-          assert.equal(operation.expected_version, state[operation.key].version);
-          state[operation.key] = { value: JSON.parse(operation.value), version: state[operation.key].version + 1 };
+          const current = state[operation.key] || { version: 0 };
+          assert.equal(operation.expected_version, current.version);
+          state[operation.key] = { value: JSON.parse(operation.value), version: current.version + 1 };
         }
         return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
       }
@@ -503,10 +676,11 @@ test("estimate-linked completion and reopening advance the same fulfillment rece
       const operations = JSON.parse(options.body).p_operations;
       batchWrites.push(operations);
       for (const operation of operations) {
-        assert.equal(operation.expected_version, state[operation.key].version);
+        const current = state[operation.key] || { version: 0 };
+        assert.equal(operation.expected_version, current.version);
         state[operation.key] = {
           value: JSON.parse(operation.value),
-          version: state[operation.key].version + 1,
+          version: current.version + 1,
         };
       }
       return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
@@ -904,8 +1078,9 @@ test("same completion key is idempotent, a competing key conflicts, and requeste
       const operations = JSON.parse(options.body).p_operations;
       if (batchWrites === 1) firstBatchKeys = operations.map((operation) => operation.key).sort();
       for (const operation of operations) {
-        assert.equal(operation.expected_version, state[operation.key].version);
-        state[operation.key] = { value: JSON.parse(operation.value), version: state[operation.key].version + 1 };
+        const current = state[operation.key] || { version: 0 };
+        assert.equal(operation.expected_version, current.version);
+        state[operation.key] = { value: JSON.parse(operation.value), version: current.version + 1 };
       }
       return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
     }
@@ -932,7 +1107,7 @@ test("same completion key is idempotent, a competing key conflicts, and requeste
   assert.equal(first.statusCode, 200);
   assert.equal(first.body.applied, true);
   assert.equal(first.body.invoiceOutcome.status, "created");
-  assert.deepEqual(firstBatchKeys, ["sps_catalog", "sps_clients", "sps_completed", "sps_invoices", "sps_schedule"], "the draft invoice and requested inventory fence commit with the stop");
+  assert.deepEqual(firstBatchKeys, ["sps_catalog", "sps_clients", "sps_completed", "sps_invoices", "sps_maintenance_billing", "sps_schedule"], "the draft invoice, billing policy fence, and requested inventory fence commit with the stop");
 
   const retry = await invoke("attempt-device-one");
   assert.equal(retry.statusCode, 200);

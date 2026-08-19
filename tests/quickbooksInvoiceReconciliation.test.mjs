@@ -45,6 +45,11 @@ const localInvoice = () => ({
     chargeType: "custom",
     chargeLabel: "Site labor",
     sourceEstimateLineId: "estimate-line-1",
+    sourceVisitLineId: "visit-line-1",
+    sourceStopId: "stop-1",
+    sourceStopIds: ["stop-1", "stop-2"],
+    sourceCompletionReceiptId: "receipt-1",
+    sourceCompletionReceiptIds: ["receipt-1", "receipt-2"],
   }],
 });
 
@@ -292,6 +297,11 @@ test("adopts the authoritative QuickBooks snapshot and preserves SPS-only metada
     chargeType: "custom",
     chargeLabel: "Site labor",
     sourceEstimateLineId: "estimate-line-1",
+    sourceVisitLineId: "visit-line-1",
+    sourceStopId: "stop-1",
+    sourceStopIds: ["stop-1", "stop-2"],
+    sourceCompletionReceiptId: "receipt-1",
+    sourceCompletionReceiptIds: ["receipt-1", "receipt-2"],
   });
   assert.equal(result.lineItems[1].qbLineId, "11");
   assert.equal(result.lineItems[1].unitCost, "");
@@ -373,6 +383,23 @@ test("clears old SPS cost metadata when a QuickBooks line changes to a different
   assert.equal(result.lineItems[0].costKnown, false);
   assert.equal(Object.hasOwn(result.lineItems[0], "refId"), false);
   assert.equal(Object.hasOwn(result.lineItems[0], "bundleItems"), false);
+  assert.equal(Object.hasOwn(result.lineItems[0], "sourceStopId"), false);
+  assert.equal(Object.hasOwn(result.lineItems[0], "sourceCompletionReceiptId"), false);
+});
+
+test("QuickBooks reconciliation preserves visit provenance only on the matching line", () => {
+  const local = localInvoice();
+  const remote = quickBooksInvoice();
+  const result = reconcileQuickBooksInvoice(local, remote);
+
+  assert.equal(result.lineItems[0].sourceStopId, "stop-1");
+  assert.deepEqual(result.lineItems[0].sourceStopIds, ["stop-1", "stop-2"]);
+  assert.equal(result.lineItems[0].sourceCompletionReceiptId, "receipt-1");
+  assert.deepEqual(result.lineItems[0].sourceCompletionReceiptIds, ["receipt-1", "receipt-2"]);
+  assert.equal(Object.hasOwn(result.lineItems[1], "sourceStopId"), false);
+  assert.equal(Object.hasOwn(result.lineItems[1], "sourceStopIds"), false);
+  assert.equal(Object.hasOwn(result.lineItems[1], "sourceCompletionReceiptId"), false);
+  assert.equal(Object.hasOwn(result.lineItems[1], "sourceCompletionReceiptIds"), false);
 });
 
 test("an unsent QuickBooks snapshot does not erase delivery recorded by SPS", () => {

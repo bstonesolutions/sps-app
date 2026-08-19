@@ -516,3 +516,247 @@ test("final monthly completion fails closed when another completed visit has no 
     stopId: first.sid,
   });
 });
+
+test("covered recurring maintenance creates no service draft", () => {
+  const stop = { sid: "prepaid-weekly", clientId: "client-1", type: "Weekly Service" };
+  const entry = {
+    sid: stop.sid,
+    completionReceiptId: "receipt-prepaid-weekly",
+    invoice: "$0",
+    quoted_price: 175,
+    services: [{ id: "maintenance", name: "Weekly maintenance", price: 175, cost: 50 }],
+  };
+  const result = planCompletionInvoice({
+    invoices: [],
+    invoicing,
+    schedule: [{ date: "08/31/2026", stops: [stop] }],
+    completed: { [stop.sid]: marker(entry.completionReceiptId) },
+    stop,
+    entry,
+    client: baseClient({
+      maintenanceBilling: {
+        version: 1,
+        mode: "prepaid",
+        coveredFrom: "2026-08-01",
+        coveredThrough: "2026-08-31",
+      },
+    }),
+    receiptId: entry.completionReceiptId,
+    completedAt: "2026-08-31T14:00:00.000Z",
+  });
+
+  assert.equal(result.changed, false);
+  assert.equal(result.invoices.length, 0);
+  assert.deepEqual(result.outcome, {
+    status: "covered",
+    kind: "prepaid-maintenance",
+    action: "no-draft",
+    sourceStopId: stop.sid,
+    coverage: {
+      version: 1,
+      mode: "prepaid",
+      coveredFrom: "2026-08-01",
+      coveredThrough: "2026-08-31",
+    },
+  });
+});
+
+test("partial-period prepaid coverage stops invoice planning for review", () => {
+  const stop = { sid: "prepaid-partial", clientId: "client-1", type: "Weekly Service" };
+  const result = planCompletionInvoice({
+    invoices: [],
+    invoicing,
+    schedule: [{ date: "08/15/2026", stops: [stop] }],
+    completed: { [stop.sid]: marker("receipt-prepaid-partial") },
+    stop,
+    entry: { invoice: "$175", completionReceiptId: "receipt-prepaid-partial" },
+    client: baseClient({
+      planFreq: "Weekly",
+      monthlyRate: "600",
+      maintenanceBilling: {
+        version: 1,
+        mode: "prepaid",
+        coveredFrom: "2026-08-15",
+        coveredThrough: "2026-09-14",
+      },
+    }),
+    completedAt: "2026-08-15T14:00:00.000Z",
+  });
+
+  assert.equal(result.changed, false);
+  assert.deepEqual(result.outcome, {
+    status: "review_required",
+    kind: "prepaid-maintenance",
+    reason: "coverage-must-span-whole-months",
+    action: "fix-client-billing-policy",
+  });
+});
+
+test("blank-type legacy weekly rows share the prepaid and monthly-maintenance classifier", () => {
+  const first = { sid: "legacy-blank-1", clientId: "client-1", type: "" };
+  const final = { sid: "legacy-blank-2", clientId: "client-1", type: "" };
+  const firstEntry = { sid: first.sid, completionReceiptId: "receipt-legacy-blank-1", invoice: "$175" };
+  const finalEntry = { sid: final.sid, completionReceiptId: "receipt-legacy-blank-2", invoice: "$175" };
+  const common = {
+    invoices: [],
+    invoicing,
+    schedule: [
+      { date: "08/03/2026", stops: [first] },
+      { date: "08/17/2026", stops: [final] },
+    ],
+    completed: {
+      [first.sid]: marker(firstEntry.completionReceiptId),
+      [final.sid]: marker(finalEntry.completionReceiptId),
+    },
+    stop: final,
+    entry: finalEntry,
+    receiptId: finalEntry.completionReceiptId,
+    completedAt: "2026-08-17T14:00:00.000Z",
+  };
+
+  const prepaid = planCompletionInvoice({
+    ...common,
+    client: baseClient({
+      planFreq: "Weekly",
+      history: [firstEntry],
+      maintenanceBilling: {
+        version: 1,
+        mode: "prepaid",
+        coveredFrom: "2026-08-01",
+        coveredThrough: "2026-08-31",
+      },
+    }),
+  });
+  assert.equal(prepaid.changed, false);
+  assert.equal(prepaid.outcome.kind, "prepaid-maintenance");
+
+  const monthly = planCompletionInvoice({
+    ...common,
+    client: baseClient({ planFreq: "Weekly", monthlyRate: "600", history: [firstEntry] }),
+  });
+  assert.equal(monthly.changed, true);
+  assert.equal(monthly.outcome.kind, "monthly");
+  assert.deepEqual(monthly.invoices[0].sourceStopIds, [first.sid, final.sid]);
+});
+
+test("covered maintenance creates an extras-only draft and reopening removes it safely", () => {
+  const stop = { sid: "prepaid-extras", clientId: "client-1", type: "Bi-Weekly Maintenance" };
+  const entry = {
+    sid: stop.sid,
+    completionReceiptId: "receipt-prepaid-extras",
+    invoice: "$0",
+    quoted_price: 175,
+    services: [{ id: "maintenance", name: "Maintenance", price: 175, cost: 50 }],
+    partsUsed: [
+      { id: "valve", name: "Replacement valve", qty: 1, retailPer: 30, costPer: 12, bill: true },
+      { id: "included", name: "Included washer", qty: 1, retailPer: 5, costPer: 1, bill: false },
+    ],
+    productsPurchased: [
+      { id: "bacteria", name: "Bacteria", qty: 2, price: 15, cost: 5, bill: true },
+    ],
+  };
+  const input = {
+    invoices: [],
+    invoicing,
+    schedule: [{ date: "08/15/2026", stops: [stop] }],
+    completed: { [stop.sid]: marker(entry.completionReceiptId) },
+    stop,
+    entry,
+    client: baseClient({
+      maintenanceBilling: {
+        version: 1,
+        mode: "prepaid",
+        coveredFrom: "2026-08-01",
+        coveredThrough: "2026-08-31",
+        sourceInvoiceNumber: "PREPAID-2026",
+      },
+    }),
+    receiptId: entry.completionReceiptId,
+    completedAt: "2026-08-15T14:00:00.000Z",
+  };
+  const result = planCompletionInvoice(input);
+
+  assert.equal(result.changed, true);
+  assert.deepEqual(result.outcome, {
+    status: "created",
+    kind: "prepaid-maintenance-extras",
+    invoiceId: "iv_stop_prepaid-extras",
+    invoiceNumber: "INV-2000",
+    sourceStopId: stop.sid,
+    extraLineCount: 2,
+  });
+  const invoice = result.invoices[0];
+  assert.equal(invoice.source, "prepaid-maintenance-extras");
+  assert.equal(invoice.sourceStopId, stop.sid);
+  assert.equal(invoice.sourceCompletionReceiptId, entry.completionReceiptId);
+  assert.deepEqual(invoice.maintenanceBilling, {
+    version: 1,
+    mode: "prepaid",
+    coveredFrom: "2026-08-01",
+    coveredThrough: "2026-08-31",
+    sourceInvoiceNumber: "PREPAID-2026",
+  });
+  assert.deepEqual(
+    invoice.lineItems.map(({ desc, qty, unitPrice, kind }) => ({ desc, qty, unitPrice, kind })),
+    [
+      { desc: "Replacement valve", qty: "1", unitPrice: "30", kind: "part" },
+      { desc: "Bacteria", qty: "2", unitPrice: "15", kind: "product" },
+    ],
+    "covered service and non-billable materials are excluded",
+  );
+
+  const replay = planCompletionInvoice({ ...input, invoices: result.invoices });
+  assert.equal(replay.changed, false);
+  assert.equal(replay.outcome.status, "existing");
+  assert.equal(replay.outcome.kind, "prepaid-maintenance-extras");
+
+  const reopened = planCompletionInvoice({
+    mode: "reverse",
+    invoices: result.invoices,
+    stop,
+    client: input.client,
+  });
+  assert.equal(reopened.changed, true);
+  assert.equal(reopened.invoices.length, 0);
+  assert.equal(reopened.outcome.kind, "prepaid-maintenance-extras");
+  assert.equal(reopened.outcome.safeToRemove, true);
+});
+
+test("prepaid policy fails open for malformed coverage and never covers repair work", () => {
+  const cases = [
+    {
+      stop: { sid: "prepaid-malformed", clientId: "client-1", type: "Monthly Service" },
+      maintenanceBilling: {
+        version: 1,
+        mode: "prepaid",
+        coveredFrom: "2026-02-31",
+        coveredThrough: "2026-08-31",
+      },
+    },
+    {
+      stop: { sid: "prepaid-repair", clientId: "client-1", type: "Repair Visit" },
+      maintenanceBilling: {
+        version: 1,
+        mode: "prepaid",
+        coveredFrom: "2026-08-01",
+        coveredThrough: "2026-08-31",
+      },
+    },
+  ];
+
+  for (const { stop, maintenanceBilling } of cases) {
+    const result = planCompletionInvoice({
+      invoices: [],
+      invoicing,
+      schedule: [{ date: "08/15/2026", stops: [stop] }],
+      completed: { [stop.sid]: marker(`receipt-${stop.sid}`) },
+      stop,
+      entry: { invoice: "$125", completionReceiptId: `receipt-${stop.sid}` },
+      client: baseClient({ maintenanceBilling }),
+      completedAt: "2026-08-15T14:00:00.000Z",
+    });
+    assert.equal(result.changed, true, stop.sid);
+    assert.equal(result.outcome.kind, "one-off", stop.sid);
+    assert.equal(result.invoices[0].lineItems[0].unitPrice, "125", stop.sid);
+  }
+});

@@ -74,6 +74,10 @@ const SPS_LINE_METADATA_FIELDS = [
   "chargeLabel",
   "sourceEstimateLineId",
   "sourceVisitLineId",
+  "sourceStopId",
+  "sourceStopIds",
+  "sourceCompletionReceiptId",
+  "sourceCompletionReceiptIds",
 ];
 
 const QUICKBOOKS_AUTHORITY_FIELDS = [
