@@ -2,6 +2,7 @@ import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
 
 process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-key";
+process.env.STOP_COMPLETION_FETCH_TIMEOUT_MS = "250";
 
 const { default: stopCompletionHandler } = await import("../api/stop-completion.js");
 const { memberHasCapability, resolveStaffUser } = await import("../api/_staff-auth.js");
@@ -27,11 +28,157 @@ function mockResponse() {
   };
 }
 
+function observableResponse() {
+  const res = mockResponse();
+  const listeners = new Map();
+  res.once = function once(event, listener) {
+    listeners.set(event, listener);
+    return this;
+  };
+  const emitFinish = () => {
+    const listener = listeners.get("finish");
+    if (listener) {
+      listeners.delete("finish");
+      listener();
+    }
+  };
+  res.json = function json(body) {
+    this.body = body;
+    emitFinish();
+    return this;
+  };
+  res.end = function end() {
+    emitFinish();
+    return this;
+  };
+  return res;
+}
+
+function requestedStateKeys(href) {
+  const equals = href.match(/key=eq\.([^&]+)/);
+  if (equals) return [decodeURIComponent(equals[1])];
+  const included = href.match(/key=in\.\(([^)]*)\)/);
+  return included && included[1]
+    ? included[1].split(",").map((key) => decodeURIComponent(key))
+    : [];
+}
+
+function stateRows(href, state) {
+  return requestedStateKeys(href).flatMap((key) => {
+    const row = state[key];
+    return row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : [];
+  });
+}
+
+function applyBatchOperations(state, operations) {
+  for (const operation of operations) {
+    const current = state[operation.key] || { version: 0 };
+    assert.equal(operation.expected_version, current.version);
+    if (operation.check_only) {
+      assert.equal(Object.prototype.hasOwnProperty.call(operation, "value"), false);
+      continue;
+    }
+    assert.equal(Object.prototype.hasOwnProperty.call(operation, "value"), true);
+    state[operation.key] = { value: JSON.parse(operation.value), version: current.version + 1 };
+  }
+}
+
 test("completeStops capability allows field edit access but rejects viewers and schedule read-only", () => {
   assert.equal(memberHasCapability({ role: "field", tabAccess: { schedule: "edit" } }, "completeStops"), true);
   assert.equal(memberHasCapability({ role: "field", tabAccess: { schedule: "view" } }, "completeStops"), false);
   assert.equal(memberHasCapability({ role: "viewer" }, "completeStops"), false);
   assert.equal(memberHasCapability({ role: "field", perms: { canCompleteStops: false } }, "completeStops"), false);
+});
+
+test("completion endpoint reflects a safe request id and exposes it through CORS", async () => {
+  const originalInfo = console.info;
+  const logs = [];
+  console.info = (...args) => logs.push(args);
+  try {
+    const res = observableResponse();
+    await stopCompletionHandler({
+      method: "OPTIONS",
+      headers: { "x-request-id": "completion-preflight-1" },
+    }, res);
+
+    assert.equal(res.statusCode, 204);
+    assert.equal(res.headers["X-Request-Id"], "completion-preflight-1");
+    assert.match(res.headers["Access-Control-Allow-Headers"], /X-Request-Id/);
+    assert.equal(res.headers["Access-Control-Expose-Headers"], "X-Request-Id");
+    assert.equal(logs.length, 1);
+    const event = JSON.parse(logs[0][1]);
+    assert.equal(event.requestId, "completion-preflight-1");
+    assert.equal(event.status, 204);
+    assert.equal(event.event, "request_finished");
+    assert.equal(typeof event.durationMs, "number");
+  } finally {
+    console.info = originalInfo;
+  }
+});
+
+test("completion endpoint replaces an unsafe request id instead of logging or reflecting it", async () => {
+  const res = mockResponse();
+  await stopCompletionHandler({
+    method: "OPTIONS",
+    headers: { "x-request-id": "bad request id\nforged" },
+  }, res);
+
+  assert.match(res.headers["X-Request-Id"], /^stop-[0-9a-f-]{36}$/);
+  assert.doesNotMatch(res.headers["X-Request-Id"], /bad|forged/);
+});
+
+test("a stalled shared-state read returns a retryable 504 before the client outbox deadline", async () => {
+  const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
+  let baselineAborted = false;
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
+    if (href.includes("key=in.(")) {
+      return new Promise((resolve, reject) => {
+        options.signal.addEventListener("abort", () => {
+          baselineAborted = true;
+          reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+        }, { once: true });
+      });
+    }
+    throw new Error(`Unexpected fetch: ${href}`);
+  };
+
+  const originalError = console.error;
+  const logs = [];
+  console.error = (...args) => logs.push(args);
+  try {
+    const res = mockResponse();
+    await stopCompletionHandler({
+      method: "POST",
+      headers: {
+        authorization: "Bearer field-token",
+        "x-request-id": "completion-timeout-server-1",
+      },
+      body: {
+        mode: "complete",
+        clientId: "c1",
+        sid: "s1",
+        idempotencyKey: "attempt-timeout-server-1",
+        entry: { invoice: "$0" },
+      },
+    }, res);
+
+    assert.equal(baselineAborted, true);
+    assert.equal(res.statusCode, 504);
+    assert.equal(res.body.code, "shared-data-timeout");
+    assert.equal(res.body.requestId, "completion-timeout-server-1");
+    assert.match(res.body.error, /retry automatically/i);
+    assert.equal(res.headers["X-Request-Id"], "completion-timeout-server-1");
+    assert.equal(logs.length, 1);
+    const event = JSON.parse(logs[0][1]);
+    assert.equal(event.requestId, "completion-timeout-server-1");
+    assert.equal(event.code, "APP_STATE_REQUEST_TIMEOUT");
+    assert.equal(event.operation, "batch-read");
+  } finally {
+    console.error = originalError;
+  }
 });
 
 test("server roster checks treat string active/disabled flags like database policies", async () => {
@@ -105,6 +252,7 @@ test("field completion is validated server-side and committed through one servic
     sps_schedule: { value: [{ date: "07/12/2026", stops: [{ sid: "s1", clientId: "c1", assigneeId: "e1" }] }], version: 7 },
   };
   let batchBody = null;
+  let baselineReads = 0;
 
   globalThis.fetch = async (url, options = {}) => {
     const href = String(url);
@@ -113,18 +261,17 @@ test("field completion is validated server-side and committed through one servic
       return response([{ value: JSON.stringify(team) }]);
     }
     if (href.includes("/rest/v1/app_state?")) {
-      const match = href.match(/key=eq\.([^&]+)/);
-      const key = match ? decodeURIComponent(match[1]) : "";
-      const row = state[key];
-      return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+      if (href.includes("key=in.(")) baselineReads += 1;
+      return response(stateRows(href, state));
     }
     if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
       batchBody = JSON.parse(options.body);
+      applyBatchOperations(state, batchBody.p_operations);
       return response([{
         applied: true,
         outcome: "applied",
         conflict_key: null,
-        current_versions: { sps_clients: 3, sps_catalog: 6, sps_completed: 4, sps_schedule: 8 },
+        current_versions: { sps_clients: 3, sps_catalog: 6, sps_completed: 4, sps_schedule: 7 },
       }]);
     }
     throw new Error(`Unexpected fetch: ${href}`);
@@ -154,13 +301,14 @@ test("field completion is validated server-side and committed through one servic
   assert.equal(res.headers["Cache-Control"], "no-store");
   assert.equal(res.body.ok, true);
   assert.equal(res.body.applied, true);
+  assert.equal(baselineReads, 1, "all related app_state rows are read in one baseline request");
   assert.equal(res.body.invoiceOutcome.status, "created");
   assert.equal(res.body.invoiceOutcome.kind, "one-off");
   assert.deepEqual(res.body.inventoryDeducted[0].deductions, [{ locationId: "truck", amount: 4 }]);
   assert.deepEqual(batchBody.p_operations.map((operation) => operation.key).sort(), ["sps_catalog", "sps_clients", "sps_completed", "sps_invoices", "sps_maintenance_billing", "sps_schedule"]);
   assert.equal(batchBody.p_operations.find((operation) => operation.key === "sps_clients").expected_version, 2);
-  assert.equal(batchBody.p_operations.find((operation) => operation.key === "sps_schedule").expected_version, 7);
-  assert.deepEqual(JSON.parse(batchBody.p_operations.find((operation) => operation.key === "sps_schedule").value), state.sps_schedule.value);
+  const scheduleFence = batchBody.p_operations.find((operation) => operation.key === "sps_schedule");
+  assert.deepEqual(scheduleFence, { key: "sps_schedule", expected_version: 7, check_only: true });
   const writtenClients = JSON.parse(batchBody.p_operations.find((operation) => operation.key === "sps_clients").value);
   assert.equal(writtenClients[0].balance, "$75");
   assert.equal(writtenClients[0].history.length, 1);
@@ -169,6 +317,78 @@ test("field completion is validated server-side and committed through one servic
   assert.equal(writtenInvoices[0].id, "iv_stop_s1");
   assert.equal(writtenInvoices[0].status, "Draft");
   assert.equal(writtenInvoices[0].lineItems[0].unitPrice, "75");
+  assert.equal(state.sps_schedule.version, 7, "the unchanged schedule fence is not rewritten or versioned");
+  assert.equal(state.sps_clients.version, 3);
+  assert.equal(state.sps_catalog.version, 6);
+  assert.equal(state.sps_completed.version, 4);
+  assert.equal(state.sps_invoices.version, 1);
+  assert.equal(state.sps_maintenance_billing.version, 1);
+});
+
+test("repeated fence conflicts leave every stop mutation untouched and use one reread per attempt", async () => {
+  const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
+  const state = {
+    sps_clients: { value: [{ id: "c1", name: "Client", balance: "$10", history: [] }], version: 2 },
+    sps_catalog: { value: { locations: [], treatments: [], parts: [], products: [] }, version: 5 },
+    sps_completed: { value: {}, version: 3 },
+    sps_schedule: { value: [{ date: "07/12/2026", stops: [{ sid: "s1", clientId: "c1", assigneeId: "e1" }] }], version: 7 },
+    sps_invoices: { value: [], version: 4 },
+    sps_invoicing: { value: { numberPrefix: "INV-", nextNumber: 4000 }, version: 2 },
+    sps_maintenance_billing: { value: { version: 1, policies: {} }, version: 1 },
+  };
+  const before = structuredClone(state);
+  const batches = [];
+  let baselineReads = 0;
+
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
+    if (href.includes("/rest/v1/app_state?")) {
+      if (href.includes("key=in.(")) baselineReads += 1;
+      return response(stateRows(href, state));
+    }
+    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+      const operations = JSON.parse(options.body).p_operations;
+      batches.push(operations);
+      return response([{
+        applied: false,
+        outcome: "conflict",
+        conflict_key: "sps_schedule",
+        current_versions: { sps_schedule: 8 },
+      }]);
+    }
+    throw new Error(`Unexpected fetch: ${href}`);
+  };
+
+  const res = mockResponse();
+  await stopCompletionHandler({
+    method: "POST",
+    headers: { authorization: "Bearer field-token" },
+    body: {
+      mode: "complete",
+      clientId: "c1",
+      sid: "s1",
+      idempotencyKey: "attempt-conflict-exhaustion",
+      entry: { invoice: "$75", notes: "Done" },
+    },
+  }, res);
+
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.code, "contention");
+  assert.equal(batches.length, 6);
+  assert.equal(baselineReads, 6, "each retry uses one batched baseline request instead of one request per key");
+  for (const operations of batches) {
+    assert.deepEqual(
+      operations.find((operation) => operation.key === "sps_schedule"),
+      { key: "sps_schedule", expected_version: 7, check_only: true },
+    );
+    assert.deepEqual(
+      operations.find((operation) => operation.key === "sps_maintenance_billing"),
+      { key: "sps_maintenance_billing", expected_version: 1, check_only: true },
+    );
+  }
+  assert.deepEqual(state, before, "a rejected atomic batch cannot partially apply history, balance, invoice, or completion writes");
 });
 
 test("server-enforced prepaid maintenance preserves quoted value without changing balance or creating a service draft", async () => {
@@ -214,10 +434,7 @@ test("server-enforced prepaid maintenance preserves quoted value without changin
     if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
     if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
     if (href.includes("/rest/v1/app_state?")) {
-      const match = href.match(/key=eq\.([^&]+)/);
-      const key = match ? decodeURIComponent(match[1]) : "";
-      const row = state[key];
-      return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+      return response(stateRows(href, state));
     }
     if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
       writtenOperations = JSON.parse(options.body).p_operations;
@@ -277,6 +494,14 @@ test("server-enforced prepaid maintenance preserves quoted value without changin
   const completedWrite = JSON.parse(writtenOperations.find((operation) => operation.key === "sps_completed").value);
   const receipt = completedWrite.__stopReversalReceipts[completedWrite["prepaid-weekly"].receiptId];
   assert.equal(receipt.balance.changed, false);
+  assert.deepEqual(
+    writtenOperations.find((operation) => operation.key === "sps_schedule"),
+    { key: "sps_schedule", expected_version: 7, check_only: true },
+  );
+  assert.deepEqual(
+    writtenOperations.find((operation) => operation.key === "sps_maintenance_billing"),
+    { key: "sps_maintenance_billing", expected_version: 1, check_only: true },
+  );
 });
 
 test("a prepaid mirror on the client cannot suppress billing without protected server policy", async () => {
@@ -312,10 +537,7 @@ test("a prepaid mirror on the client cannot suppress billing without protected s
     if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
     if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
     if (href.includes("/rest/v1/app_state?")) {
-      const match = href.match(/key=eq\.([^&]+)/);
-      const key = match ? decodeURIComponent(match[1]) : "";
-      const row = state[key];
-      return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+      return response(stateRows(href, state));
     }
     if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
       batchWrites += 1;
@@ -357,10 +579,7 @@ test("ordinary completion rejects insufficient tracked stock before any shared s
     if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
     if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
     if (href.includes("/rest/v1/app_state?")) {
-      const match = href.match(/key=eq\.([^&]+)/);
-      const key = match ? decodeURIComponent(match[1]) : "";
-      const row = state[key];
-      return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+      return response(stateRows(href, state));
     }
     if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
       batchWrites += 1;
@@ -406,10 +625,7 @@ test("ordinary completion accepts a legacy untracked product without fabricating
     if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
     if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
     if (href.includes("/rest/v1/app_state?")) {
-      const match = href.match(/key=eq\.([^&]+)/);
-      const key = match ? decodeURIComponent(match[1]) : "";
-      const row = state[key];
-      return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+      return response(stateRows(href, state));
     }
     if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
       writtenOperations = JSON.parse(options.body).p_operations;
@@ -485,18 +701,11 @@ test("the final weekly maintenance visit atomically creates one monthly draft", 
     if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
     if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
     if (href.includes("/rest/v1/app_state?")) {
-      const match = href.match(/key=eq\.([^&]+)/);
-      const key = match ? decodeURIComponent(match[1]) : "";
-      const row = state[key];
-      return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+      return response(stateRows(href, state));
     }
     if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
       writtenOperations = JSON.parse(options.body).p_operations;
-      for (const operation of writtenOperations) {
-        const current = state[operation.key] || { version: 0 };
-        assert.equal(operation.expected_version, current.version);
-        state[operation.key] = { value: JSON.parse(operation.value), version: current.version + 1 };
-      }
+      applyBatchOperations(state, writtenOperations);
       return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
     }
     throw new Error(`Unexpected fetch: ${href}`);
@@ -555,19 +764,12 @@ test("reopening removes an untouched auto-draft but preserves a sent draft for o
       if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
       if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
       if (href.includes("/rest/v1/app_state?")) {
-        const match = href.match(/key=eq\.([^&]+)/);
-        const key = match ? decodeURIComponent(match[1]) : "";
-        const row = state[key];
-        return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+        return response(stateRows(href, state));
       }
       if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
         const operations = JSON.parse(options.body).p_operations;
         batches.push(operations);
-        for (const operation of operations) {
-          const current = state[operation.key] || { version: 0 };
-          assert.equal(operation.expected_version, current.version);
-          state[operation.key] = { value: JSON.parse(operation.value), version: current.version + 1 };
-        }
+        applyBatchOperations(state, operations);
         return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
       }
       throw new Error(`Unexpected fetch: ${href}`);
@@ -667,22 +869,12 @@ test("estimate-linked completion and reopening advance the same fulfillment rece
     if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
     if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
     if (href.includes("/rest/v1/app_state?")) {
-      const match = href.match(/key=eq\.([^&]+)/);
-      const key = match ? decodeURIComponent(match[1]) : "";
-      const row = state[key];
-      return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+      return response(stateRows(href, state));
     }
     if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
       const operations = JSON.parse(options.body).p_operations;
       batchWrites.push(operations);
-      for (const operation of operations) {
-        const current = state[operation.key] || { version: 0 };
-        assert.equal(operation.expected_version, current.version);
-        state[operation.key] = {
-          value: JSON.parse(operation.value),
-          version: current.version + 1,
-        };
-      }
+      applyBatchOperations(state, operations);
       return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
     }
     throw new Error(`Unexpected fetch: ${href}`);
@@ -729,6 +921,11 @@ test("estimate-linked completion and reopening advance the same fulfillment rece
     batchWrites[0].some((operation) => operation.key === "sps_invoices"),
     true,
     "the unchanged linked invoice is included as a CAS fence",
+  );
+  assert.deepEqual(
+    batchWrites[0].find((operation) => operation.key === "sps_invoices"),
+    { key: "sps_invoices", expected_version: 1, check_only: true },
+    "the linked invoice fence is checked without sending or rewriting the invoice document",
   );
 
   const reopenedResponse = mockResponse();
@@ -811,10 +1008,7 @@ test("estimate completion fails closed when a planned catalog item is missing or
       if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
       if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
       if (href.includes("/rest/v1/app_state?")) {
-        const match = href.match(/key=eq\.([^&]+)/);
-        const key = match ? decodeURIComponent(match[1]) : "";
-        const row = state[key];
-        return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+        return response(stateRows(href, state));
       }
       if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
         batchWrites += 1;
@@ -884,10 +1078,7 @@ test("estimate completion validates the linked invoice's client and source estim
       if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
       if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
       if (href.includes("/rest/v1/app_state?")) {
-        const match = href.match(/key=eq\.([^&]+)/);
-        const key = match ? decodeURIComponent(match[1]) : "";
-        const row = state[key];
-        return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+        return response(stateRows(href, state));
       }
       if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
         batchWrites += 1;
@@ -944,10 +1135,7 @@ test("estimate-linked completion without a draft invoice fails before any shared
     if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
     if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
     if (href.includes("/rest/v1/app_state?")) {
-      const match = href.match(/key=eq\.([^&]+)/);
-      const key = match ? decodeURIComponent(match[1]) : "";
-      const row = state[key];
-      return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+      return response(stateRows(href, state));
     }
     if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
       batchWrites += 1;
@@ -996,10 +1184,7 @@ test("server rejects completing a cancelled scheduled stop before any batch writ
     if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
     if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
     if (href.includes("/rest/v1/app_state?")) {
-      const match = href.match(/key=eq\.([^&]+)/);
-      const key = match ? decodeURIComponent(match[1]) : "";
-      const row = state[key];
-      return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+      return response(stateRows(href, state));
     }
     if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) { batchWrites += 1; return response([]); }
     throw new Error(`Unexpected fetch: ${href}`);
@@ -1031,10 +1216,7 @@ test("server rejects duplicate scheduled stop IDs instead of mutating the first 
     if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
     if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
     if (href.includes("/rest/v1/app_state?")) {
-      const match = href.match(/key=eq\.([^&]+)/);
-      const key = match ? decodeURIComponent(match[1]) : "";
-      const row = state[key];
-      return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+      return response(stateRows(href, state));
     }
     if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) { batchWrites += 1; return response([]); }
     throw new Error(`Unexpected fetch: ${href}`);
@@ -1068,20 +1250,13 @@ test("same completion key is idempotent, a competing key conflicts, and requeste
     if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
     if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
     if (href.includes("/rest/v1/app_state?")) {
-      const match = href.match(/key=eq\.([^&]+)/);
-      const key = match ? decodeURIComponent(match[1]) : "";
-      const row = state[key];
-      return response(row ? [{ key, value: JSON.stringify(row.value), version: row.version, updated_at: null }] : []);
+      return response(stateRows(href, state));
     }
     if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
       batchWrites += 1;
       const operations = JSON.parse(options.body).p_operations;
       if (batchWrites === 1) firstBatchKeys = operations.map((operation) => operation.key).sort();
-      for (const operation of operations) {
-        const current = state[operation.key] || { version: 0 };
-        assert.equal(operation.expected_version, current.version);
-        state[operation.key] = { value: JSON.parse(operation.value), version: current.version + 1 };
-      }
+      applyBatchOperations(state, operations);
       return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
     }
     throw new Error(`Unexpected fetch: ${href}`);

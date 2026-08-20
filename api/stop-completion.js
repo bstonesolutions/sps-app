@@ -6,7 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import { requireCapability } from "./_staff-auth.js";
-import { compareAndSetAppStateBatch, readAppStateVersioned } from "./_app-state.js";
+import { compareAndSetAppStateBatch, readAppStatesVersioned } from "./_app-state.js";
 import { applyStopCompletion, hasPositiveTrackedUsage, isNonnegativeMoneyString, reverseStopCompletion } from "../stopCompletion.js";
 import { planCompletionInvoice } from "../completionInvoice.js";
 import {
@@ -24,6 +24,13 @@ import {
 } from "../estimateScheduleLink.js";
 
 const MAX_ATTEMPTS = 6;
+const STOP_COMPLETION_DATA_DEADLINE_MS = 24_000;
+const MIN_STOP_COMPLETION_FETCH_TIMEOUT_MS = 250;
+const STOP_COMPLETION_FETCH_TIMEOUT_MS = Math.max(
+  MIN_STOP_COMPLETION_FETCH_TIMEOUT_MS,
+  Math.min(12_000, Math.round(Number(process.env.STOP_COMPLETION_FETCH_TIMEOUT_MS) || 12_000)),
+);
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{7,95}$/;
 const ENTRY_KEYS = new Set([
   "date", "tech", "type", "assigneeId", "notes", "officeNotes", "services", "checklist",
   "readings", "readingStatus", "ph", "ammonia", "nitrite", "temp", "invoice", "photos",
@@ -38,8 +45,84 @@ const sameId = (left, right) => String(left) === String(right);
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-Id");
+  res.setHeader("Access-Control-Expose-Headers", "X-Request-Id");
   res.setHeader("Cache-Control", "no-store");
+}
+
+function requestHeader(req, name) {
+  const headers = req?.headers || {};
+  const wanted = String(name || "").toLowerCase();
+  const entry = Object.entries(headers).find(([key]) => String(key).toLowerCase() === wanted);
+  const value = entry?.[1];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function appStateTimeoutError(operation, timeoutMs) {
+  const error = new Error("app_state_request_timeout");
+  error.code = "APP_STATE_REQUEST_TIMEOUT";
+  error.operation = String(operation || "request");
+  error.timeoutMs = Number(timeoutMs) || 0;
+  return error;
+}
+
+function createRequestTelemetry(req, res) {
+  const startedAt = Date.now();
+  const suppliedId = String(requestHeader(req, "x-request-id") || "").trim();
+  const requestId = REQUEST_ID_PATTERN.test(suppliedId) ? suppliedId : `stop-${randomUUID()}`;
+  const deadlineAt = startedAt + STOP_COMPLETION_DATA_DEADLINE_MS;
+  let phase = "received";
+  let mode = "";
+  let attempts = 0;
+  let finished = false;
+
+  res.setHeader("X-Request-Id", requestId);
+
+  const finish = (event) => {
+    if (finished) return;
+    finished = true;
+    console.info("[stop-completion]", JSON.stringify({
+      event,
+      requestId,
+      method: String(req?.method || ""),
+      mode,
+      phase,
+      attempts,
+      status: Number(res.statusCode) || 0,
+      durationMs: Math.max(0, Date.now() - startedAt),
+    }));
+  };
+  if (typeof res.once === "function") {
+    res.once("finish", () => finish("request_finished"));
+    res.once("close", () => finish("request_closed"));
+  }
+
+  return {
+    requestId,
+    startedAt,
+    setPhase(value) { phase = String(value || phase); },
+    setMode(value) { mode = String(value || ""); },
+    setAttempt(value) { attempts = Number(value) || attempts; },
+    appStateOptions(operation) {
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs < MIN_STOP_COMPLETION_FETCH_TIMEOUT_MS) {
+        throw appStateTimeoutError(operation, Math.max(0, remainingMs));
+      }
+      return { timeoutMs: Math.min(STOP_COMPLETION_FETCH_TIMEOUT_MS, remainingMs) };
+    },
+    logFailure(error) {
+      console.error("[stop-completion]", JSON.stringify({
+        event: "request_failed",
+        requestId,
+        mode,
+        phase,
+        attempts,
+        durationMs: Math.max(0, Date.now() - startedAt),
+        code: String(error?.code || "STOP_COMPLETION_ERROR").slice(0, 80),
+        operation: String(error?.operation || "").slice(0, 80),
+      }));
+    },
+  };
 }
 
 function cleanId(value, max = 220) {
@@ -115,16 +198,23 @@ function mutationMessage(code, itemName) {
   return messages[code] || "The stop could not be changed safely.";
 }
 
-async function readBaseline() {
-  const [clients, catalog, completed, schedule, invoices, invoicing, maintenanceBilling] = await Promise.all([
-    readAppStateVersioned("sps_clients"),
-    readAppStateVersioned("sps_catalog"),
-    readAppStateVersioned("sps_completed"),
-    readAppStateVersioned("sps_schedule"),
-    readAppStateVersioned("sps_invoices"),
-    readAppStateVersioned("sps_invoicing"),
-    readAppStateVersioned("sps_maintenance_billing"),
-  ]);
+async function readBaseline(requestOptions = {}) {
+  const snapshot = await readAppStatesVersioned([
+    "sps_clients",
+    "sps_catalog",
+    "sps_completed",
+    "sps_schedule",
+    "sps_invoices",
+    "sps_invoicing",
+    "sps_maintenance_billing",
+  ], requestOptions);
+  const clients = snapshot.sps_clients;
+  const catalog = snapshot.sps_catalog;
+  const completed = snapshot.sps_completed;
+  const schedule = snapshot.sps_schedule;
+  const invoices = snapshot.sps_invoices;
+  const invoicing = snapshot.sps_invoicing;
+  const maintenanceBilling = snapshot.sps_maintenance_billing;
   if (!clients.exists || !Array.isArray(clients.value)) throw new Error("shared_clients_invalid");
   if (!catalog.exists || !isRecord(catalog.value)) throw new Error("shared_catalog_invalid");
   if (completed.exists && !isRecord(completed.value)) throw new Error("shared_completions_invalid");
@@ -197,13 +287,17 @@ function validateEstimateInvoiceLink(stop, invoicesState, clientId) {
 
 export default async function handler(req, res) {
   setCors(res);
+  const telemetry = createRequestTelemetry(req, res);
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
 
+  telemetry.setPhase("authorize");
   const staff = await requireCapability(req, res, "completeStops", "completing or reopening service stops");
   if (!staff) return;
 
   const mode = String((req.body && req.body.mode) || "");
+  telemetry.setMode(mode);
+  telemetry.setPhase("validate");
   const sid = cleanId(req.body && req.body.sid);
   const clientId = cleanId(req.body && req.body.clientId);
   const idempotencyKey = mode === "complete" && typeof req.body?.idempotencyKey === "string" ? req.body.idempotencyKey.trim() : "";
@@ -225,7 +319,9 @@ export default async function handler(req, res) {
   const completedAt = new Date().toISOString();
   try {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-      const baseline = await readBaseline();
+      telemetry.setAttempt(attempt);
+      telemetry.setPhase("read-baseline");
+      const baseline = await readBaseline(telemetry.appStateOptions("read-baseline"));
       const stopMatches = scheduledStops(baseline.schedule.value, sid);
       if (!stopMatches.length) return res.status(409).json({ ok: false, code: "stop-not-found", error: "This stop is no longer on the shared schedule." });
       if (stopMatches.length !== 1) return res.status(409).json({ ok: false, code: "stop-id-ambiguous", error: "This stop ID appears more than once on the shared schedule. Nothing was changed." });
@@ -433,12 +529,16 @@ export default async function handler(req, res) {
         }
       }
 
+      const scheduleOperation = stop.sourceEstimateId
+        ? { key: "sps_schedule", expectedVersion: baseline.schedule.version, value: nextSchedule }
+        : { key: "sps_schedule", expectedVersion: baseline.schedule.version, checkOnly: true };
       const operations = [
         { key: "sps_clients", expectedVersion: baseline.clients.version, value: mutation.clients },
         { key: "sps_completed", expectedVersion: baseline.completed.exists ? baseline.completed.version : 0, value: mutation.completed },
         // Estimate-linked stops also advance/release their fulfillment receipt here. Regular
-        // stops keep the same value as a version fence, so a concurrent edit still conflicts.
-        { key: "sps_schedule", expectedVersion: baseline.schedule.version, value: nextSchedule },
+        // stops use a check-only row lock, so a concurrent edit still conflicts without rewriting
+        // the full unchanged schedule document or advancing its version.
+        scheduleOperation,
       ];
       if (invoicePlan.changed) operations.push({
         key: "sps_invoices",
@@ -448,7 +548,7 @@ export default async function handler(req, res) {
       else if (estimateInvoiceFenceRequired) operations.push({
         key: "sps_invoices",
         expectedVersion: baseline.invoices.version,
-        value: baseline.invoices.value,
+        checkOnly: true,
       });
       const catalogFenceRequired = mode === "complete"
         ? hasPositiveTrackedUsage(completionEntry)
@@ -458,13 +558,23 @@ export default async function handler(req, res) {
         expectedVersion: baseline.catalog.version,
         value: mutation.catalog,
       });
-      if (maintenanceBillingFenceRequired) operations.push({
-        key: "sps_maintenance_billing",
-        expectedVersion: baseline.maintenanceBilling.exists ? baseline.maintenanceBilling.version : 0,
-        value: baseline.maintenanceBilling.value,
-      });
-      const saved = await compareAndSetAppStateBatch(operations);
+      if (maintenanceBillingFenceRequired) operations.push(baseline.maintenanceBilling.exists
+        ? {
+          key: "sps_maintenance_billing",
+          expectedVersion: baseline.maintenanceBilling.version,
+          checkOnly: true,
+        }
+        : {
+          // The first completion on an older install creates the protected ledger row. Once it
+          // exists, later completions use the check-only path above.
+          key: "sps_maintenance_billing",
+          expectedVersion: 0,
+          value: baseline.maintenanceBilling.value,
+        });
+      telemetry.setPhase("commit-batch");
+      const saved = await compareAndSetAppStateBatch(operations, telemetry.appStateOptions("commit-batch"));
       if (saved.applied) {
+        telemetry.setPhase("complete");
         return res.status(200).json({
           ok: true,
           applied: true,
@@ -485,9 +595,19 @@ export default async function handler(req, res) {
       if (saved.outcome !== "conflict") throw new Error(`unexpected_batch_outcome:${saved.outcome || "unknown"}`);
       if (attempt < MAX_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, 15 * attempt + Math.floor(Math.random() * 20)));
     }
+    telemetry.setPhase("contention");
     return res.status(409).json({ ok: false, code: "contention", error: "Another employee is changing this stop right now. Nothing was changed; please try again." });
   } catch (error) {
-    console.error("[stop-completion]", error && error.message ? error.message : error);
+    telemetry.logFailure(error);
+    if (error?.code === "APP_STATE_REQUEST_TIMEOUT") {
+      telemetry.setPhase("shared-data-timeout");
+      return res.status(504).json({
+        ok: false,
+        code: "shared-data-timeout",
+        requestId: telemetry.requestId,
+        error: "The shared data service took too long to confirm this report. Nothing was lost; the report will retry automatically.",
+      });
+    }
     return res.status(502).json({ ok: false, error: "The shared stop data could not be saved. Nothing was changed; please try again." });
   }
 }

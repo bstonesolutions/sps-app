@@ -228,7 +228,7 @@ async function lineForInboxReply(inboxId) {
   let response;
   try {
     response = await fetch(
-      `${SUPABASE_URL}/rest/v1/sps_inbox?id=eq.${encodeURIComponent(id)}&select=id,channel,from_phone,ai&limit=2`,
+      `${SUPABASE_URL}/rest/v1/sps_inbox?id=eq.${encodeURIComponent(id)}&select=id,channel,from_phone,ai,sms_direction&limit=2`,
       { headers: serviceHeaders() },
     );
   } catch (error) {
@@ -238,6 +238,9 @@ async function lineForInboxReply(inboxId) {
   const rows = await response.json().catch(() => null);
   if (!Array.isArray(rows) || rows.length !== 1 || rows[0]?.channel !== "sms") {
     throw new Error("inbox text was not found");
+  }
+  if (String(rows[0]?.sms_direction || "incoming").trim().toLowerCase() === "outgoing") {
+    throw new Error("inbox text is not an inbound reply anchor");
   }
   const ai = parseStoredValue(rows[0].ai);
   // Historical inbound texts predate multi-line support and could only have arrived on the
@@ -362,6 +365,7 @@ export default async function handler(req, res) {
   const inboxId = String((req.body || {}).inboxId || "").trim();
   const ownerSender = _u.teamRole === "owner";
   let line;
+  let verifiedInboxReply = false;
   if (inboxId) {
     if (!canSendTexts) {
       return res.status(403).json({ error: "Your team permissions do not allow replying from the business text inbox." });
@@ -387,6 +391,9 @@ export default async function handler(req, res) {
       if (replyContext.recipient !== toNum) {
         return res.status(400).json({ error: "The reply recipient does not match the original inbound text. No message was sent." });
       }
+      // Only a server-owned inbound inbox row with a matching recipient and authorized line can
+      // make this deliberate existing-thread reply live while Test Mode remains enabled.
+      verifiedInboxReply = true;
     } catch (error) {
       console.error("[send-sms] inbox reply line unavailable:", error && error.message ? error.message : error);
       return res.status(503).json({ error: "The original text line could not be verified. No reply was sent." });
@@ -444,7 +451,7 @@ export default async function handler(req, res) {
   let safeContent = normalizedContent;
   let redirected = false;
   let heldByTestMode = false;
-  if (textSafety.on) {
+  if (textSafety.on && !verifiedInboxReply) {
     const ownerTestDestination = !!textSafety.phone && toNum === textSafety.phone;
     let pilotLive = false;
     if (!ownerTestDestination && clientId && textSafety.liveClientIds.has(clientId)) {

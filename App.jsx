@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useContext, createContext, useMemo, useCallback, useId, Component, Fragment } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, useContext, createContext, useMemo, useCallback, useId, Component, Fragment } from "react";
 import { createPortal } from "react-dom";
 import { Capacitor } from "@capacitor/core";
 import { PushNotifications } from "@capacitor/push-notifications";
@@ -18,6 +18,7 @@ import { inventorySourcePreviewApplyPatch, normalizeInventorySourcePreview } fro
 import { groupInventoryProductFamilies, importSupplierProductVariants, inventoryProductDisplayName, inventoryProductFamilyName, inventoryProductVariantLabel } from "./inventoryProductVariants";
 import { inventoryAdjustmentInputIsValid, inventoryAdjustmentResult, inventoryTransferResult, sanitizeInventoryAdjustmentInput } from "./inventoryAdjustment";
 import { inventoryPackageCost } from "./inventoryPricing";
+import { stableKeyboardInset } from "./keyboardViewport";
 import { ESTIMATE_CHARGE_TYPES, estimateChargeBreakdown, estimateLineChargeLabel, estimateLineChargeType } from "./estimateBreakdown";
 import { completeEstimateWithInvoice, estimateTaxMigrationImpact, estimateToDraftInvoice, findInvoiceForEstimate, normalizeEstimateTaxForInvoice } from "./estimateInvoiceConversion";
 import { findScheduledStopForEstimate, scheduleApprovedEstimate } from "./estimateScheduleLink";
@@ -70,6 +71,7 @@ import {
   retryCompletionIntent,
   updateCompletionIntent,
 } from "./completionOutbox";
+import { requestCompletedStop } from "./completionRequest";
 
 // Manual/foreground refreshes compare these small version counters first and download only the
 // shared slices that changed. Keeping this list explicit prevents a Sync tap from tearing down the
@@ -602,10 +604,11 @@ async function sendSms(to, message, meta) {
   if (explicitTest && (!TEST_MODE.phone || phoneDigits(to) !== phoneDigits(TEST_MODE.phone))) {
     return { ok: false, accepted: false, sent: false, held: false, redirected: false, testOnly: true, acceptedForClient: false, error: "Test texts can only be sent to your saved Test Mode phone." };
   }
-  // Test/launch safety: hold or redirect to the owner so real clients get nothing —
-  // EXCEPT pilot-live clients, who get the real text while everyone else stays protected.
+  // Test/launch safety: hold or redirect to the owner so real clients get nothing, except
+  // pilot-live clients and a server-verified reply inside an existing SMS thread.
   let dest = to, body = message;
-  const testProtected = TEST_MODE.on && !explicitTest && !clientIsLive(meta && meta.clientId);
+  const existingThreadReply = !!(meta?.preserveRecipient && meta?.inboxId);
+  const testProtected = TEST_MODE.on && !explicitTest && !existingThreadReply && !clientIsLive(meta && meta.clientId);
   // Durable workflows must reach the server even in Test Mode so its at-most-once receipt records
   // the hold/redirect. Ordinary legacy calls retain the immediate client-side Test Mode UX.
   if (testProtected && !meta?.idempotencyKey && !meta?.preserveRecipient) {
@@ -619,13 +622,8 @@ async function sendSms(to, message, meta) {
       if (meta && (meta.clientId != null || meta.origin)) logComm({ clientId: meta.clientId ?? "", type: meta.type, channel: "sms", body: message, ok: false, origin: `${(meta && meta.origin) || (ACTOR ? `${ACTOR} — app` : "app")} · Test Mode misconfigured (no redirect phone)`, recipient: "" });
       return { ok: false, accepted: false, sent: false, held: false, redirected: false, testOnly: false, acceptedForClient: false, error: "Test mode is on, but no owner phone is set to redirect texts to." };
     }
-    // Inbox replies must keep the original sender in `to` so the server can prove the row and
-    // recipient match before it chooses that row's Quo line. The server then performs the same
-    // Test Mode redirect. Other legacy callers retain the immediate client-side redirect UX.
-    if (!meta?.inboxId) {
-      dest = TEST_MODE.phone;
-      body = `[TEST → ${to}] ${message}`;
-    }
+    dest = TEST_MODE.phone;
+    body = `[TEST → ${to}] ${message}`;
   }
   let result;
   try {
@@ -6229,18 +6227,73 @@ function SheetHandle({ handleProps, T }) {
 
 // Bug 2/4: track how much the on-screen keyboard overlaps the layout viewport, using the
 // visual viewport so modals/forms can lift their footer above the iOS keyboard.
-function useKeyboardInset() {
+function useKeyboardInset(active = true) {
   const [inset, setInset] = useState(0);
+  const baselineRef = useRef(0);
   useEffect(() => {
+    if (!active) {
+      setInset(0);
+      return undefined;
+    }
     const vv = window.visualViewport;
-    if (!vv) return;
-    const update = () => setInset(Math.max(0, window.innerHeight - (vv.height + vv.offsetTop)));
-    vv.addEventListener("resize", update);
-    vv.addEventListener("scroll", update);
-    update();
-    return () => { vv.removeEventListener("resize", update); vv.removeEventListener("scroll", update); };
-  }, []);
+    const touchDevice = Number(navigator.maxTouchPoints || 0) > 0;
+    if (!vv || !touchDevice) return undefined;
+
+    let frame = 0;
+    const layoutHeight = () => Math.max(
+      Number(window.innerHeight || 0),
+      Number(document.documentElement?.clientHeight || 0),
+      Number(vv.height || 0),
+    );
+    baselineRef.current = layoutHeight();
+    const measure = () => {
+      frame = 0;
+      const viewportHeight = Math.round(Number(vv.height || 0));
+      const currentLayoutHeight = layoutHeight();
+      baselineRef.current = Math.max(baselineRef.current || 0, currentLayoutHeight);
+      setInset(previous => {
+        const next = stableKeyboardInset({
+          baselineHeight: baselineRef.current,
+          viewportHeight,
+          previousInset: previous,
+        });
+        if (next === 0) baselineRef.current = currentLayoutHeight;
+        return next;
+      });
+    };
+    const scheduleMeasure = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(measure);
+    };
+    const reset = () => {
+      baselineRef.current = layoutHeight();
+      setInset(0);
+      scheduleMeasure();
+    };
+    vv.addEventListener("resize", scheduleMeasure);
+    window.addEventListener("orientationchange", reset);
+    scheduleMeasure();
+    return () => {
+      cancelAnimationFrame(frame);
+      vv.removeEventListener("resize", scheduleMeasure);
+      window.removeEventListener("orientationchange", reset);
+    };
+  }, [active]);
   return inset;
+}
+
+// Resize in a layout effect so the browser never paints the temporary collapsed textarea. The
+// prior input handler set height to auto and read scrollHeight synchronously on every key, which
+// made the full-screen thread visibly jump even when the keyboard itself did not move.
+function useGrowingTextarea(textareaRef, value, minHeight = 32, maxHeight = 92) {
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = `${minHeight}px`;
+    const naturalHeight = Math.max(minHeight, Math.min(maxHeight, Math.ceil(textarea.scrollHeight || minHeight)));
+    textarea.style.height = `${naturalHeight}px`;
+    textarea.style.overflowY = Number(textarea.scrollHeight || 0) > maxHeight ? "auto" : "hidden";
+  }, [textareaRef, value, minHeight, maxHeight]);
 }
 
 // Keep the focused field above the iOS keyboard. The app uses fixed shells with an internal
@@ -6248,6 +6301,7 @@ function useKeyboardInset() {
 function keepFocusedControlVisible(event) {
   const target = event && event.target;
   if (!target || !target.scrollIntoView || !/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+  if (target.closest?.("[data-sps-comms-detail-shell]")) return;
   setTimeout(() => {
     try { target.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" }); } catch (_) {}
   }, 120);
@@ -24847,7 +24901,7 @@ function NotificationSettings({ email, setEmail, branding, clients }) {
               Test Mode
               {tm.on && <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.06em", color: "#B45309", background: hexA("#F59E0B", 0.2), padding: "2px 8px", borderRadius: 100 }}>ON</span>}
             </div>
-            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3, lineHeight: 1.45 }}>While testing, keep client emails &amp; texts from reaching real clients. Turn off to go live.</div>
+            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 3, lineHeight: 1.45 }}>While testing, keep automatic and new outbound client messages from reaching real clients. A reply you send inside an existing text thread still goes live.</div>
           </div>
           <Toggle on={tm.on} onChange={v => setTM("on", v)} />
         </div>
@@ -24871,10 +24925,10 @@ function NotificationSettings({ email, setEmail, branding, clients }) {
                   <label style={lbl}>Send all client texts to</label>
                   <input type="tel" inputMode="tel" value={tm.phone || ""} placeholder={base.ownerPhone || "(555) 555-5555"} onChange={e => setTM("phone", e.target.value)} style={field} />
                 </div>
-                <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5 }}>Every client email &amp; text goes to you instead, tagged <b style={{ color: "#B45309" }}>[TEST → client]</b>. Leave blank to use your Owner Alert contacts below. Client portal messages and pushes are held too, unless that client is marked Pilot LIVE.</div>
+                <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5 }}>Automatic and new outbound client email and text go to you instead, tagged <b style={{ color: "#B45309" }}>[TEST → client]</b>. Replies inside existing text threads go live from the same business line. Leave blank to use your Owner Alert contacts below. Client portal messages and pushes stay held unless that client is marked Pilot LIVE.</div>
               </>
             ) : (
-              <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5 }}>No client emails, texts, portal messages, or pushes are sent. Pilot LIVE clients are the only exception. Turn Test Mode off to go live.</div>
+              <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5 }}>Automatic and new outbound client emails, texts, portal messages, and pushes are held. Replies inside existing text threads still go live. Pilot LIVE clients are the other exception.</div>
             )}
             {/* Pilot launch: hand-picked clients go LIVE (real texts/emails/portal posts/pushes)
                 while Test Mode keeps protecting everyone else — soft-launch a few at a time. */}
@@ -27084,7 +27138,7 @@ function VisitCommsGroup({ group, T, fmt, fmtDay, stepOf, line }) {
 
 function ChatThread({ clientId, sender, senderName, T, accentSide = "right", onSent, onOpenInvoice, onOpenService, portalMode = false, keyboardAware = false, workspaceScope = "", draftId = "" }) {
   const { messages, loading, send, markRead } = useMessages(clientId, portalMode);
-  const kb = useKeyboardInset();
+  const kb = useKeyboardInset(portalMode || keyboardAware);
   const [draft, setDraft] = useState(() => {
     if (!workspaceScope || !draftId) return "";
     const saved = readWorkspaceState(workspaceScope).comms?.chatDrafts;
@@ -28585,7 +28639,7 @@ function CommsMobileDetailShell({
   const shellRef = useRef(null);
   const previousFocusRef = useRef(null);
   const onBackRef = useRef(onBack);
-  const keyboardInset = useKeyboardInset();
+  const keyboardInset = useKeyboardInset(Boolean(footer));
   useBackgroundScrollLock(shellRef);
   useEffect(() => { onBackRef.current = onBack; }, [onBack]);
   useEffect(() => {
@@ -28618,11 +28672,11 @@ function CommsMobileDetailShell({
           <div style={{ justifySelf: "end", display: "flex", alignItems: "center", gap: 5 }}>{actions}</div>
         </div>
       </header>
-      <div data-sps-comms-detail-body style={{ flex: "1 1 auto", minHeight: 0, overflowY: bodyScroll ? "auto" : "hidden", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", background: T.surface, ...bodyStyle }}>
+      <div data-sps-comms-detail-body style={{ flex: "1 1 auto", minHeight: 0, overflowY: bodyScroll ? "auto" : "hidden", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", overflowAnchor: "none", background: T.surface, ...bodyStyle }}>
         {children}
       </div>
       {(footer || status) && (
-        <footer data-sps-comms-detail-footer style={{ flexShrink: 0, padding: `6px max(10px, env(safe-area-inset-right)) ${keyboardInset > 0 ? `${keyboardInset + 6}px` : "max(8px, env(safe-area-inset-bottom))"} max(10px, env(safe-area-inset-left))`, borderTop: `1px solid ${commsHairline(T, 0.12)}`, background: hexA(T.surface, 0.985), backdropFilter: "saturate(180%) blur(22px)", WebkitBackdropFilter: "saturate(180%) blur(22px)", transition: "padding-bottom 0.18s ease" }}>
+        <footer data-sps-comms-detail-footer style={{ flexShrink: 0, overflowAnchor: "none", padding: `6px max(10px, env(safe-area-inset-right)) ${keyboardInset > 0 ? `${keyboardInset + 6}px` : "max(8px, env(safe-area-inset-bottom))"} max(10px, env(safe-area-inset-left))`, borderTop: `1px solid ${commsHairline(T, 0.12)}`, background: hexA(T.surface, 0.985), backdropFilter: "saturate(180%) blur(22px)", WebkitBackdropFilter: "saturate(180%) blur(22px)" }}>
           {status}
           {footer}
         </footer>
@@ -28676,6 +28730,101 @@ function MobileSmsThread({ title, subtitle, avatar, lineLabel, categoryLabel, ca
     >
       {children}
     </CommsMobileDetailShell>
+  );
+}
+
+function SmsConversationBody({ row, maxHeight = "46vh", fullScreen = false, T, senderLabel, fmtWhen, fmtMailboxWhen }) {
+  const messages = Array.isArray(row?._smsMessages) && row._smsMessages.length ? row._smsMessages : [row];
+  const directionOf = (message) => (message?.sms_direction || message?._smsDirection) === "outgoing" ? "outgoing" : "incoming";
+  const messageTime = (message) => {
+    const value = new Date(message?.created_at || "").getTime();
+    return Number.isFinite(value) ? value : 0;
+  };
+  const lastOutgoingIndex = messages.reduce((last, message, index) => directionOf(message) === "outgoing" ? index : last, -1);
+  const threadRef = useRef(null);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (threadRef.current) threadRef.current.scrollTop = threadRef.current.scrollHeight;
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [row?._smsConversationKey, row?._messageCount]);
+  const linkify = (text) => String(text || "").split(/(https?:\/\/[^\s)]+)/g).map((part, i) => {
+    if (!/^https?:\/\//.test(part)) return part;
+    let host = part; try { host = new URL(part).hostname.replace(/^www\./, ""); } catch (_) {}
+    return <a key={i} href={part} onClick={(event) => { event.preventDefault(); openExternalBrowser(part); }} style={{ color: "inherit", fontWeight: 760, textDecoration: "underline", textUnderlineOffset: 2 }}>{host}</a>;
+  });
+  return (
+    <div ref={threadRef} aria-label={`Conversation with ${senderLabel(row)}`} data-sps-sms-thread-history
+      style={{ height: fullScreen ? "100%" : "auto", maxHeight: fullScreen ? "none" : maxHeight, boxSizing: "border-box", overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", border: fullScreen ? "none" : `1px solid ${T.border}`, borderRadius: fullScreen ? 0 : 14, padding: fullScreen ? "12px 11px 20px" : "14px 12px", scrollPaddingBottom: fullScreen ? 22 : 0, background: fullScreen ? T.surface : T.surfaceAlt, display: "flex", flexDirection: "column", gap: fullScreen ? 0 : 10 }}>
+      {messages.map((message, index) => {
+        const outgoing = directionOf(message) === "outgoing";
+        const previous = messages[index - 1];
+        const next = messages[index + 1];
+        const previousGap = previous ? Math.max(0, messageTime(message) - messageTime(previous)) : Infinity;
+        const nextGap = next ? Math.max(0, messageTime(next) - messageTime(message)) : Infinity;
+        const previousSame = !!previous && directionOf(previous) === directionOf(message) && previousGap < 5 * 60 * 1000;
+        const nextSame = !!next && directionOf(next) === directionOf(message) && nextGap < 5 * 60 * 1000;
+        const showTimestamp = fullScreen && (index === 0 || previousGap >= 15 * 60 * 1000);
+        const media = Array.isArray(message.sms_media) ? message.sms_media : [];
+        const visibleBody = smsVisibleBodyText(message.body_text, media.filter(item => !!smsMediaSource(item)).length);
+        const rawStatus = String(message.sms_status || "").toLowerCase();
+        const deliveryLabel = rawStatus === "delivered" ? "Delivered"
+          : rawStatus === "read" ? "Read"
+            : rawStatus === "failed" || rawStatus === "undelivered" ? "Not delivered"
+              : rawStatus === "queued" || rawStatus === "sending" ? "Sending…"
+                : rawStatus && rawStatus !== "received" ? "Sent"
+                  : "";
+        const showDelivery = fullScreen && outgoing && index === lastOutgoingIndex && !!deliveryLabel;
+        const bubbleRadius = !fullScreen
+          ? (outgoing ? "19px 19px 5px 19px" : "19px 19px 19px 5px")
+          : outgoing
+            ? `19px ${previousSame ? 7 : 19}px ${nextSame ? 7 : 5}px 19px`
+            : `${previousSame ? 7 : 19}px 19px 19px ${nextSame ? 7 : 5}px`;
+        return (
+          <Fragment key={message.id || index}>
+            {showTimestamp && <div style={{ alignSelf: "center", maxWidth: "90%", margin: index === 0 ? "0 0 8px" : "15px 0 8px", color: T.textMuted, fontSize: 10.5, fontWeight: 640, textAlign: "center" }}>{fmtWhen(message.created_at)}</div>}
+            <div style={{ alignSelf: outgoing ? "flex-end" : "flex-start", maxWidth: fullScreen ? "79%" : "84%", marginTop: fullScreen && !showTimestamp ? (previousSame ? 3 : 8) : 0, display: "flex", flexDirection: "column", alignItems: outgoing ? "flex-end" : "flex-start", gap: 4 }}>
+              <div data-sps-message-bubble data-direction={outgoing ? "outgoing" : "incoming"}
+                style={{ borderRadius: bubbleRadius, padding: visibleBody ? (fullScreen ? "9px 13px" : "9px 12px") : 0, background: outgoing ? T.primary : (fullScreen ? T.surfaceAlt : T.surface), color: outgoing ? "#fff" : T.text, boxShadow: "none", fontSize: fullScreen ? 15.5 : 13.5, lineHeight: 1.4, whiteSpace: "pre-wrap", wordBreak: "break-word", overflow: "hidden" }}>
+                {visibleBody ? linkify(visibleBody) : null}
+                {media.map((item, mediaIndex) => {
+                  const src = smsMediaSource(item);
+                  const kind = smsMediaKind(item);
+                  const label = smsMediaLabel(item, mediaIndex);
+                  const size = smsMediaSizeLabel(item);
+                  const radius = visibleBody ? 10 : 16;
+                  if (src && kind === "image") {
+                    return (
+                      <button key={mediaIndex} type="button" aria-label={`Open ${label}`} onClick={() => openInAppBrowser(src)}
+                        style={{ display: "block", width: "100%", marginTop: visibleBody ? 8 : 0, padding: 0, border: 0, borderRadius: radius, overflow: "hidden", background: outgoing ? "rgba(255,255,255,0.12)" : T.surfaceAlt, cursor: "pointer" }}>
+                        <img src={src} alt={label} loading="lazy" style={{ display: "block", width: "100%", maxHeight: 300, objectFit: "contain", borderRadius: radius }} />
+                      </button>
+                    );
+                  }
+                  if (src && kind === "video") {
+                    return <video key={mediaIndex} src={src} controls playsInline preload="metadata" aria-label={label} style={{ display: "block", width: "100%", maxHeight: 300, marginTop: visibleBody ? 8 : 0, borderRadius: radius, background: "#000" }} />;
+                  }
+                  if (src && kind === "audio") {
+                    return <audio key={mediaIndex} src={src} controls preload="metadata" aria-label={label} style={{ display: "block", width: "100%", minWidth: 230, marginTop: visibleBody ? 8 : 0 }} />;
+                  }
+                  return (
+                    <button key={mediaIndex} type="button" disabled={!src} onClick={() => { if (src) openInAppBrowser(src); }}
+                      style={{ width: "100%", display: "flex", alignItems: "center", gap: 9, marginTop: visibleBody ? 8 : 0, padding: "10px 11px", border: 0, background: outgoing ? "rgba(255,255,255,0.15)" : T.surface, color: "inherit", borderRadius: 10, textAlign: "left", font: "inherit", cursor: src ? "pointer" : "default", opacity: src ? 1 : 0.72 }}>
+                      <Icon name={src ? "download" : "paperclip"} size={15} />
+                      <span style={{ flex: 1, minWidth: 0, fontWeight: 720, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{src ? `Open ${label}` : `${label} unavailable`}</span>
+                      {size && <span style={{ flexShrink: 0, fontSize: 10.5, opacity: 0.72 }}>{size}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+              {fullScreen
+                ? (showDelivery && <span style={{ padding: "0 4px", fontSize: 9.5, color: rawStatus === "failed" || rawStatus === "undelivered" ? "#d9282f" : T.textMuted, fontWeight: 620 }}>{deliveryLabel}</span>)
+                : <span style={{ padding: "0 4px", fontSize: 9.5, color: T.textMuted, fontWeight: 600 }}>{outgoing ? "You · " : ""}{fmtMailboxWhen(message.created_at)}{message.sms_status && message.sms_status !== "received" ? ` · ${message.sms_status}` : ""}</span>}
+            </div>
+          </Fragment>
+        );
+      })}
+    </div>
   );
 }
 
@@ -28750,9 +28899,13 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   const [replyDraftKeyLoaded, setReplyDraftKeyLoaded] = useState("");
   const replyComposerRef = useRef(null);
   const replySucceeded = /^(Sent|Text accepted)/.test(replyMsg);
-  useEffect(() => {
-    if (!replyText && replyComposerRef.current) replyComposerRef.current.style.height = "32px";
-  }, [replyText]);
+  const inboundReplyAnchor = (row) => {
+    if (!row || row.channel !== "sms") return null;
+    const messages = Array.isArray(row._smsMessages) ? row._smsMessages : [row];
+    return [...messages].reverse().find(message => (message.sms_direction || message._smsDirection || "incoming") !== "outgoing") || null;
+  };
+  const openThreadReplyIsLive = !!inboundReplyAnchor(openRow)?.id;
+  useGrowingTextarea(replyComposerRef, replyText, 32, 92);
   const toggleReply = () => { setReplying(v => !v); setReplyMsg(""); };
   const flagReplied = (rowOrId) => {
     const target = rowOrId && typeof rowOrId === "object" ? rowOrId : { id: rowOrId };
@@ -28775,8 +28928,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
         const phoneKey = phone.replace(/\D/g, "").slice(-10);
         const clientMatches = phoneKey ? (clients || []).filter(c => String(c.phone || "").replace(/\D/g, "").slice(-10) === phoneKey) : [];
         const clientId = row._contactId || (row.ai && row.ai.clientId != null ? row.ai.clientId : (clientMatches.length === 1 ? clientMatches[0].id : undefined));
-        const messages = Array.isArray(row._smsMessages) ? row._smsMessages : [row];
-        const replyAnchor = [...messages].reverse().find(message => (message.sms_direction || message._smsDirection || "incoming") !== "outgoing");
+        const replyAnchor = inboundReplyAnchor(row);
         const sent = await sendSms(phone, replyText.trim(), { clientId, preserveRecipient: true, ...(replyAnchor?.id ? { inboxId: replyAnchor.id } : { lineRole: lineRoleForRow(row) }), type: "Text reply", origin: "Comms → Inbox text reply" });
         if (!sent.ok) setReplyMsg(sent.error || "Couldn't send the text.");
         else if (sent.held) setReplyMsg("Held by Test Mode — the customer was not contacted.");
@@ -29948,100 +30100,6 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       </span>
     );
   };
-  const SmsConversationBody = ({ row, maxHeight = "46vh", fullScreen = false }) => {
-    const messages = Array.isArray(row?._smsMessages) && row._smsMessages.length ? row._smsMessages : [row];
-    const directionOf = (message) => (message?.sms_direction || message?._smsDirection) === "outgoing" ? "outgoing" : "incoming";
-    const messageTime = (message) => {
-      const value = new Date(message?.created_at || "").getTime();
-      return Number.isFinite(value) ? value : 0;
-    };
-    const lastOutgoingIndex = messages.reduce((last, message, index) => directionOf(message) === "outgoing" ? index : last, -1);
-    const threadRef = useRef(null);
-    useEffect(() => {
-      const timer = setTimeout(() => {
-        if (threadRef.current) threadRef.current.scrollTop = threadRef.current.scrollHeight;
-      }, 0);
-      return () => clearTimeout(timer);
-    }, [row?._smsConversationKey, row?._messageCount]);
-    const linkify = (text) => String(text || "").split(/(https?:\/\/[^\s)]+)/g).map((part, i) => {
-      if (!/^https?:\/\//.test(part)) return part;
-      let host = part; try { host = new URL(part).hostname.replace(/^www\./, ""); } catch (_) {}
-      return <a key={i} href={part} onClick={(event) => { event.preventDefault(); openExternalBrowser(part); }} style={{ color: "inherit", fontWeight: 760, textDecoration: "underline", textUnderlineOffset: 2 }}>{host}</a>;
-    });
-    return (
-      <div ref={threadRef} aria-label={`Conversation with ${senderLabel(row)}`} data-sps-sms-thread-history
-        style={{ height: fullScreen ? "100%" : "auto", maxHeight: fullScreen ? "none" : maxHeight, boxSizing: "border-box", overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", border: fullScreen ? "none" : `1px solid ${T.border}`, borderRadius: fullScreen ? 0 : 14, padding: fullScreen ? "12px 11px 20px" : "14px 12px", scrollPaddingBottom: fullScreen ? 22 : 0, background: fullScreen ? T.surface : T.surfaceAlt, display: "flex", flexDirection: "column", gap: fullScreen ? 0 : 10 }}>
-        {messages.map((message, index) => {
-          const outgoing = directionOf(message) === "outgoing";
-          const previous = messages[index - 1];
-          const next = messages[index + 1];
-          const previousGap = previous ? Math.max(0, messageTime(message) - messageTime(previous)) : Infinity;
-          const nextGap = next ? Math.max(0, messageTime(next) - messageTime(message)) : Infinity;
-          const previousSame = !!previous && directionOf(previous) === directionOf(message) && previousGap < 5 * 60 * 1000;
-          const nextSame = !!next && directionOf(next) === directionOf(message) && nextGap < 5 * 60 * 1000;
-          const showTimestamp = fullScreen && (index === 0 || previousGap >= 15 * 60 * 1000);
-          const media = Array.isArray(message.sms_media) ? message.sms_media : [];
-          const visibleBody = smsVisibleBodyText(message.body_text, media.filter(item => !!smsMediaSource(item)).length);
-          const rawStatus = String(message.sms_status || "").toLowerCase();
-          const deliveryLabel = rawStatus === "delivered" ? "Delivered"
-            : rawStatus === "read" ? "Read"
-              : rawStatus === "failed" || rawStatus === "undelivered" ? "Not delivered"
-                : rawStatus === "queued" || rawStatus === "sending" ? "Sending…"
-                  : rawStatus && rawStatus !== "received" ? "Sent"
-                    : "";
-          const showDelivery = fullScreen && outgoing && index === lastOutgoingIndex && !!deliveryLabel;
-          const bubbleRadius = !fullScreen
-            ? (outgoing ? "19px 19px 5px 19px" : "19px 19px 19px 5px")
-            : outgoing
-              ? `19px ${previousSame ? 7 : 19}px ${nextSame ? 7 : 5}px 19px`
-              : `${previousSame ? 7 : 19}px 19px 19px ${nextSame ? 7 : 5}px`;
-          return (
-            <Fragment key={message.id || index}>
-              {showTimestamp && <div style={{ alignSelf: "center", maxWidth: "90%", margin: index === 0 ? "0 0 8px" : "15px 0 8px", color: T.textMuted, fontSize: 10.5, fontWeight: 640, textAlign: "center" }}>{fmtWhen(message.created_at)}</div>}
-              <div style={{ alignSelf: outgoing ? "flex-end" : "flex-start", maxWidth: fullScreen ? "79%" : "84%", marginTop: fullScreen && !showTimestamp ? (previousSame ? 3 : 8) : 0, display: "flex", flexDirection: "column", alignItems: outgoing ? "flex-end" : "flex-start", gap: 4 }}>
-                <div data-sps-message-bubble data-direction={outgoing ? "outgoing" : "incoming"}
-                  style={{ borderRadius: bubbleRadius, padding: visibleBody ? (fullScreen ? "9px 13px" : "9px 12px") : 0, background: outgoing ? T.primary : (fullScreen ? T.surfaceAlt : T.surface), color: outgoing ? "#fff" : T.text, boxShadow: "none", fontSize: fullScreen ? 15.5 : 13.5, lineHeight: 1.4, whiteSpace: "pre-wrap", wordBreak: "break-word", overflow: "hidden" }}>
-                  {visibleBody ? linkify(visibleBody) : null}
-                  {media.map((item, mediaIndex) => {
-                    const src = smsMediaSource(item);
-                    const kind = smsMediaKind(item);
-                    const label = smsMediaLabel(item, mediaIndex);
-                    const size = smsMediaSizeLabel(item);
-                    const radius = visibleBody ? 10 : 16;
-                    if (src && kind === "image") {
-                      return (
-                        <button key={mediaIndex} type="button" aria-label={`Open ${label}`} onClick={() => openInAppBrowser(src)}
-                          style={{ display: "block", width: "100%", marginTop: visibleBody ? 8 : 0, padding: 0, border: 0, borderRadius: radius, overflow: "hidden", background: outgoing ? "rgba(255,255,255,0.12)" : T.surfaceAlt, cursor: "pointer" }}>
-                          <img src={src} alt={label} loading="lazy" style={{ display: "block", width: "100%", maxHeight: 300, objectFit: "contain", borderRadius: radius }} />
-                        </button>
-                      );
-                    }
-                    if (src && kind === "video") {
-                      return <video key={mediaIndex} src={src} controls playsInline preload="metadata" aria-label={label} style={{ display: "block", width: "100%", maxHeight: 300, marginTop: visibleBody ? 8 : 0, borderRadius: radius, background: "#000" }} />;
-                    }
-                    if (src && kind === "audio") {
-                      return <audio key={mediaIndex} src={src} controls preload="metadata" aria-label={label} style={{ display: "block", width: "100%", minWidth: 230, marginTop: visibleBody ? 8 : 0 }} />;
-                    }
-                    return (
-                      <button key={mediaIndex} type="button" disabled={!src} onClick={() => { if (src) openInAppBrowser(src); }}
-                        style={{ width: "100%", display: "flex", alignItems: "center", gap: 9, marginTop: visibleBody ? 8 : 0, padding: "10px 11px", border: 0, background: outgoing ? "rgba(255,255,255,0.15)" : T.surface, color: "inherit", borderRadius: 10, textAlign: "left", font: "inherit", cursor: src ? "pointer" : "default", opacity: src ? 1 : 0.72 }}>
-                        <Icon name={src ? "download" : "paperclip"} size={15} />
-                        <span style={{ flex: 1, minWidth: 0, fontWeight: 720, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{src ? `Open ${label}` : `${label} unavailable`}</span>
-                        {size && <span style={{ flexShrink: 0, fontSize: 10.5, opacity: 0.72 }}>{size}</span>}
-                      </button>
-                    );
-                  })}
-                </div>
-                {fullScreen
-                  ? (showDelivery && <span style={{ padding: "0 4px", fontSize: 9.5, color: rawStatus === "failed" || rawStatus === "undelivered" ? "#d9282f" : T.textMuted, fontWeight: 620 }}>{deliveryLabel}</span>)
-                  : <span style={{ padding: "0 4px", fontSize: 9.5, color: T.textMuted, fontWeight: 600 }}>{outgoing ? "You · " : ""}{fmtMailboxWhen(message.created_at)}{message.sms_status && message.sms_status !== "received" ? ` · ${message.sms_status}` : ""}</span>}
-              </div>
-            </Fragment>
-          );
-        })}
-      </div>
-    );
-  };
   const setupPending = err && /hasn't been created|sps_inbox/i.test(err);
   const showMobileCompose = !smsOnly && !wide && !setupPending && rows !== null && (folder === "sent" || channelFilter !== "sms");
   const hasSearchOrCategory = !!q.trim() || filter !== "all";
@@ -30241,7 +30299,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
         <div style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12.5, color: T.text, background: hexA(T.primary, 0.05), border: `1px solid ${hexA(T.primary, 0.2)}`, borderRadius: 10, padding: "9px 12px", lineHeight: 1.5 }}><span style={{ color: T.primary, flexShrink: 0, display: "inline-flex", marginTop: 1 }}><Icon name="sparkle" size={14} /></span><span>{openRow.ai.summary}</span></div>
       )}
       {openRow._smsConversation ? (
-        <SmsConversationBody row={openRow} maxHeight="46vh" />
+        <SmsConversationBody row={openRow} maxHeight="46vh" T={T} senderLabel={senderLabel} fmtWhen={fmtWhen} fmtMailboxWhen={fmtMailboxWhen} />
       ) : openRow.body_html ? (
         <iframe title="Email content" sandbox="allow-popups allow-popups-to-escape-sandbox"
           srcDoc={`<html><head><base target="_blank"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;padding:14px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;color:#111827;word-break:break-word;background:#ffffff}img{max-width:100%;height:auto}table{max-width:100%}</style></head><body>${openRow.body_html}</body></html>`}
@@ -30293,7 +30351,10 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
             <Btn variant="primary" sm disabled={replyBusy || !replyText.trim()} onClick={sendOpenRowReply}>{replyBusy ? "Sending…" : openRow.channel === "sms" ? "Send text" : "Send reply"}</Btn>
             {replyMsg && <span style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</span>}
           </div>
-          <div style={{ fontSize: 11.5, color: T.textMuted }}>{openRow.channel === "sms" ? `Sends through Quo from the same ${lineLabelForRow(openRow).toLowerCase()} that received this text.` : "Sends from your Sending Identity (Comms → Settings) and quietly copies your Gmail for the record."}</div>
+          <div style={{ fontSize: 11.5, color: T.textMuted }}>
+            {openRow.channel === "sms" ? `Sends through Quo from the same ${lineLabelForRow(openRow).toLowerCase()} that received this text.` : "Sends from your Sending Identity (Comms → Settings) and quietly copies your Gmail for the record."}
+            {openRow.channel === "sms" && TEST_MODE.on && openThreadReplyIsLive && <span role="note" style={{ display: "block", marginTop: 4, color: T.primary, fontWeight: 750 }}>This existing-thread reply sends live. Test Mode still protects automatic and new outbound messages.</span>}
+          </div>
         </div>
       )}
       {!replying && replyMsg && <div style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</div>}
@@ -30316,6 +30377,8 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       T={T}
       status={replyMsg && !replySucceeded ? (
         <div role="status" aria-live="polite" style={{ padding: "0 8px 6px", color: T.warning, fontSize: 11, lineHeight: 1.3, fontWeight: 680, textAlign: "center" }}>{replyMsg}</div>
+      ) : TEST_MODE.on && openThreadReplyIsLive ? (
+        <div role="note" style={{ padding: "0 8px 6px", color: T.primary, fontSize: 11, lineHeight: 1.3, fontWeight: 720, textAlign: "center" }}>This reply sends live. Automatic and new outbound messages remain in Test Mode.</div>
       ) : null}
       composer={canTextFromRow(openRow) ? (
         <div style={{ display: "flex", alignItems: "flex-end", gap: 7 }}>
@@ -30326,13 +30389,9 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
               value={replyText}
               maxLength={1600}
               rows={1}
-              onChange={(event) => {
-                setReplyText(event.target.value);
-                event.target.style.height = "auto";
-                event.target.style.height = `${Math.min(event.target.scrollHeight, 92)}px`;
-              }}
+              onChange={(event) => setReplyText(event.target.value)}
               placeholder="Text Message"
-              style={{ flex: 1, width: "100%", minWidth: 0, height: 32, maxHeight: 92, padding: "6px 0 4px", border: "none", outline: "none", resize: "none", overflowY: "auto", background: "transparent", color: T.text, fontFamily: "inherit", fontSize: 16, lineHeight: 1.35, boxSizing: "border-box", boxShadow: "none" }}
+              style={{ flex: 1, width: "100%", minWidth: 0, height: 32, maxHeight: 92, padding: "6px 0 4px", border: "none", outline: "none", resize: "none", overflowY: "hidden", overflowAnchor: "none", background: "transparent", color: T.text, fontFamily: "inherit", fontSize: 16, lineHeight: 1.35, boxSizing: "border-box", boxShadow: "none" }}
             />
             {replyText.length > 1400 && <span style={{ padding: "0 5px", color: T.textMuted, fontSize: 9.5, fontWeight: 650, alignSelf: "flex-end", marginBottom: 6 }}>{replyText.length}/1600</span>}
           </div>
@@ -30345,7 +30404,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
         <div style={{ minHeight: 40, display: "flex", alignItems: "center", justifyContent: "center", color: T.textMuted, fontSize: 11.5, fontWeight: 680, textAlign: "center" }}>View only · you do not have permission to reply from this number.</div>
       )}
     >
-      <SmsConversationBody row={openRow} fullScreen maxHeight="none" />
+      <SmsConversationBody row={openRow} fullScreen maxHeight="none" T={T} senderLabel={senderLabel} fmtWhen={fmtWhen} fmtMailboxWhen={fmtMailboxWhen} />
     </MobileSmsThread>
   ) : null;
   // ── Sent folder — the emails you composed/replied from here. Read from sps_comms_log (already
@@ -30777,7 +30836,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
             )}
             {/* The email itself — real HTML in a sandboxed frame (looks like Gmail), text fallback */}
             {openRow._smsConversation ? (
-              <SmsConversationBody row={openRow} maxHeight="48vh" />
+              <SmsConversationBody row={openRow} maxHeight="48vh" T={T} senderLabel={senderLabel} fmtWhen={fmtWhen} fmtMailboxWhen={fmtMailboxWhen} />
             ) : openRow.body_html ? (
               <iframe title="Email content" sandbox="allow-popups allow-popups-to-escape-sandbox"
                 srcDoc={`<html><head><base target="_blank"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;padding:14px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;color:#111827;word-break:break-word;background:#ffffff}img{max-width:100%;height:auto}table{max-width:100%}</style></head><body>${openRow.body_html}</body></html>`}
@@ -30831,7 +30890,10 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
                   <Btn variant="primary" sm disabled={replyBusy || !replyText.trim()} onClick={sendOpenRowReply}>{replyBusy ? "Sending…" : openRow.channel === "sms" ? "Send text" : "Send reply"}</Btn>
                   {replyMsg && <span style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</span>}
                 </div>
-                <div style={{ fontSize: 11.5, color: T.textMuted }}>{openRow.channel === "sms" ? `Sends through Quo from the same ${lineLabelForRow(openRow).toLowerCase()} that received this text.` : "Sends from your Sending Identity (Comms → Settings) and quietly copies your Gmail for the record."}</div>
+                <div style={{ fontSize: 11.5, color: T.textMuted }}>
+                  {openRow.channel === "sms" ? `Sends through Quo from the same ${lineLabelForRow(openRow).toLowerCase()} that received this text.` : "Sends from your Sending Identity (Comms → Settings) and quietly copies your Gmail for the record."}
+                  {openRow.channel === "sms" && TEST_MODE.on && openThreadReplyIsLive && <span role="note" style={{ display: "block", marginTop: 4, color: T.primary, fontWeight: 750 }}>This existing-thread reply sends live. Test Mode still protects automatic and new outbound messages.</span>}
+                </div>
               </div>
             )}
             {!replying && replyMsg && <div style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</div>}
@@ -37871,7 +37933,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
           </main>
         </div>
       ) : (
-        <main ref={portalMainRef} data-sps-app-scroll onFocusCapture={keepFocusedControlVisible} style={{ flex: 1, ...(isStaffPreview ? {} : { minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }), padding: "20px 16px", maxWidth: 600, margin: "0 auto", marginBottom: portalKeyboardOpen ? 0 : "var(--sps-mobile-nav-reserve)", width: "100%", boxSizing: "border-box", paddingBottom: 0, scrollPaddingBottom: portalKeyboardOpen ? portalKeyboardInset + 40 : "var(--sps-page-bottom-clearance)", fontSize: `${textScale}em` }}>
+        <main ref={portalMainRef} data-sps-app-scroll onFocusCapture={keepFocusedControlVisible} style={{ flex: 1, ...(isStaffPreview ? {} : { minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }), paddingTop: 20, paddingRight: 16, paddingBottom: 0, paddingLeft: 16, maxWidth: 600, margin: "0 auto", marginBottom: portalKeyboardOpen ? 0 : "var(--sps-mobile-nav-reserve)", width: "100%", boxSizing: "border-box", scrollPaddingBottom: portalKeyboardOpen ? portalKeyboardInset + 40 : "var(--sps-page-bottom-clearance)", fontSize: `${textScale}em` }}>
           {screens}
           <MobilePageEndClearance keyboardOpen={portalKeyboardOpen} keyboardInset={portalKeyboardInset} />
         </main>
@@ -41550,20 +41612,11 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     }
   };
   const requestStopMutation = async (body) => {
-    const response = await fetch(`${PROD_URL}/api/stop-completion`, {
-      method: "POST",
+    return requestCompletedStop({
+      url: `${PROD_URL}/api/stop-completion`,
       headers: await authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify(body),
+      body,
     });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || data.ok !== true) {
-      const error = new Error(data.error || "The stop could not be saved. Nothing was changed.");
-      error.code = data.code || "";
-      error.status = response.status;
-      error.legacy = !!data.legacy;
-      throw error;
-    }
-    return data;
   };
 
   const refreshCompletionOutboxView = async (changedItem = null) => {
@@ -41738,7 +41791,8 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           if (blocked) {
             const error = new Error("Resolve the shared data conflict before this completed stop can sync."); error.status = 409; error.code = "app-state-conflict"; throw error;
           }
-          const saved = await requestStopMutation(item.request);
+          const requestResult = await requestStopMutation(item.request);
+          const saved = requestResult.data;
           await applyConfirmedCompletion(saved, item);
           const delivery = initializeCompletionDelivery(item.delivery);
           item = await patchCompletionOutboxItem(item.id, {
@@ -41750,6 +41804,8 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
             invoiceOutcome: saved.invoiceOutcome || null,
             applied: !!saved.applied,
             alreadyCompleted: !!saved.alreadyCompleted,
+            lastRequestId: requestResult.requestId,
+            lastRequestDurationMs: requestResult.durationMs,
             delivery,
           }) || item;
           await deliverConfirmedCompletion(item);
@@ -41762,6 +41818,8 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
               retryCount,
               retryAt: Date.now() + completionRetryDelay(retryCount),
               lastError: failure.message,
+              lastRequestId: error?.requestId || item.lastRequestId || "",
+              lastRequestDurationMs: Number(error?.durationMs) || 0,
             }) || item;
           } else {
             item = await patchCompletionOutboxItem(item.id, {
@@ -41770,6 +41828,8 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
               lastError: failure.message,
               errorCode: failure.code || "",
               errorStatus: failure.status || 0,
+              lastRequestId: error?.requestId || item.lastRequestId || "",
+              lastRequestDurationMs: Number(error?.durationMs) || 0,
             }) || item;
           }
         }
@@ -42430,7 +42490,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
             <button onClick={manualSync} style={{ background: "#F59E0B", color: "#fff", border: "none", borderRadius: 12, padding: "7px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, display:"flex", alignItems:"center", gap:5 }}>Retry</button>
           </div>
         )}
-        <main ref={appMainRef} data-sps-app-scroll onFocusCapture={keepFocusedControlVisible} style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", alignSelf: "center", padding: isCommsRoute ? (vp.isPhone ? "0 16px" : "0 32px") : (vp.isPhone ? `${isEstimatesRoute ? 0 : 22}px 16px` : "28px 32px"), maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", marginBottom: keyboardOpen ? 0 : "var(--sps-mobile-nav-reserve)", width: "100%", boxSizing: "border-box", paddingBottom: 0, scrollPaddingBottom: keyboardOpen ? keyboardInset + 40 : "var(--sps-page-bottom-clearance)" }}>
+        <main ref={appMainRef} data-sps-app-scroll onFocusCapture={keepFocusedControlVisible} style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain", alignSelf: "center", paddingTop: isCommsRoute ? 0 : (vp.isPhone ? (isEstimatesRoute ? 0 : 22) : 28), paddingRight: vp.isPhone ? 16 : 32, paddingBottom: 0, paddingLeft: vp.isPhone ? 16 : 32, maxWidth: vp.isDesktop ? 1100 : vp.isTablet ? 900 : 740, marginLeft: "auto", marginRight: "auto", marginBottom: keyboardOpen ? 0 : "var(--sps-mobile-nav-reserve)", width: "100%", boxSizing: "border-box", scrollPaddingBottom: keyboardOpen ? keyboardInset + 40 : "var(--sps-page-bottom-clearance)" }}>
           {(page === "dashboard" || page === "schedule") && <FieldReadinessBanner status={fieldReadiness} locationError={locationWatchError} testModeHoldsStaff={!!email?.testMode?.on && !perms.isAdmin} onOpen={() => { setFieldSetupMsg(""); setFieldSetupOpen(true); }} />}
           {pageBody}
           <MobilePageEndClearance keyboardOpen={keyboardOpen} keyboardInset={keyboardInset} />

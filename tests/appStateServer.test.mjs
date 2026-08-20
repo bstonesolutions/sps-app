@@ -7,6 +7,8 @@ const {
   compareAndSetAppStateBatch,
   mutateAppState,
   NO_APP_STATE_CHANGE,
+  readAppStatesVersioned,
+  withAppStateRequestDeadline,
 } = await import("../api/_app-state.js");
 
 const originalFetch = globalThis.fetch;
@@ -86,6 +88,81 @@ test("server no-change mutation performs no write", async () => {
   assert.equal(writes, 0);
 });
 
+test("server reads a related app_state baseline in one request", async () => {
+  let reads = 0;
+  globalThis.fetch = async (url) => {
+    reads += 1;
+    assert.match(String(url), /key=in\.\(sps_clients,sps_schedule,sps_invoices\)$/);
+    return response([
+      { key: "sps_clients", value: JSON.stringify([{ id: "c1" }]), version: 3, updated_at: null },
+      { key: "sps_schedule", value: JSON.stringify([]), version: 7, updated_at: null },
+    ]);
+  };
+
+  const snapshot = await readAppStatesVersioned(["sps_clients", "sps_schedule", "sps_invoices"]);
+
+  assert.equal(reads, 1);
+  assert.deepEqual(snapshot.sps_clients.value, [{ id: "c1" }]);
+  assert.equal(snapshot.sps_schedule.version, 7);
+  assert.equal(snapshot.sps_invoices.exists, false);
+});
+
+test("app_state request deadline aborts a stalled Supabase exchange with a stable retryable code", async () => {
+  let observedSignal = null;
+  let aborted = false;
+  await assert.rejects(
+    withAppStateRequestDeadline("batch-read", (signal) => {
+      observedSignal = signal;
+      return new Promise((resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          aborted = true;
+          reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+        }, { once: true });
+      });
+    }, {
+      timeoutMs: 500,
+      setTimer(callback) { setImmediate(callback); return 1; },
+      clearTimer() {},
+    }),
+    (error) => {
+      assert.equal(error.code, "APP_STATE_REQUEST_TIMEOUT");
+      assert.equal(error.operation, "batch-read");
+      assert.equal(error.timeoutMs, 500);
+      return true;
+    },
+  );
+  assert.equal(observedSignal instanceof AbortSignal, true);
+  assert.equal(aborted, true);
+});
+
+test("batched app_state reads bound response-body parsing as well as initial fetch", async () => {
+  let observedSignal = null;
+  globalThis.fetch = async (_url, options = {}) => {
+    observedSignal = options.signal;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => new Promise(() => {}),
+      text: async () => "",
+    };
+  };
+
+  await assert.rejects(
+    readAppStatesVersioned(["sps_clients", "sps_schedule"], {
+      timeoutMs: 500,
+      setTimer(callback) { setImmediate(callback); return 1; },
+      clearTimer() {},
+    }),
+    (error) => {
+      assert.equal(error.code, "APP_STATE_REQUEST_TIMEOUT");
+      assert.equal(error.operation, "batch-read");
+      return true;
+    },
+  );
+  assert.equal(observedSignal instanceof AbortSignal, true);
+  assert.equal(observedSignal.aborted, true);
+});
+
 test("trusted server batch CAS preserves JSON-string rows and returns conflicts without partial fallback", async () => {
   let requestBody = null;
   globalThis.fetch = async (url, options = {}) => {
@@ -111,4 +188,41 @@ test("trusted server batch CAS preserves JSON-string rows and returns conflicts 
   assert.deepEqual(JSON.parse(requestBody.p_operations[0].value), [{ id: "c1" }]);
   assert.deepEqual(JSON.parse(requestBody.p_operations[1].value), { treatments: [] });
   assert.equal(requestBody.p_operations[1].expected_version, 7);
+});
+
+test("trusted batch CAS sends check-only fences without serializing their unchanged value", async () => {
+  let requestBody = null;
+  globalThis.fetch = async (url, options = {}) => {
+    assert.match(String(url), /\/rest\/v1\/rpc\/sps_app_state_batch_cas$/);
+    requestBody = JSON.parse(options.body);
+    return response([{
+      applied: true,
+      outcome: "applied",
+      conflict_key: null,
+      current_versions: { sps_clients: 4, sps_schedule: 9 },
+    }]);
+  };
+
+  await compareAndSetAppStateBatch([
+    { key: "sps_clients", expectedVersion: 3, value: [{ id: "c1" }] },
+    { key: "sps_schedule", expectedVersion: 9, checkOnly: true },
+  ]);
+
+  assert.deepEqual(requestBody.p_operations[0], {
+    key: "sps_clients",
+    expected_version: 3,
+    value: JSON.stringify([{ id: "c1" }]),
+  });
+  assert.deepEqual(requestBody.p_operations[1], {
+    key: "sps_schedule",
+    expected_version: 9,
+    check_only: true,
+  });
+  await assert.rejects(
+    compareAndSetAppStateBatch([
+      { key: "sps_clients", expectedVersion: 1, value: [] },
+      { key: "sps_missing", expectedVersion: 0, checkOnly: true },
+    ]),
+    /check_requires_existing_row/,
+  );
 });

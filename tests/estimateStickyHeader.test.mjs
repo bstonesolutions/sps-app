@@ -20,5 +20,6 @@ test("mobile estimate detail owns a flush scroll edge while the list keeps its s
   assert.match(screenSource, /paddingTop: vp\.isPhone \? 22 : 0/);
 
   assert.match(app, /const isEstimatesRoute = page === "estimates"/);
-  assert.match(app, /vp\.isPhone \? `\$\{isEstimatesRoute \? 0 : 22\}px 16px`/);
+  assert.match(app, /paddingTop: isCommsRoute \? 0 : \(vp\.isPhone \? \(isEstimatesRoute \? 0 : 22\) : 28\)/);
+  assert.match(app, /paddingRight: vp\.isPhone \? 16 : 32/);
 });

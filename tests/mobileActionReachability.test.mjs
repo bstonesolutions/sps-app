@@ -15,7 +15,17 @@ test("staff and client shells keep page actions reachable above the mobile nav a
   assert.ok((app.match(/--sps-page-bottom-clearance/g) || []).length >= 4, "shared nav clearance should be defined and consumed by both shells");
   assert.ok((app.match(/--sps-mobile-nav-reserve/g) || []).length >= 4, "both shells should reserve the floating dock outside the scroll viewport");
   assert.ok((app.match(/--sps-floating-action-bottom/g) || []).length >= 6, "all mobile action bars should use the same nav offset");
-  assert.equal((app.match(/paddingBottom: 0, scrollPaddingBottom:/g) || []).length, 2, "mobile shells must not depend on Safari scroll-container padding for reachability");
+  assert.equal((app.match(/paddingBottom: 0/g) || []).length >= 2, true, "mobile shells must not depend on Safari scroll-container padding for reachability");
+  assert.equal((app.match(/scrollPaddingBottom:/g) || []).length >= 2, true, "both mobile shells should keep keyboard-aware scroll padding");
+  const mobileShellTags = [...app.matchAll(/<main ref=\{(?:portalMainRef|appMainRef)\} data-sps-app-scroll[^>]+>/g)].map((match) => match[0]);
+  assert.equal(mobileShellTags.length, 2, "both mobile shells should expose their scroll surface");
+  for (const shell of mobileShellTags) {
+    assert.doesNotMatch(shell, /\bpadding:/, "mobile shells must not mix shorthand and longhand padding during rerenders");
+    assert.match(shell, /paddingTop:/);
+    assert.match(shell, /paddingRight:/);
+    assert.match(shell, /paddingBottom: 0/);
+    assert.match(shell, /paddingLeft:/);
+  }
   assert.match(app, /marginBottom: keyboardOpen \? 0 : "var\(--sps-mobile-nav-reserve\)"/);
   assert.match(app, /marginBottom: portalKeyboardOpen \? 0 : "var\(--sps-mobile-nav-reserve\)"/);
   assert.match(app, /<MobilePageEndClearance keyboardOpen=\{keyboardOpen\} keyboardInset=\{keyboardInset\} \/>/);

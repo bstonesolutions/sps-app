@@ -28,7 +28,7 @@ let _initialReadConfirmed = false;
 let _loadPromise = null;
 let _flushing = false;
 let _ensureHydratePromise = null;
-let _pendingPersistTail = Promise.resolve();
+let _pendingPersistTail = Promise.resolve({ durable: true, empty: true });
 let _snapshotPersistTail = Promise.resolve();
 let _lastErrorAt = 0;
 let _initSelectAt = 0;
@@ -153,21 +153,93 @@ function loadPendingFallback() {
 }
 
 async function writePendingSnapshot(uid, data) {
-  if (!uid) return;
+  if (!uid) return { durable: false, error: new Error("A signed-in account is required to save pending work") };
+  const hasPending = Object.keys(data).length > 0;
+  if (!hasPending) {
+    // Both replay sources must be absent or hold an explicit empty tombstone. Otherwise an older
+    // pending envelope can come back on the next launch after the server-confirmed write completed.
+    const storageKey = pendingStorageKey(uid);
+    let localStorageCleared = false;
+    let indexedDbCleared = false;
+    let localStorageError = null;
+    let indexedDbError = null;
+    try {
+      localStorage.removeItem(storageKey);
+      if (localStorage.getItem(storageKey) !== null) localStorage.setItem(storageKey, "{}");
+      const stored = localStorage.getItem(storageKey);
+      localStorageCleared = stored === null || stored === "{}";
+    } catch (error) {
+      localStorageError = error;
+    }
+    try {
+      const key = pendingIdbKey(uid);
+      if (key) {
+        try { await idb.del(key); } catch (_) {}
+        let stored = await idb.get(key);
+        if (stored) {
+          await idb.set(key, { uid, at: Date.now(), data: {} });
+          stored = await idb.get(key);
+        }
+        indexedDbCleared = !stored || !!(
+          stored.uid === uid
+          && stored.data
+          && Object.keys(stored.data).length === 0
+        );
+      }
+    } catch (error) {
+      indexedDbError = error;
+    }
+    const durable = localStorageCleared && indexedDbCleared;
+    return {
+      durable,
+      empty: true,
+      localStorageDurable: localStorageCleared,
+      indexedDbDurable: indexedDbCleared,
+      error: durable
+        ? null
+        : (indexedDbError || localStorageError || new Error("The confirmed pending copy could not be cleared on this device")),
+    };
+  }
+
+  const serialized = JSON.stringify(data);
+  let localStorageDurable = false;
+  let indexedDbDurable = false;
+  let localStorageError = null;
+  let indexedDbError = null;
   const storageKey = pendingStorageKey(uid);
   try {
-    if (Object.keys(data).length) localStorage.setItem(storageKey, JSON.stringify(data));
-    else localStorage.removeItem(storageKey);
+    localStorage.setItem(storageKey, serialized);
+    localStorageDurable = localStorage.getItem(storageKey) === serialized;
   } catch (error) {
     // Large client files can exceed localStorage. IndexedDB below remains the primary durable copy.
+    localStorageError = error;
     try { console.warn("store: local pending-write fallback unavailable:", error && error.message); } catch (_) {}
   }
   try {
     const key = pendingIdbKey(uid);
-    if (!key) return;
-    if (Object.keys(data).length) await idb.set(key, { uid, at: Date.now(), data });
-    else await idb.del(key);
-  } catch (_) {}
+    if (key) {
+      await idb.set(key, { uid, at: Date.now(), data });
+      const stored = await idb.get(key);
+      indexedDbDurable = !!(
+        stored
+        && stored.uid === uid
+        && stored.data
+        && JSON.stringify(stored.data) === serialized
+      );
+    }
+  } catch (error) {
+    indexedDbError = error;
+  }
+
+  const durable = localStorageDurable || indexedDbDurable;
+  return {
+    durable,
+    localStorageDurable,
+    indexedDbDurable,
+    error: durable
+      ? null
+      : (indexedDbError || localStorageError || new Error("Pending work could not be verified on this device")),
+  };
 }
 
 function persistPending() {
@@ -179,8 +251,11 @@ function persistPending() {
     () => writePendingSnapshot(uid, data),
     () => writePendingSnapshot(uid, data)
   );
-  _pendingPersistTail = run.then(() => {}, () => {});
-  return run;
+  _pendingPersistTail = run.then(
+    (result) => result,
+    (error) => ({ durable: false, error })
+  );
+  return _pendingPersistTail;
 }
 
 async function awaitPendingDurability() {
@@ -189,7 +264,12 @@ async function awaitPendingDurability() {
   let observed;
   do {
     observed = _pendingPersistTail;
-    await observed;
+    const result = await observed;
+    if (!result || result.durable !== true) {
+      const error = (result && result.error) || new Error("Pending work could not be verified on this device");
+      error.code = error.code || "pending_durability_unavailable";
+      throw error;
+    }
   } while (observed !== _pendingPersistTail);
 }
 
@@ -739,7 +819,39 @@ async function finishApplied(key, envelope, value, version, identityVersion, opt
     _cache[key] = value;
   }
   recalculateRetryWindow();
-  await persistPending();
+  const pendingPersistence = await persistPending();
+  if (!pendingPersistence || pendingPersistence.durable !== true) {
+    if (!hasNewerIntent) {
+      _pending[key] = {
+        ...envelope,
+        baseExists: true,
+        baseValue: value,
+        baseVersion: version,
+        status: "pending",
+        conflicts: [],
+        retryCount: 0,
+        retryAt: 0,
+        updatedAt: Date.now(),
+      };
+      _cache[key] = value;
+      recalculateRetryWindow();
+    }
+    const restored = await persistPending();
+    const error = new Error("The change reached the server, but this device could not clear its pending copy. Keep this screen open and retry sync.");
+    error.code = "pending_cleanup_unavailable";
+    throttledError(error.message);
+    return {
+      ok: false,
+      error,
+      durabilityFailed: true,
+      cleanupFailed: true,
+      serverConfirmed: true,
+      review: true,
+      queued: !!(restored && restored.durable),
+      value,
+      version,
+    };
+  }
   if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
   saveSnapshot();
   // A newer local edit remains optimistic in _cache. Do not tell React to adopt the just-confirmed
@@ -776,7 +888,40 @@ async function finishDeleted(key, envelope, identityVersion, options = {}) {
     delete _cache[key];
   }
   recalculateRetryWindow();
-  await persistPending();
+  const pendingPersistence = await persistPending();
+  if (!pendingPersistence || pendingPersistence.durable !== true) {
+    if (!hasNewerIntent) {
+      _pending[key] = {
+        ...envelope,
+        baseExists: false,
+        baseValue: null,
+        baseVersion: 0,
+        status: "pending",
+        conflicts: [],
+        retryCount: 0,
+        retryAt: 0,
+        updatedAt: Date.now(),
+      };
+      delete _cache[key];
+      recalculateRetryWindow();
+    }
+    const restored = await persistPending();
+    const error = new Error("The deletion reached the server, but this device could not clear its pending copy. Keep this screen open and retry sync.");
+    error.code = "pending_cleanup_unavailable";
+    throttledError(error.message);
+    return {
+      ok: false,
+      error,
+      durabilityFailed: true,
+      cleanupFailed: true,
+      serverConfirmed: true,
+      review: true,
+      queued: !!(restored && restored.durable),
+      value: undefined,
+      version: 0,
+      deleted: true,
+    };
+  }
   if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
   saveSnapshot();
   if (options.notify !== false && !hasNewerIntent) notifyReconciled(key, true);
@@ -786,7 +931,20 @@ async function finishDeleted(key, envelope, identityVersion, options = {}) {
 
 async function commitKey(key, identityVersion = _identityVersion) {
   if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
-  await awaitPendingDurability();
+  try {
+    await awaitPendingDurability();
+  } catch (error) {
+    const durabilityError = new Error("This change could not be saved on this device. Keep this screen open and retry before continuing.");
+    durabilityError.code = (error && error.code) || "pending_durability_unavailable";
+    throttledError(durabilityError.message);
+    return {
+      ok: false,
+      error: durabilityError,
+      durabilityFailed: true,
+      review: true,
+      queued: false,
+    };
+  }
   if (identityVersion !== _identityVersion || !_uid) return { ok: false, staleIdentity: true };
   await ensureHydrate();
   const initialized = await init();

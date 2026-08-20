@@ -7,8 +7,11 @@ const shellStart = app.indexOf("function CommsMobileDetailShell");
 const shellEnd = app.indexOf("function CommsResponsiveDetail", shellStart);
 const detailShell = app.slice(shellStart, shellEnd > shellStart ? shellEnd : undefined);
 const threadStart = app.indexOf("function MobileSmsThread");
-const threadEnd = app.indexOf("function EmailInboxSection", threadStart);
+const threadEnd = app.indexOf("function SmsConversationBody", threadStart);
 const mobileThread = app.slice(threadStart, threadEnd > threadStart ? threadEnd : undefined);
+const conversationStart = threadEnd;
+const conversationEnd = app.indexOf("function EmailInboxSection", conversationStart);
+const smsConversationBody = app.slice(conversationStart, conversationEnd > conversationStart ? conversationEnd : undefined);
 const inboxStart = app.indexOf("function EmailInboxSection");
 const inboxEnd = app.indexOf("function LogsScreen", inboxStart);
 const inbox = app.slice(inboxStart, inboxEnd > inboxStart ? inboxEnd : undefined);
@@ -58,8 +61,8 @@ test("the full-screen thread keeps its reply composer fixed and the history inde
   assert.match(mobileThread, /footer=\{composer\}/);
 
   assert.match(inbox, /<SmsConversationBody row=\{openRow\}[\s\S]*?fullScreen/);
-  assert.match(inbox, /data-sps-sms-thread-history/);
-  assert.match(inbox, /data-sps-message-bubble data-direction=\{outgoing \? "outgoing" : "incoming"\}/);
+  assert.match(smsConversationBody, /data-sps-sms-thread-history/);
+  assert.match(smsConversationBody, /data-sps-message-bubble data-direction=\{outgoing \? "outgoing" : "incoming"\}/);
   assert.match(
     inbox,
     /composer=\{[\s\S]*?<textarea[\s\S]*?aria-label=\{`Text \$\{senderLabel\(openRow\)\}`\}[\s\S]*?value=\{replyText\}[\s\S]*?maxLength=\{1600\}[\s\S]*?Send text/,

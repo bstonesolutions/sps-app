@@ -867,6 +867,73 @@ test("inbox replies use the verified line and recipient from the original inboun
       assert.equal(calls.quo, 0);
     }
   });
+
+  await t.test("a verified automation-line thread reply sends live while Test Mode holds other texts", async () => {
+    const calls = installOutboundFetch({
+      team: [inboxStaff()],
+      inboxRows: [{ id: "sms-auto-live-reply", channel: "sms", from_phone: "+15552345678", sms_direction: "incoming", ai: { quoLine: "automation" } }],
+      textSafety: { testMode: { on: true, mode: "hold", phone: "+15550009999", liveClientIds: [] } },
+    });
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({
+      to: "+15552345678",
+      message: "Deliberate thread reply",
+      inboxId: "sms-auto-live-reply",
+    }), res);
+
+    assert.equal(res.statusCode, 202);
+    assert.equal(res.body.accepted, true);
+    assert.equal(res.body.held, false);
+    assert.equal(res.body.redirected, false);
+    assert.equal(res.body.line, "automation");
+    assert.equal(calls.quo, 1);
+    assert.deepEqual(calls.quoBodies[0], {
+      content: "Deliberate thread reply",
+      from: "+15550001111",
+      to: ["+15552345678"],
+    });
+  });
+
+  await t.test("a verified owner-line thread reply is not redirected by Test Mode", async () => {
+    const calls = installOutboundFetch({
+      team: [ownerStaff()],
+      inboxRows: [{ id: "sms-main-live-reply", channel: "sms", from_phone: "+15552345678", sms_direction: "incoming", ai: { quoLine: "main" } }],
+      textSafety: { testMode: { on: true, mode: "redirect", phone: "+15550009999", liveClientIds: [] } },
+    });
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({
+      to: "+15552345678",
+      message: "Owner thread reply",
+      inboxId: "sms-main-live-reply",
+    }), res);
+
+    assert.equal(res.statusCode, 202);
+    assert.equal(res.body.redirected, false);
+    assert.equal(res.body.line, "main");
+    assert.deepEqual(calls.quoBodies[0], {
+      content: "Owner thread reply",
+      from: "+15550002222",
+      to: ["+15552345678"],
+    });
+  });
+
+  await t.test("an outgoing inbox row cannot unlock the Test Mode reply exception", async () => {
+    const calls = installOutboundFetch({
+      team: [ownerStaff()],
+      inboxRows: [{ id: "sms-outgoing", channel: "sms", from_phone: "+15552345678", sms_direction: "outgoing", ai: { quoLine: "main" } }],
+      textSafety: { testMode: { on: true, mode: "hold", phone: "+15550009999", liveClientIds: [] } },
+    });
+    const res = makeRes();
+    await sendSmsHandler(outboundRequest({
+      to: "+15552345678",
+      message: "Must not send",
+      inboxId: "sms-outgoing",
+    }), res);
+
+    assert.equal(res.statusCode, 503);
+    assert.match(res.body.error, /original text line could not be verified/i);
+    assert.equal(calls.quo, 0);
+  });
 });
 
 test("outbound validation enforces E.164 and a 1 through 1600 character message", async () => {

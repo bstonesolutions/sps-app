@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 const app = await readFile(new URL("../App.jsx", import.meta.url), "utf8");
+const conversationStart = app.indexOf("function SmsConversationBody");
+const conversationEnd = app.indexOf("// Comms → Inbox", conversationStart);
+const smsConversationBody = app.slice(conversationStart, conversationEnd);
 const start = app.indexOf("function EmailInboxSection");
 const end = app.indexOf("function LogsScreen", start);
 const inbox = app.slice(start, end > start ? end : undefined);
@@ -18,9 +21,9 @@ const phoneRows = inbox.slice(mobileRowsStart, mobileRowsEnd);
 
 test("texts render as chronological conversations with a ready reply composer", () => {
   assert.match(inbox, /mergeInboxConversationRows\(inboxRows, clients, quoLines, smsThreadMeta\)/);
-  assert.match(inbox, /function|const SmsConversationBody/);
-  assert.match(inbox, /messages\.map\(\(message, index\)/);
-  assert.match(inbox, /alignSelf: outgoing \? "flex-end" : "flex-start"/);
+  assert.match(smsConversationBody, /function SmsConversationBody/);
+  assert.match(smsConversationBody, /messages\.map\(\(message, index\)/);
+  assert.match(smsConversationBody, /alignSelf: outgoing \? "flex-end" : "flex-start"/);
   assert.match(inbox, /const openReplyWorkspaceKey = workspaceKeyForInboxRow\(openRow\)/);
   assert.match(inbox, /setReplying\(!!smsCanReply \|\| \(!!savedDraft\.replying && openRow\?\.channel !== "sms"\)\)/);
   assert.match(inbox, /openRow\.channel !== "sms" && <Btn variant="outline" sm onClick=\{toggleReply\}/);
@@ -28,6 +31,18 @@ test("texts render as chronological conversations with a ready reply composer", 
   assert.match(inbox, /sendSms\(phone, replyText\.trim\(\), \{ clientId, preserveRecipient: true,[\s\S]*?inboxId: replyAnchor\.id/);
   assert.match(inbox, /openRow\.channel === "sms" \? "Send text" : "Send reply"/);
   assert.match(inbox, /Sends through Quo from the same/);
+});
+
+test("Test Mode clearly allows only a server-verifiable existing-thread reply to go live", () => {
+  assert.match(app, /const existingThreadReply = !!\(meta\?\.preserveRecipient && meta\?\.inboxId\);/);
+  assert.match(app, /const testProtected = TEST_MODE\.on && !explicitTest && !existingThreadReply && !clientIsLive/);
+  assert.match(inbox, /const inboundReplyAnchor = \(row\) =>/);
+  assert.match(inbox, /const openThreadReplyIsLive = !!inboundReplyAnchor\(openRow\)\?\.id;/);
+  assert.match(inbox, /const replyAnchor = inboundReplyAnchor\(row\);/);
+  assert.match(inbox, /This existing-thread reply sends live\. Test Mode still protects automatic and new outbound messages\./);
+  assert.match(inbox, /This reply sends live\. Automatic and new outbound messages remain in Test Mode\./);
+  assert.match(app, /A reply you send inside an existing text thread still goes live\./);
+  assert.match(app, /Replies inside existing text threads go live from the same business line\./);
 });
 
 test("SMS list and thread omit email-triage chrome", () => {

@@ -731,24 +731,44 @@ begin
         using errcode = '22023';
     end;
 
-    if not (operation ? 'value') then
-      raise exception 'Every batch operation requires a value'
+    if operation ? 'check_only'
+      and pg_catalog.jsonb_typeof(operation -> 'check_only') <> 'boolean'
+    then
+      raise exception 'Batch check_only must be a boolean'
+        using errcode = '22023';
+    end if;
+    if coalesce((operation ->> 'check_only')::boolean, false)
+      and expected_version = 0
+    then
+      raise exception 'Batch check_only requires an existing positive version'
         using errcode = '22023';
     end if;
 
-    if caller_is_service then
-      if operation_key = 'sps_team'
-        and not public.sps_rls_team_has_owner(operation -> 'value')
-      then
-        raise exception 'sps_team must retain an active owner'
-          using errcode = '23514';
+    if coalesce((operation ->> 'check_only')::boolean, false) then
+      if operation ? 'value' then
+        raise exception 'Batch check_only operations may not include a value'
+          using errcode = '22023';
       end if;
-    elsif not public.sps_rls_app_state_write_allowed(
-      operation_key,
-      operation -> 'value'
-    ) then
-      raise exception 'Not authorized to write app_state key %', operation_key
-        using errcode = '42501';
+    else
+      if not (operation ? 'value') then
+        raise exception 'Every batch write operation requires a value'
+          using errcode = '22023';
+      end if;
+
+      if caller_is_service then
+        if operation_key = 'sps_team'
+          and not public.sps_rls_team_has_owner(operation -> 'value')
+        then
+          raise exception 'sps_team must retain an active owner'
+            using errcode = '23514';
+        end if;
+      elsif not public.sps_rls_app_state_write_allowed(
+        operation_key,
+        operation -> 'value'
+      ) then
+        raise exception 'Not authorized to write app_state key %', operation_key
+          using errcode = '42501';
+      end if;
     end if;
   end loop;
 
@@ -805,7 +825,18 @@ begin
       active_key := operation_key;
       expected_version := (operation ->> 'expected_version')::bigint;
 
-      if expected_version = 0 then
+      if coalesce((operation ->> 'check_only')::boolean, false) then
+        -- Lock the unchanged row in the same deterministic order as writes. This keeps the
+        -- version fence atomic without replacing a large JSON value or advancing its version.
+        select state.version
+        into actual_version
+        from public.app_state as state
+        where state.key = operation_key
+        for update;
+        if not found or actual_version <> expected_version then
+          raise exception 'batch version conflict' using errcode = 'P0B01';
+        end if;
+      elsif expected_version = 0 then
         begin
           insert into public.app_state (key, value)
           values (operation_key, operation -> 'value');
