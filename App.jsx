@@ -26,8 +26,11 @@ import { findScheduledStopForEstimate, scheduleApprovedEstimate } from "./estima
 import { findInvoiceDeletionReferences, invoiceDeletionBlockedMessage } from "./invoiceDeletionGuard";
 import { applySafeBulkInvoiceEdits, invoiceSelectionForVisible, pruneInvoiceSelection, summarizeSelectedInvoices } from "./invoiceBulkActions";
 import { deliverSelectedInvoices } from "./invoiceBulkDelivery";
+import { deleteInvoiceAndCompactSafeDrafts, draftInvoiceCanBeRenumbered } from "./invoiceNumbering";
+import { buildQuickBooksInvoicePayload, partitionQuickBooksDraftSelection } from "./quickbooksDraftSync";
 import { appendCompletedVisitsToInvoice, completedVisitBillableTotal, completedVisitInvoiceLink, completedVisitLineItems, completedVisitSource, invoiceCompletedVisitSources, removeInvoiceLineAndPruneCompletedVisitSources, reserveCompletedVisitInvoice } from "./invoiceVisitImport";
 import { normalizeMaintenanceBillingPolicy } from "./maintenanceBilling";
+import MaintenanceCoverageWorkspace from "./MaintenanceCoverageWorkspace";
 import { automaticReportChannels, reportEmailUiResult } from "./reportDelivery";
 import { buildCompletedReportIndex, canRebuildCompletedReport, resolveCompletedReport } from "./completedReport";
 import { appendClientLinks, clientLinkFooter, withoutClientLinks } from "./clientMessageLinks";
@@ -18967,53 +18970,8 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     setQbReviewError("");
   };
 
-  // Build the QB payload from the current invoice
-  const buildQbPayload = () => ({
-    spsInvoiceId: inv.id,
-    number: inv.number,
-    // QuickBooks rejects invoices with no TxnDate — default an empty issue date to today.
-    date: toISO(inv.date) || toISO(todayMDY()),
-    dueDate: toISO(inv.dueDate),
-    clientName: client?.name || "",
-    clientEmail: client?.email || "",
-    clientPhone: client?.phone || "",
-    clientAddress: client?.address || "",
-    clientStreet: client?.street || "",
-    clientCity: client?.city || "",
-    clientState: client?.state || "",
-    clientZip: client?.zip || "",
-    qbCustomerId: client?.qbId || client?.qbCustomerId || null,
-    qbId: inv.qbId || null,
-    qbBaseContentFingerprint: inv.qbBaseContentFingerprint || inv.qbContentFingerprint || "",
-    qbTaxCodeRef: inv.qbTaxCodeRef || null,
-    // Tax rate so QuickBooks can apply sales tax to the taxable lines.
-    taxRate: parseFloat(inv.taxRate) || 0,
-    // Which online payment methods to offer on the QB pay link (default on).
-    allowCard: invoicing?.qbManagePayments === false ? (invoicing?.qbAllowCard !== false) : undefined,
-    allowACH: invoicing?.qbManagePayments === false ? (invoicing?.qbAllowACH !== false) : undefined,
-    lineItems: (inv.lineItems || []).map(l => {
-      const gross = (parseFloat(l.qty) || 0) * (parseFloat(l.unitPrice) || 0);
-      let disc = 0;
-      if (l.discountType === "pct") disc = gross * ((parseFloat(l.discount) || 0) / 100);
-      else if (l.discountType === "amt") disc = parseFloat(l.discount) || 0;
-      const net = Math.max(0, gross - disc);
-      const qty = parseFloat(l.qty) || 1;
-      return {
-        description: l.bundleNote ? `${l.desc} (${l.bundleNote})` : l.desc,
-        qty: String(qty),
-        unitPrice: String(qty > 0 ? (net / qty).toFixed(2) : net.toFixed(2)),
-        // Carry the app's item kind + taxability so QB maps to the right item and tax.
-        // Late-fee lines use kind "lateFee" → QB "Late Fee" service item.
-        kind: l.isLateFee ? "lateFee" : (l.kind || "custom"),
-        taxable: !!l.taxable,
-        isLateFee: !!l.isLateFee,
-        qbLineId: l.qbLineId || null,
-        qbItemRef: l.qbItemRef || null,
-      };
-    }),
-    invoiceDiscountType: inv.discountType || "",
-    invoiceDiscount: inv.discount || "",
-  });
+  // Keep single-invoice and bulk-draft QuickBooks writes on one payload contract.
+  const buildQbPayload = () => buildQuickBooksInvoicePayload(inv, client, invoicing);
 
   // Save the invoice. If QuickBooks is connected, sync automatically (no extra button).
   // B9-2: persist, then stay in-flow and offer the client-notification step (when
@@ -19609,7 +19567,11 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           <button
             disabled={deleteBusy}
             onClick={async () => {
-              if (!confirm(`Delete invoice ${inv.number || ""}? This cannot be undone.`)) return;
+              const closesDraftGap = draftInvoiceCanBeRenumbered(inv);
+              const deleteMessage = closesDraftGap
+                ? `Delete draft ${inv.number || ""}? Later unsynced drafts in this number series will close the gap. QuickBooks, sent, and paid invoice numbers will not change.`
+                : `Delete invoice ${inv.number || ""}? This cannot be undone.`;
+              if (!confirm(deleteMessage)) return;
               setDeleteBusy(true);
               try {
                 const result = await onDelete(inv.id);
@@ -19618,6 +19580,9 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
                   return;
                 }
                 if (result.warning) window.alert(result.warning);
+                else if (result.renumbered?.length) {
+                  window.alert(`Deleted draft. Renumbered ${result.renumbered.length} later unsynced draft${result.renumbered.length === 1 ? "" : "s"} to close the gap.`);
+                }
                 onClose();
               } catch (error) {
                 window.alert(error?.message || "The invoice was not deleted.");
@@ -20955,6 +20920,12 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
     setPrinting(true); setSendState("idle"); setSendMsg("");
     try {
       const res = await exportInvoicePdf({ invoice, client, totals, branding, cfg, eff, accent });
+      try {
+        await Promise.resolve(onSave?.({ ...invoice, exportedAt: new Date().toISOString() }));
+      } catch (_) {
+        // The PDF is already in the device workflow. A later save can preserve
+        // the export marker without turning a successful export into an error.
+      }
       if (res === "downloaded") {
         setSendState("sent"); setSendMsg("Invoice PDF saved to your downloads.");
         setTimeout(() => { setSendState("idle"); setSendMsg(""); }, 5000);
@@ -22760,7 +22731,7 @@ function InvoiceBulkSendModal({ invoices, clients, onSave, onClose }) {
   const acceptedCount = results.filter(result => result.accepted).length;
   const finished = results.length > 0 && pendingIds.length === 0;
   return (
-    <Modal title={`Send ${invoices.length} invoice${invoices.length === 1 ? "" : "s"}`} onClose={() => { if (!sending) onClose(); }} maxWidth={760}>
+    <Modal title={`Send ${invoices.length} invoice${invoices.length === 1 ? "" : "s"} to clients`} onClose={() => { if (!sending) onClose(); }} maxWidth={760}>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div style={{ fontSize: 12.5, color: T.textMuted, lineHeight: 1.5 }}>
           Each client receives only the channels available and enabled in their communication preferences. QuickBooks numbers, totals, tax, and line items are not changed.
@@ -22797,7 +22768,259 @@ function InvoiceBulkSendModal({ invoices, clients, onSave, onClose }) {
         )}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 9 }}>
           <button type="button" onClick={onClose} disabled={sending} style={{ border: `1px solid ${T.border}`, background: T.surface, color: T.text, borderRadius: 10, padding: "10px 15px", fontWeight: 750, fontFamily: "inherit", cursor: sending ? "default" : "pointer" }}>{finished ? "Done" : "Close"}</button>
-          {!finished && <Btn onClick={send} disabled={sending || (!doSms && !doChat && !doEmail)}>{sending ? "Sending" : results.length ? `Retry ${pendingIds.length} undelivered` : "Send selected"}</Btn>}
+          {!finished && <Btn onClick={send} disabled={sending || (!doSms && !doChat && !doEmail)}>{sending ? "Sending" : results.length ? `Retry ${pendingIds.length} undelivered` : "Send to clients"}</Btn>}
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function InvoiceQuickBooksDraftSyncModal({ invoices, clients, invoicing, onPersistInvoice, onClose }) {
+  const { T } = useApp();
+  const [running, setRunning] = useState(false);
+  const [outcomes, setOutcomes] = useState({});
+  const plan = useMemo(() => partitionQuickBooksDraftSelection(
+    invoices,
+    (invoice) => clients.find((candidate) => invoiceMatchesClient(invoice, candidate)) || null,
+  ), [invoices, clients]);
+  const totalReady = plan.ready.reduce((sum, row) => sum + invoiceTotals(row.invoice).total, 0);
+  const money = (value) => `$${Number(value || 0).toFixed(2)}`;
+
+  const persistInvoiceMutation = async (invoice, mutate) => {
+    if (typeof onPersistInvoice !== "function") {
+      throw new Error("SPS cannot confirm invoice changes right now. Nothing else will be sent to QuickBooks.");
+    }
+    return onPersistInvoice(invoice.id, mutate);
+  };
+
+  const persistFailure = async (invoice, details, extras = {}) => {
+    return persistInvoiceMutation(invoice, (current) => applyQuickBooksInvoiceSyncFailure({ ...current, ...extras }, {
+      error: details?.error || details?.message || "QuickBooks did not accept this draft.",
+      code: details?.code,
+    }));
+  };
+
+  const syncDrafts = async () => {
+    if (running) return;
+    setRunning(true);
+    try {
+      const targets = plan.ready.filter(({ invoice }) => {
+        const outcome = outcomes[String(invoice.id)];
+        return outcome?.status !== "synced" && outcome?.status !== "uncertain";
+      });
+
+      for (const row of targets) {
+        const id = String(row.invoice.id);
+        const client = row.client;
+        let baseInvoice = row.invoice;
+        let intent = "";
+        let writeStarted = false;
+        let confirmedCreate = null;
+        setOutcomes((current) => ({ ...current, [id]: { status: "sending", message: "Syncing to QuickBooks" } }));
+
+        try {
+          baseInvoice = {
+            ...row.invoice,
+            clientId: client?.id ?? row.invoice.clientId ?? null,
+            clientName: client?.name || row.invoice.clientName || "",
+            clientEmail: client?.email || row.invoice.clientEmail || "",
+            clientPhone: client?.phone || row.invoice.clientPhone || "",
+            clientAddress: client?.address || row.invoice.clientAddress || "",
+          };
+          const payload = buildQuickBooksInvoicePayload(baseInvoice, client, invoicing);
+          intent = quickBooksInvoiceIntentSignature(payload);
+          writeStarted = true;
+          const response = await fetch(`${QB_API}/create-invoice`, {
+            method: "POST",
+            headers: await authHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify({ invoice: payload }),
+          });
+          const data = await response.json().catch(() => ({}));
+
+          if (response.status === 401) {
+            qbSetConnected(false);
+            try {
+              await persistFailure(baseInvoice, {
+                error: "QuickBooks session expired. Reconnect under Customize, then retry this draft.",
+                code: "QB_AUTH_EXPIRED",
+              });
+            } catch (_) {}
+            setOutcomes((current) => ({ ...current, [id]: { status: "failed", message: "Reconnect QuickBooks" } }));
+            break;
+          }
+
+          if (!response.ok || data.error) {
+            if (data.createOutcomeUnknown) {
+              await persistFailure(baseInvoice, data, {
+                locallyEdited: true,
+                qbAuthoritative: false,
+                qbPendingLocalEdits: true,
+                qbSyncStatus: "create-outcome-unknown",
+                qbCreateOutcomeUnknown: true,
+                qbCreateIntentSignature: intent,
+                qbCreateRequestId: data.qbRequestId || "",
+              });
+              setOutcomes((current) => ({
+                ...current,
+                [id]: { status: "uncertain", message: "Needs review before retry" },
+              }));
+            } else {
+              await persistFailure(baseInvoice, data);
+              setOutcomes((current) => ({
+                ...current,
+                [id]: { status: "failed", message: String(data.error || "QuickBooks rejected this draft").slice(0, 140) },
+              }));
+            }
+            continue;
+          }
+
+          if (data.success !== true || !String(data.qbId || "").trim()) {
+            await persistFailure(baseInvoice, {
+              error: "QuickBooks returned an incomplete create response. Review this draft before retrying.",
+              code: "QB_CREATE_OUTCOME_UNKNOWN",
+            }, {
+              locallyEdited: true,
+              qbAuthoritative: false,
+              qbPendingLocalEdits: true,
+              qbSyncStatus: "create-outcome-unknown",
+              qbCreateOutcomeUnknown: true,
+              qbCreateIntentSignature: intent,
+              qbCreateRequestId: data.qbRequestId || "",
+            });
+            setOutcomes((current) => ({
+              ...current,
+              [id]: { status: "uncertain", message: "Incomplete QuickBooks response. Review before retry" },
+            }));
+            continue;
+          }
+
+          confirmedCreate = data;
+          await persistInvoiceMutation(baseInvoice, (current) => {
+            const synced = applyQuickBooksInvoiceSaveResult(current, data);
+            return { ...synced, status: current.status || "Draft" };
+          });
+          setOutcomes((current) => ({
+            ...current,
+            [id]: { status: "synced", message: "In QuickBooks" },
+          }));
+        } catch (error) {
+          const quickBooksConfirmed = !!String(confirmedCreate?.qbId || "").trim();
+          try {
+            await persistFailure(baseInvoice, {
+              error: quickBooksConfirmed
+                ? "QuickBooks created this invoice, but SPS Way could not confirm the local link. Review it before retrying."
+                : (error?.message || (writeStarted ? "The QuickBooks response was interrupted." : "This draft could not be prepared for QuickBooks.")),
+              code: quickBooksConfirmed ? "QB_LOCAL_SAVE_UNCONFIRMED" : (writeStarted ? "QB_CREATE_OUTCOME_UNKNOWN" : "QB_DRAFT_INVALID"),
+            }, quickBooksConfirmed ? {
+              qbId: confirmedCreate.qbId,
+              paymentLink: confirmedCreate.paymentLink || baseInvoice.paymentLink || "",
+              qbPushed: true,
+              locallyEdited: false,
+              qbAuthoritative: false,
+              qbPendingLocalEdits: true,
+              qbSyncStatus: "local-save-unconfirmed",
+              qbCreateRequestId: confirmedCreate.qbRequestId || "",
+            } : {
+              locallyEdited: true,
+              qbAuthoritative: false,
+              qbPendingLocalEdits: true,
+              qbSyncStatus: writeStarted ? "create-outcome-unknown" : "draft-invalid",
+              qbCreateOutcomeUnknown: writeStarted,
+              qbCreateIntentSignature: intent,
+            });
+          } catch (_) {
+            // Keep processing the remaining drafts even if this local review marker
+            // cannot be persisted. The UI still blocks an automatic retry here.
+          }
+          setOutcomes((current) => ({
+            ...current,
+            [id]: {
+              status: quickBooksConfirmed || writeStarted ? "uncertain" : "failed",
+              message: quickBooksConfirmed
+                ? "Created in QuickBooks. SPS link needs review"
+                : writeStarted ? "Connection interrupted. Review before retry" : "Draft could not be prepared",
+            },
+          }));
+        }
+      }
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const syncedCount = Object.values(outcomes).filter((outcome) => outcome.status === "synced").length;
+  const retryableCount = plan.ready.filter(({ invoice }) => {
+    const status = outcomes[String(invoice.id)]?.status;
+    return status !== "synced" && status !== "uncertain";
+  }).length;
+  const finished = plan.ready.length > 0 && retryableCount === 0;
+
+  return (
+    <Modal title="Sync drafts to QuickBooks" onClose={() => { if (!running) onClose(); }} maxWidth={780}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 18, alignItems: "center", padding: "13px 15px", borderLeft: `4px solid ${T.primary}`, background: hexA(T.primary, 0.035) }}>
+          <div>
+            <div style={{ fontSize: 13, color: T.text, lineHeight: 1.5, fontWeight: 650 }}>
+              Each eligible draft is saved to QuickBooks independently. The SPS invoice stays a draft and no client message is sent.
+            </div>
+            <div style={{ marginTop: 4, fontSize: 11.5, color: T.textMuted }}>
+              A failed draft will not stop the rest or remove anything from SPS Way.
+            </div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 22, fontWeight: 850, color: T.text, letterSpacing: "-0.035em" }}>{plan.ready.length}</div>
+            <div style={{ fontSize: 10.5, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 800 }}>{money(totalReady)} ready</div>
+          </div>
+        </div>
+
+        <div style={{ maxHeight: 330, overflowY: "auto", borderTop: `1px solid ${T.border}`, borderBottom: `1px solid ${T.border}` }}>
+          {[...plan.ready, ...plan.skipped].map((row, index) => {
+            const id = String(row.invoice.id);
+            const outcome = outcomes[id];
+            const state = row.eligible ? (outcome?.status || "ready") : "skipped";
+            const label = state === "sending" ? "Syncing"
+              : state === "synced" ? "In QuickBooks"
+              : state === "failed" ? "Needs attention"
+              : state === "uncertain" ? "Review required"
+              : state === "skipped" ? row.reason
+              : "Ready";
+            return (
+              <div key={id} data-qb-draft-row={state} style={{ display: "grid", gridTemplateColumns: "28px minmax(0, 1fr) auto", gap: 11, alignItems: "center", padding: "10px 3px", borderTop: index ? `1px solid ${T.border}` : "none", opacity: state === "skipped" ? 0.66 : 1 }}>
+                <div aria-hidden="true" style={{ width: 26, height: 30, border: `1px solid ${state === "ready" ? hexA(T.primary, 0.3) : T.border}`, borderLeft: `3px solid ${state === "ready" || state === "synced" ? T.primary : state === "failed" || state === "uncertain" ? T.warning : T.textMuted}`, background: state === "ready" ? hexA(T.primary, 0.035) : T.surface, display: "flex", alignItems: "center", justifyContent: "center", color: state === "ready" || state === "synced" ? T.primary : T.textMuted, fontSize: 10.5, fontWeight: 850 }}>{index + 1}</div>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 800, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.client?.name || row.invoice.clientName || "Client missing"}</div>
+                  <div style={{ marginTop: 2, fontSize: 11.5, color: T.textMuted }}>#{row.invoice.number || "No number"} · {money(invoiceTotals(row.invoice).total)}</div>
+                  {(state === "failed" || state === "uncertain") && outcome?.message && (
+                    <div style={{ marginTop: 4, fontSize: 11, color: T.warning, lineHeight: 1.35 }}>{outcome.message}</div>
+                  )}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6, fontSize: 10.5, fontWeight: 850, letterSpacing: "0.035em", textTransform: "uppercase", color: state === "synced" || state === "ready" ? T.primary : state === "failed" || state === "uncertain" ? T.warning : T.textMuted, textAlign: "right", maxWidth: 170 }}>
+                  <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: "currentColor", flexShrink: 0 }} />
+                  <span>{label}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {plan.skipped.length > 0 && (
+          <div style={{ borderLeft: `3px solid ${T.textMuted}`, padding: "8px 11px", background: T.surfaceAlt, fontSize: 11.5, color: T.textMuted, lineHeight: 1.45 }}>
+            {plan.skipped.length} selected invoice{plan.skipped.length === 1 ? " is" : "s are"} protected or not ready. They will remain unchanged.
+          </div>
+        )}
+        {syncedCount > 0 && (
+          <div style={{ borderLeft: `3px solid ${T.primary}`, padding: "8px 11px", background: hexA(T.primary, 0.045), fontSize: 12, color: T.text }}>
+            {syncedCount} draft{syncedCount === 1 ? " is" : "s are"} now linked to QuickBooks.
+          </div>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 9, paddingTop: 1 }}>
+          <button type="button" onClick={onClose} disabled={running} style={{ border: `1px solid ${T.border}`, background: T.surface, color: T.text, borderRadius: 10, padding: "10px 15px", fontWeight: 750, fontFamily: "inherit", cursor: running ? "default" : "pointer" }}>{finished ? "Done" : "Close"}</button>
+          {!finished && (
+            <Btn onClick={syncDrafts} disabled={running || retryableCount === 0}>
+              {running ? "Syncing drafts" : syncedCount ? `Retry ${retryableCount}` : `Sync ${plan.ready.length} draft${plan.ready.length === 1 ? "" : "s"} to QuickBooks`}
+            </Btn>
+          )}
         </div>
       </div>
     </Modal>
@@ -23304,11 +23527,17 @@ function InvoiceReconciliationReviewQueue({
   );
 }
 
-function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCatalog, qbAccounting = null, onSave, onResolveReview, onDelete, onSyncData, initialFilter = "All", vp = {} }) {
+function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding, catalog, setCatalog, qbAccounting = null, onSave, onPersistInvoice, onResolveReview, onDelete, onSyncData, initialFilter = "All", vp = {} }) {
   const { T, perms } = useApp();
   const canReviewAccounting = canManageInvoiceAccounting(perms);
   const moneyFmt = (n) => formatAccountingCurrency(n);
   const moneyExact = (n) => `$${parseFloat(n||0).toFixed(2)}`;
+  const [invoiceWorkspace, setInvoiceWorkspace] = useState("invoices");
+  const [maintenanceLedger, setMaintenanceLedger] = useState(null);
+  const [maintenanceLedgerLoading, setMaintenanceLedgerLoading] = useState(false);
+  const [maintenanceLedgerSaving, setMaintenanceLedgerSaving] = useState(false);
+  const [maintenanceLedgerError, setMaintenanceLedgerError] = useState("");
+  const maintenanceLedgerAttemptedRef = useRef(false);
 
   // ── Filter / sort state ──
   const [filter,     setFilter]     = useState(initialFilter);
@@ -23327,6 +23556,7 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
   const [selectedIds, setSelectedIds] = useState([]);
   const [bulkEditing, setBulkEditing] = useState(false);
   const [bulkSending, setBulkSending] = useState(false);
+  const [bulkQuickBooksSyncing, setBulkQuickBooksSyncing] = useState(false);
 
   // ── QuickBooks sync from the Invoices tab ──
   const [qbSyncing, setQbSyncing] = useState(false);
@@ -23366,6 +23596,80 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
       setQbSyncing(false);
     }
   };
+  const loadMaintenanceLedger = useCallback(async () => {
+    if (!canReviewAccounting) return null;
+    setMaintenanceLedgerLoading(true);
+    setMaintenanceLedgerError("");
+    try {
+      const response = await fetch(`${PROD_URL}/api/maintenance-payment-ledger`, {
+        headers: await authHeaders(),
+        cache: "no-store",
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.error) throw new Error(data.error || "Maintenance payment coverage could not be loaded.");
+      const nextLedger = data.ledger || data.maintenancePaymentLedger || null;
+      if (!nextLedger) throw new Error("Maintenance payment coverage was empty or invalid.");
+      setMaintenanceLedger(nextLedger);
+      return nextLedger;
+    } catch (error) {
+      const message = error?.message || "Maintenance payment coverage could not be loaded.";
+      setMaintenanceLedgerError(message);
+      throw error;
+    } finally {
+      setMaintenanceLedgerLoading(false);
+    }
+  }, [canReviewAccounting]);
+  const refreshMaintenanceEvidence = useCallback(async () => {
+    if (qbIsConnected()) await syncQuickBooks();
+    return loadMaintenanceLedger();
+  }, [loadMaintenanceLedger]); // eslint-disable-line react-hooks/exhaustive-deps
+  const mutateMaintenanceLedger = useCallback(async (payload) => {
+    if (!canReviewAccounting) throw new Error("Accounting permission is required.");
+    setMaintenanceLedgerSaving(true);
+    setMaintenanceLedgerError("");
+    try {
+      const response = await fetch(`${PROD_URL}/api/maintenance-payment-ledger`, {
+        method: "POST",
+        headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.error) throw new Error(data.error || "Maintenance payment coverage could not be saved.");
+      const nextLedger = data.ledger || data.maintenancePaymentLedger || null;
+      if (!nextLedger) throw new Error("The server did not return the saved maintenance payment coverage.");
+      setMaintenanceLedger(nextLedger);
+      return nextLedger;
+    } catch (error) {
+      setMaintenanceLedgerError(error?.message || "Maintenance payment coverage could not be saved.");
+      throw error;
+    } finally {
+      setMaintenanceLedgerSaving(false);
+    }
+  }, [canReviewAccounting]);
+  const assignMaintenanceCoverage = useCallback(({ clientId, monthKeys, actionType, invoiceId, note }) => mutateMaintenanceLedger({
+    action: "assign",
+    clientId,
+    monthKeys,
+    actionType,
+    ...(invoiceId ? { invoiceId } : {}),
+    ...(note ? { note } : {}),
+  }), [mutateMaintenanceLedger]);
+  const clearMaintenanceCoverage = useCallback(({ clientId, monthKeys }) => mutateMaintenanceLedger({
+    action: "clear",
+    clientId,
+    monthKeys,
+  }), [mutateMaintenanceLedger]);
+  useEffect(() => {
+    if (invoiceWorkspace !== "maintenance" || !canReviewAccounting || maintenanceLedger || maintenanceLedgerAttemptedRef.current) return;
+    maintenanceLedgerAttemptedRef.current = true;
+    void loadMaintenanceLedger().catch(() => {});
+  }, [invoiceWorkspace, canReviewAccounting, maintenanceLedger, loadMaintenanceLedger]);
+  useEffect(() => {
+    if (invoiceWorkspace !== "maintenance") maintenanceLedgerAttemptedRef.current = false;
+  }, [invoiceWorkspace]);
+  const maintenanceSchedule = useMemo(() => (schedule || []).flatMap((day) => (
+    (day?.stops || []).map((stop) => ({ ...stop, date: stop?.date || day?.date || "" }))
+  )), [schedule]);
   const [editing,    setEditing]    = useState(null);
   const [preview,    setPreview]    = useState(null);
   const [showSales,  setShowSales]  = useState(false);
@@ -23518,7 +23822,14 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
     });
   }, [visibleInvoiceSignature]); // eslint-disable-line react-hooks/exhaustive-deps
   const selectedSummary = summarizeSelectedInvoices(sorted, selectedIds);
-  const selectedInvoices = sorted.filter(invoice => selectedSummary.ids.includes(String(invoice.id)));
+  const selectedIdSet = new Set(selectedSummary.ids.map(String));
+  // Bulk writes must receive the stored invoice shape, not the filtered table's
+  // temporary _client/_total/_status fields.
+  const selectedInvoices = (invoices || []).filter(invoice => selectedIdSet.has(String(invoice.id)));
+  const selectedQuickBooksPlan = partitionQuickBooksDraftSelection(
+    selectedInvoices,
+    (invoice) => clients.find((candidate) => invoiceMatchesClient(invoice, candidate)) || null,
+  );
   const toggleSelectedInvoice = (invoice) => setSelectedIds((current) => {
     const id = String(invoice?.id || "");
     return current.includes(id) ? current.filter(value => value !== id) : [...current, id];
@@ -23548,6 +23859,50 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
 
   if (showSales && (perms.seeTotalSales || perms.isAdmin)) return <TotalSalesScreen invoices={invoices} clients={clients} onBack={() => setShowSales(false)} T={T} />;
 
+  const invoiceWorkspaceSwitch = canReviewAccounting ? (
+    <div data-invoice-workspace-switch style={{ display: "grid", gridTemplateColumns: "1fr 1fr", width: vp.isPhone ? "100%" : 360, borderBottom: `1px solid ${T.border}`, marginBottom: invoiceWorkspace === "maintenance" ? 0 : 18 }}>
+      {[
+        ["invoices", "Invoices"],
+        ["maintenance", "Maintenance coverage"],
+      ].map(([value, label]) => (
+        <button
+          key={value}
+          type="button"
+          onClick={() => setInvoiceWorkspace(value)}
+          style={{ border: "none", borderBottom: `3px solid ${invoiceWorkspace === value ? T.primary : "transparent"}`, background: "transparent", color: invoiceWorkspace === value ? T.text : T.textMuted, padding: "9px 12px 10px", fontFamily: "inherit", fontSize: 12.5, fontWeight: 820, cursor: "pointer" }}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  ) : null;
+
+  if (invoiceWorkspace === "maintenance" && canReviewAccounting) {
+    return (
+      <div style={vp.isDesktop ? { flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", padding: vp.isTablet ? "18px 18px 0" : "24px 34px 0" } : undefined}>
+        <div style={{ marginBottom: 12 }}>{invoiceWorkspaceSwitch}</div>
+        <div style={{ minHeight: 0, overflowY: vp.isDesktop ? "auto" : "visible", paddingBottom: 32 }}>
+          <MaintenanceCoverageWorkspace
+            clients={clients}
+            invoices={invoices}
+            payments={qbAccounting?.payments || []}
+            schedule={maintenanceSchedule}
+            ledger={maintenanceLedger}
+            T={T}
+            vp={vp}
+            loading={maintenanceLedgerLoading}
+            saving={maintenanceLedgerSaving}
+            error={maintenanceLedgerError}
+            onReload={() => void refreshMaintenanceEvidence().catch(() => {})}
+            onAssign={assignMaintenanceCoverage}
+            onClear={clearMaintenanceCoverage}
+            canSeeAmounts={!!(perms.seeTotalSales || perms.isAdmin)}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={vp.isDesktop ? { flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", padding: vp.isTablet ? "18px 18px 0" : "24px 34px 0" } : undefined}>
       {/* Header */}
@@ -23560,14 +23915,14 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
             const QB_GREEN = "#2CA01C";
             const active = qbSyncing || qbSynced;
             return (
-            <button onClick={syncQuickBooks} disabled={qbSyncing} title="Sync with QuickBooks"
+            <button onClick={syncQuickBooks} disabled={qbSyncing} title="Refresh invoices from QuickBooks"
               style={{ minHeight: 40, display: "flex", alignItems: "center", gap: 6, padding: "8px 13px", borderRadius: 12, border: `1.5px solid ${active ? hexA(QB_GREEN, 0.5) : T.border}`, background: active ? hexA(QB_GREEN, 0.12) : T.surface, color: active ? QB_GREEN : T.textMuted, fontWeight: 700, fontSize: 13, cursor: qbSyncing ? "default" : "pointer", fontFamily: "inherit", transition: "background 0.2s, color 0.2s, border-color 0.2s" }}>
               {qbSynced ? (
                 <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2.6} strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
               ) : (
                 <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" style={{ animation: qbSyncing ? "spin 0.8s linear infinite" : "none" }}><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
               )}
-              {qbSyncing ? "Syncing" : qbSynced ? "Synced" : "Sync"}
+              {qbSyncing ? "Refreshing" : qbSynced ? "Refreshed" : "Refresh from QuickBooks"}
             </button>
             );
           })()}
@@ -23576,10 +23931,12 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
             <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M3 6h18M7 12h10M11 18h2"/></svg>
             Filter{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
           </button>
-          {perms.invoiceCreate && <Btn sm variant="ghost" onClick={() => setBatching(true)} style={{ minHeight: 40 }}>Create batch</Btn>}
+          {perms.invoiceCreate && <Btn sm variant="ghost" onClick={() => setBatching(true)} style={{ minHeight: 40 }}>Create multiple</Btn>}
           {perms.invoiceCreate && <Btn sm onClick={() => setCreating(true)} style={{ minHeight: 40 }}>+ New</Btn>}
         </div>
       </div>
+
+      {invoiceWorkspaceSwitch}
 
       {qbSyncMsg && (
         <div style={{ marginBottom: 12, padding: "10px 14px", borderRadius: 12, background: hexA("#2CA01C", 0.08), border: `1px solid ${hexA("#2CA01C", 0.25)}`, fontSize: 13, fontWeight: 600, color: "#157a12", display: "flex", alignItems: "center", gap: 8 }}>
@@ -23753,8 +24110,22 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
             <div style={{ fontSize: 13, fontWeight: 850, color: T.text }}>{selectedSummary.count} selected</div>
             <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 1 }}>{moneyExact(selectedSummary.total)} across the current filtered view</div>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-            {perms.invoiceSend && <Btn sm onClick={() => setBulkSending(true)}>Send selected</Btn>}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, flexWrap: "wrap", minWidth: 0 }}>
+            {perms.invoiceCreate && (
+              <Btn sm disabled={selectedQuickBooksPlan.ready.length === 0} title={selectedQuickBooksPlan.ready.length === 0 ? "Select an unsynced draft with a client and line items" : "Sync the selected drafts to QuickBooks"} onClick={() => {
+                if (!qbConnected) {
+                  setQbSyncMsg("Connect QuickBooks under Customize before syncing drafts.");
+                  setTimeout(() => setQbSyncMsg(""), 5000);
+                  return;
+                }
+                setBulkQuickBooksSyncing(true);
+              }}>
+                {selectedQuickBooksPlan.ready.length > 0
+                  ? `Sync ${selectedQuickBooksPlan.ready.length} draft${selectedQuickBooksPlan.ready.length === 1 ? "" : "s"} to QuickBooks`
+                  : "No drafts ready for QuickBooks"}
+              </Btn>
+            )}
+            {perms.invoiceSend && <Btn sm variant="ghost" onClick={() => setBulkSending(true)}>Send to clients</Btn>}
             {perms.invoiceCreate && <Btn sm variant="ghost" onClick={() => setBulkEditing(true)}>Edit selected</Btn>}
             <button type="button" onClick={() => setSelectedIds([])} style={{ border: "none", background: "transparent", color: T.textMuted, fontSize: 12.5, fontWeight: 750, padding: "8px 9px", cursor: "pointer", fontFamily: "inherit" }}>Clear</button>
           </div>
@@ -23874,6 +24245,15 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
           clients={clients}
           onSave={onSave}
           onClose={() => { setBulkSending(false); setSelectedIds([]); }}
+        />
+      )}
+      {bulkQuickBooksSyncing && (
+        <InvoiceQuickBooksDraftSyncModal
+          invoices={selectedInvoices}
+          clients={clients}
+          invoicing={invoicing}
+          onPersistInvoice={onPersistInvoice}
+          onClose={() => { setBulkQuickBooksSyncing(false); setSelectedIds([]); }}
         />
       )}
       {editing  && <InvoiceEditor invoice={editing} clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onResolveReview={onResolveReview ? resolveReviewWithFeedback : undefined} onDelete={onDelete} onClose={() => setEditing(null)} />}
@@ -40858,6 +41238,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       const snapshot = {
         ...accounting,
         creditMemos: Array.isArray(syncPayload.creditMemos) ? syncPayload.creditMemos : [],
+        payments: Array.isArray(syncPayload.payments) ? syncPayload.payments : [],
         unappliedPayments: Array.isArray(syncPayload.unappliedPayments) ? syncPayload.unappliedPayments : [],
         reconciliation,
         fetchedAt: reconciliation?.fetchedAt || new Date().toISOString(),
@@ -40876,12 +41257,17 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     const nameToClientId = {};
     const emailToClientId = {};
     const emailCounts = {};
+    const nameCounts = {};
     currentClients.forEach(c => {
+      if (c.qbId != null && String(c.qbId).trim()) qbIdToClientId[String(c.qbId).trim()] = c.id;
+      const n = (c.name || "").toLowerCase().trim();
+      if (n) nameCounts[n] = (nameCounts[n] || 0) + 1;
       const e = (c.email || "").toLowerCase().trim();
       if (e) emailCounts[e] = (emailCounts[e] || 0) + 1;
     });
     currentClients.forEach(c => {
-      if (c.name) nameToClientId[c.name.toLowerCase().trim()] = c.id;
+      const n = (c.name || "").toLowerCase().trim();
+      if (n && nameCounts[n] === 1) nameToClientId[n] = c.id;
       const e = (c.email || "").toLowerCase().trim();
       if (e && emailCounts[e] === 1) emailToClientId[e] = c.id; // unique emails only
     });
@@ -40891,7 +41277,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     (qbCustomers || []).forEach(qc => {
       const nameKey  = (qc.name  || "").toLowerCase().trim();
       const emailKey = (qc.email || "").toLowerCase().trim();
-      const matchId  = nameToClientId[nameKey] || emailToClientId[emailKey];
+      const matchId  = qbIdToClientId[String(qc.qbId || "").trim()] || nameToClientId[nameKey] || emailToClientId[emailKey];
       if (matchId) {
         qbIdToClientId[qc.qbId] = matchId;
         // Tag the matching client with their QB ID
@@ -41710,6 +42096,77 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     throw new Error("Invoices changed repeatedly on another device. Refresh and try again.");
   };
 
+  // Accounting writes must be merged onto the latest shared invoice record and
+  // confirmed by the database before the UI can claim that QuickBooks is linked.
+  // The mutator receives the freshest invoice so a batch cannot overwrite edits
+  // that another employee saved while QuickBooks was processing an earlier row.
+  const handlePersistInvoiceMutation = async (invoiceId, mutate) => {
+    const targetId = String(invoiceId || "").trim();
+    if (!targetId || typeof mutate !== "function") {
+      throw new Error("The invoice update could not be prepared.");
+    }
+    const pendingConflict = store.listConflicts().find(({ key }) => key === "sps_invoices");
+    if (pendingConflict) {
+      throw new Error("Resolve the invoice sync conflict before sending drafts to QuickBooks.");
+    }
+
+    const pendingWriteReceipt = await store.flushKey("sps_invoices");
+    const pendingWriteIssue = storeReceiptIssue(pendingWriteReceipt, "Saving pending invoice changes");
+    if (pendingWriteIssue) throw new Error(pendingWriteIssue);
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const invoiceRead = await store.refresh("sps_invoices");
+      if (!invoiceRead?.ok) {
+        throw new Error(invoiceRead?.error?.message || "The latest SPS invoices could not be loaded.");
+      }
+      let latestInvoices;
+      try {
+        latestInvoices = invoiceRead.exists ? JSON.parse(invoiceRead.value || "[]") : [];
+      } catch (_) {
+        throw new Error("The shared invoice list is invalid. Nothing was changed.");
+      }
+      if (!Array.isArray(latestInvoices)) {
+        throw new Error("The shared invoice list is invalid. Nothing was changed.");
+      }
+      const index = latestInvoices.findIndex((entry) => String(entry?.id || "") === targetId);
+      if (index < 0) throw new Error("This SPS invoice no longer exists. Refresh before trying again.");
+
+      const nextInvoice = mutate(latestInvoices[index]);
+      if (!nextInvoice || typeof nextInvoice !== "object" || String(nextInvoice.id || "") !== targetId) {
+        throw new Error("The invoice update was invalid. Nothing was changed.");
+      }
+      const nextInvoices = latestInvoices.map((entry, itemIndex) => itemIndex === index ? nextInvoice : entry);
+      const saved = await store.replaceMany([{
+        key: "sps_invoices",
+        value: JSON.stringify(nextInvoices),
+        expectedVersion: Number(invoiceRead.version) || 0,
+      }]);
+      if (!saved?.ok) {
+        if (saved?.conflict && attempt < 2) continue;
+        throw new Error(saved?.conflict
+          ? "Another employee changed invoices at the same time. Refresh and try again."
+          : (saved?.error?.message || "SPS did not confirm the invoice update."));
+      }
+
+      const confirmedRead = await store.get("sps_invoices");
+      let confirmedInvoices;
+      try {
+        confirmedInvoices = confirmedRead?.value ? JSON.parse(confirmedRead.value) : [];
+      } catch (_) {
+        confirmedInvoices = [];
+      }
+      const confirmed = Array.isArray(confirmedInvoices)
+        ? confirmedInvoices.find((entry) => String(entry?.id || "") === targetId)
+        : null;
+      if (!confirmed || JSON.stringify(confirmed) !== JSON.stringify(nextInvoice)) {
+        throw new Error("SPS could not verify the saved QuickBooks link. Review this draft before retrying.");
+      }
+      setInvoices(confirmedInvoices);
+      return confirmed;
+    }
+    throw new Error("Invoices changed repeatedly on another device. Refresh and try again.");
+  };
+
   const handleSaveInvoice = (inv) => {
     // QuickBooks sync is handled inside the invoice editor's Save (create or update),
     // so here we only persist locally. This avoids double-pushing / duplicates.
@@ -42020,7 +42477,17 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           };
         }
 
-        const nextInvoices = latestInvoices.filter((invoice) => String(invoice?.id || "") !== targetId);
+        // Close a numbering gap only inside the same series of pristine, never-synced drafts.
+        // QuickBooks-linked, sent, paid, viewed, exported, uncertain, or job-linked
+        // records keep permanent numbers.
+        const protectedInvoiceIds = new Set(
+          latestInvoices
+            .filter((invoice) => findInvoiceDeletionReferences(invoice, latestEstimates, latestSchedule).blocked)
+            .map((invoice) => String(invoice?.id || ""))
+            .filter(Boolean),
+        );
+        const deletionPlan = deleteInvoiceAndCompactSafeDrafts(latestInvoices, targetId, { protectedInvoiceIds });
+        const nextInvoices = deletionPlan.invoices;
         const saved = await store.replaceMany([
           {
             key: "sps_invoices",
@@ -42082,6 +42549,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
               return {
                 ok: true,
                 warning: `Deleted from SPS Way, but QuickBooks did not confirm it: ${detail} Sync again before recreating this invoice.`,
+                renumbered: deletionPlan.renumbered,
               };
             }
           } catch (error) {
@@ -42089,10 +42557,11 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
             return {
               ok: true,
               warning: "Deleted from SPS Way, but QuickBooks could not be reached. Sync again before recreating this invoice.",
+              renumbered: deletionPlan.renumbered,
             };
           }
         }
-        return { ok: true };
+        return { ok: true, renumbered: deletionPlan.renumbered };
       }
     } catch (error) {
       return { ok: false, error: error?.message || "The invoice could not be deleted." };
@@ -42763,7 +43232,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} branding={branding} T={T} budget={budget} />}
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} isAdmin={perms.isAdmin} />}
       {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} setCatalog={setCatalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} invoices={invoices} schedule={schedule} onSaveInvoice={handleSaveInvoice} onConvertEstimate={handleConvertEstimateToInvoice} onCompleteEstimate={handleCompleteEstimate} onScheduleEstimate={handleOpenEstimateSchedule} />}
-      {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} qbAccounting={qbAccounting} onSave={handleSaveInvoice} onResolveReview={handleResolveInvoiceReview} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
+      {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} schedule={schedule} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} qbAccounting={qbAccounting} onSave={handleSaveInvoice} onPersistInvoice={handlePersistInvoiceMutation} onResolveReview={handleResolveInvoiceReview} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
       {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : commsSection || undefined} initialSectionNonce={commsSectionNonce} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} setBranding={setBranding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} onLinkLead={handleLinkLead} openLeadId={openLeadId} onLeadOpened={() => setOpenLeadId(null)} vp={vp} workspaceScope={authUserId} />}
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}

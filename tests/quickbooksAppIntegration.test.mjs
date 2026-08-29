@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 
 const source = await readFile(new URL("../App.jsx", import.meta.url), "utf8");
 const accountingSource = await readFile(new URL("../invoiceAccountingSummary.js", import.meta.url), "utf8");
+const quickBooksDraftSyncSource = await readFile(new URL("../quickbooksDraftSync.js", import.meta.url), "utf8");
 
 test("linked invoice pulls use the conflict-safe QuickBooks reconciler", () => {
   assert.match(source, /import\s+\{[\s\S]*?reconcileQuickBooksInvoice[\s\S]*?\}\s+from\s+"\.\/quickbooksInvoiceReconciliation"/);
@@ -73,6 +74,7 @@ test("QuickBooks refresh compares the latest invoice snapshot and never emits pa
 });
 
 test("QuickBooks update payload carries the reconciliation and jurisdiction fields", () => {
+  const payloadSources = `${source}\n${quickBooksDraftSyncSource}`;
   for (const field of [
     "qbBaseContentFingerprint",
     "qbTaxCodeRef",
@@ -83,7 +85,7 @@ test("QuickBooks update payload carries the reconciliation and jurisdiction fiel
     "clientState",
     "clientZip",
   ]) {
-    assert.match(source, new RegExp(`${field}:`), `${field} should be sent or persisted`);
+    assert.match(payloadSources, new RegExp(`${field}:`), `${field} should be sent or persisted`);
   }
 });
 

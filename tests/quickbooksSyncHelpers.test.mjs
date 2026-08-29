@@ -101,6 +101,13 @@ test("payments expose the applied and unapplied amounts QuickBooks uses as custo
     TxnDate: "2026-07-28",
     TotalAmt: 200,
     UnappliedAmt: 143.05,
+    PaymentMethodRef: { value: "3", name: "Check" },
+    DepositToAccountRef: { value: "35", name: "Checking" },
+    PrivateNote: "Spring maintenance prepayment",
+    Line: [{
+      Amount: 56.95,
+      LinkedTxn: [{ TxnId: "invoice-42", TxnType: "Invoice" }],
+    }],
     CustomerRef: { value: "42", name: "Generic Client" },
   });
 
@@ -115,9 +122,37 @@ test("payments expose the applied and unapplied amounts QuickBooks uses as custo
     total: 200,
     appliedAmount: 56.95,
     unappliedAmount: 143.05,
+    invoiceAllocations: [{ qbInvoiceId: "invoice-42", amount: 56.95 }],
+    allocationReviewRequired: false,
+    paymentMethod: "Check",
+    qbPaymentMethodId: "3",
+    depositAccount: "Checking",
+    qbDepositAccountId: "35",
+    note: "Spring maintenance prepayment",
     status: "Partially applied",
     source: "quickbooks-payment",
   });
+});
+
+test("payments retain ambiguous QuickBooks invoice links but require allocation review", () => {
+  const mapped = mapQuickBooksPayment({
+    Id: "p-split",
+    TotalAmt: 400,
+    UnappliedAmt: 0,
+    Line: [{
+      Amount: 400,
+      LinkedTxn: [
+        { TxnId: "invoice-a", TxnType: "Invoice" },
+        { TxnId: "invoice-b", TxnType: "Invoice" },
+      ],
+    }],
+  });
+
+  assert.deepEqual(mapped.invoiceAllocations, [
+    { qbInvoiceId: "invoice-a", amount: null },
+    { qbInvoiceId: "invoice-b", amount: null },
+  ]);
+  assert.equal(mapped.allocationReviewRequired, true);
 });
 
 test("accounting totals distinguish gross invoice balance, credits, and net receivables", () => {

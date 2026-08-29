@@ -161,6 +161,7 @@ test("QuickBooks sync emits stable line identity, item identity, tax code, and c
   assert.equal(second.qbContentFingerprint, first.qbContentFingerprint);
   assert.deepEqual(firstRes.body.creditMemos, []);
   assert.deepEqual(firstRes.body.unappliedPayments, []);
+  assert.deepEqual(firstRes.body.payments, []);
   assert.deepEqual(firstRes.body.reconciliation.qbInvoiceIds, ["1964"]);
   assert.equal(firstRes.body.reconciliation.complete, true);
   assert.equal(firstRes.body.accounting.openInvoiceBalance, 1502.02);
@@ -393,6 +394,8 @@ test("QuickBooks sync subtracts unapplied payments from net receivables", async 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.unappliedPayments.length, 1);
   assert.equal(res.body.unappliedPayments[0].unappliedAmount, 143.05);
+  assert.equal(res.body.payments.length, 1);
+  assert.equal(res.body.payments[0].qbId, "payment-9");
   assert.equal(res.body.accounting.openInvoiceBalance, 500);
   assert.equal(res.body.accounting.availableCreditBalance, 143.05);
   assert.equal(res.body.accounting.netOpenReceivables, 356.95);

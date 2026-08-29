@@ -203,3 +203,27 @@ test("a malformed protected ledger fails closed instead of dropping another clie
   }), null);
   assert.equal(setMaintenanceBillingPolicyInStore({ version: 1, policies: [] }, "client-prepaid", null), null);
 });
+
+test("legacy policy readers safely project a valid v2 payment ledger", () => {
+  const policy = normalizeMaintenanceBillingPolicy(client().maintenanceBilling);
+  assert.deepEqual(normalizeMaintenanceBillingStore({
+    version: 2,
+    policies: { "client-prepaid": policy },
+    allocations: {
+      "client-prepaid": {
+        "2026-08": {
+          status: "paid",
+          sources: [{ kind: "invoice", invoiceId: "invoice-1", amountCents: 17500 }],
+        },
+      },
+    },
+  }), {
+    version: 1,
+    policies: { "client-prepaid": policy },
+  });
+  assert.equal(normalizeMaintenanceBillingStore({
+    version: 2,
+    policies: { "client-prepaid": policy },
+    allocations: [],
+  }), null, "a malformed v2 envelope still fails closed");
+});

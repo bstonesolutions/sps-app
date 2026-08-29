@@ -7,11 +7,12 @@
 import { requireCapability } from "./_staff-auth.js";
 import { compareAndSetAppStateBatch, readAppStateVersioned } from "./_app-state.js";
 import {
-  emptyMaintenanceBillingStore,
   normalizeMaintenanceBillingPolicy,
-  normalizeMaintenanceBillingStore,
-  setMaintenanceBillingPolicyInStore,
 } from "../maintenanceBilling.js";
+import {
+  emptyMaintenancePaymentLedger,
+  normalizeMaintenancePaymentLedger,
+} from "../maintenancePaymentLedger.js";
 
 const MAX_ATTEMPTS = 6;
 const isRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value);
@@ -35,7 +36,9 @@ async function readBaseline() {
     readAppStateVersioned("sps_maintenance_billing"),
   ]);
   if (!clients.exists || !Array.isArray(clients.value)) throw new Error("shared_clients_invalid");
-  const billingValue = billing.exists ? normalizeMaintenanceBillingStore(billing.value) : emptyMaintenanceBillingStore();
+  const billingValue = billing.exists
+    ? normalizeMaintenancePaymentLedger(billing.value)
+    : emptyMaintenancePaymentLedger();
   if (!billingValue) throw new Error("shared_maintenance_billing_invalid");
   return { clients, billing: { ...billing, value: billingValue } };
 }
@@ -91,11 +94,13 @@ export default async function handler(req, res) {
       else delete nextClient.maintenanceBilling;
       nextClients[matches[0].index] = nextClient;
 
-      const nextBilling = setMaintenanceBillingPolicyInStore(
-        baseline.billing.value,
-        clientId,
-        requestedPolicy,
-      );
+      const policies = { ...baseline.billing.value.policies };
+      if (requestedPolicy) policies[clientId] = requestedPolicy;
+      else delete policies[clientId];
+      const nextBilling = normalizeMaintenancePaymentLedger({
+        ...baseline.billing.value,
+        policies,
+      });
       if (!nextBilling) throw new Error("shared_maintenance_billing_invalid");
 
       const saved = await compareAndSetAppStateBatch([

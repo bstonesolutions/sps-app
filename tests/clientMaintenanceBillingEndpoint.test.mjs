@@ -84,7 +84,19 @@ test("authorized accounting staff update the client mirror and protected ledger 
       version: 4,
     },
     sps_maintenance_billing: {
-      value: { version: 1, policies: { c2: { ...prepaid, sourceInvoiceId: "other" } } },
+      value: {
+        version: 2,
+        policies: { c2: { ...prepaid, sourceInvoiceId: "other" } },
+        allocations: {
+          c2: {
+            "2026-08": {
+              status: "paid",
+              sources: [{ kind: "invoice", invoiceId: "keep-invoice", amountCents: 17500 }],
+              allocatedCents: 17500,
+            },
+          },
+        },
+      },
       version: 2,
     },
   };
@@ -117,15 +129,32 @@ test("authorized accounting staff update the client mirror and protected ledger 
   assert.deepEqual(clients[0].history, [{ id: "visit-1" }]);
   assert.deepEqual(clients[0].maintenanceBilling, prepaid);
   assert.deepEqual(clients[1], state.sps_clients.value[1], "another client is untouched");
+  assert.equal(store.version, 2);
   assert.deepEqual(store.policies.c1, prepaid);
   assert.deepEqual(store.policies.c2, state.sps_maintenance_billing.value.policies.c2);
+  assert.deepEqual(store.allocations, state.sps_maintenance_billing.value.allocations);
 });
 
 test("a CAS retry re-reads the winning client row and policy removal preserves concurrent edits", async () => {
   const team = [{ email: "owner@example.com", role: "owner" }];
   const state = {
     sps_clients: { value: [{ id: "c1", name: "Before", maintenanceBilling: prepaid }], version: 2 },
-    sps_maintenance_billing: { value: { version: 1, policies: { c1: prepaid } }, version: 3 },
+    sps_maintenance_billing: {
+      value: {
+        version: 2,
+        policies: { c1: prepaid },
+        allocations: {
+          c1: {
+            "2026-08": {
+              status: "paid",
+              sources: [{ kind: "invoice", invoiceId: "keep-invoice", amountCents: 17500 }],
+              allocatedCents: 17500,
+            },
+          },
+        },
+      },
+      version: 3,
+    },
   };
   let batches = 0;
   let finalBatch = null;
@@ -160,6 +189,7 @@ test("a CAS retry re-reads the winning client row and policy removal preserves c
   assert.equal(clients[0].name, "Concurrent winner");
   assert.equal(Object.prototype.hasOwnProperty.call(clients[0], "maintenanceBilling"), false);
   assert.equal(Object.prototype.hasOwnProperty.call(store.policies, "c1"), false);
+  assert.deepEqual(store.allocations, state.sps_maintenance_billing.value.allocations);
   assert.equal(finalBatch.find((operation) => operation.key === "sps_clients").expected_version, 3);
 });
 

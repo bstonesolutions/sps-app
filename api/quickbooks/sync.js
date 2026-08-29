@@ -291,6 +291,9 @@ export default async function handler(req, res) {
       invoices: mappedInvoices,
       customers: mappedCustomers,
       creditMemos: mappedCreditMemos,
+      // The maintenance payment ledger needs fully applied payments too. Each mapped payment is
+      // compact and carries only the QuickBooks invoice allocations required for reconciliation.
+      payments: mappedPayments,
       unappliedPayments: mappedUnappliedPayments,
       // These totals are calculated exclusively from the current QuickBooks
       // snapshots. They deliberately do not include unsynced SPS invoices.

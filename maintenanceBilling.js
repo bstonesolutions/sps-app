@@ -154,7 +154,12 @@ export function emptyMaintenanceBillingStore() {
 
 export function normalizeMaintenanceBillingStore(rawStore) {
   if (!isRecord(rawStore)) return null;
-  if (Number(rawStore.version) !== MAINTENANCE_BILLING_STORE_VERSION) return null;
+  const version = Number(rawStore.version);
+  if (![MAINTENANCE_BILLING_STORE_VERSION, 2].includes(version)) return null;
+  // Version 2 adds protected month allocations beside the existing policy
+  // map. Legacy readers only need the policy projection, but must still fail
+  // closed when the v2 envelope is malformed.
+  if (version === 2 && !isRecord(rawStore.allocations)) return null;
   if (!isRecord(rawStore.policies)) return null;
   const policies = {};
   for (const [rawClientId, rawPolicy] of Object.entries(rawStore.policies)) {

@@ -146,6 +146,24 @@ export function mapQuickBooksPayment(payment) {
     Math.max(0, toCents(source.UnappliedAmt)),
   );
   const appliedCents = Math.max(0, totalCents - unappliedCents);
+  const invoiceAllocations = [];
+  let allocationReviewRequired = false;
+  for (const line of (Array.isArray(source.Line) ? source.Line : [])) {
+    const linkedInvoices = (Array.isArray(line?.LinkedTxn) ? line.LinkedTxn : [])
+      .filter((linked) => String(linked?.TxnType || "").toLowerCase() === "invoice" && linked?.TxnId != null);
+    if (!linkedInvoices.length) continue;
+    // QuickBooks normally emits one applied invoice per payment line. If one line points at
+    // multiple invoices, its single Amount cannot be divided safely, so keep the links visible
+    // while forcing the maintenance ledger to ask for a human allocation.
+    if (linkedInvoices.length !== 1) allocationReviewRequired = true;
+    const lineCents = Math.max(0, toCents(line?.Amount));
+    linkedInvoices.forEach((linked) => {
+      invoiceAllocations.push({
+        qbInvoiceId: String(linked.TxnId),
+        amount: linkedInvoices.length === 1 ? fromCents(lineCents) : null,
+      });
+    });
+  }
 
   return {
     qbId: source.Id != null ? String(source.Id) : "",
@@ -160,6 +178,17 @@ export function mapQuickBooksPayment(payment) {
     total: fromCents(totalCents),
     appliedAmount: fromCents(appliedCents),
     unappliedAmount: fromCents(unappliedCents),
+    invoiceAllocations,
+    allocationReviewRequired,
+    paymentMethod: source.PaymentMethodRef?.name || "",
+    qbPaymentMethodId: source.PaymentMethodRef?.value != null
+      ? String(source.PaymentMethodRef.value)
+      : "",
+    depositAccount: source.DepositToAccountRef?.name || "",
+    qbDepositAccountId: source.DepositToAccountRef?.value != null
+      ? String(source.DepositToAccountRef.value)
+      : "",
+    note: source.PrivateNote || "",
     status: unappliedCents <= 0
       ? "Applied"
       : (unappliedCents < totalCents ? "Partially applied" : "Unapplied"),
