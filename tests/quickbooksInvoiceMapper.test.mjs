@@ -70,18 +70,19 @@ test("maps a QuickBooks percentage discount and derives the effective 6% tax rat
 });
 
 test("only marks an unpaid QuickBooks invoice sent when QuickBooks has delivery evidence", () => {
-  const unsent = mapQuickBooksInvoice(baseInvoice([]));
+  const options = { todayISO: "2026-07-27" };
+  const unsent = mapQuickBooksInvoice(baseInvoice([]), options);
   const sent = mapQuickBooksInvoice({
     ...baseInvoice([]),
     EmailStatus: "EmailSent",
-  });
+  }, options);
   const delivered = mapQuickBooksInvoice({
     ...baseInvoice([]),
     DeliveryInfo: {
       DeliveryTime: "2026-07-27T14:30:00-04:00",
       DeliveryType: "Email",
     },
-  });
+  }, options);
 
   assert.equal(unsent.status, "Draft");
   assert.equal(Object.hasOwn(unsent, "sentDate"), false);

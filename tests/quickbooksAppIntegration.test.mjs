@@ -3,6 +3,7 @@ import test from "node:test";
 import { readFile } from "node:fs/promises";
 
 const source = await readFile(new URL("../App.jsx", import.meta.url), "utf8");
+const accountingSource = await readFile(new URL("../invoiceAccountingSummary.js", import.meta.url), "utf8");
 
 test("linked invoice pulls use the conflict-safe QuickBooks reconciler", () => {
   assert.match(source, /import\s+\{[\s\S]*?reconcileQuickBooksInvoice[\s\S]*?\}\s+from\s+"\.\/quickbooksInvoiceReconciliation"/);
@@ -111,8 +112,10 @@ test("outstanding summaries and client amount-due actions use remaining balance"
   assert.match(source, /const totalOwed = outstanding\.reduce\(\(s, iv\) => s \+ invoiceTotals\(iv\)\.balance/);
   assert.match(source, /Pay \$\$\{\(tot\.balance\|\|0\)\.toFixed\(2\)\} Now/);
   assert.match(source, />Amount Due<\/span>[\s\S]*?money\(totals\.balance\)/);
-  assert.match(source, /qbAccounting\.openInvoiceCount/);
-  assert.match(source, /qbAccounting\.openInvoiceBalance/);
-  assert.match(source, /qbAccounting\.paymentsReceivedThisMonth/);
+  assert.match(source, /resolveInvoiceAccountingSummary\(qbAccounting/);
+  assert.match(source, /qbAccounting=\{qbAccounting\}/);
+  assert.match(accountingSource, /qbAccounting\.openInvoiceCount/);
+  assert.match(accountingSource, /qbAccounting\.openInvoiceBalance/);
+  assert.match(accountingSource, /qbAccounting\.paymentsReceivedThisMonth/);
   assert.match(source, /available credits/);
 });

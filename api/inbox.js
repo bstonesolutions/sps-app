@@ -28,6 +28,8 @@ import { requireOwner } from "./plaid/_plaid.js";
 import { resolveFrom } from "./_sender.js";
 import { appendToGmailSent } from "./_gmail.js";
 import { mutateAppState, NO_APP_STATE_CHANGE, readAppStateVersioned } from "./_app-state.js";
+import { mergeInboxConversationRows } from "../smsConversations.js";
+import { summarizeActionableCommsRows } from "../commsPriority.js";
 
 // Sending also drops a copy into Gmail "Sent" over IMAP — give the function room for that round-trip.
 export const config = { maxDuration: 30 };
@@ -157,6 +159,34 @@ export default async function handler(req, res) {
   try {
     if (req.method === "GET") {
       const q = req.query || {};
+      if (q.summary === "actionable") {
+        // Keep full message history in Supabase while turning the badge into a short work queue:
+        // SMS is grouped per line + customer, and only business-relevant email categories count.
+        // The explicit compact projection avoids body_html and private media downloads.
+        const summaryLimit = 200;
+        const r = await fetch(
+          `${SUPABASE_URL}/rest/v1/sps_inbox?select=${encodeURIComponent(INBOX_COMPACT_FIELDS)}`
+            + `&order=created_at.desc&limit=${summaryLimit}`,
+          { headers: sbHeaders() },
+        );
+        if (!r.ok) {
+          const t = await r.text().catch(() => "");
+          const hint = /relation .*sps_inbox|42P01/i.test(t)
+            ? "The sps_inbox table hasn't been created yet. Run the SQL in CLAUDE.md."
+            : t.slice(0, 200);
+          return res.status(502).json({ error: hint });
+        }
+        const rows = (await r.json().catch(() => [])) || [];
+        if (!Array.isArray(rows)) return res.status(502).json({ error: "The inbox returned invalid data." });
+        const counts = summarizeActionableCommsRows(mergeInboxConversationRows(rows));
+        return res.status(200).json({
+          ok: true,
+          actionable: counts.total,
+          count: counts.total,
+          capped: rows.length >= summaryLimit,
+          counts,
+        });
+      }
       if (q.summary === "unread") {
         // The app renders 99+ once this reaches 100, so there is no value in counting beyond 100.
         // Selecting only the primary key also avoids fetching TOAST-backed body/html columns.

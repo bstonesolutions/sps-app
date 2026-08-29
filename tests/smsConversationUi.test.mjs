@@ -25,8 +25,8 @@ test("texts render as chronological conversations with a ready reply composer", 
   assert.match(smsConversationBody, /messages\.map\(\(message, index\)/);
   assert.match(smsConversationBody, /alignSelf: outgoing \? "flex-end" : "flex-start"/);
   assert.match(inbox, /const openReplyWorkspaceKey = workspaceKeyForInboxRow\(openRow\)/);
-  assert.match(inbox, /setReplying\(!!smsCanReply \|\| \(!!savedDraft\.replying && openRow\?\.channel !== "sms"\)\)/);
-  assert.match(inbox, /openRow\.channel !== "sms" && <Btn variant="outline" sm onClick=\{toggleReply\}/);
+  assert.match(inbox, /setReplying\(focused \? false : \(!!smsCanReply \|\| \(!!savedDraft\.replying && openRow\?\.channel !== "sms"\)\)\)/);
+  assert.match(inbox, /!focused && openRow\.channel !== "sms" && <Btn variant="outline" sm onClick=\{toggleReply\}/);
   assert.match(inbox, /<textarea[\s\S]*?value=\{replyText\}[\s\S]*?maxLength=\{1600\}/);
   assert.match(inbox, /sendSms\(phone, replyText\.trim\(\), \{ clientId, preserveRecipient: true,[\s\S]*?inboxId: replyAnchor\.id/);
   assert.match(inbox, /openRow\.channel === "sms" \? "Send text" : "Send reply"/);
@@ -66,8 +66,8 @@ test("phone rows use compact conversation chrome while retaining swipe actions",
   assert.match(phoneRows, /\{messagePreview \|\| \(sms \? "Text message" : "\(no subject\)"\)\}[\s\S]*?\{channelLabel\}/, "the actual message should precede secondary channel metadata");
   assert.match(phoneRows, /fmtMailboxWhen\(r\.created_at\)/);
   assert.match(phoneRows, /<Icon name="chevronR"/);
-  assert.match(phoneRows, /onToggleRead=\{\(\) => \{ markRead\(inboxRowMessageIds\(r\), !r\.read\); \}\}/);
-  assert.match(phoneRows, /onDelete=\{smsOnly \? undefined : \(\) => \{ deleteEmails\(inboxRowMessageIds\(r\), \{ ask: false \}\); \}\}/);
+  assert.match(phoneRows, /onToggleRead=\{focused \? undefined : \(\) => \{ markRead\(inboxRowMessageIds\(r\), !r\.read\); \}\}/);
+  assert.match(phoneRows, /onDelete=\{focused \|\| smsOnly \? undefined : \(\) => \{ deleteEmails\(inboxRowMessageIds\(r\), \{ ask: false \}\); \}\}/);
 });
 
 test("SMS accents use the SPS brand palette instead of purple", () => {
@@ -81,11 +81,19 @@ test("touch-and-hold previews without opening or marking read", () => {
   assert.match(swipe, /previewTimerRef/);
   assert.match(swipe, /window\.setTimeout\(\(\) => \{[\s\S]*?onPreview\(\);[\s\S]*?\}, 450\)/);
   assert.match(swipe, /onContextMenu=\{\(e\) => \{ if \(!disabled && onPreview\)/);
-  assert.match(phoneRows, /onPreview=\{\(\) => \{ setOpenSwipeId\(null\); setPreviewRow\(r\); \}\}/);
-  const previewHandler = phoneRows.match(/onPreview=\{\(\) => \{([^}]*)\}\}/)?.[1] || "";
+  assert.match(phoneRows, /onPreview=\{focused \? undefined : \(\) => \{ setOpenSwipeId\(null\); setPreviewRow\(r\); \}\}/);
+  const previewHandler = phoneRows.match(/onPreview=\{focused \? undefined : \(\) => \{([^}]*)\}\}/)?.[1] || "";
   assert.doesNotMatch(previewHandler, /markRead/);
   assert.match(pressPreview, /role="dialog" aria-modal="true"/);
   assert.match(inbox, /onOpen=\{\(\) => \{ const row = previewRow; setPreviewRow\(null\); openMessage\(row\); \}\}/);
+});
+
+test("focused Comms is read-only while full workspace keeps reply and mailbox controls", () => {
+  assert.match(inbox, /function EmailInboxSection\([^)]*focused = false/);
+  assert.match(inbox, /setReplying\(focused \? false :/);
+  assert.match(phoneRows, /disabled=\{focused \|\| selMode\}/);
+  assert.match(phoneRows, /onToggleRead=\{focused \? undefined/);
+  assert.match(phoneRows, /onDelete=\{focused \|\| smsOnly \? undefined/);
 });
 
 test("SMS pins are server-backed and render in a separate phone rail", () => {

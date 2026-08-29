@@ -18,6 +18,8 @@ import {
   signPrivateSmsMedia,
   toSmsE164,
 } from "./_sms-history.js";
+import { mergeInboxConversationRows } from "../smsConversations.js";
+import { summarizeActionableCommsRows } from "../commsPriority.js";
 
 const SUPABASE_URL = (
   process.env.SUPABASE_URL ||
@@ -35,6 +37,22 @@ const MAX_THREAD_META = 2500;
 const SMS_THREAD_PREFERENCES_TABLE = "sps_sms_thread_preferences";
 const MAX_THREAD_PREFERENCES = 500;
 const MAX_IDENTITY_IDS = 50;
+const ACTIONABLE_SMS_FIELDS = [
+  "id",
+  "channel",
+  "ai",
+  "kind",
+  "lead_id",
+  "read",
+  "from_phone",
+  "body_text",
+  "created_at",
+  "sms_direction",
+  "sms_line",
+  "sms_peer_phone",
+  "quo_conversation_id",
+  "sms_status",
+].join(",");
 
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -517,6 +535,29 @@ export default async function handler(req, res) {
         const hasMore = authorizedRows.length > limit;
         const safeRows = (await enrichSmsContacts(authorizedRows.slice(0, limit))).map(serializeSmsRow);
         return res.status(200).json({ ok: true, rows: safeRows, hasMore, access });
+      }
+      if (query.summary === "actionable") {
+        const summaryLimit = 200;
+        const response = await fetch(
+          `${SUPABASE_URL}/rest/v1/sps_inbox?select=${encodeURIComponent(ACTIONABLE_SMS_FIELDS)}`
+            + `&${lineScopeFilter(access)}&order=created_at.desc&limit=${summaryLimit}`,
+          { headers: serviceHeaders() },
+        );
+        if (!response.ok) return res.status(502).json({ error: "The text inbox could not be loaded." });
+        const rows = await response.json().catch(() => null);
+        if (!Array.isArray(rows)) return res.status(502).json({ error: "The text inbox returned invalid data." });
+        // The service role bypasses RLS. Re-validate every row even though PostgREST is already
+        // line-scoped, then group messages before counting so one customer thread is one item.
+        const authorizedRows = rows.filter((row) => canAccessRow(row, access));
+        const counts = summarizeActionableCommsRows(mergeInboxConversationRows(authorizedRows));
+        return res.status(200).json({
+          ok: true,
+          actionable: counts.total,
+          count: counts.total,
+          capped: rows.length >= summaryLimit,
+          counts,
+          access,
+        });
       }
       if (query.summary === "unread") {
         const response = await fetch(

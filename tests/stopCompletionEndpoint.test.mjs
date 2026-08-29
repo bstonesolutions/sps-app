@@ -325,6 +325,147 @@ test("field completion is validated server-side and committed through one servic
   assert.equal(state.sps_maintenance_billing.version, 1);
 });
 
+test("a lost batch response is confirmed from authoritative state and returned as success", async () => {
+  const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
+  const state = {
+    sps_clients: { value: [{ id: "c1", name: "Client", balance: "$0", history: [] }], version: 1 },
+    sps_catalog: {
+      value: {
+        locations: [{ id: "truck", name: "Truck" }],
+        treatments: [{ id: "t1", name: "Treatment", unit: "oz", inventoryOz: "5", stockByLoc: { truck: 5 } }],
+        parts: [],
+        products: [],
+      },
+      version: 1,
+    },
+    sps_completed: { value: {}, version: 1 },
+    sps_schedule: { value: [{ date: "07/12/2026", stops: [{ sid: "s1", clientId: "c1", assigneeId: "e1" }] }], version: 1 },
+    sps_invoices: { value: [], version: 1 },
+    sps_invoicing: { value: { numberPrefix: "INV-", nextNumber: 2000, dueDays: 15, taxRate: "6" }, version: 1 },
+  };
+  let batchWrites = 0;
+  const stateReadKeySets = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
+    if (href.includes("/rest/v1/app_state?")) {
+      stateReadKeySets.push(requestedStateKeys(href).sort());
+      return response(stateRows(href, state));
+    }
+    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+      batchWrites += 1;
+      const operations = JSON.parse(options.body).p_operations;
+      applyBatchOperations(state, operations);
+      throw new TypeError("fetch failed after commit");
+    }
+    throw new Error(`Unexpected fetch: ${href}`);
+  };
+
+  const res = mockResponse();
+  await stopCompletionHandler({
+    method: "POST",
+    headers: { authorization: "Bearer field-token", "x-request-id": "completion-lost-response-1" },
+    body: {
+      mode: "complete",
+      clientId: "c1",
+      sid: "s1",
+      idempotencyKey: "attempt-lost-response-1",
+      entry: {
+        invoice: "$75",
+        notes: "Done",
+        treatmentsUsed: [{ id: "t1", name: "Treatment", unit: "oz", oz: 2, locId: "truck" }],
+      },
+    },
+  }, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.applied, true);
+  assert.equal(res.body.confirmedAfterUncertainWrite, true);
+  assert.match(res.body.receiptId, /^stop-s1-/);
+  assert.equal(res.body.clientName, "Client");
+  assert.equal(res.body.invoiceOutcome.status, "created");
+  assert.equal(res.body.invoiceOutcome.invoiceId, "iv_stop_s1");
+  assert.deepEqual(res.body.inventoryDeducted[0].deductions, [{ locationId: "truck", amount: 2 }]);
+  assert.equal(batchWrites, 1);
+  assert.equal(stateReadKeySets.length, 2);
+  assert.deepEqual(stateReadKeySets[1], ["sps_clients", "sps_completed", "sps_invoices"]);
+  assert.equal(state.sps_clients.value[0].history.length, 1);
+  assert.equal(state.sps_invoices.value.length, 1);
+  assert.equal(state.sps_invoices.value[0].id, "iv_stop_s1");
+  assert.equal(state.sps_catalog.value.treatments[0].stockByLoc.truck, 3);
+});
+
+test("a pre-commit batch timeout returns an unconfirmed retryable result without claiming no change", async () => {
+  const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
+  const state = {
+    sps_clients: { value: [{ id: "c1", name: "Client", balance: "$0", history: [] }], version: 1 },
+    sps_catalog: { value: { locations: [], treatments: [], parts: [], products: [] }, version: 1 },
+    sps_completed: { value: {}, version: 1 },
+    sps_schedule: { value: [{ date: "07/12/2026", stops: [{ sid: "s1", clientId: "c1", assigneeId: "e1" }] }], version: 1 },
+    sps_invoices: { value: [], version: 1 },
+    sps_invoicing: { value: { numberPrefix: "INV-", nextNumber: 2000, dueDays: 15, taxRate: "6" }, version: 1 },
+  };
+  let batchWrites = 0;
+  let batchAborted = false;
+  const stateReadKeySets = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify(team) }]);
+    if (href.includes("/rest/v1/app_state?")) {
+      stateReadKeySets.push(requestedStateKeys(href).sort());
+      return response(stateRows(href, state));
+    }
+    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+      batchWrites += 1;
+      return new Promise((resolve, reject) => {
+        options.signal.addEventListener("abort", () => {
+          batchAborted = true;
+          reject(Object.assign(new Error("aborted before commit"), { name: "AbortError" }));
+        }, { once: true });
+      });
+    }
+    throw new Error(`Unexpected fetch: ${href}`);
+  };
+
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    const res = mockResponse();
+    await stopCompletionHandler({
+      method: "POST",
+      headers: { authorization: "Bearer field-token", "x-request-id": "completion-precommit-timeout-1" },
+      body: {
+        mode: "complete",
+        clientId: "c1",
+        sid: "s1",
+        idempotencyKey: "attempt-precommit-timeout-1",
+        entry: { invoice: "$75", notes: "Done" },
+      },
+    }, res);
+
+    assert.equal(batchAborted, true);
+    assert.equal(batchWrites, 1);
+    assert.equal(res.statusCode, 503);
+    assert.equal(res.body.ok, false);
+    assert.equal(res.body.code, "completion-save-unconfirmed");
+    assert.equal(res.body.retryable, true);
+    assert.equal(res.body.commitState, "unconfirmed");
+    assert.equal(res.body.requestId, "completion-precommit-timeout-1");
+    assert.match(res.body.error, /retry automatically/i);
+    assert.doesNotMatch(res.body.error, /nothing (was )?changed/i);
+    assert.equal(stateReadKeySets.length, 2);
+    assert.deepEqual(stateReadKeySets[1], ["sps_clients", "sps_completed", "sps_invoices"]);
+    assert.equal(state.sps_clients.value[0].history.length, 0);
+    assert.equal(Object.keys(state.sps_completed.value).length, 0);
+    assert.equal(state.sps_invoices.value.length, 0);
+  } finally {
+    console.error = originalError;
+  }
+});
+
 test("repeated fence conflicts leave every stop mutation untouched and use one reread per attempt", async () => {
   const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
   const state = {

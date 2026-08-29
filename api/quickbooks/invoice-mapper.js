@@ -116,10 +116,11 @@ export function mapQuickBooksInvoice(invoice, options = {}) {
     ? String(inv.DeliveryInfo.DeliveryTime).slice(0, 10)
     : null;
   const delivered = inv.EmailStatus === "EmailSent" || !!sentDate;
+  const dueDateISO = String(inv.DueDate || "").slice(0, 10);
   const overdue = !!(
-    inv.DueDate
-    && !Number.isNaN(new Date(inv.DueDate).getTime())
-    && new Date(inv.DueDate) < new Date()
+    /^\d{4}-\d{2}-\d{2}$/.test(dueDateISO)
+    && /^\d{4}-\d{2}-\d{2}$/.test(todayISO)
+    && dueDateISO < todayISO
   );
 
   return {

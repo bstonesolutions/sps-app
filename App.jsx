@@ -7,6 +7,7 @@ import { PROD_URL } from "./config";
 import { sendWidgetPayload, clearWidgetPayload } from "./widgetBridge";
 import { normalizeCompletionInvoice, STOP_REVERSAL_LEDGER_KEY } from "./stopCompletion";
 import { CLIENT_MEDIA_BUCKET, backupManifestStatus, buildMediaArchive, buildStorageObjectPath, findUniqueStableMatch, makeStorageRef, parseDataUrl, parseStorageLocator, selectLegacyMediaForMigration, validateBackupMediaSize } from "./mediaBackup";
+import { inspectLegacyMediaHealth } from "./legacyMediaHealth";
 import { createPortalDataFence, portalVisitMatchesReference, portalVisitReference, rejectPortalPreviewAction, requestPortalAction, retainPortalRatingVisit } from "./portalActionClient";
 import { foregroundFenceTransition, selectActiveEnRouteStop, selectArrivalWatchStop } from "./geofenceSafety";
 import { assessInboundLead, findMisfiledImportedLead } from "./leadQualification";
@@ -72,6 +73,17 @@ import {
   updateCompletionIntent,
 } from "./completionOutbox";
 import { requestCompletedStop } from "./completionRequest";
+import {
+  DASHBOARD_WIDGETS,
+  canEditDashboardTarget,
+  dashboardLayoutForTarget,
+  resetDashboardLayout,
+  resolveDashboardLayout,
+  visibleDashboardItems,
+  writeDashboardLayout,
+} from "./dashboardLayout";
+import { formatAccountingCurrency, resolveInvoiceAccountingSummary } from "./invoiceAccountingSummary";
+import { selectActionableCommsRows, summarizeActionableCommsRows } from "./commsPriority";
 
 // Manual/foreground refreshes compare these small version counters first and download only the
 // shared slices that changed. Keeping this list explicit prevents a Sync tap from tearing down the
@@ -3605,6 +3617,9 @@ const DEFAULT_NOTIFY = {
 };
 
 const DEFAULT_EMAIL = {
+  // Focused keeps the full email + Quo archive running while presenting only work that needs a
+  // decision. Owners can temporarily return to the legacy workspace from Comms settings.
+  commsMode: "focused",
   fromName: "Stone Property Solutions",
   fromAddress: "service@stonepropertysolutions.com",
   subject: "Your Service Report — {date}",
@@ -5600,7 +5615,7 @@ function FieldSetupModal({ status, locationError, testModeHoldsStaff, busy, mess
 // Home → Comms widget: at-a-glance unread chats / new leads / unread email + the most recent items,
 // each tappable into Comms. Self-contained fetch (messages via supabase, email via owner-gated
 // api/inbox best-effort); leads come from the app's live array.
-function HomeCommsWidget({ leads = [], clients = [], onNav, T, perms = {} }) {
+function HomeCommsWidget({ leads = [], clients = [], onNav, T, perms = {}, focused = true }) {
   const canChat = !!(perms.isAdmin || perms.commsMessages);
   const canLeads = !!(perms.isAdmin || perms.commsInbox);
   const canExternalInbox = !!(perms.isAdmin || perms.commsTextInbox || perms.commsMainLine);
@@ -5623,11 +5638,16 @@ function HomeCommsWidget({ leads = [], clients = [], onNav, T, perms = {} }) {
   const openLeads = canLeads ? (leads || []).filter(l => l && !["won", "lost"].includes(l.status)).sort((a, b) => timeValue(b.createdAt) - timeValue(a.createdAt)) : [];
   const unreadChats = threads.reduce((s, t) => s + (t.unread > 0 ? 1 : 0), 0);
   const newLeads = openLeads.filter(l => l.status === "new").length;
-  const unreadInbox = (emails || []).filter(e => e && !e.read).length;
+  const externalInboxRows = useMemo(() => {
+    const rows = Array.isArray(emails) ? emails : [];
+    if (!focused) return rows.filter(row => row && !row.read);
+    return selectActionableCommsRows(mergeInboxConversationRows(rows, clients));
+  }, [clients, emails, focused]);
+  const unreadInbox = externalInboxRows.length;
   const recent = [];
   if (canChat) threads.filter(t => t.unread > 0).slice(0, 4).forEach(t => recent.push({ kind: "chat", name: nameOf(t.cid), sub: t.lastMsg, at: t.at, seed: nameOf(t.cid), onClick: () => onNav("messages") }));
   openLeads.slice(0, 4).forEach(l => recent.push({ kind: "lead", name: l.name || l.phone || "New lead", sub: l.message || l.service || "New lead", at: l.createdAt, seed: l.name || l.id, onClick: () => onNav("leads") }));
-  (canExternalInbox ? (emails || []) : []).filter(e => e && !e.read).slice(0, 4).forEach(e => {
+  (canExternalInbox ? externalInboxRows : []).slice(0, 4).forEach(e => {
     const isText = e.channel === "sms";
     recent.push({
       kind: isText ? "sms" : (e.kind === "bill" ? "bill" : "email"),
@@ -5640,32 +5660,36 @@ function HomeCommsWidget({ leads = [], clients = [], onNav, T, perms = {} }) {
   });
   recent.sort((a, b) => timeValue(b.at) - timeValue(a.at));
   const top = recent.slice(0, 3);
-  const AV = ["#B81D24", "#0E9488", "#2563eb", "#b45309", "#7c3aed", "#c2410c", "#0891b2", "#be185d"];
+  const AV = [T.primary, "#374151", "#64748B", "#7C2D32", "#475569"];
   const col = (s) => { let h = 0; const x = String(s || "?"); for (let i = 0; i < x.length; i++) h = (h * 31 + x.charCodeAt(i)) >>> 0; return AV[h % AV.length]; };
   const fmtT = (iso) => { try { const d = new Date(iso), n = new Date(); return d.toDateString() === n.toDateString() ? d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : d.toLocaleDateString("en-US", { month: "short", day: "numeric" }); } catch (_) { return ""; } };
-  const kindBadge = { chat: ["CHAT", T.primary], lead: ["LEAD", "#16a34a"], bill: ["BILL", "#b45309"], email: ["EMAIL", "#2563eb"], sms: ["TEXT", T.primary] };
+  const kindBadge = { chat: ["CHAT", T.primary], lead: ["LEAD", T.primary], bill: ["BILL", T.textMuted], email: ["EMAIL", T.textMuted], sms: ["TEXT", T.primary] };
   const tiles = [
     canChat && ["Unread chats", unreadChats, T.primary, () => onNav("messages")],
     canLeads && ["New leads", newLeads, "#16a34a", () => onNav("leads")],
-    canExternalInbox && [perms.isAdmin ? "Inbox unread" : "Texts unread", unreadInbox, T.primary, () => onNav("comms", { commsSection: "email" })],
+    canExternalInbox && [focused ? "Needs attention" : (perms.isAdmin ? "Inbox unread" : "Texts unread"), unreadInbox, T.primary, () => onNav("comms", { commsSection: "email" })],
   ].filter(Boolean);
-  const openComms = () => canChat ? onNav("messages") : canLeads ? onNav("leads") : onNav("comms", { commsSection: "email" });
+  const openComms = () => focused
+    ? onNav("comms", { commsSection: "email" })
+    : canChat ? onNav("messages") : canLeads ? onNav("leads") : onNav("comms", { commsSection: "email" });
   const loading = (canChat && msgs === null) || (canExternalInbox && emails === null);
+  const unreadTotal = unreadChats + newLeads + unreadInbox;
   if (!tiles.length) return null;
   return (
-    <Card key="comms" style={{ marginBottom: 16 }}>
-      <CardHeader title="Comms" action={<Btn variant="text" sm onClick={openComms}>Open →</Btn>} />
-      <div style={{ padding: "10px 16px 16px" }}>
-        <div style={{ display: "grid", gridTemplateColumns: `repeat(${tiles.length}, minmax(0, 1fr))`, gap: 8, marginBottom: 4 }}>
-          {tiles.map(([lbl, n, c, go]) => (
-            <button key={lbl} onClick={go} style={{ background: T.surfaceAlt, border: "none", borderRadius: 13, padding: "11px 8px", textAlign: "center", cursor: "pointer", fontFamily: "inherit" }}>
-              <div style={{ fontSize: 20, fontWeight: 840, color: n > 0 ? c : T.textMuted }}>{n}</div>
-              <div style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700, marginTop: 1 }}>{lbl}</div>
-            </button>
-          ))}
+    <Card key="comms" style={{ marginBottom: 0, borderRadius: 18, boxShadow: "none", border: `1px solid ${T.border}`, overflow: "hidden" }}>
+      <CardHeader title="Communications" action={<Btn variant="text" sm onClick={openComms}>Open comms</Btn>} />
+      <div style={{ padding: "0 16px 14px" }}>
+        <div style={{ minHeight: 72, borderTop: `1px solid ${T.border}`, borderBottom: `1px solid ${T.border}`, display: "grid", gridTemplateColumns: "minmax(96px, .55fr) minmax(0, 1.45fr)", alignItems: "center", gap: 16, marginBottom: 2 }}>
+          <button type="button" onClick={openComms} style={{ border: "none", background: "transparent", padding: "12px 0", fontFamily: "inherit", textAlign: "left", cursor: "pointer" }}>
+            <span style={{ display: "block", color: unreadTotal ? T.primary : T.text, fontSize: 30, lineHeight: 1, fontWeight: 880, letterSpacing: "-0.04em" }}>{unreadTotal}</span>
+            <span style={{ display: "block", color: T.textMuted, fontSize: 10.5, lineHeight: 1.3, fontWeight: 780, letterSpacing: ".08em", textTransform: "uppercase", marginTop: 5 }}>Needs reply</span>
+          </button>
+          <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "flex-end", alignItems: "center", gap: "6px 14px", color: T.textMuted, fontSize: 11.5, fontWeight: 720 }}>
+            {tiles.map(([lbl, n, , go]) => <button key={lbl} type="button" onClick={go} style={{ border: "none", background: "transparent", padding: "6px 0", color: "inherit", fontFamily: "inherit", fontSize: "inherit", fontWeight: "inherit", cursor: "pointer" }}><span style={{ color: n ? T.primary : T.text, fontWeight: 860 }}>{n}</span> {lbl.replace(" unread", "")}</button>)}
+          </div>
         </div>
         {loading && <div style={{ fontSize: 12.5, color: T.textMuted, textAlign: "center", padding: "16px 0" }}>Loading…</div>}
-        {!loading && top.length === 0 && <div style={{ fontSize: 12.5, color: T.textMuted, textAlign: "center", padding: "16px 0" }}>All caught up — no unread items.</div>}
+        {!loading && top.length === 0 && <div style={{ fontSize: 12.5, color: T.textMuted, textAlign: "center", padding: "16px 0" }}>{focused ? "All caught up. No items need attention." : "All caught up. No unread items."}</div>}
         {top.map((r, i) => {
           const c = col(r.seed); const badge = kindBadge[r.kind];
           return (
@@ -5687,7 +5711,7 @@ function HomeCommsWidget({ leads = [], clients = [], onNav, T, perms = {} }) {
   );
 }
 
-function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onOpenAlert, onOpenStop, onNav, catalog, onConfirmUpgrade, userName, me, scheduleCfg, reminderLog, completedSids = {}, budget = {}, leads = [], vp = {} }) {
+function LegacyDashboard({ clients, invoices, schedule, home, setHome, officeAlerts, onResolveAlert, onOpenAlert, onOpenStop, onNav, catalog, onConfirmUpgrade, userName, me, scheduleCfg, reminderLog, completedSids = {}, budget = {}, leads = [], vp = {} }) {
   const { T, perms } = useApp();
   const [editing, setEditing] = useState(false);
   const [statPicker, setStatPicker] = useState(false);
@@ -6178,7 +6202,408 @@ function Dashboard({ clients, invoices, schedule, home, setHome, officeAlerts, o
   );
 }
 
-// ─────────────────────────────────────────────
+// Home is an operations desk first. It deliberately keeps schedule, save health, and
+// communication work in the primary column; financial data lives in a permission-gated rail.
+// The older customizable dashboard remains above as a rollback reference while this focused
+// version reuses the same stores, calculations, and navigation contracts.
+function Dashboard({
+  clients = [], invoices = [], schedule = [], home, setHome, officeAlerts = [], onResolveAlert,
+  onOpenAlert, onOpenStop, onNav, catalog, onConfirmUpgrade, userName, me, scheduleCfg,
+  reminderLog, completedSids = {}, budget = {}, leads = [], vp = {}, completionOutboxItems = [],
+  syncState = "idle", dbError = null, dataConflict = null, onReviewSavedReports,
+  onSyncSavedReports, legacyMediaHealth = null, team = [], qbAccounting = null, focusedComms = true,
+}) {
+  const { T, perms } = useApp();
+  const [editing, setEditing] = useState(false);
+  const [editTargetKey, setEditTargetKey] = useState(() => `member:${String(me?.id || "")}`);
+  const [upgradeModal, setUpgradeModal] = useState(null);
+  const crimson = "#AF011A";
+  const ink = T.text || "#17181B";
+  const slate = T.textMuted || "#62666D";
+  const line = T.border || "rgba(23,24,27,0.1)";
+  const surface = T.surface || "#FFFFFF";
+  const soft = T.surfaceAlt || "#F4F4F2";
+  const canBalance = canSeeBalanceMoney(perms);
+  const canProfit = canSeeProfitMoney(perms);
+  const canFinance = canBalance || canProfit;
+  const canOpenTab = (id) => !perms.tabAccess || perms.tabAccess[id] !== "hidden";
+  const isStopDone = (stop) => !!(stop && completedSids && completedSids[stop.sid]);
+  const todayKey = fmtMDY(new Date());
+  const today = schedule.find(day => day.date === todayKey) || { date: todayKey, stops: [] };
+  const allTodayStops = Array.isArray(today.stops) ? today.stops : [];
+  const hasAssignments = allTodayStops.some(stop => stop && stop.assigneeId);
+  const memberId = String(me?.id || "");
+  const scopedTodayStops = (!perms.isAdmin && memberId && hasAssignments)
+    ? allTodayStops.filter(stop => String(stop?.assigneeId || "") === memberId)
+    : allTodayStops;
+  const stopMinute = (time) => {
+    const match = String(time || "").trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+    if (!match) return Number.MAX_SAFE_INTEGER;
+    let hour = Number(match[1]) % 12;
+    if (match[3].toUpperCase() === "PM") hour += 12;
+    return hour * 60 + Number(match[2]);
+  };
+  const todayStops = [...scopedTodayStops].sort((a, b) => stopMinute(a?.time) - stopMinute(b?.time));
+  const doneToday = todayStops.filter(isStopDone).length;
+  const remainingToday = Math.max(0, todayStops.length - doneToday);
+  const upcomingStops = todayStops.filter(stop => !isStopDone(stop)).slice(0, 3);
+  const nextStop = upcomingStops[0] || null;
+  const routeProgress = todayStops.length ? Math.round((doneToday / todayStops.length) * 100) : 0;
+  const month = monthActuals(clients, new Date(), invoices);
+  const now = new Date();
+  const currentMonth = now.getMonth();
+  const currentYear = now.getFullYear();
+  const money = value => formatAccountingCurrency(value);
+
+  useBankSync();
+  const bankMonth = bankMonthSummary(budget);
+  const outstandingInvoices = canBalance
+    ? invoices.filter(invoice => effectiveStatus(invoice) !== "Paid" && invoice.status !== "Draft" && invoice.status !== "Void")
+    : [];
+  const fallbackOutstandingTotal = canBalance
+    ? outstandingInvoices.reduce((sum, invoice) => sum + invoiceTotals(invoice).balance, 0)
+    : 0;
+  const fallbackCollectedMonth = canBalance ? invoices.reduce((sum, invoice) => {
+    if (invoice.status !== "Paid" && effectiveStatus(invoice) !== "Paid") return sum;
+    const source = invoice.paidDate || invoice.date;
+    let paidAt = null;
+    if (source) {
+      if (String(source).includes("/")) {
+        const [mm, dd, yy] = String(source).split("/").map(Number);
+        paidAt = new Date(yy, mm - 1, dd);
+      } else paidAt = new Date(source);
+    }
+    return paidAt && paidAt.getMonth() === currentMonth && paidAt.getFullYear() === currentYear
+      ? sum + invoiceTotals(invoice).total
+      : sum;
+  }, 0) : 0;
+  const fallbackOverdueCount = canBalance
+    ? outstandingInvoices.filter(invoice => effectiveStatus(invoice) === "Overdue").length
+    : 0;
+  const accountingSummary = resolveInvoiceAccountingSummary(qbAccounting, {
+    outstandingTotal: fallbackOutstandingTotal,
+    outstandingCount: outstandingInvoices.length,
+    collectedMonth: fallbackCollectedMonth,
+    overdueCount: fallbackOverdueCount,
+  });
+  const outstandingTotal = canBalance ? accountingSummary.outstandingTotal : 0;
+  const outstandingCount = canBalance ? accountingSummary.outstandingCount : 0;
+  const collectedMonth = canBalance ? accountingSummary.collectedMonth : 0;
+  const financeRows = [
+    canBalance && { label: "Outstanding", value: money(outstandingTotal), note: `${outstandingCount} open invoice${outstandingCount === 1 ? "" : "s"}${accountingSummary.authoritative ? " · QuickBooks" : ""}`, icon: "invoice", go: () => onNav("invoices", { invoiceFilter: "Overdue" }) },
+    canBalance && { label: "Collected this month", value: money(collectedMonth), note: accountingSummary.authoritative ? "QuickBooks payments" : "Paid invoices", icon: "dollar", go: () => onNav("invoices", { invoiceFilter: "Paid" }) },
+    canProfit && { label: "Revenue this month", value: money(bankMonth ? bankMonth.income : month.revenue), note: bankMonth ? "Bank activity" : "Job revenue", icon: "chart", go: (perms.seeCostsBudget || perms.isAdmin) ? () => onNav("budget") : undefined },
+    canProfit && { label: "Profit this month", value: money(bankMonth ? bankMonth.profit : month.profit), note: bankMonth ? "Income less expenses" : `${month.jobs} completed job${month.jobs === 1 ? "" : "s"}`, icon: "dollar", go: (perms.seeReportsPnl || perms.isAdmin) ? () => onNav("reports") : undefined },
+  ].filter(Boolean);
+
+  const reminderConfig = { ...DEFAULT_SCHEDULE_CFG, ...(scheduleCfg || {}) };
+  const reminderQueue = buildReminderQueue(schedule, clients, reminderConfig, reminderLog || {}, new Date());
+  const dueReminders = (perms.isAdmin || perms.commsReminders) ? (reminderQueue.due || []) : [];
+  const saveSummary = completionOutboxSummary(completionOutboxItems);
+  const pendingSaves = saveSummary.queued + saveSummary.waiting;
+  const legacyMediaCount = Number(legacyMediaHealth?.inlineDataUrlCount || 0);
+  const hasLegacyMedia = !!(perms.isAdmin && legacyMediaCount > 0);
+  const ownerFlags = perms.isAdmin ? officeAlerts.filter(alert => alert && !alert.resolved) : [];
+  const derivedAlerts = deriveAlerts(clients, invoices, catalog).filter(alert => {
+    if (alert.financial) return canBalance;
+    if (alert.type === "inventory") return !!(perms.isAdmin || perms.seeInventory);
+    return !!perms.isAdmin;
+  });
+  const attention = [];
+  if (saveSummary.needsReview) attention.push({
+    id: "saved-report-review", icon: "warning", title: `${saveSummary.needsReview} completed report${saveSummary.needsReview === 1 ? " needs" : "s need"} review`,
+    detail: "The full draft is safe on this device.", action: "Review", onClick: onReviewSavedReports,
+  });
+  if (pendingSaves) attention.push({
+    id: "saved-report-sync", icon: "refresh", title: `${pendingSaves} completed report${pendingSaves === 1 ? " is" : "s are"} syncing`,
+    detail: "Work can continue while the shared copy catches up.", action: "Sync now", onClick: onSyncSavedReports,
+  });
+  if (dataConflict) attention.push({
+    id: "shared-conflict", icon: "warning", title: "Shared changes need review", detail: "Another device changed this workspace.", action: "Sync", onClick: onSyncSavedReports,
+  });
+  if (dbError) attention.push({
+    id: "shared-save-error", icon: "warning", title: "Shared data did not finish saving", detail: String(dbError), action: "Retry", onClick: onSyncSavedReports,
+  });
+  if (hasLegacyMedia) attention.push({
+    id: "legacy-media", icon: "photo", title: `${legacyMediaCount || "Some"} older photo${legacyMediaCount === 1 ? "" : "s"} need secure cleanup`,
+    detail: "Inspect and back up the inline media before replacing it.", action: "Inspect media",
+    onClick: () => onNav("settings", { settingsTab: "sync", settingsSection: "mediaCleanup" }),
+  });
+  if (dueReminders.length) attention.push({
+    id: "due-reminders", icon: "message", title: `${dueReminders.length} reminder${dueReminders.length === 1 ? " is" : "s are"} ready`,
+    detail: "Review the recipients before sending.", action: "Open", onClick: () => onNav("reminders"),
+  });
+  ownerFlags.slice(0, 3).forEach(alert => attention.push({
+    id: `office-${alert.id}`, icon: "warning", title: `${alert.client || alert.clientName || "Client"} needs office attention`,
+    detail: alert.message || alert.body || "Review the completed-stop note.", action: "Review",
+    onClick: () => onOpenAlert ? onOpenAlert(alert) : onNav("schedule"), alert,
+  }));
+  derivedAlerts.slice(0, 3).forEach((alert, index) => attention.push({
+    id: `derived-${index}`, icon: alert.icon || "warning", title: alert.title, detail: alert.sub,
+    action: alert.type === "inventory" ? "Inventory" : undefined,
+    onClick: alert.type === "inventory" ? () => onNav("inventory") : undefined,
+  }));
+  const visibleAttention = attention.slice(0, vp.isPhone ? 4 : 6);
+
+  const sectionAllowedFor = (widget, targetPerms, targetMember) => {
+    if (widget.permission === "finance") return canSeeBalanceMoney(targetPerms) || canSeeProfitMoney(targetPerms);
+    if (widget.permission === "comms") return canSeeComms(targetPerms);
+    if (widget.id === "clock") return targetMember ? targetMember.clockInOut !== false : true;
+    return true;
+  };
+  const liveLayout = resolveDashboardLayout(home, me);
+  const liveAllowedIds = new Set(DASHBOARD_WIDGETS.filter(widget => sectionAllowedFor(widget, perms, me)).map(widget => widget.id));
+  const liveVisibleItems = visibleDashboardItems(liveLayout.items, liveAllowedIds);
+  const enabledWidgetIds = new Set(liveVisibleItems.map(item => item.id));
+  const widgetEnabled = id => enabledWidgetIds.has(id);
+
+  const selfTargetKey = `member:${String(me?.id || "")}`;
+  useEffect(() => {
+    if (!editing || perms.isAdmin) return;
+    if (editTargetKey !== selfTargetKey) setEditTargetKey(selfTargetKey);
+  }, [editing, perms.isAdmin, selfTargetKey, editTargetKey]);
+  const ownerTargets = perms.isAdmin ? [
+    { key: selfTargetKey, target: { type: "member", id: me?.id, role: me?.role }, label: "My Home", note: "Your personal dashboard" },
+    { key: "role:field", target: { type: "role", id: "field" }, label: "Field staff default", note: "Used until a field member has their own layout" },
+    { key: "role:office", target: { type: "role", id: "office" }, label: "Office staff default", note: "Used until an office member has their own layout" },
+    ...(team || []).filter(person => person && String(person.id) !== String(me?.id)).map(person => ({
+      key: `member:${String(person.id)}`,
+      target: { type: "member", id: person.id, role: person.role },
+      label: person.name || person.email || "Team member",
+      note: `${roleLabel(person.role)} personal layout`,
+    })),
+  ] : [{ key: selfTargetKey, target: { type: "member", id: me?.id, role: me?.role }, label: "My Home", note: "Your personal dashboard" }];
+  const activeTargetOption = ownerTargets.find(option => option.key === editTargetKey) || ownerTargets[0];
+  const editTarget = activeTargetOption?.target || { type: "member", id: me?.id, role: me?.role };
+  const editTargetMember = editTarget.type === "member"
+    ? (team || []).find(person => String(person?.id) === String(editTarget.id)) || (String(editTarget.id) === String(me?.id) ? me : null)
+    : null;
+  const editTargetPerms = editTarget.type === "member"
+    ? memberPerms(editTargetMember || { id: editTarget.id, role: "field" })
+    : memberPerms({ id: `default-${editTarget.id}`, role: editTarget.id === "field" ? "field" : "full" });
+  const editLayout = dashboardLayoutForTarget(home, editTarget, team);
+  const updateTargetItems = nextItems => {
+    if (!canEditDashboardTarget(me, editTarget)) return;
+    setHome(previous => writeDashboardLayout(previous, editTarget, nextItems, me));
+  };
+  const toggleSection = id => updateTargetItems(editLayout.items.map(item => item.id === id ? { ...item, on: item.on === false } : item));
+  const moveSection = (id, offset) => {
+    const index = editLayout.items.findIndex(item => item.id === id);
+    const destination = index + offset;
+    if (index < 0 || destination < 0 || destination >= editLayout.items.length) return;
+    const next = [...editLayout.items];
+    const [moved] = next.splice(index, 1);
+    next.splice(destination, 0, moved);
+    updateTargetItems(next);
+  };
+  const resetTarget = () => {
+    if (!canEditDashboardTarget(me, editTarget)) return;
+    setHome(previous => resetDashboardLayout(previous, editTarget, me));
+  };
+
+  const quickActions = [
+    canOpenTab("schedule") && { id: "schedule", label: "Schedule", icon: "calendar", go: () => onNav("schedule") },
+    canOpenTab("clients") && { id: "clients", label: "Clients", icon: "clients", go: () => onNav("clients") },
+    canOpenTab("estimates") && perms.canInvoice && { id: "estimates", label: "New estimate", icon: "clipboard", go: () => onNav("estimates", { newEstimate: true }) },
+    canSeeComms(perms) && { id: "comms", label: "Messages", icon: "message", go: () => onNav("comms") },
+  ].filter(Boolean);
+
+  const openStop = stop => onOpenStop ? onOpenStop(stop, today.date) : onNav("schedule");
+  const sectionShell = { background: surface, border: `1px solid ${line}`, borderRadius: 16, overflow: "hidden" };
+  const sectionTitle = (eyebrow, title, action = null) => (
+    <div style={{ padding: vp.isPhone ? "15px 15px 12px" : "17px 18px 13px", display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12, borderBottom: `1px solid ${line}` }}>
+      <div>
+        <div style={{ fontSize: 9.5, fontWeight: 850, letterSpacing: ".11em", textTransform: "uppercase", color: crimson }}>{eyebrow}</div>
+        <div style={{ marginTop: 3, fontSize: vp.isPhone ? 18 : 20, lineHeight: 1.1, fontWeight: 850, color: ink, letterSpacing: "-.035em" }}>{title}</div>
+      </div>
+      {action}
+    </div>
+  );
+
+  const hero = (
+    <section aria-label="Today's work" style={{ ...sectionShell, position: "relative", minHeight: vp.isPhone ? 224 : 232, padding: vp.isPhone ? "17px 16px" : "20px 22px", borderLeft: `5px solid ${crimson}`, display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
+      <svg viewBox="0 0 512 512" aria-hidden="true" style={{ position: "absolute", width: vp.isPhone ? 142 : 188, height: vp.isPhone ? 142 : 188, right: vp.isPhone ? -35 : -28, bottom: vp.isPhone ? -34 : -38, opacity: 0.055, pointerEvents: "none" }}>
+        <defs><filter id="sps-operations-mark" colorInterpolationFilters="sRGB"><feColorMatrix type="matrix" values="0 0 0 0 .686  0 0 0 0 .004  0 0 0 0 .102  2 2 2 0 -4.5" /></filter></defs>
+        <image href="/icon-512.png" width="512" height="512" filter="url(#sps-operations-mark)" />
+      </svg>
+      <div style={{ position: "relative", zIndex: 1 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <div style={{ fontSize: 10, fontWeight: 850, letterSpacing: ".12em", color: crimson, textTransform: "uppercase" }}>Today / route</div>
+          <div style={{ fontSize: 11.5, color: slate, fontWeight: 750 }}>{doneToday} of {todayStops.length} complete</div>
+        </div>
+        <div style={{ marginTop: vp.isPhone ? 17 : 19, maxWidth: 670 }}>
+          <div style={{ fontSize: vp.isPhone ? 28 : 38, lineHeight: 1.02, letterSpacing: "-.05em", color: ink, fontWeight: 880 }}>
+            {todayStops.length === 0 ? "The route is clear." : nextStop ? nextStop.client : "Today's route is complete."}
+          </div>
+          <div style={{ marginTop: 10, maxWidth: 560, fontSize: vp.isPhone ? 13 : 14, color: slate, lineHeight: 1.5 }}>
+            {nextStop
+              ? [nextStop.time, nextStop.type, nextStop.address].filter(Boolean).join(" · ")
+              : todayStops.length === 0 ? "No stops are assigned for today." : "Every assigned stop has a completed report."}
+          </div>
+        </div>
+      </div>
+      <div style={{ position: "relative", zIndex: 1 }}>
+        {todayStops.length > 0 && <div style={{ height: 4, background: hexA(slate, .15), overflow: "hidden", marginBottom: 16 }}><div style={{ width: `${routeProgress}%`, height: "100%", background: crimson, transition: "width .3s ease" }} /></div>}
+        <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+          <button type="button" onClick={() => nextStop ? openStop(nextStop) : onNav("schedule")} style={{ minHeight: 43, border: "none", borderRadius: 10, padding: "10px 15px", background: crimson, color: "#fff", fontFamily: "inherit", fontSize: 12.5, fontWeight: 820, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 7 }}><Icon name={nextStop ? "map" : "calendar"} size={15} />{nextStop ? "Open next stop" : "Open schedule"}</button>
+          {nextStop && <button type="button" onClick={() => onNav("schedule")} style={{ minHeight: 43, border: `1px solid ${line}`, borderRadius: 10, padding: "10px 14px", background: surface, color: ink, fontFamily: "inherit", fontSize: 12.5, fontWeight: 780, cursor: "pointer" }}>View full route</button>}
+        </div>
+      </div>
+    </section>
+  );
+
+  const actionStrip = quickActions.length ? (
+    <nav aria-label="Home quick actions" style={{ display: "flex", overflowX: "auto", borderTop: `1px solid ${line}`, borderBottom: `1px solid ${line}`, background: surface, margin: vp.isPhone ? "14px 0" : "16px 0", scrollbarWidth: "none" }}>
+      {quickActions.map((action, index) => <button key={action.id} type="button" onClick={action.go} style={{ minHeight: 54, minWidth: vp.isPhone ? (index === 0 ? 138 : 112) : 132, flex: vp.isPhone ? "0 0 auto" : (index === 0 ? 1.3 : 1), padding: "9px 13px", border: "none", borderLeft: index ? `1px solid ${line}` : "none", boxShadow: index === 0 ? `inset 3px 0 0 ${crimson}` : "none", background: index === 0 ? hexA(crimson, .035) : surface, color: index === 0 ? crimson : ink, fontFamily: "inherit", cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8, fontSize: 12.5, fontWeight: index === 0 ? 830 : 760 }}><span style={{ color: crimson, display: "grid", placeItems: "center" }}><Icon name={action.icon} size={16} /></span>{action.label}</button>)}
+    </nav>
+  ) : null;
+
+  const upcoming = widgetEnabled("todayRoute") ? (
+    <section style={sectionShell}>
+      {sectionTitle("Route board", "Next stops", <button type="button" onClick={() => onNav("schedule")} style={{ border: "none", background: "transparent", color: crimson, fontFamily: "inherit", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>Open schedule</button>)}
+      {upcomingStops.length === 0 ? <div style={{ padding: "23px 18px", color: slate, fontSize: 13.5, lineHeight: 1.5 }}>No more assigned stops are waiting today.</div> : upcomingStops.map((stop, index) => (
+        <button key={stop.sid || index} type="button" onClick={() => openStop(stop)} style={{ width: "100%", minHeight: 76, border: "none", borderTop: index ? `1px solid ${line}` : "none", background: index === 0 ? hexA(crimson, .035) : surface, padding: vp.isPhone ? "13px 14px" : "14px 18px", fontFamily: "inherit", cursor: "pointer", textAlign: "left", display: "grid", gridTemplateColumns: vp.isPhone ? "56px minmax(0,1fr) 18px" : "66px minmax(0,1fr) minmax(110px,auto) 18px", gap: 12, alignItems: "center", boxShadow: index === 0 ? `inset 3px 0 0 ${crimson}` : "none" }}>
+          <div><div style={{ fontSize: 14, color: ink, fontWeight: 850 }}>{stop.time ? String(stop.time).split(" ")[0] : "Any"}</div><div style={{ marginTop: 1, fontSize: 9.5, letterSpacing: ".07em", color: slate, textTransform: "uppercase", fontWeight: 800 }}>{stop.time ? String(stop.time).split(" ")[1] : "time"}</div></div>
+          <div style={{ minWidth: 0 }}><div style={{ fontSize: 14.5, color: ink, fontWeight: 820, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{stop.client}</div><div style={{ marginTop: 3, fontSize: 11.5, color: slate, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{stop.address || "Address not added"}</div></div>
+          {!vp.isPhone && <div style={{ textAlign: "right", minWidth: 0 }}><div style={{ fontSize: 11.5, color: ink, fontWeight: 720 }}>{stop.type || "Service visit"}</div><div style={{ marginTop: 2, fontSize: 10.5, color: slate }}>{stop.duration || ""}</div></div>}
+          <span style={{ color: slate }}><Icon name="chevronR" size={15} /></span>
+        </button>
+      ))}
+    </section>
+  ) : null;
+
+  const attentionPanel = widgetEnabled("alerts") ? (
+    <section style={sectionShell}>
+      {sectionTitle("Save health", "Needs attention", visibleAttention.length ? <span style={{ color: crimson, fontSize: 12, fontWeight: 850 }}>{attention.length}</span> : null)}
+      {visibleAttention.length === 0 ? <div style={{ padding: "22px 18px", display: "flex", gap: 11, alignItems: "center" }}><span style={{ color: crimson }}><Icon name="check" size={17} /></span><div><div style={{ fontSize: 13.5, color: ink, fontWeight: 780 }}>Everything is caught up</div><div style={{ marginTop: 2, fontSize: 11.5, color: slate }}>No saved reports or office tasks need action.</div></div></div> : visibleAttention.map((item, index) => (
+        <div key={item.id} style={{ padding: "13px 15px", borderTop: index ? `1px solid ${line}` : "none", display: "grid", gridTemplateColumns: "28px minmax(0,1fr) auto", gap: 10, alignItems: "center" }}>
+          <span style={{ color: crimson, display: "grid", placeItems: "center" }}><Icon name={item.icon} size={16} /></span>
+          <div style={{ minWidth: 0 }}><div style={{ color: ink, fontSize: 12.75, fontWeight: 790, lineHeight: 1.3 }}>{item.title}</div><div style={{ marginTop: 2, color: slate, fontSize: 11.25, lineHeight: 1.35, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: vp.isPhone ? "normal" : "nowrap" }}>{item.detail}</div></div>
+          {item.action && item.onClick && <button type="button" onClick={item.onClick} style={{ minHeight: 34, borderRadius: 9, border: `1px solid ${hexA(crimson, .3)}`, background: surface, color: crimson, padding: "7px 10px", fontFamily: "inherit", fontSize: 10.5, fontWeight: 820, cursor: "pointer" }}>{item.action}</button>}
+        </div>
+      ))}
+      {attention.length > visibleAttention.length && <div style={{ borderTop: `1px solid ${line}`, padding: "10px 15px", color: slate, fontSize: 11.5 }}>{attention.length - visibleAttention.length} more item{attention.length - visibleAttention.length === 1 ? "" : "s"} available in the related section.</div>}
+    </section>
+  ) : null;
+
+  const businessPulse = widgetEnabled("profit") && canFinance ? (
+    <section style={sectionShell}>
+      {sectionTitle("Owner view", "Business pulse")}
+      {financeRows.map((row, index) => <button key={row.label} type="button" disabled={!row.go} onClick={row.go} style={{ width: "100%", border: "none", borderTop: index ? `1px solid ${line}` : "none", background: surface, padding: "14px 16px", display: "grid", gridTemplateColumns: "30px minmax(0,1fr) auto", gap: 10, alignItems: "center", fontFamily: "inherit", textAlign: "left", cursor: row.go ? "pointer" : "default" }}><span style={{ color: crimson }}><Icon name={row.icon} size={16} /></span><span style={{ minWidth: 0 }}><span style={{ display: "block", color: ink, fontSize: 12, fontWeight: 790 }}>{row.label}</span><span style={{ display: "block", color: slate, fontSize: 10.5, marginTop: 2 }}>{row.note}</span></span><span style={{ color: crimson, fontSize: 15, fontWeight: 870, letterSpacing: "-.025em", whiteSpace: "nowrap" }}>{row.value}</span></button>)}
+      <div style={{ borderTop: `1px solid ${line}`, padding: "10px 16px", color: slate, fontSize: 10.5, lineHeight: 1.4 }}>{bankMonth ? "Bank-linked month totals" : "Completed jobs and invoice records"}</div>
+    </section>
+  ) : null;
+
+  const fieldStatus = widgetEnabled("stats") ? (
+    <section style={sectionShell}>
+      {sectionTitle(canFinance ? "Operations" : "Your work", canFinance ? "Field status" : "Today at a glance")}
+      {[
+        ["Assigned stops", todayStops.length],
+        ["Completed", doneToday],
+        ["Remaining", remainingToday],
+      ].map(([label, value], index) => <div key={label} style={{ minHeight: 48, padding: "11px 16px", borderTop: index ? `1px solid ${line}` : "none", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}><span style={{ color: slate, fontSize: 12.25, fontWeight: 720 }}>{label}</span><span style={{ color: index === 2 && value ? crimson : ink, fontSize: 17, fontWeight: 870 }}>{value}</span></div>)}
+      <button type="button" onClick={() => onNav("schedule")} style={{ width: "100%", minHeight: 43, border: "none", borderTop: `1px solid ${line}`, background: soft, color: crimson, fontFamily: "inherit", fontSize: 11.5, fontWeight: 820, cursor: "pointer" }}>Open route board</button>
+    </section>
+  ) : null;
+
+  const syncLabel = syncState === "syncing" ? "Syncing" : syncState === "saved" ? "Saved" : (dbError || dataConflict) ? "Needs attention" : "Ready";
+  const clock = me && me.clockInOut !== false ? <ClockInOut me={me} T={{ ...T, primary: crimson }} compact /> : null;
+  const showComms = widgetEnabled("comms") && canSeeComms(perms);
+  const isWide = !!(vp.isDesktop && !vp.isTablet && vp.width >= 1120);
+  const homeComms = showComms
+    ? <HomeCommsWidget leads={leads} clients={clients} onNav={onNav} T={{ ...T, primary: crimson, accent: crimson }} perms={perms} focused={focusedComms} />
+    : null;
+  const dashboardWidgetNodes = {
+    todayHero: hero,
+    quickActions: actionStrip,
+    alerts: attentionPanel,
+    todayRoute: upcoming,
+    stats: fieldStatus,
+    clock,
+    comms: homeComms,
+    profit: businessPulse,
+  };
+  const orderedDashboardWidgets = liveVisibleItems
+    .map(item => ({ ...item, node: dashboardWidgetNodes[item.id] }))
+    .filter(item => !!item.node);
+  const wideWidgetSpan = id => {
+    if (id === "stats") return (widgetEnabled("clock") || widgetEnabled("profit")) ? 6 : 12;
+    if (id === "clock" && !widgetEnabled("stats")) return 12;
+    if (id === "profit" && widgetEnabled("stats") && !widgetEnabled("clock")) return 6;
+    return ["alerts", "todayRoute", "stats", "clock"].includes(id) ? 6 : 12;
+  };
+  const customizationSource = editLayout.source === "member"
+    ? "Personal layout"
+    : editLayout.source === "role"
+      ? "Role default"
+      : editLayout.source === "legacy"
+        ? "Existing Home layout"
+        : "Safe app default";
+  return (
+    <div data-home-dashboard="operations" style={{ width: "100%", maxWidth: 1440, margin: "0 auto", paddingBottom: 44, color: ink }}>
+      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 18, marginBottom: vp.isPhone ? 17 : 24 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ color: crimson, fontSize: 10, fontWeight: 850, letterSpacing: ".12em", textTransform: "uppercase" }}>{new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" })}</div>
+          <h1 style={{ margin: "5px 0 0", color: ink, fontFamily: '"SF Pro Display", -apple-system, BlinkMacSystemFont, system-ui, sans-serif', fontSize: vp.isPhone ? 28 : 40, lineHeight: 1, letterSpacing: "-.055em", fontWeight: 880, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{(() => { const hour = new Date().getHours(); return hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening"; })()}, {(userName || "Brandon").split(" ")[0]}.</h1>
+          <div style={{ marginTop: 8, color: slate, fontSize: 12, display: "flex", alignItems: "center", gap: 7 }}><span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: "50%", background: (dbError || dataConflict) ? crimson : slate, opacity: (dbError || dataConflict) ? 1 : .55 }} />{syncLabel}</div>
+        </div>
+        <button type="button" onClick={() => setEditing(value => !value)} aria-label={editing ? "Done customizing Home" : "Customize Home"} style={{ minHeight: 40, minWidth: vp.isPhone ? 40 : 112, border: `1px solid ${line}`, borderRadius: 10, background: surface, color: ink, fontFamily: "inherit", fontSize: 11.5, fontWeight: 780, cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "8px 11px" }}><Icon name={editing ? "check" : "sliders"} size={14} />{!vp.isPhone && (editing ? "Done" : "Customize")}</button>
+      </header>
+
+      {editing ? <div data-dashboard-customizer="true" style={{ display: "grid", gridTemplateColumns: (perms.isAdmin && isWide) ? "minmax(230px, .7fr) minmax(0, 2fr)" : "minmax(0, 1fr)", gap: 16, alignItems: "start" }}>
+        <section style={{ ...sectionShell, borderLeft: `4px solid ${crimson}` }}>
+          {sectionTitle("Home audience", perms.isAdmin ? "Choose a dashboard" : "Your dashboard")}
+          <div style={{ padding: "15px 16px" }}>
+            {perms.isAdmin ? <label style={{ display: "grid", gap: 7 }}>
+              <span style={{ color: slate, fontSize: 10, fontWeight: 850, letterSpacing: ".09em", textTransform: "uppercase" }}>Editing</span>
+              <select aria-label="Dashboard audience" value={activeTargetOption?.key || selfTargetKey} onChange={event => setEditTargetKey(event.target.value)} style={{ width: "100%", minHeight: 44, border: `1px solid ${line}`, background: surface, color: ink, padding: "9px 34px 9px 11px", fontFamily: "inherit", fontWeight: 760 }}>
+                {ownerTargets.map(option => <option key={option.key} value={option.key}>{option.label}</option>)}
+              </select>
+            </label> : <div style={{ color: ink, fontSize: 14, fontWeight: 820 }}>{activeTargetOption?.label || "My Home"}</div>}
+            <div style={{ marginTop: 10, color: slate, fontSize: 11.5, lineHeight: 1.45 }}>{activeTargetOption?.note}</div>
+            <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${line}`, display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
+              <span style={{ color: slate, fontSize: 10.5, fontWeight: 760 }}>{customizationSource}</span>
+              <button type="button" onClick={resetTarget} style={{ border: "none", background: "transparent", color: crimson, padding: 0, fontFamily: "inherit", fontSize: 10.5, fontWeight: 820, cursor: "pointer" }}>{editTarget.type === "member" && editLayout.source === "member" ? "Use role default" : "Reset layout"}</button>
+            </div>
+          </div>
+        </section>
+
+        <section style={sectionShell}>
+          {sectionTitle("Home sections", "Show, hide, and arrange")}
+          <div role="list" aria-label="Dashboard sections">
+            {editLayout.items.map((item, index) => {
+              const widget = DASHBOARD_WIDGETS.find(candidate => candidate.id === item.id);
+              if (!widget) return null;
+              const allowed = sectionAllowedFor(widget, editTargetPerms, editTargetMember);
+              const enabled = allowed && item.on !== false;
+              return <div key={item.id} role="listitem" data-dashboard-editor-item={item.id} style={{ minHeight: 67, borderTop: index ? `1px solid ${line}` : "none", background: surface, padding: vp.isPhone ? "10px 10px" : "11px 16px", display: "grid", gridTemplateColumns: vp.isPhone ? "25px minmax(0,1fr) 68px 42px" : "32px minmax(0,1fr) auto auto", gap: vp.isPhone ? 7 : 12, alignItems: "center", opacity: allowed ? 1 : .58 }}>
+                <span aria-hidden="true" style={{ color: allowed ? crimson : slate, fontSize: 11, fontWeight: 850, fontVariantNumeric: "tabular-nums" }}>{String(index + 1).padStart(2, "0")}</span>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ color: ink, fontSize: 13.25, fontWeight: 790 }}>{widget.label}</div>
+                  <div style={{ marginTop: 2, color: allowed ? slate : crimson, fontSize: 10.5, lineHeight: 1.35 }}>{allowed ? (item.on === false ? "Hidden" : "Visible") : "Hidden by this member's access"}</div>
+                </div>
+                <div style={{ display: "flex", gap: 4 }}>
+                  <button type="button" aria-label={`Move ${widget.label} up`} disabled={index === 0} onClick={() => moveSection(item.id, -1)} style={{ width: 32, height: 32, border: `1px solid ${line}`, borderRadius: 8, background: surface, color: slate, display: "grid", placeItems: "center", cursor: index === 0 ? "default" : "pointer", opacity: index === 0 ? .35 : 1 }}><span style={{ display: "inline-flex", transform: "rotate(-90deg)" }}><Icon name="chevronR" size={14} /></span></button>
+                  <button type="button" aria-label={`Move ${widget.label} down`} disabled={index === editLayout.items.length - 1} onClick={() => moveSection(item.id, 1)} style={{ width: 32, height: 32, border: `1px solid ${line}`, borderRadius: 8, background: surface, color: slate, display: "grid", placeItems: "center", cursor: index === editLayout.items.length - 1 ? "default" : "pointer", opacity: index === editLayout.items.length - 1 ? .35 : 1 }}><span style={{ display: "inline-flex", transform: "rotate(90deg)" }}><Icon name="chevronR" size={14} /></span></button>
+                </div>
+                <button type="button" aria-label={`${enabled ? "Hide" : "Show"} ${widget.label}`} aria-pressed={enabled} disabled={!allowed} onClick={() => toggleSection(item.id)} style={{ width: 42, height: 25, border: "none", borderRadius: 99, padding: 3, background: enabled ? crimson : hexA(slate, .18), display: "flex", justifyContent: enabled ? "flex-end" : "flex-start", cursor: allowed ? "pointer" : "not-allowed" }}><span style={{ width: 19, height: 19, borderRadius: "50%", background: "#fff", boxShadow: `0 1px 2px ${hexA(ink, .16)}` }} /></button>
+              </div>;
+            })}
+          </div>
+          <div style={{ borderTop: `1px solid ${line}`, padding: "12px 16px", color: slate, fontSize: 10.75, lineHeight: 1.45 }}>Access rules always win. Money and communications stay hidden unless this person has permission.</div>
+        </section>
+      </div> : <main data-dashboard-layout-source={liveLayout.source} style={{ display: "grid", gridTemplateColumns: isWide ? "repeat(12, minmax(0, 1fr))" : "minmax(0, 1fr)", gap: vp.isPhone ? 14 : 16, alignItems: "start" }}>
+        {orderedDashboardWidgets.map(item => <div key={item.id} data-dashboard-widget={item.id} style={{ minWidth: 0, gridColumn: isWide ? `span ${wideWidgetSpan(item.id)}` : "1 / -1" }}>{item.node}</div>)}
+      </main>}
+      {upgradeModal && <UpgradeWorkflowModal alert={upgradeModal} clients={clients} T={{ ...T, primary: crimson }} onConfirm={(updatedAlert, updatedClient) => {
+        if (onConfirmUpgrade) onConfirmUpgrade(updatedAlert, updatedClient);
+        if (updatedAlert.fullyComplete) { onResolveAlert && onResolveAlert(updatedAlert.id); setUpgradeModal(null); }
+        else setUpgradeModal(updatedAlert);
+      }} onClose={() => setUpgradeModal(null)} />}
+    </div>
+  );
+}
+
 // CLIENT LIST
 // ─────────────────────────────────────────────
 function Checkbox({ checked, onChange, accent }) {
@@ -22882,7 +23307,7 @@ function InvoiceReconciliationReviewQueue({
 function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCatalog, qbAccounting = null, onSave, onResolveReview, onDelete, onSyncData, initialFilter = "All", vp = {} }) {
   const { T, perms } = useApp();
   const canReviewAccounting = canManageInvoiceAccounting(perms);
-  const moneyFmt = (n) => Number(n || 0).toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const moneyFmt = (n) => formatAccountingCurrency(n);
   const moneyExact = (n) => `$${parseFloat(n||0).toFixed(2)}`;
 
   // ── Filter / sort state ──
@@ -23011,7 +23436,6 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
   }));
 
   // ── Summary stats ──
-  const qbAccountingComplete = qbAccounting?.complete === true;
   const localReviewInvoices = all.filter((iv) => invoiceNeedsReconciliationReview(iv, {
     effectiveStatus: iv._status,
     balance: iv._balance,
@@ -23028,19 +23452,23 @@ function InvoicesScreen({ invoices, clients, invoicing, branding, catalog, setCa
     });
   }, [reviewingReconciliation, reviewQueueSignature]); // eslint-disable-line react-hooks/exhaustive-deps
   const fallbackOpen = all.filter(iv => iv._status !== "Paid" && iv.status !== "Draft" && iv.status !== "Void");
-  const outstanding = qbAccountingComplete
-    ? Number(qbAccounting.openInvoiceBalance || 0)
-    : fallbackOpen.reduce((sum, invoice) => sum + invoice._balance, 0);
-  const outstandingCount = qbAccountingComplete ? Number(qbAccounting.openInvoiceCount || 0) : fallbackOpen.length;
-  const paidThisMonth = qbAccountingComplete
-    ? Number(qbAccounting.paymentsReceivedThisMonth || 0)
-    : all
-      .filter(iv => iv._status === "Paid" && (!qbConnected || iv.qbId))
+  const fallbackPaidThisMonth = all
+      // When the QuickBooks snapshot is unavailable this card is explicitly the SPS ledger
+      // fallback, so include every locally paid invoice just like Home does.
+      .filter(iv => iv._status === "Paid")
       .filter(iv => { const d = iv._paidDate; return d && d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); })
       .reduce((s, iv) => s + iv._total, 0);
-  const overdueCount = qbAccountingComplete
-    ? Number(qbAccounting.overdueInvoiceCount || 0)
-    : all.filter(iv => iv._status === "Overdue").length;
+  const accountingSummary = resolveInvoiceAccountingSummary(qbAccounting, {
+    outstandingTotal: fallbackOpen.reduce((sum, invoice) => sum + invoice._balance, 0),
+    outstandingCount: fallbackOpen.length,
+    collectedMonth: fallbackPaidThisMonth,
+    overdueCount: all.filter(iv => iv._status === "Overdue").length,
+  });
+  const outstanding = accountingSummary.outstandingTotal;
+  const outstandingCount = accountingSummary.outstandingCount;
+  const paidThisMonth = accountingSummary.collectedMonth;
+  const overdueCount = accountingSummary.overdueCount;
+  const qbAccountingComplete = accountingSummary.authoritative;
   const totalAll      = all.filter(iv => iv.status !== "Draft").reduce((s, iv) => s + iv._total, 0);
 
   // ── Date range helper ──
@@ -24271,15 +24699,48 @@ function fmtBytes(b) {
 // Uses live clients plus any old photo backup, matches only stable client/history/equipment IDs,
 // verifies each upload, and relinks with an exact-version CAS. Failed files remain inline and a
 // concurrent client edit cancels the relink, so this owner-only migration is safe to re-run.
-function PhotoMigration() {
+function PhotoMigration({ clients = [] }) {
   const { T, perms } = useApp();
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);     // { type, text }
   const [progress, setProgress] = useState("");
+  const [inspection, setInspection] = useState(null);
+  const localHealth = useMemo(() => inspectLegacyMediaHealth(clients), [clients]);
   const deepParse = (v) => { let x = v; for (let i = 0; i < 3 && typeof x === "string"; i++) { try { x = JSON.parse(x); } catch { break; } } return x; };
+
+  const inspect = async () => {
+    if (busy) return;
+    setBusy(true); setMsg(null); setProgress("Inspecting current client media...");
+    try {
+      const { data: liveRow, error } = await supabase.from("app_state").select("key, value, version").eq("key", "sps_clients").single();
+      if (error || !liveRow) throw new Error(error?.message || "Current clients could not be read.");
+      const liveClients = deepParse(liveRow.value);
+      if (!Array.isArray(liveClients)) throw new Error("Current clients could not be read.");
+      const version = Number(liveRow.version);
+      if (!Number.isSafeInteger(version) || version < 1) throw new Error("Run the concurrency migration before moving legacy media.");
+      const health = inspectLegacyMediaHealth(liveClients);
+      setInspection({ ...health, version, inspectedAt: new Date().toISOString() });
+      setMsg(health.inlineDataUrlCount > 0
+        ? { type: "warning", text: `Inspection found ${health.inlineDataUrlCount} inline media file${health.inlineDataUrlCount === 1 ? "" : "s"} using about ${fmtBytes(health.approximateDecodedBytes)} across ${health.affectedClientCount} client${health.affectedClientCount === 1 ? "" : "s"}. Review the summary, then apply the verified cleanup.` }
+        : { type: "ok", text: "Inspection complete. No legacy inline client media needs to be moved." });
+    } catch (error) {
+      setInspection(null);
+      setMsg({ type: "error", text: error?.message || "Client media could not be inspected." });
+    } finally {
+      setProgress(""); setBusy(false);
+    }
+  };
 
   const run = async () => {
     if (busy) return;
+    if (!inspection || inspection.inlineDataUrlCount < 1) {
+      setMsg({ type: "error", text: "Inspect the current client media before applying cleanup." });
+      return;
+    }
+    if (inspection.truncated) {
+      setMsg({ type: "error", text: "The inspection reached its safety limit. Nothing was changed." });
+      return;
+    }
     setBusy(true); setMsg(null); setProgress("Reading legacy media…");
     try {
       const { data: backups, error: be } = await supabase.from("sps_backups").select("key, value");
@@ -24298,6 +24759,10 @@ function PhotoMigration() {
       if (!Array.isArray(liveClients)) throw new Error("Current clients couldn't be read.");
       const baselineVersion = Number(liveRow.version);
       if (!Number.isSafeInteger(baselineVersion) || baselineVersion < 1) throw new Error("Run the concurrency migration before moving legacy media.");
+      if (baselineVersion !== inspection.version) {
+        setInspection(null);
+        throw new Error("Client data changed after inspection. Inspect again before applying cleanup.");
+      }
 
       let uploaded = 0, normalized = 0, failed = 0; const cache = new Map();
       const up = async (src, options = {}) => {
@@ -24380,10 +24845,10 @@ function PhotoMigration() {
       const res = await store.replaceMany([{ key: "sps_clients", value: JSON.stringify(merged), expectedVersion: baselineVersion }]);
       if (!res || !res.ok) throw new Error("Clients changed while files were uploading, so nothing was relinked. Retry to use the latest client records.");
       const moved = uploaded + normalized;
-      setMsg({ type: "ok", text: `Moved ${moved} legacy file reference${moved === 1 ? "" : "s"} to protected Storage${failed ? ` (${failed} kept unchanged — re-run to retry)` : ""}. Reloading…` });
+      setMsg({ type: "ok", text: `Moved ${moved} legacy file reference${moved === 1 ? "" : "s"} to protected Storage${failed ? ` (${failed} kept unchanged; run another inspection to retry)` : ""}. Reloading…` });
       setProgress(""); setTimeout(() => window.location.reload(), 1800);
     } catch (e) {
-      setMsg({ type: "error", text: (e && e.message) || "Migration failed — nothing was changed." });
+      setMsg({ type: "error", text: (e && e.message) || "Migration failed. Nothing was changed." });
       setProgress("");
     } finally { setBusy(false); }
   };
@@ -24396,8 +24861,17 @@ function PhotoMigration() {
           <div style={{ fontSize: 13.5, fontWeight: 700, color: T.text }}>Move legacy client media to protected Storage</div>
           <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 3, lineHeight: 1.5 }}>Owner-only: moves existing inline photos, videos, and documents out of client records. Failed uploads stay inline, and a concurrent client edit cancels the relink instead of being overwritten.</div>
         </div>
-        {msg && <div style={{ fontSize: 12.5, fontWeight: 600, color: msg.type === "ok" ? "#157a12" : "#C0392B", background: msg.type === "ok" ? hexA("#16a34a", 0.1) : hexA("#E5484D", 0.1), borderRadius: 10, padding: "9px 12px" }}>{msg.text}</div>}
-        <Btn sm onClick={run} disabled={busy} style={{ alignSelf: "flex-start" }}>{busy ? (progress || "Working…") : "Move legacy media"}</Btn>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", borderTop: `1px solid ${T.border}`, borderBottom: `1px solid ${T.border}` }}>
+          <div style={{ padding: "12px 0" }}><div style={{ color: T.textMuted, fontSize: 10, fontWeight: 800, letterSpacing: ".08em", textTransform: "uppercase" }}>Current snapshot</div><div style={{ color: localHealth.inlineDataUrlCount ? T.primary : T.text, fontSize: 18, fontWeight: 850, marginTop: 3 }}>{localHealth.inlineDataUrlCount} inline files</div></div>
+          <div style={{ padding: "12px 0" }}><div style={{ color: T.textMuted, fontSize: 10, fontWeight: 800, letterSpacing: ".08em", textTransform: "uppercase" }}>Estimated weight</div><div style={{ color: T.text, fontSize: 18, fontWeight: 850, marginTop: 3 }}>{fmtBytes(localHealth.approximateDecodedBytes)}</div></div>
+          <div style={{ padding: "12px 0" }}><div style={{ color: T.textMuted, fontSize: 10, fontWeight: 800, letterSpacing: ".08em", textTransform: "uppercase" }}>Affected reports</div><div style={{ color: T.text, fontSize: 18, fontWeight: 850, marginTop: 3 }}>{localHealth.affectedHistoryRowCount}</div></div>
+        </div>
+        {inspection && <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.45 }}>Verified against shared client version {inspection.version}. Cleanup creates a private backup, verifies each uploaded file, and refuses to relink if client data changes.</div>}
+        {msg && <div style={{ fontSize: 12.5, fontWeight: 650, color: msg.type === "error" ? T.primary : T.text, background: msg.type === "error" ? hexA(T.primary, 0.08) : T.surfaceAlt, border: `1px solid ${msg.type === "error" ? hexA(T.primary, 0.22) : T.border}`, borderRadius: 10, padding: "9px 12px" }}>{msg.text}</div>}
+        <div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>
+          <Btn sm variant="outline" onClick={inspect} disabled={busy}>{busy && progress.startsWith("Inspect") ? progress : "Inspect current data"}</Btn>
+          <Btn sm onClick={run} disabled={busy || !inspection || inspection.inlineDataUrlCount < 1 || inspection.truncated}>{busy && !progress.startsWith("Inspect") ? (progress || "Working…") : "Apply verified cleanup"}</Btn>
+        </div>
       </div>
     </div>
   );
@@ -25930,9 +26404,10 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
       {activeTab === "sync" && perms.isAdmin && (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <SyncStatus T={T} branding={branding} team={team} currentUserId={currentUserId} email={email} />
-          <Collapsible title="Backup, Restore & Reset" subtitle="Save/restore a full .zip of all data + media, or reset everything to factory defaults.">
+          <div ref={initialSection === "mediaCleanup" ? sectionRef : undefined}>
+          <Collapsible key={initialSection === "mediaCleanup" ? "backup-open" : "backup"} defaultOpen={initialSection === "mediaCleanup"} title="Backup, Restore & Reset" subtitle="Save or restore a full .zip of all data and media, or reset everything to factory defaults.">
             <BackupRestore />
-            <PhotoMigration />
+            <PhotoMigration clients={clients} />
             <div style={{ padding: "0 18px 18px" }}>
               {!confirmReset ? (
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, borderTop: `1px solid ${T.border}`, paddingTop: 16 }}>
@@ -25956,6 +26431,7 @@ function AppSettings({ branding, setBranding, catalog, setCatalog, email, setEma
               )}
             </div>
           </Collapsible>
+          </div>
         </div>
       )}
       {activeTab === "branding" && <>
@@ -28831,10 +29307,10 @@ function SmsConversationBody({ row, maxHeight = "46vh", fullScreen = false, T, s
 // Comms → Inbox. The owner gets private work email plus both business text lines through the
 // owner-only api/inbox route. Staff use the SMS-only route, where each line has an independent
 // visibility grant. The owner's ported line remains read-only for every non-owner.
-function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOnly = false, workspaceScope = "" }) {
+function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOnly = false, workspaceScope = "", focused = false }) {
   const { T, branding, perms } = useApp();
   const smsTone = T.primary;
-  const emailTone = "#2563eb";
+  const emailTone = focused ? T.textMuted : "#2563eb";
   const vp = useViewport();
   const quoLines = useQuoMainLine(branding?.companyPhone);
   const ownerView = !!perms?.isAdmin;
@@ -28862,6 +29338,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   const [channelFilter, setChannelFilter] = useState(savedChannel); // all | sms | email
   const [inboxAccess, setInboxAccess] = useState({ automation: ownerView || !!perms?.commsTextInbox, main: ownerView || !!perms?.commsMainLine });
   const [filter, setFilter] = useState(savedFilter); // all | unread | lead | bill | client | other
+  const [focusedView, setFocusedView] = useState("attention"); // attention | history
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [phoneMailMenuOpen, setPhoneMailMenuOpen] = useState(false);
   const phoneMailMenuRef = useRef(null);
@@ -29031,6 +29508,21 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   const [openSent, setOpenSent] = useState(() => savedInbox.openSentId ?? null); // expanded sent row id
   const restoreOpenInboxKeyRef = useRef(String(savedInbox.openKey || ""));
   const inboxRestoreTriedRef = useRef(false);
+  useEffect(() => {
+    if (!focused) return;
+    setFolder("inbox");
+    setChannelFilter(smsOnly ? "sms" : "all");
+    setFilter("all");
+    setFiltersOpen(false);
+    setPhoneMailMenuOpen(false);
+    setSelMode(false);
+    setSel({});
+    setComposeOpen(false);
+    setReplying(false);
+    setPreviewRow(null);
+    setBulkSortOpen(false);
+    setDeleteConfirm(null);
+  }, [focused, smsOnly]);
   useEffect(() => {
     patchWorkspaceState(workspaceScope, {
       comms: {
@@ -29370,8 +29862,16 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   }, [openRow?._smsConversationKey, openRow?._messageCount, smsMediaById]);
   useEffect(() => {
     if (rows === null || err || refreshing) return;
-    const count = mergeInboxConversationRows(rows || [], clients, quoLines, smsThreadMeta).reduce((total, row) => total + (row._smsConversation ? Number(row._unreadCount || 0) : (row.read ? 0 : 1)), 0);
+    const mergedRows = mergeInboxConversationRows(rows || [], clients, quoLines, smsThreadMeta);
+    const count = mergedRows.reduce((total, row) => total + (row._smsConversation ? Number(row._unreadCount || 0) : (row.read ? 0 : 1)), 0);
+    const actionableRows = selectActionableCommsRows(mergedRows);
     window.dispatchEvent(new CustomEvent("sps-inbox-unread", { detail: { count } }));
+    window.dispatchEvent(new CustomEvent("sps-inbox-attention", {
+      detail: {
+        count: actionableRows.length,
+        summary: summarizeActionableCommsRows(actionableRows),
+      },
+    }));
   }, [rows, clients, quoLines.automation, quoLines.main, smsThreadMeta, err, refreshing]);
   const openReplyWorkspaceKey = workspaceKeyForInboxRow(openRow);
   useEffect(() => {
@@ -29392,9 +29892,9 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     setReplyText(savedText);
     setReplyHtml(safeHtml);
     setReplyMsg("");
-    setReplying(!!smsCanReply || (!!savedDraft.replying && openRow?.channel !== "sms"));
+    setReplying(focused ? false : (!!smsCanReply || (!!savedDraft.replying && openRow?.channel !== "sms")));
     setReplyDraftKeyLoaded(key);
-  }, [openReplyWorkspaceKey, workspaceScope, openRow?.channel, openRow?.sms_line, openRow?.ai?.quoLine, perms?.sendTexts, perms?.commsTextInbox, ownerView]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [openReplyWorkspaceKey, workspaceScope, openRow?.channel, openRow?.sms_line, openRow?.ai?.quoLine, perms?.sendTexts, perms?.commsTextInbox, ownerView, focused]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!openReplyWorkspaceKey || replyDraftKeyLoaded !== openReplyWorkspaceKey) return;
     patchWorkspaceState(workspaceScope, {
@@ -29501,14 +30001,25 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   }, [workspaceScope, openRow?.id, openRow?._smsConversationKey, openRow?.channel]); // eslint-disable-line react-hooks/exhaustive-deps
   const textCount = displayInboxRows.filter(isSmsRow).length;
   const emailCount = displayInboxRows.length - textCount;
-  const channelRows = displayInboxRows.filter(r => channelFilter === "all" ? true : channelFilter === "sms" ? isSmsRow(r) : !isSmsRow(r));
+  const actionableInboxRows = useMemo(() => selectActionableCommsRows(displayInboxRows), [displayInboxRows]);
+  const actionableSummary = useMemo(() => summarizeActionableCommsRows(actionableInboxRows), [actionableInboxRows]);
+  const actionableBreakdown = useMemo(() => [
+    ["Failures", actionableSummary.failures],
+    ["Leads", actionableSummary.leads],
+    ["Client replies", actionableSummary.texts + actionableSummary.clients],
+    ["Bills", actionableSummary.bills],
+  ].filter(([, count]) => count > 0), [actionableSummary]);
+  const focusedSourceRows = focused && focusedView === "attention" ? actionableInboxRows : displayInboxRows;
+  const channelRows = focused
+    ? focusedSourceRows
+    : displayInboxRows.filter(r => channelFilter === "all" ? true : channelFilter === "sms" ? isSmsRow(r) : !isSmsRow(r));
   const qq = q.trim().toLowerCase();
   const list = channelRows
     // Lead/Bill/Client/Other are email-triage buckets. Text threads remain conversations instead
     // of masquerading as individual lead cards when an email category filter is selected.
-    .filter(r => filter === "all" ? true : filter === "unread" ? !r.read : (!isSmsRow(r) && r.kind === filter))
+    .filter(r => focused ? true : (filter === "all" ? true : filter === "unread" ? !r.read : (!isSmsRow(r) && r.kind === filter)))
     .filter(r => !qq || [r.from_name, r.from_email, r.from_phone, r.subject, r.body_text, r.ai && r.ai.summary, ...(r._smsMessages || []).map(message => message.body_text)].some(v => String(v || "").toLowerCase().includes(qq)));
-  const showPinnedRail = phone && folder === "inbox" && !q.trim() && filter === "all";
+  const showPinnedRail = !focused && phone && folder === "inbox" && !q.trim() && filter === "all";
   const pinnedRows = showPinnedRail
     ? list.filter(rowIsPinned).sort((a, b) => String(b._smsPinnedAt || "").localeCompare(String(a._smsPinnedAt || "")))
     : [];
@@ -30101,15 +30612,23 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     );
   };
   const setupPending = err && /hasn't been created|sps_inbox/i.test(err);
-  const showMobileCompose = !smsOnly && !wide && !setupPending && rows !== null && (folder === "sent" || channelFilter !== "sms");
+  const showMobileCompose = !focused && !smsOnly && !wide && !setupPending && rows !== null && (folder === "sent" || channelFilter !== "sms");
   const hasSearchOrCategory = !!q.trim() || filter !== "all";
   const hasInboxFilter = hasSearchOrCategory || (!smsOnly && channelFilter !== "all");
-  const emptyInboxTitle = channelFilter === "sms"
+  const emptyInboxTitle = focused && focusedView === "attention"
+    ? "Nothing needs attention"
+    : focused
+      ? (q.trim() ? "No history matches" : "No message history yet")
+      : channelFilter === "sms"
     ? (hasSearchOrCategory ? "No matching texts" : "No texts here yet")
     : channelFilter === "email"
       ? (hasSearchOrCategory ? "No matching emails" : "No emails here yet")
       : (hasSearchOrCategory ? "No matching messages" : "Your inbox is empty");
-  const emptyInboxCopy = hasSearchOrCategory
+  const emptyInboxCopy = focused && focusedView === "attention"
+    ? "New leads, incoming client texts, bills, and delivery failures will appear here."
+    : focused
+      ? (q.trim() ? "Try a different name, number, subject, or keyword." : "Email and Quo history continues collecting quietly in the background.")
+      : hasSearchOrCategory
     ? "Try a different channel, category, or search."
     : (smsOnly ? "Incoming business texts you are allowed to see will appear here." : "Incoming texts and work email will appear here with clear channel labels.");
   const openMessage = (r) => {
@@ -30117,7 +30636,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     inboxRestoreTriedRef.current = true;
     restoreOpenInboxKeyRef.current = "";
     setOpenRow(r);
-    if (!r.read) markRead(inboxRowMessageIds(r));
+    if (!focused && !r.read) markRead(inboxRowMessageIds(r));
   };
   const setConversationPinned = async (row, pinned) => {
     const key = smsPreferenceKey(row);
@@ -30152,10 +30671,10 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   const listRows = list.map((r, i) => {
     const active = openRow && openRow.id === r.id && wide;
     return (
-      <div key={r.id} onClick={() => { if (selMode) { toggleSel(r.id); return; } openMessage(r); }}
+      <div key={r.id} onClick={() => { if (!focused && selMode) { toggleSel(r.id); return; } openMessage(r); }}
         style={{ display: "flex", alignItems: "flex-start", gap: dense ? 9 : 13, padding: dense ? "11px 12px" : "15px 16px", cursor: "pointer", borderTop: i === 0 ? "none" : `1px solid ${commsHairline(T)}`, background: (sel[r.id] || active) ? hexA(T.primary, 0.08) : (r.read ? "transparent" : hexA(T.primary, 0.03)), position: "relative" }}>
         {!r.read && <span style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: T.primary }} />}
-        {selMode && <div style={{ alignSelf: "center", flexShrink: 0 }}><Checkbox checked={!!sel[r.id]} onChange={() => toggleSel(r.id)} /></div>}
+        {!focused && selMode && <div style={{ alignSelf: "center", flexShrink: 0 }}><Checkbox checked={!!sel[r.id]} onChange={() => toggleSel(r.id)} /></div>}
         <Avatar name={r.from_name} email={r.from_email} channel={r.channel} photo={r._contactPhoto} size={dense ? 36 : 42} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -30193,17 +30712,17 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       : (kind.label && kind.label !== "Other" ? kind.label : "Email");
     const dividerLeft = dense ? 69 : 77;
     return (
-      <InboxSwipeRow key={r.id} rowId={r.id} ariaLabel={`${r.read ? "" : "Unread "}${sms ? "text" : "email"} from ${senderLabel(r)}: ${r.subject || (sms ? "Message" : "No subject")}`} revealed={openSwipeId === r.id} disabled={selMode} selected={selected} read={!!r.read} isText={sms} T={T}
+      <InboxSwipeRow key={r.id} rowId={r.id} ariaLabel={`${r.read ? "" : "Unread "}${sms ? "text" : "email"} from ${senderLabel(r)}: ${r.subject || (sms ? "Message" : "No subject")}`} revealed={openSwipeId === r.id} disabled={focused || selMode} selected={selected} read={!!r.read} isText={sms} T={T}
         onReveal={(id) => setOpenSwipeId(id)} onClose={(id) => setOpenSwipeId(cur => cur === id ? null : cur)}
-        onActivate={() => selMode ? toggleSel(r.id) : openMessage(r)}
-        onPreview={() => { setOpenSwipeId(null); setPreviewRow(r); }}
-        onToggleRead={() => { markRead(inboxRowMessageIds(r), !r.read); }}
-        onMore={smsOnly ? undefined : () => setManageRow(r)}
-        onDelete={smsOnly ? undefined : () => { deleteEmails(inboxRowMessageIds(r), { ask: false }); }}>
+        onActivate={() => !focused && selMode ? toggleSel(r.id) : openMessage(r)}
+        onPreview={focused ? undefined : () => { setOpenSwipeId(null); setPreviewRow(r); }}
+        onToggleRead={focused ? undefined : () => { markRead(inboxRowMessageIds(r), !r.read); }}
+        onMore={() => setManageRow(r)}
+        onDelete={focused || smsOnly ? undefined : () => { deleteEmails(inboxRowMessageIds(r), { ask: false }); }}>
         <div data-sps-conversation-row data-channel={sms ? "sms" : "email"} style={{ position: "relative", display: "flex", alignItems: "center", gap: dense ? 10 : 12, minHeight: dense ? 66 : 74, boxSizing: "border-box", padding: dense ? "8px 10px 8px 15px" : "10px 11px 10px 17px", background: selected ? hexA(T.primary, 0.07) : T.surface }}>
           {i > 0 && <span aria-hidden="true" style={{ position: "absolute", left: dividerLeft, right: 0, top: 0, height: 1, background: commsHairline(T) }} />}
-          {!r.read && !selMode && <span aria-label="Unread" style={{ position: "absolute", left: 6, top: "50%", width: 6, height: 6, marginTop: -3, borderRadius: "50%", background: T.primary }} />}
-          {selMode ? (
+          {!r.read && !focused && !selMode && <span aria-label="Unread" style={{ position: "absolute", left: 6, top: "50%", width: 6, height: 6, marginTop: -3, borderRadius: "50%", background: T.primary }} />}
+          {!focused && selMode ? (
             <span aria-hidden="true" style={{ width: dense ? 42 : 46, height: dense ? 42 : 46, borderRadius: "50%", border: `2px solid ${selected ? T.primary : T.border}`, background: selected ? T.primary : T.surface, color: "#fff", display: "grid", placeItems: "center", flexShrink: 0 }}>
               {selected && <Icon name="check" size={17} />}
             </span>
@@ -30244,7 +30763,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       </div>
     </section>
   ) : null;
-  const pressPreview = previewRow ? (
+  const pressPreview = !focused && previewRow ? (
     <InboxPressPreview
       title={senderLabel(previewRow)}
       subtitle={`${isSmsRow(previewRow) ? `Text · ${lineLabelForRow(previewRow)}` : "Email"} · ${fmtMailboxWhen(previewRow.created_at)}`}
@@ -30323,22 +30842,22 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
           );
         })}
         <div style={{ flex: 1 }} />
-        <Btn variant="ghost" sm onClick={() => markRead(inboxRowMessageIds(openRow), !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>
-        <Btn variant="danger" sm onClick={() => deleteEmails(inboxRowMessageIds(openRow))}>Delete</Btn>
+        {!focused && <Btn variant="ghost" sm onClick={() => markRead(inboxRowMessageIds(openRow), !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>}
+        {!focused && <Btn variant="danger" sm onClick={() => deleteEmails(inboxRowMessageIds(openRow))}>Delete</Btn>}
       </div>}
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-        {smsOnly && <Btn variant="ghost" sm onClick={() => markRead(inboxRowMessageIds(openRow), !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>}
+        {smsOnly && !focused && <Btn variant="ghost" sm onClick={() => markRead(inboxRowMessageIds(openRow), !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>}
         {!smsOnly && !isSmsRow(openRow) && !inLeads(openRow.id) && <Btn variant="primary" sm onClick={() => addToLeads(openRow)} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={14} />Add to Leads</Btn>}
         {!smsOnly && !isSmsRow(openRow) && inLeads(openRow.id) && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 700, color: "#16a34a", alignSelf: "center" }}><Icon name="check" size={14} />In your Leads funnel</span>}
-        {openRow.channel === "sms" && openRow.from_phone && canTextFromRow(openRow) && <a href={quoCallHref(openRow.from_phone, quoCallerForRow(openRow))} title={`Call in Quo from ${lineLabelForRow(openRow).toLowerCase()}`} style={{ minHeight: 32, padding: "6px 12px", borderRadius: 9, border: `1px solid ${T.border}`, background: T.surface, color: T.text, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 750 }}><Icon name="phone" size={14} />Call</a>}
-        {openRow.channel !== "sms" && <Btn variant="outline" sm onClick={toggleReply} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="reply" size={14} />{replying ? "Hide reply" : "Reply"}</Btn>}
+        {openRow.channel === "sms" && openRow.from_phone && (focused || canTextFromRow(openRow)) && <a href={quoCallHref(openRow.from_phone, quoCallerForRow(openRow))} title={`Call in Quo from ${lineLabelForRow(openRow).toLowerCase()}`} style={{ minHeight: 32, padding: "6px 12px", borderRadius: 9, border: `1px solid ${T.border}`, background: T.surface, color: T.text, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 750 }}><Icon name="phone" size={14} />Call</a>}
+        {!focused && openRow.channel !== "sms" && <Btn variant="outline" sm onClick={toggleReply} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="reply" size={14} />{replying ? "Hide reply" : "Reply"}</Btn>}
         {openRow.channel === "sms" && !canTextFromRow(openRow) && <span style={{ fontSize: 11.5, fontWeight: 760, color: T.textMuted }}>View only · only the owner can use this number</span>}
         <Btn variant="ghost" sm onClick={async () => {
           try { await navigator.clipboard.writeText(openRow._smsConversation ? openRow._smsMessages.map(message => `${(message.sms_direction || message._smsDirection) === "outgoing" ? "You" : senderLabel(openRow)}: ${message.body_text || "[Attachment]"}`).join("\n\n") : (openRow.body_text || "")); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch (_) {}
         }}>{copied ? <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><Icon name="check" size={13} />Copied</span> : "Copy text"}</Btn>
         {!smsOnly && isSmsRow(openRow) && <Btn variant="ghost" sm onClick={() => setManageRow(openRow)} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="funnel" size={14} />Organize</Btn>}
       </div>
-      {replying && (
+      {!focused && replying && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {openRow.channel === "sms" ? (
             <div>
@@ -30357,7 +30876,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
           </div>
         </div>
       )}
-      {!replying && replyMsg && <div style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</div>}
+      {!focused && !replying && replyMsg && <div style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</div>}
     </div>
   );
   const mobileSmsCategory = openRow && isSmsRow(openRow)
@@ -30371,16 +30890,16 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       lineLabel={lineLabelForRow(openRow)}
       categoryLabel={mobileSmsCategory.label}
       categoryTone={mobileSmsCategory.color || T.textMuted}
-      callHref={openRow.from_phone && canTextFromRow(openRow) ? quoCallHref(openRow.from_phone, quoCallerForRow(openRow)) : ""}
+      callHref={openRow.from_phone && (focused || canTextFromRow(openRow)) ? quoCallHref(openRow.from_phone, quoCallerForRow(openRow)) : ""}
       onBack={() => setOpenRow(null)}
       onOrganize={() => setManageRow(openRow)}
       T={T}
-      status={replyMsg && !replySucceeded ? (
+      status={!focused && replyMsg && !replySucceeded ? (
         <div role="status" aria-live="polite" style={{ padding: "0 8px 6px", color: T.warning, fontSize: 11, lineHeight: 1.3, fontWeight: 680, textAlign: "center" }}>{replyMsg}</div>
       ) : TEST_MODE.on && openThreadReplyIsLive ? (
         <div role="note" style={{ padding: "0 8px 6px", color: T.primary, fontSize: 11, lineHeight: 1.3, fontWeight: 720, textAlign: "center" }}>This reply sends live. Automatic and new outbound messages remain in Test Mode.</div>
       ) : null}
-      composer={canTextFromRow(openRow) ? (
+      composer={focused ? null : canTextFromRow(openRow) ? (
         <div style={{ display: "flex", alignItems: "flex-end", gap: 7 }}>
           <div style={{ flex: 1, minWidth: 0, minHeight: 38, display: "flex", alignItems: "center", padding: "2px 4px 2px 12px", border: `1px solid ${hexA(T.textMuted, 0.22)}`, borderRadius: 20, background: hexA(T.surface, 0.92) }}>
             <textarea
@@ -30543,9 +31062,35 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     color: tone, fontFamily: "inherit", fontSize: 13.5, fontWeight: 760,
     textAlign: "left", cursor: "pointer",
   });
+  const focusedModeSwitcher = focused ? (
+    <div data-sps-focused-comms role="tablist" aria-label="Communication view" style={{ display: "grid", gridTemplateColumns: "1.15fr 0.85fr", alignItems: "stretch", background: T.surface, borderBottom: `1px solid ${T.border}` }}>
+      {[
+        ["attention", "Needs attention", actionableInboxRows.length],
+        ["history", "Message history", displayInboxRows.length],
+      ].map(([id, label, count]) => {
+        const active = focusedView === id;
+        return <button key={id} type="button" role="tab" aria-selected={active} onClick={() => { setFocusedView(id); setOpenRow(null); setQ(""); }} style={{ minHeight: 54, padding: "10px 14px", border: "none", borderBottom: active ? `3px solid ${T.primary}` : "3px solid transparent", background: active ? hexA(T.primary, 0.045) : "transparent", color: active ? T.primary : T.textMuted, fontFamily: "inherit", fontSize: 13, fontWeight: active ? 820 : 690, textAlign: "left", cursor: "pointer" }}>{label}<span style={{ marginLeft: 7, fontSize: 11, fontVariantNumeric: "tabular-nums", color: active ? T.primary : T.textMuted }}>{count}</span></button>;
+      })}
+    </div>
+  ) : null;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: dense ? 7 : 10, paddingBottom: phone ? (selMode ? 76 : 88) : 0 }}>
-      {phone ? (selMode && folder === "inbox" ? (
+      {focusedModeSwitcher}
+      {focused && focusedView === "attention" && actionableInboxRows.length > 0 && (
+        <div data-sps-focused-summary style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", minHeight: 38, padding: phone ? "7px 10px" : "8px 12px", borderLeft: `3px solid ${T.primary}`, background: hexA(T.primary, 0.035), color: T.text }}>
+          <span style={{ fontSize: 11.5, fontWeight: 780 }}>Only work that needs action</span>
+          <span style={{ marginLeft: phone ? 0 : "auto", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", color: T.textMuted, fontSize: 10.5, fontWeight: 680, fontVariantNumeric: "tabular-nums" }}>
+            {actionableBreakdown.map(([label, count], index) => (
+              <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                {index > 0 && <span aria-hidden="true" style={{ color: T.borderStrong }}>•</span>}
+                <span>{label}</span>
+                <strong style={{ color: T.text, fontSize: "inherit" }}>{count}</strong>
+              </span>
+            ))}
+          </span>
+        </div>
+      )}
+      {!focused && (phone ? (selMode && folder === "inbox" ? (
         <div style={{ minHeight: 42, display: "grid", gridTemplateColumns: "1fr auto 1fr", alignItems: "center", gap: 10 }}>
           <button type="button" onClick={exitSelect} style={{ minHeight: 44, justifySelf: "start", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13.5, fontWeight: 800, padding: "8px 2px", cursor: "pointer" }}>Cancel</button>
           <div style={{ fontSize: 15, fontWeight: 850, color: T.text, whiteSpace: "nowrap" }}>{selIds.length ? `${selIds.length} Selected` : "Select messages"}</div>
@@ -30562,9 +31107,9 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
             <Icon name="sliders" size={16} />
           </button>
         </div>
-      )) : null}
+      )) : null)}
       {/* Tablet/desktop folder switch. Phones use the compact mailbox dropdown above. */}
-      {!phone && <div data-sps-mailbox-toolbar style={{ display: "flex", alignItems: "center", gap: dense ? 6 : 10, flexWrap: wide ? "wrap" : "nowrap", minWidth: 0 }}>
+      {!focused && !phone && <div data-sps-mailbox-toolbar style={{ display: "flex", alignItems: "center", gap: dense ? 6 : 10, flexWrap: wide ? "wrap" : "nowrap", minWidth: 0 }}>
         {!smsOnly && folderBar}
         {wide && <div style={{ flex: 1 }} />}
         {folder === "inbox" && (wide ? (
@@ -30588,22 +31133,22 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       {!(phone && selMode) && <>
       <div style={{ display: "grid", gridTemplateColumns: wide && !smsOnly ? "minmax(260px, 1fr) minmax(330px, 0.8fr)" : "1fr", gap: dense ? 7 : 10, alignItems: "center" }}>
         {!phone && <CommsSearchField value={q} onChange={setQ} placeholder="Search messages, people, tags" T={T} />}
-        {!phone && !smsOnly && channelSwitcher}
+        {!focused && !phone && !smsOnly && channelSwitcher}
       </div>
-      {!phone && !wide && (
+      {!focused && !phone && !wide && (
         <button type="button" aria-label="Filter message categories" onClick={() => setFiltersOpen(v => !v)} aria-expanded={filtersOpen}
           style={{ minHeight: dense ? 38 : 40, width: "fit-content", maxWidth: "100%", alignSelf: "flex-start", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 9, padding: dense ? "6px 11px" : "7px 13px", background: filter !== "all" ? hexA(T.primary, 0.08) : T.surface, border: `1px solid ${filter !== "all" ? hexA(T.primary, 0.3) : T.border}`, borderRadius: 999, color: filter !== "all" ? T.primary : T.textMuted, fontFamily: "inherit", fontSize: 12.5, fontWeight: 750, cursor: "pointer" }}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}><Icon name="funnel" size={14} />{filter === "all" ? "Filters" : (KIND[filter]?.label || "Unread")}</span>
           <span style={{ display: "inline-flex", transform: filtersOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}><Icon name="chevronD" size={15} /></span>
         </button>
       )}
-      {(!phone && (wide || filtersOpen || filter !== "all")) && (
+      {!focused && (!phone && (wide || filtersOpen || filter !== "all")) && (
         <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none" }}>
           {chip("all", "All categories")}{chip("unread", `Unread${channelUnread ? ` · ${channelUnread}` : ""}`)}{chip("lead", "Leads")}{chip("bill", "Bills")}{chip("client", "Clients")}{chip("other", "Other")}
         </div>
       )}
       </>}
-      {!smsOnly && selMode && !phone && (
+      {!focused && !smsOnly && selMode && !phone && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 12, padding: "8px 12px" }}>
           <button type="button" onClick={toggleSelectAll} style={{ background: "none", border: "none", color: T.primary, fontWeight: 800, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit", padding: 0 }}>{allVisibleSelected ? "Clear" : "Select all"}</button>
           <span style={{ fontSize: 12.5, fontWeight: 700, color: T.textMuted }}>{selIds.length} selected</span>
@@ -30622,7 +31167,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
           )}
         </div>
       )}
-      {!smsOnly && importOpen && !importState.running && (
+      {!focused && !smsOnly && importOpen && !importState.running && (
         <div style={{ border: `1px solid ${T.border}`, borderRadius: 12, background: T.surface, padding: "12px 14px", display: "flex", flexDirection: "column", gap: 9 }}>
           <div style={{ fontSize: 13, color: T.text, fontWeight: 700 }}>Pull your existing Gmail into the inbox</div>
           <div style={{ fontSize: 11.5, color: T.textMuted, lineHeight: 1.5 }}>Imports past mail from your work address, AI-sorted like new email. Marked read so it won't flood your unread count. Needs a Gmail app password set up (I'll walk you through it).</div>
@@ -30633,7 +31178,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
           </div>
         </div>
       )}
-      {!smsOnly && importState.msg && <div style={{ fontSize: 12.5, fontWeight: 700, color: importState.running ? T.textMuted : (importState.msg.startsWith("Done") ? "#16a34a" : T.warning), padding: "2px 2px" }}>{importState.msg}</div>}
+      {!focused && !smsOnly && importState.msg && <div style={{ fontSize: 12.5, fontWeight: 700, color: importState.running ? T.textMuted : (importState.msg.startsWith("Done") ? "#16a34a" : T.warning), padding: "2px 2px" }}>{importState.msg}</div>}
       {gmailNote && (
         <div style={{ display: "flex", alignItems: "flex-start", gap: 10, fontSize: 12.5, fontWeight: 600, color: T.text, background: hexA(T.warning, 0.1), border: `1px solid ${hexA(T.warning, 0.35)}`, borderRadius: 10, padding: "10px 12px", lineHeight: 1.45 }}>
           <span style={{ color: T.warning, flexShrink: 0, display: "inline-flex", marginTop: 1 }}><Icon name="warning" size={15} /></span>
@@ -30687,7 +31232,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
         </div>,
         document.body
       )}
-      {phone && selMode && folder === "inbox" && createPortal(
+      {!focused && phone && selMode && folder === "inbox" && createPortal(
         <div style={{ position: "fixed", left: "max(12px, env(safe-area-inset-left))", right: "max(12px, env(safe-area-inset-right))", bottom: "var(--sps-floating-action-bottom, calc(env(safe-area-inset-bottom) + 76px))", zIndex: 98, maxWidth: 560, height: 58, margin: "0 auto", padding: "0 8px", boxSizing: "border-box", display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", alignItems: "stretch", background: hexA(T.surface, 0.97), border: "none", borderRadius: 18, boxShadow: `0 8px 28px rgba(15,23,42,0.14), ${commsInsetRing(T, 0.08)}`, backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}>
           {[
             ["check", "Read", () => { markRead(selIds, true); exitSelect(); }],
@@ -30743,18 +31288,18 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       {manageRow && (
         <InboxActionSheet title={isSmsRow(manageRow) ? "Organize conversation" : "Manage email"} onClose={() => setManageRow(null)} T={T}>
           <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
-            <button type="button" onClick={() => { markRead(inboxRowMessageIds(manageRow), !manageRow.read); setManageRow(null); }} style={sheetActionStyle(T.text)}>
+            {!focused && <button type="button" onClick={() => { markRead(inboxRowMessageIds(manageRow), !manageRow.read); setManageRow(null); }} style={sheetActionStyle(T.text)}>
               <span style={{ width: 30, height: 30, borderRadius: 9, background: hexA("#2879d9", 0.1), color: "#2879d9", display: "grid", placeItems: "center" }}><Icon name={manageRow.read ? "mail" : "check"} size={16} /></span>
               {manageRow.read ? "Mark as unread" : "Mark as read"}
-            </button>
-            {isSmsRow(manageRow) && <button type="button" disabled={pinBusyKey === smsPreferenceKey(manageRow)} onClick={async () => { const saved = await setConversationPinned(manageRow, !rowIsPinned(manageRow)); if (saved) setManageRow(null); }} style={{ ...sheetActionStyle(T.text), opacity: pinBusyKey === smsPreferenceKey(manageRow) ? 0.5 : 1 }}>
+            </button>}
+            {!focused && isSmsRow(manageRow) && <button type="button" disabled={pinBusyKey === smsPreferenceKey(manageRow)} onClick={async () => { const saved = await setConversationPinned(manageRow, !rowIsPinned(manageRow)); if (saved) setManageRow(null); }} style={{ ...sheetActionStyle(T.text), opacity: pinBusyKey === smsPreferenceKey(manageRow) ? 0.5 : 1 }}>
               <span style={{ width: 30, height: 30, borderRadius: 9, background: hexA(T.primary, 0.1), color: T.primary, display: "grid", placeItems: "center" }}><Icon name={rowIsPinned(manageRow) ? "close" : "plus"} size={16} /></span>
               {pinBusyKey === smsPreferenceKey(manageRow) ? "Saving pin…" : (rowIsPinned(manageRow) ? "Unpin conversation" : "Pin conversation")}
             </button>}
-            <button type="button" onClick={() => { setSel({ [manageRow.id]: true }); setSelMode(true); setManageRow(null); }} style={sheetActionStyle(T.text)}>
+            {!focused && <button type="button" onClick={() => { setSel({ [manageRow.id]: true }); setSelMode(true); setManageRow(null); }} style={sheetActionStyle(T.text)}>
               <span style={{ width: 30, height: 30, borderRadius: 9, background: hexA(T.primary, 0.1), color: T.primary, display: "grid", placeItems: "center" }}><Icon name="check" size={16} /></span>
               {isSmsRow(manageRow) ? "Select conversation" : "Select this message"}
-            </button>
+            </button>}
             <>
               <div style={{ marginTop: 5, fontSize: 10.5, fontWeight: 800, letterSpacing: "0.07em", textTransform: "uppercase", color: T.textMuted }}>Category</div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
@@ -30776,14 +31321,14 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
               </div>
               {manageRow.kind === "lead" && !rowInLeads(manageRow) && <button type="button" onClick={() => { addToLeads(manageRow); setManageRow(null); }} style={sheetActionStyle("#16a34a")}><span style={{ width: 30, height: 30, borderRadius: 9, background: hexA("#16a34a", 0.1), color: "#16a34a", display: "grid", placeItems: "center" }}><Icon name="plus" size={16} /></span>Create missing lead record</button>}
             </>
-            <button type="button" onClick={() => { const r = manageRow; setManageRow(null); deleteEmails(inboxRowMessageIds(r)); }} style={sheetActionStyle("#d9282f", true)}>
+            {!focused && <button type="button" onClick={() => { const r = manageRow; setManageRow(null); deleteEmails(inboxRowMessageIds(r)); }} style={sheetActionStyle("#d9282f", true)}>
               <span style={{ width: 30, height: 30, borderRadius: 9, background: hexA("#d9282f", 0.1), color: "#d9282f", display: "grid", placeItems: "center" }}><Icon name="trash" size={16} /></span>
               {isSmsRow(manageRow) ? "Remove from SPS Inbox" : "Move to Gmail Trash"}
-            </button>
+            </button>}
           </div>
         </InboxActionSheet>
       )}
-      {bulkSortOpen && (
+      {!focused && bulkSortOpen && (
         <InboxActionSheet title={`Categorize ${selIds.length} message${selIds.length === 1 ? "" : "s"}`} onClose={() => setBulkSortOpen(false)} T={T}>
           <div style={{ fontSize: 12.5, lineHeight: 1.45, color: T.textMuted, marginBottom: 12 }}>Choose where the selected messages belong.</div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 9 }}>
@@ -30794,7 +31339,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
           </div>
         </InboxActionSheet>
       )}
-      {deleteConfirm && (
+      {!focused && deleteConfirm && (
         <InboxActionSheet title={deleteConfirm.ids.length === 1 ? "Delete message?" : `Delete ${deleteConfirm.ids.length} messages?`} onClose={() => setDeleteConfirm(null)} T={T}>
           <div style={{ fontSize: 13.5, color: T.text, lineHeight: 1.55 }}>{deleteConfirm.prompt}</div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 9, marginTop: 17 }}>
@@ -30812,7 +31357,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
           onBack={() => setOpenRow(null)}
           kind="email"
           actions={<>
-            <button type="button" onClick={toggleReply} aria-label="Reply to email" title="Reply" style={{ width: 38, height: 38, borderRadius: 19, border: "none", background: T.surfaceAlt, color: T.primary, display: "grid", placeItems: "center", cursor: "pointer" }}><Icon name="reply" size={17} /></button>
+            {!focused && <button type="button" onClick={toggleReply} aria-label="Reply to email" title="Reply" style={{ width: 38, height: 38, borderRadius: 19, border: "none", background: T.surfaceAlt, color: T.primary, display: "grid", placeItems: "center", cursor: "pointer" }}><Icon name="reply" size={17} /></button>}
             <button type="button" onClick={() => setManageRow(openRow)} aria-label="Organize email" title="Organize" style={{ width: 38, height: 38, borderRadius: 19, border: "none", background: T.surfaceAlt, color: T.primary, display: "grid", placeItems: "center", cursor: "pointer" }}><Icon name="info" size={17} /></button>
           </>}
           bodyStyle={{ padding: "16px max(16px, env(safe-area-inset-right)) 28px max(16px, env(safe-area-inset-left))", boxSizing: "border-box" }}
@@ -30862,22 +31407,22 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
                 );
               })}
               <div style={{ flex: 1 }} />
-              <Btn variant="ghost" sm onClick={() => markRead(inboxRowMessageIds(openRow), !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>
-              <Btn variant="danger" sm onClick={() => deleteEmails(inboxRowMessageIds(openRow))}>Delete</Btn>
+              {!focused && <Btn variant="ghost" sm onClick={() => markRead(inboxRowMessageIds(openRow), !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>}
+              {!focused && <Btn variant="danger" sm onClick={() => deleteEmails(inboxRowMessageIds(openRow))}>Delete</Btn>}
             </div>}
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-              {smsOnly && <Btn variant="ghost" sm onClick={() => markRead(inboxRowMessageIds(openRow), !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>}
+              {smsOnly && !focused && <Btn variant="ghost" sm onClick={() => markRead(inboxRowMessageIds(openRow), !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>}
               {!smsOnly && !isSmsRow(openRow) && !inLeads(openRow.id) && <Btn variant="primary" sm onClick={() => addToLeads(openRow)} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={14} />Add to Leads</Btn>}
               {!smsOnly && !isSmsRow(openRow) && inLeads(openRow.id) && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 700, color: "#16a34a", alignSelf: "center" }}><Icon name="check" size={14} />In your Leads funnel</span>}
               {openRow.channel === "sms" && openRow.from_phone && canTextFromRow(openRow) && <a href={quoCallHref(openRow.from_phone, quoCallerForRow(openRow))} title={`Call in Quo from ${lineLabelForRow(openRow).toLowerCase()}`} style={{ minHeight: 32, padding: "6px 12px", borderRadius: 9, border: `1px solid ${T.border}`, background: T.surface, color: T.text, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 750 }}><Icon name="phone" size={14} />Call</a>}
-              {openRow.channel !== "sms" && <Btn variant="outline" sm onClick={toggleReply} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="reply" size={14} />{replying ? "Hide reply" : "Reply"}</Btn>}
+              {!focused && openRow.channel !== "sms" && <Btn variant="outline" sm onClick={toggleReply} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="reply" size={14} />{replying ? "Hide reply" : "Reply"}</Btn>}
               {openRow.channel === "sms" && !canTextFromRow(openRow) && <span style={{ fontSize: 11.5, fontWeight: 760, color: T.textMuted }}>View only · only the owner can use this number</span>}
               <Btn variant="ghost" sm onClick={async () => {
                 try { await navigator.clipboard.writeText(openRow._smsConversation ? openRow._smsMessages.map(message => `${(message.sms_direction || message._smsDirection) === "outgoing" ? "You" : senderLabel(openRow)}: ${message.body_text || "[Attachment]"}`).join("\n\n") : (openRow.body_text || "")); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch (_) {}
               }}>{copied ? <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><Icon name="check" size={13} />Copied</span> : "Copy text"}</Btn>
               {!smsOnly && isSmsRow(openRow) && <Btn variant="ghost" sm onClick={() => setManageRow(openRow)} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="funnel" size={14} />Organize</Btn>}
             </div>
-            {replying && (
+            {!focused && replying && (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {openRow.channel === "sms" ? (
                   <div>
@@ -30896,12 +31441,12 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
                 </div>
               </div>
             )}
-            {!replying && replyMsg && <div style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</div>}
+            {!focused && !replying && replyMsg && <div style={{ fontSize: 12.5, fontWeight: 700, color: replySucceeded ? "#16a34a" : T.warning }}>{replyMsg}</div>}
           </div>
         </CommsMobileDetailShell>
       )}
 
-      {!smsOnly && composeOpen && (
+      {!focused && !smsOnly && composeOpen && (
         <CommsResponsiveDetail phone={phone} title="New email" subtitle="Compose a work message" backLabel={folder === "sent" ? "Sent" : "Inbox"} onClose={() => setComposeOpen(false)} kind="compose-email" maxWidth={620} T={T}>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {(() => {
@@ -31190,6 +31735,8 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
     try { localStorage.setItem("sps_comms_density_v1", next); } catch (_) {}
   };
   const isAdmin = !!perms.isAdmin;
+  const focusedComms = email?.commsMode !== "full";
+  const setFocusedComms = (nextFocused) => setEmail({ ...(email || DEFAULT_EMAIL), commsMode: nextFocused ? "focused" : "full" });
   // Debounced editors for the template cards (heavy textareas) — snappy local echo, one write
   // per burst instead of per keystroke, functional-merge commit (no clobber of other cards).
   const [emailTpl, setEmailTpl] = useDebouncedFields(email, setEmail);
@@ -31207,7 +31754,7 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
     log:       isAdmin,
     email:     isAdmin || !!perms.commsTextInbox || !!perms.commsMainLine, // owner: email + both lines; granted staff: scoped SMS only
   };
-  const SECTIONS = [
+  const allSections = [
     { id: "messages", label: "Chat", icon: "message" },
     { id: "inbox", label: "Leads", icon: "funnel" },
     { id: "email", label: isAdmin ? "Inbox" : "Texts", icon: isAdmin ? "mail" : "message" },
@@ -31216,6 +31763,13 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
     { id: "settings", label: "Settings", icon: "sliders" },
     { id: "log", label: "Activity", icon: "history" },
   ].filter(s => CAN[s.id]);
+  const SECTIONS = focusedComms
+    ? [
+        allSections.find(s => s.id === "email") ? { ...allSections.find(s => s.id === "email"), label: "Priority" } : null,
+        allSections.find(s => s.id === "inbox"),
+        allSections.find(s => s.id === "settings"),
+      ].filter(Boolean)
+    : allSections;
   const firstId = SECTIONS[0] ? SECTIONS[0].id : "messages";
   const secKey = SECTIONS.map(s => s.id).join(",");
   const single = SECTIONS.length <= 1;
@@ -31304,7 +31858,19 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
       {section === "reminders" && CAN.reminders && <div style={{ padding: `0 ${compactComms ? 12 : 16}px` }}><RemindersScreen schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} reminderLog={reminderLog} setReminderLog={setReminderLog} T={T} workspaceScope={workspaceScope} /></div>}
       {section === "inbox" && CAN.inbox && <LeadsScreen leads={leads} setLeads={setLeads} clients={clients} onConvert={onConvertLead} onLink={onLinkLead} openLeadId={openLeadId} onLeadOpened={onLeadOpened} vp={vp} workspaceScope={workspaceScope} />}
       {section === "settings" && CAN.settings && <div style={{ padding: `0 ${compactComms ? 12 : 16}px`, display: "flex", flexDirection: "column", gap: compactComms ? 12 : 18, maxWidth: 920, margin: "0 auto" }}>
-        <CommsPageHeader title="Communication settings" description="Sending identity, safety controls, reminders, automation, and message templates." icon="sliders" T={T} />
+        <CommsPageHeader title="Communication settings" description={focusedComms ? "Choose how much of the communication workspace you want to manage." : "Sending identity, safety controls, reminders, automation, and message templates."} icon="sliders" T={T} />
+        <Card>
+          <div style={{ padding: compactComms ? "12px 14px" : "16px 18px" }}>
+            <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>Comms workspace</div>
+            <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2 }}>Focused keeps ingestion and history running, while showing only communication that needs action.</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1.12fr 0.88fr", gap: 8, marginTop: 13 }}>
+              {[[true, "Focused", "Needs attention + history"], [false, "Full workspace", "Every inbox tool"]].map(([value, label, note]) => {
+                const on = focusedComms === value;
+                return <button key={label} type="button" onClick={() => setFocusedComms(value)} style={{ minHeight: 54, padding: "9px 12px", border: `1px solid ${on ? T.primary : T.border}`, borderLeft: on ? `4px solid ${T.primary}` : `1px solid ${T.border}`, background: on ? hexA(T.primary, 0.045) : T.surface, color: on ? T.primary : T.text, fontFamily: "inherit", textAlign: "left", cursor: "pointer" }}><span style={{ display: "block", fontSize: 12.5, fontWeight: 820 }}>{label}</span><span style={{ display: "block", marginTop: 2, fontSize: 10.5, fontWeight: 600, color: T.textMuted }}>{note}</span></button>;
+              })}
+            </div>
+          </div>
+        </Card>
         <Card>
           <div style={{ padding: compactComms ? "12px 14px" : "16px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
             <div>
@@ -31327,16 +31893,16 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
         {(perms.isAdmin || perms.editNotifications) && (
           <Card><CardHeader title="Test Mode, Your Contacts & Alerts" /><NotificationSettings email={email} setEmail={setEmail} branding={branding} clients={clients} /></Card>
         )}
-        {(perms.isAdmin || perms.commsSettings) && <OwnerDigestSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} branding={branding} T={T} />}
-        {(perms.isAdmin || perms.commsSettings) && <Card><div style={{ padding: 18 }}><ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /></div></Card>}
-        {(perms.isAdmin || perms.commsSettings) && <Card><div style={{ padding: 18 }}><CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /></div></Card>}
+        {!focusedComms && (perms.isAdmin || perms.commsSettings) && <OwnerDigestSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} branding={branding} T={T} />}
+        {!focusedComms && (perms.isAdmin || perms.commsSettings) && <Card><div style={{ padding: 18 }}><ReminderSettings scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /></div></Card>}
+        {!focusedComms && (perms.isAdmin || perms.commsSettings) && <Card><div style={{ padding: 18 }}><CommunicationsHub scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} T={T} /></div></Card>}
         {/* Message + email templates now live HERE (moved out of Customize so all comms editing
             is in one place). EmailSettings = client texts/emails; InviteEmailSettings = staff invite + login emails. */}
-        {(perms.isAdmin || perms.editNotifications) && <div><EmailSettings email={emailTpl} setEmail={setEmailTpl} branding={brandTpl} setBranding={setBrandTpl} /></div>}
-        {(perms.isAdmin || perms.editSettings || perms.canInvoice) && <Card><CardHeader title="Staff Invite & Login Emails" /><InviteEmailSettings email={emailTpl} setEmail={setEmailTpl} branding={brandTpl} /></Card>}
+        {!focusedComms && (perms.isAdmin || perms.editNotifications) && <div><EmailSettings email={emailTpl} setEmail={setEmailTpl} branding={brandTpl} setBranding={setBrandTpl} /></div>}
+        {!focusedComms && (perms.isAdmin || perms.editSettings || perms.canInvoice) && <Card><CardHeader title="Staff Invite & Login Emails" /><InviteEmailSettings email={emailTpl} setEmail={setEmailTpl} branding={brandTpl} /></Card>}
       </div>}
       {section === "broadcast" && CAN.broadcast && <BroadcastSection clients={clients} invoices={invoices} email={email} branding={branding} T={T} workspaceScope={workspaceScope} />}
-      {section === "email" && CAN.email && <div style={{ padding: `0 ${compactComms ? 12 : 16}px` }}><EmailInboxSection leads={leads} setLeads={setLeads} clients={clients} invoices={invoices} smsOnly={!isAdmin} workspaceScope={workspaceScope} /></div>}
+      {section === "email" && CAN.email && <div style={{ padding: `0 ${compactComms ? 12 : 16}px` }}><EmailInboxSection leads={leads} setLeads={setLeads} clients={clients} invoices={invoices} smsOnly={!isAdmin} workspaceScope={workspaceScope} focused={focusedComms} /></div>}
       {section === "log" && CAN.log && <div style={{ padding: `0 ${compactComms ? 12 : 16}px` }}><LogsScreen clients={clients} showOwnerRows={!!perms.isAdmin} workspaceScope={workspaceScope} /></div>}
     </>
     </CommsDensityContext.Provider>
@@ -38189,6 +38755,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
 
   // Persistent data — survives reloads and app updates
   const [clients, setClients, lc] = useStoredState("sps_clients", []);
+  const legacyMediaHealth = useMemo(() => inspectLegacyMediaHealth(clients), [clients]);
   // Live-sync a client's communication/notification preferences onto THIS device the moment they
   // change them in their portal — no manual reload. We subscribe to the shared sps_clients row and
   // merge ONLY each client's notifyPrefs by id; we never replace the array (that would clobber
@@ -39439,7 +40006,10 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   // Track unread message count for nav badge
   const [navUnread, setNavUnread] = useState(0);
   const [inboxUnread, setInboxUnread] = useState(0);
-  const navUnreadTotal = navUnread + (perms.isAdmin || perms.commsTextInbox || perms.commsMainLine ? inboxUnread : 0);
+  const [inboxAttention, setInboxAttention] = useState(0);
+  const focusedCommsMode = email?.commsMode !== "full";
+  const externalCommsBadge = focusedCommsMode ? inboxAttention : inboxUnread;
+  const navUnreadTotal = navUnread + (perms.isAdmin || perms.commsTextInbox || perms.commsMainLine ? externalCommsBadge : 0);
   // Count of reminders due now, for the nav badge + dashboard alert
   const reminderDueCount = useMemo(() => {
     try { return buildReminderQueue(schedule, clients, scheduleCfg, reminderLog, new Date()).due.length; }
@@ -39758,7 +40328,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   }, [perms.isAdmin, perms.commsMessages]);
   useEffect(() => {
     const canReadExternalInbox = !!(perms.isAdmin || perms.commsTextInbox || perms.commsMainLine);
-    if (!canReadExternalInbox) { setInboxUnread(0); return undefined; }
+    if (!canReadExternalInbox) { setInboxUnread(0); setInboxAttention(0); return undefined; }
     const endpoint = perms.isAdmin ? "/api/inbox" : "/api/sms-inbox";
     let alive = true;
     let inFlight = false;
@@ -39766,9 +40336,13 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       if (document.hidden || inFlight) return;
       inFlight = true;
       try {
-        const r = await fetch(`${PROD_URL}${endpoint}?summary=unread`, { headers: await authHeaders() });
+        const summaryMode = focusedCommsMode ? "actionable" : "unread";
+        const r = await fetch(`${PROD_URL}${endpoint}?summary=${summaryMode}`, { headers: await authHeaders() });
         const d = await r.json().catch(() => ({}));
-        if (alive && r.ok) setInboxUnread(Math.max(0, Number(d.unread) || 0));
+        if (alive && r.ok) {
+          if (focusedCommsMode) setInboxAttention(Math.max(0, Number(d.actionable ?? d.count) || 0));
+          else setInboxUnread(Math.max(0, Number(d.unread) || 0));
+        }
       } catch (_) {
       } finally { inFlight = false; }
     };
@@ -39776,7 +40350,12 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       const count = Number(event && event.detail && event.detail.count);
       if (Number.isFinite(count)) setInboxUnread(Math.max(0, count));
     };
+    const onAttentionUpdate = (event) => {
+      const count = Number(event && event.detail && event.detail.count);
+      if (Number.isFinite(count)) setInboxAttention(Math.max(0, count));
+    };
     window.addEventListener("sps-inbox-unread", onLocalUpdate);
+    window.addEventListener("sps-inbox-attention", onAttentionUpdate);
     window.addEventListener("sps-push-received", load);
     const onVisible = () => { if (!document.hidden) load(); };
     document.addEventListener("visibilitychange", onVisible);
@@ -39786,10 +40365,11 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       alive = false;
       clearInterval(interval);
       window.removeEventListener("sps-inbox-unread", onLocalUpdate);
+      window.removeEventListener("sps-inbox-attention", onAttentionUpdate);
       window.removeEventListener("sps-push-received", load);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [perms.isAdmin, perms.commsTextInbox, perms.commsMainLine]);
+  }, [perms.isAdmin, perms.commsTextInbox, perms.commsMainLine, focusedCommsMode]);
 
   // Sign-out unbinds this exact app install and clears native customer state FIRST, while the auth
   // token is still valid. Give the server enough time to confirm the unlink instead of racing auth
@@ -42114,7 +42694,38 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   const isEstimatesRoute = page === "estimates";
   const pageBody = (
     <>
-      {page === "dashboard" && <Dashboard clients={clients} invoices={invoices} schedule={schedule} home={home} setHome={setHome} officeAlerts={officeAlerts} onResolveAlert={handleResolveAlert} onOpenAlert={handleOpenAlert} onOpenStop={handleOpenStop} onNav={handleNav} catalog={catalog} onConfirmUpgrade={handleConfirmUpgrade} userName={currentUser?.name} me={currentUser} scheduleCfg={scheduleCfg} reminderLog={reminderLog} completedSids={completedSids} budget={budget} leads={leads} vp={vp} />}
+      {page === "dashboard" && <Dashboard
+        clients={clients}
+        invoices={invoices}
+        schedule={schedule}
+        home={home}
+        setHome={setHome}
+        officeAlerts={officeAlerts}
+        onResolveAlert={handleResolveAlert}
+        onOpenAlert={handleOpenAlert}
+        onOpenStop={handleOpenStop}
+        onNav={handleNav}
+        catalog={catalog}
+        onConfirmUpgrade={handleConfirmUpgrade}
+        userName={currentUser?.name}
+        me={currentUser}
+        team={team}
+        scheduleCfg={scheduleCfg}
+        reminderLog={reminderLog}
+        completedSids={completedSids}
+        budget={budget}
+        leads={leads}
+        vp={vp}
+        completionOutboxItems={completionOutboxItems}
+        syncState={syncState}
+        dbError={dbError}
+        dataConflict={dataConflict}
+        legacyMediaHealth={legacyMediaHealth}
+        qbAccounting={qbAccounting}
+        focusedComms={focusedCommsMode}
+        onReviewSavedReports={() => { setCompletionReviewMessage(""); setCompletionReviewOpen(true); }}
+        onSyncSavedReports={() => { void completionOutboxDrainRef.current?.(); manualSync(); }}
+      />}
       {page === "clients" && adding && <ClientEditForm client={convertLead ? leadToClientForm(convertLead) : BLANK_CLIENT} title={convertLead ? "Convert Lead to Client" : "Add Client"} onSave={handleSaveNewClient} onCancel={handleCancelConvert} />}
       {page === "clients" && !adding && (vp.isDesktop ? (
         clientsView === "table" ? (
@@ -42507,10 +43118,14 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
             return n ? { id: n.id, label: n.label, icon: n.icon, onClick: () => handleTabNav(n.id) } : null;
           }).filter(Boolean);
           const dockedSet = new Set(docked);
-          const commsBadge = (perms.isAdmin || perms.commsMessages ? navUnread : 0)
-            + (perms.isAdmin || perms.commsTextInbox || perms.commsMainLine ? inboxUnread : 0)
-            + (perms.isAdmin || perms.commsReminders ? reminderDueCount : 0)
-            + (perms.isAdmin || perms.commsInbox ? leadNewCount : 0);
+          const commsBadge = focusedCommsMode
+            ? ((perms.isAdmin || perms.commsMessages ? navUnread : 0)
+              + (perms.isAdmin || perms.commsTextInbox || perms.commsMainLine ? inboxAttention : 0)
+              + (perms.isAdmin || perms.commsInbox ? leadNewCount : 0))
+            : ((perms.isAdmin || perms.commsMessages ? navUnread : 0)
+              + (perms.isAdmin || perms.commsTextInbox || perms.commsMainLine ? inboxUnread : 0)
+              + (perms.isAdmin || perms.commsReminders ? reminderDueCount : 0)
+              + (perms.isAdmin || perms.commsInbox ? leadNewCount : 0));
           const menuBadge = dockedSet.has("comms") ? 0 : commsBadge;
           const tabs = [
             ...primary.map(t => ({ ...t, active: page === t.id, badge: t.id === "comms" ? commsBadge : 0 })),
