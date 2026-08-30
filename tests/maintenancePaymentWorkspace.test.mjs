@@ -55,6 +55,7 @@ test("maintenance history reconciliation waits for fresh QuickBooks state and ex
   assert.match(workspace, /Reconcile history/);
   assert.match(workspace, /data-maintenance-reconciliation-receipt/);
   assert.match(workspace, /No matching payment/);
+  assert.match(workspace, /Plan history needed/);
   assert.match(workspace, /Unallocated history/);
   assert.doesNotMatch(workspace, /No coverage/);
 });

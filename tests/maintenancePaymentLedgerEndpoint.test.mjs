@@ -374,6 +374,40 @@ test("reconcile flattens canonical day-group schedule evidence for generic servi
   assert.equal(batch.find((operation) => operation.key === "sps_schedule").check_only, true);
 });
 
+test("reconcile derives its historical range from an MDY schedule date", async () => {
+  const state = {
+    sps_clients: { value: [canonicalClient], version: 3 },
+    sps_invoices: { value: [], version: 8 },
+    sps_maintenance_billing: { value: { version: 2, policies: {}, allocations: {} }, version: 4 },
+    sps_schedule: {
+      value: [{
+        date: "7/10/2025",
+        stops: [{
+          id: "c1",
+          sid: "visit-2025-07-mdy-range",
+          type: "Monthly Service",
+          frequency: "Monthly",
+          status: "Completed",
+        }],
+      }],
+      version: 11,
+    },
+  };
+  globalThis.fetch = authenticatedStateFetch({ state });
+
+  const res = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { authorization: "Bearer owner-token" },
+    body: { action: "reconcile" },
+  }, res);
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.fromYear, 2025);
+  assert.equal(res.body.toYear, new Date().getUTCFullYear());
+  assert.equal(res.body.changed, false);
+});
+
 test("reconcile is idempotent and does not advance the ledger on a no-op", async () => {
   const existingAllocation = {
     status: "paid",

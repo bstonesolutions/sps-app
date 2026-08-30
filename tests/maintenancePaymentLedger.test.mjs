@@ -47,6 +47,12 @@ test("money and month normalization are deterministic", () => {
   assert.equal(moneyToCents("$1,229.95"), 122995);
   assert.equal(moneyToCents(2.345), 235);
   assert.equal(normalizeMonthKey("2026-04-30"), "2026-04");
+  assert.equal(normalizeMonthKey("07/10/2025"), "2025-07");
+  assert.equal(normalizeMonthKey("02/29/2024"), "2024-02");
+  assert.equal(normalizeMonthKey("02/29/2025"), "");
+  assert.equal(normalizeMonthKey("7/10/2025"), "2025-07");
+  assert.equal(normalizeMonthKey("8/3/2026"), "2026-08");
+  assert.equal(normalizeMonthKey("7/40/2025"), "");
   assert.equal(normalizeMonthKey("2026-13"), "");
 });
 
@@ -105,10 +111,10 @@ test("a protected v1 prepaid policy store upgrades without trusting the client m
     year: 2026,
   });
   assert.equal(cell(rows, "2026-05").payment.status, "prepaid");
-  assert.equal(cell(rows, "2026-07").payment.status, "missing", "the client mirror cannot extend protected coverage");
+  assert.equal(cell(rows, "2026-07").payment.status, "plan_history_needed", "the client mirror cannot extend protected coverage");
 });
 
-test("a single paid maintenance invoice covers its unambiguous transaction month", () => {
+test("a current recurring plan does not retroactively manufacture missing months", () => {
   const rows = buildMaintenancePaymentLedgerRows({
     clients: [recurringClient()],
     invoices: [invoice()],
@@ -119,7 +125,8 @@ test("a single paid maintenance invoice covers its unambiguous transaction month
   assert.equal(cell(rows, "2026-04").payment.status, "paid");
   assert.equal(cell(rows, "2026-04").payment.appliedCents, 22900);
   assert.equal(cell(rows, "2026-03").payment.status, "not_expected");
-  assert.equal(cell(rows, "2026-05").payment.status, "missing");
+  assert.equal(cell(rows, "2026-05").payment.status, "plan_history_needed");
+  assert.equal(cell(rows, "2026-05").payment.evidenceState, "plan_history_needed");
 });
 
 test("an open or partly settled invoice remains due or partial", () => {
@@ -160,7 +167,7 @@ test("an ambiguous multi-month amount is review instead of auto-paid", () => {
   });
   assert.equal(cell(rows, "2026-04").payment.status, "review");
   assert.match(cell(rows, "2026-04").payment.reasons.join(" "), /more than one maintenance month/i);
-  assert.equal(cell(rows, "2026-05").payment.status, "missing");
+  assert.equal(cell(rows, "2026-05").payment.status, "plan_history_needed");
 });
 
 test("explicit invoice months let one paid invoice cover several months", () => {
@@ -245,6 +252,7 @@ test("manual month allocation wins only while its invoice or payment source stil
   });
   assert.equal(cell(valid, "2026-05").payment.status, "paid");
   assert.equal(cell(valid, "2026-05").payment.manual, true);
+  assert.equal(cell(valid, "2026-06").payment.status, "plan_history_needed");
 
   const stale = buildMaintenancePaymentLedgerRows({
     clients: [recurringClient()],
@@ -346,7 +354,7 @@ test("a recurring schedule row can establish expectation for a legacy client wit
   });
   assert.equal(cell(rows, "2026-04").payment.status, "missing");
   assert.equal(cell(rows, "2026-04").schedule.expected, true);
-  assert.equal(cell(rows, "2026-05").payment.status, "not_expected");
+  assert.equal(cell(rows, "2026-05").payment.status, "plan_history_needed");
 });
 
 test("inactive and out-of-window months are not expected", () => {
@@ -463,6 +471,34 @@ test("a generic service invoice reconciles only with recurring visit evidence", 
   assert.equal(result.ledger.allocations["client-1"]["2025-07"].allocatedCents, 19000);
 });
 
+test("a generic service invoice recognizes the app's canonical MDY schedule date", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient()],
+    invoices: [invoice({
+      date: "2025-07-12",
+      total: 190,
+      lineItems: [{ desc: "Services", amount: 190 }],
+    })],
+    payments: [],
+    schedule: [{
+      date: "07/10/2025",
+      stops: [{
+        id: "client-1",
+        sid: "visit-2025-07-mdy",
+        type: "Monthly Service",
+        frequency: "Monthly",
+        status: "Completed",
+      }],
+    }],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2025,
+    toYear: 2025,
+  });
+
+  assert.equal(result.receipt.counts.assignedMonths, 1);
+  assert.equal(result.ledger.allocations["client-1"]["2025-07"].allocatedCents, 19000);
+});
+
 test("a linked source visit maps an otherwise generic invoice to its recurring service month", () => {
   const result = reconcileMaintenancePaymentHistory({
     clients: [recurringClient()],
@@ -544,7 +580,7 @@ test("reconciliation preserves an existing manual month allocation", () => {
   assert.equal(result.receipt.counts.assignedMonths, 0);
 });
 
-test("recurring evidence bounds expectations instead of manufacturing earlier missing months", () => {
+test("a real scheduled historical month remains expected without manufacturing adjacent missing months", () => {
   const rows = buildMaintenancePaymentLedgerRows({
     clients: [recurringClient()],
     invoices: [],
@@ -564,6 +600,8 @@ test("recurring evidence bounds expectations instead of manufacturing earlier mi
   assert.equal(cell(rows, "2025-03").payment.evidenceState, "not_expected");
   assert.equal(cell(rows, "2025-04").payment.status, "missing");
   assert.equal(cell(rows, "2025-04").payment.evidenceState, "no_matching_payment");
+  assert.equal(cell(rows, "2025-05").payment.status, "plan_history_needed");
+  assert.equal(cell(rows, "2025-05").payment.evidenceState, "plan_history_needed");
 });
 
 test("a recurring client without dated evidence does not manufacture a full year of missing months", () => {

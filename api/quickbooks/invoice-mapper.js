@@ -68,6 +68,7 @@ export function mapQuickBooksInvoice(invoice, options = {}) {
       taxable: isTaxableCode(detail.TaxCodeRef),
       kind: lateFee ? "lateFee" : itemNameToKind(detail.ItemRef?.name),
       isLateFee: lateFee,
+      ...(detail.ServiceDate ? { serviceDate: String(detail.ServiceDate) } : {}),
     };
   });
 
@@ -134,6 +135,12 @@ export function mapQuickBooksInvoice(invoice, options = {}) {
     qbCustomerId: inv.CustomerRef?.value || "",
     date: inv.TxnDate,
     dueDate: inv.DueDate,
+    ...(inv.PrivateNote ? { privateNote: String(inv.PrivateNote) } : {}),
+    ...(inv.CustomerMemo?.value
+      ? { memo: String(inv.CustomerMemo.value) }
+      : (typeof inv.CustomerMemo === "string" && inv.CustomerMemo
+        ? { memo: inv.CustomerMemo }
+        : {})),
     total,
     taxAmount: totalTax,
     subTotal: total - totalTax,
@@ -164,6 +171,9 @@ export function mapQuickBooksInvoice(invoice, options = {}) {
       qty: line.SalesItemLineDetail?.Qty || 1,
       rate: line.SalesItemLineDetail?.UnitPrice || 0,
       amount: line.Amount || 0,
+      ...(line.SalesItemLineDetail?.ServiceDate
+        ? { serviceDate: String(line.SalesItemLineDetail.ServiceDate) }
+        : {}),
     })),
   };
 }

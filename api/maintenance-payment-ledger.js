@@ -171,9 +171,9 @@ async function readMutationBaseline({ includeSchedule = false } = {}) {
 }
 
 function yearFromDateLike(value) {
-  const match = text(value).match(/^(\d{4})[-/]/);
-  if (!match) return null;
-  const year = Number(match[1]);
+  const monthKey = normalizeMonthKey(value);
+  if (!monthKey) return null;
+  const year = Number(monthKey.slice(0, 4));
   return Number.isSafeInteger(year) ? year : null;
 }
 

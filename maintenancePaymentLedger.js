@@ -33,11 +33,28 @@ export function moneyToCents(value) {
 }
 
 export function normalizeMonthKey(value) {
-  const match = text(value).match(/^(\d{4})-(\d{2})(?:-\d{2})?(?:T.*)?$/);
-  if (!match) return "";
-  const year = Number(match[1]);
-  const month = Number(match[2]);
+  const normalized = text(value);
+  const isoMatch = normalized.match(/^(\d{4})-(\d{2})(?:-\d{2})?(?:T.*)?$/);
+  if (isoMatch) {
+    const year = Number(isoMatch[1]);
+    const month = Number(isoMatch[2]);
+    if (year < 1900 || year > 2200 || month < 1 || month > 12) return "";
+    return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}`;
+  }
+
+  const mdyMatch = normalized.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!mdyMatch) return "";
+  const month = Number(mdyMatch[1]);
+  const day = Number(mdyMatch[2]);
+  const year = Number(mdyMatch[3]);
   if (year < 1900 || year > 2200 || month < 1 || month > 12) return "";
+  const candidate = new Date(Date.UTC(year, month - 1, day));
+  if (
+    day < 1
+    || candidate.getUTCFullYear() !== year
+    || candidate.getUTCMonth() !== month - 1
+    || candidate.getUTCDate() !== day
+  ) return "";
   return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}`;
 }
 
@@ -1076,15 +1093,26 @@ function completedStop(stop) {
   return stop?.completed === true || !!stop?.completedAt || ["complete", "completed", "done", "finished"].includes(status);
 }
 
-function clientExpectedInMonth(client, month, inferredStart = "") {
-  if (text(client?.status).toLowerCase() === "inactive" || client?.active === false) return false;
-  const start = normalizeMonthKey(client?.maintenanceStartDate || client?.serviceStartDate || client?.startDate)
-    || normalizeMonthKey(inferredStart);
-  const end = normalizeMonthKey(client?.maintenanceEndDate || client?.serviceEndDate || client?.endDate);
-  if (!start) return false;
-  if (start && month < start) return false;
-  if (end && month > end) return false;
-  return recurringClient(client);
+function clientPlanExpectationForMonth(client, month, { inferredStart = "", exactEvidence = false } = {}) {
+  if (exactEvidence) return "expected";
+
+  const explicitStart = normalizeMonthKey(client?.maintenanceStartDate || client?.serviceStartDate || client?.startDate);
+  const explicitEnd = normalizeMonthKey(client?.maintenanceEndDate || client?.serviceEndDate || client?.endDate);
+  if (explicitStart && explicitEnd) {
+    return month >= explicitStart && month <= explicitEnd ? "expected" : "not_expected";
+  }
+  if (explicitStart && month < explicitStart) return "not_expected";
+  if (explicitEnd && month > explicitEnd) return "not_expected";
+
+  const evidenceStart = normalizeMonthKey(inferredStart);
+  if (!evidenceStart || month < evidenceStart) return "not_expected";
+
+  const now = new Date();
+  const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  if (month < currentMonth) return "plan_history_needed";
+
+  const inactive = text(client?.status).toLowerCase() === "inactive" || client?.active === false;
+  return !inactive && recurringClient(client) ? "expected" : "not_expected";
 }
 
 function statusFromInvoice(invoice, appliedFromPaymentsCents = 0) {
@@ -1290,8 +1318,21 @@ export function buildMaintenancePaymentLedgerRows({
     const monthRows = months.map((month) => {
       const manual = ledger.allocations?.[clientId]?.[month] || null;
       const scheduled = scheduleByClientAndMonth.get(`${clientId}|${month}`);
-      const expected = clientExpectedInMonth(client, month, inferredStart) || !!scheduled;
       const expectedCents = manual?.expectedCents ?? baseExpectedCents;
+      const policyCoversMonth = !!(
+        policy && monthsBetween(policy.coveredFrom, policy.coveredThrough).includes(month)
+      );
+      const invoiceEvidence = clientInvoices.some((invoice) => !!automaticCandidateForMonth({
+        invoice,
+        month,
+        expectedCents,
+        paymentIndex,
+      }));
+      const expectation = clientPlanExpectationForMonth(client, month, {
+        inferredStart,
+        exactEvidence: !!manual || !!scheduled || policyCoversMonth || invoiceEvidence,
+      });
+      const expected = expectation === "expected";
       const payment = summarizeCell({
         expected,
         expectedCents,
@@ -1301,13 +1342,19 @@ export function buildMaintenancePaymentLedgerRows({
         clientInvoices,
         indexes: { invoices: invoiceIndex, payments: paymentIndex },
       });
-      payment.evidenceState = payment.status === "not_expected"
+      if (expectation === "plan_history_needed" && payment.status === "not_expected") {
+        payment.status = "plan_history_needed";
+        payment.reasons = ["A dated maintenance plan or recurring visit is needed before this month can be treated as unpaid."];
+      }
+      payment.evidenceState = payment.status === "plan_history_needed"
+        ? "plan_history_needed"
+        : (payment.status === "not_expected"
         ? "not_expected"
         : (payment.status === "review"
           ? "unallocated_paid_history"
           : (["paid", "prepaid", "waived"].includes(payment.status)
             ? "covered"
-            : (["due", "partial"].includes(payment.status) ? "matching_invoice_open" : "no_matching_payment")));
+            : (["due", "partial"].includes(payment.status) ? "matching_invoice_open" : "no_matching_payment"))));
       const scheduleState = Array.isArray(schedule) ? {
         expected,
         visitCount: scheduled?.visitCount || 0,

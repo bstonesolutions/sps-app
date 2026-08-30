@@ -203,3 +203,43 @@ test("derives the editable rate from QuickBooks TotalTax when component rates di
   assert.equal(result.taxAmount, 9.50);
   assert.equal(result.taxRate, 9.5);
 });
+
+test("preserves QuickBooks maintenance evidence without changing invoice amounts", () => {
+  const invoice = {
+    ...baseInvoice([{
+      Id: "line-1",
+      Amount: 90,
+      DetailType: "SalesItemLineDetail",
+      Description: "Monthly maintenance",
+      SalesItemLineDetail: {
+        ItemRef: { value: "8", name: "Services" },
+        Qty: 1,
+        UnitPrice: 90,
+        TaxCodeRef: { value: "NON" },
+        ServiceDate: "2025-07-10",
+      },
+    }]),
+    PrivateNote: "Internal maintenance allocation for July 2025",
+    CustomerMemo: { value: "July 2025 pond maintenance" },
+    TotalAmt: 90,
+    Balance: 0,
+    TxnTaxDetail: { TotalTax: 0 },
+  };
+
+  const result = mapQuickBooksInvoice(invoice);
+
+  assert.equal(result.privateNote, "Internal maintenance allocation for July 2025");
+  assert.equal(result.memo, "July 2025 pond maintenance");
+  assert.equal(result.lineItems[0].serviceDate, "2025-07-10");
+  assert.equal(result.lines[0].serviceDate, "2025-07-10");
+  assert.equal(result.total, 90);
+  assert.equal(result.balance, 0);
+  assert.equal(result.status, "Paid");
+});
+
+test("does not fabricate QuickBooks maintenance evidence when it is absent", () => {
+  const result = mapQuickBooksInvoice(baseInvoice([]));
+
+  assert.equal(Object.hasOwn(result, "privateNote"), false);
+  assert.equal(Object.hasOwn(result, "memo"), false);
+});

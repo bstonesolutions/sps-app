@@ -23,6 +23,7 @@ const STATUS = {
   waived: { label: "Waived", short: "Waived" },
   refunded: { label: "Refunded", short: "Refund" },
   upcoming: { label: "Upcoming", short: "Upcoming" },
+  plan_history_needed: { label: "Plan history needed", short: "Plan history" },
   not_expected: { label: "Not expected", short: "" },
 };
 
