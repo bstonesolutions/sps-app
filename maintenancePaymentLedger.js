@@ -459,15 +459,30 @@ function normalizedName(value) {
   return text(value).toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+const QUICKBOOKS_ADDRESS_SUFFIX = /^(?:\d+[a-z]?(?:[-/]\d+[a-z]?)?\s+).+\b(?:st(?:reet)?|rd|road|ave(?:nue)?|blvd|boulevard|dr|drive|ln|lane|ct|court|cir|circle|way|trl|trail|pike|hwy|highway|pl|place|ter|terrace|pkwy|parkway|run|loop|row|path)\.?$/i;
+
+function quickBooksClientNameBeforeAddress(value) {
+  // QuickBooks display names can append a property address. Strip only the
+  // explicit spaced separator and a street-shaped suffix, never arbitrary text.
+  const match = text(value).match(/^(.+?)\s+-\s+(.+)$/);
+  if (!match || !QUICKBOOKS_ADDRESS_SUFFIX.test(match[2].trim())) return "";
+  return normalizedName(match[1]);
+}
+
 function invoiceClientId(invoice, clients, uniqueClientByName) {
   const direct = text(invoice?.clientId);
   if (direct && clients.some((client) => clientIdOf(client) === direct)) return direct;
   const qbCustomerId = text(invoice?.qbCustomerId);
   if (qbCustomerId) {
-    const match = clients.find((client) => text(client?.qbId || client?.qbCustomerId) === qbCustomerId);
-    if (match) return clientIdOf(match);
+    const matches = clients.filter((client) => text(client?.qbId || client?.qbCustomerId) === qbCustomerId);
+    if (matches.length === 1) return clientIdOf(matches[0]);
+    if (matches.length > 1) return "";
   }
-  return uniqueClientByName.get(normalizedName(invoice?.clientName || invoice?.customerName)) || "";
+  const invoiceClientName = invoice?.clientName || invoice?.customerName;
+  const exact = uniqueClientByName.get(normalizedName(invoiceClientName));
+  if (exact) return exact;
+  const beforeAddress = quickBooksClientNameBeforeAddress(invoiceClientName);
+  return beforeAddress ? (uniqueClientByName.get(beforeAddress) || "") : "";
 }
 
 function invoiceTotalCents(invoice) {
@@ -643,6 +658,47 @@ function explicitInvoiceAllocations(invoice) {
   return months.map((month, index) => ({ month, amountCents: allocationShare(total, months.length, index) }));
 }
 
+function explicitDatedLineAllocations(invoice) {
+  const rawLines = Array.isArray(invoice?.lines) && invoice.lines.length
+    ? invoice.lines
+    : (Array.isArray(invoice?.lineItems) ? invoice.lineItems : []);
+  if (!rawLines.length) return [];
+
+  const byMonth = new Map();
+  let allocatedCents = 0;
+  const invoiceCents = invoiceTotalCents(invoice);
+  if (!(invoiceCents > 0)) return [];
+  for (const line of rawLines) {
+    const month = normalizeMonthKey(
+      line?.maintenanceMonth
+        || line?.serviceMonth
+        || line?.serviceDate
+        || line?.servicePeriodStart
+        || line?.serviceStartDate,
+    );
+    const hasDirectAmount = hasOwn(line || {}, "amount");
+    const rawDirectAmount = typeof line?.amount === "number"
+      ? line.amount
+      : Number(text(line?.amount).replace(/[$,\s]/g, ""));
+    if (hasDirectAmount && !Number.isFinite(rawDirectAmount)) return [];
+    const directAmount = hasDirectAmount ? Math.round(rawDirectAmount * 100) : null;
+    const qty = Number(line?.qty ?? line?.quantity ?? 1);
+    const unitPrice = Number(line?.unitPrice ?? line?.rate ?? line?.price);
+    const calculatedAmount = Number.isFinite(qty) && Number.isFinite(unitPrice)
+      ? Math.round(qty * unitPrice * 100)
+      : null;
+    const amountCents = directAmount == null ? calculatedAmount : directAmount;
+    if (!month || !Number.isSafeInteger(amountCents) || amountCents <= 0) return [];
+    byMonth.set(month, (byMonth.get(month) || 0) + amountCents);
+    allocatedCents += amountCents;
+  }
+
+  if (byMonth.size < 2 || allocatedCents !== invoiceCents) return [];
+  return [...byMonth.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([month, amountCents]) => ({ month, amountCents }));
+}
+
 function invoiceLooksLikeMaintenance(invoice, { clientId = "", scheduleEvidence = null } = {}) {
   if (explicitInvoiceAllocations(invoice).length) return true;
   const description = invoiceDescription(invoice);
@@ -723,10 +779,22 @@ function classifyHistoricalMaintenanceInvoice({ invoice, clientId, client, sched
       months: explicit.map((entry) => entry.month),
     };
   }
-
   const description = invoiceDescription(invoice);
   if (NON_MAINTENANCE_WORDING.test(description)) {
     return { kind: "skip", reason: "repair, product, equipment, or material wording", months: [] };
+  }
+
+  const maintenanceFlag = invoice?.recurringMaintenance === true
+    || text(invoice?.billingMode).toLowerCase().includes("maintenance");
+  const maintenanceWording = maintenanceFlag || MAINTENANCE_WORDING.test(description);
+  const datedLines = explicitDatedLineAllocations(invoice);
+  if (maintenanceWording && datedLines.length) {
+    return {
+      kind: "candidate",
+      reason: "explicit-line-service-months",
+      allocations: datedLines,
+      months: datedLines.map((entry) => entry.month),
+    };
   }
 
   const linkedIds = invoiceLinkedVisitIds(invoice);
@@ -756,9 +824,6 @@ function classifyHistoricalMaintenanceInvoice({ invoice, clientId, client, sched
   }
   const transactionMonth = invoiceTransactionMonth(invoice);
   const month = serviceMonths[0] || transactionMonth;
-  const maintenanceFlag = invoice?.recurringMaintenance === true
-    || text(invoice?.billingMode).toLowerCase().includes("maintenance");
-  const maintenanceWording = maintenanceFlag || MAINTENANCE_WORDING.test(description);
   const genericService = GENERIC_SERVICE_WORDING.test(description);
 
   if (maintenanceWording) {
@@ -778,12 +843,43 @@ function classifyHistoricalMaintenanceInvoice({ invoice, clientId, client, sched
     };
   }
 
-  if (genericService && month && scheduleEvidence.byClientAndMonth.has(`${clientId}|${month}`)) {
+  const hasRecurringVisit = !!(
+    month && scheduleEvidence.byClientAndMonth.has(`${clientId}|${month}`)
+  );
+  const genericRecurringPrepayment = !!(
+    genericService
+      && recurringClient(client)
+      && suspiciousMultiMonthInvoice(invoice, expectedMonthlyCents(client), serviceMonths.length === 1)
+  );
+  if (genericRecurringPrepayment) {
+    return {
+      kind: "ambiguous",
+      reason: "invoice may be a multi-month prepayment but has no explicit covered months",
+      months: month ? [month] : [],
+    };
+  }
+  const genericRecurringInvoice = !!(
+    genericService
+      && recurringClient(client)
+      && expectedMonthlyCents(client) > 0
+      && totalCents === expectedMonthlyCents(client)
+      && !suspiciousMultiMonthInvoice(invoice, expectedMonthlyCents(client), serviceMonths.length === 1)
+  );
+  if (genericService && month && (hasRecurringVisit || genericRecurringInvoice)) {
     return {
       kind: "candidate",
-      reason: "generic-service-with-recurring-visit",
+      reason: hasRecurringVisit
+        ? "generic-service-with-recurring-visit"
+        : "generic-service-for-recurring-client",
       months: [month],
       allocations: [{ month, amountCents: totalCents }],
+    };
+  }
+  if (genericService && recurringClient(client) && month) {
+    return {
+      kind: "ambiguous",
+      reason: "generic service amount does not match the saved monthly maintenance price",
+      months: [month],
     };
   }
   return { kind: "skip", reason: "no maintenance evidence", months: month ? [month] : [] };

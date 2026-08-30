@@ -409,6 +409,86 @@ test("historical maintenance rates do not block a one-month reconciliation", () 
   assert.equal(result.ledger.allocations["client-1"]["2024-06"].allocatedCents, 17500);
 });
 
+test("a unique QuickBooks client name with an appended street address reconciles safely", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient({
+      id: "client-eleanor",
+      name: "Eleanor Michinoc",
+      qbId: "",
+    })],
+    invoices: [invoice({
+      id: "invoice-eleanor",
+      qbId: "qb-invoice-eleanor",
+      clientId: "",
+      qbCustomerId: "",
+      clientName: "Eleanor Michinoc - 604 Whiteland Hunt Rd.",
+      date: "2025-06-15",
+    })],
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2025,
+    toYear: 2025,
+  });
+
+  assert.equal(result.receipt.counts.unmatchedClientInvoices, 0);
+  assert.equal(result.receipt.counts.assignedMonths, 1);
+  assert.equal(result.ledger.allocations["client-eleanor"]["2025-06"].status, "paid");
+});
+
+test("an appended address does not bypass duplicate client-name protection", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [
+      recurringClient({ id: "client-eleanor-a", name: "Eleanor Michinoc", qbId: "" }),
+      recurringClient({ id: "client-eleanor-b", name: "Eleanor Michinoc", qbId: "" }),
+    ],
+    invoices: [invoice({
+      id: "invoice-eleanor",
+      qbId: "qb-invoice-eleanor",
+      clientId: "",
+      qbCustomerId: "",
+      clientName: "Eleanor Michinoc - 604 Whiteland Hunt Rd.",
+      date: "2025-06-15",
+    })],
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2025,
+    toYear: 2025,
+  });
+
+  assert.equal(result.receipt.counts.unmatchedClientInvoices, 1);
+  assert.equal(result.receipt.counts.assignedMonths, 0);
+  assert.deepEqual(result.ledger.allocations, {});
+});
+
+test("a non-address QuickBooks name suffix is not stripped for client matching", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient({
+      id: "client-eleanor",
+      name: "Eleanor Michinoc",
+      qbId: "",
+    })],
+    invoices: [invoice({
+      id: "invoice-eleanor",
+      qbId: "qb-invoice-eleanor",
+      clientId: "",
+      qbCustomerId: "",
+      clientName: "Eleanor Michinoc - Commercial Project",
+      date: "2025-06-15",
+    })],
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2025,
+    toYear: 2025,
+  });
+
+  assert.equal(result.receipt.counts.unmatchedClientInvoices, 1);
+  assert.equal(result.receipt.counts.assignedMonths, 0);
+  assert.deepEqual(result.ledger.allocations, {});
+});
+
 test("explicit historical month lists safely reconcile a multi-month invoice", () => {
   const result = reconcileMaintenancePaymentHistory({
     clients: [recurringClient()],
@@ -428,6 +508,92 @@ test("explicit historical month lists safely reconcile a multi-month invoice", (
   assert.equal(result.ledger.allocations["client-1"]["2025-05"].allocatedCents, 22900);
 });
 
+test("dated QuickBooks maintenance lines allocate exact amounts across multiple months", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient()],
+    invoices: [invoice({
+      date: "2025-04-01",
+      total: 404,
+      notes: "Spring maintenance prepayment",
+      lineItems: [
+        { desc: "Monthly maintenance", serviceDate: "2025-04-10", amount: 175 },
+        { desc: "Monthly maintenance", serviceDate: "2025-05-10", amount: 229 },
+      ],
+      lines: [
+        { description: "Monthly maintenance", serviceDate: "2025-04-10", amount: 175 },
+        { description: "Monthly maintenance", serviceDate: "2025-05-10", amount: 229 },
+      ],
+    })],
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2025,
+    toYear: 2025,
+  });
+
+  assert.equal(result.receipt.counts.assignedMonths, 2);
+  assert.equal(result.receipt.counts.ambiguousInvoices, 0);
+  assert.equal(result.ledger.allocations["client-1"]["2025-04"].allocatedCents, 17500);
+  assert.equal(result.ledger.allocations["client-1"]["2025-05"].allocatedCents, 22900);
+});
+
+test("dated lines with an invoice-total mismatch stay in owner review", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient()],
+    invoices: [invoice({
+      date: "2025-04-01",
+      total: 428.24,
+      notes: "Spring maintenance prepayment including tax",
+      lineItems: [
+        { desc: "Monthly maintenance", serviceDate: "2025-04-10", amount: 175 },
+        { desc: "Monthly maintenance", serviceDate: "2025-05-10", amount: 229 },
+      ],
+      lines: [
+        { description: "Monthly maintenance", serviceDate: "2025-04-10", amount: 175 },
+        { description: "Monthly maintenance", serviceDate: "2025-05-10", amount: 229 },
+      ],
+    })],
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2025,
+    toYear: 2025,
+  });
+
+  assert.equal(result.receipt.counts.assignedMonths, 0);
+  assert.equal(result.receipt.counts.ambiguousInvoices, 1);
+  assert.match(result.receipt.ambiguousInvoices[0].reason, /more than one service month/i);
+  assert.deepEqual(result.ledger.allocations, {});
+});
+
+test("dated non-maintenance lines never become maintenance coverage", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient()],
+    invoices: [invoice({
+      date: "2025-04-01",
+      total: 404,
+      notes: "Equipment repair project",
+      lineItems: [
+        { desc: "Pump repair", serviceDate: "2025-04-10", amount: 175 },
+        { desc: "Replacement material", serviceDate: "2025-05-10", amount: 229 },
+      ],
+      lines: [
+        { description: "Pump repair", serviceDate: "2025-04-10", amount: 175 },
+        { description: "Replacement material", serviceDate: "2025-05-10", amount: 229 },
+      ],
+    })],
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2025,
+    toYear: 2025,
+  });
+
+  assert.equal(result.receipt.counts.assignedMonths, 0);
+  assert.equal(result.receipt.counts.ambiguousInvoices, 0);
+  assert.deepEqual(result.ledger.allocations, {});
+});
+
 test("a likely prepayment without explicit months remains auditable and unallocated", () => {
   const result = reconcileMaintenancePaymentHistory({
     clients: [recurringClient()],
@@ -444,7 +610,7 @@ test("a likely prepayment without explicit months remains auditable and unalloca
   assert.deepEqual(result.ledger.allocations, {});
 });
 
-test("a generic service invoice reconciles only with recurring visit evidence", () => {
+test("a generic service invoice reconciles with recurring visit evidence even when the amount changed", () => {
   const result = reconcileMaintenancePaymentHistory({
     clients: [recurringClient()],
     invoices: [invoice({
@@ -469,6 +635,90 @@ test("a generic service invoice reconciles only with recurring visit evidence", 
   });
   assert.equal(result.receipt.counts.assignedMonths, 1);
   assert.equal(result.ledger.allocations["client-1"]["2025-07"].allocatedCents, 19000);
+});
+
+test("a generic recurring-service invoice establishes coverage without SPS visit history", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient()],
+    invoices: [invoice({
+      date: "2024-07-12",
+      total: 229,
+      lineItems: [{ desc: "Services", amount: 229 }],
+    })],
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2024,
+    toYear: 2024,
+  });
+
+  assert.equal(result.receipt.counts.assignedMonths, 1);
+  assert.equal(result.ledger.allocations["client-1"]["2024-07"].allocatedCents, 22900);
+  assert.equal(result.receipt.clients[0].assignedMonths[0], "2024-07");
+});
+
+test("a generic service amount that differs from the saved maintenance price stays in review without SPS visit evidence", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient()],
+    invoices: [invoice({
+      date: "2024-07-12",
+      total: 190,
+      lineItems: [{ desc: "Services", amount: 190 }],
+    })],
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2024,
+    toYear: 2024,
+  });
+
+  assert.equal(result.receipt.counts.assignedMonths, 0);
+  assert.equal(result.receipt.counts.ambiguousInvoices, 1);
+  assert.match(result.receipt.ambiguousInvoices[0].reason, /does not match/i);
+  assert.deepEqual(result.ledger.allocations, {});
+});
+
+test("duplicate QuickBooks customer ids never auto-assign an invoice by list order", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [
+      recurringClient({ id: "client-a", name: "Jamie Price" }),
+      recurringClient({ id: "client-b", name: "Jamie Price Second Property" }),
+    ],
+    invoices: [invoice({
+      clientId: "",
+      qbCustomerId: "qb-customer-1",
+      clientName: "Jamie Price",
+    })],
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2026,
+    toYear: 2026,
+  });
+
+  assert.equal(result.receipt.counts.unmatchedClientInvoices, 1);
+  assert.equal(result.receipt.counts.assignedMonths, 0);
+  assert.deepEqual(result.ledger.allocations, {});
+});
+
+test("a large generic recurring-service invoice without explicit months remains unallocated", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient()],
+    invoices: [invoice({
+      date: "2024-01-12",
+      total: 2290,
+      lineItems: [{ desc: "Services", amount: 2290 }],
+    })],
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2024,
+    toYear: 2024,
+  });
+
+  assert.equal(result.receipt.counts.assignedMonths, 0);
+  assert.equal(result.receipt.counts.ambiguousInvoices, 1);
+  assert.match(result.receipt.ambiguousInvoices[0].reason, /multi-month prepayment/i);
 });
 
 test("a generic service invoice recognizes the app's canonical MDY schedule date", () => {

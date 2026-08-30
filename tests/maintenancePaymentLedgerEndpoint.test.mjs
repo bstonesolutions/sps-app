@@ -188,6 +188,38 @@ test("assign rejects an invoice linked to a different client without writing", a
   assert.equal(writes, 0);
 });
 
+test("assign accepts a unique QuickBooks client name with an appended street address", async () => {
+  const state = {
+    sps_clients: {
+      value: [{ ...canonicalClient, qbId: "", name: "Eleanor Michinoc" }],
+      version: 3,
+    },
+    sps_invoices: {
+      value: [{
+        ...canonicalInvoice,
+        clientId: "",
+        qbCustomerId: "",
+        clientName: "Eleanor Michinoc - 604 Whiteland Hunt Rd.",
+      }],
+      version: 8,
+    },
+    sps_maintenance_billing: { value: { version: 2, policies: {}, allocations: {} }, version: 4 },
+  };
+  let batch = null;
+  globalThis.fetch = authenticatedStateFetch({ state, onBatch(operations) { batch = operations; } });
+
+  const res = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { authorization: "Bearer owner-token" },
+    body: { action: "assign", clientId: "c1", invoiceId: "iv1", monthKeys: ["2026-08"] },
+  }, res);
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const written = JSON.parse(batch.find((operation) => operation.key === "sps_maintenance_billing").value);
+  assert.equal(written.allocations.c1["2026-08"].status, "due");
+});
+
 test("accounting staff can waive selected months without inventing invoice evidence", async () => {
   const state = {
     sps_clients: { value: [canonicalClient], version: 2 },

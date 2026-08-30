@@ -58,6 +58,14 @@ function normalizedName(value) {
   return text(value).toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+const QUICKBOOKS_ADDRESS_SUFFIX = /^(?:\d+[a-z]?(?:[-/]\d+[a-z]?)?\s+).+\b(?:st(?:reet)?|rd|road|ave(?:nue)?|blvd|boulevard|dr|drive|ln|lane|ct|court|cir|circle|way|trl|trail|pike|hwy|highway|pl|place|ter|terrace|pkwy|parkway|run|loop|row|path)\.?$/i;
+
+function quickBooksClientNameBeforeAddress(value) {
+  const match = text(value).match(/^(.+?)\s+-\s+(.+)$/);
+  if (!match || !QUICKBOOKS_ADDRESS_SUFFIX.test(match[2].trim())) return "";
+  return normalizedName(match[1]);
+}
+
 function clientIdOf(client) {
   return cleanId(client?.id || client?.clientId);
 }
@@ -102,7 +110,10 @@ function invoiceBelongsToClient(invoice, client, clients, requestedClientId) {
     }
   }
 
-  const invoiceName = normalizedName(invoice?.clientName || invoice?.customerName);
+  const rawInvoiceName = invoice?.clientName || invoice?.customerName;
+  const exactInvoiceName = normalizedName(rawInvoiceName);
+  const addressBaseName = quickBooksClientNameBeforeAddress(rawInvoiceName);
+  const invoiceName = exactInvoiceName === clientNameOf(client) ? exactInvoiceName : addressBaseName;
   if (!invoiceName || clientNameOf(client) !== invoiceName) return false;
   const nameMatches = clients.filter((candidate) => isRecord(candidate) && clientNameOf(candidate) === invoiceName);
   return nameMatches.length === 1 && clientIdOf(nameMatches[0]) === requestedClientId;
