@@ -86,20 +86,43 @@ function matchesForField(invoices, field, value) {
   return invoices.filter((invoice) => isRecord(invoice) && text(invoice[field]) === value);
 }
 
-function canonicalInvoice(invoices, invoiceId) {
-  for (const field of ["id", "qbId", "number"]) {
-    const matches = matchesForField(invoices, field, invoiceId);
-    if (matches.length === 1) return { invoice: matches[0] };
-    if (matches.length > 1) return { error: "duplicate" };
+function invoiceReference(value) {
+  const raw = cleanId(value);
+  if (!raw) return null;
+  const namespaced = raw.match(/^(sps|qb):(.+)$/i);
+  if (!namespaced) return { namespace: "legacy", id: raw };
+  const id = cleanId(namespaced[2]);
+  return id ? { namespace: namespaced[1].toLowerCase(), id } : null;
+}
+
+function matchesForFields(invoices, fields, value) {
+  const matches = fields.flatMap((field) => matchesForField(invoices, field, value));
+  return [...new Set(matches)];
+}
+
+function canonicalInvoice(invoices, rawInvoiceReference) {
+  const reference = invoiceReference(rawInvoiceReference);
+  if (!reference) return { error: "missing" };
+  let matches = [];
+  if (reference.namespace === "sps") {
+    matches = matchesForFields(invoices, ["id"], reference.id);
+  } else if (reference.namespace === "qb") {
+    matches = matchesForFields(invoices, ["qbId", "Id"], reference.id);
+  } else {
+    // Older builds sent a bare ID. Preserve that path only when the value
+    // resolves to one canonical invoice across every supported namespace.
+    matches = matchesForFields(invoices, ["id", "qbId", "Id", "number", "DocNumber"], reference.id);
   }
+  if (matches.length === 1) return { invoice: matches[0] };
+  if (matches.length > 1) return { error: "duplicate" };
   return { error: "missing" };
 }
 
 function invoiceBelongsToClient(invoice, client, clients, requestedClientId) {
-  const directClientId = cleanId(invoice?.clientId);
+  const directClientId = cleanId(invoice?.clientId || invoice?.customerId);
   if (directClientId) return directClientId === requestedClientId;
 
-  const invoiceQbCustomerId = cleanId(invoice?.qbCustomerId);
+  const invoiceQbCustomerId = cleanId(invoice?.qbCustomerId || invoice?.CustomerRef?.value);
   if (invoiceQbCustomerId) {
     const qbMatches = clients.filter((candidate) => (
       isRecord(candidate)
@@ -110,7 +133,7 @@ function invoiceBelongsToClient(invoice, client, clients, requestedClientId) {
     }
   }
 
-  const rawInvoiceName = invoice?.clientName || invoice?.customerName;
+  const rawInvoiceName = invoice?.clientName || invoice?.customerName || invoice?.CustomerRef?.name;
   const exactInvoiceName = normalizedName(rawInvoiceName);
   const addressBaseName = quickBooksClientNameBeforeAddress(rawInvoiceName);
   const invoiceName = exactInvoiceName === clientNameOf(client) ? exactInvoiceName : addressBaseName;
@@ -120,15 +143,16 @@ function invoiceBelongsToClient(invoice, client, clients, requestedClientId) {
 }
 
 function canonicalInvoiceTotalCents(invoice) {
-  const candidate = invoice?.total ?? invoice?.amount ?? invoice?.subtotal;
+  const candidate = invoice?.total ?? invoice?.amount ?? invoice?.subtotal ?? invoice?.TotalAmt;
   return Math.max(0, moneyToCents(candidate));
 }
 
 function canonicalInvoiceStatus(invoice, totalCents) {
   const status = text(invoice?.status).toLowerCase();
   if (status === "paid" || text(invoice?.paidDate)) return "paid";
-  if (hasOwn(invoice, "balance")) {
-    const balanceCents = Math.max(0, moneyToCents(invoice.balance));
+  if (hasOwn(invoice, "balance") || hasOwn(invoice, "Balance")) {
+    const balance = hasOwn(invoice, "balance") ? invoice.balance : invoice.Balance;
+    const balanceCents = Math.max(0, moneyToCents(balance));
     if (balanceCents === 0) return "paid";
     if (balanceCents < totalCents) return "partial";
   }
@@ -144,16 +168,16 @@ function sourceForInvoice(invoice) {
   return {
     kind: "invoice",
     invoiceId: text(invoice?.id),
-    qbInvoiceId: text(invoice?.qbId),
-    invoiceNumber: text(invoice?.number),
+    qbInvoiceId: text(invoice?.qbId || invoice?.Id),
+    invoiceNumber: text(invoice?.number || invoice?.DocNumber),
   };
 }
 
 function invoiceSummary(invoice) {
   return {
     id: text(invoice?.id),
-    qbId: text(invoice?.qbId),
-    number: text(invoice?.number),
+    qbId: text(invoice?.qbId || invoice?.Id),
+    number: text(invoice?.number || invoice?.DocNumber),
     totalCents: canonicalInvoiceTotalCents(invoice),
   };
 }

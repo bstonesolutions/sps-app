@@ -37,9 +37,63 @@ const hexA = (hex, alpha) => {
 const formatMoney = (cents, hidden = false) => hidden
   ? "Hidden"
   : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format((Number(cents) || 0) / 100);
-const invoiceAmountCents = (invoice) => moneyToCents(invoice?.total ?? invoice?.amount ?? invoice?.subtotal);
-const displayStatusForMonth = (cell, monthKey) => {
-  return maintenancePaymentDisplayStatus(cell?.payment?.status, monthKey);
+const invoiceAmountCents = (invoice) => moneyToCents(invoice?.total ?? invoice?.amount ?? invoice?.subtotal ?? invoice?.TotalAmt);
+const invoiceLinkIdentity = (invoice) => {
+  const spsInvoiceId = text(invoice?.id);
+  if (spsInvoiceId) return `sps:${spsInvoiceId}`;
+  const qbInvoiceId = text(invoice?.qbId || invoice?.Id);
+  return qbInvoiceId ? `qb:${qbInvoiceId}` : "";
+};
+const invoiceEvidenceIdentity = (invoice, index = 0) => {
+  const spsInvoiceId = text(invoice?.invoiceId);
+  if (spsInvoiceId) return `sps:${spsInvoiceId}`;
+  const qbInvoiceId = text(invoice?.qbInvoiceId);
+  if (qbInvoiceId) return `qb:${qbInvoiceId}`;
+  return `number:${text(invoice?.invoiceNumber) || "unnumbered"}:${text(invoice?.invoiceMonth) || "unknown"}:${index}`;
+};
+const invoiceEvidenceSourceLabel = (invoice) => (
+  invoice?.qbInvoiceId ? "QuickBooks" : (invoice?.invoiceId ? "SPS record" : "Invoice record")
+);
+const displayStatusForMonth = (cell, monthKey) => maintenancePaymentDisplayStatus(cell?.payment?.status, monthKey);
+const coverageLabel = (status) => STATUS[status]?.label || status;
+const invoiceEvidenceLabel = (cell, compact = false) => {
+  const monthInvoiceEvidence = Array.isArray(cell?.invoiceEvidence) ? cell.invoiceEvidence : [];
+  if (monthInvoiceEvidence.length) {
+    const linkedEvidence = monthInvoiceEvidence.filter((invoice) => invoice?.linkedToCoverage);
+    const statusEvidence = linkedEvidence.length ? linkedEvidence : monthInvoiceEvidence;
+    const statuses = new Set(statusEvidence.map((invoice) => invoice?.status).filter(Boolean));
+    const hasPaid = statusEvidence.some((invoice) => invoice?.status === "paid");
+    const hasPartial = statusEvidence.some((invoice) => invoice?.status === "partial");
+    const hasOpen = statusEvidence.some((invoice) => invoice?.status === "due");
+    const unlinkedEvidence = monthInvoiceEvidence.filter((invoice) => !invoice?.linkedToCoverage);
+    const hasReview = unlinkedEvidence.some((invoice) => invoice?.coverageKind === "review");
+    const onlyOtherWork = unlinkedEvidence.length === monthInvoiceEvidence.length
+      && unlinkedEvidence.every((invoice) => invoice?.coverageKind === "other_work");
+    if (statuses.size > 1) {
+      const evidenceCount = statusEvidence.length;
+      return `${evidenceCount} ${linkedEvidence.length ? "linked invoices" : "invoices"} · mixed status`;
+    }
+    const base = hasPaid ? "Paid invoice" : hasPartial ? "Partly paid invoice" : hasOpen ? "Open invoice" : "Invoice found";
+    if (hasReview) return compact ? `${base} · needs match` : `${base} · needs maintenance match`;
+    if (onlyOtherWork) return compact ? `${base} · other work` : `${base} · other work, not maintenance`;
+    return monthInvoiceEvidence.length > 1 ? `${base} · ${monthInvoiceEvidence.length} records` : base;
+  }
+  const hasPrepayment = (cell?.payment?.sources || []).some((source) => source?.kind === "prepaid");
+  const hasLinkedInvoice = (cell?.payment?.sources || []).some((source) => (
+    source?.kind === "invoice" || source?.invoiceId || source?.qbInvoiceId || source?.invoiceNumber
+  ));
+  if (hasPrepayment) return "Prepayment coverage";
+  if (hasLinkedInvoice) return "Linked invoice";
+  return compact ? "No invoice" : "No invoice evidence";
+};
+const visitEvidenceLabel = (cell, compact = false) => {
+  if (!cell?.schedule) return compact ? "Visit data unavailable" : "SPS visit data unavailable";
+  const visitCount = Number(cell.schedule.visitCount || 0);
+  const completedCount = Number(cell.schedule.completedCount || 0);
+  if (!visitCount) return "No SPS visit data";
+  return compact
+    ? `${completedCount}/${visitCount} SPS visits`
+    : `${completedCount} of ${visitCount} SPS visits complete`;
 };
 const statusMatchesView = (status, view) => {
   if (view === "all") return true;
@@ -85,21 +139,32 @@ function clientInvoicesFor(row, invoices, clients) {
   const client = clients.find((candidate) => String(candidate?.id) === String(row.clientId));
   const clientName = normalizedName(row.clientName);
   return (invoices || []).filter((invoice) => {
-    if (String(invoice?.clientId || "") === String(row.clientId)) return true;
-    if (client?.qbId && String(invoice?.qbCustomerId || "") === String(client.qbId)) return true;
-    return normalizedName(invoice?.clientName || invoice?.customerName) === clientName;
-  }).sort((left, right) => String(right?.date || right?.createdAt || "").localeCompare(String(left?.date || left?.createdAt || "")));
+    if (String(invoice?.clientId || invoice?.customerId || "") === String(row.clientId)) return true;
+    if (client?.qbId && String(invoice?.qbCustomerId || invoice?.CustomerRef?.value || "") === String(client.qbId)) return true;
+    return normalizedName(invoice?.clientName || invoice?.customerName || invoice?.CustomerRef?.name) === clientName;
+  }).sort((left, right) => String(right?.date || right?.createdAt || right?.TxnDate || "").localeCompare(String(left?.date || left?.createdAt || left?.TxnDate || "")));
 }
 
 function sourceInvoiceForCell(cell, invoices) {
   const sources = cell?.payment?.sources || [];
   for (const source of sources) {
-    const match = (invoices || []).find((invoice) => (
-      (source.invoiceId && String(invoice?.id) === String(source.invoiceId))
-      || (source.qbInvoiceId && String(invoice?.qbId) === String(source.qbInvoiceId))
-      || (source.invoiceNumber && String(invoice?.number) === String(source.invoiceNumber))
-    ));
-    if (match) return match;
+    const spsInvoiceId = text(source?.invoiceId);
+    const qbInvoiceId = text(source?.qbInvoiceId);
+    if (spsInvoiceId || qbInvoiceId) {
+      if (spsInvoiceId) {
+        const spsMatch = (invoices || []).find((invoice) => text(invoice?.id) === spsInvoiceId);
+        if (spsMatch) return spsMatch;
+      }
+      if (qbInvoiceId) {
+        const qbMatch = (invoices || []).find((invoice) => text(invoice?.qbId || invoice?.Id) === qbInvoiceId);
+        if (qbMatch) return qbMatch;
+      }
+      continue;
+    }
+    const invoiceNumber = text(source?.invoiceNumber);
+    if (!invoiceNumber) continue;
+    const numberMatches = (invoices || []).filter((invoice) => text(invoice?.number || invoice?.DocNumber) === invoiceNumber);
+    if (numberMatches.length === 1) return numberMatches[0];
   }
   return null;
 }
@@ -107,22 +172,26 @@ function sourceInvoiceForCell(cell, invoices) {
 function CoverageCell({ cell, monthKey, monthLabel, selected, T, onClick }) {
   const status = displayStatusForMonth(cell, monthKey);
   const tone = statusTone(status, T);
-  const hasVisits = Number(cell?.schedule?.visitCount || 0) > 0;
+  const paymentLabel = coverageLabel(status);
+  const compactInvoiceLabel = invoiceEvidenceLabel(cell, true);
+  const compactVisitLabel = visitEvidenceLabel(cell, true);
   return (
     <button
       type="button"
-      aria-label={`${monthLabel}: ${STATUS[status]?.label || status}`}
+      aria-label={`${monthLabel}: ${paymentLabel}. ${invoiceEvidenceLabel(cell)}. ${visitEvidenceLabel(cell)}.`}
+      title={`${paymentLabel} · ${invoiceEvidenceLabel(cell)} · ${visitEvidenceLabel(cell)}`}
       onClick={onClick}
       style={{
-        width: "100%", minHeight: 58, border: "none", borderLeft: `2px solid ${selected ? (T.primary || "#AF011A") : tone.line}`,
+        width: "100%", minHeight: 68, border: "none", borderLeft: `2px solid ${selected ? (T.primary || "#AF011A") : tone.line}`,
         background: selected ? hexA(T.primary || "#AF011A", 0.08) : (status === "missing" ? T.surface : tone.background),
         color: tone.color, padding: "8px 7px 7px", textAlign: "left", cursor: "pointer", fontFamily: "inherit",
       }}
     >
-      <div style={{ fontSize: 11.5, lineHeight: 1.15, fontWeight: 780 }}>{STATUS[status]?.short || ""}</div>
-      <div style={{ marginTop: 5, display: "flex", alignItems: "center", gap: 4, fontSize: 9.5, color: T.textMuted }}>
+      <div style={{ fontSize: 11.5, lineHeight: 1.15, fontWeight: 780 }}>{paymentLabel}</div>
+      <div style={{ marginTop: 4, fontSize: 9.5, lineHeight: 1.2, color: T.textMuted }}>{compactInvoiceLabel}</div>
+      <div style={{ marginTop: 3, display: "flex", alignItems: "center", gap: 4, fontSize: 9.5, color: T.textMuted }}>
         {status === "paid" || status === "prepaid" || status === "waived" ? <Icon name="check" size={11} /> : null}
-        {hasVisits ? `${cell.schedule.completedCount}/${cell.schedule.visitCount} visits` : "No visits"}
+        {compactVisitLabel}
       </div>
     </button>
   );
@@ -140,7 +209,7 @@ function DetailPanel({ selection, rows, invoices, clients, year, hiddenAmounts, 
   useEffect(() => {
     setMonths(initialMonth ? [initialMonth] : []);
     const invoice = sourceInvoiceForCell(row?.byMonth?.[initialMonth], invoices);
-    setInvoiceId(invoice?.id || invoice?.qbId ? String(invoice.id || invoice.qbId) : "");
+    setInvoiceId(invoiceLinkIdentity(invoice));
     setMode(row?.byMonth?.[initialMonth]?.payment?.status === "waived" ? "waived" : "invoice");
     setNote("");
     setError("");
@@ -150,7 +219,11 @@ function DetailPanel({ selection, rows, invoices, clients, year, hiddenAmounts, 
   const candidates = clientInvoicesFor(row, invoices, clients);
   const cell = row.byMonth[initialMonth];
   const status = displayStatusForMonth(cell, initialMonth);
-  const selectedInvoice = candidates.find((invoice) => String(invoice?.id || invoice?.qbId) === String(invoiceId));
+  const paymentLabel = coverageLabel(status);
+  const invoiceLabel = invoiceEvidenceLabel(cell);
+  const visitLabel = visitEvidenceLabel(cell);
+  const monthInvoiceEvidence = Array.isArray(cell?.invoiceEvidence) ? cell.invoiceEvidence : [];
+  const selectedInvoice = candidates.find((invoice) => invoiceLinkIdentity(invoice) === invoiceId);
   const monthMeta = MONTHS.find(([number]) => initialMonth.endsWith(`-${number}`));
   const toggleMonth = (monthKey) => setMonths((current) => current.includes(monthKey)
     ? (current.length === 1 ? current : current.filter((value) => value !== monthKey))
@@ -189,18 +262,36 @@ function DetailPanel({ selection, rows, invoices, clients, year, hiddenAmounts, 
         <div>
           <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: ".08em", textTransform: "uppercase", color: T.primary }}>{monthMeta?.[2]} {year}</div>
           <h3 style={{ margin: "5px 0 0", fontSize: 27, lineHeight: 1.05, letterSpacing: "-.035em", color: T.text }}>{row.clientName}</h3>
-          <div style={{ marginTop: 7, fontSize: 13, color: T.textMuted }}>{STATUS[status]?.label} · {formatMoney(cell.expectedCents, hiddenAmounts)} expected</div>
+          <div style={{ marginTop: 7, fontSize: 13, color: T.textMuted }}>{paymentLabel} · {formatMoney(cell.expectedCents, hiddenAmounts)} expected</div>
         </div>
         <button type="button" onClick={onClose} aria-label="Close" style={{ width: 38, height: 38, border: `1px solid ${T.border}`, borderRadius: "50%", background: T.surface, color: T.textMuted, display: "grid", placeItems: "center", cursor: "pointer" }}><Icon name="close" size={17}/></button>
       </div>
 
       <div style={{ padding: "22px 24px 38px" }}>
         <section style={{ borderTop: `3px solid ${T.text}`, borderBottom: `1px solid ${T.border}`, padding: "15px 0 17px" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
-            <div><div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: ".07em", textTransform: "uppercase", color: T.textMuted }}>Payment</div><div style={{ marginTop: 5, fontSize: 17, fontWeight: 800 }}>{STATUS[status]?.label}</div></div>
-            <div><div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: ".07em", textTransform: "uppercase", color: T.textMuted }}>Service visits</div><div style={{ marginTop: 5, fontSize: 17, fontWeight: 800 }}>{cell.schedule ? `${cell.schedule.completedCount} of ${cell.schedule.visitCount} complete` : "Schedule unavailable"}</div></div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 18 }}>
+            <div><div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: ".07em", textTransform: "uppercase", color: T.textMuted }}>Coverage</div><div style={{ marginTop: 5, fontSize: 17, fontWeight: 800 }}>{paymentLabel}</div></div>
+            <div><div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: ".07em", textTransform: "uppercase", color: T.textMuted }}>Invoice evidence</div><div style={{ marginTop: 5, fontSize: 17, fontWeight: 800 }}>{invoiceLabel}</div></div>
+            <div><div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: ".07em", textTransform: "uppercase", color: T.textMuted }}>SPS visits</div><div style={{ marginTop: 5, fontSize: 17, fontWeight: 800 }}>{visitLabel}</div></div>
           </div>
+          {status === "review" ? <div style={{ marginTop: 13, padding: "10px 11px", borderLeft: `3px solid ${T.primary}`, background: hexA(T.primary, .045), color: T.text, fontSize: 12.5, lineHeight: 1.45 }}>Invoice evidence exists, but this month is not counted as maintenance coverage until the invoice is safely linked.</div> : null}
           {cell.payment?.reasons?.length ? <div style={{ marginTop: 13, paddingLeft: 11, borderLeft: `2px solid ${T.primary}`, color: T.textMuted, fontSize: 12.5, lineHeight: 1.45 }}>{cell.payment.reasons.join(" ")}</div> : null}
+          {monthInvoiceEvidence.length ? (
+            <div data-maintenance-month-invoice-evidence style={{ marginTop: 15, borderTop: `1px solid ${T.border}` }}>
+              {monthInvoiceEvidence.map((invoice, index) => (
+                <div key={invoiceEvidenceIdentity(invoice, index)} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 12, padding: "11px 0", borderBottom: `1px solid ${T.border}` }}>
+                  <div>
+                    <div style={{ fontSize: 12.5, fontWeight: 820 }}>Invoice #{invoice.invoiceNumber || "Unnumbered"} · {invoiceEvidenceSourceLabel(invoice)}</div>
+                    <div style={{ marginTop: 3, color: T.textMuted, fontSize: 11.5 }}>{invoice.linkedToCoverage ? "Linked maintenance coverage" : invoice.coverageKind === "maintenance" ? "Maintenance evidence" : invoice.coverageKind === "review" ? "Needs maintenance match" : "Other work, not maintenance"}</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 820 }}>{formatMoney(invoice.amountCents, hiddenAmounts)}</div>
+                    <div style={{ marginTop: 3, color: T.textMuted, fontSize: 11.5 }}>{invoice.status === "paid" ? "Paid" : invoice.status === "due" ? "Open" : invoice.status === "partial" ? "Partly paid" : "Review"}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
         </section>
 
         <section style={{ marginTop: 25 }}>
@@ -229,24 +320,25 @@ function DetailPanel({ selection, rows, invoices, clients, year, hiddenAmounts, 
               </div>
               <div data-maintenance-invoice-evidence style={{ maxHeight: 236, overflowY: "auto", borderTop: `1px solid ${T.border}` }}>
                 {candidates.map((invoice) => {
-                  const value = String(invoice.id || invoice.qbId || "");
+                  const value = invoiceLinkIdentity(invoice);
                   const active = value === invoiceId;
                   return (
                     <button
-                      key={invoice.id || invoice.qbId || invoice.number}
+                      key={value || `number:${text(invoice.number || invoice.DocNumber)}`}
                       type="button"
                       onClick={() => setInvoiceId(value)}
+                      disabled={!value}
                       aria-pressed={active}
                       style={{
                         width: "100%", display: "grid", gridTemplateColumns: "1fr auto", gap: 14,
                         border: "none", borderBottom: `1px solid ${T.border}`, borderLeft: `3px solid ${active ? T.primary : "transparent"}`,
                         background: active ? hexA(T.primary, .055) : T.surface, color: T.text,
-                        padding: "12px 10px 12px 12px", textAlign: "left", fontFamily: "inherit", cursor: "pointer",
+                        padding: "12px 10px 12px 12px", textAlign: "left", fontFamily: "inherit", cursor: value ? "pointer" : "default", opacity: value ? 1 : 0.55,
                       }}
                     >
                       <span>
-                        <span style={{ display: "block", fontSize: 13, fontWeight: 850 }}>Invoice #{invoice.number || "Unnumbered"}</span>
-                        <span style={{ display: "block", marginTop: 4, color: T.textMuted, fontSize: 11.5 }}>{invoice.date || "No issue date"} · {invoice.qbId ? "QuickBooks confirmed" : "SPS record"}</span>
+                        <span style={{ display: "block", fontSize: 13, fontWeight: 850 }}>Invoice #{invoice.number || invoice.DocNumber || "Unnumbered"}</span>
+                        <span style={{ display: "block", marginTop: 4, color: T.textMuted, fontSize: 11.5 }}>{invoice.date || invoice.TxnDate || "No issue date"} · {invoice.qbId || invoice.Id ? "QuickBooks confirmed" : "SPS record"}</span>
                       </span>
                       <span style={{ textAlign: "right" }}>
                         <span style={{ display: "block", fontSize: 13, fontWeight: 850 }}>{formatMoney(invoiceAmountCents(invoice), hiddenAmounts)}</span>
@@ -336,14 +428,14 @@ export default function MaintenanceCoverageWorkspace({
     const details = [
       ...ambiguousInvoices.map((invoice) => ({ ...invoice, evidenceType: "Needs allocation", fallbackReason: "invoice evidence could not be assigned safely" })),
       ...unmatchedClientInvoices.map((invoice) => ({ ...invoice, evidenceType: "Client not matched", fallbackReason: "invoice client could not be matched to an SPS client" })),
-      ...skippedInvoices.map((invoice) => ({ ...invoice, evidenceType: "Excluded", fallbackReason: "invoice did not contain maintenance evidence" })),
+      ...skippedInvoices.map((invoice) => ({ ...invoice, evidenceType: "Excluded", fallbackReason: "invoice is not counted as maintenance coverage" })),
     ];
     return {
       matched: Number(receiptCounts.assignedMonths || 0) + Number(receiptCounts.alreadyAssigned || 0),
       assigned: Number(receiptCounts.assignedMonths || 0),
       alreadyAssigned: Number(receiptCounts.alreadyAssigned || 0),
       ambiguous: Number(receiptCounts.ambiguousInvoices || 0) + Number(receiptCounts.unmatchedClientInvoices || 0),
-      skipped: Number(receiptCounts.skippedNonMaintenance || 0),
+      excluded: Number(receiptCounts.skippedNonMaintenance || 0),
       fromYear: Number(reconciliationReceipt.fromYear || historyRange.fromYear),
       toYear: Number(reconciliationReceipt.toYear || historyRange.toYear),
       changed: reconciliationReceipt.changed !== false,
@@ -412,7 +504,7 @@ export default function MaintenanceCoverageWorkspace({
               ["Assigned", receiptEvidence.assigned],
               ["Already tied", receiptEvidence.alreadyAssigned],
               ["Needs review", receiptEvidence.ambiguous],
-              ["Skipped", receiptEvidence.skipped],
+              ["Excluded", receiptEvidence.excluded],
             ].map(([label, value]) => (
               <div key={label} style={{ padding: "10px 11px", borderRight: `1px solid ${T.border}`, borderTop: compactControls ? `1px solid ${T.border}` : "none" }}>
                 <div style={{ fontSize: 16, lineHeight: 1, fontWeight: 880, color: label === "Needs review" && value ? T.primary : T.text }}>{value}</div>
@@ -498,12 +590,15 @@ export default function MaintenanceCoverageWorkspace({
       {vp.isPhone ? (
         <div style={{ borderTop: `1px solid ${T.border}` }}>
           {visibleRows.map((row) => {
-            const statusEntries = monthMeta.map(([number, short, long]) => ({ number, short, long, status: displayStatusForMonth(row.byMonth[`${year}-${number}`], `${year}-${number}`) }));
+            const statusEntries = monthMeta.map(([number, short, long]) => {
+              const cell = row.byMonth[`${year}-${number}`];
+              return { number, short, long, cell, status: displayStatusForMonth(cell, `${year}-${number}`) };
+            });
             const issueCount = statusEntries.filter(({ status }) => statusMatchesView(status, "attention")).length;
             const currentNumber = String(new Date().getMonth() + 1).padStart(2, "0");
             const fallbackEntry = statusEntries.find(({ number }) => number === currentNumber) || statusEntries[0];
             const preferredEntry = view === "all" ? fallbackEntry : (statusEntries.find(({ status }) => statusMatchesView(status, view)) || fallbackEntry);
-            return <button key={row.clientId} type="button" onClick={() => openCell(row, `${year}-${preferredEntry.number}`)} style={{ width: "100%", display: "grid", gridTemplateColumns: "1fr auto", gap: 12, border: "none", borderBottom: `1px solid ${T.border}`, background: T.surface, color: T.text, textAlign: "left", padding: "14px 2px", fontFamily: "inherit", cursor: "pointer" }}><div><div style={{ fontSize: 14, fontWeight: 850 }}>{row.clientName}</div><div style={{ marginTop: 4, fontSize: 11.5, color: issueCount ? T.primary : T.textMuted }}>{preferredEntry.long}: {STATUS[preferredEntry.status]?.label || preferredEntry.status}{issueCount ? ` · ${issueCount} need attention` : ""}</div></div><div style={{ display: "flex", alignItems: "center", gap: 7 }}><div style={{ fontSize: 12, fontWeight: 800 }}>{formatMoney(row.expectedMonthlyCents, !canSeeAmounts)}</div><Icon name="chevron" size={14}/></div></button>;
+            return <button key={row.clientId} type="button" onClick={() => openCell(row, `${year}-${preferredEntry.number}`)} style={{ width: "100%", display: "grid", gridTemplateColumns: "1fr auto", gap: 12, border: "none", borderBottom: `1px solid ${T.border}`, background: T.surface, color: T.text, textAlign: "left", padding: "14px 2px", fontFamily: "inherit", cursor: "pointer" }}><div><div style={{ fontSize: 14, fontWeight: 850 }}>{row.clientName}</div><div style={{ marginTop: 4, fontSize: 11.5, color: issueCount ? T.primary : T.textMuted }}>{preferredEntry.long}: {coverageLabel(preferredEntry.status)} · {invoiceEvidenceLabel(preferredEntry.cell)} · {visitEvidenceLabel(preferredEntry.cell)}{issueCount ? ` · ${issueCount} need attention` : ""}</div></div><div style={{ display: "flex", alignItems: "center", gap: 7 }}><div style={{ fontSize: 12, fontWeight: 800 }}>{formatMoney(row.expectedMonthlyCents, !canSeeAmounts)}</div><Icon name="chevron" size={14}/></div></button>;
           })}
         </div>
       ) : (

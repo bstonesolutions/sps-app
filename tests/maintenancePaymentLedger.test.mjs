@@ -39,6 +39,34 @@ const invoice = (overrides = {}) => ({
   ...overrides,
 });
 
+const paidQuickBooksSeriesInvoice = (month, overrides = {}) => {
+  const amount = overrides.total ?? 175;
+  return invoice({
+    id: `invoice-${month}`,
+    qbId: `qb-invoice-${month}`,
+    number: `series-${month}`,
+    date: `${month}-15`,
+    total: amount,
+    balance: 0,
+    status: "Paid",
+    taxAmount: 0,
+    taxRate: 0,
+    discountType: "",
+    discount: "",
+    qbHasUnsupportedLines: false,
+    qbUnsupportedLineTypes: [],
+    lineItems: [{
+      desc: "Services",
+      qty: "1",
+      unitPrice: String(amount),
+      taxable: false,
+      kind: "service",
+      qbItemRef: { value: "qb-service-item-1", name: "Services" },
+    }],
+    ...overrides,
+  });
+};
+
 const cell = (rows, month, clientId = "client-1") => (
   rows.find((row) => row.clientId === clientId)?.byMonth?.[month]
 );
@@ -263,6 +291,40 @@ test("manual month allocation wins only while its invoice or payment source stil
   });
   assert.equal(cell(stale, "2026-05").payment.status, "review");
   assert.match(cell(stale, "2026-05").payment.reasons[0], /no longer points to a valid/i);
+});
+
+test("SPS and QuickBooks payment identifiers never match across namespaces", () => {
+  const cases = [
+    {
+      source: { kind: "payment", paymentId: "shared-id" },
+      payment: { id: "other-sps-id", qbId: "shared-id", total: 229 },
+    },
+    {
+      source: { kind: "payment", qbPaymentId: "shared-id" },
+      payment: { id: "shared-id", qbId: "other-qb-id", total: 229 },
+    },
+  ];
+
+  for (const { source, payment } of cases) {
+    const ledger = assignMaintenancePaymentSourceAcrossMonths(emptyMaintenancePaymentLedger(), {
+      clientId: "client-1",
+      months: ["2026-04"],
+      source,
+      status: "paid",
+      totalCents: 22900,
+      expectedCents: 22900,
+    });
+    const rows = buildMaintenancePaymentLedgerRows({
+      clients: [recurringClient()],
+      invoices: [],
+      payments: [payment],
+      ledger,
+      year: 2026,
+    });
+
+    assert.equal(cell(rows, "2026-04").payment.status, "review");
+    assert.match(cell(rows, "2026-04").payment.reasons[0], /no longer points to a valid/i);
+  }
 });
 
 test("a protected prepaid month remains prepaid and flags an overlapping invoice", () => {
@@ -637,14 +699,10 @@ test("a generic service invoice reconciles with recurring visit evidence even wh
   assert.equal(result.ledger.allocations["client-1"]["2025-07"].allocatedCents, 19000);
 });
 
-test("a generic recurring-service invoice establishes coverage without SPS visit history", () => {
+test("a single generic recurring-service invoice stays reviewable without SPS visit history", () => {
   const result = reconcileMaintenancePaymentHistory({
     clients: [recurringClient()],
-    invoices: [invoice({
-      date: "2024-07-12",
-      total: 229,
-      lineItems: [{ desc: "Services", amount: 229 }],
-    })],
+    invoices: [paidQuickBooksSeriesInvoice("2024-07", { total: 229 })],
     payments: [],
     schedule: [],
     ledger: emptyMaintenancePaymentLedger(),
@@ -652,9 +710,120 @@ test("a generic recurring-service invoice establishes coverage without SPS visit
     toYear: 2024,
   });
 
-  assert.equal(result.receipt.counts.assignedMonths, 1);
-  assert.equal(result.ledger.allocations["client-1"]["2024-07"].allocatedCents, 22900);
-  assert.equal(result.receipt.clients[0].assignedMonths[0], "2024-07");
+  assert.equal(result.receipt.counts.assignedMonths, 0);
+  assert.equal(result.receipt.counts.ambiguousInvoices, 1);
+  assert.match(result.receipt.ambiguousInvoices[0].reason, /three matching months/i);
+  assert.deepEqual(result.ledger.allocations, {});
+});
+
+test("calendar rows expose QuickBooks invoice evidence independently from SPS visits and coverage", () => {
+  const rows = buildMaintenancePaymentLedgerRows({
+    clients: [recurringClient()],
+    invoices: [invoice({
+      id: "repair-invoice",
+      qbId: "qb-repair-invoice",
+      number: "1046",
+      date: "2024-07-12",
+      total: 750,
+      balance: 0,
+      status: "Paid",
+      lineItems: [{ desc: "Pond repair and cleaning", amount: 750 }],
+    })],
+    payments: [],
+    schedule: undefined,
+    ledger: emptyMaintenancePaymentLedger(),
+    year: 2024,
+  });
+
+  const july = cell(rows, "2024-07");
+  assert.equal(july.payment.status, "not_expected");
+  assert.equal(july.schedule, null);
+  assert.equal(july.invoiceEvidence.length, 1);
+  assert.equal(july.invoiceEvidence[0].invoiceNumber, "1046");
+  assert.equal(july.invoiceEvidence[0].status, "paid");
+  assert.equal(july.invoiceEvidence[0].coverageKind, "other_work");
+});
+
+test("duplicate document numbers never link the wrong QuickBooks invoice to coverage", () => {
+  const maintenanceInvoice = invoice({
+    id: "invoice-maintenance",
+    qbId: "qb-maintenance",
+    number: "2050",
+    date: "2026-04-15",
+    lineItems: [{ desc: "Monthly maintenance", amount: 229 }],
+  });
+  const unrelatedInvoice = invoice({
+    id: "invoice-repair",
+    qbId: "qb-repair",
+    number: "2050",
+    date: "2026-04-16",
+    total: 700,
+    lineItems: [{ desc: "Pond repair", amount: 700 }],
+  });
+  const ledger = assignMaintenanceInvoiceMonths(emptyMaintenancePaymentLedger(), {
+    clientId: "client-1",
+    monthKeys: ["2026-04"],
+    invoice: maintenanceInvoice,
+    expectedCents: 22900,
+  });
+  const rows = buildMaintenancePaymentLedgerRows({
+    clients: [recurringClient()],
+    invoices: [unrelatedInvoice, maintenanceInvoice],
+    payments: [],
+    schedule: undefined,
+    ledger,
+    year: 2026,
+  });
+
+  const april = cell(rows, "2026-04");
+  assert.equal(april.payment.status, "paid");
+  assert.equal(april.invoiceEvidence.length, 2);
+  assert.equal(april.invoiceEvidence.find((entry) => entry.qbInvoiceId === "qb-maintenance")?.linkedToCoverage, true);
+  assert.equal(april.invoiceEvidence.find((entry) => entry.qbInvoiceId === "qb-repair")?.linkedToCoverage, undefined);
+});
+
+test("raw QuickBooks invoice aliases remain visible and linkable without SPS visit history", () => {
+  const rawInvoice = {
+    Id: "raw-qb-2051",
+    DocNumber: "2051",
+    TxnDate: "2026-05-15",
+    TotalAmt: 229,
+    Balance: 0,
+    CustomerRef: { value: "qb-customer-1", name: "Jamie Price" },
+    Line: [{
+      DetailType: "SalesItemLineDetail",
+      Description: "Monthly maintenance",
+      Amount: 229,
+      SalesItemLineDetail: {
+        ItemRef: { value: "qb-maintenance-item", name: "Monthly maintenance" },
+        Qty: 1,
+        UnitPrice: 229,
+      },
+    }],
+  };
+  const ledger = assignMaintenanceInvoiceMonths(emptyMaintenancePaymentLedger(), {
+    clientId: "client-1",
+    monthKeys: ["2026-05"],
+    invoice: rawInvoice,
+    expectedCents: 22900,
+  });
+  const rows = buildMaintenancePaymentLedgerRows({
+    clients: [recurringClient()],
+    invoices: [rawInvoice],
+    payments: [],
+    schedule: undefined,
+    ledger,
+    year: 2026,
+  });
+
+  const may = cell(rows, "2026-05");
+  assert.equal(may.payment.status, "paid");
+  assert.equal(may.schedule, null);
+  assert.equal(may.invoiceEvidence.length, 1);
+  assert.equal(may.invoiceEvidence[0].qbInvoiceId, "raw-qb-2051");
+  assert.equal(may.invoiceEvidence[0].invoiceNumber, "2051");
+  assert.equal(may.invoiceEvidence[0].amountCents, 22900);
+  assert.equal(may.invoiceEvidence[0].linkedToCoverage, true);
 });
 
 test("a generic service amount that differs from the saved maintenance price stays in review without SPS visit evidence", () => {
@@ -674,8 +843,199 @@ test("a generic service amount that differs from the saved maintenance price sta
 
   assert.equal(result.receipt.counts.assignedMonths, 0);
   assert.equal(result.receipt.counts.ambiguousInvoices, 1);
-  assert.match(result.receipt.ambiguousInvoices[0].reason, /does not match/i);
+  assert.match(result.receipt.ambiguousInvoices[0].reason, /saved maintenance rate/i);
   assert.deepEqual(result.ledger.allocations, {});
+});
+
+test("three exact paid QuickBooks service invoices establish only their observed historical months", () => {
+  const invoices = [
+    paidQuickBooksSeriesInvoice("2024-01"),
+    paidQuickBooksSeriesInvoice("2024-03"),
+    paidQuickBooksSeriesInvoice("2024-05", {
+      lineItems: [],
+      items: [{
+        description: "Services",
+        quantity: "1",
+        price: "175",
+        taxable: false,
+        type: "service",
+        quickBooksItemRef: { value: "qb-service-item-1", name: "Services" },
+      }],
+    }),
+  ];
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient({ monthlyRate: "175.00" })],
+    invoices,
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2024,
+    toYear: 2024,
+  });
+
+  assert.equal(result.receipt.counts.assignedMonths, 3);
+  assert.equal(result.receipt.counts.ambiguousInvoices, 0);
+  assert.deepEqual(Object.keys(result.ledger.allocations["client-1"]), ["2024-01", "2024-03", "2024-05"]);
+  assert.equal(result.ledger.allocations["client-1"]["2024-01"].allocatedCents, 17500);
+  assert.equal(result.ledger.allocations["client-1"]["2024-02"], undefined);
+  assert.equal(result.ledger.allocations["client-1"]["2024-04"], undefined);
+  const rows = buildMaintenancePaymentLedgerRows({
+    clients: [recurringClient({ monthlyRate: "175.00" })], invoices, payments: [], schedule: undefined, ledger: result.ledger, year: 2024,
+  });
+  assert.equal(cell(rows, "2024-03").invoiceEvidence[0].coverageKind, "review");
+  assert.equal(cell(rows, "2024-03").invoiceEvidence[0].linkedToCoverage, true);
+});
+
+test("an exact paid QuickBooks series establishes historical evidence without current cadence metadata", () => {
+  const historicalClient = recurringClient({
+    status: "Inactive",
+    planFreq: "",
+    monthlyRate: "175.00",
+  });
+  const invoices = [
+    paidQuickBooksSeriesInvoice("2024-01"),
+    paidQuickBooksSeriesInvoice("2024-03"),
+    paidQuickBooksSeriesInvoice("2024-05"),
+  ];
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [historicalClient],
+    invoices,
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2024,
+    toYear: 2024,
+  });
+
+  assert.equal(result.receipt.counts.assignedMonths, 3);
+  assert.equal(result.receipt.counts.ambiguousInvoices, 0);
+  assert.deepEqual(Object.keys(result.ledger.allocations["client-1"]), ["2024-01", "2024-03", "2024-05"]);
+
+  const rows = buildMaintenancePaymentLedgerRows({
+    clients: [historicalClient],
+    invoices,
+    payments: [],
+    schedule: [],
+    ledger: result.ledger,
+    year: 2024,
+  });
+  assert.equal(cell(rows, "2024-01").payment.status, "paid");
+  assert.equal(cell(rows, "2024-02").payment.status, "plan_history_needed");
+  assert.deepEqual(cell(rows, "2024-02").invoiceEvidence, []);
+  assert.equal(cell(rows, "2024-03").schedule.visitCount, 0);
+  assert.deepEqual(cell(rows, "2024-03").schedule.serviceDates, []);
+});
+
+test("a repeated generic service series that differs from the saved maintenance rate stays in review", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient({ monthlyRate: "229.00" })],
+    invoices: [
+      paidQuickBooksSeriesInvoice("2024-01"),
+      paidQuickBooksSeriesInvoice("2024-03"),
+      paidQuickBooksSeriesInvoice("2024-05"),
+    ],
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2024,
+    toYear: 2024,
+  });
+  assert.equal(result.receipt.counts.assignedMonths, 0);
+  assert.equal(result.receipt.counts.ambiguousInvoices, 3);
+  assert.deepEqual(result.ledger.allocations, {});
+  assert.match(result.receipt.ambiguousInvoices[0].reason, /saved maintenance rate/i);
+});
+
+test("SPS and QuickBooks invoice identifiers never match across namespaces", () => {
+  const selected = invoice({
+    id: "sps-selected",
+    qbId: "shared-id",
+    number: "SELECTED",
+    date: "2026-04-15",
+  });
+  const colliding = invoice({
+    id: "shared-id",
+    qbId: "qb-colliding",
+    number: "COLLIDING",
+    date: "2026-04-15",
+    total: 700,
+    lineItems: [{ desc: "Pond repair", amount: 700 }],
+  });
+  const ledger = assignMaintenanceInvoiceMonths(emptyMaintenancePaymentLedger(), {
+    clientId: "client-1",
+    monthKeys: ["2026-04"],
+    invoice: selected,
+    expectedCents: 22900,
+  });
+  const rows = buildMaintenancePaymentLedgerRows({
+    clients: [recurringClient()],
+    invoices: [colliding, selected],
+    payments: [],
+    schedule: undefined,
+    ledger,
+    year: 2026,
+  });
+  const april = cell(rows, "2026-04");
+  assert.equal(april.payment.status, "paid");
+  assert.equal(april.invoiceEvidence.find((entry) => entry.qbInvoiceId === "shared-id")?.linkedToCoverage, true);
+  assert.equal(april.invoiceEvidence.find((entry) => entry.invoiceId === "shared-id")?.linkedToCoverage, undefined);
+});
+
+test("two invoices or a six-month span never establish a generic QuickBooks series", () => {
+  for (const invoices of [
+    [paidQuickBooksSeriesInvoice("2024-01"), paidQuickBooksSeriesInvoice("2024-03")],
+    [
+      paidQuickBooksSeriesInvoice("2024-01"),
+      paidQuickBooksSeriesInvoice("2024-04"),
+      paidQuickBooksSeriesInvoice("2024-06"),
+    ],
+  ]) {
+    const result = reconcileMaintenancePaymentHistory({
+      clients: [recurringClient()],
+      invoices,
+      payments: [],
+      schedule: [],
+      ledger: emptyMaintenancePaymentLedger(),
+      fromYear: 2024,
+      toYear: 2024,
+    });
+    assert.equal(result.receipt.counts.assignedMonths, 0);
+    assert.equal(result.receipt.counts.ambiguousInvoices, invoices.length);
+    assert.deepEqual(result.ledger.allocations, {});
+  }
+});
+
+test("generic series matching rejects tax, repair wording, partial payment, and unstable item identity", () => {
+  const unsafeCases = [
+    paidQuickBooksSeriesInvoice("2024-03", { taxAmount: 10.5, taxRate: 6 }),
+    paidQuickBooksSeriesInvoice("2024-03", {
+      lineItems: [{
+        desc: "Repair service",
+        qty: "1",
+        unitPrice: "175",
+        taxable: false,
+        kind: "service",
+        qbItemRef: { value: "qb-service-item-1", name: "Services" },
+      }],
+    }),
+    paidQuickBooksSeriesInvoice("2024-03", { balance: 50, status: "Sent" }),
+    paidQuickBooksSeriesInvoice("2024-03", {
+      lineItems: [{ desc: "Services", qty: "1", unitPrice: "175", taxable: false, kind: "service", qbItemRef: { name: "Services" } }],
+    }),
+  ];
+  for (const unsafe of unsafeCases) {
+    const result = reconcileMaintenancePaymentHistory({
+      clients: [recurringClient()],
+      invoices: [paidQuickBooksSeriesInvoice("2024-01"), unsafe, paidQuickBooksSeriesInvoice("2024-05")],
+      payments: [],
+      schedule: [],
+      ledger: emptyMaintenancePaymentLedger(),
+      fromYear: 2024,
+      toYear: 2024,
+    });
+    assert.equal(result.receipt.counts.assignedMonths, 0);
+    assert.deepEqual(result.ledger.allocations, {});
+  }
 });
 
 test("duplicate QuickBooks customer ids never auto-assign an invoice by list order", () => {
@@ -802,6 +1162,88 @@ test("repair evidence is never backfilled as maintenance", () => {
   assert.equal(result.receipt.counts.assignedMonths, 0);
   assert.equal(result.receipt.counts.skippedNonMaintenance, 1);
   assert.match(result.receipt.skippedNonMaintenance[0].reason, /repair/i);
+});
+
+test("one-time pond cleaning evidence is never backfilled as recurring maintenance", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient()],
+    invoices: [invoice({
+      date: "2025-07-12",
+      sourceVisitId: "visit-2025-07",
+      lineItems: [{ desc: "Pond Services: Pond Cleaning", amount: 750 }],
+    })],
+    payments: [],
+    schedule: [{
+      id: "visit-2025-07",
+      clientId: "client-1",
+      date: "2025-07-10",
+      type: "Monthly Service",
+      frequency: "Monthly",
+      status: "Completed",
+    }],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2025,
+    toYear: 2025,
+  });
+  assert.equal(result.receipt.counts.assignedMonths, 0);
+  assert.equal(result.receipt.counts.skippedNonMaintenance, 1);
+  assert.match(result.receipt.skippedNonMaintenance[0].reason, /cleaning/i);
+});
+
+test("non-maintenance wording overrides untrusted invoice month fields", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient()],
+    invoices: [
+      invoice({
+        id: "repair-months",
+        qbId: "repair-months-qb",
+        number: "REPAIR-MONTHS",
+        serviceMonths: ["2025-07"],
+        lineItems: [{ desc: "Emergency pump repair", amount: 229 }],
+      }),
+      invoice({
+        id: "cleaning-allocation",
+        qbId: "cleaning-allocation-qb",
+        number: "CLEANING-ALLOCATION",
+        maintenanceAllocations: [{ month: "2025-08", amount: 229 }],
+        lineItems: [{ desc: "Pond cleaning", amount: 229 }],
+      }),
+    ],
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2025,
+    toYear: 2025,
+  });
+  assert.equal(result.receipt.counts.assignedMonths, 0);
+  assert.equal(result.receipt.counts.skippedNonMaintenance, 2);
+});
+
+test("a historical client with only QuickBooks maintenance evidence remains visible", () => {
+  const historicalClient = recurringClient({
+    id: "historical-client",
+    qbId: "historical-qb-client",
+    planFreq: "",
+    monthlyRate: "",
+    status: "Inactive",
+  });
+  const rows = buildMaintenancePaymentLedgerRows({
+    clients: [historicalClient],
+    invoices: [invoice({
+      id: "historical-maintenance",
+      qbId: "historical-maintenance-qb",
+      clientId: "historical-client",
+      date: "2024-06-15",
+      lineItems: [{ desc: "Monthly maintenance", amount: 229 }],
+    })],
+    payments: [],
+    schedule: [],
+    year: 2024,
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].clientId, "historical-client");
+  assert.equal(rows[0].byMonth["2024-06"].invoiceEvidence.length, 1);
+  assert.equal(rows[0].byMonth["2024-06"].schedule?.visitCount || 0, 0);
 });
 
 test("reconciliation preserves an existing manual month allocation", () => {

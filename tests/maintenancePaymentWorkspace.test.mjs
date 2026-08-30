@@ -26,7 +26,24 @@ test("maintenance payment workspace provides a monthly matrix and explicit invoi
   assert.match(workspace, /data-maintenance-invoice-evidence/);
   assert.match(workspace, /Months covered by this choice/);
   assert.match(workspace, /QuickBooks confirmed/);
+  assert.match(workspace, /Paid invoice/);
+  assert.match(workspace, /No SPS visit data/);
+  assert.match(workspace, /needs maintenance match/);
+  assert.match(workspace, /data-maintenance-month-invoice-evidence/);
+  assert.match(workspace, /Other work, not maintenance/);
+  assert.match(workspace, /cell\.invoiceEvidence/);
+  assert.match(workspace, /\{coverageLabel\(preferredEntry\.status\)\} · \{invoiceEvidenceLabel\(preferredEntry\.cell\)\} · \{visitEvidenceLabel\(preferredEntry\.cell\)\}/);
+  assert.match(workspace, /const invoiceLinkIdentity = \(invoice\) =>/);
+  assert.match(workspace, /return `sps:\$\{spsInvoiceId\}`/);
+  assert.match(workspace, /return qbInvoiceId \? `qb:\$\{qbInvoiceId\}` : ""/);
+  assert.match(workspace, /if \(statuses\.size > 1\)/);
+  assert.match(workspace, />Invoice evidence<\/div>/);
+  assert.match(workspace, /invoiceLinkIdentity\(invoice\)/);
   assert.doesNotMatch(workspace, /<select value=\{invoiceId\}/);
+  assert.doesNotMatch(workspace, /No visits/);
+  assert.doesNotMatch(workspace, /!linkedEvidence\.length && statuses\.size > 1/);
+  assert.doesNotMatch(workspace, />QuickBooks invoice<\/div>/);
+  assert.doesNotMatch(workspace, /No QuickBooks invoice/);
 });
 
 test("maintenance history reconciliation waits for fresh QuickBooks state and exposes truthful evidence", async () => {
@@ -57,6 +74,10 @@ test("maintenance history reconciliation waits for fresh QuickBooks state and ex
   assert.match(workspace, /No matching payment/);
   assert.match(workspace, /Plan history needed/);
   assert.match(workspace, /Unallocated history/);
+  assert.match(workspace, /invoice is not counted as maintenance coverage/);
+  assert.match(workspace, /skippedInvoices\.map/);
+  assert.match(workspace, /\["Excluded", receiptEvidence\.excluded\]/);
+  assert.doesNotMatch(workspace, /\["Skipped", receiptEvidence\.skipped\]/);
   assert.doesNotMatch(workspace, /No coverage/);
 });
 

@@ -167,6 +167,107 @@ test("assign uses canonical invoice evidence, ignores spoofed totals, and fences
   });
 });
 
+test("assign resolves a namespaced QuickBooks invoice without colliding with an SPS invoice ID", async () => {
+  const state = {
+    sps_clients: { value: [canonicalClient, { id: "c2", name: "Other Client" }], version: 3 },
+    sps_invoices: {
+      value: [
+        {
+          ...canonicalInvoice,
+          id: "shared-identity",
+          qbId: "qb-wrong",
+          clientId: "c2",
+          clientName: "Other Client",
+        },
+        {
+          ...canonicalInvoice,
+          id: "target-local",
+          qbId: "shared-identity",
+          number: "2051",
+        },
+      ],
+      version: 8,
+    },
+    sps_maintenance_billing: { value: { version: 2, policies: {}, allocations: {} }, version: 4 },
+  };
+  let batch = null;
+  globalThis.fetch = authenticatedStateFetch({ state, onBatch(operations) { batch = operations; } });
+
+  const res = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { authorization: "Bearer owner-token" },
+    body: { action: "assign", clientId: "c1", invoiceId: "qb:shared-identity", monthKeys: ["2026-08"] },
+  }, res);
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.invoice.id, "target-local");
+  assert.equal(res.body.invoice.qbId, "shared-identity");
+  const written = JSON.parse(batch.find((operation) => operation.key === "sps_maintenance_billing").value);
+  assert.equal(written.allocations.c1["2026-08"].sources[0].invoiceId, "target-local");
+  assert.equal(written.allocations.c1["2026-08"].sources[0].qbInvoiceId, "shared-identity");
+});
+
+test("assign rejects a legacy bare invoice identity when SPS and QuickBooks namespaces collide", async () => {
+  const state = {
+    sps_clients: { value: [canonicalClient, { id: "c2", name: "Other Client" }], version: 3 },
+    sps_invoices: {
+      value: [
+        { ...canonicalInvoice, id: "shared-identity", qbId: "qb-wrong", clientId: "c2", clientName: "Other Client" },
+        { ...canonicalInvoice, id: "target-local", qbId: "shared-identity", number: "2051" },
+      ],
+      version: 8,
+    },
+    sps_maintenance_billing: { value: { version: 2, policies: {}, allocations: {} }, version: 4 },
+  };
+  let writes = 0;
+  globalThis.fetch = authenticatedStateFetch({ state, onBatch() { writes += 1; } });
+
+  const res = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { authorization: "Bearer owner-token" },
+    body: { action: "assign", clientId: "c1", invoiceId: "shared-identity", monthKeys: ["2026-08"] },
+  }, res);
+
+  assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+  assert.match(res.body.error, /not unique/i);
+  assert.equal(writes, 0);
+});
+
+test("assign accepts a raw QuickBooks invoice identity and canonicalizes its aliases", async () => {
+  const rawQuickBooksInvoice = {
+    Id: "raw-qb-1",
+    DocNumber: "2052",
+    TxnDate: "2026-08-10",
+    TotalAmt: 229,
+    Balance: 0,
+    CustomerRef: { value: "qb-c1", name: "Generic Client" },
+    status: "Open",
+  };
+  const state = {
+    sps_clients: { value: [canonicalClient], version: 3 },
+    sps_invoices: { value: [rawQuickBooksInvoice], version: 8 },
+    sps_maintenance_billing: { value: { version: 2, policies: {}, allocations: {} }, version: 4 },
+  };
+  let batch = null;
+  globalThis.fetch = authenticatedStateFetch({ state, onBatch(operations) { batch = operations; } });
+
+  const res = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { authorization: "Bearer owner-token" },
+    body: { action: "assign", clientId: "c1", invoiceId: "qb:raw-qb-1", monthKeys: ["2026-08"] },
+  }, res);
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.deepEqual(res.body.invoice, { id: "", qbId: "raw-qb-1", number: "2052", totalCents: 22900 });
+  const written = JSON.parse(batch.find((operation) => operation.key === "sps_maintenance_billing").value);
+  assert.equal(written.allocations.c1["2026-08"].status, "paid");
+  assert.equal(written.allocations.c1["2026-08"].sources[0].qbInvoiceId, "raw-qb-1");
+  assert.equal(written.allocations.c1["2026-08"].sources[0].invoiceNumber, "2052");
+});
+
 test("assign rejects an invoice linked to a different client without writing", async () => {
   const state = {
     sps_clients: { value: [canonicalClient, { id: "c2", name: "Other Client" }], version: 1 },

@@ -343,14 +343,14 @@ export function assignMaintenanceInvoiceMonths(rawLedger, {
       paymentId,
       qbPaymentId,
       invoiceId: text(invoice?.id),
-      qbInvoiceId: text(invoice?.qbId),
-      invoiceNumber: text(invoice?.number),
+      qbInvoiceId: text(invoice?.qbId || invoice?.Id),
+      invoiceNumber: text(invoice?.number || invoice?.DocNumber),
     }
     : {
       kind: "invoice",
       invoiceId: text(invoice?.id),
-      qbInvoiceId: text(invoice?.qbId),
-      invoiceNumber: text(invoice?.number),
+      qbInvoiceId: text(invoice?.qbId || invoice?.Id),
+      invoiceNumber: text(invoice?.number || invoice?.DocNumber),
     };
   const totalCents = payment
     ? moneyToCents(payment?.appliedAmount ?? payment?.total ?? payment?.amount)
@@ -470,15 +470,15 @@ function quickBooksClientNameBeforeAddress(value) {
 }
 
 function invoiceClientId(invoice, clients, uniqueClientByName) {
-  const direct = text(invoice?.clientId);
+  const direct = text(invoice?.clientId || invoice?.customerId);
   if (direct && clients.some((client) => clientIdOf(client) === direct)) return direct;
-  const qbCustomerId = text(invoice?.qbCustomerId);
+  const qbCustomerId = text(invoice?.qbCustomerId || invoice?.CustomerRef?.value);
   if (qbCustomerId) {
     const matches = clients.filter((client) => text(client?.qbId || client?.qbCustomerId) === qbCustomerId);
     if (matches.length === 1) return clientIdOf(matches[0]);
     if (matches.length > 1) return "";
   }
-  const invoiceClientName = invoice?.clientName || invoice?.customerName;
+  const invoiceClientName = invoice?.clientName || invoice?.customerName || invoice?.CustomerRef?.name;
   const exact = uniqueClientByName.get(normalizedName(invoiceClientName));
   if (exact) return exact;
   const beforeAddress = quickBooksClientNameBeforeAddress(invoiceClientName);
@@ -486,11 +486,12 @@ function invoiceClientId(invoice, clients, uniqueClientByName) {
 }
 
 function invoiceTotalCents(invoice) {
-  return Math.max(0, moneyToCents(invoice?.total ?? invoice?.amount ?? invoice?.subtotal));
+  return Math.max(0, moneyToCents(invoice?.total ?? invoice?.amount ?? invoice?.subtotal ?? invoice?.TotalAmt));
 }
 
 function invoiceBalanceCents(invoice) {
   if (hasOwn(invoice, "balance")) return Math.max(0, moneyToCents(invoice.balance));
+  if (hasOwn(invoice, "Balance")) return Math.max(0, moneyToCents(invoice.Balance));
   const status = text(invoice?.status).toLowerCase();
   return status === "paid" ? 0 : invoiceTotalCents(invoice);
 }
@@ -499,10 +500,85 @@ function invoiceSource(invoice, amountCents) {
   return normalizeAllocationSource({
     kind: "invoice",
     invoiceId: invoice?.id,
-    qbInvoiceId: invoice?.qbId,
-    invoiceNumber: invoice?.number,
+    qbInvoiceId: invoice?.qbId || invoice?.Id,
+    invoiceNumber: invoice?.number || invoice?.DocNumber,
     amountCents,
   });
+}
+
+function invoiceLineRecords(invoice) {
+  if (Array.isArray(invoice?.lineItems) && invoice.lineItems.length) return invoice.lineItems;
+  if (Array.isArray(invoice?.items) && invoice.items.length) return invoice.items;
+  if (Array.isArray(invoice?.lines) && invoice.lines.length) return invoice.lines;
+  if (Array.isArray(invoice?.Line) && invoice.Line.length) return invoice.Line;
+  return [];
+}
+
+function qbReference(rawReference) {
+  if (rawReference == null) return { id: "", name: "" };
+  if (!isRecord(rawReference)) return { id: text(rawReference), name: "" };
+  return {
+    id: text(rawReference.value || rawReference.id || rawReference.Id),
+    name: text(rawReference.name || rawReference.Name),
+  };
+}
+
+function normalizeHistoricalInvoiceLine(rawLine) {
+  const salesDetail = isRecord(rawLine?.SalesItemLineDetail) ? rawLine.SalesItemLineDetail : null;
+  const reference = qbReference(
+    rawLine?.qbItemRef
+      || rawLine?.quickBooksItemRef
+      || rawLine?.quickbooksItemRef
+      || rawLine?.itemRef
+      || rawLine?.ItemRef
+      || salesDetail?.ItemRef,
+  );
+  const detailType = text(rawLine?.DetailType || rawLine?.detailType);
+  const hasDirectAmount = hasOwn(rawLine, "amount") || hasOwn(rawLine, "Amount");
+  const directAmount = hasOwn(rawLine, "amount") ? rawLine.amount : rawLine?.Amount;
+  const directAmountNumber = typeof directAmount === "number"
+    ? directAmount
+    : Number(text(directAmount).replace(/[$,\s]/g, ""));
+  const qty = Number(rawLine?.qty ?? rawLine?.quantity ?? salesDetail?.Qty ?? 1);
+  const unitPrice = Number(rawLine?.unitPrice ?? rawLine?.rate ?? rawLine?.price ?? salesDetail?.UnitPrice);
+  const amountCents = hasDirectAmount && Number.isFinite(directAmountNumber)
+    ? Math.round(directAmountNumber * 100)
+    : (Number.isFinite(qty) && Number.isFinite(unitPrice) ? Math.round(qty * unitPrice * 100) : null);
+  const taxReference = qbReference(salesDetail?.TaxCodeRef || rawLine?.TaxCodeRef);
+  return {
+    rawLine,
+    detailType,
+    isSalesLine: !detailType || detailType === "SalesItemLineDetail",
+    description: text(
+      rawLine?.desc
+        || rawLine?.description
+        || rawLine?.Description
+        || rawLine?.name
+        || rawLine?.itemName
+        || reference.name,
+    ),
+    itemId: reference.id,
+    itemName: reference.name,
+    kind: text(rawLine?.kind || rawLine?.type || rawLine?.category || rawLine?.chargeType),
+    amountCents,
+    qty,
+    unitPrice,
+    serviceMonth: normalizeMonthKey(
+      rawLine?.maintenanceMonth
+        || rawLine?.serviceMonth
+        || rawLine?.serviceDate
+        || rawLine?.servicePeriodStart
+        || rawLine?.serviceStartDate
+        || salesDetail?.ServiceDate,
+    ),
+    taxable: rawLine?.taxable === true
+      || /^(?:tax|taxable|t)$/i.test(taxReference.id)
+      || /^(?:tax|taxable|t)$/i.test(taxReference.name),
+  };
+}
+
+function normalizedHistoricalInvoiceLines(invoice) {
+  return invoiceLineRecords(invoice).map(normalizeHistoricalInvoiceLine);
 }
 
 function invoiceDescription(invoice) {
@@ -511,16 +587,15 @@ function invoiceDescription(invoice) {
     invoice?.memo,
     invoice?.notes,
     invoice?.privateNote,
-    ...(Array.isArray(invoice?.lineItems)
-      ? invoice.lineItems.flatMap((line) => [line?.desc, line?.description, line?.name, line?.itemName])
-      : []),
+    ...normalizedHistoricalInvoiceLines(invoice).flatMap((line) => [line.description, line.itemName, line.kind]),
   ].map(text).filter(Boolean).join(" ").toLowerCase();
 }
 
 const MAINTENANCE_WORDING = /\bmaintenance\b|weekly\s+service|bi[\s-]*weekly\s+service|monthly\s+service/;
 const PREPAY_WORDING = /\bpre[\s-]*paid\b|\bprepayment\b|\bannual\b|\bfull[\s-]*season\b|\bseason[\s-]*pass\b|\bmultiple\s+months?\b/;
-const NON_MAINTENANCE_WORDING = /\brepair\b|\binstall(?:ation)?\b|\breplace(?:ment)?\b|\bequipment\b|\bmaterial(?:s)?\b|\bproduct(?:s)?\b|\bpart(?:s)?\b|\bconstruction\b|\brenovation\b|\bservice\s*call\b|\bemergency\b|\bdiagnostic\b/;
+const NON_MAINTENANCE_WORDING = /\brepair\b|\binstall(?:ation)?\b|\breplace(?:ment)?\b|\bequipment\b|\bmaterial(?:s)?\b|\bproduct(?:s)?\b|\bpart(?:s)?\b|\bconstruction\b|\brenovation\b|\bservice\s*call\b|\bemergency\b|\bdiagnostic\b|\bpond\s+clean(?:ing|out)\b|\bclean[-\s]*out\b/;
 const GENERIC_SERVICE_WORDING = /(^|\s)service(?:s)?($|\s)/;
+const EXACT_GENERIC_SERVICE_WORDING = /^service(?:s)?$/;
 
 function invoiceTransactionMonth(invoice) {
   return normalizeMonthKey(
@@ -528,6 +603,7 @@ function invoiceTransactionMonth(invoice) {
       || invoice?.issuedDate
       || invoice?.issueDate
       || invoice?.txnDate
+      || invoice?.TxnDate
       || invoice?.createdAt
       || invoice?.created_at,
   );
@@ -542,9 +618,7 @@ function explicitServiceMonths(invoice) {
     invoice?.serviceDate,
     invoice?.servicePeriodStart,
     invoice?.serviceStartDate,
-    ...(Array.isArray(invoice?.lineItems)
-      ? invoice.lineItems.flatMap((line) => [line?.maintenanceMonth, line?.serviceMonth, line?.serviceDate])
-      : []),
+    ...normalizedHistoricalInvoiceLines(invoice).map((line) => line.serviceMonth),
   ];
   return [...new Set(direct.map(normalizeMonthKey).filter(Boolean))].sort();
 }
@@ -700,9 +774,9 @@ function explicitDatedLineAllocations(invoice) {
 }
 
 function invoiceLooksLikeMaintenance(invoice, { clientId = "", scheduleEvidence = null } = {}) {
-  if (explicitInvoiceAllocations(invoice).length) return true;
   const description = invoiceDescription(invoice);
   if (NON_MAINTENANCE_WORDING.test(description)) return false;
+  if (explicitInvoiceAllocations(invoice).length) return true;
   if (invoice?.recurringMaintenance === true || text(invoice?.billingMode).toLowerCase().includes("maintenance")) return true;
   if (MAINTENANCE_WORDING.test(description)) return true;
 
@@ -731,10 +805,14 @@ function linkedPaymentAllocations(payment) {
 }
 
 function paymentIndexes(payments) {
-  const byId = new Map();
+  const bySpsId = new Map();
+  const byQbId = new Map();
   const appliedByInvoice = new Map();
   for (const payment of payments) {
-    for (const id of [payment?.id, payment?.qbId].map(text).filter(Boolean)) byId.set(id, payment);
+    const spsId = text(payment?.id);
+    const qbId = text(payment?.qbId);
+    if (spsId) bySpsId.set(spsId, payment);
+    if (qbId) byQbId.set(qbId, payment);
     for (const allocation of linkedPaymentAllocations(payment)) {
       const current = appliedByInvoice.get(allocation.qbInvoiceId) || { amountCents: 0, paymentIds: [] };
       current.amountCents += allocation.amountCents;
@@ -742,21 +820,25 @@ function paymentIndexes(payments) {
       appliedByInvoice.set(allocation.qbInvoiceId, current);
     }
   }
-  return { byId, appliedByInvoice };
+  return { bySpsId, byQbId, appliedByInvoice };
 }
 
 function invoiceIndexes(invoices) {
-  const byId = new Map();
+  const bySpsId = new Map();
+  const byQbId = new Map();
   const byNumber = new Map();
   for (const invoice of invoices) {
-    for (const id of [invoice?.id, invoice?.qbId].map(text).filter(Boolean)) byId.set(id, invoice);
-    const number = text(invoice?.number);
+    const spsId = text(invoice?.id);
+    const qbId = text(invoice?.qbId || invoice?.Id);
+    if (spsId) bySpsId.set(spsId, invoice);
+    if (qbId) byQbId.set(qbId, invoice);
+    const number = text(invoice?.number || invoice?.DocNumber);
     if (number) {
       if (byNumber.has(number)) byNumber.set(number, null);
       else byNumber.set(number, invoice);
     }
   }
-  return { byId, byNumber };
+  return { bySpsId, byQbId, byNumber };
 }
 
 function suspiciousMultiMonthInvoice(invoice, expectedCents, hasDirectMonthEvidence) {
@@ -768,8 +850,159 @@ function suspiciousMultiMonthInvoice(invoice, expectedCents, hasDirectMonthEvide
   return ratio >= 1.75;
 }
 
+function finiteOwnNumber(record, key) {
+  if (!hasOwn(record, key)) return null;
+  const value = typeof record[key] === "number"
+    ? record[key]
+    : Number(text(record[key]).replace(/[$,\s%]/g, ""));
+  return Number.isFinite(value) ? value : null;
+}
+
+function invoiceHasKnownZeroTaxAndDiscount(invoice) {
+  const taxAmount = finiteOwnNumber(invoice, "taxAmount");
+  const taxRate = finiteOwnNumber(invoice, "taxRate");
+  if (taxAmount !== 0 || taxRate !== 0) return false;
+  if (!hasOwn(invoice, "discountType") || !hasOwn(invoice, "discount")) return false;
+  const discountType = text(invoice?.discountType).toLowerCase();
+  if (discountType && !["none", "off", "false", "0"].includes(discountType)) return false;
+  const discount = text(invoice?.discount);
+  if (discount && moneyToCents(discount) !== 0) return false;
+  return invoice?.qbHasUnsupportedLines === false
+    && (!Array.isArray(invoice?.qbUnsupportedLineTypes) || invoice.qbUnsupportedLineTypes.length === 0);
+}
+
+function lineHasKnownNonTaxableCode(line) {
+  if (hasOwn(line?.rawLine, "taxable")) return line.rawLine.taxable === false;
+  const salesDetail = isRecord(line?.rawLine?.SalesItemLineDetail)
+    ? line.rawLine.SalesItemLineDetail
+    : null;
+  const reference = qbReference(salesDetail?.TaxCodeRef || line?.rawLine?.TaxCodeRef);
+  return /^(?:non|nontaxable|0)$/i.test(reference.id)
+    || /^(?:non|nontaxable|0)$/i.test(reference.name);
+}
+
+function invoiceIsFullyPaidByQuickBooks(invoice, appliedFromPaymentsCents = 0) {
+  const totalCents = invoiceTotalCents(invoice);
+  if (!(totalCents > 0)) return false;
+  const hasBalance = hasOwn(invoice, "balance") || hasOwn(invoice, "Balance");
+  const rawBalance = hasOwn(invoice, "balance") ? invoice.balance : invoice?.Balance;
+  const parsedBalance = typeof rawBalance === "number"
+    ? rawBalance
+    : Number(text(rawBalance).replace(/[$,\s]/g, ""));
+  const knownZeroBalance = hasBalance && Number.isFinite(parsedBalance) && Math.round(parsedBalance * 100) === 0;
+  return knownZeroBalance || appliedFromPaymentsCents >= totalCents;
+}
+
+function weakHistoricalSeriesEvidence({ invoice, clientId, client, appliedFromPaymentsCents = 0 }) {
+  const qbInvoiceId = text(invoice?.qbId || invoice?.Id);
+  const serviceMonths = explicitServiceMonths(invoice);
+  const month = serviceMonths.length === 1
+    ? serviceMonths[0]
+    : invoiceTransactionMonth(invoice);
+  const totalCents = invoiceTotalCents(invoice);
+  const knownMonthlyCents = expectedMonthlyCents(client);
+  const lines = normalizedHistoricalInvoiceLines(invoice);
+  const combinedDescription = invoiceDescription(invoice);
+  const genericOrBlank = [
+    invoice?.description,
+    invoice?.memo,
+    invoice?.notes,
+    invoice?.privateNote,
+    ...lines.flatMap((line) => [line.description, line.itemName, line.kind]),
+  ].map((value) => text(value).toLowerCase()).filter(Boolean)
+    .every((value) => EXACT_GENERIC_SERVICE_WORDING.test(value));
+
+  if (!genericOrBlank || PREPAY_WORDING.test(combinedDescription) || NON_MAINTENANCE_WORDING.test(combinedDescription)) {
+    return null;
+  }
+  if (!qbInvoiceId) return { reviewReason: "generic invoice has no stable QuickBooks invoice identity" };
+  if (!invoiceIsFullyPaidByQuickBooks(invoice, appliedFromPaymentsCents)) {
+    return { reviewReason: "generic invoice is not confirmed fully paid by QuickBooks" };
+  }
+  if (!month) return { reviewReason: "generic invoice has no usable transaction or service month" };
+  if (!(knownMonthlyCents > 0) || totalCents !== knownMonthlyCents) {
+    return { reviewReason: "generic invoice amount does not match the saved maintenance rate" };
+  }
+  if (serviceMonths.length > 1) {
+    return { reviewReason: "generic invoice contains more than one possible service month" };
+  }
+  if (lines.length !== 1 || !lines[0].isSalesLine) {
+    return { reviewReason: "generic invoice does not contain exactly one safe service line" };
+  }
+  const line = lines[0];
+  const serviceKind = text(line.kind).toLowerCase() === "service"
+    || EXACT_GENERIC_SERVICE_WORDING.test(text(line.itemName).toLowerCase());
+  if (!serviceKind || !line.itemId) {
+    return { reviewReason: "generic invoice has no stable QuickBooks service item identity" };
+  }
+  if (
+    !Number.isSafeInteger(line.amountCents)
+      || line.amountCents <= 0
+      || !Number.isFinite(line.qty)
+      || line.qty <= 0
+      || !Number.isFinite(line.unitPrice)
+      || line.unitPrice <= 0
+      || line.amountCents !== totalCents
+  ) {
+    return { reviewReason: "generic invoice line amount does not exactly match the invoice total" };
+  }
+  if (
+    line.taxable
+      || !lineHasKnownNonTaxableCode(line)
+      || !invoiceHasKnownZeroTaxAndDiscount(invoice)
+      || invoice?.lateFeeAppliedAt
+      || line?.rawLine?.isLateFee === true
+      || /late\s*fee/i.test(`${line.description} ${line.itemName} ${line.kind}`)
+  ) {
+    return { reviewReason: "generic invoice includes tax, discount, late-fee, or unsupported line evidence" };
+  }
+  return {
+    qbInvoiceId,
+    clientId,
+    month,
+    totalCents,
+    itemId: line.itemId,
+    seriesKey: `${clientId}|${line.itemId}|${totalCents}`,
+  };
+}
+
+function monthOrdinal(month) {
+  const normalized = normalizeMonthKey(month);
+  if (!normalized) return null;
+  const [year, monthNumber] = normalized.split("-").map(Number);
+  return (year * 12) + monthNumber - 1;
+}
+
+function qualifyingWeakSeriesMonths(candidates) {
+  const byMonth = new Map();
+  const qbIds = new Set();
+  for (const candidate of candidates) {
+    if (qbIds.has(candidate.qbInvoiceId)) return new Set();
+    qbIds.add(candidate.qbInvoiceId);
+    const entries = byMonth.get(candidate.month) || [];
+    entries.push(candidate);
+    byMonth.set(candidate.month, entries);
+  }
+  if ([...byMonth.values()].some((entries) => entries.length !== 1)) return new Set();
+  const months = [...byMonth.keys()].sort();
+  const qualifying = new Set();
+  for (let startIndex = 0; startIndex < months.length; startIndex += 1) {
+    const startOrdinal = monthOrdinal(months[startIndex]);
+    const windowMonths = months.filter((month) => {
+      const ordinal = monthOrdinal(month);
+      return ordinal >= startOrdinal && ordinal <= startOrdinal + 4;
+    });
+    if (windowMonths.length >= 3) windowMonths.forEach((month) => qualifying.add(month));
+  }
+  return qualifying;
+}
+
 function classifyHistoricalMaintenanceInvoice({ invoice, clientId, client, scheduleEvidence }) {
   const totalCents = invoiceTotalCents(invoice);
+  const description = invoiceDescription(invoice);
+  if (NON_MAINTENANCE_WORDING.test(description)) {
+    return { kind: "skip", reason: "repair, cleaning, product, equipment, or material wording", months: [] };
+  }
   const explicit = explicitInvoiceAllocations(invoice);
   if (explicit.length) {
     return {
@@ -779,11 +1012,6 @@ function classifyHistoricalMaintenanceInvoice({ invoice, clientId, client, sched
       months: explicit.map((entry) => entry.month),
     };
   }
-  const description = invoiceDescription(invoice);
-  if (NON_MAINTENANCE_WORDING.test(description)) {
-    return { kind: "skip", reason: "repair, product, equipment, or material wording", months: [] };
-  }
-
   const maintenanceFlag = invoice?.recurringMaintenance === true
     || text(invoice?.billingMode).toLowerCase().includes("maintenance");
   const maintenanceWording = maintenanceFlag || MAINTENANCE_WORDING.test(description);
@@ -858,19 +1086,10 @@ function classifyHistoricalMaintenanceInvoice({ invoice, clientId, client, sched
       months: month ? [month] : [],
     };
   }
-  const genericRecurringInvoice = !!(
-    genericService
-      && recurringClient(client)
-      && expectedMonthlyCents(client) > 0
-      && totalCents === expectedMonthlyCents(client)
-      && !suspiciousMultiMonthInvoice(invoice, expectedMonthlyCents(client), serviceMonths.length === 1)
-  );
-  if (genericService && month && (hasRecurringVisit || genericRecurringInvoice)) {
+  if (genericService && month && hasRecurringVisit) {
     return {
       kind: "candidate",
-      reason: hasRecurringVisit
-        ? "generic-service-with-recurring-visit"
-        : "generic-service-for-recurring-client",
+      reason: "generic-service-with-recurring-visit",
       months: [month],
       allocations: [{ month, amountCents: totalCents }],
     };
@@ -878,7 +1097,7 @@ function classifyHistoricalMaintenanceInvoice({ invoice, clientId, client, sched
   if (genericService && recurringClient(client) && month) {
     return {
       kind: "ambiguous",
-      reason: "generic service amount does not match the saved monthly maintenance price",
+      reason: "generic service invoice needs a repeated paid QuickBooks series before it can be treated as maintenance",
       months: [month],
     };
   }
@@ -888,11 +1107,53 @@ function classifyHistoricalMaintenanceInvoice({ invoice, clientId, client, sched
 function invoiceReceiptIdentity(invoice) {
   return {
     invoiceId: text(invoice?.id),
-    qbInvoiceId: text(invoice?.qbId),
-    invoiceNumber: text(invoice?.number),
+    qbInvoiceId: text(invoice?.qbId || invoice?.Id),
+    invoiceNumber: text(invoice?.number || invoice?.DocNumber),
     invoiceMonth: invoiceTransactionMonth(invoice),
     amountCents: invoiceTotalCents(invoice),
   };
+}
+
+function invoiceEvidenceMonths(invoice) {
+  const allocatedMonths = explicitInvoiceAllocations(invoice).map((entry) => entry.month).filter(Boolean);
+  if (allocatedMonths.length) return [...new Set(allocatedMonths)].sort();
+  const serviceMonths = explicitServiceMonths(invoice);
+  if (serviceMonths.length) return serviceMonths;
+  const transactionMonth = invoiceTransactionMonth(invoice);
+  return transactionMonth ? [transactionMonth] : [];
+}
+
+function invoiceEvidenceForMonth({ invoice, month, clientId, client, scheduleEvidence, paymentIndex }) {
+  if (!invoiceEvidenceMonths(invoice).includes(month)) return null;
+  const qbInvoiceId = text(invoice?.qbId || invoice?.Id);
+  const appliedCents = paymentIndex.appliedByInvoice.get(qbInvoiceId)?.amountCents || 0;
+  const classification = classifyHistoricalMaintenanceInvoice({
+    invoice,
+    clientId,
+    client,
+    scheduleEvidence,
+  });
+  return {
+    ...invoiceReceiptIdentity(invoice),
+    status: statusFromInvoice(invoice, appliedCents),
+    coverageKind: classification.kind === "candidate"
+      ? "maintenance"
+      : (classification.kind === "ambiguous" ? "review" : "other_work"),
+    reason: classification.reason || "invoice exists for this month",
+  };
+}
+
+function paymentSourceMatchesInvoiceEvidence(source, evidence) {
+  const sourceSpsId = text(source?.invoiceId);
+  const sourceQbId = text(source?.qbInvoiceId);
+  const evidenceSpsId = text(evidence?.invoiceId);
+  const evidenceQbId = text(evidence?.qbInvoiceId);
+  if (sourceSpsId && evidenceSpsId && sourceSpsId === evidenceSpsId) return true;
+  if (sourceQbId && evidenceQbId && sourceQbId === evidenceQbId) return true;
+  if (sourceSpsId || sourceQbId || evidenceSpsId || evidenceQbId) return false;
+  const sourceNumber = text(source?.invoiceNumber);
+  const evidenceNumber = text(evidence?.invoiceNumber);
+  return !!sourceNumber && sourceNumber === evidenceNumber;
 }
 
 function invoiceWithinYearRange(invoice, fromYear, toYear, scheduleEvidence = null) {
@@ -982,6 +1243,7 @@ export function reconcileMaintenancePaymentHistory({
   const scheduleEvidence = buildMaintenanceScheduleEvidence(schedule, clientList);
   const paymentIndex = paymentIndexes(payments);
   const candidates = [];
+  const weakSeriesCandidates = [];
 
   for (const invoice of invoices.filter((entry) => (
     invoiceWithinYearRange(entry, normalizedFromYear, normalizedToYear, scheduleEvidence)
@@ -991,12 +1253,21 @@ export function reconcileMaintenancePaymentHistory({
       receipt.unmatchedClientInvoices.push({ ...invoiceReceiptIdentity(invoice), clientName: text(invoice?.clientName || invoice?.customerName) });
       continue;
     }
+    const applied = paymentIndex.appliedByInvoice.get(text(invoice?.qbId || invoice?.Id))?.amountCents || 0;
     const classification = classifyHistoricalMaintenanceInvoice({
       invoice,
       clientId,
       client: clientById.get(clientId),
       scheduleEvidence,
     });
+    const weakEvidence = classification.kind === "candidate"
+      ? null
+      : weakHistoricalSeriesEvidence({
+        invoice,
+        clientId,
+        client: clientById.get(clientId),
+        appliedFromPaymentsCents: applied,
+      });
     const detail = {
       ...invoiceReceiptIdentity(invoice),
       clientId,
@@ -1004,15 +1275,27 @@ export function reconcileMaintenancePaymentHistory({
       reason: classification.reason,
       months: classification.months || [],
     };
+    if (weakEvidence?.seriesKey) {
+      weakSeriesCandidates.push({ invoice, clientId, ...weakEvidence });
+      continue;
+    }
     if (classification.kind === "ambiguous") {
-      receipt.ambiguousInvoices.push(detail);
+      receipt.ambiguousInvoices.push({
+        ...detail,
+        ...(weakEvidence?.reviewReason && /repeated paid QuickBooks series/i.test(classification.reason)
+          ? { reason: weakEvidence.reviewReason }
+          : {}),
+      });
       continue;
     }
     if (classification.kind === "skip") {
-      receipt.skippedNonMaintenance.push(detail);
+      if (weakEvidence?.reviewReason) {
+        receipt.ambiguousInvoices.push({ ...detail, reason: weakEvidence.reviewReason });
+      } else {
+        receipt.skippedNonMaintenance.push(detail);
+      }
       continue;
     }
-    const applied = paymentIndex.appliedByInvoice.get(text(invoice?.qbId))?.amountCents || 0;
     const status = statusFromInvoice(invoice, applied);
     if (!["paid", "due"].includes(status)) {
       receipt.ambiguousInvoices.push({ ...detail, reason: `invoice is ${status || "not settled"}` });
@@ -1023,6 +1306,41 @@ export function reconcileMaintenancePaymentHistory({
       return year >= normalizedFromYear && year <= normalizedToYear;
     });
     if (allocations.length) candidates.push({ invoice, clientId, status, classification, allocations });
+  }
+
+  const weakSeriesGroups = new Map();
+  for (const candidate of weakSeriesCandidates) {
+    const group = weakSeriesGroups.get(candidate.seriesKey) || [];
+    group.push(candidate);
+    weakSeriesGroups.set(candidate.seriesKey, group);
+  }
+  for (const group of weakSeriesGroups.values()) {
+    const qualifyingMonths = qualifyingWeakSeriesMonths(group);
+    for (const candidate of group) {
+      const detail = {
+        ...invoiceReceiptIdentity(candidate.invoice),
+        clientId: candidate.clientId,
+        clientName: clientNameOf(clientById.get(candidate.clientId)),
+        reason: "generic or blank paid invoice needs at least three matching months in a rolling five-month QuickBooks series",
+        months: [candidate.month],
+        qbItemRef: candidate.itemId,
+      };
+      if (!qualifyingMonths.has(candidate.month)) {
+        receipt.ambiguousInvoices.push(detail);
+        continue;
+      }
+      candidates.push({
+        invoice: candidate.invoice,
+        clientId: candidate.clientId,
+        status: "paid",
+        classification: {
+          reason: "stable-paid-quickbooks-service-series",
+          months: [candidate.month],
+          qbItemRef: candidate.itemId,
+        },
+        allocations: [{ month: candidate.month, amountCents: candidate.totalCents }],
+      });
+    }
   }
 
   let nextLedger = structuredClone(ledger);
@@ -1164,13 +1482,14 @@ export function reconcileMaintenancePaymentHistory({
 
 function resolveSource(source, { invoices, payments, policy, month }) {
   if (source.kind === "invoice" || source.kind === "refund") {
-    const invoice = invoices.byId.get(text(source.invoiceId))
-      || invoices.byId.get(text(source.qbInvoiceId))
+    const invoice = invoices.bySpsId.get(text(source.invoiceId))
+      || invoices.byQbId.get(text(source.qbInvoiceId))
       || invoices.byNumber.get(text(source.invoiceNumber));
     if (invoice) return { valid: true, invoice };
   }
   if (source.kind === "payment" || source.kind === "refund") {
-    const payment = payments.byId.get(text(source.paymentId)) || payments.byId.get(text(source.qbPaymentId));
+    const payment = payments.bySpsId.get(text(source.paymentId))
+      || payments.byQbId.get(text(source.qbPaymentId));
     if (payment) return { valid: true, payment };
   }
   if (source.kind === "prepaid" && policy && monthsBetween(policy.coveredFrom, policy.coveredThrough).includes(month)) {
@@ -1225,7 +1544,7 @@ function statusFromInvoice(invoice, appliedFromPaymentsCents = 0) {
 function automaticCandidateForMonth({ invoice, month, expectedCents, paymentIndex }) {
   const explicit = explicitInvoiceAllocations(invoice);
   const total = invoiceTotalCents(invoice);
-  const qbId = text(invoice?.qbId);
+  const qbId = text(invoice?.qbId || invoice?.Id);
   const applied = paymentIndex.appliedByInvoice.get(qbId)?.amountCents || 0;
   if (explicit.length) {
     const allocation = explicit.find((entry) => entry.month === month);
@@ -1269,7 +1588,7 @@ function summarizeCell({ expected, expectedCents, policy, manual, month, clientI
       if (invoices.length && !["waived", "prepaid", "review", "refunded"].includes(status)) {
         const statuses = invoices.map((invoice) => statusFromInvoice(
           invoice,
-          indexes.payments.appliedByInvoice.get(text(invoice?.qbId))?.amountCents || 0,
+          indexes.payments.appliedByInvoice.get(text(invoice?.qbId || invoice?.Id))?.amountCents || 0,
         ));
         status = statuses.includes("partial") ? "partial" : (statuses.includes("due") ? "due" : "paid");
       }
@@ -1300,7 +1619,7 @@ function summarizeCell({ expected, expectedCents, policy, manual, month, clientI
   if (policyCoversMonth) {
     const policySourceIds = new Set([policy.sourceInvoiceId, policy.sourceInvoiceNumber].map(text).filter(Boolean));
     const unrelated = candidates.filter((candidate) => {
-      const invoiceIds = [candidate.invoice?.id, candidate.invoice?.qbId, candidate.invoice?.number].map(text);
+      const invoiceIds = [candidate.invoice?.id, candidate.invoice?.qbId, candidate.invoice?.Id, candidate.invoice?.number, candidate.invoice?.DocNumber].map(text);
       return !invoiceIds.some((id) => id && policySourceIds.has(id));
     });
     if (unrelated.length) {
@@ -1382,20 +1701,37 @@ export function buildMaintenancePaymentLedgerRows({
   const invoiceIndex = invoiceIndexes(invoices);
   const paymentIndex = paymentIndexes(payments);
   const months = Array.from({ length: 12 }, (_, index) => `${normalizedYear}-${String(index + 1).padStart(2, "0")}`);
+  const invoiceOnlyEvidenceByClient = new Map();
+  for (const client of clientList) {
+    const clientId = clientIdOf(client);
+    const hasInvoiceEvidence = (invoicesByClient.get(clientId) || []).some((invoice) => {
+      const classification = classifyHistoricalMaintenanceInvoice({
+        invoice,
+        clientId,
+        client,
+        scheduleEvidence,
+      });
+      if (!["candidate", "ambiguous"].includes(classification.kind)) return false;
+      return classification.months.some((month) => month.startsWith(`${normalizedYear}-`));
+    });
+    invoiceOnlyEvidenceByClient.set(clientId, hasInvoiceEvidence);
+  }
 
   const included = clientList.filter((client) => {
     const clientId = clientIdOf(client);
     return recurringClient(client)
       || !!protectedBillingStore?.policies?.[clientId]
       || !!ledger.allocations[clientId]
-      || [...scheduleByClientAndMonth.keys()].some((key) => key.startsWith(`${clientId}|`));
+      || [...scheduleByClientAndMonth.keys()].some((key) => key.startsWith(`${clientId}|`))
+      || invoiceOnlyEvidenceByClient.get(clientId);
   });
 
   return included.map((client) => {
     const clientId = clientIdOf(client);
     const baseExpectedCents = expectedMonthlyCents(client);
     const policy = protectedBillingStore ? maintenanceBillingPolicyForClient(protectedBillingStore, clientId) : null;
-    const clientInvoices = (invoicesByClient.get(clientId) || []).filter((invoice) => (
+    const allClientInvoices = invoicesByClient.get(clientId) || [];
+    const clientInvoices = allClientInvoices.filter((invoice) => (
       invoiceLooksLikeMaintenance(invoice, { clientId, scheduleEvidence })
     ));
     const invoiceEvidenceStart = earliestMonth(clientInvoices.flatMap((invoice) => (
@@ -1418,7 +1754,7 @@ export function buildMaintenancePaymentLedgerRows({
       const policyCoversMonth = !!(
         policy && monthsBetween(policy.coveredFrom, policy.coveredThrough).includes(month)
       );
-      const invoiceEvidence = clientInvoices.some((invoice) => !!automaticCandidateForMonth({
+      const maintenanceInvoiceEvidence = clientInvoices.some((invoice) => !!automaticCandidateForMonth({
         invoice,
         month,
         expectedCents,
@@ -1426,7 +1762,7 @@ export function buildMaintenancePaymentLedgerRows({
       }));
       const expectation = clientPlanExpectationForMonth(client, month, {
         inferredStart,
-        exactEvidence: !!manual || !!scheduled || policyCoversMonth || invoiceEvidence,
+        exactEvidence: !!manual || !!scheduled || policyCoversMonth || maintenanceInvoiceEvidence,
       });
       const expected = expectation === "expected";
       const payment = summarizeCell({
@@ -1437,6 +1773,18 @@ export function buildMaintenancePaymentLedgerRows({
         month,
         clientInvoices,
         indexes: { invoices: invoiceIndex, payments: paymentIndex },
+      });
+      const rawMonthInvoiceEvidence = allClientInvoices.map((invoice) => invoiceEvidenceForMonth({
+        invoice,
+        month,
+        clientId,
+        client,
+        scheduleEvidence,
+        paymentIndex,
+      })).filter(Boolean);
+      const monthInvoiceEvidence = rawMonthInvoiceEvidence.map((evidence) => {
+        const linked = (payment.sources || []).some((source) => paymentSourceMatchesInvoiceEvidence(source, evidence));
+        return linked ? { ...evidence, linkedToCoverage: true } : evidence;
       });
       if (expectation === "plan_history_needed" && payment.status === "not_expected") {
         payment.status = "plan_history_needed";
@@ -1462,6 +1810,7 @@ export function buildMaintenancePaymentLedgerRows({
         month,
         expectedCents,
         payment,
+        invoiceEvidence: monthInvoiceEvidence,
         schedule: scheduleState,
       };
     });
