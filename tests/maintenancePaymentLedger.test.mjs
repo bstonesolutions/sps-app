@@ -12,6 +12,7 @@ import {
   moneyToCents,
   normalizeMaintenancePaymentLedger,
   normalizeMonthKey,
+  reconcileMaintenancePaymentHistory,
   setMaintenancePaymentMonthOverride,
 } from "../maintenancePaymentLedger.js";
 
@@ -117,6 +118,7 @@ test("a single paid maintenance invoice covers its unambiguous transaction month
   assert.equal(cell(rows, "2026-04").expectedCents, 22900);
   assert.equal(cell(rows, "2026-04").payment.status, "paid");
   assert.equal(cell(rows, "2026-04").payment.appliedCents, 22900);
+  assert.equal(cell(rows, "2026-03").payment.status, "not_expected");
   assert.equal(cell(rows, "2026-05").payment.status, "missing");
 });
 
@@ -379,4 +381,291 @@ test("invalid assignment inputs fail closed without changing another month", () 
     status: "paid",
   });
   assert.equal(ledger, null);
+});
+
+test("historical maintenance rates do not block a one-month reconciliation", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient()],
+    invoices: [invoice({ date: "2024-06-15", total: 175, lineItems: [{ desc: "Monthly maintenance", amount: 175 }] })],
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2024,
+    toYear: 2024,
+    actor: "owner-1",
+    updatedAt: "2026-08-29T12:00:00Z",
+  });
+  assert.equal(result.receipt.counts.assignedMonths, 1);
+  assert.equal(result.receipt.counts.ambiguousInvoices, 0);
+  assert.equal(result.ledger.allocations["client-1"]["2024-06"].status, "paid");
+  assert.equal(result.ledger.allocations["client-1"]["2024-06"].allocatedCents, 17500);
+});
+
+test("explicit historical month lists safely reconcile a multi-month invoice", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient()],
+    invoices: [invoice({
+      date: "2025-04-01",
+      total: 687,
+      maintenanceMonths: ["2025-04", "2025-05", "2025-06"],
+    })],
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2025,
+    toYear: 2025,
+  });
+  assert.equal(result.receipt.counts.assignedMonths, 3);
+  assert.deepEqual(Object.keys(result.ledger.allocations["client-1"]), ["2025-04", "2025-05", "2025-06"]);
+  assert.equal(result.ledger.allocations["client-1"]["2025-05"].allocatedCents, 22900);
+});
+
+test("a likely prepayment without explicit months remains auditable and unallocated", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient()],
+    invoices: [invoice({ date: "2025-04-01", total: 687, notes: "Spring maintenance prepayment" })],
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2025,
+    toYear: 2025,
+  });
+  assert.equal(result.receipt.counts.assignedMonths, 0);
+  assert.equal(result.receipt.counts.ambiguousInvoices, 1);
+  assert.match(result.receipt.ambiguousInvoices[0].reason, /multi-month prepayment/i);
+  assert.deepEqual(result.ledger.allocations, {});
+});
+
+test("a generic service invoice reconciles only with recurring visit evidence", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient()],
+    invoices: [invoice({
+      date: "2025-07-12",
+      total: 190,
+      lineItems: [{ desc: "Services", amount: 190 }],
+    })],
+    payments: [],
+    schedule: [{
+      date: "2025-07-10",
+      stops: [{
+        id: "client-1",
+        sid: "visit-2025-07",
+        type: "Monthly Service",
+        frequency: "Monthly",
+        status: "Completed",
+      }],
+    }],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2025,
+    toYear: 2025,
+  });
+  assert.equal(result.receipt.counts.assignedMonths, 1);
+  assert.equal(result.ledger.allocations["client-1"]["2025-07"].allocatedCents, 19000);
+});
+
+test("a linked source visit maps an otherwise generic invoice to its recurring service month", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient()],
+    invoices: [invoice({
+      id: "linked-invoice",
+      qbId: "linked-qb",
+      date: "2025-08-02",
+      total: 180,
+      sourceVisitId: "recurring-visit-august",
+      lineItems: [{ desc: "Service", amount: 180 }],
+    })],
+    payments: [],
+    schedule: [{
+      id: "recurring-visit-august",
+      clientId: "client-1",
+      date: "2025-07-29",
+      type: "Monthly Service",
+      frequency: "Monthly",
+      status: "Completed",
+    }],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2025,
+    toYear: 2025,
+  });
+  assert.equal(result.receipt.counts.assignedMonths, 1);
+  assert.equal(result.ledger.allocations["client-1"]["2025-07"].allocatedCents, 18000);
+  assert.equal(result.ledger.allocations["client-1"]["2025-08"], undefined);
+});
+
+test("repair evidence is never backfilled as maintenance", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient()],
+    invoices: [invoice({
+      date: "2025-07-12",
+      sourceVisitId: "visit-2025-07",
+      lineItems: [{ desc: "Emergency pump repair service", amount: 229 }],
+    })],
+    payments: [],
+    schedule: [{
+      id: "visit-2025-07",
+      clientId: "client-1",
+      date: "2025-07-10",
+      type: "Monthly Service",
+      frequency: "Monthly",
+      status: "Completed",
+    }],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2025,
+    toYear: 2025,
+  });
+  assert.equal(result.receipt.counts.assignedMonths, 0);
+  assert.equal(result.receipt.counts.skippedNonMaintenance, 1);
+  assert.match(result.receipt.skippedNonMaintenance[0].reason, /repair/i);
+});
+
+test("reconciliation preserves an existing manual month allocation", () => {
+  const manualInvoice = invoice({ id: "manual-invoice", qbId: "manual-qb", number: "MANUAL", date: "2025-04-02" });
+  const manualLedger = assignMaintenanceInvoiceMonths(emptyMaintenancePaymentLedger(), {
+    clientId: "client-1",
+    monthKeys: ["2025-04"],
+    invoice: manualInvoice,
+    expectedCents: 22900,
+    note: "Owner confirmed",
+    actor: "owner-1",
+  });
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient()],
+    invoices: [manualInvoice, invoice({ id: "history", qbId: "history-qb", number: "HISTORY", date: "2025-04-15" })],
+    payments: [],
+    schedule: [],
+    ledger: manualLedger,
+    fromYear: 2025,
+    toYear: 2025,
+  });
+  const allocation = result.ledger.allocations["client-1"]["2025-04"];
+  assert.equal(allocation.note, "Owner confirmed");
+  assert.equal(allocation.sources.length, 1);
+  assert.equal(allocation.sources[0].invoiceId, "manual-invoice");
+  assert.equal(result.receipt.counts.assignedMonths, 0);
+});
+
+test("recurring evidence bounds expectations instead of manufacturing earlier missing months", () => {
+  const rows = buildMaintenancePaymentLedgerRows({
+    clients: [recurringClient()],
+    invoices: [],
+    payments: [],
+    schedule: [{
+      id: "first-known-visit",
+      clientId: "client-1",
+      date: "2025-04-03",
+      type: "Monthly Service",
+      frequency: "Monthly",
+      status: "Completed",
+    }],
+    year: 2025,
+  });
+  assert.equal(rows[0].coverageStartMonth, "2025-04");
+  assert.equal(cell(rows, "2025-03").payment.status, "not_expected");
+  assert.equal(cell(rows, "2025-03").payment.evidenceState, "not_expected");
+  assert.equal(cell(rows, "2025-04").payment.status, "missing");
+  assert.equal(cell(rows, "2025-04").payment.evidenceState, "no_matching_payment");
+});
+
+test("a recurring client without dated evidence does not manufacture a full year of missing months", () => {
+  const rows = buildMaintenancePaymentLedgerRows({
+    clients: [recurringClient()],
+    invoices: [],
+    payments: [],
+    schedule: [],
+    year: 2025,
+  });
+  assert.equal(rows[0].coverageStartMonth, "");
+  assert.equal(rows[0].months.every((entry) => entry.payment.status === "not_expected"), true);
+});
+
+test("an amount-only invoice is not maintenance without recurring schedule evidence", () => {
+  const unrelated = invoice({
+    date: "2025-04-15",
+    lineItems: [{ desc: "Consulting", amount: 229 }],
+  });
+  const reconciled = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient()],
+    invoices: [unrelated],
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2025,
+    toYear: 2025,
+  });
+  assert.equal(reconciled.receipt.counts.assignedMonths, 0);
+  assert.equal(reconciled.receipt.counts.skippedNonMaintenance, 1);
+
+  const rows = buildMaintenancePaymentLedgerRows({
+    clients: [recurringClient()],
+    invoices: [unrelated],
+    payments: [],
+    schedule: [],
+    year: 2025,
+  });
+  assert.equal(rows[0].coverageStartMonth, "");
+  assert.equal(cell(rows, "2025-04").payment.status, "not_expected");
+});
+
+test("an obvious historical maintenance lump sum stays ambiguous despite a changed monthly rate", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient()],
+    invoices: [invoice({
+      date: "2024-06-15",
+      total: 2100,
+      lineItems: [{ desc: "Maintenance", amount: 2100 }],
+    })],
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2024,
+    toYear: 2024,
+  });
+  assert.equal(result.receipt.counts.assignedMonths, 0);
+  assert.equal(result.receipt.counts.ambiguousInvoices, 1);
+  assert.match(result.receipt.ambiguousInvoices[0].reason, /multi-month prepayment/i);
+});
+
+test("historical invoices accept issueDate and created_at aliases", () => {
+  const result = reconcileMaintenancePaymentHistory({
+    clients: [recurringClient()],
+    invoices: [
+      invoice({ id: "issue-date", qbId: "issue-date-qb", number: "ISSUE", date: undefined, issueDate: "2024-03-15" }),
+      invoice({ id: "created-at", qbId: "created-at-qb", number: "CREATED", date: undefined, created_at: "2024-05-15" }),
+    ],
+    payments: [],
+    schedule: [],
+    ledger: emptyMaintenancePaymentLedger(),
+    fromYear: 2024,
+    toYear: 2024,
+  });
+  assert.equal(result.receipt.counts.assignedMonths, 2);
+  assert.equal(result.ledger.allocations["client-1"]["2024-03"].status, "paid");
+  assert.equal(result.ledger.allocations["client-1"]["2024-05"].status, "paid");
+});
+
+test("manual duplicate resolution produces an idempotent receipt", () => {
+  const selected = invoice({ id: "selected", qbId: "selected-qb", number: "SELECTED", date: "2025-04-02" });
+  const duplicate = invoice({ id: "duplicate", qbId: "duplicate-qb", number: "DUPLICATE", date: "2025-04-18" });
+  const manualLedger = assignMaintenanceInvoiceMonths(emptyMaintenancePaymentLedger(), {
+    clientId: "client-1",
+    monthKeys: ["2025-04"],
+    invoice: selected,
+    expectedCents: 22900,
+    note: "Owner selected this invoice",
+  });
+  const input = {
+    clients: [recurringClient()],
+    invoices: [selected, duplicate],
+    payments: [],
+    schedule: [],
+    ledger: manualLedger,
+    fromYear: 2025,
+    toYear: 2025,
+  };
+  const first = reconcileMaintenancePaymentHistory(input);
+  const second = reconcileMaintenancePaymentHistory({ ...input, ledger: first.ledger });
+  assert.equal(first.receipt.counts.alreadyAssigned, 1);
+  assert.equal(first.receipt.counts.ambiguousInvoices, 1);
+  assert.equal(first.receipt.ambiguousInvoices[0].invoiceId, "duplicate");
+  assert.deepEqual(second, first);
 });

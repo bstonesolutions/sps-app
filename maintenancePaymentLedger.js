@@ -1,4 +1,5 @@
 import {
+  isRecurringMaintenanceStop,
   maintenanceBillingPolicyForClient,
   normalizeMaintenanceBillingStore,
   recurringMaintenanceCadence,
@@ -221,6 +222,10 @@ export function normalizeMaintenancePaymentLedger(rawLedger) {
     policies: policyStore.policies,
     allocations,
   };
+}
+
+function earliestMonth(...values) {
+  return values.flat().map(normalizeMonthKey).filter(Boolean).sort()[0] || "";
 }
 
 export function maintenancePaymentAllocationForMonth(rawLedger, rawClientId, rawMonth) {
@@ -468,6 +473,137 @@ function invoiceSource(invoice, amountCents) {
   });
 }
 
+function invoiceDescription(invoice) {
+  return [
+    invoice?.description,
+    invoice?.memo,
+    invoice?.notes,
+    invoice?.privateNote,
+    ...(Array.isArray(invoice?.lineItems)
+      ? invoice.lineItems.flatMap((line) => [line?.desc, line?.description, line?.name, line?.itemName])
+      : []),
+  ].map(text).filter(Boolean).join(" ").toLowerCase();
+}
+
+const MAINTENANCE_WORDING = /\bmaintenance\b|weekly\s+service|bi[\s-]*weekly\s+service|monthly\s+service/;
+const PREPAY_WORDING = /\bpre[\s-]*paid\b|\bprepayment\b|\bannual\b|\bfull[\s-]*season\b|\bseason[\s-]*pass\b|\bmultiple\s+months?\b/;
+const NON_MAINTENANCE_WORDING = /\brepair\b|\binstall(?:ation)?\b|\breplace(?:ment)?\b|\bequipment\b|\bmaterial(?:s)?\b|\bproduct(?:s)?\b|\bpart(?:s)?\b|\bconstruction\b|\brenovation\b|\bservice\s*call\b|\bemergency\b|\bdiagnostic\b/;
+const GENERIC_SERVICE_WORDING = /(^|\s)service(?:s)?($|\s)/;
+
+function invoiceTransactionMonth(invoice) {
+  return normalizeMonthKey(
+    invoice?.date
+      || invoice?.issuedDate
+      || invoice?.issueDate
+      || invoice?.txnDate
+      || invoice?.createdAt
+      || invoice?.created_at,
+  );
+}
+
+function explicitServiceMonths(invoice) {
+  const direct = [
+    invoice?.maintenanceMonth,
+    invoice?.serviceMonth,
+    invoice?.billingMonth,
+    invoice?.periodMonth,
+    invoice?.serviceDate,
+    invoice?.servicePeriodStart,
+    invoice?.serviceStartDate,
+    ...(Array.isArray(invoice?.lineItems)
+      ? invoice.lineItems.flatMap((line) => [line?.maintenanceMonth, line?.serviceMonth, line?.serviceDate])
+      : []),
+  ];
+  return [...new Set(direct.map(normalizeMonthKey).filter(Boolean))].sort();
+}
+
+function invoiceLinkedVisitIds(invoice) {
+  const direct = [
+    invoice?.sourceStopId,
+    invoice?.sourceVisitId,
+    invoice?.stopId,
+    invoice?.visitId,
+    ...(Array.isArray(invoice?.sourceStopIds) ? invoice.sourceStopIds : []),
+    ...(Array.isArray(invoice?.sourceVisitIds) ? invoice.sourceVisitIds : []),
+    ...(Array.isArray(invoice?.stopIds) ? invoice.stopIds : []),
+    ...(Array.isArray(invoice?.visitIds) ? invoice.visitIds : []),
+    ...(Array.isArray(invoice?.lineItems)
+      ? invoice.lineItems.flatMap((line) => [
+        line?.sourceStopId,
+        line?.sourceVisitId,
+        line?.stopId,
+        line?.visitId,
+      ])
+      : []),
+  ];
+  return [...new Set(direct.map(text).filter(Boolean))].sort();
+}
+
+export function flattenMaintenanceSchedule(schedule = []) {
+  const flattened = [];
+  for (const entry of Array.isArray(schedule) ? schedule : []) {
+    if (!isRecord(entry)) continue;
+    if (!Array.isArray(entry.stops)) {
+      flattened.push(entry);
+      continue;
+    }
+    const dayDate = text(entry.date || entry.scheduledDate || entry.day);
+    for (const stop of entry.stops) {
+      if (!isRecord(stop)) continue;
+      const stopDate = text(stop.date || stop.scheduledDate || stop.visitDate);
+      flattened.push(stopDate || !dayDate ? stop : { ...stop, date: dayDate });
+    }
+  }
+  return flattened;
+}
+
+function scheduleStopIds(stop, clientId = "") {
+  return [...new Set([
+    stop?.sid,
+    stop?.stopId,
+    stop?.visitId,
+    stop?.reportId,
+    stop?.completionId,
+    text(stop?.id) !== clientId ? stop?.id : "",
+  ].map(text).filter(Boolean))];
+}
+
+function buildMaintenanceScheduleEvidence(schedule, clients) {
+  const clientById = new Map(clients.map((client) => [clientIdOf(client), client]));
+  const byClientAndMonth = new Map();
+  const byId = new Map();
+  const earliestByClient = new Map();
+  if (!Array.isArray(schedule)) return { byClientAndMonth, byId, earliestByClient };
+  for (const stop of flattenMaintenanceSchedule(schedule)) {
+    const directClientId = text(stop?.clientId);
+    const legacyClientId = text(stop?.id);
+    const clientId = clientById.has(directClientId)
+      ? directClientId
+      : (clientById.has(legacyClientId) ? legacyClientId : "");
+    const client = clientById.get(clientId);
+    const month = scheduleDate(stop);
+    if (!clientId || !client || !month || !isRecurringMaintenanceStop(stop, client)) continue;
+    const evidence = {
+      stop,
+      clientId,
+      month,
+      completed: completedStop(stop),
+      serviceDate: text(stop?.date || stop?.scheduledDate || stop?.visitDate),
+    };
+    for (const id of scheduleStopIds(stop, clientId)) byId.set(id, evidence);
+    const key = `${clientId}|${month}`;
+    const current = byClientAndMonth.get(key) || { visitCount: 0, completedCount: 0, serviceDates: [], visits: [] };
+    current.visitCount += 1;
+    if (evidence.completed) current.completedCount += 1;
+    current.serviceDates.push(evidence.serviceDate);
+    current.visits.push(evidence);
+    byClientAndMonth.set(key, current);
+    const previous = earliestByClient.get(clientId);
+    if (!previous || month < previous) earliestByClient.set(clientId, month);
+  }
+  return { byClientAndMonth, byId, earliestByClient };
+}
+
 function explicitInvoiceAllocations(invoice) {
   const exact = invoice?.maintenanceAllocations || invoice?.monthAllocations;
   if (Array.isArray(exact)) {
@@ -490,16 +626,26 @@ function explicitInvoiceAllocations(invoice) {
   return months.map((month, index) => ({ month, amountCents: allocationShare(total, months.length, index) }));
 }
 
-function invoiceLooksLikeMaintenance(invoice, expectedCents) {
+function invoiceLooksLikeMaintenance(invoice, { clientId = "", scheduleEvidence = null } = {}) {
   if (explicitInvoiceAllocations(invoice).length) return true;
+  const description = invoiceDescription(invoice);
+  if (NON_MAINTENANCE_WORDING.test(description)) return false;
   if (invoice?.recurringMaintenance === true || text(invoice?.billingMode).toLowerCase().includes("maintenance")) return true;
-  const description = [
-    invoice?.description,
-    invoice?.notes,
-    ...(Array.isArray(invoice?.lineItems) ? invoice.lineItems.map((line) => line?.desc || line?.description || line?.name) : []),
-  ].map(text).join(" ").toLowerCase();
-  if (/maintenance|weekly service|biweekly service|bi-weekly service|monthly service/.test(description)) return true;
-  return expectedCents > 0 && Math.abs(invoiceTotalCents(invoice) - expectedCents) <= 1;
+  if (MAINTENANCE_WORDING.test(description)) return true;
+
+  const linked = invoiceLinkedVisitIds(invoice)
+    .map((id) => scheduleEvidence?.byId?.get(id))
+    .filter(Boolean);
+  if (linked.length && linked.every((entry) => entry.clientId === clientId)) return true;
+
+  const serviceMonths = explicitServiceMonths(invoice);
+  const month = serviceMonths.length === 1 ? serviceMonths[0] : invoiceTransactionMonth(invoice);
+  return !!(
+    clientId
+      && month
+      && GENERIC_SERVICE_WORDING.test(description)
+      && scheduleEvidence?.byClientAndMonth?.has(`${clientId}|${month}`)
+  );
 }
 
 function linkedPaymentAllocations(payment) {
@@ -540,6 +686,369 @@ function invoiceIndexes(invoices) {
   return { byId, byNumber };
 }
 
+function suspiciousMultiMonthInvoice(invoice, expectedCents, hasDirectMonthEvidence) {
+  if (hasDirectMonthEvidence) return false;
+  const description = invoiceDescription(invoice);
+  if (PREPAY_WORDING.test(description)) return true;
+  if (!(expectedCents > 0)) return false;
+  const ratio = invoiceTotalCents(invoice) / expectedCents;
+  return ratio >= 1.75;
+}
+
+function classifyHistoricalMaintenanceInvoice({ invoice, clientId, client, scheduleEvidence }) {
+  const totalCents = invoiceTotalCents(invoice);
+  const explicit = explicitInvoiceAllocations(invoice);
+  if (explicit.length) {
+    return {
+      kind: "candidate",
+      reason: "explicit-months",
+      allocations: explicit,
+      months: explicit.map((entry) => entry.month),
+    };
+  }
+
+  const description = invoiceDescription(invoice);
+  if (NON_MAINTENANCE_WORDING.test(description)) {
+    return { kind: "skip", reason: "repair, product, equipment, or material wording", months: [] };
+  }
+
+  const linkedIds = invoiceLinkedVisitIds(invoice);
+  if (linkedIds.length) {
+    const linked = linkedIds.map((id) => scheduleEvidence.byId.get(id)).filter(Boolean);
+    if (!linked.length) {
+      return { kind: "ambiguous", reason: "linked recurring visit was not found", months: [] };
+    }
+    if (linked.some((entry) => entry.clientId !== clientId)) {
+      return { kind: "ambiguous", reason: "linked visits belong to a different client", months: [] };
+    }
+    const months = [...new Set(linked.map((entry) => entry.month))].sort();
+    return {
+      kind: "candidate",
+      reason: "linked-recurring-visits",
+      months,
+      allocations: months.map((month, index) => ({
+        month,
+        amountCents: allocationShare(totalCents, months.length, index),
+      })),
+    };
+  }
+
+  const serviceMonths = explicitServiceMonths(invoice);
+  if (serviceMonths.length > 1) {
+    return { kind: "ambiguous", reason: "more than one service month is present", months: serviceMonths };
+  }
+  const transactionMonth = invoiceTransactionMonth(invoice);
+  const month = serviceMonths[0] || transactionMonth;
+  const maintenanceFlag = invoice?.recurringMaintenance === true
+    || text(invoice?.billingMode).toLowerCase().includes("maintenance");
+  const maintenanceWording = maintenanceFlag || MAINTENANCE_WORDING.test(description);
+  const genericService = GENERIC_SERVICE_WORDING.test(description);
+
+  if (maintenanceWording) {
+    if (!month) return { kind: "ambiguous", reason: "maintenance invoice has no usable service month", months: [] };
+    if (suspiciousMultiMonthInvoice(invoice, expectedMonthlyCents(client), serviceMonths.length === 1)) {
+      return {
+        kind: "ambiguous",
+        reason: "invoice may be a multi-month prepayment but has no explicit covered months",
+        months: [month],
+      };
+    }
+    return {
+      kind: "candidate",
+      reason: serviceMonths.length ? "explicit-service-month" : "maintenance-transaction-month",
+      months: [month],
+      allocations: [{ month, amountCents: totalCents }],
+    };
+  }
+
+  if (genericService && month && scheduleEvidence.byClientAndMonth.has(`${clientId}|${month}`)) {
+    return {
+      kind: "candidate",
+      reason: "generic-service-with-recurring-visit",
+      months: [month],
+      allocations: [{ month, amountCents: totalCents }],
+    };
+  }
+  return { kind: "skip", reason: "no maintenance evidence", months: month ? [month] : [] };
+}
+
+function invoiceReceiptIdentity(invoice) {
+  return {
+    invoiceId: text(invoice?.id),
+    qbInvoiceId: text(invoice?.qbId),
+    invoiceNumber: text(invoice?.number),
+    invoiceMonth: invoiceTransactionMonth(invoice),
+    amountCents: invoiceTotalCents(invoice),
+  };
+}
+
+function invoiceWithinYearRange(invoice, fromYear, toYear, scheduleEvidence = null) {
+  const months = [
+    invoiceTransactionMonth(invoice),
+    ...explicitInvoiceAllocations(invoice).map((entry) => entry.month),
+    ...explicitServiceMonths(invoice),
+    ...invoiceLinkedVisitIds(invoice).map((id) => scheduleEvidence?.byId?.get(id)?.month),
+  ].filter(Boolean);
+  return months.some((month) => {
+    const year = Number(month.slice(0, 4));
+    return year >= fromYear && year <= toYear;
+  });
+}
+
+function sourceAlreadyAssigned(rawLedger, clientId, source) {
+  const identity = sourceIdentity(source);
+  const found = [];
+  for (const [month, allocation] of Object.entries(rawLedger?.allocations?.[clientId] || {})) {
+    if (allocation.sources.some((candidate) => sourceIdentity(candidate) === identity)) found.push(month);
+  }
+  return found.sort();
+}
+
+/**
+ * Conservatively reconciles historical QuickBooks evidence into the protected
+ * month ledger. The function never changes an invoice or a protected prepaid
+ * policy. Ambiguous evidence is returned to the caller for owner review.
+ */
+export function reconcileMaintenancePaymentHistory({
+  clients = [],
+  invoices = [],
+  payments = [],
+  schedule = [],
+  ledger: rawLedger = null,
+  fromYear = new Date().getFullYear(),
+  toYear = fromYear,
+  actor = "",
+  updatedAt = "",
+} = {}) {
+  const normalizedFromYear = Number(fromYear);
+  const normalizedToYear = Number(toYear);
+  const ledger = rawLedger == null ? emptyMaintenancePaymentLedger() : normalizeMaintenancePaymentLedger(rawLedger);
+  const valid = ledger
+    && Array.isArray(clients)
+    && Array.isArray(invoices)
+    && Array.isArray(payments)
+    && Array.isArray(schedule)
+    && Number.isInteger(normalizedFromYear)
+    && Number.isInteger(normalizedToYear)
+    && normalizedFromYear >= 1900
+    && normalizedToYear <= 2200
+    && normalizedFromYear <= normalizedToYear;
+  const receipt = {
+    version: 1,
+    fromYear: normalizedFromYear,
+    toYear: normalizedToYear,
+    ...(text(actor) ? { actor: text(actor).slice(0, 220) } : {}),
+    ...(text(updatedAt) ? { updatedAt: text(updatedAt).slice(0, 80) } : {}),
+    counts: {
+      assignedMonths: 0,
+      alreadyAssigned: 0,
+      ambiguousInvoices: 0,
+      unmatchedClientInvoices: 0,
+      skippedNonMaintenance: 0,
+    },
+    clients: [],
+    ambiguousInvoices: [],
+    unmatchedClientInvoices: [],
+    skippedNonMaintenance: [],
+  };
+  if (!valid) return { ledger: ledger || emptyMaintenancePaymentLedger(), receipt: { ...receipt, invalidInput: true } };
+
+  const clientList = clients.filter((client) => clientIdOf(client));
+  const clientById = new Map(clientList.map((client) => [clientIdOf(client), client]));
+  const nameGroups = new Map();
+  for (const client of clientList) {
+    const key = normalizedName(clientNameOf(client));
+    if (!key) continue;
+    const ids = nameGroups.get(key) || [];
+    ids.push(clientIdOf(client));
+    nameGroups.set(key, ids);
+  }
+  const uniqueClientByName = new Map(
+    [...nameGroups.entries()].filter(([, ids]) => ids.length === 1).map(([name, ids]) => [name, ids[0]]),
+  );
+  const scheduleEvidence = buildMaintenanceScheduleEvidence(schedule, clientList);
+  const paymentIndex = paymentIndexes(payments);
+  const candidates = [];
+
+  for (const invoice of invoices.filter((entry) => (
+    invoiceWithinYearRange(entry, normalizedFromYear, normalizedToYear, scheduleEvidence)
+  ))) {
+    const clientId = invoiceClientId(invoice, clientList, uniqueClientByName);
+    if (!clientId) {
+      receipt.unmatchedClientInvoices.push({ ...invoiceReceiptIdentity(invoice), clientName: text(invoice?.clientName || invoice?.customerName) });
+      continue;
+    }
+    const classification = classifyHistoricalMaintenanceInvoice({
+      invoice,
+      clientId,
+      client: clientById.get(clientId),
+      scheduleEvidence,
+    });
+    const detail = {
+      ...invoiceReceiptIdentity(invoice),
+      clientId,
+      clientName: clientNameOf(clientById.get(clientId)),
+      reason: classification.reason,
+      months: classification.months || [],
+    };
+    if (classification.kind === "ambiguous") {
+      receipt.ambiguousInvoices.push(detail);
+      continue;
+    }
+    if (classification.kind === "skip") {
+      receipt.skippedNonMaintenance.push(detail);
+      continue;
+    }
+    const applied = paymentIndex.appliedByInvoice.get(text(invoice?.qbId))?.amountCents || 0;
+    const status = statusFromInvoice(invoice, applied);
+    if (!["paid", "due"].includes(status)) {
+      receipt.ambiguousInvoices.push({ ...detail, reason: `invoice is ${status || "not settled"}` });
+      continue;
+    }
+    const allocations = classification.allocations.filter((entry) => {
+      const year = Number(entry.month.slice(0, 4));
+      return year >= normalizedFromYear && year <= normalizedToYear;
+    });
+    if (allocations.length) candidates.push({ invoice, clientId, status, classification, allocations });
+  }
+
+  let nextLedger = structuredClone(ledger);
+  const clientReceipt = new Map();
+  const receiptForClient = (clientId) => {
+    if (!clientReceipt.has(clientId)) {
+      clientReceipt.set(clientId, {
+        clientId,
+        clientName: clientNameOf(clientById.get(clientId)),
+        coverageStartMonth: scheduleEvidence.earliestByClient.get(clientId) || "",
+        assignedMonths: [],
+        alreadyAssignedMonths: [],
+      });
+    }
+    return clientReceipt.get(clientId);
+  };
+
+  const pendingCandidates = [];
+  for (const candidate of candidates) {
+    const detail = {
+      ...invoiceReceiptIdentity(candidate.invoice),
+      clientId: candidate.clientId,
+      clientName: clientNameOf(clientById.get(candidate.clientId)),
+      reason: candidate.classification.reason,
+      months: candidate.allocations.map((entry) => entry.month),
+    };
+    const source = invoiceSource(candidate.invoice, invoiceTotalCents(candidate.invoice));
+    if (!source) {
+      receipt.ambiguousInvoices.push({ ...detail, reason: "invoice has no stable source identity" });
+      continue;
+    }
+    const previouslyAssignedMonths = new Set(sourceAlreadyAssigned(nextLedger, candidate.clientId, source));
+    if (previouslyAssignedMonths.size) {
+      const clientEntry = receiptForClient(candidate.clientId);
+      clientEntry.coverageStartMonth = earliestMonth(
+        clientEntry.coverageStartMonth,
+        ...previouslyAssignedMonths,
+        ...candidate.allocations.map((entry) => entry.month),
+      );
+      clientEntry.alreadyAssignedMonths.push(...previouslyAssignedMonths);
+      receipt.counts.alreadyAssigned += previouslyAssignedMonths.size;
+      continue;
+    }
+    pendingCandidates.push({ ...candidate, source });
+  }
+
+  const conflicts = new Map();
+  for (const candidate of pendingCandidates) {
+    for (const allocation of candidate.allocations) {
+      const key = `${candidate.clientId}|${allocation.month}`;
+      const entries = conflicts.get(key) || [];
+      entries.push(candidate);
+      conflicts.set(key, entries);
+    }
+  }
+  const conflictCandidates = new Set(
+    [...conflicts.values()].filter((entries) => entries.length > 1).flat(),
+  );
+
+  for (const candidate of pendingCandidates) {
+    const detail = {
+      ...invoiceReceiptIdentity(candidate.invoice),
+      clientId: candidate.clientId,
+      clientName: clientNameOf(clientById.get(candidate.clientId)),
+      reason: "more than one invoice points to the same maintenance month",
+      months: candidate.allocations.map((entry) => entry.month),
+    };
+    if (conflictCandidates.has(candidate)) {
+      receipt.ambiguousInvoices.push(detail);
+      continue;
+    }
+    const blockedMonths = [];
+    for (const allocation of candidate.allocations) {
+      const policy = maintenanceBillingPolicyForClient({ version: 1, policies: nextLedger.policies }, candidate.clientId);
+      const protectedMonth = policy && monthsBetween(policy.coveredFrom, policy.coveredThrough).includes(allocation.month);
+      if (nextLedger.allocations?.[candidate.clientId]?.[allocation.month] || protectedMonth) {
+        blockedMonths.push(allocation.month);
+      }
+    }
+    if (blockedMonths.length) {
+      receipt.ambiguousInvoices.push({
+        ...detail,
+        reason: "maintenance month is already covered by a different saved allocation or protected prepaid policy",
+        months: blockedMonths,
+      });
+      continue;
+    }
+    const available = [];
+    const amountsCents = {};
+    for (const allocation of candidate.allocations) {
+      const month = allocation.month;
+      const clientEntry = receiptForClient(candidate.clientId);
+      clientEntry.coverageStartMonth = earliestMonth(clientEntry.coverageStartMonth, month);
+      available.push(month);
+      amountsCents[month] = allocation.amountCents;
+    }
+    if (!available.length) continue;
+    const reconciled = assignMaintenancePaymentSourceAcrossMonths(nextLedger, {
+      clientId: candidate.clientId,
+      months: available,
+      source: candidate.source,
+      status: candidate.status,
+      amountsCents,
+      expectedCents: expectedMonthlyCents(clientById.get(candidate.clientId)),
+      note: `Historical QuickBooks reconciliation: ${candidate.classification.reason}.`,
+      updatedAt,
+      updatedBy: actor,
+      replaceSourceAssignments: false,
+    });
+    if (!reconciled) {
+      receipt.ambiguousInvoices.push({ ...detail, reason: "the allocation could not be normalized safely" });
+      continue;
+    }
+    nextLedger = reconciled;
+    const clientEntry = receiptForClient(candidate.clientId);
+    clientEntry.assignedMonths.push(...available);
+    receipt.counts.assignedMonths += available.length;
+  }
+
+  const byStableInvoiceIdentity = (left, right) => [
+    left.invoiceMonth.localeCompare(right.invoiceMonth),
+    left.invoiceNumber.localeCompare(right.invoiceNumber),
+    left.qbInvoiceId.localeCompare(right.qbInvoiceId),
+    left.invoiceId.localeCompare(right.invoiceId),
+  ].find((value) => value !== 0) || 0;
+  receipt.ambiguousInvoices.sort(byStableInvoiceIdentity);
+  receipt.unmatchedClientInvoices.sort(byStableInvoiceIdentity);
+  receipt.skippedNonMaintenance.sort(byStableInvoiceIdentity);
+  receipt.clients = [...clientReceipt.values()].map((entry) => ({
+    ...entry,
+    assignedMonths: [...new Set(entry.assignedMonths)].sort(),
+    alreadyAssignedMonths: [...new Set(entry.alreadyAssignedMonths)].sort(),
+  })).sort((left, right) => left.clientName.localeCompare(right.clientName) || left.clientId.localeCompare(right.clientId));
+  receipt.counts.ambiguousInvoices = receipt.ambiguousInvoices.length;
+  receipt.counts.unmatchedClientInvoices = receipt.unmatchedClientInvoices.length;
+  receipt.counts.skippedNonMaintenance = receipt.skippedNonMaintenance.length;
+  return { ledger: nextLedger, receipt };
+}
+
 function resolveSource(source, { invoices, payments, policy, month }) {
   if (source.kind === "invoice" || source.kind === "refund") {
     const invoice = invoices.byId.get(text(source.invoiceId))
@@ -567,10 +1076,12 @@ function completedStop(stop) {
   return stop?.completed === true || !!stop?.completedAt || ["complete", "completed", "done", "finished"].includes(status);
 }
 
-function clientExpectedInMonth(client, month) {
+function clientExpectedInMonth(client, month, inferredStart = "") {
   if (text(client?.status).toLowerCase() === "inactive" || client?.active === false) return false;
-  const start = normalizeMonthKey(client?.maintenanceStartDate || client?.serviceStartDate || client?.startDate);
+  const start = normalizeMonthKey(client?.maintenanceStartDate || client?.serviceStartDate || client?.startDate)
+    || normalizeMonthKey(inferredStart);
   const end = normalizeMonthKey(client?.maintenanceEndDate || client?.serviceEndDate || client?.endDate);
+  if (!start) return false;
   if (start && month < start) return false;
   if (end && month > end) return false;
   return recurringClient(client);
@@ -602,7 +1113,7 @@ function automaticCandidateForMonth({ invoice, month, expectedCents, paymentInde
       invoice,
     };
   }
-  const invoiceMonth = normalizeMonthKey(invoice?.date || invoice?.issuedDate || invoice?.createdAt);
+  const invoiceMonth = invoiceTransactionMonth(invoice);
   if (invoiceMonth !== month) return null;
   if (expectedCents > 0 && total > expectedCents + 1) {
     return {
@@ -742,22 +1253,8 @@ export function buildMaintenancePaymentLedgerRows({
     if (!invoicesByClient.has(clientId)) invoicesByClient.set(clientId, []);
     invoicesByClient.get(clientId).push(invoice);
   }
-  const scheduleByClientAndMonth = new Map();
-  if (Array.isArray(schedule)) {
-    for (const stop of schedule) {
-      const clientId = text(stop?.clientId);
-      const month = scheduleDate(stop);
-      const client = clientList.find((candidate) => clientIdOf(candidate) === clientId);
-      const cadence = recurringMaintenanceCadence(stop, client);
-      if (!clientId || !month || !client || !["weekly", "biweekly", "monthly"].includes(cadence)) continue;
-      const key = `${clientId}|${month}`;
-      const current = scheduleByClientAndMonth.get(key) || { visitCount: 0, completedCount: 0, serviceDates: [] };
-      current.visitCount += 1;
-      if (completedStop(stop)) current.completedCount += 1;
-      current.serviceDates.push(text(stop?.date || stop?.scheduledDate || stop?.visitDate));
-      scheduleByClientAndMonth.set(key, current);
-    }
-  }
+  const scheduleEvidence = buildMaintenanceScheduleEvidence(schedule, clientList);
+  const scheduleByClientAndMonth = scheduleEvidence.byClientAndMonth;
   const invoiceIndex = invoiceIndexes(invoices);
   const paymentIndex = paymentIndexes(payments);
   const months = Array.from({ length: 12 }, (_, index) => `${normalizedYear}-${String(index + 1).padStart(2, "0")}`);
@@ -775,12 +1272,25 @@ export function buildMaintenancePaymentLedgerRows({
     const baseExpectedCents = expectedMonthlyCents(client);
     const policy = protectedBillingStore ? maintenanceBillingPolicyForClient(protectedBillingStore, clientId) : null;
     const clientInvoices = (invoicesByClient.get(clientId) || []).filter((invoice) => (
-      invoiceLooksLikeMaintenance(invoice, baseExpectedCents)
+      invoiceLooksLikeMaintenance(invoice, { clientId, scheduleEvidence })
     ));
+    const invoiceEvidenceStart = earliestMonth(clientInvoices.flatMap((invoice) => (
+      explicitInvoiceAllocations(invoice).map((entry) => entry.month).concat(
+        explicitServiceMonths(invoice),
+        invoiceTransactionMonth(invoice),
+      )
+    )));
+    const allocationStart = earliestMonth(Object.keys(ledger.allocations?.[clientId] || {}));
+    const inferredStart = earliestMonth(
+      policy?.coveredFrom,
+      scheduleEvidence.earliestByClient.get(clientId),
+      invoiceEvidenceStart,
+      allocationStart,
+    );
     const monthRows = months.map((month) => {
       const manual = ledger.allocations?.[clientId]?.[month] || null;
       const scheduled = scheduleByClientAndMonth.get(`${clientId}|${month}`);
-      const expected = clientExpectedInMonth(client, month) || !!scheduled;
+      const expected = clientExpectedInMonth(client, month, inferredStart) || !!scheduled;
       const expectedCents = manual?.expectedCents ?? baseExpectedCents;
       const payment = summarizeCell({
         expected,
@@ -791,6 +1301,13 @@ export function buildMaintenancePaymentLedgerRows({
         clientInvoices,
         indexes: { invoices: invoiceIndex, payments: paymentIndex },
       });
+      payment.evidenceState = payment.status === "not_expected"
+        ? "not_expected"
+        : (payment.status === "review"
+          ? "unallocated_paid_history"
+          : (["paid", "prepaid", "waived"].includes(payment.status)
+            ? "covered"
+            : (["due", "partial"].includes(payment.status) ? "matching_invoice_open" : "no_matching_payment")));
       const scheduleState = Array.isArray(schedule) ? {
         expected,
         visitCount: scheduled?.visitCount || 0,
@@ -809,6 +1326,7 @@ export function buildMaintenancePaymentLedgerRows({
       clientId,
       clientName: clientNameOf(client),
       expectedMonthlyCents: baseExpectedCents,
+      coverageStartMonth: inferredStart,
       months: monthRows,
       byMonth: Object.fromEntries(monthRows.map((entry) => [entry.month, entry])),
     };

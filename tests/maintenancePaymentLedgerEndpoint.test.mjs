@@ -70,8 +70,8 @@ function authenticatedStateFetch({ team = ownerTeam, state, onBatch } = {}) {
     if (href.includes("/rest/v1/app_state?")) return response(stateRows(href, state));
     if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
       const operations = JSON.parse(options.body).p_operations;
-      if (onBatch) onBatch(operations);
-      return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
+      const customResult = onBatch ? onBatch(operations) : null;
+      return response([customResult || { applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
     }
     throw new Error(`Unexpected fetch: ${href}`);
   };
@@ -276,4 +276,228 @@ test("clearing one invoice source preserves policies and other invoice evidence"
   assert.equal(written.allocations.c1["2026-08"].sources.length, 1);
   assert.equal(written.allocations.c1["2026-08"].sources[0].invoiceId, "iv2");
   assert.equal(written.allocations.c1["2026-08"].allocatedCents, 20000);
+});
+
+test("reconcile backfills canonical historical evidence and fences every source row", async () => {
+  const state = {
+    sps_clients: { value: [canonicalClient], version: 3 },
+    sps_invoices: {
+      value: [{
+        ...canonicalInvoice,
+        id: "history-1",
+        qbId: "qb-history-1",
+        number: "1493",
+        date: "2025-06-15",
+        total: 175,
+        balance: 0,
+        status: "Paid",
+        lineItems: [{ desc: "Monthly maintenance", amount: 175 }],
+      }],
+      version: 8,
+    },
+    sps_maintenance_billing: { value: { version: 2, policies: {}, allocations: {} }, version: 4 },
+    sps_schedule: { value: [], version: 11 },
+  };
+  let batch = null;
+  globalThis.fetch = authenticatedStateFetch({ state, onBatch(operations) { batch = operations; } });
+
+  const res = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { authorization: "Bearer owner-token" },
+    body: { action: "reconcile", fromYear: 2025, toYear: 2025 },
+  }, res);
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.changed, true);
+  assert.equal(res.body.fromYear, 2025);
+  assert.equal(res.body.toYear, 2025);
+  assert.equal(res.body.reconciliationReceipt.counts.assignedMonths, 1);
+  assert.equal(res.body.maintenancePaymentLedger.allocations.c1["2025-06"].allocatedCents, 17500);
+  assert.deepEqual(batch.map((operation) => operation.key), [
+    "sps_clients",
+    "sps_invoices",
+    "sps_schedule",
+    "sps_maintenance_billing",
+  ]);
+  for (const key of ["sps_clients", "sps_invoices", "sps_schedule"]) {
+    assert.equal(batch.find((operation) => operation.key === key).check_only, true);
+  }
+  assert.equal(batch.find((operation) => operation.key === "sps_schedule").expected_version, 11);
+});
+
+test("reconcile flattens canonical day-group schedule evidence for generic service invoices", async () => {
+  const state = {
+    sps_clients: { value: [canonicalClient], version: 3 },
+    sps_invoices: {
+      value: [{
+        ...canonicalInvoice,
+        id: "history-generic",
+        qbId: "qb-history-generic",
+        number: "1494",
+        date: "2025-07-15",
+        total: 190,
+        balance: 0,
+        status: "Paid",
+        lineItems: [{ desc: "Services", amount: 190 }],
+      }],
+      version: 8,
+    },
+    sps_maintenance_billing: { value: { version: 2, policies: {}, allocations: {} }, version: 4 },
+    sps_schedule: {
+      value: [{
+        date: "2025-07-10",
+        stops: [{
+          id: "c1",
+          sid: "visit-2025-07",
+          type: "Monthly Service",
+          frequency: "Monthly",
+          status: "Completed",
+        }],
+      }],
+      version: 11,
+    },
+  };
+  let batch = null;
+  globalThis.fetch = authenticatedStateFetch({ state, onBatch(operations) { batch = operations; } });
+
+  const res = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { authorization: "Bearer owner-token" },
+    body: { action: "reconcile", fromYear: 2025, toYear: 2025 },
+  }, res);
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.reconciliationReceipt.counts.assignedMonths, 1);
+  assert.equal(res.body.maintenancePaymentLedger.allocations.c1["2025-07"].allocatedCents, 19000);
+  assert.equal(batch.find((operation) => operation.key === "sps_schedule").check_only, true);
+});
+
+test("reconcile is idempotent and does not advance the ledger on a no-op", async () => {
+  const existingAllocation = {
+    status: "paid",
+    sources: [{
+      kind: "invoice",
+      invoiceId: "history-1",
+      qbInvoiceId: "qb-history-1",
+      invoiceNumber: "1493",
+      amountCents: 17500,
+    }],
+    expectedCents: 22900,
+    allocatedCents: 17500,
+    note: "Owner confirmed historical payment.",
+    updatedAt: "2026-08-20T12:00:00.000Z",
+    updatedBy: "owner@example.com",
+  };
+  const state = {
+    sps_clients: { value: [canonicalClient], version: 3 },
+    sps_invoices: {
+      value: [{
+        ...canonicalInvoice,
+        id: "history-1",
+        qbId: "qb-history-1",
+        number: "1493",
+        date: "2025-06-15",
+        total: 175,
+        balance: 0,
+        status: "Paid",
+        lineItems: [{ desc: "Monthly maintenance", amount: 175 }],
+      }],
+      version: 8,
+    },
+    sps_maintenance_billing: {
+      value: { version: 2, policies: {}, allocations: { c1: { "2025-06": existingAllocation } } },
+      version: 4,
+    },
+    sps_schedule: { value: [], version: 11 },
+  };
+  let writes = 0;
+  globalThis.fetch = authenticatedStateFetch({ state, onBatch() { writes += 1; } });
+
+  const res = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { authorization: "Bearer owner-token" },
+    body: { action: "reconcile", fromYear: 2025, toYear: 2025 },
+  }, res);
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.changed, false);
+  assert.equal(res.body.reconciliationReceipt.counts.assignedMonths, 0);
+  assert.equal(res.body.reconciliationReceipt.counts.alreadyAssigned, 1);
+  assert.deepEqual(res.body.maintenancePaymentLedger.allocations.c1["2025-06"], existingAllocation);
+  assert.equal(writes, 0);
+});
+
+test("reconcile rejects invalid or dangerously broad year ranges before writing", async () => {
+  const state = {
+    sps_clients: { value: [canonicalClient], version: 3 },
+    sps_invoices: { value: [canonicalInvoice], version: 8 },
+    sps_maintenance_billing: { value: { version: 2, policies: {}, allocations: {} }, version: 4 },
+    sps_schedule: { value: [], version: 11 },
+  };
+  let writes = 0;
+  globalThis.fetch = authenticatedStateFetch({ state, onBatch() { writes += 1; } });
+
+  const res = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { authorization: "Bearer owner-token" },
+    body: { action: "reconcile", fromYear: 1999, toYear: 2025 },
+  }, res);
+
+  assert.equal(res.statusCode, 400, JSON.stringify(res.body));
+  assert.match(res.body.error, /valid year range/i);
+  assert.equal(writes, 0);
+});
+
+test("reconcile re-reads canonical state and retries after a CAS conflict", async () => {
+  const state = {
+    sps_clients: { value: [canonicalClient], version: 3 },
+    sps_invoices: {
+      value: [{
+        ...canonicalInvoice,
+        id: "history-1",
+        qbId: "qb-history-1",
+        number: "1493",
+        date: "2025-06-15",
+        total: 175,
+        balance: 0,
+        status: "Paid",
+        lineItems: [{ desc: "Monthly maintenance", amount: 175 }],
+      }],
+      version: 8,
+    },
+    sps_maintenance_billing: { value: { version: 2, policies: {}, allocations: {} }, version: 4 },
+    sps_schedule: { value: [], version: 11 },
+  };
+  let batches = 0;
+  let snapshotReads = 0;
+  const baseFetch = authenticatedStateFetch({
+    state,
+    onBatch() {
+      batches += 1;
+      if (batches === 1) {
+        return { applied: false, outcome: "conflict", conflict_key: "sps_schedule", current_versions: {} };
+      }
+      return { applied: true, outcome: "applied", conflict_key: null, current_versions: {} };
+    },
+  });
+  globalThis.fetch = async (url, options) => {
+    if (String(url).includes("key=in.(")) snapshotReads += 1;
+    return baseFetch(url, options);
+  };
+
+  const res = mockResponse();
+  await handler({
+    method: "POST",
+    headers: { authorization: "Bearer owner-token" },
+    body: { action: "reconcile", fromYear: 2025, toYear: 2025 },
+  }, res);
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.changed, true);
+  assert.equal(batches, 2);
+  assert.equal(snapshotReads, 2);
 });

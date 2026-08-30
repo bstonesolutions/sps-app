@@ -1793,7 +1793,39 @@ function useStoredState(key, initial) {
     document.addEventListener("sps-reconciled", onReconciled);
     return () => document.removeEventListener("sps-reconciled", onReconciled);
   }, [key, value, loaded]);
-  return [value, setValue, loaded];
+  // Critical workflows (for example QuickBooks reconciliation) need an exact, awaited
+  // server receipt for the payload they just computed.  Waiting for React effects or
+  // flushing the key can certify a different render's value, so expose a narrow commit
+  // path that uses this hook's own CAS baseline and only updates React after confirmation.
+  const persistExact = useCallback(async (nextValue) => {
+    if (!loaded) {
+      return { ok: false, notReady: true, error: new Error(`${key} has not finished loading.`) };
+    }
+    if (!DB_READ_OK) {
+      return { ok: false, initFailed: true, error: new Error(`${key} cannot be saved until shared data finishes loading.`) };
+    }
+    let json;
+    try {
+      json = JSON.stringify(nextValue);
+    } catch (error) {
+      return { ok: false, error };
+    }
+    if (typeof window.__onSpsSyncStart === "function") window.__onSpsSyncStart();
+    const submittedBase = lastPersisted.current;
+    const receipt = await store.set(key, json, { baseValue: submittedBase });
+    if (!receipt?.ok) {
+      if (typeof window.__onSpsSyncFail === "function") window.__onSpsSyncFail();
+      return receipt || { ok: false, error: new Error(`${key} was not saved.`) };
+    }
+    const savedJson = typeof receipt.value === "string" ? receipt.value : json;
+    lastPersisted.current = savedJson;
+    let parsedValue = nextValue;
+    try { parsedValue = JSON.parse(savedJson); } catch (_) {}
+    setValue(parsedValue);
+    if (typeof window.__onSpsSync === "function") window.__onSpsSync();
+    return { ...receipt, ok: true, value: savedJson, parsedValue };
+  }, [key, loaded]);
+  return [value, setValue, loaded, persistExact];
 }
 // Debounced auto-save for a Customize section. Edits update a local draft
 // immediately (responsive UI) and commit to the real setter ~500ms after the
@@ -19944,7 +19976,12 @@ function QBConnect({ onSyncData }) {
       }
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      if (onSyncData && data.invoices) onSyncData(data.invoices, data.customers, data);
+      const canonicalPersistence = onSyncData && data.invoices
+        ? await Promise.resolve(onSyncData(data.invoices, data.customers, data))
+        : null;
+      if (!canonicalPersistence?.ok) {
+        throw new Error("QuickBooks refreshed, but the shared client and invoice records were not confirmed saved.");
+      }
       setResult(data);
       setStatus("done");
     } catch (err) {
@@ -23527,7 +23564,29 @@ function InvoiceReconciliationReviewQueue({
   );
 }
 
-function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding, catalog, setCatalog, qbAccounting = null, onSave, onPersistInvoice, onResolveReview, onDelete, onSyncData, initialFilter = "All", vp = {} }) {
+const maintenanceReconciliationStorageKey = (userId, companyId) => {
+  const userScope = encodeURIComponent(String(userId || "anonymous"));
+  const companyScope = encodeURIComponent(String(companyId || "company"));
+  return `sps_maintenance_reconciliation_receipt:${userScope}:${companyScope}`;
+};
+
+const maintenanceQuickBooksSnapshotIssue = (data) => {
+  const pagination = data?.reconciliation?.pagination || {};
+  const incomplete = (label, page) => {
+    if (page?.complete !== true) return `${label} history was not complete`;
+    if (page?.truncated === true) return `${label} history was truncated`;
+    if (page?.error) return `${label} history failed: ${page.error}`;
+    return "";
+  };
+  const invoiceIssue = incomplete("QuickBooks invoice", pagination.invoices);
+  if (invoiceIssue) return invoiceIssue;
+  const customerIssue = incomplete("QuickBooks customer", pagination.customers);
+  if (customerIssue) return customerIssue;
+  if (!data?.canonicalPersistence?.ok) return "Refreshed QuickBooks clients and invoices were not confirmed in shared storage";
+  return "";
+};
+
+function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding, catalog, setCatalog, qbAccounting = null, currentUserId = "", onSave, onPersistInvoice, onResolveReview, onDelete, onSyncData, initialFilter = "All", vp = {} }) {
   const { T, perms } = useApp();
   const canReviewAccounting = canManageInvoiceAccounting(perms);
   const moneyFmt = (n) => formatAccountingCurrency(n);
@@ -23537,7 +23596,25 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
   const [maintenanceLedgerLoading, setMaintenanceLedgerLoading] = useState(false);
   const [maintenanceLedgerSaving, setMaintenanceLedgerSaving] = useState(false);
   const [maintenanceLedgerError, setMaintenanceLedgerError] = useState("");
+  const maintenanceReceiptStorageKey = useMemo(() => maintenanceReconciliationStorageKey(
+    currentUserId,
+    qbAccounting?.realmId || branding?.companyName || "company",
+  ), [branding?.companyName, currentUserId, qbAccounting?.realmId]);
+  const [maintenanceReconciliationReceipt, setMaintenanceReconciliationReceipt] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem(maintenanceReceiptStorageKey);
+      return saved ? JSON.parse(saved) : null;
+    } catch (_) { return null; }
+  });
   const maintenanceLedgerAttemptedRef = useRef(false);
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem(maintenanceReceiptStorageKey);
+      setMaintenanceReconciliationReceipt(saved ? JSON.parse(saved) : null);
+    } catch (_) {
+      setMaintenanceReconciliationReceipt(null);
+    }
+  }, [maintenanceReceiptStorageKey]);
 
   // ── Filter / sort state ──
   const [filter,     setFilter]     = useState(initialFilter);
@@ -23563,9 +23640,9 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
   const [qbSynced, setQbSynced]   = useState(false);
   const [qbSyncMsg, setQbSyncMsg] = useState("");
   const qbConnected = qbIsConnected();
-  const syncQuickBooks = async () => {
-    if (!canReviewAccounting) return;
-    if (!qbIsConnected()) { setQbSyncMsg("Connect QuickBooks under Customize first."); setTimeout(() => setQbSyncMsg(""), 4000); return; }
+  const syncQuickBooks = useCallback(async () => {
+    if (!canReviewAccounting) return null;
+    if (!qbIsConnected()) { setQbSyncMsg("Connect QuickBooks under Customize first."); setTimeout(() => setQbSyncMsg(""), 4000); return null; }
     setQbSyncing(true); setQbSynced(false); setQbSyncMsg("");
 
     try {
@@ -23577,11 +23654,16 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
         const why = d401.reason ? ` (${d401.reason})` : (d401.detail ? ` — ${String(d401.detail).slice(0, 140)}` : "");
         setQbSyncMsg("QuickBooks session expired" + why + ". Reconnect under Customize.");
         setTimeout(() => setQbSyncMsg(""), 8000);
-        return;
+        return null;
       }
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      if (onSyncData && data.invoices) onSyncData(data.invoices, data.customers, data);
+      const canonicalPersistence = onSyncData && data.invoices
+        ? await Promise.resolve(onSyncData(data.invoices, data.customers, data))
+        : null;
+      if (!canonicalPersistence?.ok) {
+        throw new Error("Refreshed QuickBooks clients and invoices could not be confirmed in shared storage.");
+      }
       setQbSynced(true);
       const creditCount = Number(data.accounting?.openCreditMemoCount || 0);
       setQbSyncMsg(data.accounting?.complete
@@ -23589,13 +23671,15 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
         : `QuickBooks returned ${data.invoices?.length || 0} invoices, but part of the accounting snapshot was incomplete. Totals were not presented as final.`);
       // Let the "done" confirmation linger before clearing.
       setTimeout(() => { setQbSynced(false); setQbSyncMsg(""); }, 4500);
+      return { ...data, canonicalPersistence };
     } catch (err) {
       setQbSyncMsg("Sync failed: " + (err.message || "try again"));
       setTimeout(() => setQbSyncMsg(""), 5000);
+      return null;
     } finally {
       setQbSyncing(false);
     }
-  };
+  }, [canReviewAccounting, onSyncData]);
   const loadMaintenanceLedger = useCallback(async () => {
     if (!canReviewAccounting) return null;
     setMaintenanceLedgerLoading(true);
@@ -23620,9 +23704,25 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
     }
   }, [canReviewAccounting]);
   const refreshMaintenanceEvidence = useCallback(async () => {
-    if (qbIsConnected()) await syncQuickBooks();
+    if (!qbIsConnected()) {
+      const error = new Error("Connect QuickBooks before refreshing maintenance coverage. Stored invoice history was not used as authoritative evidence.");
+      setMaintenanceLedgerError(error.message);
+      throw error;
+    }
+    const freshQuickBooks = await syncQuickBooks();
+    if (!freshQuickBooks) {
+      const error = new Error("QuickBooks refresh did not finish, so maintenance coverage was not recalculated from stale data.");
+      setMaintenanceLedgerError(error.message);
+      throw error;
+    }
+    const snapshotIssue = maintenanceQuickBooksSnapshotIssue(freshQuickBooks);
+    if (snapshotIssue) {
+      const error = new Error(`${snapshotIssue}. Maintenance coverage was not recalculated.`);
+      setMaintenanceLedgerError(error.message);
+      throw error;
+    }
     return loadMaintenanceLedger();
-  }, [loadMaintenanceLedger]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [loadMaintenanceLedger, syncQuickBooks]);
   const mutateMaintenanceLedger = useCallback(async (payload) => {
     if (!canReviewAccounting) throw new Error("Accounting permission is required.");
     setMaintenanceLedgerSaving(true);
@@ -23659,6 +23759,46 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
     clientId,
     monthKeys,
   }), [mutateMaintenanceLedger]);
+  const reconcileMaintenanceHistory = useCallback(async ({ fromYear, toYear }) => {
+    if (!canReviewAccounting) throw new Error("Accounting permission is required.");
+    setMaintenanceLedgerSaving(true);
+    setMaintenanceLedgerError("");
+    try {
+      if (!qbIsConnected()) throw new Error("Connect QuickBooks before reconciling maintenance history. Stored invoice history was not used as authoritative evidence.");
+      const freshQuickBooks = await syncQuickBooks();
+      if (!freshQuickBooks) throw new Error("QuickBooks refresh did not finish. History was not reconciled from stale data.");
+      const snapshotIssue = maintenanceQuickBooksSnapshotIssue(freshQuickBooks);
+      if (snapshotIssue) throw new Error(`${snapshotIssue}. History was not reconciled.`);
+      const receiptStorageKey = maintenanceReconciliationStorageKey(
+        currentUserId,
+        freshQuickBooks.realmId || branding?.companyName || "company",
+      );
+      const response = await fetch(`${PROD_URL}/api/maintenance-payment-ledger`, {
+        method: "POST",
+        headers: await authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ action: "reconcile", fromYear, toYear }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.error) throw new Error(data.error || "Maintenance payment history could not be reconciled.");
+      const nextLedger = data.maintenancePaymentLedger || data.ledger || null;
+      if (!nextLedger || !data.reconciliationReceipt) throw new Error("The server did not return reconciliation evidence.");
+      setMaintenanceLedger(nextLedger);
+      const reconciliationEvidence = {
+        ...data.reconciliationReceipt,
+        changed: data.changed !== false,
+        updatedAt: data.reconciliationReceipt.updatedAt || new Date().toISOString(),
+        scopeKey: receiptStorageKey,
+      };
+      setMaintenanceReconciliationReceipt(reconciliationEvidence);
+      try { sessionStorage.setItem(receiptStorageKey, JSON.stringify(reconciliationEvidence)); } catch (_) {}
+      return data;
+    } catch (error) {
+      setMaintenanceLedgerError(error?.message || "Maintenance payment history could not be reconciled.");
+      throw error;
+    } finally {
+      setMaintenanceLedgerSaving(false);
+    }
+  }, [branding?.companyName, canReviewAccounting, currentUserId, syncQuickBooks]);
   useEffect(() => {
     if (invoiceWorkspace !== "maintenance" || !canReviewAccounting || maintenanceLedger || maintenanceLedgerAttemptedRef.current) return;
     maintenanceLedgerAttemptedRef.current = true;
@@ -23894,6 +24034,8 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
             saving={maintenanceLedgerSaving}
             error={maintenanceLedgerError}
             onReload={() => void refreshMaintenanceEvidence().catch(() => {})}
+            onReconcile={(range) => void reconcileMaintenanceHistory(range).catch(() => {})}
+            reconciliationReceipt={maintenanceReconciliationReceipt}
             onAssign={assignMaintenanceCoverage}
             onClear={clearMaintenanceCoverage}
             canSeeAmounts={!!(perms.seeTotalSales || perms.isAdmin)}
@@ -39134,7 +39276,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   if (!portalDataFenceRef.current) portalDataFenceRef.current = createPortalDataFence();
 
   // Persistent data — survives reloads and app updates
-  const [clients, setClients, lc] = useStoredState("sps_clients", []);
+  const [clients, setClients, lc, persistClientsExact] = useStoredState("sps_clients", []);
   const legacyMediaHealth = useMemo(() => inspectLegacyMediaHealth(clients), [clients]);
   // Live-sync a client's communication/notification preferences onto THIS device the moment they
   // change them in their portal — no manual reload. We subscribe to the shared sps_clients row and
@@ -39272,7 +39414,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     return validateTeamWrite(next, prev);
   });
   const [session, setSession, lsesh] = useStoredState("sps_session", { userId: DEFAULT_OWNER_ID });
-  const [invoices, setInvoices, linv] = useStoredState("sps_invoices", DEMO_INVOICES);
+  const [invoices, setInvoices, linv, persistInvoicesExact] = useStoredState("sps_invoices", DEMO_INVOICES);
   // QuickBooks refresh listeners are installed once after hydration. Keep the comparison
   // snapshot in a stable ref so those long-lived listeners never compare a fresh QB response
   // against the unpaid invoice array captured on the first render.
@@ -40943,7 +41085,8 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           if (!res.ok) return null;
           const data = await res.json().catch(() => ({}));
           if (disposed || !data || data.error || !Array.isArray(data.invoices)) return null;
-          handleQBSync(data.invoices, data.customers, data);
+          const canonicalPersistence = await handleQBSync(data.invoices, data.customers, data);
+          if (!canonicalPersistence?.ok) return null;
           // Record only a confirmed, applied refresh. Failed requests remain immediately retryable.
           try { localStorage.setItem("qb_autosync_at", String(Date.now())); } catch (_) {}
           return data;
@@ -41230,22 +41373,21 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     })();
   }, [hydrated, currentUser, dbOk]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleQBSync = (qbInvoices, qbCustomers, syncPayload = {}) => {
+  const handleQBSync = async (qbInvoices, qbCustomers, syncPayload = {}) => {
     const reconciliation = syncPayload?.reconciliation || null;
     const accounting = syncPayload?.accounting || reconciliation?.accounting || null;
     const invoiceSnapshotComplete = reconciliation?.pagination?.invoices?.complete === true;
-    if (accounting) {
-      const snapshot = {
+    const accountingSnapshot = accounting
+      ? {
         ...accounting,
+        realmId: syncPayload?.realmId || null,
         creditMemos: Array.isArray(syncPayload.creditMemos) ? syncPayload.creditMemos : [],
         payments: Array.isArray(syncPayload.payments) ? syncPayload.payments : [],
         unappliedPayments: Array.isArray(syncPayload.unappliedPayments) ? syncPayload.unappliedPayments : [],
         reconciliation,
         fetchedAt: reconciliation?.fetchedAt || new Date().toISOString(),
-      };
-      setQbAccounting(snapshot);
-      try { localStorage.setItem("sps_qb_accounting", JSON.stringify(snapshot)); } catch (_) {}
-    }
+      }
+      : null;
     // Build client lookup maps from current clients snapshot
     const currentClients = clients || [];
 
@@ -41285,11 +41427,6 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
         if (idx >= 0) updatedClients[idx] = { ...updatedClients[idx], qbId: qc.qbId };
       }
     });
-
-    // Update clients with QB IDs — but ONLY when tagging actually changed something. Previously this
-    // wrote sps_clients on every app open (always a fresh array), fanning a redundant realtime read
-    // to every connected device for nothing.
-    if (JSON.stringify(updatedClients) !== JSON.stringify(currentClients)) setClients(updatedClients);
 
     // Map QB invoices to SPS format with clientId resolved
     const newInvoices = qbInvoices.map(qi => {
@@ -41363,8 +41500,8 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       const wasPaid = effectiveStatus(iv) === "Paid" || iv.status === "Paid";
       if (!wasPaid && qi.status === "Paid") _newlyPaid = { clientName: iv.clientName || qi.clientName || "A client", amount: "$" + ((Number(qi.total) || 0).toFixed(2)), number: qi.number || iv.number, invoiceId: iv.id };
     });
-    setInvoices(prev => {
-      const prevList = prev || [];
+    const finalInvoices = (() => {
+      const prevList = invoicesRef.current || [];
       const usedQbIds = new Set();
       // Choose one record per QB id as the reconciliation target. Any older duplicate stays
       // visible and is fenced for review below — sync must never silently discard SPS data.
@@ -41412,7 +41549,27 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       });
       const fresh = newInvoices.filter(n => !usedQbIds.has(String(n.qbId)));
       return [...merged, ...fresh];
-    });
+    })();
+
+    // Confirm the exact canonical client and invoice snapshots before reporting a successful
+    // QuickBooks refresh. React effects and generic key flushes can race with another render and
+    // certify stale data; these receipts belong to the payloads computed immediately above.
+    const clientReceipt = await persistClientsExact(updatedClients);
+    const clientIssue = storeReceiptIssue(clientReceipt, "Saving refreshed client matches");
+    if (clientIssue) throw new Error(clientIssue);
+    const invoiceReceipt = await persistInvoicesExact(finalInvoices);
+    const invoiceIssue = storeReceiptIssue(invoiceReceipt, "Saving refreshed invoices");
+    if (invoiceIssue) throw new Error(invoiceIssue);
+    const confirmedClients = clientReceipt.parsedValue || updatedClients;
+    const confirmedInvoices = invoiceReceipt.parsedValue || finalInvoices;
+    invoicesRef.current = confirmedInvoices;
+
+    // Accounting summaries are only made visible after the client and invoice evidence that
+    // supports them has been durably confirmed.
+    if (accountingSnapshot) {
+      setQbAccounting(accountingSnapshot);
+      try { localStorage.setItem("sps_qb_accounting", JSON.stringify(accountingSnapshot)); } catch (_) {}
+    }
 
     // Build 15, Item 6 — surface a payment-received banner to the owner (in-app, while open).
     if (_newlyPaid && perms && perms.isAdmin) setPayBanner({ ..._newlyPaid, id: Date.now() });
@@ -41422,6 +41579,12 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     // Log match stats
     const matched = newInvoices.filter(iv => iv.clientId).length;
     console.log(`QB Sync: ${newInvoices.length} invoices, ${matched} matched to clients`);
+    return {
+      ok: true,
+      clients: confirmedClients,
+      invoices: confirmedInvoices,
+      receipts: { clients: clientReceipt, invoices: invoiceReceipt },
+    };
   };
 
   // Push a new invoice to QuickBooks and get back payment link
@@ -43232,7 +43395,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} branding={branding} T={T} budget={budget} />}
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} isAdmin={perms.isAdmin} />}
       {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} setCatalog={setCatalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} invoices={invoices} schedule={schedule} onSaveInvoice={handleSaveInvoice} onConvertEstimate={handleConvertEstimateToInvoice} onCompleteEstimate={handleCompleteEstimate} onScheduleEstimate={handleOpenEstimateSchedule} />}
-      {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} schedule={schedule} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} qbAccounting={qbAccounting} onSave={handleSaveInvoice} onPersistInvoice={handlePersistInvoiceMutation} onResolveReview={handleResolveInvoiceReview} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
+      {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} schedule={schedule} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} qbAccounting={qbAccounting} currentUserId={currentUser.id} onSave={handleSaveInvoice} onPersistInvoice={handlePersistInvoiceMutation} onResolveReview={handleResolveInvoiceReview} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
       {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : commsSection || undefined} initialSectionNonce={commsSectionNonce} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} setBranding={setBranding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} onLinkLead={handleLinkLead} openLeadId={openLeadId} onLeadOpened={() => setOpenLeadId(null)} vp={vp} workspaceScope={authUserId} />}
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}

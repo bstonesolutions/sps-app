@@ -18,8 +18,8 @@ const STATUS = {
   prepaid: { label: "Prepaid", short: "Pre" },
   due: { label: "Invoice open", short: "Open" },
   partial: { label: "Partly paid", short: "Part" },
-  missing: { label: "No coverage", short: "Missing" },
-  review: { label: "Needs review", short: "Review" },
+  missing: { label: "No matching payment", short: "No match" },
+  review: { label: "Unallocated history", short: "Review" },
   waived: { label: "Waived", short: "Waived" },
   refunded: { label: "Refunded", short: "Refund" },
   upcoming: { label: "Upcoming", short: "Upcoming" },
@@ -39,6 +39,21 @@ const formatMoney = (cents, hidden = false) => hidden
 const invoiceAmountCents = (invoice) => moneyToCents(invoice?.total ?? invoice?.amount ?? invoice?.subtotal);
 const displayStatusForMonth = (cell, monthKey) => {
   return maintenancePaymentDisplayStatus(cell?.payment?.status, monthKey);
+};
+const statusMatchesView = (status, view) => {
+  if (view === "all") return true;
+  if (view === "covered") return ["paid", "prepaid", "waived"].includes(status);
+  if (view === "missing") return status === "missing";
+  if (view === "review") return ["review", "partial", "refunded"].includes(status);
+  if (view === "open") return status === "due";
+  return ["missing", "review", "partial", "refunded", "due"].includes(status);
+};
+const formatReceiptTimestamp = (value) => {
+  const date = new Date(value || "");
+  if (!Number.isFinite(date.getTime())) return "Time unavailable";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit",
+  }).format(date);
 };
 
 function Icon({ name, size = 18 }) {
@@ -130,7 +145,7 @@ function DetailPanel({ selection, rows, invoices, clients, year, hiddenAmounts, 
     setError("");
   }, [row?.clientId, initialMonth, invoices]);
 
-  if (!row || !initialMonth) return null;
+  if (!row || !initialMonth || !initialMonth.startsWith(`${year}-`)) return null;
   const candidates = clientInvoicesFor(row, invoices, clients);
   const cell = row.byMonth[initialMonth];
   const status = displayStatusForMonth(cell, initialMonth);
@@ -265,7 +280,8 @@ function DetailPanel({ selection, rows, invoices, clients, year, hiddenAmounts, 
 
 export default function MaintenanceCoverageWorkspace({
   clients = [], invoices = [], payments = [], schedule = [], ledger = null,
-  T, vp = {}, loading = false, saving = false, error = "", onReload, onAssign, onClear,
+  T, vp = {}, loading = false, saving = false, error = "", onReload, onReconcile,
+  reconciliationReceipt = null, onAssign, onClear,
   canSeeAmounts = true,
 }) {
   const currentYear = new Date().getFullYear();
@@ -274,65 +290,205 @@ export default function MaintenanceCoverageWorkspace({
   const [view, setView] = useState("attention");
   const [fullYear, setFullYear] = useState(false);
   const [selection, setSelection] = useState(null);
+  const [receiptExpanded, setReceiptExpanded] = useState(false);
+  const compactControls = !!(vp.isPhone || vp.isTablet);
+  const historyRange = useMemo(() => {
+    const evidenceYears = [...(invoices || []), ...(schedule || [])].map((entry) => {
+      const raw = text(entry?.date || entry?.issueDate || entry?.issuedDate || entry?.createdAt || entry?.scheduledDate);
+      const match = raw.match(/^(\d{4})[-/]/);
+      return match ? Number(match[1]) : null;
+    }).filter((candidate) => Number.isSafeInteger(candidate) && candidate >= 2000 && candidate <= currentYear + 1);
+    const earliest = evidenceYears.length ? Math.min(...evidenceYears) : currentYear;
+    return {
+      fromYear: Math.max(2000, currentYear - 24, Math.min(earliest, year)),
+      toYear: Math.min(currentYear + 1, Math.max(currentYear, year)),
+    };
+  }, [currentYear, invoices, schedule, year]);
   const monthMeta = fullYear ? MONTHS : MONTHS.slice(3);
+  const visibleRangeLabel = fullYear ? "January to December" : "April to December";
   const rows = useMemo(() => buildMaintenancePaymentLedgerRows({
     clients, invoices, payments, ledger, schedule, year,
   }), [clients, invoices, payments, ledger, schedule, year]);
   const visibleRows = useMemo(() => rows.filter((row) => {
     const matches = !search || row.clientName.toLowerCase().includes(search.toLowerCase());
     if (!matches) return false;
-    if (view === "all") return true;
     const statuses = monthMeta.map(([number]) => displayStatusForMonth(row.byMonth[`${year}-${number}`], `${year}-${number}`));
-    if (view === "covered") return statuses.some((status) => ["paid", "prepaid", "waived"].includes(status));
-    return statuses.some((status) => ["missing", "review", "partial", "refunded", "due"].includes(status));
+    return statuses.some((status) => statusMatchesView(status, view));
   }), [rows, search, view, monthMeta, year]);
   const counts = useMemo(() => {
-    const result = { missing: 0, review: 0, open: 0, covered: 0 };
+    const result = { missing: 0, review: 0, open: 0, covered: 0, attention: 0 };
     for (const row of rows) for (const [number] of monthMeta) {
       const status = displayStatusForMonth(row.byMonth[`${year}-${number}`], `${year}-${number}`);
-      if (status === "missing") result.missing += 1;
-      else if (["review", "partial", "refunded"].includes(status)) result.review += 1;
-      else if (status === "due") result.open += 1;
+      if (status === "missing") { result.missing += 1; result.attention += 1; }
+      else if (["review", "partial", "refunded"].includes(status)) { result.review += 1; result.attention += 1; }
+      else if (status === "due") { result.open += 1; result.attention += 1; }
       else if (["paid", "prepaid", "waived"].includes(status)) result.covered += 1;
     }
     return result;
   }, [rows, monthMeta, year]);
+  const receiptEvidence = useMemo(() => {
+    if (!reconciliationReceipt?.counts) return null;
+    const receiptCounts = reconciliationReceipt.counts;
+    const ambiguousInvoices = Array.isArray(reconciliationReceipt.ambiguousInvoices) ? reconciliationReceipt.ambiguousInvoices : [];
+    const unmatchedClientInvoices = Array.isArray(reconciliationReceipt.unmatchedClientInvoices) ? reconciliationReceipt.unmatchedClientInvoices : [];
+    const skippedInvoices = Array.isArray(reconciliationReceipt.skippedNonMaintenance) ? reconciliationReceipt.skippedNonMaintenance : [];
+    const details = [
+      ...ambiguousInvoices.map((invoice) => ({ ...invoice, evidenceType: "Needs allocation", fallbackReason: "invoice evidence could not be assigned safely" })),
+      ...unmatchedClientInvoices.map((invoice) => ({ ...invoice, evidenceType: "Client not matched", fallbackReason: "invoice client could not be matched to an SPS client" })),
+      ...skippedInvoices.map((invoice) => ({ ...invoice, evidenceType: "Excluded", fallbackReason: "invoice did not contain maintenance evidence" })),
+    ];
+    return {
+      matched: Number(receiptCounts.assignedMonths || 0) + Number(receiptCounts.alreadyAssigned || 0),
+      assigned: Number(receiptCounts.assignedMonths || 0),
+      alreadyAssigned: Number(receiptCounts.alreadyAssigned || 0),
+      ambiguous: Number(receiptCounts.ambiguousInvoices || 0) + Number(receiptCounts.unmatchedClientInvoices || 0),
+      skipped: Number(receiptCounts.skippedNonMaintenance || 0),
+      fromYear: Number(reconciliationReceipt.fromYear || historyRange.fromYear),
+      toYear: Number(reconciliationReceipt.toYear || historyRange.toYear),
+      changed: reconciliationReceipt.changed !== false,
+      updatedAt: reconciliationReceipt.updatedAt || "",
+      details,
+    };
+  }, [historyRange, reconciliationReceipt]);
+  useEffect(() => setReceiptExpanded(false), [reconciliationReceipt]);
 
   const openCell = (row, monthKey) => setSelection({ clientId: row.clientId, monthKey });
+  const changeYear = (nextYear) => {
+    setSelection(null);
+    setYear(nextYear);
+  };
+  const toggleYearRange = () => {
+    setSelection(null);
+    setFullYear((value) => !value);
+  };
+  const openReceiptDetail = (detail) => {
+    const monthKey = (Array.isArray(detail?.months) ? detail.months[0] : "") || detail?.invoiceMonth || "";
+    const monthMatch = String(monthKey).match(/^(\d{4})-(\d{2})$/);
+    if (!detail?.clientId || !monthMatch) return;
+    const targetYear = Number(monthMatch[1]);
+    if (Number(monthMatch[2]) < 4) setFullYear(true);
+    setYear(targetYear);
+    setSelection({ clientId: detail.clientId, monthKey });
+  };
   return (
     <div data-maintenance-payment-ledger style={{ color: T.text, minHeight: 0, display: "flex", flexDirection: "column", fontFamily: "inherit" }}>
-      <div style={{ display: "grid", gridTemplateColumns: vp.isPhone ? "1fr" : "minmax(260px, 1fr) auto", alignItems: "end", gap: 18, padding: vp.isPhone ? "18px 0 16px" : "24px 0 20px", borderBottom: `3px solid ${T.text}` }}>
+      <div style={{ display: "grid", gridTemplateColumns: compactControls ? "1fr" : "minmax(260px, 1fr) auto", alignItems: "end", gap: 18, padding: vp.isPhone ? "18px 0 16px" : "24px 0 20px", borderBottom: `3px solid ${T.text}` }}>
         <div>
           <div style={{ color: T.primary, fontSize: 11, fontWeight: 900, letterSpacing: ".09em", textTransform: "uppercase" }}>Maintenance accounting</div>
           <h3 style={{ margin: "5px 0 0", fontSize: vp.isPhone ? 28 : 34, lineHeight: 1, letterSpacing: "-.045em" }}>Payment calendar</h3>
           <div style={{ marginTop: 9, color: T.textMuted, fontSize: 13, lineHeight: 1.4 }}>QuickBooks payments, prepayments, and expected service shown together before another invoice is created.</div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: vp.isPhone ? "space-between" : "flex-end", gap: 8 }}>
-          <button type="button" onClick={() => setYear((value) => value - 1)} style={{ width: 38, height: 38, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontFamily: "inherit", cursor: "pointer" }}>‹</button>
-          <div style={{ minWidth: 72, textAlign: "center", fontWeight: 850, fontSize: 14 }}>{year}</div>
-          <button type="button" onClick={() => setYear((value) => value + 1)} style={{ width: 38, height: 38, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontFamily: "inherit", cursor: "pointer" }}>›</button>
-          <button type="button" onClick={() => setFullYear((value) => !value)} style={{ minHeight: 38, border: `1px solid ${T.border}`, background: T.surface, color: T.textMuted, padding: "0 12px", fontFamily: "inherit", fontWeight: 750, cursor: "pointer" }}>{fullYear ? "Apr to Dec" : "Full year"}</button>
-          <button type="button" onClick={onReload} disabled={loading} style={{ minHeight: 38, border: "none", background: T.primary, color: "#fff", padding: "0 13px", fontFamily: "inherit", fontSize: 12, fontWeight: 820, cursor: loading ? "wait" : "pointer", opacity: loading ? .68 : 1 }}>{loading ? "Checking" : "Refresh QuickBooks"}</button>
+        <div style={{ display: "grid", gridTemplateColumns: compactControls ? "1fr 1fr" : "auto auto auto auto", alignItems: "center", justifyContent: compactControls ? "stretch" : "end", gap: 8, width: compactControls ? "100%" : "auto" }}>
+          <div style={{ gridColumn: compactControls ? "1 / -1" : "auto", display: "grid", gridTemplateColumns: "38px minmax(58px, 1fr) 38px", alignItems: "center", border: `1px solid ${T.border}`, background: T.surface }}>
+            <button type="button" aria-label="Previous year" onClick={() => changeYear(year - 1)} style={{ width: 38, height: 38, border: "none", borderRight: `1px solid ${T.border}`, background: "transparent", color: T.text, fontFamily: "inherit", cursor: "pointer" }}>‹</button>
+            <div style={{ minWidth: 58, textAlign: "center", fontWeight: 850, fontSize: 14 }}>{year}</div>
+            <button type="button" aria-label="Next year" onClick={() => changeYear(year + 1)} style={{ width: 38, height: 38, border: "none", borderLeft: `1px solid ${T.border}`, background: "transparent", color: T.text, fontFamily: "inherit", cursor: "pointer" }}>›</button>
+          </div>
+          <button type="button" aria-pressed={fullYear} onClick={toggleYearRange} style={{ minHeight: 40, border: `1px solid ${T.border}`, background: T.surface, color: T.textMuted, padding: "0 12px", fontFamily: "inherit", fontWeight: 750, cursor: "pointer" }}>{fullYear ? "Show Apr to Dec" : "Show full year"}</button>
+          <button type="button" onClick={onReload} disabled={loading || saving} style={{ minHeight: 40, border: `1px solid ${T.border}`, background: T.surface, color: T.text, padding: "0 13px", fontFamily: "inherit", fontSize: 12, fontWeight: 820, cursor: loading || saving ? "wait" : "pointer", opacity: loading || saving ? .68 : 1 }}>{loading ? "Checking" : "Refresh QuickBooks"}</button>
+          <button
+            type="button"
+            data-maintenance-reconcile-history
+            onClick={() => onReconcile?.(historyRange)}
+            disabled={loading || saving || !onReconcile}
+            title={`Check ${historyRange.fromYear} to ${historyRange.toYear} against confirmed QuickBooks history`}
+            style={{ minHeight: 40, gridColumn: compactControls ? "1 / -1" : "auto", border: "none", background: T.primary, color: "#fff", padding: "0 13px", fontFamily: "inherit", fontSize: 12, fontWeight: 840, cursor: loading || saving ? "wait" : "pointer", opacity: loading || saving ? .68 : 1 }}
+          >
+            {saving ? "Reconciling" : "Reconcile history"}
+          </button>
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: vp.isPhone ? "1fr 1fr" : "1fr auto", gap: 12, alignItems: "center", padding: "13px 0", borderBottom: `1px solid ${T.border}` }}>
-        <div style={{ display: "flex", gap: vp.isPhone ? 13 : 24, alignItems: "baseline", flexWrap: "wrap" }}>
-          <div><strong style={{ fontSize: 18, color: counts.missing ? T.primary : T.text }}>{counts.missing}</strong><span style={{ marginLeft: 5, fontSize: 11.5, color: T.textMuted }}>missing</span></div>
-          <div><strong style={{ fontSize: 18, color: counts.review ? T.primary : T.text }}>{counts.review}</strong><span style={{ marginLeft: 5, fontSize: 11.5, color: T.textMuted }}>review</span></div>
-          <div><strong style={{ fontSize: 18 }}>{counts.open}</strong><span style={{ marginLeft: 5, fontSize: 11.5, color: T.textMuted }}>open</span></div>
-          <div><strong style={{ fontSize: 18 }}>{counts.covered}</strong><span style={{ marginLeft: 5, fontSize: 11.5, color: T.textMuted }}>covered</span></div>
+      {receiptEvidence ? (
+        <div data-maintenance-reconciliation-receipt style={{ borderBottom: `1px solid ${T.border}`, background: T.surface }}>
+          <div style={{ display: "grid", gridTemplateColumns: compactControls ? "1fr 1fr" : "minmax(230px, 1.35fr) repeat(4, minmax(92px, .55fr))" }}>
+            <div style={{ gridColumn: compactControls ? "1 / -1" : "auto", padding: "11px 12px 10px", borderLeft: `3px solid ${T.primary}`, borderRight: compactControls ? "none" : `1px solid ${T.border}` }}>
+              <div style={{ fontSize: 16, lineHeight: 1.05, fontWeight: 880, color: T.text }}>{receiptEvidence.matched} months matched</div>
+              <div style={{ marginTop: 5, fontSize: 10.5, fontWeight: 760, letterSpacing: ".035em", textTransform: "uppercase", color: T.textMuted }}>{receiptEvidence.fromYear} to {receiptEvidence.toYear} · {receiptEvidence.changed ? "ledger updated" : "no new allocations"}</div>
+              <div style={{ marginTop: 4, fontSize: 10.5, color: T.textMuted }}>Run {formatReceiptTimestamp(receiptEvidence.updatedAt)}</div>
+            </div>
+            {[
+              ["Assigned", receiptEvidence.assigned],
+              ["Already tied", receiptEvidence.alreadyAssigned],
+              ["Needs review", receiptEvidence.ambiguous],
+              ["Skipped", receiptEvidence.skipped],
+            ].map(([label, value]) => (
+              <div key={label} style={{ padding: "10px 11px", borderRight: `1px solid ${T.border}`, borderTop: compactControls ? `1px solid ${T.border}` : "none" }}>
+                <div style={{ fontSize: 16, lineHeight: 1, fontWeight: 880, color: label === "Needs review" && value ? T.primary : T.text }}>{value}</div>
+                <div style={{ marginTop: 4, fontSize: 10.5, color: T.textMuted }}>{label}</div>
+              </div>
+            ))}
+          </div>
+          {receiptEvidence.details.length ? (
+            <>
+              <button
+                type="button"
+                data-maintenance-reconciliation-details-toggle
+                aria-expanded={receiptExpanded}
+                onClick={() => setReceiptExpanded((value) => !value)}
+                style={{ width: "100%", minHeight: 38, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, border: "none", borderTop: `1px solid ${T.border}`, background: T.surface, color: T.text, padding: "7px 12px", fontFamily: "inherit", fontSize: 11.5, fontWeight: 820, textAlign: "left", cursor: "pointer" }}
+              >
+                <span>Review {receiptEvidence.details.length} invoice detail{receiptEvidence.details.length === 1 ? "" : "s"}</span>
+                <span style={{ color: T.textMuted }}>{receiptExpanded ? "Hide details" : "Show invoice, client, and reason"}</span>
+              </button>
+              {receiptExpanded ? (
+                <div data-maintenance-reconciliation-details style={{ maxHeight: 290, overflowY: "auto", borderTop: `1px solid ${T.border}` }}>
+                  {receiptEvidence.details.map((detail, index) => {
+                    const invoiceIdentity = detail.invoiceNumber ? `Invoice #${detail.invoiceNumber}` : detail.qbInvoiceId ? `QuickBooks ${detail.qbInvoiceId}` : detail.invoiceId ? `SPS ${detail.invoiceId}` : "Invoice identity unavailable";
+                    const targetMonth = (Array.isArray(detail.months) ? detail.months[0] : "") || detail.invoiceMonth || "";
+                    const canOpenMonth = !!(detail.clientId && /^\d{4}-\d{2}$/.test(String(targetMonth)));
+                    const content = (
+                      <>
+                        <span style={{ minWidth: 0 }}>
+                          <span style={{ display: "block", fontSize: 12.5, fontWeight: 850, color: T.text }}>{invoiceIdentity} · {detail.clientName || "Client not matched"}</span>
+                          <span style={{ display: "block", marginTop: 3, fontSize: 11.5, lineHeight: 1.4, color: T.textMuted }}>{detail.reason || detail.fallbackReason}</span>
+                        </span>
+                        <span style={{ textAlign: "right", fontSize: 10.5, color: detail.evidenceType === "Excluded" ? T.textMuted : T.primary, fontWeight: 820 }}>
+                          <span style={{ display: "block" }}>{detail.evidenceType}</span>
+                          {targetMonth ? <span style={{ display: "block", marginTop: 3 }}>{targetMonth}</span> : null}
+                        </span>
+                      </>
+                    );
+                    const sharedStyle = { width: "100%", display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 14, border: "none", borderBottom: `1px solid ${T.border}`, background: T.surface, padding: "10px 12px", textAlign: "left", fontFamily: "inherit" };
+                    return canOpenMonth
+                      ? <button key={`${detail.evidenceType}-${invoiceIdentity}-${index}`} type="button" onClick={() => openReceiptDetail(detail)} aria-label={`Open ${targetMonth} coverage for ${detail.clientName || "client"}`} style={{ ...sharedStyle, cursor: "pointer" }}>{content}</button>
+                      : <div key={`${detail.evidenceType}-${invoiceIdentity}-${index}`} style={sharedStyle}>{content}</div>;
+                  })}
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <div style={{ borderTop: `1px solid ${T.border}`, padding: "8px 12px", fontSize: 11.5, color: T.textMuted }}>No invoices need owner review from this run.</div>
+          )}
         </div>
-        <div style={{ justifySelf: "end", color: T.textMuted, fontSize: 11.5 }}>Future months stay visible without counting as missing.</div>
+      ) : null}
+
+      <div style={{ display: "grid", gridTemplateColumns: compactControls ? "1fr" : "1fr auto", gap: 10, alignItems: "center", padding: "13px 0", borderBottom: `1px solid ${T.border}` }}>
+        <div style={{ gridColumn: "1 / -1", color: T.textMuted, fontSize: 11.5 }}>
+          Showing {visibleRangeLabel} {year}. Counts below represent client months.
+        </div>
+        <div style={{ display: "flex", gap: vp.isPhone ? 14 : 24, alignItems: "baseline", flexWrap: "wrap" }}>
+          {[
+            ["attention", counts.attention, "needs attention"],
+            ["missing", counts.missing, "no matching payment"],
+            ["review", counts.review, "unallocated history"],
+            ["open", counts.open, "invoice open"],
+            ["covered", counts.covered, "covered"],
+            ["all", rows.length, "clients"],
+          ].map(([value, count, label]) => (
+            <button key={value} type="button" onClick={() => setView(value)} aria-pressed={view === value} style={{ border: "none", borderBottom: `2px solid ${view === value ? T.primary : "transparent"}`, background: "transparent", color: T.text, padding: "3px 0 5px", fontFamily: "inherit", cursor: "pointer" }}>
+              <strong style={{ fontSize: 18, color: count && ["attention", "missing", "review"].includes(value) ? T.primary : T.text }}>{count}</strong>
+              <span style={{ marginLeft: 5, fontSize: 11.5, color: T.textMuted }}>{label}</span>
+            </button>
+          ))}
+        </div>
+        <div style={{ justifySelf: compactControls ? "start" : "end", color: T.textMuted, fontSize: 11.5 }}>Future months stay visible without counting as missing.</div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: vp.isPhone ? "1fr" : "minmax(260px, 1fr) auto", alignItems: "center", gap: 12, padding: "15px 0" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr", alignItems: "center", gap: 12, padding: "15px 0" }}>
         <div style={{ position: "relative" }}>
           <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", color: T.textMuted }}><Icon name="search" size={16}/></span>
           <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find maintenance client" style={{ width: "100%", height: 43, boxSizing: "border-box", padding: "0 12px 0 35px", border: `1px solid ${T.border}`, borderRadius: 7, background: T.surface, color: T.text, fontFamily: "inherit", fontSize: 13.5 }} />
-        </div>
-        <div style={{ display: "flex", gap: 0, borderBottom: `1px solid ${T.border}` }}>
-          {[['attention', 'Attention'], ['covered', 'Covered'], ['all', `All ${rows.length}`]].map(([value, label]) => <button key={value} type="button" onClick={() => setView(value)} style={{ border: "none", borderBottom: `3px solid ${view === value ? T.primary : "transparent"}`, background: "transparent", color: view === value ? T.text : T.textMuted, padding: "9px 12px 8px", fontFamily: "inherit", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>{label}</button>)}
         </div>
       </div>
 
@@ -341,11 +497,12 @@ export default function MaintenanceCoverageWorkspace({
       {vp.isPhone ? (
         <div style={{ borderTop: `1px solid ${T.border}` }}>
           {visibleRows.map((row) => {
-            const statuses = monthMeta.map(([number]) => displayStatusForMonth(row.byMonth[`${year}-${number}`], `${year}-${number}`));
-            const issueCount = statuses.filter((status) => ["missing", "review", "partial", "refunded", "due"].includes(status)).length;
+            const statusEntries = monthMeta.map(([number, short, long]) => ({ number, short, long, status: displayStatusForMonth(row.byMonth[`${year}-${number}`], `${year}-${number}`) }));
+            const issueCount = statusEntries.filter(({ status }) => statusMatchesView(status, "attention")).length;
             const currentNumber = String(new Date().getMonth() + 1).padStart(2, "0");
-            const preferredNumber = monthMeta.some(([number]) => number === currentNumber) ? currentNumber : monthMeta[0][0];
-            return <button key={row.clientId} type="button" onClick={() => openCell(row, `${year}-${preferredNumber}`)} style={{ width: "100%", display: "grid", gridTemplateColumns: "1fr auto", gap: 12, border: "none", borderBottom: `1px solid ${T.border}`, background: T.surface, color: T.text, textAlign: "left", padding: "14px 2px", fontFamily: "inherit", cursor: "pointer" }}><div><div style={{ fontSize: 14, fontWeight: 850 }}>{row.clientName}</div><div style={{ marginTop: 4, fontSize: 11.5, color: issueCount ? T.primary : T.textMuted }}>{issueCount ? `${issueCount} month${issueCount === 1 ? "" : "s"} need attention` : "Coverage is current"}</div></div><div style={{ display: "flex", alignItems: "center", gap: 7 }}><div style={{ fontSize: 12, fontWeight: 800 }}>{formatMoney(row.expectedMonthlyCents, !canSeeAmounts)}</div><Icon name="chevron" size={14}/></div></button>;
+            const fallbackEntry = statusEntries.find(({ number }) => number === currentNumber) || statusEntries[0];
+            const preferredEntry = view === "all" ? fallbackEntry : (statusEntries.find(({ status }) => statusMatchesView(status, view)) || fallbackEntry);
+            return <button key={row.clientId} type="button" onClick={() => openCell(row, `${year}-${preferredEntry.number}`)} style={{ width: "100%", display: "grid", gridTemplateColumns: "1fr auto", gap: 12, border: "none", borderBottom: `1px solid ${T.border}`, background: T.surface, color: T.text, textAlign: "left", padding: "14px 2px", fontFamily: "inherit", cursor: "pointer" }}><div><div style={{ fontSize: 14, fontWeight: 850 }}>{row.clientName}</div><div style={{ marginTop: 4, fontSize: 11.5, color: issueCount ? T.primary : T.textMuted }}>{preferredEntry.long}: {STATUS[preferredEntry.status]?.label || preferredEntry.status}{issueCount ? ` · ${issueCount} need attention` : ""}</div></div><div style={{ display: "flex", alignItems: "center", gap: 7 }}><div style={{ fontSize: 12, fontWeight: 800 }}>{formatMoney(row.expectedMonthlyCents, !canSeeAmounts)}</div><Icon name="chevron" size={14}/></div></button>;
           })}
         </div>
       ) : (

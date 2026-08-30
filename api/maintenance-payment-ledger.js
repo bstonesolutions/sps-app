@@ -11,12 +11,16 @@ import {
   moneyToCents,
   normalizeMaintenancePaymentLedger,
   normalizeMonthKey,
+  reconcileMaintenancePaymentHistory,
   setMaintenancePaymentMonthOverride,
 } from "../maintenancePaymentLedger.js";
 
 const MAX_ATTEMPTS = 6;
 const MAX_MONTHS = 120;
 const STATE_KEYS = ["sps_clients", "sps_invoices", "sps_maintenance_billing"];
+const RECONCILE_STATE_KEYS = [...STATE_KEYS, "sps_schedule"];
+const MIN_RECONCILE_YEAR = 2000;
+const MAX_RECONCILE_YEARS = 25;
 const isRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value);
 const text = (value) => String(value == null ? "" : value).trim();
 const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
@@ -143,8 +147,8 @@ function invoiceSummary(invoice) {
   };
 }
 
-async function readMutationBaseline() {
-  const snapshot = await readAppStatesVersioned(STATE_KEYS);
+async function readMutationBaseline({ includeSchedule = false } = {}) {
+  const snapshot = await readAppStatesVersioned(includeSchedule ? RECONCILE_STATE_KEYS : STATE_KEYS);
   const clients = snapshot.sps_clients;
   const invoices = snapshot.sps_invoices;
   const billing = snapshot.sps_maintenance_billing;
@@ -154,7 +158,104 @@ async function readMutationBaseline() {
     ? normalizeMaintenancePaymentLedger(billing.value)
     : emptyMaintenancePaymentLedger();
   if (!ledger) throw new Error("shared_maintenance_billing_invalid");
-  return { clients, invoices, billing: { ...billing, value: ledger } };
+  const schedule = snapshot.sps_schedule;
+  if (includeSchedule && (!schedule?.exists || !Array.isArray(schedule.value))) {
+    throw new Error("shared_schedule_invalid");
+  }
+  return {
+    clients,
+    invoices,
+    billing: { ...billing, value: ledger },
+    ...(includeSchedule ? { schedule } : {}),
+  };
+}
+
+function yearFromDateLike(value) {
+  const match = text(value).match(/^(\d{4})[-/]/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  return Number.isSafeInteger(year) ? year : null;
+}
+
+function canonicalEvidenceYears(baseline, currentYear) {
+  const years = [];
+  const addYear = (value) => {
+    const year = yearFromDateLike(value);
+    if (year != null && year >= MIN_RECONCILE_YEAR && year <= currentYear + 1) years.push(year);
+  };
+  for (const invoice of baseline.invoices.value) {
+    if (!isRecord(invoice)) continue;
+    addYear(invoice.date || invoice.issueDate || invoice.issuedDate || invoice.createdAt || invoice.created_at);
+  }
+  for (const day of baseline.schedule.value) {
+    if (!isRecord(day)) continue;
+    addYear(day.date || day.scheduledDate || day.day);
+    for (const stop of Array.isArray(day.stops) ? day.stops : []) {
+      if (!isRecord(stop)) continue;
+      addYear(stop.date || stop.scheduledDate || stop.completedAt || stop.completedDate);
+    }
+  }
+  for (const policy of Object.values(baseline.billing.value.policies || {})) {
+    if (!isRecord(policy)) continue;
+    addYear(policy.coveredFrom);
+    addYear(policy.coveredThrough);
+  }
+  for (const months of Object.values(baseline.billing.value.allocations || {})) {
+    if (!isRecord(months)) continue;
+    for (const monthKey of Object.keys(months)) addYear(monthKey);
+  }
+  return years;
+}
+
+function canonicalScheduleStops(schedule) {
+  const stops = [];
+  for (const entry of Array.isArray(schedule) ? schedule : []) {
+    if (!isRecord(entry)) continue;
+    if (!Array.isArray(entry.stops)) {
+      stops.push(entry);
+      continue;
+    }
+    const dayDate = text(entry.date || entry.scheduledDate || entry.day);
+    for (const stop of entry.stops) {
+      if (!isRecord(stop)) continue;
+      const hasStopDate = !!text(stop.date || stop.scheduledDate || stop.visitDate || stop.startAt || stop.start);
+      stops.push(hasStopDate || !dayDate ? stop : { ...stop, date: dayDate });
+    }
+  }
+  return stops;
+}
+
+function requestedYear(value) {
+  if (value == null || value === "") return null;
+  if (typeof value !== "number" && typeof value !== "string") return NaN;
+  const raw = typeof value === "string" ? value.trim() : value;
+  if (raw === "" || !/^\d{4}$/.test(String(raw))) return NaN;
+  const year = Number(raw);
+  return Number.isSafeInteger(year) ? year : NaN;
+}
+
+function reconcileYearRange(body, baseline, now = new Date()) {
+  const currentYear = now.getUTCFullYear();
+  const requestedFrom = requestedYear(body?.fromYear);
+  const requestedTo = requestedYear(body?.toYear);
+  if (Number.isNaN(requestedFrom) || Number.isNaN(requestedTo)) return null;
+
+  const evidenceYears = canonicalEvidenceYears(baseline, currentYear);
+  const evidenceFrom = evidenceYears.length ? Math.min(...evidenceYears) : currentYear;
+  const evidenceTo = evidenceYears.length ? Math.max(...evidenceYears) : currentYear;
+  const fromYear = requestedFrom ?? evidenceFrom;
+  const toYear = requestedTo ?? Math.max(evidenceTo, currentYear);
+  if (
+    fromYear < MIN_RECONCILE_YEAR
+    || toYear > currentYear + 1
+    || fromYear > toYear
+    || (toYear - fromYear + 1) > MAX_RECONCILE_YEARS
+  ) return null;
+  return { fromYear, toYear };
+}
+
+function sameLedger(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function validateInvoiceEvidence(baseline, clientId, invoiceId) {
@@ -219,15 +320,93 @@ export default async function handler(req, res) {
 
   const body = isRecord(req.body) ? req.body : null;
   const action = text(body?.action).toLowerCase();
+  if (!body || !["assign", "clear", "reconcile"].includes(action)) {
+    return res.status(400).json({ ok: false, error: "Choose a valid maintenance accounting action." });
+  }
+
+  if (action === "reconcile") {
+    const requestedAt = new Date();
+    const actor = text(staff.email || staff.id);
+    try {
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+        const baseline = await readMutationBaseline({ includeSchedule: true });
+        const range = reconcileYearRange(body, baseline, requestedAt);
+        if (!range) {
+          return res.status(400).json({
+            ok: false,
+            error: `Choose a valid year range of no more than ${MAX_RECONCILE_YEARS} years, ending no later than next year.`,
+          });
+        }
+
+        const result = reconcileMaintenancePaymentHistory({
+          clients: baseline.clients.value,
+          invoices: baseline.invoices.value,
+          payments: [],
+          schedule: canonicalScheduleStops(baseline.schedule.value),
+          ledger: structuredClone(baseline.billing.value),
+          ...range,
+          actor,
+          updatedAt: requestedAt.toISOString(),
+        });
+        const nextLedger = normalizeMaintenancePaymentLedger(result?.ledger);
+        if (!nextLedger || !isRecord(result?.receipt)) throw new Error("maintenance_reconciliation_invalid");
+
+        if (sameLedger(nextLedger, baseline.billing.value)) {
+          return res.status(200).json({
+            ok: true,
+            action,
+            changed: false,
+            ...range,
+            maintenancePaymentLedger: nextLedger,
+            reconciliationReceipt: result.receipt,
+          });
+        }
+
+        const saved = await compareAndSetAppStateBatch([
+          { key: "sps_clients", expectedVersion: baseline.clients.version, checkOnly: true },
+          { key: "sps_invoices", expectedVersion: baseline.invoices.version, checkOnly: true },
+          { key: "sps_schedule", expectedVersion: baseline.schedule.version, checkOnly: true },
+          {
+            key: "sps_maintenance_billing",
+            expectedVersion: baseline.billing.exists ? baseline.billing.version : 0,
+            value: nextLedger,
+          },
+        ]);
+        if (saved.applied) {
+          return res.status(200).json({
+            ok: true,
+            action,
+            changed: true,
+            ...range,
+            maintenancePaymentLedger: nextLedger,
+            reconciliationReceipt: result.receipt,
+          });
+        }
+        if (saved.outcome !== "conflict") throw new Error(`unexpected_batch_outcome:${saved.outcome || "unknown"}`);
+        if (attempt < MAX_ATTEMPTS) {
+          await new Promise((resolve) => setTimeout(resolve, 15 * attempt + Math.floor(Math.random() * 20)));
+        }
+      }
+      return res.status(409).json({
+        ok: false,
+        error: "Another employee changed these accounting records at the same time. Nothing was changed; please try again.",
+      });
+    } catch (error) {
+      console.error("[maintenance-payment-ledger:reconcile]", error && error.message ? error.message : error);
+      return res.status(502).json({
+        ok: false,
+        error: "Maintenance payment history could not be reconciled safely. Nothing was changed; please try again.",
+      });
+    }
+  }
+
   const actionType = action === "assign" ? (text(body?.actionType).toLowerCase() || "invoice") : "";
   const clientId = cleanId(body?.clientId);
   const invoiceId = cleanId(body?.invoiceId);
   const monthKeys = cleanMonthKeys(body?.monthKeys);
   const note = body?.note == null ? "" : (typeof body.note === "string" ? body.note.trim().slice(0, 1200) : null);
   if (
-    !body
-    || !["assign", "clear"].includes(action)
-    || (action === "assign" && !["invoice", "waived"].includes(actionType))
+    (action === "assign" && !["invoice", "waived"].includes(actionType))
     || !clientId
     || !monthKeys
     || note == null
