@@ -85,6 +85,120 @@ test("older provenance without a client is upgraded only from that client's hist
   assert.equal(unsafe?.code, "visit-client-unverified");
 });
 
+test("an existing legacy invoice upgrades missing visit ownership only while preserving its saved client", () => {
+  const imported = appendCompletedVisitsToInvoice(
+    { id: "invoice-2060", clientId: "client-1", lineItems: [] },
+    [visit()],
+    { clientId: "client-1" },
+  ).invoice;
+  delete imported.sourceVisitClientId;
+  delete imported.sourceVisitClientIds;
+  const persisted = { ...imported, lineItems: imported.lineItems.map(line => ({ ...line })) };
+
+  const preserved = reserveCompletedVisitInvoice(imported, [persisted], [], { clientId: "client-1" });
+  assert.equal(preserved.ok, true);
+  assert.deepEqual(preserved.reservedInvoice.sourceVisitClientIds, ["client-1"]);
+
+  const moved = reserveCompletedVisitInvoice(
+    { ...imported, clientId: "client-2" },
+    [persisted],
+    [],
+    { clientId: "client-2" },
+  );
+  assert.equal(moved.ok, false);
+  assert.equal(moved.conflict.code, "visit-client-mismatch");
+
+  const forgedMove = reserveCompletedVisitInvoice(
+    {
+      ...imported,
+      clientId: "client-2",
+      sourceVisitClientId: "client-2",
+      sourceVisitClientIds: ["client-2"],
+    },
+    [persisted],
+    [],
+    { clientId: "client-2" },
+  );
+  assert.equal(forgedMove.ok, false);
+  assert.equal(forgedMove.conflict.code, "visit-client-mismatch");
+
+  const alteredSources = reserveCompletedVisitInvoice(
+    { ...imported, sourceStopId: "stop-other", sourceStopIds: ["stop-other"] },
+    [persisted],
+    [],
+    { clientId: "client-1" },
+  );
+  assert.equal(alteredSources.ok, false);
+  assert.equal(alteredSources.conflict.code, "visit-client-unverified");
+
+  const duplicateRecord = reserveCompletedVisitInvoice(
+    imported,
+    [persisted, { ...persisted }],
+    [],
+    { clientId: "client-1" },
+  );
+  assert.equal(duplicateRecord.ok, false);
+  assert.equal(duplicateRecord.conflict.code, "invoice-id-ambiguous");
+
+  const alreadyReservedElsewhere = reserveCompletedVisitInvoice(
+    imported,
+    [
+      persisted,
+      {
+        id: "invoice-other",
+        number: "2059",
+        clientId: "client-1",
+        sourceStopIds: [...persisted.sourceStopIds],
+        sourceCompletionReceiptIds: [...persisted.sourceCompletionReceiptIds],
+        sourceVisitClientIds: ["client-1"],
+        lineItems: [],
+      },
+    ],
+    [],
+    { clientId: "client-1" },
+  );
+  assert.equal(alreadyReservedElsewhere.ok, false);
+  assert.equal(alreadyReservedElsewhere.conflict.code, "visit-already-linked");
+  assert.equal(alreadyReservedElsewhere.conflict.invoiceNumber, "2059");
+});
+
+test("persisted explicit visit ownership is restored and cannot be stripped to bypass a mismatch", () => {
+  const imported = appendCompletedVisitsToInvoice(
+    { id: "invoice-2060", clientId: "client-1", lineItems: [] },
+    [visit()],
+    { clientId: "client-1" },
+  ).invoice;
+  const candidate = { ...imported };
+  delete candidate.sourceVisitClientId;
+  delete candidate.sourceVisitClientIds;
+
+  const restored = reserveCompletedVisitInvoice(candidate, [imported], [], { clientId: "client-1" });
+  assert.equal(restored.ok, true);
+  assert.deepEqual(restored.reservedInvoice.sourceVisitClientIds, ["client-1"]);
+
+  const persistedMismatch = {
+    ...imported,
+    sourceVisitClientId: "client-2",
+    sourceVisitClientIds: ["client-2"],
+  };
+  const blocked = reserveCompletedVisitInvoice(candidate, [persistedMismatch], [], { clientId: "client-1" });
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.conflict.code, "visit-client-mismatch");
+
+  const candidateMasksPersistedMismatch = reserveCompletedVisitInvoice(
+    {
+      ...candidate,
+      sourceVisitClientId: "client-1",
+      sourceVisitClientIds: ["client-1"],
+    },
+    [persistedMismatch],
+    [],
+    { clientId: "client-1" },
+  );
+  assert.equal(candidateMasksPersistedMismatch.ok, false);
+  assert.equal(candidateMasksPersistedMismatch.conflict.code, "visit-client-mismatch");
+});
+
 test("latest shared invoices prevent the same completed visit from being reserved twice", () => {
   const candidate = appendCompletedVisitsToInvoice(
     { id: "invoice-new", clientId: "client-1", lineItems: [] },

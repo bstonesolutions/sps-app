@@ -204,13 +204,50 @@ export function completedVisitInvoiceLink(visit, invoices, { clientId = "", curr
   };
 }
 
-export function completedVisitInvoiceSaveConflict(candidateInvoice, invoices, visits, { clientId = "" } = {}) {
+export function completedVisitInvoiceSaveConflict(candidateInvoice, invoices, visits, {
+  clientId = "",
+  persistedInvoice = null,
+} = {}) {
   const candidateId = text(candidateInvoice?.id);
   const candidateClientId = text(candidateInvoice?.clientId ?? clientId);
   const sources = invoiceCompletedVisitSources(candidateInvoice);
   if (!sources.hasSources) return null;
 
-  if (sources.sourceVisitClientIds.some(sourceClientId => sourceClientId !== candidateClientId)) {
+  const persisted = persistedInvoice && typeof persistedInvoice === "object" ? persistedInvoice : null;
+  const persistedSources = persisted ? invoiceCompletedVisitSources(persisted) : null;
+  const sameSourceSet = (left, right) => (
+    left.length === right.length && left.every(id => right.includes(id))
+  );
+  const samePersistedIdentityAndSources = (
+    !!candidateId
+    && !!persisted
+    && text(persisted.id) === candidateId
+    && sameSourceSet(sources.sourceStopIds, persistedSources.sourceStopIds)
+    && sameSourceSet(sources.sourceCompletionReceiptIds, persistedSources.sourceCompletionReceiptIds)
+  );
+  const persistedClientId = text(persisted?.clientId);
+  const preservesPersistedRecord = (
+    samePersistedIdentityAndSources
+    && !!persistedClientId
+    && candidateClientId === persistedClientId
+  );
+  const effectiveSourceClientIds = [...new Set([
+    ...sources.sourceVisitClientIds,
+    ...(samePersistedIdentityAndSources ? persistedSources.sourceVisitClientIds : []),
+  ])];
+
+  if (effectiveSourceClientIds.some(sourceClientId => sourceClientId !== candidateClientId)) {
+    return {
+      code: "visit-client-mismatch",
+      message: "Completed visits belong to a different client. Remove those visit lines before changing the invoice client.",
+    };
+  }
+
+  if (
+    samePersistedIdentityAndSources
+    && !!persistedClientId
+    && candidateClientId !== persistedClientId
+  ) {
     return {
       code: "visit-client-mismatch",
       message: "Completed visits belong to a different client. Remove those visit lines before changing the invoice client.",
@@ -223,18 +260,23 @@ export function completedVisitInvoiceSaveConflict(candidateInvoice, invoices, vi
   // the selected client's own completed history; otherwise require the visit lines to be
   // removed and imported again under the correct client.
   if (!sources.sourceVisitClientIds.length) {
-    const visitSources = list(visits).map(visit => completedVisitSource(visit, { clientId: candidateClientId }));
-    const knownStopIds = new Set(visitSources.map(source => source.sourceStopId).filter(Boolean));
-    const knownReceiptIds = new Set(visitSources.map(source => source.sourceCompletionReceiptId).filter(Boolean));
-    const unresolvedStopId = sources.sourceStopIds.find(id => !knownStopIds.has(id));
-    const unresolvedReceiptId = sources.sourceCompletionReceiptIds.find(id => !knownReceiptIds.has(id));
-    if (unresolvedStopId || unresolvedReceiptId) {
-      return {
-        code: "visit-client-unverified",
-        sourceStopId: unresolvedStopId || "",
-        sourceCompletionReceiptId: unresolvedReceiptId || "",
-        message: "SPS cannot verify that the attached visits belong to this client. Remove those visit lines and import them again before saving.",
-      };
+    // For an existing shared invoice, preserving the exact saved client + exact saved
+    // stop/receipt sets is safe. This upgrades only missing ownership metadata and cannot
+    // attach, remove, or move a source while another service app's history is delayed.
+    if (!preservesPersistedRecord) {
+      const visitSources = list(visits).map(visit => completedVisitSource(visit, { clientId: candidateClientId }));
+      const knownStopIds = new Set(visitSources.map(source => source.sourceStopId).filter(Boolean));
+      const knownReceiptIds = new Set(visitSources.map(source => source.sourceCompletionReceiptId).filter(Boolean));
+      const unresolvedStopId = sources.sourceStopIds.find(id => !knownStopIds.has(id));
+      const unresolvedReceiptId = sources.sourceCompletionReceiptIds.find(id => !knownReceiptIds.has(id));
+      if (unresolvedStopId || unresolvedReceiptId) {
+        return {
+          code: "visit-client-unverified",
+          sourceStopId: unresolvedStopId || "",
+          sourceCompletionReceiptId: unresolvedReceiptId || "",
+          message: "SPS cannot verify that the attached visits belong to this client. Remove those visit lines and import them again before saving.",
+        };
+      }
     }
   }
 
@@ -283,7 +325,28 @@ export function completedVisitInvoiceSaveConflict(candidateInvoice, invoices, vi
 
 export function reserveCompletedVisitInvoice(candidateInvoice, invoices, visits, { clientId = "" } = {}) {
   const currentInvoices = list(invoices);
-  const conflict = completedVisitInvoiceSaveConflict(candidateInvoice, currentInvoices, visits, { clientId });
+  const candidateId = text(candidateInvoice?.id);
+  const matchingIndexes = candidateId
+    ? currentInvoices.reduce((indexes, invoice, invoiceIndex) => (
+      text(invoice?.id) === candidateId ? [...indexes, invoiceIndex] : indexes
+    ), [])
+    : [];
+  if (matchingIndexes.length > 1) {
+    return {
+      ok: false,
+      conflict: {
+        code: "invoice-id-ambiguous",
+        message: "SPS found duplicate records for this invoice. Refresh and review them before saving.",
+      },
+      invoices: currentInvoices,
+    };
+  }
+  const index = matchingIndexes.length === 1 ? matchingIndexes[0] : -1;
+  const persistedInvoice = index >= 0 ? currentInvoices[index] : null;
+  const conflict = completedVisitInvoiceSaveConflict(candidateInvoice, currentInvoices, visits, {
+    clientId,
+    persistedInvoice,
+  });
   if (conflict) return { ok: false, conflict, invoices: currentInvoices };
 
   const sources = invoiceCompletedVisitSources(candidateInvoice);
@@ -300,8 +363,6 @@ export function reserveCompletedVisitInvoice(candidateInvoice, invoices, visits,
     sourceVisitClientIds,
     ...(sourceVisitClientIds.length === 1 ? { sourceVisitClientId: sourceVisitClientIds[0] } : {}),
   };
-  const candidateId = text(candidateInvoice?.id);
-  const index = currentInvoices.findIndex(invoice => text(invoice?.id) === candidateId);
   if (index < 0) {
     return {
       ok: true,
