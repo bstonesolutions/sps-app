@@ -194,6 +194,71 @@ test("removing the final imported visit line prunes its invoice provenance and c
   assert.deepEqual(sources.sourceVisitClientIds, []);
 });
 
+test("removing a singular-source visit line clears provenance through editor merging", () => {
+  const current = {
+    id: "invoice-legacy",
+    clientId: "client-1",
+    sourceStopId: "stop-legacy",
+    sourceStopIds: ["stop-legacy"],
+    sourceCompletionReceiptId: "receipt-legacy",
+    sourceCompletionReceiptIds: ["receipt-legacy"],
+    sourceVisitClientId: "client-1",
+    sourceVisitClientIds: ["client-1"],
+    lineItems: [
+      { id: "legacy-visit-line", desc: "September maintenance", qty: "1", unitPrice: "175", sourceStopId: "stop-legacy", sourceCompletionReceiptId: "receipt-legacy" },
+      { id: "custom-line", desc: "Spare bulb", qty: "1", unitPrice: "20.97", kind: "product" },
+    ],
+  };
+  const pruned = removeInvoiceLineAndPruneCompletedVisitSources(current, "legacy-visit-line");
+  // This mirrors the historical editor merge that used to resurrect deleted singular ids.
+  const merged = { ...current, ...pruned };
+
+  assert.deepEqual(merged.lineItems.map(line => line.id), ["custom-line"]);
+  assert.equal(invoiceCompletedVisitSources(merged).hasSources, false);
+  assert.deepEqual(invoiceCompletedVisitSources(merged).sourceVisitClientIds, []);
+  assert.equal(completedVisitInvoiceSaveConflict(merged, [], [], { clientId: "client-1" }), null);
+});
+
+test("removing an unrelated untagged line never clears top-level visit provenance", () => {
+  const current = {
+    id: "invoice-legacy",
+    clientId: "client-1",
+    sourceStopId: "stop-legacy",
+    sourceCompletionReceiptId: "receipt-legacy",
+    sourceVisitClientId: "client-1",
+    sourceVisitClientIds: ["client-1"],
+    lineItems: [
+      { id: "legacy-visit-line", desc: "September maintenance", qty: "1", unitPrice: "175" },
+      { id: "custom-line", desc: "Spare bulb", qty: "1", unitPrice: "20.97", kind: "product" },
+    ],
+  };
+  const next = removeInvoiceLineAndPruneCompletedVisitSources(current, "custom-line");
+  const sources = invoiceCompletedVisitSources(next);
+
+  assert.deepEqual(next.lineItems.map(line => line.id), ["legacy-visit-line"]);
+  assert.deepEqual(sources.sourceStopIds, ["stop-legacy"]);
+  assert.deepEqual(sources.sourceCompletionReceiptIds, ["receipt-legacy"]);
+  assert.deepEqual(sources.sourceVisitClientIds, ["client-1"]);
+});
+
+test("removing one sourced line preserves visit provenance represented by surviving lines", () => {
+  const imported = appendCompletedVisitsToInvoice(
+    { id: "invoice-1", clientId: "client-1", lineItems: [] },
+    [
+      visit({ sid: "stop-a", completionReceiptId: "receipt-a", services: [], partsUsed: [], productsPurchased: [{ id: "a", name: "Pump A", qty: 1, price: 200, cost: 125 }] }),
+      visit({ sid: "stop-b", completionReceiptId: "receipt-b", services: [], partsUsed: [], productsPurchased: [{ id: "b", name: "Pump B", qty: 1, price: 250, cost: 150 }] }),
+    ],
+    { clientId: "client-1" },
+  ).invoice;
+  const lineA = imported.lineItems.find(line => line.sourceStopId === "stop-a");
+  const next = removeInvoiceLineAndPruneCompletedVisitSources(imported, lineA.id);
+  const sources = invoiceCompletedVisitSources(next);
+
+  assert.deepEqual(sources.sourceStopIds, ["stop-b"]);
+  assert.deepEqual(sources.sourceCompletionReceiptIds, ["receipt-b"]);
+  assert.deepEqual(sources.sourceVisitClientIds, ["client-1"]);
+});
+
 test("visit lines retain source provenance, service tax rules, and item taxability", () => {
   const lines = completedVisitLineItems(visit(), { clientId: "client-1" });
 
@@ -260,6 +325,7 @@ test("invoice editor exposes a searchable multi-visit picker instead of the eigh
   assert.match(editorSource, /disabled=\{clientLockedByImportedVisits\}/);
   assert.match(editorSource, /reserveVisitSourcesBeforeAccounting\(baseInv\)/);
   assert.match(editorSource, /reservedSources = invoiceCompletedVisitSources\(reservation\.reservedInvoice\)/);
+  assert.match(editorSource, /removeInvoiceLineAndPruneCompletedVisitSources\(s, id\)[\s\S]*\{ replace: true \}/);
   assert.ok(
     editorSource.indexOf("reserveVisitSourcesBeforeAccounting(baseInv)") < editorSource.indexOf("const qbPayload = buildQbPayload()"),
     "visit sources must be reserved before any QuickBooks payload/request path",

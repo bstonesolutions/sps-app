@@ -18779,14 +18779,20 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const [sendStep, setSendStep] = useState(null); // B9-2: client-notification step after a successful save
   const [qbReviewLoading, setQbReviewLoading] = useState(false);
   const [qbReviewError, setQbReviewError] = useState("");
-  const withLocalInvoiceEdit = (current, patch) => {
+  const [qbState, setQbState] = useState("idle"); // idle | sending | done | error
+  const [qbMsg, setQbMsg] = useState("");
+  const clearSaveError = () => {
+    setQbState(current => current === "error" ? "idle" : current);
+    setQbMsg("");
+  };
+  const withLocalInvoiceEdit = (current, patch, { replace = false } = {}) => {
     // A reconciliation choice is applied to the latest confirmed SPS record. Do not let
     // an editable-looking draft collect changes that would be discarded by that choice.
     // Choosing the SPS version below clears this lock and makes the form editable again.
     if (current.qbSyncStatus === "conflict" || current.qbPendingRemoteInvoice) return current;
+    const next = replace ? { ...patch } : { ...current, ...patch };
     return {
-      ...current,
-      ...patch,
+      ...next,
       ...(current.qbId ? {
         locallyEdited: true,
         qbAuthoritative: false,
@@ -18795,9 +18801,16 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
       } : {}),
     };
   };
-  const set = (k, v) => setInv(s => withLocalInvoiceEdit(s, { [k]: v }));
-  const setLine = (id, k, v) => setInv(s => withLocalInvoiceEdit(s, { lineItems: s.lineItems.map(l => l.id === id ? { ...l, [k]: v } : l) }));
+  const set = (k, v) => {
+    clearSaveError();
+    setInv(s => withLocalInvoiceEdit(s, { [k]: v }));
+  };
+  const setLine = (id, k, v) => {
+    clearSaveError();
+    setInv(s => withLocalInvoiceEdit(s, { lineItems: s.lineItems.map(l => l.id === id ? { ...l, [k]: v } : l) }));
+  };
   const setLineCost = (id, rawValue) => {
+    clearSaveError();
     const value = String(rawValue || "").replace(/[^\d.]/g, "");
     const costKnown = value.trim() !== "" && Number.isFinite(Number(value));
     setInv(s => withLocalInvoiceEdit(s, {
@@ -18809,11 +18822,18 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
       } : l),
     }));
   };
-  const addLine = () => setInv(s => withLocalInvoiceEdit(s, { lineItems: [...s.lineItems, { id: `l${Date.now()}`, desc: "", qty: "1", unitPrice: "", unitCost: "", taxable: false, kind: "custom" }] }));
-  const removeLine = (id) => setInv(s => withLocalInvoiceEdit(
-    s,
-    removeInvoiceLineAndPruneCompletedVisitSources(s, id),
-  ));
+  const addLine = () => {
+    clearSaveError();
+    setInv(s => withLocalInvoiceEdit(s, { lineItems: [...s.lineItems, { id: `l${Date.now()}`, desc: "", qty: "1", unitPrice: "", unitCost: "", taxable: false, kind: "custom" }] }));
+  };
+  const removeLine = (id) => {
+    clearSaveError();
+    setInv(s => withLocalInvoiceEdit(
+      s,
+      removeInvoiceLineAndPruneCompletedVisitSources(s, id),
+      { replace: true },
+    ));
+  };
 
   // ── Catalog item picker — add Services, Products, Treatments, Parts ──
   const [picker, setPicker] = useState(false);       // show the add-from-catalog sheet
@@ -18898,8 +18918,6 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     });
     setVisitPick(false);
   };
-  const [qbState, setQbState] = useState("idle"); // idle | sending | done | error
-  const [qbMsg, setQbMsg] = useState("");
   const [deleteBusy, setDeleteBusy] = useState(false);
   const qbConnected = qbIsConnected();
   const editorInvoiceTotals = invoiceTotals(inv);

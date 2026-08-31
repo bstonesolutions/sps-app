@@ -351,7 +351,6 @@ export function removeInvoiceLineAndPruneCompletedVisitSources(invoice, lineId) 
     "sourceCompletionReceiptId",
     "sourceCompletionReceiptIds",
   ));
-  if (!removedStopIds.size && !removedReceiptIds.size) return { ...base, lineItems: nextLines };
 
   const remainingStopIds = new Set();
   const remainingReceiptIds = new Set();
@@ -359,6 +358,8 @@ export function removeInvoiceLineAndPruneCompletedVisitSources(invoice, lineId) 
     lineSourceValues(line, "sourceStopId", "sourceStopIds").forEach(id => remainingStopIds.add(id));
     lineSourceValues(line, "sourceCompletionReceiptId", "sourceCompletionReceiptIds").forEach(id => remainingReceiptIds.add(id));
   });
+
+  if (!removedStopIds.size && !removedReceiptIds.size) return { ...base, lineItems: nextLines };
   const next = {
     ...base,
     lineItems: nextLines,
@@ -370,17 +371,17 @@ export function removeInvoiceLineAndPruneCompletedVisitSources(invoice, lineId) 
     )),
   };
   if (removedStopIds.has(text(next.sourceStopId)) && !remainingStopIds.has(text(next.sourceStopId))) {
-    delete next.sourceStopId;
+    next.sourceStopId = undefined;
   }
   if (
     removedReceiptIds.has(text(next.sourceCompletionReceiptId))
     && !remainingReceiptIds.has(text(next.sourceCompletionReceiptId))
   ) {
-    delete next.sourceCompletionReceiptId;
+    next.sourceCompletionReceiptId = undefined;
   }
   if (!invoiceCompletedVisitSources(next).hasSources) {
-    delete next.sourceVisitClientId;
-    delete next.sourceVisitClientIds;
+    next.sourceVisitClientId = undefined;
+    next.sourceVisitClientIds = [];
   }
   return next;
 }

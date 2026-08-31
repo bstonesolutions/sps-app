@@ -374,6 +374,11 @@ function buildDraftBase({ invoices, invoicing, client, lineItems, issueDate, cre
     taxRate,
     notes,
     createdAt,
+    // The stop-completion planner already has the authoritative client. Persist that
+    // ownership with the visit provenance so a delayed or incomplete history refresh
+    // cannot make a valid draft look as though it belongs to an unknown client.
+    sourceVisitClientId: client.id,
+    sourceVisitClientIds: [client.id],
     ...source.fields,
   };
 }

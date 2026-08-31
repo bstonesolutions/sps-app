@@ -74,6 +74,8 @@ test("one-off completion creates one deterministic draft with service, billable 
   assert.equal(invoice.source, "completed-stop");
   assert.equal(invoice.sourceStopId, stop.sid);
   assert.equal(invoice.sourceCompletionReceiptId, entry.completionReceiptId);
+  assert.equal(invoice.sourceVisitClientId, "client-1");
+  assert.deepEqual(invoice.sourceVisitClientIds, ["client-1"]);
   assert.equal(invoice.date, "08/03/2026");
   assert.equal(invoice.dueDate, "08/18/2026");
   assert.equal(invoice.taxRate, "6");
