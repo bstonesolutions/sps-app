@@ -352,6 +352,40 @@ export function removeInvoiceLineAndPruneCompletedVisitSources(invoice, lineId) 
     "sourceCompletionReceiptIds",
   ));
 
+  // Older completion drafts kept visit provenance only on the invoice. QuickBooks
+  // reconciliation could therefore leave the service row untagged even though the
+  // invoice still carried one stop/receipt lock. Treat removal of the final explicit
+  // service row as unlinking that one legacy visit. Never infer this from description
+  // text, and never clear a multi-visit invoice or an unrelated product/custom row.
+  if (!removedStopIds.size && !removedReceiptIds.size) {
+    const baseSources = invoiceCompletedVisitSources(base);
+    const removedKind = text(removedLine?.kind).trim().toLowerCase();
+    const remainingHasService = nextLines.some(line => text(line?.kind).trim().toLowerCase() === "service");
+    const remainingHasLineSources = nextLines.some(line => (
+      lineSourceValues(line, "sourceStopId", "sourceStopIds").length
+      || lineSourceValues(line, "sourceCompletionReceiptId", "sourceCompletionReceiptIds").length
+    ));
+    const removesSingleLegacyVisit = (
+      removedKind === "service"
+      && baseSources.sourceStopIds.length === 1
+      && baseSources.sourceCompletionReceiptIds.length <= 1
+      && !remainingHasService
+      && !remainingHasLineSources
+    );
+
+    if (!removesSingleLegacyVisit) return { ...base, lineItems: nextLines };
+    return {
+      ...base,
+      lineItems: nextLines,
+      sourceStopId: undefined,
+      sourceStopIds: [],
+      sourceCompletionReceiptId: undefined,
+      sourceCompletionReceiptIds: [],
+      sourceVisitClientId: undefined,
+      sourceVisitClientIds: [],
+    };
+  }
+
   const remainingStopIds = new Set();
   const remainingReceiptIds = new Set();
   nextLines.forEach((line) => {
@@ -359,7 +393,6 @@ export function removeInvoiceLineAndPruneCompletedVisitSources(invoice, lineId) 
     lineSourceValues(line, "sourceCompletionReceiptId", "sourceCompletionReceiptIds").forEach(id => remainingReceiptIds.add(id));
   });
 
-  if (!removedStopIds.size && !removedReceiptIds.size) return { ...base, lineItems: nextLines };
   const next = {
     ...base,
     lineItems: nextLines,

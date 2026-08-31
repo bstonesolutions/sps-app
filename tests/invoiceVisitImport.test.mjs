@@ -241,6 +241,79 @@ test("removing an unrelated untagged line never clears top-level visit provenanc
   assert.deepEqual(sources.sourceVisitClientIds, ["client-1"]);
 });
 
+test("removing the final untagged legacy service clears one visit lock but removing its product does not", () => {
+  const current = {
+    id: "invoice-2060",
+    clientId: "client-1",
+    sourceStopId: "stop-2060",
+    sourceStopIds: ["stop-2060"],
+    sourceCompletionReceiptId: "receipt-2060",
+    sourceCompletionReceiptIds: ["receipt-2060"],
+    sourceVisitClientId: "client-1",
+    sourceVisitClientIds: ["client-1"],
+    lineItems: [
+      { id: "legacy-service", kind: "service", desc: "September Maintenance", qty: "1", unitPrice: "175" },
+      { id: "product-line", kind: "product", desc: "Spare 4 watt bulb", qty: "1", unitPrice: "20.97" },
+    ],
+  };
+
+  const withoutService = removeInvoiceLineAndPruneCompletedVisitSources(current, "legacy-service");
+  assert.deepEqual(withoutService.lineItems.map(line => line.id), ["product-line"]);
+  assert.equal(invoiceCompletedVisitSources(withoutService).hasSources, false);
+  assert.deepEqual(invoiceCompletedVisitSources(withoutService).sourceVisitClientIds, []);
+  assert.equal(completedVisitInvoiceSaveConflict(withoutService, [], [], { clientId: "client-1" }), null);
+
+  const withoutProduct = removeInvoiceLineAndPruneCompletedVisitSources(current, "product-line");
+  assert.deepEqual(withoutProduct.lineItems.map(line => line.id), ["legacy-service"]);
+  assert.deepEqual(invoiceCompletedVisitSources(withoutProduct).sourceStopIds, ["stop-2060"]);
+  assert.deepEqual(invoiceCompletedVisitSources(withoutProduct).sourceCompletionReceiptIds, ["receipt-2060"]);
+  assert.deepEqual(invoiceCompletedVisitSources(withoutProduct).sourceVisitClientIds, ["client-1"]);
+});
+
+test("top-level-only provenance survives until the final legacy service line is removed", () => {
+  const current = {
+    id: "invoice-two-services",
+    clientId: "client-1",
+    sourceStopId: "stop-legacy",
+    sourceCompletionReceiptId: "receipt-legacy",
+    sourceVisitClientId: "client-1",
+    sourceVisitClientIds: ["client-1"],
+    lineItems: [
+      { id: "service-a", kind: "service", desc: "Monthly Service", qty: "1", unitPrice: "100" },
+      { id: "service-b", kind: "service", desc: "Repair Service", qty: "1", unitPrice: "75" },
+      { id: "product", kind: "product", desc: "Bulb", qty: "1", unitPrice: "20" },
+    ],
+  };
+
+  const afterFirst = removeInvoiceLineAndPruneCompletedVisitSources(current, "service-a");
+  assert.equal(invoiceCompletedVisitSources(afterFirst).hasSources, true);
+  assert.deepEqual(afterFirst.lineItems.map(line => line.id), ["service-b", "product"]);
+
+  const afterFinal = removeInvoiceLineAndPruneCompletedVisitSources(afterFirst, "service-b");
+  assert.equal(invoiceCompletedVisitSources(afterFinal).hasSources, false);
+  assert.deepEqual(afterFinal.lineItems.map(line => line.id), ["product"]);
+});
+
+test("an untagged service cannot silently unlink multiple legacy visits", () => {
+  const current = {
+    id: "invoice-multiple-visits",
+    clientId: "client-1",
+    sourceStopIds: ["stop-a", "stop-b"],
+    sourceCompletionReceiptIds: ["receipt-a", "receipt-b"],
+    sourceVisitClientId: "client-1",
+    sourceVisitClientIds: ["client-1"],
+    lineItems: [
+      { id: "service", kind: "service", desc: "Maintenance", qty: "1", unitPrice: "350" },
+      { id: "product", kind: "product", desc: "Bulb", qty: "1", unitPrice: "20" },
+    ],
+  };
+
+  const next = removeInvoiceLineAndPruneCompletedVisitSources(current, "service");
+  assert.deepEqual(invoiceCompletedVisitSources(next).sourceStopIds, ["stop-a", "stop-b"]);
+  assert.deepEqual(invoiceCompletedVisitSources(next).sourceCompletionReceiptIds, ["receipt-a", "receipt-b"]);
+  assert.equal(invoiceCompletedVisitSources(next).hasSources, true);
+});
+
 test("removing one sourced line preserves visit provenance represented by surviving lines", () => {
   const imported = appendCompletedVisitsToInvoice(
     { id: "invoice-1", clientId: "client-1", lineItems: [] },
