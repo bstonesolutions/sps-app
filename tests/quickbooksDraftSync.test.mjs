@@ -26,6 +26,22 @@ test("unknown creates and SPS-only drafts fail closed", () => {
   assert.equal(quickBooksDraftSyncEligibility({ id: "a", status: "Draft", lineItems: [{}], qbSyncStatus: "sps-only" }, client).eligible, false);
 });
 
+test("an SPS progress checkpoint remains ready for a later deliberate QuickBooks sync", () => {
+  const checkpoint = {
+    id: "checkpoint-1",
+    number: "INV-1005",
+    status: "Draft",
+    clientId: client.id,
+    clientName: client.name,
+    lineItems: [{ desc: "Monthly service", qty: 1, unitPrice: 175 }],
+  };
+
+  assert.equal(quickBooksDraftSyncEligibility(checkpoint, client).eligible, true);
+  const partitioned = partitionQuickBooksDraftSelection([checkpoint], () => client);
+  assert.deepEqual(partitioned.ready.map((row) => row.invoice.id), ["checkpoint-1"]);
+  assert.equal(partitioned.skipped.length, 0);
+});
+
 test("missing numbers and zero-value lines never enter the QuickBooks draft queue", () => {
   assert.equal(quickBooksDraftSyncEligibility({ id: "a", status: "Draft", lineItems: [{ desc: "Service", qty: 1, unitPrice: 100 }] }, client).reason, "Invoice number is missing");
   assert.equal(quickBooksDraftSyncEligibility({ id: "a", number: "INV-1", status: "Draft", lineItems: [{ desc: "Service", qty: 1, unitPrice: 0 }] }, client).reason, "No billable line items");

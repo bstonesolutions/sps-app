@@ -8284,7 +8284,7 @@ function ClientDocuments({ client, onChange }) {
   );
 }
 
-function ClientDetail({ client: init, invoices, invoicing, branding, catalog, setCatalog, team, schedule, email, onBack, onUpdate, onSaveInvoice, onResolveInvoiceReview, onDeleteInvoice, onDelete, onPreviewClient, initialTab, onTabChange }) {
+function ClientDetail({ client: init, invoices, invoicing, branding, catalog, setCatalog, team, schedule, email, onBack, onUpdate, onSaveInvoice, onPersistInvoiceProgress, onResolveInvoiceReview, onDeleteInvoice, onDelete, onPreviewClient, initialTab, onTabChange }) {
   const { T, perms, tiers } = useApp();
   const clientVp = useViewport();
   const [client, setClient] = useState(init);
@@ -8460,7 +8460,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
       {tab === "overview" && <ClientOverview client={client} invoices={invoices} schedule={schedule} onUpdate={onUpdate} />}
       {tab === "equipment" && <ClientEquipment client={client} invoices={invoices} onChange={eq => update({ equipment: eq })} />}
       {tab === "history" && <ClientHistory client={client} catalog={catalog} team={team} onChange={hist => update({ history: hist })} />}
-      {tab === "invoices" && (perms.canInvoice || perms.viewInvoices) && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={onSaveInvoice} onResolveReview={onResolveInvoiceReview} onDelete={onDeleteInvoice} />}
+      {tab === "invoices" && (perms.canInvoice || perms.viewInvoices) && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={onSaveInvoice} onPersistProgress={onPersistInvoiceProgress} onResolveReview={onResolveInvoiceReview} onDelete={onDeleteInvoice} />}
       {tab === "docs"    && <ClientDocuments client={client} onChange={docs => update({ documents: docs })} />}
       {tab === "portal" && <ClientPortal client={client} invoices={invoices} invoicing={invoicing} schedule={schedule} branding={branding} email={email} onPreviewClient={onPreviewClient} />}
 
@@ -18753,11 +18753,12 @@ function InvoiceVisitPicker({ visits, invoices, currentInvoice, clientId, onAdd,
   );
 }
 
-function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCatalog, presetClientId, onSave, onResolveReview, onClose, onDelete }) {
+function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCatalog, presetClientId, onSave, onPersistProgress, onResolveReview, onClose, onDelete }) {
   const { T, perms } = useApp();
   const canSeeLineCost = !!(perms.isAdmin || perms.seeProfit || perms.seeInventoryCost);
   const invoiceVp = useViewport();
   const narrowInvoice = invoiceVp.width <= 420;
+  const stackInvoiceSaveActions = invoiceVp.width <= 520;
   const money = (n) => `$${(n || 0).toFixed(2)}`;
   const toISO = (mdy) => { const d = parseMDY(mdy); return d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}` : ""; };
   const fromISO = (iso) => { if (!iso) return ""; const [y, m, d] = iso.split("-"); return `${m}/${d}/${y}`; };
@@ -18775,6 +18776,11 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     createdAt: Date.now(),
   });
   const [inv, setInv] = useState(() => invoice ? { ...invoice, lineItems: (invoice.lineItems || []).map(l => ({ ...l })) } : fresh());
+  const progressBaselineRef = useRef(invoice ? JSON.stringify(invoice) : "");
+  const editRevisionRef = useRef(0);
+  const [progressState, setProgressState] = useState("idle"); // idle | saving | saved | changed | error
+  const [progressMsg, setProgressMsg] = useState("");
+  const [isPersisted, setIsPersisted] = useState(!!invoice);
   const [visitPick, setVisitPick] = useState(false);
   const [sendStep, setSendStep] = useState(null); // B9-2: client-notification step after a successful save
   const [qbReviewLoading, setQbReviewLoading] = useState(false);
@@ -18782,6 +18788,9 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const [qbState, setQbState] = useState("idle"); // idle | sending | done | error
   const [qbMsg, setQbMsg] = useState("");
   const clearSaveError = () => {
+    editRevisionRef.current += 1;
+    setProgressState(current => current === "saving" ? current : "idle");
+    setProgressMsg("");
     setQbState(current => current === "error" ? "idle" : current);
     setQbMsg("");
   };
@@ -18843,6 +18852,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
 
   // Add a single catalog entry as a line item, carrying its price AND our cost (for margin)
   const addCatalogLine = (kind, item) => {
+    clearSaveError();
     let line;
     if (kind === "service") {
       line = { id: `l${Date.now()}`, desc: item.name, qty: "1", unitPrice: String(item.price || ""), unitCost: String(item.cost || "0"), taxable: false, kind: "service", refId: item.id };
@@ -18861,6 +18871,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const addBundledParts = (selected) => {
     // selected: [{ part, qty }]
     if (!selected.length) return;
+    clearSaveError();
     const totalPrice = selected.reduce((s, x) => s + n(x.part.retailPer) * n(x.qty), 0);
     const totalCost  = selected.reduce((s, x) => s + n(x.part.costPer) * n(x.qty), 0);
     const names = selected.map(x => `${x.part.name}${n(x.qty) > 1 ? ` ×${x.qty}` : ""}`).join(", ");
@@ -18905,6 +18916,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   const clientLockedByImportedVisits = importedVisitSources.hasSources;
 
   const importVisits = (selectedVisits) => {
+    clearSaveError();
     setInv(current => {
       const result = appendCompletedVisitsToInvoice(current, selectedVisits, { clientId: client?.id ?? current.clientId });
       if (!result.addedLineCount) return current;
@@ -19000,6 +19012,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   };
 
   const keepSpsReview = () => {
+    clearSaveError();
     setInv(current => {
       const remote = current.qbPendingRemoteInvoice;
       const remoteFingerprint = remote?.qbContentFingerprint || current.qbSyncConflict?.currentFingerprint || "";
@@ -19030,6 +19043,42 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     onSave(finalInv);
     if (client && (finalInv.lineItems || []).length) setSendStep(finalInv);
     else onClose();
+  };
+
+  // QuickBooks errors keep the editor open. Persist that recovery state through the
+  // same confirmed SPS checkpoint used by Save progress so its next baseline is exact.
+  // Never claim the recovery copy is safe merely because a local state setter ran.
+  const persistRetainedEditorInvoice = async (candidateInvoice, revisionAtSaveStart) => {
+    if (typeof onPersistProgress !== "function") {
+      const error = new Error("SPS progress saving is unavailable. Keep this invoice open and try again.");
+      setProgressState("error");
+      setProgressMsg(error.message);
+      return { ok: false, error };
+    }
+    try {
+      const confirmed = await onPersistProgress(candidateInvoice, {
+        baselineJson: progressBaselineRef.current,
+      });
+      if (!confirmed || String(confirmed.id || "") !== String(candidateInvoice.id || "")) {
+        throw new Error("SPS could not verify the retained invoice progress.");
+      }
+      progressBaselineRef.current = JSON.stringify(confirmed);
+      setIsPersisted(true);
+      if (editRevisionRef.current === revisionAtSaveStart) {
+        setInv(confirmed);
+        setProgressState("idle");
+        setProgressMsg("");
+      } else {
+        setProgressState("changed");
+        setProgressMsg("Earlier progress saved in SPS. Your newest edits still need saving.");
+      }
+      return { ok: true, invoice: confirmed };
+    } catch (error) {
+      if (editRevisionRef.current === revisionAtSaveStart) setInv(candidateInvoice);
+      setProgressState("error");
+      setProgressMsg(error?.message || "SPS could not confirm the retained invoice progress.");
+      return { ok: false, error };
+    }
   };
 
   const reserveVisitSourcesBeforeAccounting = async (candidateInvoice) => {
@@ -19087,7 +19136,46 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     return { ok: false, error: "Invoices changed repeatedly on another device. Refresh and try again." };
   };
 
+  // Save a confirmed SPS checkpoint without entering any QuickBooks or client-delivery path.
+  // The root callback performs the completed-visit validation and atomic shared-state write.
+  const saveProgress = async () => {
+    if (typeof onPersistProgress !== "function" || progressState === "saving" || qbState === "sending") return;
+    const revisionAtStart = editRevisionRef.current;
+    const candidate = {
+      ...inv,
+      clientId: client?.id ?? inv.clientId ?? null,
+      clientName: client?.name || "",
+      clientAddress: client?.address || "",
+      clientEmail: client?.email || "",
+    };
+    setProgressState("saving");
+    setProgressMsg("");
+    setQbMsg("");
+    try {
+      const confirmed = await onPersistProgress(candidate, {
+        baselineJson: progressBaselineRef.current,
+      });
+      if (!confirmed || String(confirmed.id || "") !== String(candidate.id || "")) {
+        throw new Error("SPS could not verify this invoice checkpoint.");
+      }
+      progressBaselineRef.current = JSON.stringify(confirmed);
+      setIsPersisted(true);
+      if (editRevisionRef.current === revisionAtStart) {
+        setInv(confirmed);
+        setProgressState("saved");
+        setProgressMsg("Saved in SPS · QuickBooks unchanged.");
+      } else {
+        setProgressState("changed");
+        setProgressMsg("Earlier progress saved in SPS. Your newest edits still need saving.");
+      }
+    } catch (error) {
+      setProgressState("error");
+      setProgressMsg(error?.message || "SPS could not save this progress. Nothing changed in QuickBooks.");
+    }
+  };
+
   const save = async () => {
+    const revisionAtSaveStart = editRevisionRef.current;
     // Persist the client link + a name snapshot on the record (Bug 1) — never rely on
     // a transient field. clientId resolves the live client; clientName is the fallback.
     let baseInv = { ...inv, clientId: client?.id ?? inv.clientId ?? null, clientName: client?.name || "", clientAddress: client?.address || "", clientEmail: client?.email || "" };
@@ -19104,6 +19192,10 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         setQbMsg(reservation.error || "The completed visits could not be confirmed. Nothing was sent to QuickBooks.");
         return;
       }
+      // The source reservation is itself a confirmed SPS write. Use that exact
+      // record as the baseline for any recovery checkpoint after QuickBooks fails.
+      progressBaselineRef.current = JSON.stringify(reservation.reservedInvoice);
+      setIsPersisted(true);
       // A provenance-only invoice from an earlier build is upgraded during the
       // authoritative reservation. Carry that verified client identity into the
       // subsequent local save so the normal editor write cannot remove the upgrade.
@@ -19130,7 +19222,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
     const originalCreateIntent = inv.qbCreateIntentSignature || "";
     let createAttempted = !inv.qbId;
 
-    const rememberUnknownCreate = (details = {}) => {
+    const rememberUnknownCreate = async (details = {}) => {
       const pending = applyQuickBooksInvoiceSyncFailure({
         ...baseInv,
         locallyEdited: true,
@@ -19146,13 +19238,14 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         error: details.error || "QuickBooks may have created this invoice, but SPS did not receive a final response.",
         code: "QB_CREATE_OUTCOME_UNKNOWN",
       });
-      setInv(pending);
-      onSave(pending);
+      const persisted = await persistRetainedEditorInvoice(pending, revisionAtSaveStart);
       setQbState("error");
-      setQbMsg("Saved locally. QuickBooks may have created this invoice, but the response was interrupted. Tap Save again to recover it safely; SPS will not create a duplicate.");
+      setQbMsg(persisted.ok
+        ? "Saved in SPS. QuickBooks may have created this invoice, but the response was interrupted. Tap Save again to recover it safely; SPS will not create a duplicate."
+        : `QuickBooks may have created this invoice, and SPS could not confirm the recovery checkpoint. Keep this editor open. ${persisted.error?.message || "Try saving progress again."}`);
     };
 
-    const acceptCreateResult = (createData) => {
+    const acceptCreateResult = async (createData) => {
       const result = {
         ...createData,
         qbId: createData.qbId || null,
@@ -19204,10 +19297,11 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
       delete conflict.qbCreateOutcomeUnknown;
       delete conflict.qbCreateIntentSignature;
       delete conflict.qbCreateRequestId;
-      setInv(conflict);
-      onSave(conflict);
+      const persisted = await persistRetainedEditorInvoice(conflict, revisionAtSaveStart);
       setQbState("error");
-      setQbMsg("QuickBooks recovered the original invoice, but SPS has newer edits. Review the two versions above before syncing again.");
+      setQbMsg(persisted.ok
+        ? "QuickBooks recovered the original invoice, but SPS has newer edits. Review the two versions above before syncing again."
+        : `QuickBooks recovered the original invoice, but SPS could not confirm the review checkpoint. Keep this editor open. ${persisted.error?.message || "Try saving progress again."}`);
     };
 
     try {
@@ -19223,9 +19317,11 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           message: "QuickBooks session expired. Reconnect under Customize to sync.",
           code: "QB_AUTH_EXPIRED",
         });
-        setInv(failedInvoice);
-        onSave(failedInvoice);
-        setQbState("error"); setQbMsg("Saved locally. QuickBooks session expired — reconnect under Customize to sync.");
+        const persisted = await persistRetainedEditorInvoice(failedInvoice, revisionAtSaveStart);
+        setQbState("error");
+        setQbMsg(persisted.ok
+          ? "Saved in SPS. QuickBooks session expired. Reconnect under Customize to sync."
+          : `QuickBooks session expired, and SPS could not confirm this progress. Keep this editor open. ${persisted.error?.message || "Try saving progress again."}`);
         return;
       }
       const data = await res.json();
@@ -19247,26 +19343,27 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
         });
         const createData = await createRes.json();
         if (createData.error) {
-          if (createData.createOutcomeUnknown) rememberUnknownCreate(createData);
+          if (createData.createOutcomeUnknown) await rememberUnknownCreate(createData);
           else {
             const failedInvoice = applyQuickBooksInvoiceSyncFailure(baseInv, {
               error: createData,
               message: createData.error,
               code: createData.code,
             });
-            setInv(failedInvoice);
-            onSave(failedInvoice);
+            const persisted = await persistRetainedEditorInvoice(failedInvoice, revisionAtSaveStart);
             setQbState("error");
-            setQbMsg("Saved locally. QuickBooks sync failed: " + createData.error);
+            setQbMsg(persisted.ok
+              ? "Saved in SPS. QuickBooks sync failed: " + createData.error
+              : `QuickBooks sync failed, and SPS could not confirm this progress. Keep this editor open. ${persisted.error?.message || "Try saving progress again."}`);
           }
           return;
         }
-        acceptCreateResult(createData);
+        await acceptCreateResult(createData);
         return;
       }
       if (data.error) {
         if (data.createOutcomeUnknown && createAttempted) {
-          rememberUnknownCreate(data);
+          await rememberUnknownCreate(data);
           return;
         }
         // QB failed but keep the local save
@@ -19296,27 +19393,31 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           message: data.error,
           code: data.code,
         });
-        setInv(failedInvoice);
-        onSave(failedInvoice);
-        setQbState("error"); setQbMsg("Saved locally. QuickBooks sync failed: " + data.error);
+        const persisted = await persistRetainedEditorInvoice(failedInvoice, revisionAtSaveStart);
+        setQbState("error");
+        setQbMsg(persisted.ok
+          ? "Saved in SPS. QuickBooks sync failed: " + data.error
+          : `QuickBooks sync failed, and SPS could not confirm this progress. Keep this editor open. ${persisted.error?.message || "Try saving progress again."}`);
         return;
       }
-      if (createAttempted) acceptCreateResult(data);
+      if (createAttempted) await acceptCreateResult(data);
       else finishSave(applyQuickBooksInvoiceSaveResult(baseInv, {
           ...data,
           qbId: data.qbId || inv.qbId,
           paymentLink: data.paymentLink || inv.paymentLink,
         }));
     } catch (err) {
-      if (createAttempted) rememberUnknownCreate();
+      if (createAttempted) await rememberUnknownCreate({ error: err?.message || "QuickBooks could not be reached." });
       else {
         const failedInvoice = applyQuickBooksInvoiceSyncFailure(baseInv, {
           error: err,
           code: "QB_NETWORK_ERROR",
         });
-        setInv(failedInvoice);
-        onSave(failedInvoice);
-        setQbState("error"); setQbMsg("Saved locally. Could not reach QuickBooks: " + (err.message || "network error"));
+        const persisted = await persistRetainedEditorInvoice(failedInvoice, revisionAtSaveStart);
+        setQbState("error");
+        setQbMsg(persisted.ok
+          ? "Saved in SPS. Could not reach QuickBooks: " + (err.message || "network error")
+          : `QuickBooks could not be reached, and SPS could not confirm this progress. Keep this editor open. ${persisted.error?.message || "Try saving progress again."}`);
       }
     }
   };
@@ -19329,7 +19430,7 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
   if (sendStep) return <InvoiceSendStep invoice={sendStep} client={client} onSent={onSave} onClose={onClose} />;
 
   return (
-    <Modal title={invoice ? `Edit ${inv.number}` : "New Invoice"} onClose={onClose}>
+    <Modal title={isPersisted || invoice ? `Edit ${inv.number}` : "New Invoice"} onClose={onClose}>
       <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
         {editorNeedsReview && (
           <div style={{ background: hexA("#D97706", 0.08), border: `1px solid ${hexA("#D97706", 0.3)}`, borderRadius: 13, padding: 13 }}>
@@ -19579,11 +19680,51 @@ function InvoiceEditor({ invoice, clients, invoices, invoicing, catalog, setCata
           <textarea rows={2} style={{ ...field, resize: "vertical" }} value={inv.notes} onChange={e => set("notes", e.target.value)} />
         </div>
 
-        <Btn onClick={save} disabled={qbState === "sending"} style={{ width: "100%", padding: "13px", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", gap: 9 }}>
-          {qbState === "sending"
-            ? <><div style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /> Saving &amp; syncing…</>
-            : (invoice ? "Save Invoice" : "Create Invoice") + (qbConnected ? " & Sync to QuickBooks" : "")}
-        </Btn>
+        {qbConnected && typeof onPersistProgress === "function" ? (
+          <div
+            data-invoice-save-actions
+            role="group"
+            aria-label="Invoice save actions"
+            aria-busy={progressState === "saving" || qbState === "sending" || undefined}
+          >
+            <div style={{ display: "grid", gridTemplateColumns: stackInvoiceSaveActions ? "1fr" : "minmax(0, 2fr) minmax(0, 3fr)", gap: 9 }}>
+              <button
+                type="button"
+                data-invoice-save-progress
+                onClick={saveProgress}
+                disabled={progressState === "saving" || qbState === "sending"}
+                aria-describedby="invoice-progress-save-help"
+                aria-busy={progressState === "saving" || undefined}
+                style={{ minHeight: 48, padding: "12px 15px", borderRadius: 11, border: `1.5px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 13.5, fontWeight: 800, fontFamily: "inherit", cursor: progressState === "saving" || qbState === "sending" ? "default" : "pointer", opacity: progressState === "saving" || qbState === "sending" ? 0.62 : 1 }}
+              >
+                {progressState === "saving" ? "Saving in SPS…" : "Save progress"}
+              </button>
+              <Btn onClick={save} disabled={qbState === "sending" || progressState === "saving"} style={{ width: "100%", minHeight: 48, padding: "12px 15px", borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", gap: 9 }}>
+                {qbState === "sending"
+                  ? <><div style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /> Saving &amp; syncing…</>
+                  : `${isPersisted || invoice ? "Save" : "Create"} & sync to QuickBooks`}
+              </Btn>
+            </div>
+            <div id="invoice-progress-save-help" style={{ marginTop: 7, fontSize: 11.5, lineHeight: 1.45, color: T.textMuted }}>
+              Save progress keeps this invoice in SPS. QuickBooks will not change.
+            </div>
+            {progressMsg && (
+              <div
+                role={progressState === "error" ? "alert" : "status"}
+                aria-live={progressState === "error" ? undefined : "polite"}
+                style={{ marginTop: 6, paddingLeft: 9, borderLeft: `2px solid ${progressState === "error" ? T.primary : T.border}`, fontSize: 11.5, lineHeight: 1.45, fontWeight: progressState === "error" ? 700 : 650, color: progressState === "error" ? T.primary : T.text }}
+              >
+                {progressMsg}
+              </div>
+            )}
+          </div>
+        ) : (
+          <Btn onClick={save} disabled={qbState === "sending"} style={{ width: "100%", padding: "13px", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", gap: 9 }}>
+            {qbState === "sending"
+              ? <><div style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /> Saving &amp; syncing…</>
+              : (invoice ? "Save Invoice" : "Create Invoice") + (qbConnected ? " & Sync to QuickBooks" : "")}
+          </Btn>
+        )}
 
         {!qbConnected && (
           <div style={{ fontSize: 12, color: T.textMuted, textAlign: "center", lineHeight: 1.5 }}>
@@ -21239,7 +21380,7 @@ const canManageEstimates = (perms = {}) => !!(
   || (perms.tabAccess ? perms.tabAccess.estimates === "edit" : perms.canInvoice)
 );
 
-function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoicing, T, estimates: estimatesProp, setEstimates: setEstimatesProp, invoices = [], schedule = [], onSaveInvoice, onConvertEstimate, onCompleteEstimate, onScheduleEstimate }) {
+function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoicing, T, estimates: estimatesProp, setEstimates: setEstimatesProp, invoices = [], schedule = [], onSaveInvoice, onPersistInvoiceProgress, onConvertEstimate, onCompleteEstimate, onScheduleEstimate }) {
   const { perms = {} } = useApp();
   const vp = useViewport();
   const showProfit = !!(perms.isAdmin || perms.seeProfit);
@@ -21351,6 +21492,7 @@ function EstimatesScreen({ clients, catalog, setCatalog, branding, email, invoic
           catalog={catalog}
           setCatalog={setCatalog}
           onSave={saveConvertedInvoice}
+          onPersistProgress={onPersistInvoiceProgress}
           onClose={() => setInvoiceEditor(null)}
         />}
       </>
@@ -23604,7 +23746,7 @@ const maintenanceQuickBooksSnapshotIssue = (data) => {
   return "";
 };
 
-function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding, catalog, setCatalog, qbAccounting = null, currentUserId = "", onSave, onPersistInvoice, onResolveReview, onDelete, onSyncData, initialFilter = "All", vp = {} }) {
+function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding, catalog, setCatalog, qbAccounting = null, currentUserId = "", onSave, onPersistInvoice, onPersistProgress, onResolveReview, onDelete, onSyncData, initialFilter = "All", vp = {} }) {
   const { T, perms } = useApp();
   const canReviewAccounting = canManageInvoiceAccounting(perms);
   const moneyFmt = (n) => formatAccountingCurrency(n);
@@ -24374,7 +24516,10 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
           }}
           onReview={(invoice) => {
             setReviewingReconciliation(false);
-            if (perms.canInvoice) setEditing(invoice);
+            if (perms.canInvoice) {
+              const canonicalInvoice = (invoices || []).find((entry) => String(entry?.id || "") === String(invoice?.id || "")) || invoice;
+              setEditing(canonicalInvoice);
+            }
             else setPreview(invoice);
           }}
           onViewRelated={(invoice) => {
@@ -24384,7 +24529,7 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
           T={T}
         />
       )}
-      {creating && <InvoiceEditor clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onResolveReview={onResolveReview ? resolveReviewWithFeedback : undefined} onClose={() => setCreating(false)} />}
+      {creating && <InvoiceEditor clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onPersistProgress={onPersistProgress} onResolveReview={onResolveReview ? resolveReviewWithFeedback : undefined} onClose={() => setCreating(false)} />}
       {batching && <BatchInvoiceModal clients={clients} invoices={invoices} invoicing={invoicing} onSave={onSave} onClose={() => setBatching(false)} />}
       {bulkEditing && (
         <InvoiceBulkEditModal
@@ -24416,13 +24561,13 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
           onClose={() => { setBulkQuickBooksSyncing(false); setSelectedIds([]); }}
         />
       )}
-      {editing  && <InvoiceEditor invoice={editing} clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onResolveReview={onResolveReview ? resolveReviewWithFeedback : undefined} onDelete={onDelete} onClose={() => setEditing(null)} />}
+      {editing  && <InvoiceEditor invoice={editing} clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onPersistProgress={onPersistProgress} onResolveReview={onResolveReview ? resolveReviewWithFeedback : undefined} onDelete={onDelete} onClose={() => setEditing(null)} />}
       {livePreview && <InvoicePreview invoice={livePreview} client={clients.find(c => invoiceMatchesClient(livePreview, c))} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
     </div>
   );
 }
 
-function ClientInvoices({ client, invoices, invoicing, branding, catalog, setCatalog, onSave, onResolveReview, onDelete }) {
+function ClientInvoices({ client, invoices, invoicing, branding, catalog, setCatalog, onSave, onPersistProgress, onResolveReview, onDelete }) {
   const { T, perms } = useApp();
   const list = sortInvoices(clientInvoicesOf(invoices, client.id, client)).map(iv => ({ ...iv, _client: client }));
   const [creating, setCreating] = useState(false);
@@ -24455,8 +24600,8 @@ function ClientInvoices({ client, invoices, invoicing, branding, catalog, setCat
         {list.length === 0 && <div style={{ fontSize: 13, color: T.textMuted, padding: "6px 0" }}>No invoices yet for this client.</div>}
         {list.map(iv => <InvoiceRow key={iv.id} iv={iv} onClick={() => setPreview(iv)} />)}
       </div>
-      {creating && <InvoiceEditor clients={[client]} presetClientId={client.id} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onClose={() => setCreating(false)} />}
-      {editing && <InvoiceEditor invoice={editing} clients={[client]} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onResolveReview={onResolveReview} onDelete={onDelete} onClose={() => setEditing(null)} />}
+      {creating && <InvoiceEditor clients={[client]} presetClientId={client.id} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onPersistProgress={onPersistProgress} onClose={() => setCreating(false)} />}
+      {editing && <InvoiceEditor invoice={editing} clients={[client]} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onPersistProgress={onPersistProgress} onResolveReview={onResolveReview} onDelete={onDelete} onClose={() => setEditing(null)} />}
       {livePreview && <InvoicePreview invoice={livePreview} client={client} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
     </Card>
   );
@@ -42277,6 +42422,168 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
     throw new Error("Invoices changed repeatedly on another device. Refresh and try again.");
   };
 
+  // Progress checkpoints are SPS-only. They validate completed-visit ownership,
+  // replace the exact shared invoice with compare-and-swap, and read it back before
+  // the editor can claim success. No accounting or delivery side effect belongs here.
+  const handlePersistInvoiceProgress = async (candidateInvoice, options = {}) => {
+    const targetId = String(candidateInvoice?.id || "").trim();
+    if (!targetId || !candidateInvoice || typeof candidateInvoice !== "object") {
+      throw new Error("This invoice checkpoint could not be prepared.");
+    }
+    const baselineJson = typeof options.baselineJson === "string" ? options.baselineJson : "";
+    let baselineInvoice = null;
+    if (baselineJson) {
+      try { baselineInvoice = JSON.parse(baselineJson); } catch (_) {}
+    }
+
+    const pendingConflict = store.listConflicts().find(({ key }) => key === "sps_invoices");
+    if (pendingConflict) {
+      throw new Error("Resolve the invoice sync conflict before saving this progress.");
+    }
+    const pendingWriteReceipt = await store.flushKey("sps_invoices");
+    const pendingWriteIssue = storeReceiptIssue(pendingWriteReceipt, "Saving pending invoice changes");
+    if (pendingWriteIssue) throw new Error(pendingWriteIssue);
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const invoiceRead = await store.refresh("sps_invoices");
+      if (!invoiceRead?.ok) {
+        throw new Error(invoiceRead?.error?.message || "The latest SPS invoices could not be loaded.");
+      }
+      let latestInvoices;
+      try {
+        latestInvoices = invoiceRead.exists ? JSON.parse(invoiceRead.value || "[]") : [];
+      } catch (_) {
+        throw new Error("The shared invoice list is invalid. Your progress was not saved.");
+      }
+      if (!Array.isArray(latestInvoices)) {
+        throw new Error("The shared invoice list is invalid. Your progress was not saved.");
+      }
+
+      const matchingIndexes = latestInvoices.reduce((indexes, entry, entryIndex) => (
+        String(entry?.id || "") === targetId ? [...indexes, entryIndex] : indexes
+      ), []);
+      if (matchingIndexes.length > 1) {
+        throw new Error("SPS found duplicate records for this invoice. Refresh and review them before saving.");
+      }
+      const index = matchingIndexes.length === 1 ? matchingIndexes[0] : -1;
+      if (baselineJson) {
+        if (index < 0) throw new Error("This invoice was removed on another device. Your open draft was left unchanged.");
+        if (JSON.stringify(latestInvoices[index]) !== baselineJson) {
+          throw new Error("This invoice changed on another device. Reopen it before saving so those changes are not overwritten.");
+        }
+      }
+
+      // A checkpoint stores invoice content, not lifecycle or delivery events. New records
+      // remain Draft. Existing records keep their confirmed status and external evidence so
+      // this quiet save cannot expose a draft, send a reminder, or manufacture a payment.
+      const lifecycleFields = [
+        "sentDate", "sentAt", "emailedAt", "emailSentAt", "deliveredAt", "deliveryDate",
+        "qbEmailStatus", "viewedAt", "clientViewedAt", "openedAt", "downloadedAt",
+        "exportedAt", "printedAt", "sharedAt", "paymentLink", "paidDate", "paidAt",
+        "payment", "payments", "paymentId", "paymentStatus",
+      ];
+      const persistedInvoice = index >= 0 ? latestInvoices[index] : null;
+      const progressCandidate = {
+        ...candidateInvoice,
+        status: persistedInvoice?.status || "Draft",
+      };
+      for (const fieldName of lifecycleFields) {
+        if (persistedInvoice && Object.prototype.hasOwnProperty.call(persistedInvoice, fieldName)) {
+          progressCandidate[fieldName] = persistedInvoice[fieldName];
+        } else {
+          delete progressCandidate[fieldName];
+        }
+      }
+      if (!baselineJson && index >= 0) {
+        if (JSON.stringify(latestInvoices[index]) === JSON.stringify(progressCandidate)) {
+          invoicesRef.current = latestInvoices;
+          setInvoices(latestInvoices);
+          return latestInvoices[index];
+        }
+        throw new Error("This new invoice already exists with different details. Reopen it before saving.");
+      }
+
+      const candidateNumber = String(progressCandidate.number || "").trim().toLowerCase();
+      const baselineNumber = String(baselineInvoice?.number || "").trim().toLowerCase();
+      const numberChanged = !baselineInvoice || candidateNumber !== baselineNumber;
+      const duplicateNumber = candidateNumber && numberChanged
+        ? latestInvoices.find((entry) => (
+          String(entry?.id || "") !== targetId
+          && String(entry?.number || "").trim().toLowerCase() === candidateNumber
+        ))
+        : null;
+      if (duplicateNumber) {
+        throw new Error(`Invoice ${progressCandidate.number} already exists. Choose another number before saving.`);
+      }
+
+      const matchedClient = (clients || []).find((entry) => String(entry?.id || "") === String(progressCandidate.clientId || ""));
+      const completedVisits = Array.isArray(matchedClient?.history) ? matchedClient.history : [];
+      const reservation = reserveCompletedVisitInvoice(
+        progressCandidate,
+        latestInvoices,
+        completedVisits,
+        { clientId: progressCandidate.clientId },
+      );
+      if (!reservation.ok) {
+        throw new Error(reservation.conflict?.message || "A completed visit is already linked to another invoice.");
+      }
+
+      let nextInvoice = { ...progressCandidate };
+      const candidateSources = invoiceCompletedVisitSources(progressCandidate);
+      if (candidateSources.hasSources) {
+        const reservedSources = invoiceCompletedVisitSources(reservation.reservedInvoice);
+        nextInvoice.sourceVisitClientIds = reservedSources.sourceVisitClientIds;
+        if (reservedSources.sourceVisitClientIds.length === 1) {
+          nextInvoice.sourceVisitClientId = reservedSources.sourceVisitClientIds[0];
+        } else {
+          delete nextInvoice.sourceVisitClientId;
+        }
+      }
+
+      const nextInvoices = index >= 0
+        ? latestInvoices.map((entry, entryIndex) => entryIndex === index ? nextInvoice : entry)
+        : [nextInvoice, ...latestInvoices];
+      if (index >= 0 && JSON.stringify(latestInvoices[index]) === JSON.stringify(nextInvoice)) {
+        invoicesRef.current = latestInvoices;
+        setInvoices(latestInvoices);
+        return latestInvoices[index];
+      }
+
+      const saved = await store.replaceMany([{
+        key: "sps_invoices",
+        value: JSON.stringify(nextInvoices),
+        expectedVersion: Number(invoiceRead.version) || 0,
+      }]);
+      if (!saved?.ok) {
+        if (saved?.conflict && attempt < 2) continue;
+        const blockedByThisDevice = saved?.error?.message === "A local edit is still pending";
+        throw new Error(blockedByThisDevice
+          ? "This device is still saving an earlier invoice change. Wait for Saved, then try again."
+          : saved?.conflict
+            ? "Another employee changed invoices at the same time. Reopen this invoice before saving."
+            : (saved?.error?.message || "SPS did not confirm this invoice checkpoint."));
+      }
+
+      const confirmedRead = await store.get("sps_invoices");
+      let confirmedInvoices;
+      try {
+        confirmedInvoices = confirmedRead?.value ? JSON.parse(confirmedRead.value) : [];
+      } catch (_) {
+        confirmedInvoices = [];
+      }
+      const confirmed = Array.isArray(confirmedInvoices)
+        ? confirmedInvoices.find((entry) => String(entry?.id || "") === targetId)
+        : null;
+      if (!confirmed || JSON.stringify(confirmed) !== JSON.stringify(nextInvoice)) {
+        throw new Error("SPS could not verify the saved invoice progress. QuickBooks was not changed.");
+      }
+      invoicesRef.current = confirmedInvoices;
+      setInvoices(confirmedInvoices);
+      return confirmed;
+    }
+    throw new Error("Invoices changed repeatedly on another device. Reopen this invoice and try again.");
+  };
+
   // Accounting writes must be merged onto the latest shared invoice record and
   // confirmed by the database before the UI can claim that QuickBooks is linked.
   // The mutator receives the freshest invoice so a batch cannot overwrite edits
@@ -43391,7 +43698,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           </div>
           <div style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: vp.isTablet ? "20px 16px" : "24px 30px" }}>
             {selectedClient
-              ? <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} initialTab={clientOpenTab} onTabChange={setClientOpenTab} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onResolveInvoiceReview={handleResolveInvoiceReview} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>
+              ? <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} initialTab={clientOpenTab} onTabChange={setClientOpenTab} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onPersistInvoiceProgress={handlePersistInvoiceProgress} onResolveInvoiceReview={handleResolveInvoiceReview} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>
               : (
                 <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: T.textMuted, gap: 12, padding: 40, textAlign: "center" }}>
                   <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.06), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="clients" size={30} /></div>
@@ -43405,15 +43712,15 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       ) : (
         <>
           {!selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => { setConvertLead(null); setAdding(true); }} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
-          {selectedClient && <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} initialTab={clientOpenTab} onTabChange={setClientOpenTab} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onResolveInvoiceReview={handleResolveInvoiceReview} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>}
+          {selectedClient && <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} initialTab={clientOpenTab} onTabChange={setClientOpenTab} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onPersistInvoiceProgress={handlePersistInvoiceProgress} onResolveInvoiceReview={handleResolveInvoiceReview} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>}
         </>
       ))}
       {page === "schedule" && <SectionErrorBoundary key={"schedule-" + schedNonce}><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} estimates={estimatesRaw} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} seedEstimate={scheduleEstimateSeed} clearEstimateSeed={() => setScheduleEstimateSeed(null)} onScheduleEstimate={handleScheduleApprovedEstimate} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} stopDraftsReady={lstopDrafts} draftScope={authUserId} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} onValidateArrival={validateArrivalStop} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
       {page === "inventory"  && (perms.isAdmin || perms.seeInventory) && <SectionErrorBoundary key="inventory"><InventoryScreen catalog={catalog} setCatalog={setCatalog} clients={clients} canSeeCost={perms.isAdmin || perms.seeInventoryCost} canEdit={perms.isAdmin || perms.editInventory} T={T} /></SectionErrorBoundary>}
       {page === "reports"   && (perms.isAdmin || perms.seeReportsPnl) && <ReportsScreen clients={clients} invoices={invoices} schedule={schedule} costs={costs} branding={branding} T={T} budget={budget} />}
       {page === "budget"    && (perms.isAdmin || perms.seeCostsBudget) && <BudgetHub budget={budget} setBudget={setBudget} clients={clients} costs={costs} invoices={invoices || []} onNav={handleNav} T={T} vp={vp} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} isAdmin={perms.isAdmin} />}
-      {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} setCatalog={setCatalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} invoices={invoices} schedule={schedule} onSaveInvoice={handleSaveInvoice} onConvertEstimate={handleConvertEstimateToInvoice} onCompleteEstimate={handleCompleteEstimate} onScheduleEstimate={handleOpenEstimateSchedule} />}
-      {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} schedule={schedule} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} qbAccounting={qbAccounting} currentUserId={currentUser.id} onSave={handleSaveInvoice} onPersistInvoice={handlePersistInvoiceMutation} onResolveReview={handleResolveInvoiceReview} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
+      {page === "estimates" && perms.canInvoice && <EstimatesScreen clients={clients} catalog={catalog} setCatalog={setCatalog} branding={branding} email={email} invoicing={invoicing} T={T} estimates={estimatesRaw} setEstimates={setEstimatesRaw} invoices={invoices} schedule={schedule} onSaveInvoice={handleSaveInvoice} onPersistInvoiceProgress={handlePersistInvoiceProgress} onConvertEstimate={handleConvertEstimateToInvoice} onCompleteEstimate={handleCompleteEstimate} onScheduleEstimate={handleOpenEstimateSchedule} />}
+      {page === "invoices"  && (perms.canInvoice || perms.viewInvoices) && <InvoicesScreen invoices={invoices} clients={clients} schedule={schedule} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} qbAccounting={qbAccounting} currentUserId={currentUser.id} onSave={handleSaveInvoice} onPersistInvoice={handlePersistInvoiceMutation} onPersistProgress={handlePersistInvoiceProgress} onResolveReview={handleResolveInvoiceReview} onDelete={handleDeleteInvoice} onSyncData={handleQBSync} initialFilter={invoiceFilter} vp={vp} />}
       {(page === "comms" || page === "reminders" || page === "messages" || page === "leads") && canSeeComms(perms) && <CommsScreen initialSection={page === "reminders" ? "reminders" : page === "messages" ? "messages" : page === "leads" ? "inbox" : commsSection || undefined} initialSectionNonce={commsSectionNonce} perms={perms} currentUser={currentUser} schedule={schedule} clients={clients} invoices={invoices} scheduleCfg={scheduleCfg} setScheduleCfg={setScheduleCfg} email={email} setEmail={setEmail} branding={branding} setBranding={setBranding} reminderLog={reminderLog} setReminderLog={setReminderLog} leads={leads} setLeads={setLeads} onConvertLead={handleConvertLead} onLinkLead={handleLinkLead} openLeadId={openLeadId} onLeadOpened={() => setOpenLeadId(null)} vp={vp} workspaceScope={authUserId} />}
       {page === "import"   && perms.canImport && <SkimmerImport clients={clients} onApply={handleImportApply} onGoToClients={() => handleNav("clients")} />}
       {page === "importHistory" && perms.canImport && <SkimmerHistoryImport clients={clients} team={team} onImport={handleImportHistory} onGoToClients={() => handleNav("clients")} />}
