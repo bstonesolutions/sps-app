@@ -133,3 +133,18 @@ export function commsNavigationCount({ focused = true, perms = {}, leads = 0, fa
     + (perms.isAdmin || perms.commsMessages ? count(chats) : 0)
     + (perms.isAdmin || perms.commsReminders ? count(reminders) : 0);
 }
+
+// Sections are already permission-filtered by the caller. Focused Comms starts
+// with Leads; a deliberate destination still takes priority over that default.
+export function initialCommsSection({ sections = [], focused = true, initialSection, rememberedSection } = {}) {
+  const permitted = id => sections.some(section => section.id === id);
+  if (permitted(initialSection)) return initialSection;
+  if (focused && permitted("inbox")) return "inbox";
+  if (!focused && permitted(rememberedSection)) return rememberedSection;
+  return sections[0]?.id || "messages";
+}
+
+export function primaryCommsSections(sections, focused = true) {
+  const order = focused ? ["inbox", "email"] : ["email", "messages", "inbox"];
+  return order.map(id => sections.find(section => section.id === id)).filter(Boolean);
+}

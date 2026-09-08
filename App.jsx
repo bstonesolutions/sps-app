@@ -88,7 +88,7 @@ import {
   writeDashboardLayout,
 } from "./dashboardLayout";
 import { formatAccountingCurrency, resolveInvoiceAccountingSummary } from "./invoiceAccountingSummary";
-import { selectActionableCommsRows, summarizeActionableCommsRows, commsNavigationCount } from "./commsPriority";
+import { selectActionableCommsRows, summarizeActionableCommsRows, commsNavigationCount, initialCommsSection, primaryCommsSections } from "./commsPriority";
 import { currentSharedConflict, sharedConflictReview } from "./sharedConflictNotice";
 
 // Manual/foreground refreshes compare these small version counters first and download only the
@@ -26432,11 +26432,10 @@ function CommsFloatingSearchDock({ value, onChange, placeholder, actionIcon, act
 
 // Mobile Comms is a workspace, not a seven-tab control panel. Keep the three daily
 // destinations visible and place administrative tools behind one predictable menu.
-function CommsSectionNavigator({ sections, activeId, onChange, T, phone = false, navRef }) {
+function CommsSectionNavigator({ sections, activeId, onChange, T, phone = false, focused = false, navRef }) {
   const [moreOpen, setMoreOpen] = useState(false);
-  const primaryOrder = ["email", "messages", "inbox"];
-  const primary = primaryOrder.map(id => sections.find(section => section.id === id)).filter(Boolean);
-  const secondary = sections.filter(section => !primaryOrder.includes(section.id));
+  const primary = primaryCommsSections(sections, focused);
+  const secondary = sections.filter(section => !primary.some(item => item.id === section.id));
   const secondaryActive = secondary.some(section => section.id === activeId);
   useEffect(() => { setMoreOpen(false); }, [activeId]);
   const shortLabel = (section) => section.id === "email" ? (section.label === "Texts" ? "Texts" : "Inbox") : section.id === "messages" ? "Chats" : "Leads";
@@ -32409,11 +32408,7 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
   const secKey = SECTIONS.map(s => s.id).join(",");
   const single = SECTIONS.length <= 1;
   const rememberedSection = savedCommsRef.current.comms?.section;
-  const [section, setSection] = useState(
-    SECTIONS.some(s => s.id === initialSection)
-      ? initialSection
-      : SECTIONS.some(s => s.id === rememberedSection) ? rememberedSection : firstId
-  );
+  const [section, setSection] = useState(() => initialCommsSection({ sections: SECTIONS, focused: focusedComms, initialSection, rememberedSection }));
   useEffect(() => { if (SECTIONS.some(s => s.id === initialSection)) setSection(initialSection); }, [initialSection, initialSectionNonce]); // eslint-disable-line react-hooks/exhaustive-deps
   // If the permitted set changes and the current section is no longer allowed, snap to the first.
   useEffect(() => { if (!SECTIONS.some(s => s.id === section)) setSection(firstId); }, [secKey]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -32550,7 +32545,7 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
       <div ref={commsRootRef} style={{ maxWidth: 780, marginTop: 0, marginLeft: vpx.isPhone ? -16 : "auto", marginRight: vpx.isPhone ? -16 : "auto" }}>
         {!single && (
           <div style={{ position: "sticky", top: 0, zIndex: 30, background: hexA(T.bg, 0.965), backdropFilter: "saturate(180%) blur(20px)", WebkitBackdropFilter: "saturate(180%) blur(20px)", padding: vpx.isPhone ? "6px 10px 7px" : "9px 12px 7px", borderBottom: `1px solid ${commsHairline(T, 0.1)}` }}>
-            <CommsSectionNavigator sections={SECTIONS} activeId={section} onChange={setSection} T={T} phone={vpx.isPhone} navRef={mobileNavRef} />
+            <CommsSectionNavigator sections={SECTIONS} activeId={section} onChange={setSection} T={T} phone={vpx.isPhone} focused={focusedComms} navRef={mobileNavRef} />
           </div>
         )}
         <div style={{ paddingTop: vpx.isPhone ? 4 : (compactComms ? 8 : 16) }}>{content}</div>
