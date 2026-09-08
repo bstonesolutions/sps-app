@@ -539,6 +539,94 @@ test("recognizes only explicit local edit markers", () => {
   assert.equal(hasPendingLocalInvoiceEdits({ qbSyncStatus: "dirty" }), true);
 });
 
+test("refreshing the same confirmed QuickBooks revision preserves saved SPS progress without creating a conflict", () => {
+  const remote = quickBooksInvoice();
+  const confirmed = reconcileQuickBooksInvoice(localInvoice(), remote);
+  const pending = {
+    ...confirmed, locallyEdited: true, qbPendingLocalEdits: true,
+    qbSyncStatus: "pending-push", qbAuthoritative: false, total: "1999",
+    notes: "Work intentionally saved in SPS",
+    lineItems: confirmed.lineItems.map((line, index) => index ? line : { ...line, unitPrice: "999" }),
+  };
+  const saved = structuredClone(pending);
+  const result = reconcileQuickBooksInvoice(pending, remote);
+  assert.deepEqual(result, saved);
+  assert.notEqual(result, pending);
+  assert.equal(result.qbNeedsReview, undefined);
+  assert.equal(result.qbPendingRemoteInvoice, undefined);
+  assert.deepEqual(pending, saved);
+  assert.deepEqual(reconcileQuickBooksInvoice(result, remote), result);
+});
+
+test("unchanged content with a newer QuickBooks payment or delivery revision still requires review", () => {
+  const remote = quickBooksInvoice();
+  const pending = { ...reconcileQuickBooksInvoice(localInvoice(), remote), locallyEdited: true, qbSyncStatus: "pending-push" };
+  const paid = { ...remote, qbSyncToken: "5", balance: 0, status: "Paid", paidDate: "2026-08-01" };
+  const result = reconcileQuickBooksInvoice(pending, paid);
+  assert.equal(result.qbSyncStatus, "conflict");
+  assert.equal(result.qbPendingRemoteInvoice.balance, 0);
+  assert.equal(result.qbPendingRemoteInvoice.status, "Paid");
+  assert.equal(result.qbPendingRemoteInvoice.paidDate, "2026-08-01");
+  assert.deepEqual(result.lineItems, pending.lineItems);
+});
+
+test("payment and delivery changes remain reviewable even if QuickBooks revision metadata is unchanged", () => {
+  const remote = quickBooksInvoice();
+  const pending = { ...reconcileQuickBooksInvoice(localInvoice(), remote), locallyEdited: true, qbSyncStatus: "pending-push" };
+  for (const changed of [
+    { balance: 900 }, { qbEmailStatus: "NeedToSend" }, { qbDeliveryType: "Email" },
+    { paidDate: "2026-09-07" }, { partial: false },
+  ]) {
+    const updatedRemote = { ...remote, ...changed };
+    const result = reconcileQuickBooksInvoice(pending, updatedRemote);
+    assert.equal(result.qbSyncStatus, "conflict");
+    for (const [field, value] of Object.entries(changed)) assert.equal(result.qbPendingRemoteInvoice[field], value);
+  }
+});
+
+test("missing revision evidence and changed QuickBooks content retain the conflict fence", () => {
+  const remote = quickBooksInvoice();
+  const confirmed = reconcileQuickBooksInvoice(localInvoice(), remote);
+  for (const changed of [
+    { qbBaseContentFingerprint: "" }, { qbSyncToken: "" }, { qbId: undefined },
+    { qbBaseContentFingerprint: "an-older-content-revision" },
+  ]) {
+    const pending = { ...confirmed, locallyEdited: true, qbSyncStatus: "pending-push", ...changed };
+    assert.equal(reconcileQuickBooksInvoice(pending, remote).qbSyncStatus, "conflict");
+  }
+});
+
+test("an old false conflict clears only when its recorded remote copy is the same confirmed base revision", () => {
+  const remote = quickBooksInvoice();
+  const confirmed = reconcileQuickBooksInvoice(localInvoice(), remote);
+  const oldFalseConflict = {
+    ...confirmed, locallyEdited: true, qbAuthoritative: false,
+    qbSyncStatus: "conflict", qbNeedsReview: true, qbRemoteChangesPending: true,
+    qbSyncConflict: { type: "quickbooks-remote-update", reason: "pending-local-edits" },
+    qbPendingRemoteInvoice: structuredClone(remote),
+  };
+  const result = reconcileQuickBooksInvoice(oldFalseConflict, remote);
+  assert.equal(result.qbSyncStatus, "pending-push");
+  assert.equal(result.locallyEdited, true);
+  assert.equal(result.qbAuthoritative, false);
+  assert.equal(result.qbNeedsReview, undefined);
+  assert.equal(result.qbPendingRemoteInvoice, undefined);
+  assert.equal(result.qbSyncConflict, undefined);
+  assert.deepEqual(result.lineItems, oldFalseConflict.lineItems);
+  assert.deepEqual(result.sourceVisitIds, oldFalseConflict.sourceVisitIds);
+  assert.equal(result.balance, oldFalseConflict.balance);
+
+  const withFailure = { ...oldFalseConflict, qbSyncError: "Network failure", qbSyncErrorCode: "QB_NETWORK_ERROR" };
+  assert.equal(reconcileQuickBooksInvoice(withFailure, remote).qbNeedsReview, true);
+  for (const protectedConflict of [
+    { ...oldFalseConflict, qbPendingRemoteInvoice: { ...remote, qbSyncToken: "5" } },
+    { ...oldFalseConflict, qbSyncConflict: { reason: "newer-local-edits-after-unknown-create" } },
+    { ...oldFalseConflict, qbCreateOutcomeUnknown: true },
+  ]) {
+    assert.equal(reconcileQuickBooksInvoice(protectedConflict, remote).qbSyncStatus, "conflict");
+  }
+});
+
 test("rejects a QuickBooks snapshot that omitted lineItems", () => {
   assert.throws(
     () => reconcileQuickBooksInvoice(localInvoice(), { qbId: "4949" }),

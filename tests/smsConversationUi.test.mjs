@@ -66,8 +66,8 @@ test("phone rows use compact conversation chrome while retaining swipe actions",
   assert.match(phoneRows, /\{messagePreview \|\| \(sms \? "Text message" : "\(no subject\)"\)\}[\s\S]*?\{channelLabel\}/, "the actual message should precede secondary channel metadata");
   assert.match(phoneRows, /fmtMailboxWhen\(r\.created_at\)/);
   assert.match(phoneRows, /<Icon name="chevronR"/);
-  assert.match(phoneRows, /onToggleRead=\{focused \? undefined : \(\) => \{ markRead\(inboxRowMessageIds\(r\), !r\.read\); \}\}/);
-  assert.match(phoneRows, /onDelete=\{focused \|\| smsOnly \? undefined : \(\) => \{ deleteEmails\(inboxRowMessageIds\(r\), \{ ask: false \}\); \}\}/);
+  assert.match(phoneRows, /onToggleRead=\{\(\) => \{ markRead\(inboxRowMessageIds\(r\), !r\.read\); \}\}/);
+  assert.match(phoneRows, /onDelete=\{smsOnly \? undefined : \(\) => \{ deleteEmails\(inboxRowMessageIds\(r\)\); \}\}/);
 });
 
 test("SMS accents use the SPS brand palette instead of purple", () => {
@@ -88,12 +88,12 @@ test("touch-and-hold previews without opening or marking read", () => {
   assert.match(inbox, /onOpen=\{\(\) => \{ const row = previewRow; setPreviewRow\(null\); openMessage\(row\); \}\}/);
 });
 
-test("focused Comms is read-only while full workspace keeps reply and mailbox controls", () => {
+test("focused Comms allows explicit cleanup while keeping customer replies in full workspace", () => {
   assert.match(inbox, /function EmailInboxSection\([^)]*focused = false/);
   assert.match(inbox, /setReplying\(focused \? false :/);
-  assert.match(phoneRows, /disabled=\{focused \|\| selMode\}/);
-  assert.match(phoneRows, /onToggleRead=\{focused \? undefined/);
-  assert.match(phoneRows, /onDelete=\{focused \|\| smsOnly \? undefined/);
+  assert.match(phoneRows, /disabled=\{selMode\}/);
+  assert.match(phoneRows, /onToggleRead=\{\(\) =>/);
+  assert.match(phoneRows, /onDelete=\{smsOnly \? undefined/);
 });
 
 test("SMS pins are server-backed and render in a separate phone rail", () => {

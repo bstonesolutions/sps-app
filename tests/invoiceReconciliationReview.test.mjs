@@ -96,8 +96,8 @@ test("a persisted create failure is not mislabeled as a two-version conflict", (
 
 test("invoice review UI is actionable and its QuickBooks inspection is read-only", () => {
   assert.match(appSource, /function InvoiceReconciliationReviewQueue/);
-  assert.match(appSource, /Review & sync/);
-  assert.match(appSource, /Compare SPS with the confirmed QuickBooks record, then apply either version in one step/);
+  assert.match(appSource, /QuickBooks review/);
+  assert.match(appSource, /onClick=\{\(\) => setReviewingReconciliation\(true\)\}/);
   assert.match(appSource, /SPS ID:/);
   assert.match(appSource, /QB ID:/);
   assert.match(appSource, /Check QuickBooks/);

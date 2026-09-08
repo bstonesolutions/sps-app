@@ -47,14 +47,10 @@ test("QuickBooks draft queue saves each invoice independently and never delivers
   const modal = app.slice(start, end);
 
   assert.match(modal, /for \(const row of targets\)/);
-  assert.match(modal, /create-invoice/);
-  assert.match(modal, /applyQuickBooksInvoiceSaveResult/);
+  assert.match(modal, /syncInvoiceToQuickBooks/);
+  assert.match(modal, /draftsOnly: !individual/);
   assert.match(modal, /onPersistInvoice/);
-  assert.match(modal, /data\.success !== true/);
-  assert.match(modal, /!String\(data\.qbId/);
-  assert.match(modal, /response\.status === 401/);
-  assert.match(modal, /status: current\.status \|\| "Draft"/);
-  assert.match(modal, /typeof onPersistInvoice !== "function"/);
+  assert.match(modal, /outcome\.reconnect/);
   assert.doesNotMatch(modal, /onSave/);
   assert.match(modal, /no client message is sent/);
   assert.doesNotMatch(modal, /deliverSelectedInvoices/);

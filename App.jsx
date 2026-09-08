@@ -28,6 +28,7 @@ import { applySafeBulkInvoiceEdits, invoiceSelectionForVisible, pruneInvoiceSele
 import { deliverSelectedInvoices } from "./invoiceBulkDelivery";
 import { deleteInvoiceAndCompactSafeDrafts, draftInvoiceCanBeRenumbered } from "./invoiceNumbering";
 import { buildQuickBooksInvoicePayload, partitionQuickBooksDraftSelection } from "./quickbooksDraftSync";
+import { quickBooksInvoiceSyncEligibility, quickBooksInvoiceUrl, syncInvoiceToQuickBooks } from "./quickbooksDirectSync";
 import { appendCompletedVisitsToInvoice, completedVisitBillableTotal, completedVisitInvoiceLink, completedVisitLineItems, completedVisitSource, invoiceCompletedVisitSources, removeInvoiceLineAndPruneCompletedVisitSources, reserveCompletedVisitInvoice } from "./invoiceVisitImport";
 import { normalizeMaintenanceBillingPolicy } from "./maintenanceBilling";
 import MaintenanceCoverageWorkspace from "./MaintenanceCoverageWorkspace";
@@ -60,6 +61,7 @@ import {
 import { smsMediaKind, smsMediaLabel, smsMediaSizeLabel, smsMediaSource, smsVisibleBodyText } from "./smsMediaPresentation";
 import { shouldWriteLiveLocation } from "./liveLocationThrottle";
 import { clearWorkspaceState, patchWorkspaceState, readWorkspaceState } from "./workspaceState";
+import { cleanupSpsInbox, reconcileInboxRemoval, mergeInboxDetail } from "./inboxCleanup";
 import { reminderSystemEnabled } from "./reminderSystem";
 import {
   classifyCompletionFailure,
@@ -86,7 +88,8 @@ import {
   writeDashboardLayout,
 } from "./dashboardLayout";
 import { formatAccountingCurrency, resolveInvoiceAccountingSummary } from "./invoiceAccountingSummary";
-import { selectActionableCommsRows, summarizeActionableCommsRows } from "./commsPriority";
+import { selectActionableCommsRows, summarizeActionableCommsRows, commsNavigationCount } from "./commsPriority";
+import { currentSharedConflict, sharedConflictReview } from "./sharedConflictNotice";
 
 // Manual/foreground refreshes compare these small version counters first and download only the
 // shared slices that changed. Keeping this list explicit prevents a Sync tap from tearing down the
@@ -5680,7 +5683,7 @@ function HomeCommsWidget({ leads = [], clients = [], onNav, T, perms = {}, focus
   }, [clients, emails, focused]);
   const unreadInbox = externalInboxRows.length;
   const recent = [];
-  if (canChat) threads.filter(t => t.unread > 0).slice(0, 4).forEach(t => recent.push({ kind: "chat", name: nameOf(t.cid), sub: t.lastMsg, at: t.at, seed: nameOf(t.cid), onClick: () => onNav("messages") }));
+  if (canChat && !focused) threads.filter(t => t.unread > 0).slice(0, 4).forEach(t => recent.push({ kind: "chat", name: nameOf(t.cid), sub: t.lastMsg, at: t.at, seed: nameOf(t.cid), onClick: () => onNav("messages") }));
   openLeads.slice(0, 4).forEach(l => recent.push({ kind: "lead", name: l.name || l.phone || "New lead", sub: l.message || l.service || "New lead", at: l.createdAt, seed: l.name || l.id, onClick: () => onNav("leads") }));
   (canExternalInbox ? externalInboxRows : []).slice(0, 4).forEach(e => {
     const isText = e.channel === "sms";
@@ -5693,34 +5696,38 @@ function HomeCommsWidget({ leads = [], clients = [], onNav, T, perms = {}, focus
       onClick: () => onNav("comms", { commsSection: "email" }),
     });
   });
-  recent.sort((a, b) => timeValue(b.at) - timeValue(a.at));
+  recent.sort((a, b) => (focused ? Number(b.kind === "lead") - Number(a.kind === "lead") : 0) || timeValue(b.at) - timeValue(a.at));
   const top = recent.slice(0, 3);
   const AV = [T.primary, "#374151", "#64748B", "#7C2D32", "#475569"];
   const col = (s) => { let h = 0; const x = String(s || "?"); for (let i = 0; i < x.length; i++) h = (h * 31 + x.charCodeAt(i)) >>> 0; return AV[h % AV.length]; };
   const fmtT = (iso) => { try { const d = new Date(iso), n = new Date(); return d.toDateString() === n.toDateString() ? d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : d.toLocaleDateString("en-US", { month: "short", day: "numeric" }); } catch (_) { return ""; } };
   const kindBadge = { chat: ["CHAT", T.primary], lead: ["LEAD", T.primary], bill: ["BILL", T.textMuted], email: ["EMAIL", T.textMuted], sms: ["TEXT", T.primary] };
-  const tiles = [
+  const failures = summarizeActionableCommsRows(externalInboxRows).failures;
+  const tiles = focused ? [
+    canExternalInbox && ["Open inbox", null, T.textMuted, () => onNav("comms", { commsSection: "email" })],
+    canExternalInbox && failures > 0 && ["Delivery failures", failures, T.primary, () => onNav("comms", { commsSection: "email" })],
+  ].filter(Boolean) : [
     canChat && ["Unread chats", unreadChats, T.primary, () => onNav("messages")],
     canLeads && ["New leads", newLeads, "#16a34a", () => onNav("leads")],
     canExternalInbox && [focused ? "Needs attention" : (perms.isAdmin ? "Inbox unread" : "Texts unread"), unreadInbox, T.primary, () => onNav("comms", { commsSection: "email" })],
   ].filter(Boolean);
   const openComms = () => focused
-    ? onNav("comms", { commsSection: "email" })
+    ? (canLeads ? onNav("leads") : onNav("comms", { commsSection: "email" }))
     : canChat ? onNav("messages") : canLeads ? onNav("leads") : onNav("comms", { commsSection: "email" });
   const loading = (canChat && msgs === null) || (canExternalInbox && emails === null);
-  const unreadTotal = unreadChats + newLeads + unreadInbox;
-  if (!tiles.length) return null;
+  const unreadTotal = focused ? newLeads : unreadChats + newLeads + unreadInbox;
+  if (!canLeads && !tiles.length) return null;
   return (
     <Card key="comms" style={{ marginBottom: 0, borderRadius: 18, boxShadow: "none", border: `1px solid ${T.border}`, overflow: "hidden" }}>
-      <CardHeader title="Communications" action={<Btn variant="text" sm onClick={openComms}>Open comms</Btn>} />
+      <CardHeader title={focused ? "Leads & communications" : "Communications"} action={<Btn variant="text" sm onClick={openComms}>{focused && canLeads ? "View leads" : "Open comms"}</Btn>} />
       <div style={{ padding: "0 16px 14px" }}>
         <div style={{ minHeight: 72, borderTop: `1px solid ${T.border}`, borderBottom: `1px solid ${T.border}`, display: "grid", gridTemplateColumns: "minmax(96px, .55fr) minmax(0, 1.45fr)", alignItems: "center", gap: 16, marginBottom: 2 }}>
           <button type="button" onClick={openComms} style={{ border: "none", background: "transparent", padding: "12px 0", fontFamily: "inherit", textAlign: "left", cursor: "pointer" }}>
             <span style={{ display: "block", color: unreadTotal ? T.primary : T.text, fontSize: 30, lineHeight: 1, fontWeight: 880, letterSpacing: "-0.04em" }}>{unreadTotal}</span>
-            <span style={{ display: "block", color: T.textMuted, fontSize: 10.5, lineHeight: 1.3, fontWeight: 780, letterSpacing: ".08em", textTransform: "uppercase", marginTop: 5 }}>Needs reply</span>
+            <span style={{ display: "block", color: T.textMuted, fontSize: 10.5, lineHeight: 1.3, fontWeight: 780, letterSpacing: ".08em", textTransform: "uppercase", marginTop: 5 }}>{focused ? "New leads" : "Needs reply"}</span>
           </button>
           <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "flex-end", alignItems: "center", gap: "6px 14px", color: T.textMuted, fontSize: 11.5, fontWeight: 720 }}>
-            {tiles.map(([lbl, n, , go]) => <button key={lbl} type="button" onClick={go} style={{ border: "none", background: "transparent", padding: "6px 0", color: "inherit", fontFamily: "inherit", fontSize: "inherit", fontWeight: "inherit", cursor: "pointer" }}><span style={{ color: n ? T.primary : T.text, fontWeight: 860 }}>{n}</span> {lbl.replace(" unread", "")}</button>)}
+            {tiles.map(([lbl, n, , go]) => <button key={lbl} type="button" onClick={go} style={{ border: "none", background: "transparent", padding: "6px 0", color: "inherit", fontFamily: "inherit", fontSize: "inherit", fontWeight: "inherit", cursor: "pointer" }}>{n != null && <span style={{ color: n ? T.primary : T.text, fontWeight: 860 }}>{n} </span>}{lbl.replace(" unread", "")}</button>)}
           </div>
         </div>
         {loading && <div style={{ fontSize: 12.5, color: T.textMuted, textAlign: "center", padding: "16px 0" }}>Loading…</div>}
@@ -8284,7 +8291,7 @@ function ClientDocuments({ client, onChange }) {
   );
 }
 
-function ClientDetail({ client: init, invoices, invoicing, branding, catalog, setCatalog, team, schedule, email, onBack, onUpdate, onSaveInvoice, onPersistInvoiceProgress, onResolveInvoiceReview, onDeleteInvoice, onDelete, onPreviewClient, initialTab, onTabChange }) {
+function ClientDetail({ client: init, invoices, invoicing, branding, catalog, setCatalog, team, schedule, email, onBack, onUpdate, onSaveInvoice, onPersistInvoice, onPersistInvoiceProgress, onResolveInvoiceReview, onDeleteInvoice, onDelete, onPreviewClient, initialTab, onTabChange }) {
   const { T, perms, tiers } = useApp();
   const clientVp = useViewport();
   const [client, setClient] = useState(init);
@@ -8460,7 +8467,7 @@ function ClientDetail({ client: init, invoices, invoicing, branding, catalog, se
       {tab === "overview" && <ClientOverview client={client} invoices={invoices} schedule={schedule} onUpdate={onUpdate} />}
       {tab === "equipment" && <ClientEquipment client={client} invoices={invoices} onChange={eq => update({ equipment: eq })} />}
       {tab === "history" && <ClientHistory client={client} catalog={catalog} team={team} onChange={hist => update({ history: hist })} />}
-      {tab === "invoices" && (perms.canInvoice || perms.viewInvoices) && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={onSaveInvoice} onPersistProgress={onPersistInvoiceProgress} onResolveReview={onResolveInvoiceReview} onDelete={onDeleteInvoice} />}
+      {tab === "invoices" && (perms.canInvoice || perms.viewInvoices) && <ClientInvoices client={client} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} onSave={onSaveInvoice} onPersistInvoice={onPersistInvoice} onPersistProgress={onPersistInvoiceProgress} onResolveReview={onResolveInvoiceReview} onDelete={onDeleteInvoice} />}
       {tab === "docs"    && <ClientDocuments client={client} onChange={docs => update({ documents: docs })} />}
       {tab === "portal" && <ClientPortal client={client} invoices={invoices} invoicing={invoicing} schedule={schedule} branding={branding} email={email} onPreviewClient={onPreviewClient} />}
 
@@ -21083,18 +21090,27 @@ function MarkPaidModal({ invoice, client, onSave, onClose }) {
   );
 }
 
-function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose, onEdit, onDelete, canManage, embedded }) {
+function InvoicePreview({ invoice, client, branding, invoicing, onSave, onPersistInvoice, onClose, onEdit, onDelete, canManage, embedded }) {
   const { T, perms, email } = useApp();
   const [markPaid, setMarkPaid] = useState(false); // B9-3: mark-as-paid + QB payment modal
   // Fine-grained invoice actions (default to canManage, so unchanged unless restricted).
   const canSend     = canManage && perms.invoiceSend;
   const canMarkPaid = canManage && perms.invoiceMarkPaid;
   const canEditInv  = canManage && perms.invoiceCreate;
+  const canSyncQuickBooks = canManage && perms.canInvoice && perms.invoiceCreate && typeof onPersistInvoice === "function";
+  const [quickBooksReview, setQuickBooksReview] = useState(false);
+  const quickBooksEligibility = quickBooksInvoiceSyncEligibility(invoice, client);
+  const quickBooksUrl = quickBooksInvoiceUrl(invoice);
   const money = (n) => `$${(n || 0).toFixed(2)}`;
   const totals = invoiceTotals(invoice);
   const eff = effectiveStatus(invoice);
   const anyTaxable = (invoice.lineItems || []).some(l => l.taxable);
-  const setStatus = (status) => { const upd = { ...invoice, status }; if (status === "Paid") upd.paidDate = todayMDY(); onSave(upd); };
+  const setStatus = (status) => {
+    const upd = { ...invoice, status };
+    if (status === "Paid") upd.paidDate = todayMDY();
+    if (status === "Sent" && invoice.status === "Draft") upd.sentDate = todayMDY();
+    onSave(upd);
+  };
   const cfg = { ...DEFAULT_INVOICING, ...(invoicing || {}) };
   const accent = cfg.accent || T.primary;
   const contactBits = [branding.companyPhone, branding.companyEmail, branding.companyWebsite].filter(Boolean);
@@ -21216,7 +21232,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
   // Send-to-client button + status feedback (stacked full-width — modal layout).
   const sendBlock = canSend && (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <Btn onClick={sendToClient} disabled={!clientEmail || sendState === "sending"}
+      <Btn variant="ghost" onClick={sendToClient} disabled={!clientEmail || sendState === "sending"}
         style={{ borderRadius: 12, gap: 8, justifyContent: "center", opacity: clientEmail ? 1 : 0.55 }}>
         <Icon name="mail" size={15} />
         {sendState === "sending" ? "Sending…" : sendState === "sent" ? "Sent ✓" : "Send to Client"}
@@ -21236,7 +21252,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
   const actionRow = canManage && (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
       {eff !== "Paid" && canMarkPaid && <Btn variant="accent" onClick={() => setMarkPaid(true)} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Mark Paid</Btn>}
-      {invoice.status === "Draft" && canMarkPaid && <Btn variant="ghost" onClick={() => setStatus("Sent")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Mark Sent</Btn>}
+      {invoice.status === "Draft" && canMarkPaid && <Btn variant="ghost" onClick={() => setStatus("Sent")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Record manual send</Btn>}
       {eff === "Paid" && canMarkPaid && <Btn variant="ghost" onClick={() => setStatus("Sent")} style={{ flex: 1, minWidth: 120, borderRadius: 12 }}>Reopen</Btn>}
       {canEditInv && <Btn variant="ghost" onClick={() => onEdit(invoice)} style={{ borderRadius: 12 }}>Edit</Btn>}
       <Btn variant="ghost" onClick={print} disabled={printing} style={{ borderRadius: 12 }}>{printing ? "Preparing…" : "Print / Export PDF"}</Btn>
@@ -21267,7 +21283,7 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
   const repSent = invoice.qbEmailStatus === "EmailSent" || !!invoice.sentDate;
   const repRows = [
     ["Issued",  fmtRep(invoice.date) || "—", T.text],
-    ["Sent",    repSent ? (invoice.sentDate ? fmtRep(invoice.sentDate) : "Yes") : (invoice.source === "quickbooks" ? "Not sent via QuickBooks" : "Sent from the app"), T.text],
+    ["Sent",    repSent ? (invoice.sentDate ? fmtRep(invoice.sentDate) : "Yes") : "Not recorded as sent", T.text],
     ["Viewed",  "Not tracked via QuickBooks", T.textMuted],
     ["Paid",    eff === "Paid" ? (repPaidDate ? fmtRep(repPaidDate) : "Yes")
                 : invoice.partial ? `Partial — ${money(Math.max(0, (totals.total || 0) - repBalance))} of ${money(totals.total)}`
@@ -21292,9 +21308,29 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
     </div>
   ) : null;
 
-  // ── Modal layout (mobile / inside a client record): document, then actions stacked. ──
+  const quickBooksBlock = canSyncQuickBooks && (
+    <div data-invoice-quickbooks-actions style={{ borderLeft: `3px solid ${T.primary}`, padding: "4px 0 4px 13px", display: "flex", flexDirection: "column", gap: 9 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+        <Btn onClick={() => setQuickBooksReview(true)} disabled={!quickBooksEligibility.eligible} title={quickBooksEligibility.reason || undefined}>
+          {invoice.qbId ? "Sync changes to QuickBooks" : "Send to QuickBooks"}
+        </Btn>
+        {quickBooksUrl && <a href={quickBooksUrl} target="_blank" rel="noopener noreferrer" style={{ padding: "8px 2px", color: T.primary, fontWeight: 750, fontSize: 12.5, textDecoration: "none" }}>Open in QuickBooks ↗</a>}
+      </div>
+      <div style={{ fontSize: 12, color: T.textMuted, lineHeight: 1.45 }}>
+        {quickBooksEligibility.eligible ? "Sync here, then send the invoice from QuickBooks. Customer delivery is separate." : quickBooksEligibility.reason}
+      </div>
+    </div>
+  );
+
+  // Show the QuickBooks review in the same modal slot, keeping mobile actions visible.
+  if (quickBooksReview && canSyncQuickBooks) return (
+    <InvoiceQuickBooksDraftSyncModal individual invoices={[invoice]} clients={client ? [client] : []} invoicing={invoicing} onPersistInvoice={onPersistInvoice} onClose={() => setQuickBooksReview(false)} />
+  );
+
+  // ── Modal layout (mobile / inside a client record): accounting action, then document. ──
   const body = (
     <div style={{ display: "flex", flexDirection: "column", gap: 14, paddingBottom: "max(16px, env(safe-area-inset-bottom))" }}>
+      {quickBooksBlock}
       {doc}
       {reportBlock}
       {paidInfo}
@@ -21317,13 +21353,14 @@ function InvoicePreview({ invoice, client, branding, invoicing, onSave, onClose,
             <div style={{ flex: 1 }} />
             {onClose && <button onClick={onClose} aria-label="Close" style={{ width: 32, height: 32, borderRadius: "50%", border: "none", background: T.surfaceAlt, color: T.textMuted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="close" size={16} /></button>}
           </div>
+          {quickBooksBlock && <div style={{ marginBottom: 14 }}>{quickBooksBlock}</div>}
           {canManage && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-              {canSend && <Btn sm onClick={sendToClient} disabled={!clientEmail || sendState === "sending"} style={{ borderRadius: 10, gap: 6, opacity: clientEmail ? 1 : 0.55 }}>
-                <Icon name="mail" size={14} />{sendState === "sending" ? "Sending…" : sendState === "sent" ? "Sent ✓" : "Send"}
+              {canSend && <Btn sm variant="ghost" onClick={sendToClient} disabled={!clientEmail || sendState === "sending"} style={{ borderRadius: 10, gap: 6, opacity: clientEmail ? 1 : 0.55 }}>
+                <Icon name="mail" size={14} />{sendState === "sending" ? "Sending…" : sendState === "sent" ? "Sent ✓" : "Send to client"}
               </Btn>}
               {eff !== "Paid" && canMarkPaid && <Btn sm variant="accent" onClick={() => setMarkPaid(true)} style={{ borderRadius: 10 }}>Mark Paid</Btn>}
-              {invoice.status === "Draft" && canMarkPaid && <Btn sm variant="ghost" onClick={() => setStatus("Sent")} style={{ borderRadius: 10 }}>Mark Sent</Btn>}
+              {invoice.status === "Draft" && canMarkPaid && <Btn sm variant="ghost" onClick={() => setStatus("Sent")} style={{ borderRadius: 10 }}>Record manual send</Btn>}
               {eff === "Paid" && canMarkPaid && <Btn sm variant="ghost" onClick={() => setStatus("Sent")} style={{ borderRadius: 10 }}>Reopen</Btn>}
               {canEditInv && <Btn sm variant="ghost" onClick={() => onEdit(invoice)} style={{ borderRadius: 10 }}>Edit</Btn>}
               <Btn sm variant="ghost" onClick={print} disabled={printing} style={{ borderRadius: 10 }}>{printing ? "Preparing…" : "Print / PDF"}</Btn>
@@ -22972,172 +23009,58 @@ function InvoiceBulkSendModal({ invoices, clients, onSave, onClose }) {
   );
 }
 
-function InvoiceQuickBooksDraftSyncModal({ invoices, clients, invoicing, onPersistInvoice, onClose }) {
-  const { T } = useApp();
+function InvoiceQuickBooksDraftSyncModal({ invoices, clients, invoicing, onPersistInvoice, onClose, individual = false }) {
+  const { T, perms } = useApp();
   const [running, setRunning] = useState(false);
   const [outcomes, setOutcomes] = useState({});
-  const plan = useMemo(() => partitionQuickBooksDraftSelection(
-    invoices,
-    (invoice) => clients.find((candidate) => invoiceMatchesClient(invoice, candidate)) || null,
-  ), [invoices, clients]);
+  // Keep the reviewed list stable while the parent receives confirmed changes.
+  const [reviewedInvoices] = useState(() => invoices);
+  const plan = useMemo(() => {
+    const resolveClient = (invoice) => clients.find((candidate) => invoiceMatchesClient(invoice, candidate)) || null;
+    if (!individual) return partitionQuickBooksDraftSelection(reviewedInvoices, resolveClient);
+    const rows = reviewedInvoices.map((invoice) => {
+      const client = resolveClient(invoice);
+      return { invoice, client, ...quickBooksInvoiceSyncEligibility(invoice, client) };
+    });
+    return { ready: rows.filter((row) => row.eligible), skipped: rows.filter((row) => !row.eligible) };
+  }, [reviewedInvoices, clients, individual]);
   const totalReady = plan.ready.reduce((sum, row) => sum + invoiceTotals(row.invoice).total, 0);
   const money = (value) => `$${Number(value || 0).toFixed(2)}`;
 
-  const persistInvoiceMutation = async (invoice, mutate) => {
-    if (typeof onPersistInvoice !== "function") {
-      throw new Error("SPS cannot confirm invoice changes right now. Nothing else will be sent to QuickBooks.");
-    }
-    return onPersistInvoice(invoice.id, mutate);
-  };
-
-  const persistFailure = async (invoice, details, extras = {}) => {
-    return persistInvoiceMutation(invoice, (current) => applyQuickBooksInvoiceSyncFailure({ ...current, ...extras }, {
-      error: details?.error || details?.message || "QuickBooks did not accept this draft.",
-      code: details?.code,
-    }));
-  };
-
   const syncDrafts = async () => {
-    if (running) return;
+    if (running || !perms.canInvoice || !perms.invoiceCreate) return;
     setRunning(true);
     try {
       const targets = plan.ready.filter(({ invoice }) => {
         const outcome = outcomes[String(invoice.id)];
         return outcome?.status !== "synced" && outcome?.status !== "uncertain";
       });
-
       for (const row of targets) {
         const id = String(row.invoice.id);
-        const client = row.client;
-        let baseInvoice = row.invoice;
-        let intent = "";
-        let writeStarted = false;
-        let confirmedCreate = null;
+        if (!qbIsConnected()) {
+          setOutcomes((current) => ({ ...current, [id]: { status: "failed", message: "Connect QuickBooks under Customize, then retry" } }));
+          break;
+        }
         setOutcomes((current) => ({ ...current, [id]: { status: "sending", message: "Syncing to QuickBooks" } }));
-
-        try {
-          baseInvoice = {
-            ...row.invoice,
-            clientId: client?.id ?? row.invoice.clientId ?? null,
-            clientName: client?.name || row.invoice.clientName || "",
-            clientEmail: client?.email || row.invoice.clientEmail || "",
-            clientPhone: client?.phone || row.invoice.clientPhone || "",
-            clientAddress: client?.address || row.invoice.clientAddress || "",
-          };
-          const payload = buildQuickBooksInvoicePayload(baseInvoice, client, invoicing);
-          intent = quickBooksInvoiceIntentSignature(payload);
-          writeStarted = true;
-          const response = await fetch(`${QB_API}/create-invoice`, {
-            method: "POST",
-            headers: await authHeaders({ "Content-Type": "application/json" }),
-            body: JSON.stringify({ invoice: payload }),
-          });
-          const data = await response.json().catch(() => ({}));
-
-          if (response.status === 401) {
-            qbSetConnected(false);
-            try {
-              await persistFailure(baseInvoice, {
-                error: "QuickBooks session expired. Reconnect under Customize, then retry this draft.",
-                code: "QB_AUTH_EXPIRED",
-              });
-            } catch (_) {}
-            setOutcomes((current) => ({ ...current, [id]: { status: "failed", message: "Reconnect QuickBooks" } }));
-            break;
-          }
-
-          if (!response.ok || data.error) {
-            if (data.createOutcomeUnknown) {
-              await persistFailure(baseInvoice, data, {
-                locallyEdited: true,
-                qbAuthoritative: false,
-                qbPendingLocalEdits: true,
-                qbSyncStatus: "create-outcome-unknown",
-                qbCreateOutcomeUnknown: true,
-                qbCreateIntentSignature: intent,
-                qbCreateRequestId: data.qbRequestId || "",
-              });
-              setOutcomes((current) => ({
-                ...current,
-                [id]: { status: "uncertain", message: "Needs review before retry" },
-              }));
-            } else {
-              await persistFailure(baseInvoice, data);
-              setOutcomes((current) => ({
-                ...current,
-                [id]: { status: "failed", message: String(data.error || "QuickBooks rejected this draft").slice(0, 140) },
-              }));
-            }
-            continue;
-          }
-
-          if (data.success !== true || !String(data.qbId || "").trim()) {
-            await persistFailure(baseInvoice, {
-              error: "QuickBooks returned an incomplete create response. Review this draft before retrying.",
-              code: "QB_CREATE_OUTCOME_UNKNOWN",
-            }, {
-              locallyEdited: true,
-              qbAuthoritative: false,
-              qbPendingLocalEdits: true,
-              qbSyncStatus: "create-outcome-unknown",
-              qbCreateOutcomeUnknown: true,
-              qbCreateIntentSignature: intent,
-              qbCreateRequestId: data.qbRequestId || "",
+        const outcome = await syncInvoiceToQuickBooks({
+          invoice: row.invoice,
+          client: row.client,
+          invoicing,
+          persistInvoice: onPersistInvoice,
+          draftsOnly: !individual,
+          request: async (endpoint, payload) => {
+            const response = await fetch(`${QB_API}/${endpoint}`, {
+              method: "POST",
+              headers: await authHeaders({ "Content-Type": "application/json" }),
+              body: JSON.stringify({ invoice: payload }),
             });
-            setOutcomes((current) => ({
-              ...current,
-              [id]: { status: "uncertain", message: "Incomplete QuickBooks response. Review before retry" },
-            }));
-            continue;
-          }
-
-          confirmedCreate = data;
-          await persistInvoiceMutation(baseInvoice, (current) => {
-            const synced = applyQuickBooksInvoiceSaveResult(current, data);
-            return { ...synced, status: current.status || "Draft" };
-          });
-          setOutcomes((current) => ({
-            ...current,
-            [id]: { status: "synced", message: "In QuickBooks" },
-          }));
-        } catch (error) {
-          const quickBooksConfirmed = !!String(confirmedCreate?.qbId || "").trim();
-          try {
-            await persistFailure(baseInvoice, {
-              error: quickBooksConfirmed
-                ? "QuickBooks created this invoice, but SPS Way could not confirm the local link. Review it before retrying."
-                : (error?.message || (writeStarted ? "The QuickBooks response was interrupted." : "This draft could not be prepared for QuickBooks.")),
-              code: quickBooksConfirmed ? "QB_LOCAL_SAVE_UNCONFIRMED" : (writeStarted ? "QB_CREATE_OUTCOME_UNKNOWN" : "QB_DRAFT_INVALID"),
-            }, quickBooksConfirmed ? {
-              qbId: confirmedCreate.qbId,
-              paymentLink: confirmedCreate.paymentLink || baseInvoice.paymentLink || "",
-              qbPushed: true,
-              locallyEdited: false,
-              qbAuthoritative: false,
-              qbPendingLocalEdits: true,
-              qbSyncStatus: "local-save-unconfirmed",
-              qbCreateRequestId: confirmedCreate.qbRequestId || "",
-            } : {
-              locallyEdited: true,
-              qbAuthoritative: false,
-              qbPendingLocalEdits: true,
-              qbSyncStatus: writeStarted ? "create-outcome-unknown" : "draft-invalid",
-              qbCreateOutcomeUnknown: writeStarted,
-              qbCreateIntentSignature: intent,
-            });
-          } catch (_) {
-            // Keep processing the remaining drafts even if this local review marker
-            // cannot be persisted. The UI still blocks an automatic retry here.
-          }
-          setOutcomes((current) => ({
-            ...current,
-            [id]: {
-              status: quickBooksConfirmed || writeStarted ? "uncertain" : "failed",
-              message: quickBooksConfirmed
-                ? "Created in QuickBooks. SPS link needs review"
-                : writeStarted ? "Connection interrupted. Review before retry" : "Draft could not be prepared",
-            },
-          }));
+            return { response, data: await response.json().catch(() => ({})) };
+          },
+        });
+        setOutcomes((current) => ({ ...current, [id]: outcome }));
+        if (outcome.reconnect) {
+          qbSetConnected(false);
+          break;
         }
       }
     } finally {
@@ -23153,20 +23076,20 @@ function InvoiceQuickBooksDraftSyncModal({ invoices, clients, invoicing, onPersi
   const finished = plan.ready.length > 0 && retryableCount === 0;
 
   return (
-    <Modal title="Sync drafts to QuickBooks" onClose={() => { if (!running) onClose(); }} maxWidth={780}>
+    <Modal title={individual ? (reviewedInvoices[0]?.qbId ? "Sync changes to QuickBooks" : "Send to QuickBooks") : "Sync drafts to QuickBooks"} onClose={() => { if (!running) onClose(); }} maxWidth={individual ? 580 : 780}>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 18, alignItems: "center", padding: "13px 15px", borderLeft: `4px solid ${T.primary}`, background: hexA(T.primary, 0.035) }}>
           <div>
             <div style={{ fontSize: 13, color: T.text, lineHeight: 1.5, fontWeight: 650 }}>
-              Each eligible draft is saved to QuickBooks independently. The SPS invoice stays a draft and no client message is sent.
+              {individual ? "Save this invoice in QuickBooks, then open it there to send to the customer. This step does not email, text, or mark the invoice sent." : "Each eligible draft is saved to QuickBooks independently. The SPS invoice stays a draft and no client message is sent."}
             </div>
             <div style={{ marginTop: 4, fontSize: 11.5, color: T.textMuted }}>
-              A failed draft will not stop the rest or remove anything from SPS Way.
+              {individual ? "Your saved SPS invoice is checked before syncing." : "A failed draft will not stop the rest or remove anything from SPS Way."}
             </div>
           </div>
           <div style={{ textAlign: "right" }}>
-            <div style={{ fontSize: 22, fontWeight: 850, color: T.text, letterSpacing: "-0.035em" }}>{plan.ready.length}</div>
-            <div style={{ fontSize: 10.5, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 800 }}>{money(totalReady)} ready</div>
+            <div style={{ fontSize: 22, fontWeight: 850, color: T.text, letterSpacing: "-0.035em" }}>{individual ? money(totalReady) : plan.ready.length}</div>
+            <div style={{ fontSize: 10.5, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 800 }}>{individual ? "Invoice total" : `${money(totalReady)} ready`}</div>
           </div>
         </div>
 
@@ -23207,15 +23130,18 @@ function InvoiceQuickBooksDraftSyncModal({ invoices, clients, invoicing, onPersi
         )}
         {syncedCount > 0 && (
           <div style={{ borderLeft: `3px solid ${T.primary}`, padding: "8px 11px", background: hexA(T.primary, 0.045), fontSize: 12, color: T.text }}>
-            {syncedCount} draft{syncedCount === 1 ? " is" : "s are"} now linked to QuickBooks.
+            {individual ? "Saved in QuickBooks. Ready to send from there." : `${syncedCount} draft${syncedCount === 1 ? " is" : "s are"} now linked to QuickBooks.`}
+            {individual && Object.values(outcomes).filter((outcome) => outcome.status === "synced" && quickBooksInvoiceUrl(outcome.invoice)).map((outcome) => (
+              <a key={outcome.invoice.id} href={quickBooksInvoiceUrl(outcome.invoice)} target="_blank" rel="noopener noreferrer" style={{ display: "block", marginTop: 8, color: T.primary, fontWeight: 800, textDecoration: "none" }}>Open in QuickBooks ↗</a>
+            ))}
           </div>
         )}
 
         <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 9, paddingTop: 1 }}>
           <button type="button" onClick={onClose} disabled={running} style={{ border: `1px solid ${T.border}`, background: T.surface, color: T.text, borderRadius: 10, padding: "10px 15px", fontWeight: 750, fontFamily: "inherit", cursor: running ? "default" : "pointer" }}>{finished ? "Done" : "Close"}</button>
           {!finished && (
-            <Btn onClick={syncDrafts} disabled={running || retryableCount === 0}>
-              {running ? "Syncing drafts" : syncedCount ? `Retry ${retryableCount}` : `Sync ${plan.ready.length} draft${plan.ready.length === 1 ? "" : "s"} to QuickBooks`}
+            <Btn onClick={syncDrafts} disabled={running || retryableCount === 0 || !perms.canInvoice || !perms.invoiceCreate}>
+              {running ? "Syncing…" : individual ? (reviewedInvoices[0]?.qbId ? "Sync changes" : "Send to QuickBooks") : syncedCount ? `Retry ${retryableCount}` : `Sync ${plan.ready.length} draft${plan.ready.length === 1 ? "" : "s"} to QuickBooks`}
             </Btn>
           )}
         </div>
@@ -24044,7 +23970,6 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
     effectiveStatus: iv._status,
     balance: iv._balance,
   }));
-  const localReviewBalance = localReviewInvoices.reduce((sum, invoice) => sum + invoice._balance, 0);
   const reviewQueueSignature = localReviewInvoices.map((invoice) => String(invoice.id || "")).join("|");
   useEffect(() => {
     if (!canReviewAccounting || !reviewingReconciliation || !localReviewInvoices.length) return;
@@ -24251,18 +24176,15 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
           type="button"
           aria-label={`Review ${localReviewInvoices.length} SPS invoice record${localReviewInvoices.length === 1 ? "" : "s"}`}
           onClick={() => setReviewingReconciliation(true)}
-          style={{ width: "100%", marginBottom: 12, padding: "11px 14px", borderRadius: 12, background: hexA(T.warning, 0.08), border: `1px solid ${hexA(T.warning, 0.28)}`, color: T.text, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}
+          style={{ width: "100%", minHeight: 42, marginBottom: 12, padding: "8px 1px", background: "transparent", border: "none", borderBottom: `1px solid ${T.border}`, color: T.text, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}
         >
-          <div>
-            <div style={{ fontSize: 12.5, fontWeight: 800 }}>{localReviewInvoices.length} invoice{localReviewInvoices.length === 1 ? " needs a" : "s need"} QuickBooks choice</div>
-            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>Compare SPS with the confirmed QuickBooks record, then apply either version in one step.</div>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 7, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 12, fontWeight: 650 }}>QuickBooks review</span>
+            <span style={{ fontSize: 11.5, color: T.textMuted }}>{localReviewInvoices.length} record{localReviewInvoices.length === 1 ? "" : "s"}</span>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 7, flexShrink: 0 }}>
-            {(perms.seeTotalSales || perms.isAdmin) && (
-              <span data-invoice-review-balance style={{ fontSize: 13, fontWeight: 850, color: T.warning }}>{moneyFmt(localReviewBalance)}</span>
-            )}
-            <span style={{ fontSize: 11.5, fontWeight: 800, color: T.warning }}>Review & sync</span>
-            <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke={T.warning} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+          <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0, color: T.primary }}>
+            <span style={{ fontSize: 12, fontWeight: 700 }}>Review</span>
+            <Icon name="chevronR" size={14} />
           </div>
         </button>
       )}
@@ -24562,12 +24484,12 @@ function InvoicesScreen({ invoices, clients, schedule = [], invoicing, branding,
         />
       )}
       {editing  && <InvoiceEditor invoice={editing} clients={clients} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onPersistProgress={onPersistProgress} onResolveReview={onResolveReview ? resolveReviewWithFeedback : undefined} onDelete={onDelete} onClose={() => setEditing(null)} />}
-      {livePreview && <InvoicePreview invoice={livePreview} client={clients.find(c => invoiceMatchesClient(livePreview, c))} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
+      {livePreview && <InvoicePreview invoice={livePreview} client={clients.find(c => invoiceMatchesClient(livePreview, c))} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onPersistInvoice={onPersistInvoice} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
     </div>
   );
 }
 
-function ClientInvoices({ client, invoices, invoicing, branding, catalog, setCatalog, onSave, onPersistProgress, onResolveReview, onDelete }) {
+function ClientInvoices({ client, invoices, invoicing, branding, catalog, setCatalog, onSave, onPersistInvoice, onPersistProgress, onResolveReview, onDelete }) {
   const { T, perms } = useApp();
   const list = sortInvoices(clientInvoicesOf(invoices, client.id, client)).map(iv => ({ ...iv, _client: client }));
   const [creating, setCreating] = useState(false);
@@ -24602,7 +24524,7 @@ function ClientInvoices({ client, invoices, invoicing, branding, catalog, setCat
       </div>
       {creating && <InvoiceEditor clients={[client]} presetClientId={client.id} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onPersistProgress={onPersistProgress} onClose={() => setCreating(false)} />}
       {editing && <InvoiceEditor invoice={editing} clients={[client]} invoices={invoices} invoicing={invoicing} catalog={catalog} setCatalog={setCatalog} onSave={onSave} onPersistProgress={onPersistProgress} onResolveReview={onResolveReview} onDelete={onDelete} onClose={() => setEditing(null)} />}
-      {livePreview && <InvoicePreview invoice={livePreview} client={client} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
+      {livePreview && <InvoicePreview invoice={livePreview} client={client} branding={branding} invoicing={invoicing} canManage={perms.canInvoice} onSave={onSave} onPersistInvoice={onPersistInvoice} onEdit={(iv) => { setPreview(null); setEditing(iv); }} onDelete={onDelete} onClose={() => setPreview(null)} />}
     </Card>
   );
 }
@@ -29467,7 +29389,7 @@ function RichEditor({ onChange, placeholder = "Write your message…", minHeight
 // A phone-first mailbox row with Apple Mail-style reveal actions. Pointer movement stays local to
 // the row (the parent inbox only hears about the final open/closed state), so dragging one message
 // never forces the entire mailbox to repaint on every pixel.
-function InboxSwipeRow({ rowId, ariaLabel, revealed, disabled, selected, read, isText, onReveal, onClose, onActivate, onPreview, onToggleRead, onMore, onDelete, T, children }) {
+function InboxSwipeRow({ rowId, ariaLabel, revealed, disabled, selected, read, isText, spsOnly = false, onReveal, onClose, onActivate, onPreview, onToggleRead, onMore, onDelete, T, children }) {
   const frontRef = useRef(null);
   const offsetRef = useRef(0);
   const gestureRef = useRef(null);
@@ -29610,7 +29532,7 @@ function InboxSwipeRow({ rowId, ariaLabel, revealed, disabled, selected, read, i
     <div style={{ position: "relative", overflow: "hidden", background: T.surfaceAlt, touchAction: "pan-y" }}>
       <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "stretch", justifyContent: "space-between" }}>
         <button type="button" tabIndex={revealed && revealSide === "right" && !disabled ? 0 : -1} aria-hidden={revealSide !== "right"} onClick={action(onToggleRead)} aria-label={read ? "Mark unread" : "Mark read"}
-          style={{ width: RIGHT_REVEAL, border: "none", background: "#0066CC", color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, fontFamily: "inherit", fontSize: 10.5, fontWeight: 700, cursor: "pointer" }}>
+          style={{ width: RIGHT_REVEAL, border: "none", background: T.primary, color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, fontFamily: "inherit", fontSize: 10.5, fontWeight: 700, cursor: "pointer" }}>
           <Icon name={read ? "mail" : "check"} size={18} />{read ? "Unread" : "Read"}
         </button>
         <div style={{ display: "flex", marginLeft: "auto" }}>
@@ -29618,9 +29540,9 @@ function InboxSwipeRow({ rowId, ariaLabel, revealed, disabled, selected, read, i
             style={{ width: 68, border: "none", background: "#636366", color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, fontFamily: "inherit", fontSize: 10.5, fontWeight: 700, cursor: "pointer" }}>
             <span aria-hidden="true" style={{ fontSize: 20, lineHeight: 0.6, letterSpacing: 1 }}>•••</span>More
           </button>}
-          {canDelete && <button type="button" tabIndex={revealed && revealSide === "left" && !disabled ? 0 : -1} aria-hidden={revealSide !== "left"} onClick={action(onDelete)} aria-label={isText ? "Remove text from inbox" : "Move email to Trash"}
+          {canDelete && <button type="button" tabIndex={revealed && revealSide === "left" && !disabled ? 0 : -1} aria-hidden={revealSide !== "left"} onClick={action(onDelete)} aria-label={spsOnly ? "Remove from SPS Inbox" : isText ? "Remove text from inbox" : "Move email to Trash"}
             style={{ width: 80, border: "none", background: "#D9282F", color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, fontFamily: "inherit", fontSize: 10.5, fontWeight: 700, cursor: "pointer" }}>
-            <Icon name="trash" size={18} />{isText ? "Remove" : "Trash"}
+            <Icon name="trash" size={18} />{spsOnly || isText ? "Remove" : "Trash"}
           </button>}
         </div>
       </div>
@@ -30455,7 +30377,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     const cache = emailDetailCacheRef.current;
     if (cache.has(id)) {
       const cached = cache.get(id);
-      if (cached) setOpenRow(current => current && String(current.id) === id ? { ...current, ...cached } : current);
+      if (cached) setOpenRow(current => current && String(current.id) === id ? mergeInboxDetail(current, cached) : current);
       return undefined;
     }
     let cancelled = false;
@@ -30470,7 +30392,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
         const detail = body?.row && typeof body.row === "object" ? body.row : null;
         cache.set(id, detail);
         while (cache.size > 6) cache.delete(cache.keys().next().value);
-        if (detail) setOpenRow(current => current && String(current.id) === id ? { ...current, ...detail } : current);
+        if (detail) setOpenRow(current => current && String(current.id) === id ? mergeInboxDetail(current, detail) : current);
       } catch (_) {}
     })();
     return () => { cancelled = true; };
@@ -30687,13 +30609,6 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   const textCount = displayInboxRows.filter(isSmsRow).length;
   const emailCount = displayInboxRows.length - textCount;
   const actionableInboxRows = useMemo(() => selectActionableCommsRows(displayInboxRows), [displayInboxRows]);
-  const actionableSummary = useMemo(() => summarizeActionableCommsRows(actionableInboxRows), [actionableInboxRows]);
-  const actionableBreakdown = useMemo(() => [
-    ["Failures", actionableSummary.failures],
-    ["Leads", actionableSummary.leads],
-    ["Client replies", actionableSummary.texts + actionableSummary.clients],
-    ["Bills", actionableSummary.bills],
-  ].filter(([, count]) => count > 0), [actionableSummary]);
   const focusedSourceRows = focused && focusedView === "attention" ? actionableInboxRows : displayInboxRows;
   const channelRows = focused
     ? focusedSourceRows
@@ -30784,7 +30699,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       // Recurring compact email refreshes must not strip the one full body already hydrated for
       // the active reading pane.
       const detail = fresh.channel !== "sms" ? emailDetailCacheRef.current.get(String(fresh.id)) : null;
-      setOpenRow(detail ? { ...fresh, ...detail } : fresh);
+      setOpenRow(mergeInboxDetail(fresh, detail));
     }
   }, [rows, clients, smsThreadMeta, smsThreadPrefs, smsMediaById]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
@@ -30798,6 +30713,10 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   }, [openSwipeId]);
   const unread = displayInboxRows.reduce((total, row) => total + (row._smsConversation ? Number(row._unreadCount || 0) : (row.read ? 0 : 1)), 0);
   const channelUnread = channelRows.reduce((total, row) => total + (row._smsConversation ? Number(row._unreadCount || 0) : (row.read ? 0 : 1)), 0);
+  const requestInboxCleanup = async (payload) => {
+    const response = await fetch(inboxApiUrl, { method: "POST", headers: await authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(payload) });
+    return { response, receipt: await response.json().catch(() => ({})) };
+  };
   const markRead = (rawIds, read = true) => {
     const requested = new Set((rawIds || []).map(String));
     // Do not show the new state until the remote systems confirm it. This also removes no-op rows
@@ -30805,6 +30724,16 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     const targets = (rows || []).filter(row => requested.has(String(row.id)) && !!row.read !== read);
     const ids = targets.map(row => row.id);
     if (!ids.length) return Promise.resolve({ ok: true, gmailOk: true });
+    if (focused) {
+      setGmailNote("");
+      return cleanupSpsInbox({ ids, action: "markRead", read, request: requestInboxCleanup }).then(result => {
+        const confirmed = new Set(result.confirmedIds);
+        setRows(current => (current || []).map(row => confirmed.has(String(row.id)) ? { ...row, read } : row));
+        setOpenRow(current => current && confirmed.has(String(current.id)) ? { ...current, read } : current);
+        if (!result.ok) setGmailNote("Some messages could not be confirmed. Refresh before trying again.");
+        return result;
+      });
+    }
     const smsKeys = new Set(targets.filter(isSmsRow).map(row => String(row.id)));
     const emailIds = ids.filter(id => !smsKeys.has(String(id)));
     setGmailNote("");
@@ -30832,7 +30761,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
           return { updated, skipped, changes, requestFailed };
         };
 
-        // Email rows are Gmail-first. Texts have no Gmail copy and stay entirely app-local.
+        // Focused cleanup changes SPS read state only. Full workspace email actions remain Gmail-first.
         const gmail = emailIds.length
           ? await gmailAction(read ? "markRead" : "markUnread", emailIds)
           : { updated: new Set(), skipped: [], changes: new Map(), requestFailed: false };
@@ -31009,7 +30938,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       setGmailNote("Couldn't change those message categories — nothing was saved. Try again.");
     }
   };
-  const deleteEmails = (rawIds, { ask = true } = {}) => {
+  const deleteEmails = (rawIds, { ask = true, spsOnly = focused } = {}) => {
     const requestedKeys = new Set((rawIds || []).filter(Boolean).map(String));
     // Capture the rows so we can put back any the server could NOT actually remove from Gmail —
     // deleting the app copy while the message lingers in Gmail is the exact bug we're fixing.
@@ -31018,12 +30947,33 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     const idKeys = new Set(ids.map(String));
     const textTotal = removed.filter(r => r.channel === "sms").length;
     const emailTotal = removed.length - textTotal;
-    const deletePrompt = textTotal && !emailTotal
+    const deletePrompt = spsOnly
+      ? `Remove ${ids.length === 1 ? "this message" : `${ids.length} messages`} from SPS Inbox? Gmail and Quo are unchanged. Existing leads are kept. This removes the SPS inbox copies permanently.`
+      : textTotal && !emailTotal
       ? `Delete ${textTotal} text${textTotal === 1 ? "" : "s"} from the SPS inbox? ${textTotal === 1 ? "It remains" : "They remain"} available in Quo.`
       : emailTotal && !textTotal
         ? `Delete ${emailTotal} email${emailTotal === 1 ? "" : "s"}? ${emailTotal === 1 ? "It moves" : "They move"} to Gmail Trash (recoverable there for ~30 days).`
         : `Delete ${ids.length} messages? Emails move to Gmail Trash; texts are removed from the SPS inbox but remain in Quo.`;
-    if (ask) { setDeleteConfirm({ ids, prompt: deletePrompt }); return; }
+    if (ask) { setDeleteConfirm({ ids, prompt: deletePrompt, spsOnly }); return; }
+    if (spsOnly) {
+      if (busyBulk) return;
+      setBusyBulk(true);
+      setGmailNote("");
+      ids.forEach(id => deletingIdsRef.current.add(String(id)));
+      return cleanupSpsInbox({ ids, action: "delete", request: requestInboxCleanup }).then(result => {
+        const confirmed = new Set(result.confirmedIds);
+        setRows(current => reconcileInboxRemoval(current, removed, result));
+        setOpenRow(current => current && confirmed.has(String(current.id)) ? null : current);
+        if (result.ok) { exitSelect(); notifyInbox("Removed from SPS Inbox. Gmail and Quo are unchanged."); }
+        else setGmailNote(`${result.confirmedIds.length ? "Some messages were removed. " : ""}SPS could not confirm the rest. Refresh before trying again.`);
+        // Keep confirmed removals fenced for this inbox session so an older in-flight
+        // refresh cannot reintroduce them. Failed removals remain visible and retryable.
+        result.failedIds.forEach(id => deletingIdsRef.current.delete(String(id)));
+        return result;
+      }).finally(() => {
+        setBusyBulk(false);
+      });
+    }
     const smsIds = new Set(removed.filter(r => r.channel === "sms").map(r => String(r.id))); // no Gmail copy → app-only delete
     ids.forEach(id => deletingIdsRef.current.add(String(id)));
     // INSTANT: pull them from the list now (optimistic). We reconcile against the REAL Gmail result
@@ -31099,13 +31049,15 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
           if (gmailMovedButAppFailed) {
             setGmailNote(`${movedButAppFailed.length === 1 ? "Gmail moved that email to Trash" : `Gmail moved ${movedButAppFailed.length} emails to Trash`}, but SPS couldn't finish removing ${movedButAppFailed.length === 1 ? "the inbox copy" : "their inbox copies"}. ${movedButAppFailed.length === 1 ? "It is" : "They are"} still shown here so the failure isn't hidden.`);
           } else if (appOnlyFailed) {
-            setGmailNote(`Couldn't remove ${failIds.length === 1 ? "that text" : "those texts"} from SPS Inbox — ${failIds.length === 1 ? "it is" : "they are"} still available here and in Quo.`);
+            setGmailNote(`Couldn't remove ${failIds.length === 1 ? "that message" : "those messages"} from SPS Inbox. Please refresh before trying again.`);
           } else {
             const hardErr = callFailed || failIds.some(id => { const s = skipped.find(x => String(x.id) === String(id)); return s && ["search-error", "op-error"].includes(s.reason); });
             setGmailNote(hardErr
               ? `Couldn't reach Gmail to delete ${failIds.length === 1 ? "that email" : `${failIds.length} emails`} — ${failIds.length === 1 ? "it's" : "they're"} still here, so nothing was lost. Try again in a moment.`
               : `${failIds.length === 1 ? "That email is" : `${failIds.length} emails are`} still here — Gmail did not confirm moving ${failIds.length === 1 ? "it" : "them"} to Trash.`);
           }
+        } else if (spsOnly) {
+          notifyInbox(`Removed ${ids.length === 1 ? "message" : `${ids.length} messages`} from SPS Inbox`);
         } else if (textTotal && !emailTotal) {
           notifyInbox(`Removed ${textTotal === 1 ? "text" : `${textTotal} texts`} from SPS Inbox · Still available in Quo`);
         } else if (emailTotal && !textTotal) {
@@ -31281,6 +31233,8 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
     let face = null;
     if (photo) {
       face = <img src={photo} alt="" style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", background: T.surfaceAlt }} />;
+    } else if (focused) {
+      face = <div aria-label={sms ? "Text conversation" : "Email"} style={{ width: size, height: size, borderRadius: 9, background: T.surfaceAlt, color: T.textMuted, display: "grid", placeItems: "center" }}><Icon name={sms ? "message" : "mail"} size={Math.round(size * 0.43)} /></div>;
     } else if (sms) {
       const initial = String(name || "").trim().match(/[A-Za-z0-9]/)?.[0]?.toUpperCase();
       face = <div title="Text conversation" style={{ width: size, height: size, borderRadius: "50%", background: hexA(tone, 0.14), color: tone, display: "flex", alignItems: "center", justifyContent: "center", fontSize: size * 0.38, fontWeight: 820 }}>{initial || <Icon name="message" size={Math.max(17, Math.round(size * 0.46))} />}</div>;
@@ -31356,15 +31310,15 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   const listRows = list.map((r, i) => {
     const active = openRow && openRow.id === r.id && wide;
     return (
-      <div key={r.id} onClick={() => { if (!focused && selMode) { toggleSel(r.id); return; } openMessage(r); }}
-        style={{ display: "flex", alignItems: "flex-start", gap: dense ? 9 : 13, padding: dense ? "11px 12px" : "15px 16px", cursor: "pointer", borderTop: i === 0 ? "none" : `1px solid ${commsHairline(T)}`, background: (sel[r.id] || active) ? hexA(T.primary, 0.08) : (r.read ? "transparent" : hexA(T.primary, 0.03)), position: "relative" }}>
-        {!r.read && <span style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: T.primary }} />}
-        {!focused && selMode && <div style={{ alignSelf: "center", flexShrink: 0 }}><Checkbox checked={!!sel[r.id]} onChange={() => toggleSel(r.id)} /></div>}
+      <div key={r.id} onClick={() => { if (selMode) { toggleSel(r.id); return; } openMessage(r); }}
+        style={{ display: "flex", alignItems: "flex-start", gap: dense ? 9 : 13, padding: dense ? "11px 12px" : "15px 16px", cursor: "pointer", borderTop: i === 0 ? "none" : `1px solid ${commsHairline(T)}`, background: (sel[r.id] || active) ? hexA(T.primary, 0.08) : (focused || r.read ? "transparent" : hexA(T.primary, 0.03)), position: "relative" }}>
+        {!focused && !r.read && <span style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: T.primary }} />}
+        {selMode && <div style={{ alignSelf: "center", flexShrink: 0 }}><Checkbox checked={!!sel[r.id]} onChange={() => toggleSel(r.id)} /></div>}
         <Avatar name={r.from_name} email={r.from_email} channel={r.channel} photo={r._contactPhoto} size={dense ? 36 : 42} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 14.5, fontWeight: r.read ? 600 : 820, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{senderLabel(r)}</span>
-            <span style={{ fontSize: 11.5, color: r.read ? T.textMuted : T.primary, fontWeight: r.read ? 500 : 700, flexShrink: 0 }}>{fmtWhen(r.created_at)}</span>
+            <span style={{ fontSize: 14.5, fontWeight: focused || r.read ? 600 : 820, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, minWidth: 0 }}>{senderLabel(r)}</span>
+            <span style={{ fontSize: 11.5, color: focused || r.read ? T.textMuted : T.primary, fontWeight: r.read ? 500 : 700, flexShrink: 0 }}>{fmtWhen(r.created_at)}</span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 4 }}>
             <span style={{ fontSize: 13.5, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontWeight: r.read ? 550 : 750, flex: 1, minWidth: 0 }}>{r.subject || "(no subject)"}</span>
@@ -31372,7 +31326,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
           {!r._smsConversation && <div style={{ fontSize: 12.5, color: T.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginTop: 4 }}>{(r.ai && r.ai.summary) || (r.body_text || "").slice(0, 120)}</div>}
           <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 9, flexWrap: "wrap" }}>
             {channelBadge(r)}
-            {r._smsConversation && <span style={{ fontSize: 9.5, fontWeight: 780, color: T.textMuted }}>{r._messageCount} message{r._messageCount === 1 ? "" : "s"}{r._unreadCount ? ` · ${r._unreadCount} unread` : ""}</span>}
+            {r._smsConversation && <span style={{ fontSize: 9.5, fontWeight: 780, color: T.textMuted }}>{r._messageCount} message{r._messageCount === 1 ? "" : "s"}{!focused && r._unreadCount ? ` · ${r._unreadCount} unread` : ""}</span>}
             {!isSmsRow(r) && badge(r.kind)}
             {!isSmsRow(r) && inLeads(r.id) && <span style={{ fontSize: 9.5, fontWeight: 800, color: "#16a34a", flexShrink: 0 }}>→ Leads</span>}
             {r.replied && <span title="Replied" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="reply" size={12} /></span>}
@@ -31397,27 +31351,27 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       : (kind.label && kind.label !== "Other" ? kind.label : "Email");
     const dividerLeft = dense ? 69 : 77;
     return (
-      <InboxSwipeRow key={r.id} rowId={r.id} ariaLabel={`${r.read ? "" : "Unread "}${sms ? "text" : "email"} from ${senderLabel(r)}: ${r.subject || (sms ? "Message" : "No subject")}`} revealed={openSwipeId === r.id} disabled={focused || selMode} selected={selected} read={!!r.read} isText={sms} T={T}
+      <InboxSwipeRow key={r.id} rowId={r.id} ariaLabel={`${r.read ? "" : "Unread "}${sms ? "text" : "email"} from ${senderLabel(r)}: ${r.subject || (sms ? "Message" : "No subject")}`} revealed={openSwipeId === r.id} disabled={selMode} selected={selected} read={!!r.read} isText={sms} spsOnly={focused} T={T}
         onReveal={(id) => setOpenSwipeId(id)} onClose={(id) => setOpenSwipeId(cur => cur === id ? null : cur)}
-        onActivate={() => !focused && selMode ? toggleSel(r.id) : openMessage(r)}
+        onActivate={() => selMode ? toggleSel(r.id) : openMessage(r)}
         onPreview={focused ? undefined : () => { setOpenSwipeId(null); setPreviewRow(r); }}
-        onToggleRead={focused ? undefined : () => { markRead(inboxRowMessageIds(r), !r.read); }}
+        onToggleRead={() => { markRead(inboxRowMessageIds(r), !r.read); }}
         onMore={() => setManageRow(r)}
-        onDelete={focused || smsOnly ? undefined : () => { deleteEmails(inboxRowMessageIds(r), { ask: false }); }}>
+        onDelete={smsOnly ? undefined : () => { deleteEmails(inboxRowMessageIds(r)); }}>
         <div data-sps-conversation-row data-channel={sms ? "sms" : "email"} style={{ position: "relative", display: "flex", alignItems: "center", gap: dense ? 10 : 12, minHeight: dense ? 66 : 74, boxSizing: "border-box", padding: dense ? "8px 10px 8px 15px" : "10px 11px 10px 17px", background: selected ? hexA(T.primary, 0.07) : T.surface }}>
           {i > 0 && <span aria-hidden="true" style={{ position: "absolute", left: dividerLeft, right: 0, top: 0, height: 1, background: commsHairline(T) }} />}
           {!r.read && !focused && !selMode && <span aria-label="Unread" style={{ position: "absolute", left: 6, top: "50%", width: 6, height: 6, marginTop: -3, borderRadius: "50%", background: T.primary }} />}
-          {!focused && selMode ? (
+          {selMode ? (
             <span aria-hidden="true" style={{ width: dense ? 42 : 46, height: dense ? 42 : 46, borderRadius: "50%", border: `2px solid ${selected ? T.primary : T.border}`, background: selected ? T.primary : T.surface, color: "#fff", display: "grid", placeItems: "center", flexShrink: 0 }}>
               {selected && <Icon name="check" size={17} />}
             </span>
           ) : <Avatar name={r.from_name} email={r.from_email} channel={r.channel} photo={r._contactPhoto} size={dense ? 44 : 48} />}
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-              <span style={{ flex: 1, minWidth: 0, fontSize: dense ? 14.5 : 15.5, fontWeight: r.read ? 600 : 820, color: T.text, letterSpacing: "-0.015em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{senderLabel(r)}</span>
+              <span style={{ flex: 1, minWidth: 0, fontSize: dense ? 14.5 : 15.5, fontWeight: focused || r.read ? 600 : 820, color: T.text, letterSpacing: "-0.015em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{senderLabel(r)}</span>
               <span aria-label={sms ? "Text conversation" : "Email conversation"} title={sms ? "Text" : "Email"} style={{ display: "inline-flex", color: hexA(channelTone, 0.88), flexShrink: 0 }}><Icon name={sms ? "message" : "mail"} size={11} /></span>
               {r.replied && <span title="Replied" style={{ display: "inline-flex", color: T.textMuted, flexShrink: 0 }}><Icon name="reply" size={12} /></span>}
-              <span style={{ fontSize: dense ? 10.5 : 11.5, color: r.read ? T.textMuted : T.primary, fontWeight: r.read ? 560 : 720, flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{fmtMailboxWhen(r.created_at)}</span>
+              <span style={{ fontSize: dense ? 10.5 : 11.5, color: focused || r.read ? T.textMuted : T.primary, fontWeight: r.read ? 560 : 720, flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{fmtMailboxWhen(r.created_at)}</span>
               <span aria-hidden="true" style={{ display: "inline-flex", color: hexA(T.textMuted, 0.55), flexShrink: 0 }}><Icon name="chevronR" size={13} /></span>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0, marginTop: dense ? 3 : 4, fontSize: dense ? 12 : 13, lineHeight: 1.3 }}>
@@ -31436,7 +31390,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       <div style={{ padding: "0 5px 3px", color: T.textMuted, fontSize: 9.5, fontWeight: 720, letterSpacing: "0.075em", textTransform: "uppercase" }}>Pinned</div>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 1, overflowX: "auto", padding: "0 2px 3px", WebkitOverflowScrolling: "touch", scrollbarWidth: "none", msOverflowStyle: "none", scrollSnapType: "x mandatory" }}>
         {pinnedRows.map((row) => {
-          const unreadCount = row._smsConversation ? Number(row._unreadCount || 0) : (row.read ? 0 : 1);
+          const unreadCount = focused ? 0 : row._smsConversation ? Number(row._unreadCount || 0) : (row.read ? 0 : 1);
           return (
             <div key={`pin-${row._smsConversationKey || row.id}`} style={{ scrollSnapAlign: "start" }}>
               <InboxPinnedConversation label={senderLabel(row)} unread={unreadCount} onOpen={() => openMessage(row)} onPreview={() => setPreviewRow(row)} T={T}>
@@ -31527,11 +31481,11 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
           );
         })}
         <div style={{ flex: 1 }} />
-        {!focused && <Btn variant="ghost" sm onClick={() => markRead(inboxRowMessageIds(openRow), !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>}
-        {!focused && <Btn variant="danger" sm onClick={() => deleteEmails(inboxRowMessageIds(openRow))}>Delete</Btn>}
+        <Btn variant="ghost" sm onClick={() => markRead(inboxRowMessageIds(openRow), !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>
+        <Btn variant="outline" sm onClick={() => deleteEmails(inboxRowMessageIds(openRow))} style={{ color: T.primary }}>{focused ? "Remove from inbox" : "Delete"}</Btn>
       </div>}
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-        {smsOnly && !focused && <Btn variant="ghost" sm onClick={() => markRead(inboxRowMessageIds(openRow), !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>}
+        {smsOnly && <Btn variant="ghost" sm onClick={() => markRead(inboxRowMessageIds(openRow), !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>}
         {!smsOnly && !isSmsRow(openRow) && !inLeads(openRow.id) && <Btn variant="primary" sm onClick={() => addToLeads(openRow)} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={14} />Add to Leads</Btn>}
         {!smsOnly && !isSmsRow(openRow) && inLeads(openRow.id) && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 700, color: "#16a34a", alignSelf: "center" }}><Icon name="check" size={14} />In your Leads funnel</span>}
         {openRow.channel === "sms" && openRow.from_phone && (focused || canTextFromRow(openRow)) && <a href={quoCallHref(openRow.from_phone, quoCallerForRow(openRow))} title={`Call in Quo from ${lineLabelForRow(openRow).toLowerCase()}`} style={{ minHeight: 32, padding: "6px 12px", borderRadius: 9, border: `1px solid ${T.border}`, background: T.surface, color: T.text, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 750 }}><Icon name="phone" size={14} />Call</a>}
@@ -31750,31 +31704,27 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
   const focusedModeSwitcher = focused ? (
     <div data-sps-focused-comms role="tablist" aria-label="Communication view" style={{ display: "grid", gridTemplateColumns: "1.15fr 0.85fr", alignItems: "stretch", background: T.surface, borderBottom: `1px solid ${T.border}` }}>
       {[
-        ["attention", "Needs attention", actionableInboxRows.length],
-        ["history", "Message history", displayInboxRows.length],
-      ].map(([id, label, count]) => {
+        ["attention", "Needs attention"],
+        ["history", "Message history"],
+      ].map(([id, label]) => {
         const active = focusedView === id;
-        return <button key={id} type="button" role="tab" aria-selected={active} onClick={() => { setFocusedView(id); setOpenRow(null); setQ(""); }} style={{ minHeight: 54, padding: "10px 14px", border: "none", borderBottom: active ? `3px solid ${T.primary}` : "3px solid transparent", background: active ? hexA(T.primary, 0.045) : "transparent", color: active ? T.primary : T.textMuted, fontFamily: "inherit", fontSize: 13, fontWeight: active ? 820 : 690, textAlign: "left", cursor: "pointer" }}>{label}<span style={{ marginLeft: 7, fontSize: 11, fontVariantNumeric: "tabular-nums", color: active ? T.primary : T.textMuted }}>{count}</span></button>;
+        return <button key={id} type="button" role="tab" aria-selected={active} onClick={() => { exitSelect(); setFocusedView(id); setOpenRow(null); setQ(""); }} style={{ minHeight: 46, padding: "8px 12px", border: "none", borderBottom: active ? `2px solid ${T.primary}` : "2px solid transparent", background: "transparent", color: active ? T.primary : T.textMuted, fontFamily: "inherit", fontSize: 13, fontWeight: active ? 820 : 690, textAlign: "left", cursor: "pointer" }}>{label}</button>;
       })}
     </div>
   ) : null;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: dense ? 7 : 10, paddingBottom: phone ? (selMode ? 76 : 88) : 0 }}>
       {focusedModeSwitcher}
-      {focused && focusedView === "attention" && actionableInboxRows.length > 0 && (
-        <div data-sps-focused-summary style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", minHeight: 38, padding: phone ? "7px 10px" : "8px 12px", borderLeft: `3px solid ${T.primary}`, background: hexA(T.primary, 0.035), color: T.text }}>
-          <span style={{ fontSize: 11.5, fontWeight: 780 }}>Only work that needs action</span>
-          <span style={{ marginLeft: phone ? 0 : "auto", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", color: T.textMuted, fontSize: 10.5, fontWeight: 680, fontVariantNumeric: "tabular-nums" }}>
-            {actionableBreakdown.map(([label, count], index) => (
-              <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                {index > 0 && <span aria-hidden="true" style={{ color: T.borderStrong }}>•</span>}
-                <span>{label}</span>
-                <strong style={{ color: T.text, fontSize: "inherit" }}>{count}</strong>
-              </span>
-            ))}
-          </span>
-        </div>
-      )}
+      {focused && <div data-sps-inbox-cleanup style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: "4px 2px" }}>
+        <span style={{ flex: 1, minWidth: 130, fontSize: 12, color: T.textMuted }}>{selMode ? `${selectedDisplayRows.length} selected` : "Select messages to mark read or remove."}</span>
+        {!selMode && <Btn variant="ghost" sm disabled={refreshing} onClick={load}>{refreshing ? "Refreshing…" : "Refresh"}</Btn>}
+        {!smsOnly && <Btn variant="outline" sm disabled={busyBulk || (!selMode && !list.length)} onClick={() => { setOpenRow(null); if (selMode) exitSelect(); else setSelMode(true); }}>{selMode ? "Done" : "Select"}</Btn>}
+        {selMode && <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", flexBasis: "100%", paddingTop: 4 }}>
+          <Btn variant="ghost" sm disabled={busyBulk} onClick={toggleSelectAll}>{allVisibleSelected ? "Clear selection" : "Select all"}</Btn>
+          <Btn variant="outline" sm disabled={busyBulk || !selIds.length} onClick={async () => { setBusyBulk(true); const result = await markRead(selIds, true); setBusyBulk(false); if (result.ok) exitSelect(); }}>{busyBulk ? "Saving…" : "Mark read"}</Btn>
+          <Btn variant="outline" sm disabled={busyBulk || !selIds.length} onClick={bulkDelete} style={{ color: T.primary }}>Remove from inbox</Btn>
+        </div>}
+      </div>}
       {!focused && (phone ? (selMode && folder === "inbox" ? (
         <div style={{ minHeight: 42, display: "grid", gridTemplateColumns: "1fr auto 1fr", alignItems: "center", gap: 10 }}>
           <button type="button" onClick={exitSelect} style={{ minHeight: 44, justifySelf: "start", border: "none", background: "none", color: T.primary, fontFamily: "inherit", fontSize: 13.5, fontWeight: 800, padding: "8px 2px", cursor: "pointer" }}>Cancel</button>
@@ -31903,7 +31853,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       ) : (
         <>
           {pinnedRail}
-          {mobileRows.length > 0 && <div style={{ border: phone ? "none" : `1px solid ${commsHairline(T, 0.18)}`, borderRadius: phone ? 0 : (dense ? 14 : 17), overflow: "hidden", background: T.surface, boxShadow: phone ? "none" : "0 2px 10px rgba(15,23,42,0.035)", marginBottom: phone ? 8 : 12 }}>{mobileRows}</div>}
+          {mobileRows.length > 0 && <div style={{ border: phone ? "none" : `1px solid ${commsHairline(T, 0.18)}`, borderRadius: focused || phone ? 0 : (dense ? 14 : 17), overflow: "hidden", background: T.surface, boxShadow: focused || phone ? "none" : "0 2px 10px rgba(15,23,42,0.035)", marginBottom: phone ? 8 : 12 }}>{mobileRows}</div>}
         </>
       ))}
         </>
@@ -31973,7 +31923,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
       {manageRow && (
         <InboxActionSheet title={isSmsRow(manageRow) ? "Organize conversation" : "Manage email"} onClose={() => setManageRow(null)} T={T}>
           <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
-            {!focused && <button type="button" onClick={() => { markRead(inboxRowMessageIds(manageRow), !manageRow.read); setManageRow(null); }} style={sheetActionStyle(T.text)}>
+            {<button type="button" onClick={() => { markRead(inboxRowMessageIds(manageRow), !manageRow.read); setManageRow(null); }} style={sheetActionStyle(T.text)}>
               <span style={{ width: 30, height: 30, borderRadius: 9, background: hexA("#2879d9", 0.1), color: "#2879d9", display: "grid", placeItems: "center" }}><Icon name={manageRow.read ? "mail" : "check"} size={16} /></span>
               {manageRow.read ? "Mark as unread" : "Mark as read"}
             </button>}
@@ -31981,7 +31931,7 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
               <span style={{ width: 30, height: 30, borderRadius: 9, background: hexA(T.primary, 0.1), color: T.primary, display: "grid", placeItems: "center" }}><Icon name={rowIsPinned(manageRow) ? "close" : "plus"} size={16} /></span>
               {pinBusyKey === smsPreferenceKey(manageRow) ? "Saving pin…" : (rowIsPinned(manageRow) ? "Unpin conversation" : "Pin conversation")}
             </button>}
-            {!focused && <button type="button" onClick={() => { setSel({ [manageRow.id]: true }); setSelMode(true); setManageRow(null); }} style={sheetActionStyle(T.text)}>
+            {!smsOnly && <button type="button" onClick={() => { setSel({ [manageRow.id]: true }); setSelMode(true); setManageRow(null); }} style={sheetActionStyle(T.text)}>
               <span style={{ width: 30, height: 30, borderRadius: 9, background: hexA(T.primary, 0.1), color: T.primary, display: "grid", placeItems: "center" }}><Icon name="check" size={16} /></span>
               {isSmsRow(manageRow) ? "Select conversation" : "Select this message"}
             </button>}
@@ -32006,9 +31956,9 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
               </div>
               {manageRow.kind === "lead" && !rowInLeads(manageRow) && <button type="button" onClick={() => { addToLeads(manageRow); setManageRow(null); }} style={sheetActionStyle("#16a34a")}><span style={{ width: 30, height: 30, borderRadius: 9, background: hexA("#16a34a", 0.1), color: "#16a34a", display: "grid", placeItems: "center" }}><Icon name="plus" size={16} /></span>Create missing lead record</button>}
             </>
-            {!focused && <button type="button" onClick={() => { const r = manageRow; setManageRow(null); deleteEmails(inboxRowMessageIds(r)); }} style={sheetActionStyle("#d9282f", true)}>
+            {!smsOnly && <button type="button" onClick={() => { const r = manageRow; setManageRow(null); deleteEmails(inboxRowMessageIds(r)); }} style={sheetActionStyle("#d9282f", true)}>
               <span style={{ width: 30, height: 30, borderRadius: 9, background: hexA("#d9282f", 0.1), color: "#d9282f", display: "grid", placeItems: "center" }}><Icon name="trash" size={16} /></span>
-              {isSmsRow(manageRow) ? "Remove from SPS Inbox" : "Move to Gmail Trash"}
+              {focused || isSmsRow(manageRow) ? "Remove from SPS Inbox" : "Move to Gmail Trash"}
             </button>}
           </div>
         </InboxActionSheet>
@@ -32024,12 +31974,12 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
           </div>
         </InboxActionSheet>
       )}
-      {!focused && deleteConfirm && (
-        <InboxActionSheet title={deleteConfirm.ids.length === 1 ? "Delete message?" : `Delete ${deleteConfirm.ids.length} messages?`} onClose={() => setDeleteConfirm(null)} T={T}>
+      {deleteConfirm && (
+        <InboxActionSheet title={deleteConfirm.spsOnly ? "Remove from SPS Inbox?" : deleteConfirm.ids.length === 1 ? "Delete message?" : `Delete ${deleteConfirm.ids.length} messages?`} onClose={() => setDeleteConfirm(null)} T={T}>
           <div style={{ fontSize: 13.5, color: T.text, lineHeight: 1.55 }}>{deleteConfirm.prompt}</div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 9, marginTop: 17 }}>
             <button type="button" onClick={() => setDeleteConfirm(null)} style={{ minHeight: 46, borderRadius: 13, border: `1px solid ${T.border}`, background: T.surfaceAlt, color: T.text, fontFamily: "inherit", fontSize: 13, fontWeight: 780, cursor: "pointer" }}>Cancel</button>
-            <button type="button" onClick={() => { const ids = deleteConfirm.ids; setDeleteConfirm(null); deleteEmails(ids, { ask: false }); }} style={{ minHeight: 46, borderRadius: 13, border: "none", background: "#d9282f", color: "#fff", fontFamily: "inherit", fontSize: 13, fontWeight: 820, cursor: "pointer" }}>Delete</button>
+            <button type="button" onClick={() => { const { ids, spsOnly } = deleteConfirm; setDeleteConfirm(null); deleteEmails(ids, { ask: false, spsOnly }); }} style={{ minHeight: 46, borderRadius: 13, border: "none", background: T.primary, color: "#fff", fontFamily: "inherit", fontSize: 13, fontWeight: 820, cursor: "pointer" }}>{deleteConfirm.spsOnly ? "Remove" : "Delete"}</button>
           </div>
         </InboxActionSheet>
       )}
@@ -32092,11 +32042,11 @@ function EmailInboxSection({ leads, setLeads, clients = [], invoices = [], smsOn
                 );
               })}
               <div style={{ flex: 1 }} />
-              {!focused && <Btn variant="ghost" sm onClick={() => markRead(inboxRowMessageIds(openRow), !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>}
-              {!focused && <Btn variant="danger" sm onClick={() => deleteEmails(inboxRowMessageIds(openRow))}>Delete</Btn>}
+              <Btn variant="ghost" sm onClick={() => markRead(inboxRowMessageIds(openRow), !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>
+              <Btn variant="outline" sm onClick={() => deleteEmails(inboxRowMessageIds(openRow))} style={{ color: T.primary }}>{focused ? "Remove from inbox" : "Delete"}</Btn>
             </div>}
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-              {smsOnly && !focused && <Btn variant="ghost" sm onClick={() => markRead(inboxRowMessageIds(openRow), !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>}
+              {smsOnly && <Btn variant="ghost" sm onClick={() => markRead(inboxRowMessageIds(openRow), !openRow.read)}>{openRow.read ? "Mark unread" : "Mark read"}</Btn>}
               {!smsOnly && !isSmsRow(openRow) && !inLeads(openRow.id) && <Btn variant="primary" sm onClick={() => addToLeads(openRow)} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={14} />Add to Leads</Btn>}
               {!smsOnly && !isSmsRow(openRow) && inLeads(openRow.id) && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 700, color: "#16a34a", alignSelf: "center" }}><Icon name="check" size={14} />In your Leads funnel</span>}
               {openRow.channel === "sms" && openRow.from_phone && canTextFromRow(openRow) && <a href={quoCallHref(openRow.from_phone, quoCallerForRow(openRow))} title={`Call in Quo from ${lineLabelForRow(openRow).toLowerCase()}`} style={{ minHeight: 32, padding: "6px 12px", borderRadius: 9, border: `1px solid ${T.border}`, background: T.surface, color: T.text, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 750 }}><Icon name="phone" size={14} />Call</a>}
@@ -32450,8 +32400,8 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
   ].filter(s => CAN[s.id]);
   const SECTIONS = focusedComms
     ? [
-        allSections.find(s => s.id === "email") ? { ...allSections.find(s => s.id === "email"), label: "Priority" } : null,
         allSections.find(s => s.id === "inbox"),
+        allSections.find(s => s.id === "email") ? { ...allSections.find(s => s.id === "email"), label: "Inbox" } : null,
         allSections.find(s => s.id === "settings"),
       ].filter(Boolean)
     : allSections;
@@ -32547,9 +32497,9 @@ function CommsScreen({ initialSection, initialSectionNonce = 0, perms = {}, curr
         <Card>
           <div style={{ padding: compactComms ? "12px 14px" : "16px 18px" }}>
             <div style={{ fontSize: 14, fontWeight: 800, color: T.text }}>Comms workspace</div>
-            <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2 }}>Focused keeps ingestion and history running, while showing only communication that needs action.</div>
+            <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2 }}>Focused puts leads first. Inbox history stays available, with controls to mark read or remove messages.</div>
             <div style={{ display: "grid", gridTemplateColumns: "1.12fr 0.88fr", gap: 8, marginTop: 13 }}>
-              {[[true, "Focused", "Needs attention + history"], [false, "Full workspace", "Every inbox tool"]].map(([value, label, note]) => {
+              {[[true, "Focused", "Leads first, quiet inbox"], [false, "Full workspace", "Every inbox tool"]].map(([value, label, note]) => {
                 const on = focusedComms === value;
                 return <button key={label} type="button" onClick={() => setFocusedComms(value)} style={{ minHeight: 54, padding: "9px 12px", border: `1px solid ${on ? T.primary : T.border}`, borderLeft: on ? `4px solid ${T.primary}` : `1px solid ${T.border}`, background: on ? hexA(T.primary, 0.045) : T.surface, color: on ? T.primary : T.text, fontFamily: "inherit", textAlign: "left", cursor: "pointer" }}><span style={{ display: "block", fontSize: 12.5, fontWeight: 820 }}>{label}</span><span style={{ display: "block", marginTop: 2, fontSize: 10.5, fontWeight: 600, color: T.textMuted }}>{note}</span></button>;
               })}
@@ -36214,7 +36164,7 @@ function DockEditor({ navDock, setNavDock, perms, T }) {
   );
 }
 
-function NavSheet({ page, perms, navUnread, reminderDue, leadDue = 0, navDock, setNavDock, onNav, onSignOut, currentUser, T, onClose }) {
+function NavSheet({ page, perms, commsBadge = 0, navDock, setNavDock, onNav, onSignOut, currentUser, T, onClose }) {
   const items = ALL_NAV.filter(n => isTabVisible(n, perms));
   const [editDock, setEditDock] = useState(false);
   const { handleProps, sheetStyle } = useSheetSwipe(onClose);
@@ -36232,7 +36182,7 @@ function NavSheet({ page, perms, navUnread, reminderDue, leadDue = 0, navDock, s
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
           {items.map(n => {
             const active = page === n.id;
-            const badge = n.id === "comms" ? ((perms.isAdmin || perms.commsMessages ? navUnread : 0) + (perms.isAdmin || perms.commsReminders ? reminderDue : 0) + (perms.isAdmin || perms.commsInbox ? leadDue : 0)) : 0;
+            const badge = n.id === "comms" ? commsBadge : 0;
             return (
               <button key={n.id} onClick={() => { onNav(n.id); onClose(); }}
                 style={{ display: "flex", alignItems: "center", gap: 11, padding: "15px 14px", border: `1.5px solid ${active ? T.primary : T.border}`, borderRadius: 14, background: active ? hexA(T.primary, 0.08) : T.surface, color: active ? T.primary : T.text, cursor: "pointer", fontFamily: "inherit", textAlign: "left", position: "relative" }}>
@@ -39232,7 +39182,7 @@ function SPSClientPortal({ client, schedule, invoices, estimates, branding, invo
 // Desktop (>=1024px) left sidebar — replaces the mobile floating menu button.
 // Same destinations as the mobile nav sheet, shown vertically with the SPS logo on
 // top, active item in crimson, and sync/account/sign-out pinned at the bottom.
-function DesktopSidebar({ page, perms, navUnread, reminderDue, leadDue = 0, onNav, onSignOut, currentUser, branding, syncState, onSync, T, vp = {} }) {
+function DesktopSidebar({ page, perms, commsBadge = 0, onNav, onSignOut, currentUser, branding, syncState, onSync, T, vp = {} }) {
   const items = ALL_NAV.filter(n => isTabVisible(n, perms));
   // Collapsible to an icon rail so the owner can reclaim the ~244px whenever they want. Persisted.
   const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem("sps_sidebar_collapsed") === "1"; } catch { return false; } });
@@ -39265,7 +39215,7 @@ function DesktopSidebar({ page, perms, navUnread, reminderDue, leadDue = 0, onNa
       <nav style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: collapsed ? "10px 8px" : "10px 12px", display: "flex", flexDirection: "column", gap: 3 }}>
         {items.map(n => {
           const active = page === n.id;
-          const badge = n.id === "comms" ? ((perms.isAdmin || perms.commsMessages ? navUnread : 0) + (perms.isAdmin || perms.commsReminders ? reminderDue : 0) + (perms.isAdmin || perms.commsInbox ? leadDue : 0)) : 0;
+          const badge = n.id === "comms" ? commsBadge : 0;
           return (
             <button key={n.id} onClick={() => onNav(n.id)} title={collapsed ? n.label : undefined}
               style={{ display: "flex", alignItems: "center", gap: 12, justifyContent: collapsed ? "center" : "flex-start", padding: collapsed ? "11px 0" : "11px 13px", border: "none", borderRadius: 11, background: active ? T.primary : "transparent", color: active ? "#fff" : T.text, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%", fontWeight: active ? 700 : 600, fontSize: 14, letterSpacing: "-0.01em" }}>
@@ -39347,29 +39297,36 @@ const CONFLICT_SECTION_NAMES = {
   sps_team: "Team settings",
 };
 
-// A CAS conflict is deliberately blocking: independent edits were already merged, but choosing a
-// winner for one field is a business decision. Keeping that choice visible prevents either device's
-// work from being silently discarded.
-function DataConflictBanner({ conflict, busy, T, onResolve }) {
+// Keep real save conflicts visible, with the version choice behind an explicit review step.
+// Collapsing the review does not dismiss or resolve the underlying pending change.
+function DataConflictBanner({ conflict, busy, error, T, onResolve }) {
+  const [reviewing, setReviewing] = useState(false);
+  const reviewId = useId();
+  const signature = JSON.stringify(conflict);
+  useEffect(() => { setReviewing(false); }, [signature]);
   if (!conflict) return null;
   const section = CONFLICT_SECTION_NAMES[conflict.key] || "Shared data";
-  const conflictItems = Array.isArray(conflict.conflicts) ? conflict.conflicts : [];
-  const count = Number(conflict.count) || conflictItems.length;
-  const pathText = conflict.summary || conflictItems.map((item) => item && item.path).filter(Boolean).slice(0, 3).join(", ");
+  const review = sharedConflictReview(conflict);
   return (
-    <div style={{ background: hexA("#C2410C", 0.1), borderBottom: `1px solid ${hexA("#C2410C", 0.3)}`, padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, color: T.text, flexWrap: "wrap" }}>
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 8, minWidth: 220, flex: 1 }}>
-        <Icon name="warning" size={16} style={{ color: "#C2410C", marginTop: 1, flexShrink: 0 }} />
-        <div>
-          <div style={{ fontSize: 12.5, fontWeight: 800 }}>{section} was edited on two devices</div>
-          <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 2 }}>Non-overlapping work is safe. Choose which change to keep for {count || "the"} overlapping field{count === 1 ? "" : "s"}{pathText ? ` (${pathText})` : ""}.</div>
+    <section aria-label={`${section} save review`} style={{ background: T.surface, borderBottom: `1px solid ${T.border}`, padding: "8px 16px", color: T.text, flexShrink: 0 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+        <div style={{ minWidth: 0, display: "flex", alignItems: "center", gap: 8 }}>
+          <span aria-hidden="true" style={{ width: 5, height: 5, borderRadius: "50%", background: T.primary, flexShrink: 0 }} />
+          <span style={{ fontSize: 12, fontWeight: 650 }}>{section}: changes need review</span>
         </div>
+        <button type="button" disabled={busy} aria-expanded={reviewing} aria-controls={reviewId} onClick={() => setReviewing(value => !value)} style={{ border: "none", background: "transparent", color: T.primary, padding: "8px 0 8px 8px", fontSize: 12, fontWeight: 700, fontFamily: "inherit", cursor: busy ? "wait" : "pointer", flexShrink: 0, minHeight: 36 }}>{reviewing ? "Close review" : "Review"}</button>
       </div>
-      <div style={{ display: "flex", gap: 7, flexShrink: 0 }}>
-        <button disabled={busy} onClick={() => onResolve("remote")} style={{ border: `1px solid ${T.border}`, background: T.surface, color: T.text, borderRadius: 9, padding: "7px 11px", fontSize: 11.5, fontWeight: 700, cursor: busy ? "wait" : "pointer", fontFamily: "inherit", opacity: busy ? 0.6 : 1 }}>Use shared change</button>
-        <button disabled={busy} onClick={() => onResolve("local")} style={{ border: "none", background: "#C2410C", color: "#fff", borderRadius: 9, padding: "7px 11px", fontSize: 11.5, fontWeight: 800, cursor: busy ? "wait" : "pointer", fontFamily: "inherit", opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Use my change"}</button>
-      </div>
-    </div>
+      {reviewing && <div id={reviewId} style={{ borderTop: `1px solid ${T.border}`, padding: "12px 0 8px", maxWidth: 700 }}>
+        <div style={{ fontSize: 13, fontWeight: 700 }}>A saved change overlaps with work on this device.</div>
+        <p style={{ fontSize: 12, color: T.textMuted, lineHeight: 1.5, margin: "5px 0 10px" }}>{review.explanation}</p>
+        {!!review.fields.length && <div style={{ fontSize: 11.5, color: T.textMuted, marginBottom: 12 }}>Review: {review.fields.join(", ")}</div>}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <Btn sm variant="outline" disabled={busy} onClick={() => onResolve("remote")}>Use saved changes</Btn>
+          <Btn sm variant="outline" disabled={busy} onClick={() => onResolve("local")}>{busy ? "Saving…" : "Use this device's changes"}</Btn>
+        </div>
+      </div>}
+      {error && <div role="status" style={{ fontSize: 12, color: T.primary, lineHeight: 1.5, padding: "4px 0 8px" }}>{error}</div>}
+    </section>
   );
 }
 
@@ -40650,27 +40607,37 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
 
   const [dataConflict, setDataConflict] = useState(null);
   const [conflictBusy, setConflictBusy] = useState(false);
+  const [conflictError, setConflictError] = useState("");
   useEffect(() => {
-    const onConflict = (event) => {
-      const detail = (event && event.detail) || {};
-      if (detail.key) setDataConflict(detail);
+    const reconcileConflictNotice = () => {
+      try {
+        const active = (store.listConflicts && store.listConflicts()) || [];
+        setDataConflict(previous => currentSharedConflict(active, previous));
+        if (!active.length) setConflictError("");
+      } catch (_) { /* Keep the current warning if the status read is unavailable. */ }
     };
-    document.addEventListener("sps-conflict", onConflict);
-    try {
-      const existing = store.listConflicts && store.listConflicts();
-      if (existing && existing.length) setDataConflict(existing[0]);
-    } catch (_) {}
-    return () => document.removeEventListener("sps-conflict", onConflict);
+    // A background save, recovery or account change can clear a conflict without using this
+    // banner's buttons. Re-read the live queue so an obsolete warning cannot linger.
+    const events = ["sps-conflict", "sps-reconciled", "sps-db-status"];
+    events.forEach(name => document.addEventListener(name, reconcileConflictNotice));
+    reconcileConflictNotice();
+    return () => events.forEach(name => document.removeEventListener(name, reconcileConflictNotice));
   }, []);
   const resolveDataConflict = async (strategy) => {
     if (!dataConflict || conflictBusy) return;
     setConflictBusy(true);
+    setConflictError("");
     try {
       const result = await store.resolveConflict(dataConflict.key, strategy);
-      if (result && result.ok) {
-        const remaining = (store.listConflicts && store.listConflicts()) || [];
-        setDataConflict(remaining[0] || null);
+      const remaining = (store.listConflicts && store.listConflicts()) || [];
+      setDataConflict(previous => currentSharedConflict(remaining, previous));
+      if (!result?.ok) {
+        setConflictError(result?.conflict
+          ? "The saved copy changed again. Review the updated changes before choosing."
+          : (result?.error?.message || "This choice has not finished saving. Your pending work is still available. Try again."));
       }
+    } catch (error) {
+      setConflictError(error?.message || "This choice could not be saved. Try again.");
     } finally { setConflictBusy(false); }
   };
 
@@ -40691,10 +40658,8 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   // Track unread message count for nav badge
   const [navUnread, setNavUnread] = useState(0);
   const [inboxUnread, setInboxUnread] = useState(0);
-  const [inboxAttention, setInboxAttention] = useState(0);
+  const [inboxFailures, setInboxFailures] = useState(0);
   const focusedCommsMode = email?.commsMode !== "full";
-  const externalCommsBadge = focusedCommsMode ? inboxAttention : inboxUnread;
-  const navUnreadTotal = navUnread + (perms.isAdmin || perms.commsTextInbox || perms.commsMainLine ? externalCommsBadge : 0);
   // Count of reminders due now, for the nav badge + dashboard alert
   const reminderDueCount = useMemo(() => {
     try { return buildReminderQueue(schedule, clients, scheduleCfg, reminderLog, new Date()).due.length; }
@@ -40702,6 +40667,8 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   }, [schedule, clients, scheduleCfg, reminderLog]);
   // Count of new (unhandled) leads, for the Comms nav badge — so leads stay visible now they live in the hub
   const leadNewCount = useMemo(() => (leads || []).filter(l => l && l.status === "new").length, [leads]);
+
+  const commsNavCount = commsNavigationCount({ focused: focusedCommsMode, perms, leads: leadNewCount, failures: inboxFailures, chats: navUnread, inbox: inboxUnread, reminders: reminderDueCount });
 
   // Customizable dock — which pages appear in the bottom bar (max 5)
   const [navDock, setNavDock, lndock] = useStoredState("sps_nav_dock", DEFAULT_DOCK);
@@ -41013,7 +40980,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
   }, [perms.isAdmin, perms.commsMessages]);
   useEffect(() => {
     const canReadExternalInbox = !!(perms.isAdmin || perms.commsTextInbox || perms.commsMainLine);
-    if (!canReadExternalInbox) { setInboxUnread(0); setInboxAttention(0); return undefined; }
+    if (!canReadExternalInbox) { setInboxUnread(0); setInboxFailures(0); return undefined; }
     const endpoint = perms.isAdmin ? "/api/inbox" : "/api/sms-inbox";
     let alive = true;
     let inFlight = false;
@@ -41025,7 +40992,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
         const r = await fetch(`${PROD_URL}${endpoint}?summary=${summaryMode}`, { headers: await authHeaders() });
         const d = await r.json().catch(() => ({}));
         if (alive && r.ok) {
-          if (focusedCommsMode) setInboxAttention(Math.max(0, Number(d.actionable ?? d.count) || 0));
+          if (focusedCommsMode) setInboxFailures(Math.max(0, Number(d.counts?.failures) || 0));
           else setInboxUnread(Math.max(0, Number(d.unread) || 0));
         }
       } catch (_) {
@@ -41036,8 +41003,8 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       if (Number.isFinite(count)) setInboxUnread(Math.max(0, count));
     };
     const onAttentionUpdate = (event) => {
-      const count = Number(event && event.detail && event.detail.count);
-      if (Number.isFinite(count)) setInboxAttention(Math.max(0, count));
+      const count = Number(event?.detail?.summary?.failures);
+      if (Number.isFinite(count)) setInboxFailures(Math.max(0, count));
     };
     window.addEventListener("sps-inbox-unread", onLocalUpdate);
     window.addEventListener("sps-inbox-attention", onAttentionUpdate);
@@ -43698,7 +43665,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           </div>
           <div style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: vp.isTablet ? "20px 16px" : "24px 30px" }}>
             {selectedClient
-              ? <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} initialTab={clientOpenTab} onTabChange={setClientOpenTab} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onPersistInvoiceProgress={handlePersistInvoiceProgress} onResolveInvoiceReview={handleResolveInvoiceReview} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>
+              ? <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} initialTab={clientOpenTab} onTabChange={setClientOpenTab} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onPersistInvoice={handlePersistInvoiceMutation} onPersistInvoiceProgress={handlePersistInvoiceProgress} onResolveInvoiceReview={handleResolveInvoiceReview} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>
               : (
                 <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: T.textMuted, gap: 12, padding: 40, textAlign: "center" }}>
                   <div style={{ width: 64, height: 64, borderRadius: 20, background: hexA(T.primary, 0.06), color: T.primary, display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="clients" size={30} /></div>
@@ -43712,7 +43679,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       ) : (
         <>
           {!selectedClient && <ClientList clients={clients} invoices={invoices} schedule={schedule} vp={vp} onSelect={handleClientSelect} onAdd={() => { setConvertLead(null); setAdding(true); }} onImport={() => handleNav("import")} onImportHistory={() => handleNav("importHistory")} onFindDuplicates={() => handleNav("duplicates")} onBatchUpdate={handleBatchUpdate} onBatchDelete={handleBatchDelete} onBatchSchedule={handleBatchSchedule} />}
-          {selectedClient && <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} initialTab={clientOpenTab} onTabChange={setClientOpenTab} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onPersistInvoiceProgress={handlePersistInvoiceProgress} onResolveInvoiceReview={handleResolveInvoiceReview} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>}
+          {selectedClient && <SectionErrorBoundary key={selectedClient.id}><ClientDetail client={selectedClient} initialTab={clientOpenTab} onTabChange={setClientOpenTab} invoices={invoices} invoicing={invoicing} branding={branding} catalog={catalog} setCatalog={setCatalog} team={team} schedule={schedule} email={email} onBack={() => setSelectedClient(null)} onUpdate={handleUpdateClient} onSaveInvoice={handleSaveInvoice} onPersistInvoice={handlePersistInvoiceMutation} onPersistInvoiceProgress={handlePersistInvoiceProgress} onResolveInvoiceReview={handleResolveInvoiceReview} onDeleteInvoice={handleDeleteInvoice} onDelete={id => { handleBatchDelete([id]); setSelectedClient(null); }} onPreviewClient={setPreviewClient} /></SectionErrorBoundary>}
         </>
       ))}
       {page === "schedule" && <SectionErrorBoundary key={"schedule-" + schedNonce}><Schedule clients={clients} setClients={setClients} catalog={catalog} costs={costs} schedule={schedule} setSchedule={setSchedule} scheduleCfg={scheduleCfg} team={team} me={currentUser} onClientSelect={handleClientSelect} estimates={estimatesRaw} seedClientIds={scheduleSeed} clearSeed={() => setScheduleSeed(null)} seedEstimate={scheduleEstimateSeed} clearEstimateSeed={() => setScheduleEstimateSeed(null)} onScheduleEstimate={handleScheduleApprovedEstimate} focusStop={scheduleFocus} clearFocus={() => setScheduleFocus(null)} stopDrafts={stopDrafts} setStopDrafts={setStopDrafts} stopDraftsReady={lstopDrafts} draftScope={authUserId} email={email} onComplete={handleCompleteStop} onUncomplete={handleUncompleteStop} completedSids={completedSids} onOfficeAlert={handleOfficeAlert} routeAssignments={routeAssignments} setRouteAssignments={setRouteAssignments} vp={vp} arrivals={arrivals} onArrived={handleArrived} onValidateArrival={validateArrivalStop} enRoute={enRoute} onEnRoute={handleEnRoute} /></SectionErrorBoundary>}
@@ -43917,10 +43884,10 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
       <AppCtx.Provider value={{ T, branding, perms, email, tiers: serviceTiers || DEFAULT_TIERS }}>
         <div style={{ fontFamily: fontStack, background: T.bg, position: "fixed", top: 0, left: 0, right: 0, bottom: 0, overflow: "hidden", display: "flex", flexDirection: "row", color: T.text, WebkitFontSmoothing: "antialiased", MozOsxFontSmoothing: "grayscale", letterSpacing: "-0.01em", ["--ring"]: hexA(T.primary, 0.22), ["--ringBorder"]: T.primary }}>
           {shellCss}
-          <DesktopSidebar page={page} perms={perms} navUnread={navUnreadTotal} reminderDue={reminderDueCount} leadDue={leadNewCount} onNav={handleTabNav} onSignOut={handleSignOut} currentUser={currentUser} branding={branding} syncState={syncState} onSync={manualSync} T={T} vp={vp} />
+          <DesktopSidebar page={page} perms={perms} commsBadge={commsNavCount} onNav={handleTabNav} onSignOut={handleSignOut} currentUser={currentUser} branding={branding} syncState={syncState} onSync={manualSync} T={T} vp={vp} />
           <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
             <div style={{ height: 2, flexShrink: 0, zIndex: 99, background: syncState === "syncing" ? T.primary : syncState === "saved" ? "#16a34a" : "transparent", transition: "background 0.3s", animation: syncState === "syncing" ? "syncPulse 0.8s ease-in-out" : "none" }} />
-            <DataConflictBanner conflict={dataConflict} busy={conflictBusy} T={T} onResolve={resolveDataConflict} />
+            <DataConflictBanner conflict={dataConflict} busy={conflictBusy} error={conflictError} T={T} onResolve={resolveDataConflict} />
             {completionOutboxBanner}
             {dbError && (
               <div style={{ background: hexA("#F59E0B", 0.1), borderBottom: `1px solid ${hexA("#F59E0B", 0.3)}`, padding: "10px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: T.text }}>
@@ -44050,7 +44017,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
         {/* Sync indicator strip — a 2px flex child just under the header (no layout shift) */}
         <div style={{ height: 2, flexShrink: 0, zIndex: 99, background: syncState === "syncing" ? T.primary : syncState === "saved" ? "#16a34a" : "transparent", transition: "background 0.3s", animation: syncState === "syncing" ? "syncPulse 0.8s ease-in-out" : "none" }} />
 
-        <DataConflictBanner conflict={dataConflict} busy={conflictBusy} T={T} onResolve={resolveDataConflict} />
+        <DataConflictBanner conflict={dataConflict} busy={conflictBusy} error={conflictError} T={T} onResolve={resolveDataConflict} />
         {completionOutboxBanner}
         {dbError && (
           <div style={{ background: hexA("#F59E0B", 0.1), borderBottom: `1px solid ${hexA("#F59E0B", 0.3)}`, padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: T.text }}>
@@ -44075,14 +44042,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
             return n ? { id: n.id, label: n.label, icon: n.icon, onClick: () => handleTabNav(n.id) } : null;
           }).filter(Boolean);
           const dockedSet = new Set(docked);
-          const commsBadge = focusedCommsMode
-            ? ((perms.isAdmin || perms.commsMessages ? navUnread : 0)
-              + (perms.isAdmin || perms.commsTextInbox || perms.commsMainLine ? inboxAttention : 0)
-              + (perms.isAdmin || perms.commsInbox ? leadNewCount : 0))
-            : ((perms.isAdmin || perms.commsMessages ? navUnread : 0)
-              + (perms.isAdmin || perms.commsTextInbox || perms.commsMainLine ? inboxUnread : 0)
-              + (perms.isAdmin || perms.commsReminders ? reminderDueCount : 0)
-              + (perms.isAdmin || perms.commsInbox ? leadNewCount : 0));
+          const commsBadge = commsNavCount;
           const menuBadge = dockedSet.has("comms") ? 0 : commsBadge;
           const tabs = [
             ...primary.map(t => ({ ...t, active: page === t.id, badge: t.id === "comms" ? commsBadge : 0 })),
@@ -44111,8 +44071,7 @@ export default function App({ authUserId = "", authEmail = "", onSignOut }) {
           <NavSheet
             page={page}
             perms={perms}
-            navUnread={navUnreadTotal}
-            reminderDue={reminderDueCount} leadDue={leadNewCount}
+            commsBadge={commsNavCount}
             navDock={navDock}
             setNavDock={setNavDock}
             onNav={handleTabNav}

@@ -382,6 +382,49 @@ export function reconcileQuickBooksInvoice(localInvoice, quickBooksInvoice) {
 
   if (hasPendingLocalInvoiceEdits(localInvoice)) {
     const next = clone(localInvoice);
+    const baseFingerprint = canonicalText(localInvoice.qbBaseContentFingerprint);
+    const remoteFingerprint = canonicalText(quickBooksInvoice.qbContentFingerprint);
+    const baseToken = canonicalText(localInvoice.qbSyncToken);
+    const remoteToken = canonicalText(quickBooksInvoice.qbSyncToken);
+    // A refresh of the exact QB revision that these SPS edits started from is not a
+    // competing edit. Fingerprints exclude payments/delivery, so check the known
+    // SyncToken and those facts independently. A changed balance must never be
+    // hidden even if an upstream snapshot unexpectedly reuses revision metadata.
+    const unchangedPaymentAndDelivery = own(localInvoice, "balance") && own(quickBooksInvoice, "balance")
+      && canonicalOptionalNumber(localInvoice.balance) === canonicalOptionalNumber(quickBooksInvoice.balance)
+      && ["qbEmailStatus", "qbDeliveryType", "paidDate", "qbLastUpdatedTime"].every(field => (
+        canonicalText(localInvoice[field]) === canonicalText(quickBooksInvoice[field])
+      ))
+      && !!localInvoice.partial === !!quickBooksInvoice.partial;
+    const unchangedConfirmedRevision = !!canonicalText(localInvoice.qbId)
+      && canonicalText(localInvoice.qbId) === canonicalText(quickBooksInvoice.qbId)
+      && !!baseFingerprint && baseFingerprint === remoteFingerprint
+      && !!baseToken && baseToken === remoteToken
+      && unchangedPaymentAndDelivery;
+    const existingConflict = localInvoice.qbSyncStatus === "conflict" || !!localInvoice.qbPendingRemoteInvoice;
+    const repeatedUnchangedConflict = existingConflict
+      && localInvoice.qbSyncConflict?.type === "quickbooks-remote-update"
+      && localInvoice.qbSyncConflict?.reason === "pending-local-edits"
+      && canonicalText(localInvoice.qbPendingRemoteInvoice?.qbContentFingerprint) === baseFingerprint
+      && canonicalText(localInvoice.qbPendingRemoteInvoice?.qbSyncToken) === baseToken;
+    if (
+      unchangedConfirmedRevision
+      && !localInvoice.qbCreateOutcomeUnknown
+      && normalizedText(localInvoice.qbSyncStatus) !== "create-outcome-unknown"
+      && (!existingConflict || repeatedUnchangedConflict)
+    ) {
+      if (repeatedUnchangedConflict) {
+        next.qbSyncStatus = "pending-push";
+        next.locallyEdited = true;
+        next.qbAuthoritative = false;
+        delete next.qbRemoteChangesPending;
+        delete next.qbSyncConflict;
+        delete next.qbPendingRemoteInvoice;
+        // Removing this false conflict must not hide a separate failed-send diagnostic.
+        if (!next.qbSyncError && !next.qbSyncErrorCode) delete next.qbNeedsReview;
+      }
+      return next;
+    }
     next.qbSyncStatus = "conflict";
     next.qbNeedsReview = true;
     next.qbRemoteChangesPending = true;

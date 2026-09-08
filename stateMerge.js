@@ -377,6 +377,18 @@ function mergeObject(base, local, remote, path, ctx) {
   keys.forEach((key) => {
     if (deriveInventoryOz && key === "inventoryOz") return;
     if (deriveEstimateTotals && ESTIMATE_DERIVED_FIELDS.has(key)) return;
+    // Independent complete QB pulls can first notice the same missing invoice a minute
+    // apart. That observation time is not an accounting edit. Restrict this rule to the
+    // same top-level invoice in the same missing state; every other field still merges
+    // normally and remains reviewable if the devices disagree.
+    if (ctx.key === "sps_invoices" && path.length === 1 && key === "qbMissingSince"
+      && local.qbSyncStatus === "missing-remote" && remote.qbSyncStatus === "missing-remote"
+      && validDateMs(local[key]) != null && validDateMs(remote[key]) != null) {
+      out[key] = timestampExtreme([
+        ...(base.qbSyncStatus === "missing-remote" ? [base[key]] : []), local[key], remote[key],
+      ], "min");
+      return;
+    }
     const value = mergeNode(
       Object.prototype.hasOwnProperty.call(base, key) ? base[key] : MISSING,
       Object.prototype.hasOwnProperty.call(local, key) ? local[key] : MISSING,

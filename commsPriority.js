@@ -79,6 +79,7 @@ export function actionableCommsReason(row) {
     // remains visible even when the failed message was outgoing.
     if (isTestRedirect(row)) return "";
     if (rowFailed(row)) return "failure";
+    if (row.read === true) return "";
     return latestSmsDirection(row) === "incoming" && !isLowSignalSms(row) ? "text" : "";
   }
 
@@ -119,4 +120,16 @@ export function summarizeActionableCommsRows(rows) {
   }
 
   return counts;
+}
+
+// Keep every navigation surface on the same permission-aware count. Focused mode
+// reserves badges for new leads and failed delivery; history remains available inside Comms.
+export function commsNavigationCount({ focused = true, perms = {}, leads = 0, failures = 0, chats = 0, inbox = 0, reminders = 0 } = {}) {
+  const count = value => Math.max(0, Math.floor(Number(value) || 0));
+  const canInbox = perms.isAdmin || perms.commsTextInbox || perms.commsMainLine;
+  const leadCount = perms.isAdmin || perms.commsInbox ? count(leads) : 0;
+  if (focused) return leadCount + (canInbox ? count(failures) : 0);
+  return leadCount + (canInbox ? count(inbox) : 0)
+    + (perms.isAdmin || perms.commsMessages ? count(chats) : 0)
+    + (perms.isAdmin || perms.commsReminders ? count(reminders) : 0);
 }

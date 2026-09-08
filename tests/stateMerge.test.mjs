@@ -431,6 +431,36 @@ test("keeps the earliest concurrent arrival timestamp", () => {
   assert.equal(result.data.s1, "2026-07-12T14:00:00.000Z");
 });
 
+test("same missing QuickBooks observation on two devices keeps its earliest timestamp without a conflict", () => {
+  const base = [{ id: "iv-1", qbId: "42", status: "Sent", total: "150", balance: 150, notes: "Base" }];
+  const local = [{ ...base[0], qbSyncStatus: "missing-remote", qbNeedsReview: true, qbMissingSince: "2026-09-07T12:01:00.000Z" }];
+  const remote = [{ ...base[0], qbSyncStatus: "missing-remote", qbNeedsReview: true, qbMissingSince: "2026-09-07T12:00:00.000Z" }];
+  const result = runMerge("sps_invoices", base, local, remote);
+  assert.deepEqual(result.conflicts, []);
+  assert.deepEqual(result.data, remote);
+});
+
+test("missing QuickBooks timestamps do not suppress independent accounting or content conflicts", () => {
+  const base = [{ id: "iv-1", qbId: "42", qbSyncStatus: "missing-remote", qbMissingSince: "2026-09-07T11:00:00.000Z", total: "150", notes: "Base" }];
+  const local = [{ ...base[0], qbMissingSince: "2026-09-07T12:01:00.000Z", total: "175", notes: "Local change" }];
+  const remote = [{ ...base[0], qbMissingSince: "2026-09-07T12:00:00.000Z", total: "200", notes: "Remote change" }];
+  const result = runMerge("sps_invoices", base, local, remote);
+  assert.equal(result.data[0].qbMissingSince, base[0].qbMissingSince);
+  assert.deepEqual(result.conflicts.map(item => item.path).sort(), ["$.id:iv-1.notes", "$.id:iv-1.total"]);
+});
+
+test("invalid timestamps and differing QuickBooks states keep the ordinary conflict review", () => {
+  const base = [{ id: "iv-1", qbId: "42", qbSyncStatus: "synced" }];
+  const local = [{ ...base[0], qbSyncStatus: "missing-remote", qbMissingSince: "2026-09-07T12:01:00.000Z" }];
+  for (const remoteChange of [
+    { qbSyncStatus: "synced", qbMissingSince: "2026-09-07T12:00:00.000Z" },
+    { qbSyncStatus: "missing-remote", qbMissingSince: "not-a-date" },
+  ]) {
+    const result = runMerge("sps_invoices", base, local, [{ ...base[0], ...remoteChange }]);
+    assert.ok(result.conflicts.some(item => item.path.endsWith(".qbMissingSince")));
+  }
+});
+
 test("reports incompatible concurrent ordering changes", () => {
   const makeStop = (sid) => ({ sid, clientId: sid });
   const a = makeStop("a"), b = makeStop("b"), c = makeStop("c");
