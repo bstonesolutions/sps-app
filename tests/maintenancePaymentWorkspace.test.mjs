@@ -32,7 +32,7 @@ test("maintenance payment workspace provides a monthly matrix and explicit invoi
   assert.match(workspace, /data-maintenance-month-invoice-evidence/);
   assert.match(workspace, /Other work, not maintenance/);
   assert.match(workspace, /cell\.invoiceEvidence/);
-  assert.match(workspace, /\{coverageLabel\(preferredEntry\.status\)\} · \{invoiceEvidenceLabel\(preferredEntry\.cell\)\} · \{visitEvidenceLabel\(preferredEntry\.cell\)\}/);
+  assert.match(workspace, /aria-label=\{`\$\{clientName\}, \$\{monthLabel\}: \$\{paymentLabel\}\./);
   assert.match(workspace, /const invoiceLinkIdentity = \(invoice\) =>/);
   assert.match(workspace, /return `sps:\$\{spsInvoiceId\}`/);
   assert.match(workspace, /return qbInvoiceId \? `qb:\$\{qbInvoiceId\}` : ""/);
@@ -81,12 +81,15 @@ test("maintenance history reconciliation waits for fresh QuickBooks state and ex
   assert.doesNotMatch(workspace, /No coverage/);
 });
 
-test("maintenance mobile filters open a matching month and the visible range is explicit", async () => {
+test("maintenance calendar shows all clients and months on every screen size", async () => {
   const workspace = await readWorkspace();
 
   assert.match(workspace, /const statusMatchesView = \(status, view\)/);
-  assert.match(workspace, /statusEntries\.find\(\(\{ status \}\) => statusMatchesView\(status, view\)\)/);
-  assert.match(workspace, /openCell\(row, `\$\{year\}-\$\{preferredEntry\.number\}`\)/);
+  assert.match(workspace, /\[view, setView\] = useState\("all"\)/);
+  assert.match(workspace, /data-maintenance-calendar-grid/);
+  assert.match(workspace, /scope="row"/);
+  assert.match(workspace, /\["Price", "Prepaid"/);
+  assert.match(workspace, /openCell\(row, monthKey\)/);
   assert.match(workspace, /Showing \{visibleRangeLabel\} \{year\}\. Counts below represent client months\./);
   assert.match(workspace, /const visibleRangeLabel = fullYear \? "January to December" : "April to December"/);
 });

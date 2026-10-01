@@ -3,6 +3,7 @@ import {
   prepaidMaintenanceCoverage,
   recurringMaintenanceCadence,
 } from "./maintenanceBilling.js";
+import { isMaintenanceServiceExtra, savedMaintenanceCoverage } from "./maintenanceInvoiceCoverage.js";
 
 export const COMPLETION_INVOICE_VERSION = 1;
 
@@ -478,7 +479,11 @@ function planPrepaidMaintenance({
     };
   }
 
-  const lineItems = purchasedLines(entry, sourceStopId, sourceReceiptId);
+  const extraServices = list(entry?.services).filter(isMaintenanceServiceExtra);
+  const lineItems = [
+    ...serviceLines({ ...entry, services: extraServices, quoted_price: undefined, invoice: undefined }, stop, sourceStopId, sourceReceiptId),
+    ...purchasedLines(entry, sourceStopId, sourceReceiptId),
+  ];
   if (!lineItems.length) {
     return {
       invoices,
@@ -659,9 +664,25 @@ export function planCompletionInvoice({
   const sourceReceiptId = text(receiptId || entry?.completionReceiptId || markerReceiptId(completed, stop.sid));
   const coverage = maintenanceBillingDecision && typeof maintenanceBillingDecision.covered === "boolean"
     ? maintenanceBillingDecision
-    : prepaidMaintenanceCoverage({ client, stop: authoritativeStop, entry, scheduledDate });
+    : (savedMaintenanceCoverage(entry) || prepaidMaintenanceCoverage({ client, stop: authoritativeStop, entry, scheduledDate }));
 
   if (coverage.blocked) {
+    if (coverage.snapshot?.mode === "review" && isCompleted(completed, stop.sid)) {
+      const extras = planPrepaidMaintenance({
+        invoices, invoicing, client, stop: authoritativeStop, entry, sourceReceiptId, issueDate, createdAt, coverage,
+      });
+      return {
+        ...extras,
+        outcome: {
+          ...extras.outcome,
+          status: "review_required",
+          kind: "maintenance",
+          reason: coverage.reason,
+          action: "review-maintenance-coverage",
+          maintenanceChargeHeld: true,
+        },
+      };
+    }
     return {
       invoices,
       changed: false,

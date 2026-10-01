@@ -11,6 +11,7 @@ import { mapQuickBooksInvoice } from "./invoice-mapper.js";
 import { buildUsTxnTaxDetail } from "./qb-tax.js";
 import { getValidAccessToken, QB_API_BASE, setCors } from "./qb-store.js";
 import { requireUser } from "../_auth.js";
+import { quickBooksMaintenanceGuard } from "./maintenance-guard.js";
 
 export default async function handler(req, res) {
   setCors(res);
@@ -27,6 +28,9 @@ export default async function handler(req, res) {
   if (!invoice) {
     return res.status(400).json({ error: "Missing invoice" });
   }
+
+  const coverageIssue = await quickBooksMaintenanceGuard(invoice);
+  if (coverageIssue) return res.status(coverageIssue.status).json({ error: coverageIssue.message, code: coverageIssue.code, reviewRequired: true });
 
   // Tokens are read server-side from the store (never passed by the client).
   let access_token, realm_id;

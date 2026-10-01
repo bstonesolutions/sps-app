@@ -15,7 +15,7 @@ const MONTHS = [
 
 const STATUS = {
   paid: { label: "Paid", short: "Paid" },
-  prepaid: { label: "Prepaid", short: "Pre" },
+  prepaid: { label: "Prepaid", short: "Prepaid" },
   due: { label: "Invoice open", short: "Open" },
   partial: { label: "Partly paid", short: "Part" },
   missing: { label: "No matching payment", short: "No match" },
@@ -24,7 +24,7 @@ const STATUS = {
   refunded: { label: "Refunded", short: "Refund" },
   upcoming: { label: "Upcoming", short: "Upcoming" },
   plan_history_needed: { label: "Plan history needed", short: "Plan history" },
-  not_expected: { label: "Not expected", short: "" },
+  not_expected: { label: "Not expected", short: "·" },
 };
 
 const text = (value) => String(value == null ? "" : value).trim();
@@ -169,30 +169,26 @@ function sourceInvoiceForCell(cell, invoices) {
   return null;
 }
 
-function CoverageCell({ cell, monthKey, monthLabel, selected, T, onClick }) {
+function CoverageCell({ cell, monthKey, monthLabel, clientName, selected, T, onClick }) {
   const status = displayStatusForMonth(cell, monthKey);
   const tone = statusTone(status, T);
   const paymentLabel = coverageLabel(status);
-  const compactInvoiceLabel = invoiceEvidenceLabel(cell, true);
-  const compactVisitLabel = visitEvidenceLabel(cell, true);
   return (
     <button
       type="button"
-      aria-label={`${monthLabel}: ${paymentLabel}. ${invoiceEvidenceLabel(cell)}. ${visitEvidenceLabel(cell)}.`}
+      aria-label={`${clientName}, ${monthLabel}: ${paymentLabel}. ${invoiceEvidenceLabel(cell)}. ${visitEvidenceLabel(cell)}.`}
       title={`${paymentLabel} · ${invoiceEvidenceLabel(cell)} · ${visitEvidenceLabel(cell)}`}
       onClick={onClick}
       style={{
-        width: "100%", minHeight: 68, border: "none", borderLeft: `2px solid ${selected ? (T.primary || "#AF011A") : tone.line}`,
+        width: "100%", minHeight: 54, border: "none", boxShadow: selected ? `inset 0 0 0 2px ${T.primary}` : "none",
         background: selected ? hexA(T.primary || "#AF011A", 0.08) : (status === "missing" ? T.surface : tone.background),
-        color: tone.color, padding: "8px 7px 7px", textAlign: "left", cursor: "pointer", fontFamily: "inherit",
+        color: tone.color, padding: "8px", textAlign: "center", cursor: "pointer", fontFamily: "inherit",
       }}
     >
-      <div style={{ fontSize: 11.5, lineHeight: 1.15, fontWeight: 780 }}>{paymentLabel}</div>
-      <div style={{ marginTop: 4, fontSize: 9.5, lineHeight: 1.2, color: T.textMuted }}>{compactInvoiceLabel}</div>
-      <div style={{ marginTop: 3, display: "flex", alignItems: "center", gap: 4, fontSize: 9.5, color: T.textMuted }}>
-        {status === "paid" || status === "prepaid" || status === "waived" ? <Icon name="check" size={11} /> : null}
-        {compactVisitLabel}
-      </div>
+      <span style={{ display: "inline-flex", gap: 4, alignItems: "center", fontSize: 11.5, lineHeight: 1.25, fontWeight: 730 }}>
+        {["paid", "prepaid", "waived"].includes(status) ? <Icon name="check" size={12} /> : null}
+        {STATUS[status]?.short || paymentLabel}
+      </span>
     </button>
   );
 }
@@ -375,12 +371,12 @@ export default function MaintenanceCoverageWorkspace({
   clients = [], invoices = [], payments = [], schedule = [], ledger = null,
   T, vp = {}, loading = false, saving = false, error = "", onReload, onReconcile,
   reconciliationReceipt = null, onAssign, onClear,
-  canSeeAmounts = true,
+  canSeeAmounts = true, autoRefreshConnected = false, lastCheckedAt = null,
 }) {
   const currentYear = new Date().getFullYear();
   const [year, setYear] = useState(currentYear);
   const [search, setSearch] = useState("");
-  const [view, setView] = useState("attention");
+  const [view, setView] = useState("all");
   const [fullYear, setFullYear] = useState(false);
   const [selection, setSelection] = useState(null);
   const [receiptExpanded, setReceiptExpanded] = useState(false);
@@ -403,7 +399,7 @@ export default function MaintenanceCoverageWorkspace({
     clients, invoices, payments, ledger, schedule, year,
   }), [clients, invoices, payments, ledger, schedule, year]);
   const visibleRows = useMemo(() => rows.filter((row) => {
-    const matches = !search || row.clientName.toLowerCase().includes(search.toLowerCase());
+    const matches = !search.trim() || row.clientName.toLowerCase().includes(search.trim().toLowerCase());
     if (!matches) return false;
     const statuses = monthMeta.map(([number]) => displayStatusForMonth(row.byMonth[`${year}-${number}`], `${year}-${number}`));
     return statuses.some((status) => statusMatchesView(status, view));
@@ -470,6 +466,7 @@ export default function MaintenanceCoverageWorkspace({
           <div style={{ color: T.primary, fontSize: 11, fontWeight: 900, letterSpacing: ".09em", textTransform: "uppercase" }}>Maintenance accounting</div>
           <h3 style={{ margin: "5px 0 0", fontSize: vp.isPhone ? 28 : 34, lineHeight: 1, letterSpacing: "-.045em" }}>Payment calendar</h3>
           <div style={{ marginTop: 9, color: T.textMuted, fontSize: 13, lineHeight: 1.4 }}>QuickBooks payments, prepayments, and expected service shown together before another invoice is created.</div>
+          <div role="status" data-maintenance-refresh-status style={{ marginTop: 7, fontSize: 11.5, color: T.textMuted }}>{autoRefreshConnected ? loading || saving ? "Updating from QuickBooks…" : `${lastCheckedAt ? `QuickBooks checked ${new Date(lastCheckedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}. ` : ""}Updates automatically while this calendar is open.` : "Connect QuickBooks to keep payment status up to date."}</div>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: compactControls ? "1fr 1fr" : "auto auto auto auto", alignItems: "center", justifyContent: compactControls ? "stretch" : "end", gap: 8, width: compactControls ? "100%" : "auto" }}>
           <div style={{ gridColumn: compactControls ? "1 / -1" : "auto", display: "grid", gridTemplateColumns: "38px minmax(58px, 1fr) 38px", alignItems: "center", border: `1px solid ${T.border}`, background: T.surface }}>
@@ -485,14 +482,14 @@ export default function MaintenanceCoverageWorkspace({
             onClick={() => onReconcile?.(historyRange)}
             disabled={loading || saving || !onReconcile}
             title={`Check ${historyRange.fromYear} to ${historyRange.toYear} against confirmed QuickBooks history`}
-            style={{ minHeight: 40, gridColumn: compactControls ? "1 / -1" : "auto", border: "none", background: T.primary, color: "#fff", padding: "0 13px", fontFamily: "inherit", fontSize: 12, fontWeight: 840, cursor: loading || saving ? "wait" : "pointer", opacity: loading || saving ? .68 : 1 }}
+            style={{ minHeight: 32, gridColumn: compactControls ? "1 / -1" : "auto", justifySelf: "end", border: "none", background: "transparent", color: T.textMuted, padding: "0 3px", textDecoration: "underline", textUnderlineOffset: 3, fontFamily: "inherit", fontSize: 11.5, fontWeight: 650, cursor: loading || saving ? "wait" : "pointer", opacity: loading || saving ? .68 : 1 }}
           >
             {saving ? "Reconciling" : "Reconcile history"}
           </button>
         </div>
       </div>
 
-      {receiptEvidence ? (
+      {receiptEvidence && (!reconciliationReceipt?.automatic || receiptEvidence.details.length > 0) ? (
         <div data-maintenance-reconciliation-receipt style={{ borderBottom: `1px solid ${T.border}`, background: T.surface }}>
           <div style={{ display: "grid", gridTemplateColumns: compactControls ? "1fr 1fr" : "minmax(230px, 1.35fr) repeat(4, minmax(92px, .55fr))" }}>
             <div style={{ gridColumn: compactControls ? "1 / -1" : "auto", padding: "11px 12px 10px", borderLeft: `3px solid ${T.primary}`, borderRight: compactControls ? "none" : `1px solid ${T.border}` }}>
@@ -562,15 +559,15 @@ export default function MaintenanceCoverageWorkspace({
         </div>
         <div style={{ display: "flex", gap: vp.isPhone ? 14 : 24, alignItems: "baseline", flexWrap: "wrap" }}>
           {[
+            ["all", rows.length, "all clients"],
             ["attention", counts.attention, "needs attention"],
             ["missing", counts.missing, "no matching payment"],
             ["review", counts.review, "unallocated history"],
             ["open", counts.open, "invoice open"],
             ["covered", counts.covered, "covered"],
-            ["all", rows.length, "clients"],
           ].map(([value, count, label]) => (
             <button key={value} type="button" onClick={() => setView(value)} aria-pressed={view === value} style={{ border: "none", borderBottom: `2px solid ${view === value ? T.primary : "transparent"}`, background: "transparent", color: T.text, padding: "3px 0 5px", fontFamily: "inherit", cursor: "pointer" }}>
-              <strong style={{ fontSize: 18, color: count && ["attention", "missing", "review"].includes(value) ? T.primary : T.text }}>{count}</strong>
+              <strong style={{ fontSize: 16, color: view === value ? T.primary : T.text }}>{count}</strong>
               <span style={{ marginLeft: 5, fontSize: 11.5, color: T.textMuted }}>{label}</span>
             </button>
           ))}
@@ -579,47 +576,42 @@ export default function MaintenanceCoverageWorkspace({
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr", alignItems: "center", gap: 12, padding: "15px 0" }}>
-        <div style={{ position: "relative" }}>
+        <div style={{ position: "relative", width: compactControls ? "100%" : 360 }}>
           <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", color: T.textMuted }}><Icon name="search" size={16}/></span>
-          <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find maintenance client" style={{ width: "100%", height: 43, boxSizing: "border-box", padding: "0 12px 0 35px", border: `1px solid ${T.border}`, borderRadius: 7, background: T.surface, color: T.text, fontFamily: "inherit", fontSize: 13.5 }} />
+          <input type="search" aria-label="Filter maintenance clients" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Filter clients (optional)" style={{ width: "100%", height: 43, boxSizing: "border-box", padding: "0 12px 0 35px", border: `1px solid ${T.border}`, borderRadius: 7, background: T.surface, color: T.text, fontFamily: "inherit", fontSize: 13.5 }} />
         </div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 11.5, color: T.textMuted }}><span>{visibleRows.length} of {rows.length} clients · Tap a month for payment and visit details.</span><span>{compactControls ? "Swipe across for more months" : "Client names stay visible as you scroll"}</span></div>
       </div>
 
       {error ? <div role="alert" style={{ padding: "10px 12px", borderLeft: `3px solid ${T.primary}`, background: hexA(T.primary, .06), color: T.primary, fontSize: 12.5, fontWeight: 750, marginBottom: 12 }}>{error}</div> : null}
 
-      {vp.isPhone ? (
-        <div style={{ borderTop: `1px solid ${T.border}` }}>
-          {visibleRows.map((row) => {
-            const statusEntries = monthMeta.map(([number, short, long]) => {
-              const cell = row.byMonth[`${year}-${number}`];
-              return { number, short, long, cell, status: displayStatusForMonth(cell, `${year}-${number}`) };
-            });
-            const issueCount = statusEntries.filter(({ status }) => statusMatchesView(status, "attention")).length;
-            const currentNumber = String(new Date().getMonth() + 1).padStart(2, "0");
-            const fallbackEntry = statusEntries.find(({ number }) => number === currentNumber) || statusEntries[0];
-            const preferredEntry = view === "all" ? fallbackEntry : (statusEntries.find(({ status }) => statusMatchesView(status, view)) || fallbackEntry);
-            return <button key={row.clientId} type="button" onClick={() => openCell(row, `${year}-${preferredEntry.number}`)} style={{ width: "100%", display: "grid", gridTemplateColumns: "1fr auto", gap: 12, border: "none", borderBottom: `1px solid ${T.border}`, background: T.surface, color: T.text, textAlign: "left", padding: "14px 2px", fontFamily: "inherit", cursor: "pointer" }}><div><div style={{ fontSize: 14, fontWeight: 850 }}>{row.clientName}</div><div style={{ marginTop: 4, fontSize: 11.5, color: issueCount ? T.primary : T.textMuted }}>{preferredEntry.long}: {coverageLabel(preferredEntry.status)} · {invoiceEvidenceLabel(preferredEntry.cell)} · {visitEvidenceLabel(preferredEntry.cell)}{issueCount ? ` · ${issueCount} need attention` : ""}</div></div><div style={{ display: "flex", alignItems: "center", gap: 7 }}><div style={{ fontSize: 12, fontWeight: 800 }}>{formatMoney(row.expectedMonthlyCents, !canSeeAmounts)}</div><Icon name="chevron" size={14}/></div></button>;
-          })}
-        </div>
-      ) : (
-        <div style={{ overflowX: "auto", borderTop: `1px solid ${T.border}`, borderBottom: `1px solid ${T.border}` }}>
-          <div style={{ minWidth: 900 }}>
-            <div style={{ display: "grid", gridTemplateColumns: `minmax(210px, 1.8fr) repeat(${monthMeta.length}, minmax(72px, .72fr))`, borderBottom: `1px solid ${T.border}`, background: T.surfaceAlt }}>
-              <div style={{ padding: "10px 13px", fontSize: 10.5, fontWeight: 850, letterSpacing: ".07em", textTransform: "uppercase", color: T.textMuted }}>Client · expected</div>
-              {monthMeta.map(([number, short]) => <div key={number} style={{ padding: "10px 7px", fontSize: 10.5, textAlign: "left", fontWeight: 850, color: T.textMuted }}>{short}</div>)}
-            </div>
-            {visibleRows.map((row) => (
-              <div key={row.clientId} style={{ display: "grid", gridTemplateColumns: `minmax(210px, 1.8fr) repeat(${monthMeta.length}, minmax(72px, .72fr))`, borderBottom: `1px solid ${T.border}`, background: T.surface }}>
-                <button type="button" onClick={() => openCell(row, `${year}-${monthMeta[0][0]}`)} style={{ border: "none", background: "transparent", color: T.text, padding: "10px 13px", textAlign: "left", fontFamily: "inherit", cursor: "pointer" }}><div style={{ fontSize: 13.5, fontWeight: 850, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{row.clientName}</div><div style={{ marginTop: 3, fontSize: 10.5, color: T.textMuted }}>{formatMoney(row.expectedMonthlyCents, !canSeeAmounts)} monthly</div></button>
-                {monthMeta.map(([number, , long]) => {
-                  const monthKey = `${year}-${number}`;
-                  return <CoverageCell key={monthKey} cell={row.byMonth[monthKey]} monthKey={monthKey} monthLabel={`${long} ${year}`} selected={selection?.clientId === row.clientId && selection?.monthKey === monthKey} T={T} onClick={() => openCell(row, monthKey)} />;
-                })}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      <div role="region" aria-label="Maintenance payment calendar" tabIndex={0} style={{ overflow: "auto", maxHeight: "68vh", border: `1px solid ${T.border}`, background: T.surface }}>
+        <table data-maintenance-calendar-grid style={{ width: "100%", minWidth: 390 + monthMeta.length * 90, borderCollapse: "separate", borderSpacing: 0, tableLayout: "fixed" }}>
+          <colgroup><col style={{ width: vp.isPhone ? 154 : 210 }} /><col style={{ width: 88 }} /><col style={{ width: 100 }} />{monthMeta.map(([number]) => <col key={number} style={{ width: 90 }} />)}</colgroup>
+          <thead style={{ position: "sticky", top: 0, zIndex: 3 }}>
+            <tr>
+              <th scope="col" style={{ position: "sticky", left: 0, zIndex: 4, background: T.surfaceAlt, textAlign: "left", padding: "12px", fontSize: 11, borderBottom: `2px solid ${T.text}`, borderRight: `1px solid ${T.border}` }}>Client</th>
+              {["Price", "Prepaid", ...monthMeta.map(([, short]) => short)].map((label) => <th key={label} scope="col" style={{ background: T.surfaceAlt, padding: "12px 6px", fontSize: 11, fontWeight: 800, textAlign: "center", borderBottom: `2px solid ${T.text}` }}>{label}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {visibleRows.map((row) => {
+              const prepaidMonths = monthMeta.filter(([number]) => row.byMonth[`${year}-${number}`]?.payment?.status === "prepaid");
+              return (
+                <tr key={row.clientId}>
+                  <th scope="row" style={{ position: "sticky", left: 0, zIndex: 2, background: T.surface, textAlign: "left", padding: "10px 12px", fontSize: 13, fontWeight: 750, borderBottom: `1px solid ${T.border}`, borderRight: `1px solid ${T.border}`, overflowWrap: "anywhere" }}>{row.clientName}</th>
+                  <td style={{ padding: "8px", textAlign: "center", fontSize: 12, fontVariantNumeric: "tabular-nums", borderBottom: `1px solid ${T.border}` }}>{formatMoney(row.expectedMonthlyCents, !canSeeAmounts)}</td>
+                  <td style={{ padding: "8px", textAlign: "center", fontSize: 11.5, color: prepaidMonths.length ? T.text : T.textMuted, borderBottom: `1px solid ${T.border}` }} title={prepaidMonths.map(([, short]) => short).join(", ") || "No prepaid months recorded"}>{prepaidMonths.length ? <><strong>{prepaidMonths.length} months</strong><span style={{ display: "block", marginTop: 3, fontSize: 10 }}>{prepaidMonths.length === monthMeta.length ? "Full period" : "See months"}</span></> : "None recorded"}</td>
+                  {monthMeta.map(([number, , long]) => {
+                    const monthKey = `${year}-${number}`;
+                    return <td key={monthKey} style={{ padding: 0, borderBottom: `1px solid ${T.border}`, borderLeft: `1px solid ${T.border}` }}><CoverageCell cell={row.byMonth[monthKey]} monthKey={monthKey} monthLabel={`${long} ${year}`} clientName={row.clientName} selected={selection?.clientId === row.clientId && selection?.monthKey === monthKey} T={T} onClick={() => openCell(row, monthKey)} /></td>;
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
 
       {!loading && visibleRows.length === 0 ? <div style={{ padding: "50px 12px", textAlign: "center", color: T.textMuted }}><div style={{ fontSize: 16, fontWeight: 800, color: T.text }}>No maintenance clients match this view</div><div style={{ marginTop: 6, fontSize: 12.5 }}>Try All clients or clear the search.</div></div> : null}
       {selection ? <DetailPanel selection={selection} rows={rows} invoices={invoices} clients={clients} year={year} hiddenAmounts={!canSeeAmounts} T={T} busy={saving} onClose={() => setSelection(null)} onAssign={onAssign} onClear={onClear} /> : null}

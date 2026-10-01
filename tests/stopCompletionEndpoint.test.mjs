@@ -645,6 +645,104 @@ test("server-enforced prepaid maintenance preserves quoted value without changin
   );
 });
 
+test("paid maintenance month allocations suppress duplicate drafts and fence their canonical invoice evidence", async () => {
+  const state = {
+    sps_clients: { value: [{ id: "c1", name: "Demo Client", monthlyRate: "175", balance: "$25", history: [] }], version: 2 },
+    sps_catalog: { value: { locations: [], treatments: [], parts: [], products: [] }, version: 5 },
+    sps_completed: { value: {}, version: 3 },
+    sps_schedule: { value: [{ date: "10/01/2026", stops: [{ sid: "allocated-month", clientId: "c1", type: "Monthly Service" }] }], version: 7 },
+    sps_invoices: { value: [{ id: "paid-source", clientId: "c1", status: "Paid", total: 175, balance: 0 }], version: 4 },
+    sps_invoicing: { value: {}, version: 2 },
+    sps_maintenance_billing: { value: {
+      version: 2, policies: {}, allocations: { c1: { "2026-10": {
+        status: "paid", expectedCents: 17500, allocatedCents: 17500,
+        sources: [{ kind: "invoice", invoiceId: "paid-source", amountCents: 17500 }],
+      } } },
+    }, version: 9 },
+  };
+  const writes = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+    if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify([{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }]) }]);
+    if (href.includes("/rest/v1/app_state?")) return response(stateRows(href, state));
+    if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+      const operations = JSON.parse(options.body).p_operations;
+      writes.push(operations);
+      applyBatchOperations(state, operations);
+      return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
+    }
+    throw new Error(`Unexpected fetch: ${href}`);
+  };
+  const request = {
+    method: "POST", headers: { authorization: "Bearer field-token" },
+    body: { mode: "complete", clientId: "c1", sid: "allocated-month", idempotencyKey: "allocated-month-attempt", entry: { invoice: "$175", services: [{ name: "Monthly maintenance", price: 175 }] } },
+  };
+  const first = mockResponse();
+  await stopCompletionHandler(request, first);
+  assert.equal(first.statusCode, 200, JSON.stringify(first.body));
+  assert.equal(first.body.invoiceOutcome.status, "covered");
+  assert.equal(state.sps_invoices.value.length, 1);
+  assert.equal(state.sps_clients.value[0].balance, "$25");
+  assert.equal(state.sps_clients.value[0].history[0].invoice, "$0");
+  assert.equal(state.sps_clients.value[0].history[0].billingDisposition, "covered-maintenance");
+  assert.equal(state.sps_clients.value[0].history[0].maintenanceBillingSnapshot.status, "paid");
+  assert.deepEqual(writes[0].find(operation => operation.key === "sps_invoices"), { key: "sps_invoices", expected_version: 4, check_only: true });
+  assert.deepEqual(writes[0].find(operation => operation.key === "sps_maintenance_billing"), { key: "sps_maintenance_billing", expected_version: 9, check_only: true });
+  // The immutable completion remains covered even if a later correction removes
+  // the allocation. Replaying an already completed visit cannot create a bill.
+  state.sps_maintenance_billing.value.allocations = {};
+  const replay = mockResponse();
+  await stopCompletionHandler(request, replay);
+  assert.equal(replay.statusCode, 200, JSON.stringify(replay.body));
+  assert.equal(replay.body.invoiceOutcome.status, "covered");
+  assert.equal(writes.length, 1);
+});
+
+test("partial or mismatched maintenance payments save the crew report while holding automatic maintenance billing", async () => {
+  for (const payment of [
+    { clientId: "c1", status: "Paid", total: 175, balance: 25 },
+    { clientId: "other-client", status: "Paid", total: 175, balance: 0 },
+  ]) {
+    const state = {
+      sps_clients: { value: [{ id: "c1", name: "Demo Client", monthlyRate: "175", history: [] }], version: 1 },
+      sps_catalog: { value: { locations: [], treatments: [], parts: [], products: [] }, version: 1 },
+      sps_completed: { value: {}, version: 1 },
+      sps_schedule: { value: [{ date: "10/01/2026", stops: [{ sid: "held-month", clientId: "c1", type: "Monthly Service" }] }], version: 1 },
+      sps_invoices: { value: [{ id: "paid-source", ...payment }], version: 1 },
+      sps_invoicing: { value: {}, version: 1 },
+      sps_maintenance_billing: { value: { version: 2, policies: {}, allocations: { c1: { "2026-10": {
+        status: "paid", expectedCents: 17500, allocatedCents: 17500,
+        sources: [{ kind: "invoice", invoiceId: "paid-source", amountCents: 17500 }],
+      } } } }, version: 1 },
+    };
+    let writes = 0;
+    globalThis.fetch = async (url, options = {}) => {
+      const href = String(url);
+      if (href.includes("/auth/v1/user")) return response({ id: "auth-1", email: "tech@example.com" });
+      if (href.includes("key=eq.sps_team")) return response([{ value: JSON.stringify([{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }]) }]);
+      if (href.includes("/rest/v1/app_state?")) return response(stateRows(href, state));
+      if (href.endsWith("/rest/v1/rpc/sps_app_state_batch_cas")) {
+        writes++;
+        const operations = JSON.parse(options.body).p_operations;
+        assert.equal(operations.some(operation => operation.key === "sps_invoices" && !operation.check_only), false);
+        applyBatchOperations(state, operations);
+        return response([{ applied: true, outcome: "applied", conflict_key: null, current_versions: {} }]);
+      }
+      throw new Error(`Unexpected fetch: ${href}`);
+    };
+    const res = mockResponse();
+    await stopCompletionHandler({ method: "POST", headers: { authorization: "Bearer field-token" }, body: { mode: "complete", clientId: "c1", sid: "held-month", idempotencyKey: "held-month-attempt", entry: { invoice: "$175" } } }, res);
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(res.body.invoiceOutcome.reason, "maintenance-payment-evidence-unverified");
+    assert.equal(res.body.invoiceOutcome.status, "review_required");
+    assert.equal(res.body.invoiceOutcome.maintenanceChargeHeld, true);
+    assert.equal(state.sps_clients.value[0].history[0].billingDisposition, "maintenance-review");
+    assert.equal(state.sps_clients.value[0].history[0].invoice, "$0");
+    assert.equal(writes, 1);
+  }
+});
+
 test("a prepaid mirror on the client cannot suppress billing without protected server policy", async () => {
   const team = [{ id: "e1", email: "tech@example.com", role: "field", tabAccess: { schedule: "edit" } }];
   const state = {

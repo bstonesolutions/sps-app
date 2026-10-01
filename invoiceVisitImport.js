@@ -1,3 +1,5 @@
+import { isMaintenanceServiceExtra, savedMaintenanceCoverage } from "./maintenanceInvoiceCoverage.js";
+
 const text = (value) => String(value == null ? "" : value).trim();
 const list = (value) => (Array.isArray(value) ? value : []);
 const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
@@ -489,8 +491,12 @@ export function completedVisitLineItems(visit, { clientId = "" } = {}) {
   const source = completedVisitSource(visit, { clientId });
   const idRoot = `il_visit_${safeIdPart(source.sourceStopId)}`;
   const lines = [];
+  const coverage = savedMaintenanceCoverage(visit, { clientId });
+  // Missing/corrupt accounting evidence must not turn a covered visit back into
+  // a charge. Review it first, while keeping unrelated billable extras intact.
+  const serviceCoveredOrHeld = coverage?.covered || coverage?.blocked;
 
-  list(visit?.services).forEach((rawService, index) => {
+  list(visit?.services).filter(service => !serviceCoveredOrHeld || isMaintenanceServiceExtra(service)).forEach((rawService, index) => {
     const service = typeof rawService === "string" ? { name: rawService } : (rawService || {});
     const desc = text(service.name || service.desc || service.description || visit?.type) || "Service visit";
     const costKnown = hasOwn(service, "cost") || hasOwn(service, "unitCost");

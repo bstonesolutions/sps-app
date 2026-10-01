@@ -14,6 +14,7 @@ import {
 } from "./invoice-mapper.js";
 import { buildUsTxnTaxDetail } from "./qb-tax.js";
 import { requireUser } from "../_auth.js";
+import { quickBooksMaintenanceGuard } from "./maintenance-guard.js";
 
 export default async function handler(req, res) {
   setCors(res);
@@ -124,6 +125,9 @@ export default async function handler(req, res) {
         ],
       });
     }
+
+    const coverageIssue = await quickBooksMaintenanceGuard(invoice, { mode: "update", existingQuickBooksInvoice: existing });
+    if (coverageIssue) return res.status(coverageIssue.status).json({ error: coverageIssue.message, code: coverageIssue.code, reviewRequired: true });
 
     // Step 2: build updated line items. Keep only real ids imported from
     // QuickBooks; new SPS lines omit Id so QuickBooks creates them.

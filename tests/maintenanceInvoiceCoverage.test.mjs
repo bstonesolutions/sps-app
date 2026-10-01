@@ -1,0 +1,187 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  invoiceMaintenanceCoverageIssue,
+  maintenanceCoverageForService,
+  prepareCoveredMaintenanceEntry,
+  savedMaintenanceCoverage,
+} from "../maintenanceInvoiceCoverage.js";
+import { completedVisitLineItems, appendCompletedVisitsToInvoice } from "../invoiceVisitImport.js";
+import { planCompletionInvoice } from "../completionInvoice.js";
+
+const client = { id: "demo-client", name: "Demo Client", monthlyRate: "175", planFreq: "Monthly", history: [] };
+const stop = { sid: "demo-stop", clientId: client.id, type: "Monthly Service" };
+const sourceInvoice = { id: "paid-source", number: "INV-1", clientId: client.id, status: "Paid", total: 350, balance: 0, date: "09/01/2026" };
+const paidCell = () => ({ status: "paid", expectedCents: 17500, allocatedCents: 17500, sources: [{ kind: "invoice", invoiceId: sourceInvoice.id, amountCents: 17500 }] });
+const ledger = () => ({ version: 2, policies: {}, allocations: { [client.id]: { "2026-10": paidCell(), "2026-11": paidCell() } } });
+const fixture = () => ({ client, clients: [client], stop, scheduledDate: "10/01/2026", ledger: ledger(), invoices: [sourceInvoice] });
+const service = { name: "Monthly maintenance", price: 175 };
+const extra = { name: "Replacement valve", qty: 1, retailPer: 25, bill: true };
+const draft = () => ({ id: "new-draft", clientId: client.id, date: "10/01/2026", lineItems: [{ id: "line", desc: "Monthly maintenance", qty: 1, unitPrice: 175, kind: "service" }] });
+
+test("allocated prepaid months use settled canonical invoice evidence without relying on the client mirror", () => {
+  const result = maintenanceCoverageForService(fixture());
+  assert.equal(result.covered, true);
+  assert.equal(result.invoiceEvidenceRequired, true);
+  assert.equal(result.snapshot.month, "2026-10");
+  assert.equal(result.snapshot.status, "paid");
+  assert.equal(maintenanceCoverageForService({ ...fixture(), scheduledDate: "12/01/2026" }).covered, false);
+});
+
+test("an exact paid monthly QuickBooks invoice prevents a duplicate before allocations are saved", () => {
+  const currentPaid = { ...sourceInvoice, qbId: "qb-paid", date: "10/01/2026", total: 175, lineItems: [{ desc: "Monthly maintenance", qty: 1, unitPrice: 175 }] };
+  const noAllocations = { version: 2, policies: {}, allocations: {} };
+  const result = maintenanceCoverageForService({ ...fixture(), ledger: noAllocations, invoices: [currentPaid] });
+  assert.equal(result.covered, true);
+  assert.equal(result.invoiceEvidenceRequired, true);
+  assert.deepEqual(noAllocations.allocations, {}, "derived coverage does not write ledger allocations");
+  assert.equal(maintenanceCoverageForService({ ...fixture(), ledger: noAllocations, invoices: [currentPaid, { ...currentPaid, id: "duplicate", qbId: "qb-duplicate" }] }).blocked, true);
+  assert.equal(maintenanceCoverageForService({ ...fixture(), ledger: noAllocations, invoices: [{ ...currentPaid, clientId: "other-client" }] }).covered, false);
+  const entry = { sid: stop.sid, type: stop.type, date: "10/01/2026", invoice: "$175", services: [service], partsUsed: [extra] };
+  const prepared = prepareCoveredMaintenanceEntry({ ...fixture(), ledger: noAllocations, invoices: [currentPaid], entry });
+  const plan = planCompletionInvoice({ invoices: [currentPaid], client, stop, entry: prepared.entry, schedule: [{ date: "10/01/2026", stops: [stop] }], completed: { [stop.sid]: true }, completedAt: "2026-10-01T12:00:00Z", maintenanceBillingDecision: prepared.decision });
+  assert.deepEqual(plan.invoices[0].lineItems.map(line => line.desc), ["Replacement valve"]);
+});
+
+test("coverage rejects wrong owners, ambiguous source IDs, revoked payments, and partial allocations", () => {
+  const cases = [
+    { invoices: [{ ...sourceInvoice, clientId: "other-client" }] },
+    { invoices: [sourceInvoice, { ...sourceInvoice }] },
+    { invoices: [{ ...sourceInvoice, status: "Void" }] },
+    { invoices: [{ ...sourceInvoice, status: "Draft" }] },
+    { invoices: [{ ...sourceInvoice, balance: 1 }] },
+    { invoices: [{ ...sourceInvoice, balance: "invalid" }] },
+    { invoices: [{ ...sourceInvoice, qbPendingLocalEdits: true }] },
+    { invoices: [] },
+    { ledger: { version: 2, policies: {}, allocations: { [client.id]: { "2026-10": { ...paidCell(), allocatedCents: 17501 } } } } },
+    { ledger: { version: 2, policies: {}, allocations: { [client.id]: { "2026-10": { ...paidCell(), expectedCents: 18000 } } } } },
+  ];
+  for (const overrides of cases) {
+    const result = maintenanceCoverageForService({ ...fixture(), ...overrides });
+    assert.equal(result.covered, false, JSON.stringify(overrides));
+    assert.equal(result.blocked, true, JSON.stringify(overrides));
+  }
+});
+
+test("one settled payment cannot be allocated to more service months than it pays for", () => {
+  const overallocated = ledger();
+  overallocated.allocations[client.id]["2026-12"] = paidCell();
+  assert.equal(maintenanceCoverageForService({ ...fixture(), ledger: overallocated }).reason, "maintenance-payment-overallocated");
+});
+
+test("QuickBooks-only ownership must identify exactly one client", () => {
+  const qbClient = { ...client, qbId: "qb-client" };
+  const invoice = { ...sourceInvoice, clientId: undefined, qbCustomerId: "qb-client" };
+  assert.equal(maintenanceCoverageForService({ ...fixture(), client: qbClient, clients: [qbClient], invoices: [invoice] }).covered, true);
+  assert.equal(maintenanceCoverageForService({ ...fixture(), client: qbClient, clients: [qbClient, { ...qbClient, id: "other" }], invoices: [invoice] }).blocked, true);
+});
+
+test("every supplied source reference must identify the same canonical invoice", () => {
+  const conflicting = ledger();
+  conflicting.allocations[client.id]["2026-10"].sources[0].qbInvoiceId = "other-qb-invoice";
+  assert.equal(maintenanceCoverageForService({ ...fixture(), ledger: conflicting }).blocked, true);
+});
+
+test("waived months are covered, while partial, due, review, refunded, and unverified months are held", () => {
+  const waived = ledger();
+  waived.allocations[client.id]["2026-10"] = { status: "waived", sources: [{ kind: "waiver", waiverId: "approved-waiver" }] };
+  assert.equal(maintenanceCoverageForService({ ...fixture(), ledger: waived }).snapshot.status, "waived");
+  for (const status of ["review", "refunded", "prepaid"]) {
+    const pending = ledger();
+    pending.allocations[client.id]["2026-10"].status = status;
+    assert.equal(maintenanceCoverageForService({ ...fixture(), ledger: pending }).blocked, true, status);
+  }
+});
+
+test("QuickBooks settlement updates previously due or partial allocations without assigning months again", () => {
+  for (const status of ["due", "partial"]) {
+    const pending = ledger();
+    pending.allocations[client.id]["2026-10"].status = status;
+    assert.equal(maintenanceCoverageForService({ ...fixture(), ledger: pending }).covered, true);
+    assert.equal(maintenanceCoverageForService({ ...fixture(), ledger: pending, invoices: [{ ...sourceInvoice, balance: 25 }] }).blocked, true);
+  }
+});
+
+test("repairs, projects, and estimate work remain billable for a prepaid client", () => {
+  for (const change of [{ type: "Repair Visit" }, { type: "Pond Project" }, { sourceEstimateId: "estimate" }, { billingMode: "one-off" }]) {
+    assert.equal(maintenanceCoverageForService({ ...fixture(), stop: { ...stop, ...change } }).covered, false);
+  }
+});
+
+test("recorded covered visits stay covered on retry and import, retaining purchased extras", () => {
+  const prepared = prepareCoveredMaintenanceEntry({ ...fixture(), entry: { sid: stop.sid, date: "10/01/2026", invoice: "$175", services: [service], partsUsed: [extra] } });
+  assert.equal(prepared.entry.invoice, "$0");
+  assert.equal(prepared.entry.quoted_price, 175);
+  assert.equal(prepared.entry.billingDisposition, "covered-maintenance");
+  assert.equal(savedMaintenanceCoverage(prepared.entry).covered, true);
+  assert.equal(maintenanceCoverageForService({ ...fixture(), ledger: null, invoices: [], entry: prepared.entry }).covered, true);
+  assert.deepEqual(completedVisitLineItems(prepared.entry, { clientId: client.id }).map(line => line.desc), ["Replacement valve"]);
+  const noExtras = { ...prepared.entry, partsUsed: [] };
+  assert.equal(appendCompletedVisitsToInvoice({ lineItems: [] }, [noExtras], { clientId: client.id }).addedLineCount, 0);
+  const plan = planCompletionInvoice({ invoices: [sourceInvoice], client, stop, entry: prepared.entry, schedule: [{ date: "10/01/2026", stops: [stop] }], completed: { [stop.sid]: true }, completedAt: "2026-10-01T12:00:00Z" });
+  assert.deepEqual(plan.invoices[0].lineItems.map(line => line.desc), ["Replacement valve"]);
+});
+
+test("policy snapshots also suppress imported maintenance and invalid snapshots cannot rebill it", () => {
+  const entry = { billingDisposition: "prepaid-maintenance", maintenanceBillingSnapshot: { version: 1, mode: "prepaid", coveredFrom: "2026-10-01", coveredThrough: "2026-10-31" }, services: [service], partsUsed: [extra] };
+  assert.deepEqual(completedVisitLineItems(entry).map(line => line.desc), ["Replacement valve"]);
+  assert.equal(savedMaintenanceCoverage({ ...entry, maintenanceBillingSnapshot: null }).blocked, true);
+  assert.deepEqual(completedVisitLineItems({ ...entry, maintenanceBillingSnapshot: null }).map(line => line.desc), ["Replacement valve"]);
+});
+
+test("covered visits keep separately billable repair labor in imports, completion drafts, and send checks", () => {
+  const entry = { sid: stop.sid, type: stop.type, date: "10/01/2026", invoice: "$265", services: [service, { name: "Pump repair labor", price: 90 }], partsUsed: [extra] };
+  const prepared = prepareCoveredMaintenanceEntry({ ...fixture(), entry });
+  assert.equal(prepared.entry.invoice, "$90.00");
+  assert.equal(prepared.entry.quoted_price, 265);
+  assert.deepEqual(completedVisitLineItems(prepared.entry, { clientId: client.id }).map(line => [line.desc, line.unitPrice]), [["Pump repair labor", "90"], ["Replacement valve", "25"]]);
+  const plan = planCompletionInvoice({ invoices: [sourceInvoice], client, stop, entry: prepared.entry, schedule: [{ date: "10/01/2026", stops: [stop] }], completed: { [stop.sid]: true }, completedAt: "2026-10-01T12:00:00Z" });
+  assert.deepEqual(plan.invoices[0].lineItems.map(line => [line.desc, line.unitPrice]), [["Pump repair labor", "90"], ["Replacement valve", "25"]]);
+  const repairInvoice = { ...draft(), sourceStopId: stop.sid, lineItems: [{ desc: "Pump repair labor", kind: "service", qty: 1, unitPrice: 90 }] };
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...fixture(), client: { ...client, history: [prepared.entry] }, invoice: repairInvoice }), null);
+});
+
+test("a billing review preserves work completion and extras without rebilling maintenance on retry", () => {
+  const pending = ledger();
+  pending.allocations[client.id]["2026-10"].status = "review";
+  const entry = { sid: stop.sid, type: stop.type, date: "10/01/2026", invoice: "$265", services: [service, { name: "Pump repair labor", price: 90 }] };
+  const prepared = prepareCoveredMaintenanceEntry({ ...fixture(), ledger: pending, entry });
+  assert.equal(prepared.entry.billingDisposition, "maintenance-review");
+  assert.equal(prepared.entry.invoice, "$90.00");
+  assert.equal(savedMaintenanceCoverage(prepared.entry).blocked, true);
+  const plan = planCompletionInvoice({ invoices: [sourceInvoice], client, stop, entry: prepared.entry, schedule: [{ date: "10/01/2026", stops: [stop] }], completed: { [stop.sid]: true }, completedAt: "2026-10-01T12:00:00Z" });
+  assert.equal(plan.outcome.status, "review_required");
+  assert.equal(plan.outcome.maintenanceChargeHeld, true);
+  assert.deepEqual(plan.invoices[0].lineItems.map(line => [line.desc, line.unitPrice]), [["Pump repair labor", "90"]]);
+  assert.deepEqual(completedVisitLineItems(prepared.entry).map(line => line.desc), ["Pump repair labor"]);
+});
+
+test("invoice checks block covered service, permit original payment evidence and unrelated charges", () => {
+  const options = { client, clients: [client], ledger: ledger(), invoices: [sourceInvoice] };
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...options, invoice: draft() }).code, "maintenance-already-covered");
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...options, invoice: { ...draft(), id: sourceInvoice.id } }), null);
+  for (const line of [{ desc: "Pump repair", kind: "service" }, { desc: "Maintenance kit", kind: "product" }, { desc: "Replacement part", kind: "part" }]) {
+    assert.equal(invoiceMaintenanceCoverageIssue({ ...options, invoice: { ...draft(), lineItems: [{ ...line, qty: 1, unitPrice: 50 }] } }), null);
+  }
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...options, ledger: null, invoice: draft() }).code, "maintenance-coverage-review");
+});
+
+test("invoice coverage follows the service month rather than a later invoice issue date", () => {
+  const invoice = { ...draft(), date: "12/01/2026", autoPeriod: "2026-10" };
+  assert.deepEqual(invoiceMaintenanceCoverageIssue({ ...fixture(), invoice }).months, ["2026-10"]);
+  const repair = { sid: "repair", type: "Repair Visit", date: "10/02/2026" };
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...fixture(), client: { ...client, history: [repair] }, invoice: { ...invoice, sourceStopId: repair.sid, lineItems: [{ desc: "Pump repair", kind: "service", qty: 1, unitPrice: 50 }] } }), null);
+});
+
+test("explicit monthly periods respect protected prepaid policies and exempt their source invoice", () => {
+  const invoice = { ...draft(), autoPeriod: "2026-10", date: "12/01/2026" };
+  const policyLedger = { version: 1, policies: { [client.id]: { version: 1, mode: "prepaid", coveredFrom: "2026-10-01", coveredThrough: "2026-10-31", sourceInvoiceId: sourceInvoice.id } } };
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...fixture(), ledger: policyLedger, invoice }).covered, true);
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...fixture(), ledger: policyLedger, invoice: { ...invoice, id: sourceInvoice.id } }), null);
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...fixture(), ledger: policyLedger, invoice: { ...invoice, number: sourceInvoice.number, qbId: sourceInvoice.id } }).covered, true);
+  const numberOnlyPolicy = structuredClone(policyLedger);
+  delete numberOnlyPolicy.policies[client.id].sourceInvoiceId;
+  numberOnlyPolicy.policies[client.id].sourceInvoiceNumber = sourceInvoice.number;
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...fixture(), ledger: numberOnlyPolicy, invoice: { ...invoice, number: sourceInvoice.number } }).covered, true);
+  assert.equal(invoiceMaintenanceCoverageIssue({ ...fixture(), ledger: numberOnlyPolicy, invoice: { ...invoice, id: sourceInvoice.id } }), null);
+});

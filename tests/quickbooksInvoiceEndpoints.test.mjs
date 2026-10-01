@@ -68,6 +68,13 @@ function installAuthAndTokenMocks(routeFetch) {
     if (href.startsWith("https://supabase.test/rest/v1/qb_tokens")) {
       return jsonResponse(quickBooksTokenRow());
     }
+    if (href.startsWith("https://supabase.test/rest/v1/app_state?")) {
+      return jsonResponse(Object.entries({
+        sps_clients: [{ id: "client-42", qbId: "42", name: "Generic Client" }],
+        sps_invoices: [], sps_schedule: [],
+        sps_maintenance_billing: { version: 2, policies: {}, allocations: {} },
+      }).map(([key, value]) => ({ key, value: JSON.stringify(value), version: 1 })));
+    }
     return routeFetch(href, options);
   };
 }

@@ -223,6 +223,13 @@ test("update endpoint proceeds when the current QuickBooks content still matches
   globalThis.fetch = async (url, options = {}) => {
     const href = String(url);
     if (href.includes("/auth/v1/user")) return jsonResponse({ id: "owner-1" });
+    if (href.includes("/rest/v1/app_state?")) {
+      return jsonResponse(Object.entries({
+        sps_clients: [{ id: "client-42", qbId: existing.CustomerRef.value, name: "Generic Client" }],
+        sps_invoices: [], sps_schedule: [],
+        sps_maintenance_billing: { version: 2, policies: {}, allocations: {} },
+      }).map(([key, value]) => ({ key, value: JSON.stringify(value), version: 1 })));
+    }
     if (href.includes("/rest/v1/qb_tokens")) {
       return jsonResponse([{
         realm_id: "realm-1",

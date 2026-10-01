@@ -56,6 +56,14 @@ export function buildQuickBooksInvoicePayload(invoice, client, invoicing, { toda
   const fallbackDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
   return {
     spsInvoiceId: invoice?.id,
+    clientId: client?.id ?? invoice?.clientId ?? null,
+    source: invoice?.source,
+    autoPeriod: invoice?.autoPeriod,
+    serviceMonth: invoice?.serviceMonth,
+    sourceStopId: invoice?.sourceStopId,
+    sourceStopIds: invoice?.sourceStopIds,
+    sourceCompletionReceiptId: invoice?.sourceCompletionReceiptId,
+    sourceCompletionReceiptIds: invoice?.sourceCompletionReceiptIds,
     number: invoice?.number,
     date: toISODate(invoice?.date, fallbackDate),
     dueDate: toISODate(invoice?.dueDate),
@@ -82,6 +90,11 @@ export function buildQuickBooksInvoicePayload(invoice, client, invoicing, { toda
         : line?.discountType === "amt" ? number(line?.discount) : 0;
       const net = Math.max(0, gross - discount);
       return {
+        id: line?.id,
+        sourceStopId: line?.sourceStopId,
+        sourceStopIds: line?.sourceStopIds,
+        sourceCompletionReceiptId: line?.sourceCompletionReceiptId,
+        sourceCompletionReceiptIds: line?.sourceCompletionReceiptIds,
         description: line?.bundleNote ? `${line?.desc || ""} (${line.bundleNote})` : (line?.desc || ""),
         qty: String(qty),
         unitPrice: String(qty > 0 ? (net / qty).toFixed(2) : net.toFixed(2)),

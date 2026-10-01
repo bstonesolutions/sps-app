@@ -103,6 +103,12 @@ test("authorized invoice staff can send only after the protected team lookup", a
     if (href.includes("key=eq.sps_team")) {
       return response([{ value: JSON.stringify(team) }]);
     }
+    if (href.includes("/rest/v1/app_state?")) {
+      return response([
+        { key: "sps_clients", value: JSON.stringify([]), version: 1 },
+        { key: "sps_invoices", value: JSON.stringify([]), version: 1 },
+      ]);
+    }
     if (href === "https://api.resend.com/emails") {
       return response({ id: "email-2048" });
     }

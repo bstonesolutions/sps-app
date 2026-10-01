@@ -15,13 +15,9 @@ import {
   reverseStopCompletion,
 } from "../stopCompletion.js";
 import { planCompletionInvoice } from "../completionInvoice.js";
-import {
-  emptyMaintenanceBillingStore,
-  maintenanceBillingPolicyForClient,
-  normalizeMaintenanceBillingStore,
-  prepaidMaintenanceCoverage,
-  preparePrepaidMaintenanceEntry,
-} from "../maintenanceBilling.js";
+import { prepaidMaintenanceCoverage } from "../maintenanceBilling.js";
+import { emptyMaintenancePaymentLedger, normalizeMaintenancePaymentLedger } from "../maintenancePaymentLedger.js";
+import { prepareCoveredMaintenanceEntry, savedMaintenanceCoverage } from "../maintenanceInvoiceCoverage.js";
 import {
   assertScheduledEstimateInventoryApplied,
   claimScheduledEstimateCompletion,
@@ -232,8 +228,8 @@ async function readBaseline(requestOptions = {}) {
   if (invoices.exists && !Array.isArray(invoices.value)) throw new Error("shared_invoices_invalid");
   if (invoicing.exists && !isRecord(invoicing.value)) throw new Error("shared_invoicing_invalid");
   const maintenanceBillingValue = maintenanceBilling.exists
-    ? normalizeMaintenanceBillingStore(maintenanceBilling.value)
-    : emptyMaintenanceBillingStore();
+    ? normalizeMaintenancePaymentLedger(maintenanceBilling.value)
+    : emptyMaintenancePaymentLedger();
   if (!maintenanceBillingValue) throw new Error("shared_maintenance_billing_invalid");
   return {
     clients,
@@ -428,6 +424,7 @@ export default async function handler(req, res) {
       let completionEntry = entry;
       let maintenanceBillingDecision = null;
       let maintenanceBillingFenceRequired = false;
+      let maintenanceInvoiceFenceRequired = false;
       let estimateInventoryRequirements = [];
       let estimateInvoiceFenceRequired = false;
       if (isNewCompletion && stop.sourceEstimateId) {
@@ -470,27 +467,27 @@ export default async function handler(req, res) {
           // staff can update. Never let that operational row decide whether an
           // invoice is suppressed. Only the protected server-maintained ledger
           // is authoritative, and fence its version in the completion commit.
-          const clientForBilling = { ...clientMatches[0] };
-          const authoritativePolicy = maintenanceBillingPolicyForClient(
-            baseline.maintenanceBilling.value,
-            clientId,
-          );
-          if (authoritativePolicy) clientForBilling.maintenanceBilling = authoritativePolicy;
-          else delete clientForBilling.maintenanceBilling;
           maintenanceBillingFenceRequired = true;
-          const prepared = preparePrepaidMaintenanceEntry({
-            client: clientForBilling,
+          const prepared = prepareCoveredMaintenanceEntry({
+            client: clientMatches[0],
+            clients: baseline.clients.value,
+            ledger: baseline.maintenanceBilling.value,
+            invoices: baseline.invoices.exists ? baseline.invoices.value : [],
+            schedule: baseline.schedule.value,
             stop,
             entry: completionEntry,
             scheduledDate,
           });
           completionEntry = prepared.entry;
           maintenanceBillingDecision = prepared.decision;
-          if (maintenanceBillingDecision?.blocked) {
+          maintenanceInvoiceFenceRequired = !!maintenanceBillingDecision?.invoiceEvidenceRequired;
+          if (maintenanceBillingDecision?.blocked && !prepared.entry?.maintenanceBillingSnapshot) {
             return res.status(409).json({
               ok: false,
               code: maintenanceBillingDecision.reason,
-              error: "Prepaid maintenance coverage must start on the first day of a month and end on the last day of a month. Update the client's billing coverage before completing this stop. Nothing was changed.",
+              error: maintenanceBillingDecision.reason === "coverage-must-span-whole-months"
+                ? "Prepaid maintenance coverage must start on the first day of a month and end on the last day of a month. Update the client's billing coverage before completing this stop. Nothing was changed."
+                : "This maintenance month has payment coverage that needs review. Check its payment or waiver before completing the stop. No service charge or other changes were saved.",
             });
           }
         }
@@ -551,7 +548,7 @@ export default async function handler(req, res) {
         )
         : null;
       if (mode === "complete" && !isNewCompletion) {
-        maintenanceBillingDecision = prepaidMaintenanceCoverage({
+        maintenanceBillingDecision = savedMaintenanceCoverage(durableCompletionEntry) || prepaidMaintenanceCoverage({
           client,
           stop,
           entry: durableCompletionEntry,
@@ -632,7 +629,7 @@ export default async function handler(req, res) {
         expectedVersion: baseline.invoices.exists ? baseline.invoices.version : 0,
         value: invoicePlan.invoices,
       });
-      else if (estimateInvoiceFenceRequired) operations.push({
+      else if (estimateInvoiceFenceRequired || maintenanceInvoiceFenceRequired) operations.push({
         key: "sps_invoices",
         expectedVersion: baseline.invoices.version,
         checkOnly: true,

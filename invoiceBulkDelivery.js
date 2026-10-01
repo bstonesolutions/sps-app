@@ -25,7 +25,14 @@ export async function deliverInvoiceThroughChannels(channels) {
 export async function deliverSelectedInvoices({ invoices, buildChannels, onAccepted }) {
   const results = [];
   for (const invoice of list(invoices)) {
-    const delivery = await deliverInvoiceThroughChannels(await buildChannels(invoice));
+    let channels;
+    try {
+      channels = await buildChannels(invoice);
+    } catch (error) {
+      results.push({ invoiceId: text(invoice?.id), accepted: false, succeeded: [], protected: [], failed: [{ channel: "preflight", error: text(error?.message) || "Invoice delivery could not be checked" }] });
+      continue;
+    }
+    const delivery = await deliverInvoiceThroughChannels(channels);
     if (delivery.accepted && typeof onAccepted === "function") await onAccepted(invoice, delivery);
     results.push({ invoiceId: text(invoice?.id), ...delivery });
   }

@@ -6,6 +6,8 @@
 // Optional env: RESEND_FROM (defaults to the verified SPS domain address)
 
 import { brandLogoSource } from "../brandAssets.js";
+import { buildQuickBooksInvoicePayload } from "../quickbooksDraftSync.js";
+import { quickBooksMaintenanceGuard } from "./quickbooks/maintenance-guard.js";
 
 const escapeHtml = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -143,6 +145,18 @@ export default async function handler(req, res) {
     if (tm.to && /.+@.+\..+/.test(tm.to)) { recipient = tm.to; subjectPrefix = `[TEST → ${to}] `; }
     else return res.status(200).json({ sent: false, held: true, testMode: true, reason: "No test redirect email set." });
   }
+
+  const coverageIssue = await quickBooksMaintenanceGuard(buildQuickBooksInvoicePayload(
+    { ...invoice, id: invoice.id || invoice.spsInvoiceId || "" },
+    { id: invoice.clientId || req.body.clientId || "", name: clientName, email: to, qbId: invoice.qbCustomerId },
+    {},
+  ), { mode: "send" });
+  if (coverageIssue) return res.status(coverageIssue.status || 409).json({
+    error: coverageIssue.message,
+    code: coverageIssue.code,
+    reviewRequired: true,
+    sent: false,
+  });
 
   const RESEND_KEY = process.env.RESEND_API_KEY;
   const FROM = resolveFrom(req.body, process.env.RESEND_FROM || "Stone Property Solutions <noreply@stonepropertysolutions.com>");
